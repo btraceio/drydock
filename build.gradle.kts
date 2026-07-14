@@ -16,3 +16,44 @@ tasks.register<Exec>("verifyEnvironment") {
     description = "Runs scripts/verify-environment.sh to check local dev prerequisites."
     commandLine("bash", "${rootDir}/scripts/verify-environment.sh")
 }
+
+// Builds libghostty for both supported macOS architectures (arm64 and
+// x86_64 -- see the "Supported platforms" deviation in README.md) from the
+// pinned third_party/ghostty submodule.
+//
+// Delegates to scripts/build-ghostty.sh, which:
+//   - requires Zig 0.15.x (not whatever newer/older `zig` may be on PATH)
+//     and a full Xcode install with the Metal Toolchain component, failing
+//     with a clear, actionable message if either is missing;
+//   - fails clearly if the third_party/ghostty submodule is not initialized;
+//   - shells out to `zig build -Dxcframework-target=universal` (the only
+//     mode that produces an aarch64-macos slice on an x86_64 host, and vice
+//     versa -- see docs/native-integration.md), then splits the resulting
+//     universal static library into one archive per architecture.
+//
+// Declaring explicit inputs/outputs lets Gradle skip this task entirely
+// (UP-TO-DATE) when nothing relevant has changed; even when it does run,
+// Zig's own build cache (third_party/ghostty/.zig-cache) makes a no-op
+// rebuild fast (a few seconds) rather than a full rebuild (several minutes).
+val ghosttyNativeOutputDir = layout.buildDirectory.dir("native")
+val ghosttyGeneratedDir = layout.buildDirectory.dir("generated")
+
+tasks.register<Exec>("buildGhosttyNative") {
+    group = "native"
+    description = "Builds libghostty (macOS arm64 + x86_64) via scripts/build-ghostty.sh."
+
+    inputs.file("${rootDir}/scripts/build-ghostty.sh")
+    inputs.files(
+        fileTree("${rootDir}/third_party/ghostty") {
+            exclude(".zig-cache/**", "zig-out/**", "macos/GhosttyKit.xcframework/**")
+        }
+    )
+    outputs.dir(ghosttyNativeOutputDir)
+    outputs.file(ghosttyGeneratedDir.map { it.file("ghostty-version.properties") })
+
+    // System.getenv("ZIG_BIN") lets a developer pin a different Zig 0.15.x
+    // location than the script's own auto-detection
+    // (/usr/local/opt/zig@0.15/bin/zig); left unset here to defer entirely
+    // to the script's documented defaults/detection.
+    commandLine("bash", "${rootDir}/scripts/build-ghostty.sh")
+}

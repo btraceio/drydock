@@ -104,11 +104,65 @@ check_arch() {
     echo "Supported per docs/implementation-plan.md deviation: x86_64 and arm64 macOS."
 }
 
+check_zig() {
+    section "zig 0.15.x (for libghostty)"
+    local zig_bin=""
+    if [[ -x /usr/local/opt/zig@0.15/bin/zig ]]; then
+        zig_bin=/usr/local/opt/zig@0.15/bin/zig
+    elif [[ -x /opt/homebrew/opt/zig@0.15/bin/zig ]]; then
+        zig_bin=/opt/homebrew/opt/zig@0.15/bin/zig
+    elif command -v zig >/dev/null 2>&1; then
+        zig_bin="$(command -v zig)"
+    fi
+
+    if [[ -z "$zig_bin" ]]; then
+        echo "MISSING: no zig found (checked /usr/local/opt/zig@0.15, /opt/homebrew/opt/zig@0.15, PATH)."
+        echo "  Install with: brew install zig@0.15"
+        fail=1
+        return
+    fi
+
+    local ver
+    ver="$("$zig_bin" version)"
+    if [[ "$ver" == 0.15.* ]]; then
+        echo "OK: $zig_bin"
+        echo "    $ver"
+    else
+        echo "WRONG VERSION: $zig_bin reports $ver; Ghostty requires exactly 0.15.x."
+        echo "  Install the pinned version with: brew install zig@0.15"
+        echo "  (does not need to replace the default 'zig' on PATH; see docs/native-integration.md)"
+        fail=1
+    fi
+}
+
+check_xcode() {
+    section "Xcode command line tools (for libghostty)"
+    if ! command -v xcodebuild >/dev/null 2>&1; then
+        echo "MISSING: xcodebuild not found. Install full Xcode (not just the CLT) from the App Store."
+        fail=1
+        return
+    fi
+    local xcode_path
+    xcode_path="$(xcode-select -p 2>/dev/null || true)"
+    if [[ -n "$xcode_path" ]]; then
+        echo "OK: xcode-select -p -> $xcode_path"
+        echo "NOTE: building libghostty also requires the Metal Toolchain component"
+        echo "      (xcodebuild -downloadComponent MetalToolchain) -- not checked here,"
+        echo "      scripts/build-ghostty.sh will fail with a clear error if it's missing."
+    else
+        echo "MISSING: xcode-select has no configured path."
+        echo "  Run: xcode-select -s /Applications/Xcode.app/Contents/Developer"
+        fail=1
+    fi
+}
+
 check_jdk26
 check_git
 check_claude
 check_gradle
 check_arch
+check_zig
+check_xcode
 
 echo
 if [[ $fail -ne 0 ]]; then

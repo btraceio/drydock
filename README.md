@@ -5,17 +5,61 @@ A JavaFX desktop application for managing local Git repositories and the
 (no `tmux`, no external multiplexer). See `docs/implementation-plan.md`
 for the full design and scope.
 
-This repository is currently at **Milestone 0 (project bootstrap)**: a
-single-module Gradle project with JDK 26 + JavaFX 26, one empty window,
-and unit-test infrastructure. Terminal embedding, repository management,
-Git inspection, and packaging are not implemented yet.
+This repository is currently at **Milestone 1 (libghostty feasibility, in
+progress)**: a single-module Gradle project with JDK 26 + JavaFX 26, one
+empty window, unit-test infrastructure, and a working Gradle task that
+builds libghostty for both macOS architectures. Repository management, Git
+inspection, and packaging are not implemented yet.
 
 Ghostty is vendored as a pinned git submodule at `third_party/ghostty`
 (tag v1.3.1, see `.gitmodules`; clone with `git submodule update --init`).
 See `docs/native-integration.md` for the full findings on how to build
 libghostty from that checkout, its C API, required frameworks, and
-lifecycle/threading constraints — nothing about the native build has been
-wired into Gradle yet (that starts at Task 3).
+lifecycle/threading constraints.
+
+### Building libghostty (Task 3)
+
+```bash
+./gradlew buildGhosttyNative
+```
+
+runs `scripts/build-ghostty.sh`, which builds libghostty for **both**
+`macos-x86_64` and `macos-arm64` in one invocation (using Ghostty's
+`-Dxcframework-target=universal`, the only mode that can produce an
+`aarch64-macos` slice when building on an Intel host — `native` mode
+silently ignores `-Dtarget` and always builds the host's own architecture;
+see `docs/native-integration.md` for the empirical finding), then splits the
+resulting universal static library with `lipo -thin` into one archive per
+architecture. Deliverables:
+
+```text
+build/native/macos-x86_64/libghostty.a
+build/native/macos-arm64/libghostty.a
+build/native/include/ghostty.h            (+ include/ghostty/*, module.modulemap)
+build/generated/ghostty-version.properties
+```
+
+Both architectures are built and verified on this (Intel) development
+machine — `lipo -info` was used to confirm each split archive actually
+contains only its own architecture's object code, not merely that the
+build reported success.
+
+Rebuilding without source changes is a Gradle `UP-TO-DATE` no-op (inputs
+are the script and the submodule's tracked sources, excluding its own
+`.zig-cache`/`zig-out`/`macos/GhosttyKit.xcframework` build outputs); even
+a forced re-run is fast (a few seconds) because Zig's own build cache
+inside `third_party/ghostty/.zig-cache` avoids recompiling unchanged
+sources. A clean checkout with missing prerequisites fails immediately with
+a message naming exactly what's missing (wrong/missing Zig 0.15.x, missing
+Xcode, or an uninitialized submodule) rather than an opaque build error.
+
+**Known artifact limitation, not yet resolved:** Ghostty's `zig build` never
+installs a loose `.dylib` on macOS (only a static `.a`, see
+`docs/native-integration.md`). FFM's `SymbolLookup` needs a dynamically
+loadable image, so Task 4 (FFM smoke test) will need a small shim `.dylib`
+that statically links against these `.a` files and re-exports the
+`ghostty_*` symbols — this is a real, confirmed gap in Ghostty's own build,
+not something skipped here by mistake.
 
 ## Supported platforms
 
@@ -44,16 +88,21 @@ Version 0.1 targets **macOS only**, on **both**:
 ## Development prerequisites
 
 Run `./scripts/verify-environment.sh` to check most of these automatically
-(JDK 26, `git`, `claude` CLI, wrapper presence, current CPU architecture).
-`zig` and the Xcode command line tools are needed starting with the
-libghostty build task and are not yet checked by that script.
+(JDK 26, `git`, `claude` CLI, wrapper presence, current CPU architecture,
+zig 0.15.x, and Xcode command line tools).
+
+Note: `scripts/verify-environment.sh` cannot detect the Xcode **Metal
+Toolchain** component specifically (`xcodebuild -downloadComponent
+MetalToolchain`), which `zig build`'s `metal` shader compilation step also
+requires. If `./gradlew buildGhosttyNative` fails with `cannot execute tool
+'metal' due to missing Metal Toolchain`, run that download command once.
 
 | Tool | Required version | Notes |
 |---|---|---|
 | JDK | 26 (Temurin 26.0.1 used in dev) | Used as the Gradle **toolchain** to compile and run the app. Install via `sdk install java 26.0.1-tem` (sdkman). |
 | Gradle | 8.11.1 | Provided via the checked-in wrapper (`./gradlew`); no separate install needed to build this project. |
 | zig | **0.15.2 exactly** (not 0.16.0) | Ghostty (pinned at `third_party/ghostty`, tag v1.3.1) requires exactly Zig 0.15.x (`build.zig.zon`'s `minimum_zig_version = "0.15.2"`, enforced by an exact major.minor check in `src/build/zig.zig`). The Homebrew default `zig` formula currently installs 0.16.0, which fails both that check and fails to compile Ghostty's build script (`std.process.EnvMap` was removed in 0.16). Install the versioned formula alongside the default one: `brew install zig@0.15` (keg-only, installs to `/usr/local/opt/zig@0.15/bin/zig`, does not relink the default `zig`). Any Gradle task invoking `zig build` for libghostty must use this path explicitly — see `docs/native-integration.md`. |
-| Xcode Command Line Tools | 26.5 (or matching Xcode) | Needed for macOS native/framework builds from Task 2/3 onward. `xcode-select --install`. |
+| Xcode | 26.5, **full Xcode, not just the standalone CLT**, plus the Metal Toolchain component | `zig build`'s macOS xcframework step shells out to `xcodebuild -create-xcframework` and to `xcrun -sdk macosx metal` (to compile Ghostty's Metal shaders); the latter requires the Metal Toolchain component, which is not installed by default even with `xcode-select -p` pointing at a full Xcode install. If missing, download it once with `xcodebuild -downloadComponent MetalToolchain` (confirmed working without `sudo` on this machine; ~690 MB download). If `xcodebuild` itself reports plugin-loading errors first, run `xcodebuild -runFirstLaunch` (also works without `sudo` here). |
 | git | 2.49.0 (any recent 2.x) | Invoked directly as a subprocess; never through a shell string (plan sections 6.7, 21). |
 | `claude` CLI | any recent version supporting `--version`/`--help` | Capability-detected at startup once Claude integration is implemented (plan section 6.8); not yet wired up in this milestone. |
 
