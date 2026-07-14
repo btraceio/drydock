@@ -123,3 +123,45 @@ calls the public, pointer-free methods on `GhosttyApp`/`GhosttySurface`/
 `CpmTerminalHost`. If/when bindings are generated (e.g. via `jextract`) for
 a larger API surface, they must live in a separate source set/package from
 the hand-written code above (plan rule 27.17).
+
+## Unresolved risks (added in Task 7 / Gate 0E)
+
+Full detail and reproduction steps in `docs/claude-integration.md`. Summarized
+here per plan rule 15:
+
+- **Closing a `GhosttySurface` whose child process is still alive terminates the
+  entire JVM with a non-zero exit status**, reproducibly, with no catchable Java
+  exception logged anywhere in this project's own code. Gate 0C/0D never hit this
+  because their checklists always drove the child to a confirmed clean exit
+  (`processExited() == true`) before closing. Gate 0E's `claude` transcript is the
+  first spike to close a surface with a live child, and does so every time it runs
+  to its scripted end. **Must be fixed with a bounded wait-for-exit-then-force-close
+  protocol before any real session-tab-closing code is written**, and needs its own
+  focused regression test once that lifecycle code exists (plan rule 14). This is
+  also the most likely root cause of a second observed symptom: `claude --resume`
+  reporting "No conversations found" for a repo a full multi-turn session had just
+  run in — abrupt teardown likely pre-empts `claude`'s own on-exit session-persistence
+  write.
+- **A fixed-delay-then-send-Enter script can lose a keystroke to `claude`'s TUI**
+  if sent too soon after a screen transition (a completed response, or a fresh
+  relaunch banner) — not a ghostty defect (the identical `sendKey` call is 100%
+  reliable against a plain shell per Gate 0D), but a real risk for anything that
+  drives this terminal programmatically at faster-than-human speed. Any future
+  scripted-input code (this project's own automation, or something built on top of
+  it) should poll `readScreenText()` for two consecutive identical reads
+  ("screen has settled") before sending the next key, rather than trusting a fixed
+  delay.
+- **Ctrl+C did not interrupt an in-progress `claude` response** in either Gate 0E
+  run, using the exact mechanism Gate 0D proved interrupts a foreground shell
+  command. Not yet root-caused (ghostty-level delivery vs. `claude`/Ink-level
+  debounce are both plausible); needs re-verification with a real physical
+  keypress before being treated as a confirmed application bug, but is flagged as
+  a real risk to the plan's Gate 0E "Ctrl+C cancellation" requirement either way.
+- **The workspace-trust and per-tool permission prompts could not be exercised**
+  on this dev machine, because its own pre-existing `~/.claude/settings.json` has
+  `permissions.defaultMode: "auto"` (the user's own configuration; this project
+  never reads or writes that file). The application cannot assume this UI will
+  always render in the embedded terminal — its presence is entirely a function of
+  the user's own Claude Code settings, which are explicitly out of this project's
+  control (plan section 21). Needs a from-clean-account manual pass before v0.1
+  ships, per the same rule that flagged this as unresolved rather than assumed-ok.

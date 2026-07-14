@@ -177,3 +177,44 @@ tasks.register<JavaExec>("gate0dSpike") {
 
     workingDir = rootProject.projectDir
 }
+
+// Gate 0E (plan section 7 / 28 "Task 7"): runs the real installed `claude`
+// CLI inside the embedded terminal, in a throwaway git repository (never
+// this project's own repository). See app.cpm.terminal.Gate0eSpike and
+// docs/claude-integration.md.
+tasks.register<JavaExec>("gate0eSpike") {
+    group = "verification"
+    description = "Gate 0E: runs the real `claude` CLI in a throwaway test repo inside the embedded terminal."
+
+    dependsOn(rootProject.tasks.named("buildGhosttyNative"))
+    dependsOn(rootProject.tasks.named("buildNativeHost"))
+
+    classpath = sourceSets.main.get().runtimeClasspath
+    mainClass.set("app.cpm.terminal.Gate0eSpikeLauncher")
+    javaLauncher.set(javaToolchains.launcherFor(java.toolchain))
+
+    jvmArgs = listOf("--enable-native-access=ALL-UNNAMED")
+
+    // Required: an absolute path to a throwaway git repository (created
+    // and torn down by the caller, never this project's own checkout --
+    // plan section 21 forbids interpreting arbitrary repository content as
+    // config, and there is no reason to point a spike at a real repo).
+    if (project.hasProperty("app.cpm.gate0e.repo")) {
+        systemProperty("app.cpm.gate0e.repo", project.property("app.cpm.gate0e.repo") as String)
+    }
+    // Defaults to ~/.local/bin/claude; override with
+    // -Papp.cpm.gate0e.claude=<path> if the CLI lives elsewhere.
+    if (project.hasProperty("app.cpm.gate0e.claude")) {
+        systemProperty("app.cpm.gate0e.claude", project.property("app.cpm.gate0e.claude") as String)
+    }
+
+    // Runs the scripted transcript by default. Pass
+    // -Papp.cpm.gate0e.interactive to leave the window open with a live
+    // `claude` session instead (for a human to drive the rest of the
+    // checklist -- workspace trust UI polish, real clipboard, etc.).
+    if (!project.hasProperty("app.cpm.gate0e.interactive")) {
+        systemProperty("app.cpm.gate0e.autoExit", "true")
+    }
+
+    workingDir = rootProject.projectDir
+}

@@ -119,6 +119,37 @@ terminal surface via a small AppKit host shim
 investigation, including why JavaFX has no public API for this and what
 was and wasn't possible to verify without a human watching the window.
 
+### Interactive shell checklist spike (Task 6, Gate 0D)
+
+```bash
+./gradlew gate0dSpike                              # scripted, auto-exits, 12/12 checks pass
+./gradlew gate0dSpike -Papp.cpm.gate0d.interactive # leaves a live /bin/zsh -l session open
+```
+
+Spawns `/bin/zsh -l` inside the Gate 0C surface and drives the plan's
+manual terminal checklist (section 22.4) headlessly by reading back
+rendered screen text (`GhosttySurface#readScreenText`) after sending real
+input. See `docs/manual-terminal-checklist.md` (full checklist results)
+and `docs/native-integration.md` ("Task 6 / Gate 0D") for two real bugs
+found and fixed along the way (native vs. `GHOSTTY_KEY_*` keycodes; paste
+vs. typed-key semantics).
+
+### `claude` CLI spike (Task 7, Gate 0E)
+
+```bash
+./gradlew gate0eSpike -Papp.cpm.gate0e.repo=<throwaway git repo, NOT this project>
+```
+
+Runs the real installed `claude` CLI inside the embedded terminal, in a
+disposable throwaway repository. Unlike Gate 0D, this does not assert hard
+pass/fail (the CLI's behavior/timing/model output are not this project's
+to control) -- it logs a full scripted transcript for manual review. See
+`docs/claude-integration.md` for the complete per-checklist-item findings,
+including several real incompatibilities (most importantly: closing a
+terminal surface while `claude` is still running currently kills the whole
+JVM, which is why this task's Gradle invocation currently exits non-zero
+-- see that document for why this is being surfaced rather than hidden).
+
 ## Supported platforms
 
 Version 0.1 targets **macOS only**, on **both**:
