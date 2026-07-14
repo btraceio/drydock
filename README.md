@@ -10,6 +10,13 @@ single-module Gradle project with JDK 26 + JavaFX 26, one empty window,
 and unit-test infrastructure. Terminal embedding, repository management,
 Git inspection, and packaging are not implemented yet.
 
+Ghostty is vendored as a pinned git submodule at `third_party/ghostty`
+(tag v1.3.1, see `.gitmodules`; clone with `git submodule update --init`).
+See `docs/native-integration.md` for the full findings on how to build
+libghostty from that checkout, its C API, required frameworks, and
+lifecycle/threading constraints — nothing about the native build has been
+wired into Gradle yet (that starts at Task 3).
+
 ## Supported platforms
 
 Version 0.1 targets **macOS only**, on **both**:
@@ -45,7 +52,7 @@ libghostty build task and are not yet checked by that script.
 |---|---|---|
 | JDK | 26 (Temurin 26.0.1 used in dev) | Used as the Gradle **toolchain** to compile and run the app. Install via `sdk install java 26.0.1-tem` (sdkman). |
 | Gradle | 8.11.1 | Provided via the checked-in wrapper (`./gradlew`); no separate install needed to build this project. |
-| zig | 0.16.0 | Needed from the libghostty build task onward (Task 2/3). Install via `brew install zig`. |
+| zig | **0.15.2 exactly** (not 0.16.0) | Ghostty (pinned at `third_party/ghostty`, tag v1.3.1) requires exactly Zig 0.15.x (`build.zig.zon`'s `minimum_zig_version = "0.15.2"`, enforced by an exact major.minor check in `src/build/zig.zig`). The Homebrew default `zig` formula currently installs 0.16.0, which fails both that check and fails to compile Ghostty's build script (`std.process.EnvMap` was removed in 0.16). Install the versioned formula alongside the default one: `brew install zig@0.15` (keg-only, installs to `/usr/local/opt/zig@0.15/bin/zig`, does not relink the default `zig`). Any Gradle task invoking `zig build` for libghostty must use this path explicitly — see `docs/native-integration.md`. |
 | Xcode Command Line Tools | 26.5 (or matching Xcode) | Needed for macOS native/framework builds from Task 2/3 onward. `xcode-select --install`. |
 | git | 2.49.0 (any recent 2.x) | Invoked directly as a subprocess; never through a shell string (plan sections 6.7, 21). |
 | `claude` CLI | any recent version supporting `--version`/`--help` | Capability-detected at startup once Claude integration is implemented (plan section 6.8); not yet wired up in this milestone. |
