@@ -101,3 +101,50 @@ tasks.register<JavaExec>("ffmSmokeTest") {
     // default working directory.
     workingDir = rootProject.projectDir
 }
+
+// Gate 0C (plan section 7 / 28 "Task 5"): the smallest possible JavaFX
+// window that embeds one Ghostty terminal surface. See
+// app.cpm.terminal.Gate0cSpike and docs/native-integration.md.
+tasks.register<JavaExec>("gate0cSpike") {
+    group = "verification"
+    description = "Gate 0C: opens a JavaFX window embedding one Ghostty terminal surface."
+
+    dependsOn(rootProject.tasks.named("buildGhosttyNative"))
+    dependsOn(rootProject.tasks.named("buildNativeHost"))
+
+    classpath = sourceSets.main.get().runtimeClasspath
+    // See Gate0cSpikeLauncher's Javadoc: launching Gate0cSpike (an
+    // Application subclass) directly as the JVM's main class trips
+    // JavaFX's "JavaFX runtime components are missing" module-path check,
+    // even though everything needed is present on the classpath.
+    mainClass.set("app.cpm.terminal.Gate0cSpikeLauncher")
+    javaLauncher.set(javaToolchains.launcherFor(java.toolchain))
+
+    jvmArgs = listOf(
+        "--enable-native-access=ALL-UNNAMED"
+        // Note: app.cpm.terminal.host.JavaFxNativeView reaches into the
+        // internal com.sun.glass.ui.{Window,View} classes (see that
+        // class's Javadoc for why, and the risk of doing so -- plan rule
+        // 27.8). No --add-exports is needed here because this project
+        // runs JavaFX from the classpath (unnamed module), not the module
+        // path: javafx-graphics-26-mac.jar's module-info.class is ignored
+        // in that mode and there is no module-boundary enforcement to
+        // open up. If/when this project modularizes (plan section 6.4,
+        // "prefer a modular application once native loading is stable"),
+        // this will need to become
+        // --add-exports javafx.graphics/com.sun.glass.ui=ALL-UNNAMED (or
+        // to the application's own named module) -- verified empirically
+        // that --add-exports referencing "javafx.graphics" fails fast
+        // ("Unknown module") in the current classpath-mode setup.
+    )
+
+    // Runs the scripted show/resize/type/screenshot/close sequence by
+    // default so this task's pass/fail (and its log output) can be
+    // evaluated without a human driving the window. Pass
+    // -Papp.cpm.gate0c.interactive to leave the window open instead.
+    if (!project.hasProperty("app.cpm.gate0c.interactive")) {
+        systemProperty("app.cpm.gate0c.autoExit", "true")
+    }
+
+    workingDir = rootProject.projectDir
+}

@@ -105,6 +105,20 @@ dual-architecture `os.arch` selection logic lives
 (`GhosttyNativeLibrary.detectArchDirectoryName()`), per the deviation
 below.
 
+### Terminal surface embedding spike (Task 5, Gate 0C)
+
+```bash
+./gradlew gate0cSpike                              # scripted, auto-exits
+./gradlew gate0cSpike -Papp.cpm.gate0c.interactive # leaves the window open
+```
+
+Opens the smallest possible JavaFX window that embeds one live Ghostty
+terminal surface via a small AppKit host shim
+(`native-host/CpmTerminalHost.{h,m}`, built by `./gradlew buildNativeHost`)
+-- see `docs/native-integration.md` ("Task 5 / Gate 0C") for the full
+investigation, including why JavaFX has no public API for this and what
+was and wasn't possible to verify without a human watching the window.
+
 ## Supported platforms
 
 Version 0.1 targets **macOS only**, on **both**:
@@ -214,13 +228,28 @@ software rendering / Monocle instead of a real display:
 ├── app/                      # the (currently) single Gradle module
 │   ├── build.gradle.kts
 │   └── src/
-│       ├── main/java/app/cpm/       # application code
+│       ├── main/java/app/cpm/                 # application code
+│       │   └── terminal/
+│       │       ├── ghostty/    # narrow native boundary: libghostty FFM bindings
+│       │       ├── host/       # narrow native boundary: AppKit host shim FFM bindings
+│       │       ├── Gate0cSpike.java            # Gate 0C composition root (Task 5)
+│       │       └── Gate0cSpikeLauncher.java
 │       ├── main/resources/          # app.css, icons/, syntax/ (empty for now)
 │       └── test/java/app/cpm/       # JUnit 5 tests
+├── native-host/              # AppKit host shim C sources (plan section 8); no ghostty dependency
+│   ├── CpmTerminalHost.h
+│   └── CpmTerminalHost.m
+├── third_party/
+│   ├── ghostty/               # pinned submodule
+│   └── patches/                # reviewed patches applied by scripts/build-ghostty.sh
 ├── docs/
-│   └── implementation-plan.md
+│   ├── implementation-plan.md
+│   ├── native-integration.md  # Gate 0A-0C findings, patches, verification methodology
+│   └── architecture.md        # unresolved risks (plan rule 27.15)
 ├── scripts/
-│   └── verify-environment.sh
+│   ├── verify-environment.sh
+│   ├── build-ghostty.sh       # builds libghostty for both macOS architectures
+│   └── build-native-host.sh   # builds libcpmterminalhost for both macOS architectures
 ├── build.gradle.kts
 ├── settings.gradle.kts
 ├── gradle.properties

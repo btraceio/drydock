@@ -68,3 +68,18 @@ tasks.register<Exec>("buildGhosttyNative") {
     // to the script's documented defaults/detection.
     commandLine("bash", "${rootDir}/scripts/build-ghostty.sh")
 }
+
+// Builds the tiny AppKit host shim (native-host/CpmTerminalHost.{h,m}, plan
+// section 8) for both supported macOS architectures. See
+// scripts/build-native-host.sh and docs/native-integration.md.
+tasks.register<Exec>("buildNativeHost") {
+    group = "native"
+    description = "Builds libcpmterminalhost (macOS arm64 + x86_64) via scripts/build-native-host.sh."
+
+    inputs.file("${rootDir}/scripts/build-native-host.sh")
+    inputs.dir("${rootDir}/native-host")
+    outputs.file(ghosttyNativeOutputDir.map { it.dir("macos-x86_64").file("libcpmterminalhost.dylib") })
+    outputs.file(ghosttyNativeOutputDir.map { it.dir("macos-arm64").file("libcpmterminalhost.dylib") })
+
+    commandLine("bash", "${rootDir}/scripts/build-native-host.sh")
+}

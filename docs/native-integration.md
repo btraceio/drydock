@@ -492,3 +492,239 @@ see `third_party/patches/ghostty-install-macos-shared-lib.patch` and the
   (exports `ghostty_init`, `ghostty_config_new/free`, `ghostty_info`, etc.)
   and by actually calling into it from Java via FFM (see
   `app/src/main/java/app/cpm/terminal/ghostty/GhosttySmokeTest.java`).
+
+## Task 5 / Gate 0C: rendering a terminal surface
+
+### Does JavaFX expose a native NSView handle? (plan rule 27.7 — verify, don't assume)
+
+**No, not through any public API.** Verified empirically, not assumed:
+
+- Every public `javafx.stage`/`javafx.scene` class was checked (via
+  `javap -p` against `javafx-graphics-26-mac.jar`) for anything resembling a
+  native handle accessor. There is none.
+- The handle *does* exist one layer down: `com.sun.glass.ui.View#getNativeView()`
+  returns it as a `long` (confirmed by reading Glass's mac backend class
+  list in the jar). `com.sun.glass.ui.Window#getView()` gets the `View` for
+  a given native `Window`, and `Window#getWindows()` lists all currently
+  open native windows.
+- `com.sun.glass.ui` is a genuinely internal package: inspecting
+  `javafx-graphics-26-mac.jar`'s `module-info.class` with
+  `javap -verbose` shows it is a **qualified** export, to `javafx.media`,
+  `javafx.swing`, and `javafx.web` only — not to this application's
+  (unnamed) module. In a modular run this would need
+  `--add-exports javafx.graphics/com.sun.glass.ui=ALL-UNNAMED`.
+- **This project currently runs JavaFX from the classpath, not the module
+  path** (the `org.openjfx.javafxplugin` Gradle plugin puts the JavaFX jars
+  on `sourceSets.main.runtimeClasspath`, and `app/build.gradle.kts` has no
+  `module-info.java`). In that mode the JVM's module system does not
+  enforce qualified exports at all — `com.sun.glass.ui` classes are
+  directly importable and callable with **no** `--add-exports` flag needed.
+  Verified empirically: adding `--add-exports javafx.graphics/...` to the
+  `gate0cSpike` JVM args fails fast with `WARNING: Unknown module:
+  javafx.graphics specified to --add-exports` (there is no *named* module
+  `javafx.graphics` loaded at all in this run mode) — so that flag was
+  removed again. If/when this project modularizes (plan section 6.4), the
+  flag will become necessary and this note should be revisited.
+
+**Decision:** per plan rule 27.9 ("prefer a tiny explicit native host shim
+over extensive reflection into JavaFX internals"), Glass access is used for
+exactly one purpose and nowhere else: obtaining the single `NSView*`
+pointer of the current window, in
+`app.cpm.terminal.host.JavaFxNativeView` (package-private, called only
+from `CpmTerminalHost.createForCurrentWindow()`). All further native work
+(child view creation, resize, focus, teardown) goes through the AppKit
+host shim below, not more Glass calls.
+
+**Risk (plan rule 15):** `com.sun.glass.ui` is unsupported, undocumented,
+internal API. A future JavaFX release could rename, restructure, or remove
+it without notice; there is no fallback implemented. `JavaFxNativeView`'s
+"most recently created window" heuristic is also only valid for this
+single-window spike — a real multi-window app will need a real
+`Stage`-to-native-`Window` correlation, deliberately not implemented yet.
+
+### The AppKit host shim (plan section 8)
+
+Implemented at `native-host/CpmTerminalHost.{h,m}`, built by
+`scripts/build-native-host.sh` into
+`build/native/{macos-x86_64,macos-arm64}/libcpmterminalhost.dylib`, loaded
+by `app.cpm.terminal.host.CpmTerminalHostLibrary`/`CpmTerminalHostBinding`
+(mirroring the `ghostty` package's loader), and exposed publicly as
+`app.cpm.terminal.host.CpmTerminalHost`.
+
+It implements the plan's six suggested functions exactly
+(`cpm_terminal_host_create/set_frame/content_view/set_visible/set_focused/destroy`),
+plus **one deliberate, documented extension**:
+`cpm_terminal_host_set_key_event_callback`. The plan's literal API list has
+no way for the host view to report keyboard input (Java code cannot
+subclass `NSView` to override `-keyDown:`), so the shim's view overrides
+`-keyDown:`/`-keyUp:`/`-flagsChanged:` and forwards the raw AppKit event
+fields (key code, modifier flags, down/up, resolved `characters` string)
+verbatim to one registered callback — it performs **zero** interpretation
+of the event (no shortcut parsing, no ghostty-specific translation), so it
+still satisfies section 8's "must not... implement terminal rendering /
+parse keyboard shortcuts" constraints. All ghostty-specific key-code
+translation (`GHOSTTY_KEY_*` mapping, deciding text vs. special-key calls)
+happens in `app.cpm.terminal.Gate0cSpike` / will move to the Ghostty
+adapter proper in a later task.
+
+**Threading contract:** every shim function, and every `ghostty_*` call in
+this codebase, must run on the AppKit main thread. On this project's
+macOS/JavaFX setup, **the JavaFX Application Thread already *is* the AppKit
+main thread** — this is a documented property of Glass's Cocoa backend
+(it relaunches/reconfigures the process so the FX Application Thread runs
+as the process's actual Cocoa main thread, rather than a same-process
+worker thread as on other platforms). Practically: everything in
+`Gate0cSpike` runs either directly inside `Application#start`/JavaFX
+property-change callbacks, or inside `Platform.runLater` (used for the
+`ghostty_app_new` wakeup callback, since that fires from an arbitrary
+libghostty-internal thread) — never from a raw background/executor thread.
+This was not independently re-verified beyond "the spike didn't crash and
+AppKit calls succeeded", which is consistent with, but not conclusive
+proof of, the thread-identity claim; a `Thread.currentThread()` vs. a
+native `[NSThread isMainThread]` cross-check would make this airtight and
+is worth adding before Gate 0D.
+
+### Wiring an actual `ghostty_app`/`ghostty_surface` (not just an empty view)
+
+Added `GhosttyAppBinding` (struct layouts + downcall handles for
+`ghostty_app_new/free/tick/set_focus` and
+`ghostty_surface_config_new/new/free/set_size/set_focus/draw/refresh/text/key/process_exited`),
+`GhosttyApp` (owns the `ghostty_app_t`, its `ghostty_config_t`, and the
+`ghostty_runtime_config_s` callback table), and `GhosttySurface` (owns one
+`ghostty_surface_t`, created against a `CpmTerminalHost`'s content view).
+
+**Struct layout verification methodology:** rather than hand-deriving C
+struct offsets/padding by eye (error-prone, and Zig's C ABI compatibility
+mode is not something to guess at — plan rule 27.6), a throwaway
+`sizeof()`/`_Alignof()` C program was compiled against the pinned
+`build/native/include/ghostty.h` to get ground truth:
+
+```text
+sizeof(ghostty_action_s)=32 align=8
+sizeof(ghostty_target_s)=16 align=8
+sizeof(ghostty_runtime_config_s)=64 align=8
+sizeof(ghostty_surface_config_s)=88 align=8
+sizeof(ghostty_input_key_s)=32 align=8
+```
+
+Every `StructLayout` in `GhosttyAppBinding` was cross-checked against these
+sizes (all matched the manually-derived field-by-field layout on the first
+try, confirming the reasoning was sound, not just declaring a
+byte-count-only layout and hoping).
+
+**What is and isn't wired up for Gate 0C:** `ghostty_runtime_config_s` has
+six callback fields. Only `wakeup_cb` does something real (it invokes a
+caller-supplied `Runnable`, used to schedule `Platform.runLater(() ->
+{ app.tick(); surface.draw(); })`). The other five
+(`action_cb`, `read_clipboard_cb`, `confirm_read_clipboard_cb`,
+`write_clipboard_cb`, `close_surface_cb`) are wired to real, ABI-correct
+upcall stubs (never `NULL` — a `NULL` function pointer would very likely
+crash the process the first time libghostty tries to invoke one) that are
+deliberately no-ops: `action_cb` always returns `false` ("not handled")
+without reading its `ghostty_action_s` payload at all, since that payload
+is a large tagged union covering every UI action (new window/tab, clipboard
+writes, fullscreen, IPC, etc.) that a real application would need to act
+on. This is explicitly **not complete** — a real app integration will need
+to implement `action_cb` properly (most importantly clipboard writes via
+OSC 52 and the close-surface/quit flow), which is out of scope for this
+feasibility spike. This is the single biggest functional gap left after
+Gate 0C.
+
+### What was verified, and how (since a human wasn't watching the screen)
+
+`./gradlew gate0cSpike` (`app.cpm.terminal.Gate0cSpike`, launched via
+`Gate0cSpikeLauncher` — see below) runs an automated sequence
+(`-Dapp.cpm.gate0c.autoExit=true`, the Gradle task's default) and exits
+with status 0. From one real run's log output:
+
+```text
+[gate0c] starting
+[gate0c] stage shown
+[gate0c] ghostty_init OK
+[gate0c] AppKit host view created and attached to JavaFX window's NSView
+[gate0c] ghostty_app_new OK
+[gate0c] ghostty_surface_new OK (scale=2.0)
+[gate0c] resized: 900.0x600.0 logical -> 1800x1200 px
+[gate0c] focus set (host + app + surface)
+[gate0c] initial ghostty_app_tick + ghostty_surface_draw OK
+[gate0c] automated: sent test text (direct API call, not a real keystroke)
+[gate0c] automated: osascript synthetic keystroke 'q' exit=0
+[gate0c] key event: text="q"
+[gate0c] automated: resized stage
+[gate0c] resized: 1000.0x600.0 logical -> 2000x1200 px
+[gate0c] resized: 1000.0x672.0 logical -> 2000x1344 px
+could not create image from display
+[gate0c] automated: screencapture exit=1 -> .../build/gate0c-screenshot.png
+[gate0c] automated: closing
+[gate0c] shutting down
+[gate0c] shutdown complete, no crash
+```
+
+Mapped against the Gate 0C acceptance criteria (plan section 7):
+
+- **a window opens** — verified (log + process reaches `stage shown` and
+  survives to a scripted close, `BUILD SUCCESSFUL` / exit 0).
+- **terminal content is rendered** — **partially** verified: `ghostty_surface_new`
+  and every `ghostty_surface_draw`/`ghostty_app_tick` call returned/completed
+  without throwing or crashing the process, which is strong evidence the
+  Metal-backed rendering path libghostty sets up on the handed-in `NSView`
+  (see "the `nsview` embedding model" above — confirmed by reading
+  `src/renderer/Metal.zig`, which makes the given view layer-hosting with a
+  `CAMetalLayer` and relies on ghostty's own draw calls after that) is at
+  least not immediately failing. **Not** independently confirmed pixel-by-pixel
+  (i.e., that recognizable terminal glyphs actually appear) — see the
+  screenshot note below.
+- **window resizing updates terminal dimensions** — verified via logs:
+  both the initial size and both dimensions of the automated
+  `stage.setWidth(1000); stage.setHeight(700)` resize produced correctly
+  scaled (`logical * outputScaleX`) calls into `ghostty_surface_set_size`.
+- **focus works** — verified indirectly but strongly: the `osascript`
+  synthetic keystroke below was delivered to *this* process's key window
+  and reached the host view's `-keyDown:` override, which would not happen
+  if `cpm_terminal_host_set_focused`/`makeFirstResponder:` had not
+  actually taken effect.
+- **keyboard input reaches the terminal** — verified with a **real OS-level
+  keystroke**, not just a direct API call: the spike's automated sequence
+  calls `osascript -e 'tell application "System Events" to keystroke "q"'`
+  after bringing its own stage to front, and the log line
+  `[gate0c] key event: text="q"` confirms that keystroke actually traveled
+  System Events → the real window server → AppKit's responder chain → the
+  host shim's `-keyDown:` override → the FFM upcall →
+  `Gate0cSpike.onKeyEvent` → `GhosttySurface.sendText`. (The earlier
+  `surface.sendText("echo gate0c\r")` call in the same log is a *direct*
+  API call used only to exercise `ghostty_surface_text` itself, and is
+  explicitly logged as such — it is not evidence of the AppKit key-routing
+  path.)
+- **the application closes without a crash** — verified: `shutdown
+  complete, no crash` logs, and the Gradle task (and therefore the JVM
+  process) exits 0.
+
+**What could not be verified without a human:** the screenshot capture
+step (`screencapture -x build/gate0c-screenshot.png`) failed with
+`could not create image from display` / exit 1 in this run. This was
+investigated, not just noted: macOS Screen Recording permission (`tccutil`
+service `kTCCServiceScreenCapture`) is required for `screencapture` since
+macOS 10.15+, and the process this task ran in does not have it (confirmed
+— `sqlite3` access to the local `TCC.db` itself returns "authorization
+denied", i.e. the calling process is sandboxed/unprivileged with respect to
+TCC, consistent with lacking the grant). This is an environment limitation,
+not a code defect: **no screenshot was produced by this task run**; a
+human running `./gradlew gate0cSpike -Papp.cpm.gate0c.interactive` locally
+(with Screen Recording permission granted once to their terminal app) would
+get `build/gate0c-screenshot.png` and should look at it to confirm
+recognizable terminal content (a shell prompt, ideally) is actually
+rendered, since that is the one acceptance criterion this task could not
+close out with certainty.
+
+### Running it
+
+```bash
+./gradlew gate0cSpike                              # scripted, auto-exits, safe for CI/agents
+./gradlew gate0cSpike -Papp.cpm.gate0c.interactive # leaves the window open for a human
+```
+
+`Gate0cSpikeLauncher` exists only because launching an
+`Application` subclass directly as the JVM's main class trips JavaFX's
+"JavaFX runtime components are missing" module-path detection even when
+everything needed is already on the classpath (verified empirically); a
+trivial indirection class avoids that check.

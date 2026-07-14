@@ -1,0 +1,152 @@
+// Implementation of the minimal AppKit host shim declared in
+// CpmTerminalHost.h. See that header and docs/native-integration.md for the
+// contract and rationale.
+#import <Cocoa/Cocoa.h>
+#import "CpmTerminalHost.h"
+
+// A small NSView subclass that does the minimum needed to be a usable host:
+//   - accepts first responder / key events, and forwards them verbatim to a
+//     C callback (see CpmTerminalHostKeyForwardingView.keyCallback below);
+//   - is otherwise a completely plain, un-opinionated NSView. It performs no
+//     drawing of its own; libghostty (or nothing at all) is responsible for
+//     everything the view displays, via cpm_terminal_host_content_view().
+@interface CpmTerminalHostKeyForwardingView : NSView
+@property(nonatomic, assign) cpm_terminal_host_key_event_cb keyCallback;
+@property(nonatomic, assign) void *keyCallbackUserdata;
+@end
+
+@implementation CpmTerminalHostKeyForwardingView
+
+- (BOOL)acceptsFirstResponder {
+    return YES;
+}
+
+- (BOOL)isFlipped {
+    // Top-left origin, matching JavaFX's coordinate space, so
+    // cpm_terminal_host_set_frame's (x, y) can be passed through unmodified
+    // by callers instead of every caller having to flip against the
+    // parent's height.
+    return YES;
+}
+
+- (void)forwardKeyEvent:(NSEvent *)event down:(BOOL)down {
+    if (self.keyCallback == NULL) {
+        return;
+    }
+    NSString *chars = [event characters];
+    const char *utf8 = chars != nil ? [chars UTF8String] : NULL;
+    size_t len = utf8 != NULL ? strlen(utf8) : 0;
+    self.keyCallback(self.keyCallbackUserdata,
+                      (uint16_t)[event keyCode],
+                      (uint32_t)[event modifierFlags],
+                      down ? 1 : 0,
+                      utf8,
+                      len);
+}
+
+- (void)keyDown:(NSEvent *)event {
+    [self forwardKeyEvent:event down:YES];
+}
+
+- (void)keyUp:(NSEvent *)event {
+    [self forwardKeyEvent:event down:NO];
+}
+
+- (void)flagsChanged:(NSEvent *)event {
+    // Modifier-only changes (Shift/Ctrl/Option/Command pressed or
+    // released alone). Forward as a "key down" with empty characters; the
+    // Java-side translator decides what (if anything) to do with it.
+    [self forwardKeyEvent:event down:YES];
+}
+
+@end
+
+cpm_terminal_host_t cpm_terminal_host_create(void *parent_nsview) {
+    if (parent_nsview == NULL) {
+        NSLog(@"cpm_terminal_host_create: parent_nsview is NULL");
+        return NULL;
+    }
+    NSView *parent = (__bridge NSView *)parent_nsview;
+    if (![parent isKindOfClass:[NSView class]]) {
+        NSLog(@"cpm_terminal_host_create: parent_nsview is not an NSView");
+        return NULL;
+    }
+
+    CpmTerminalHostKeyForwardingView *view =
+        [[CpmTerminalHostKeyForwardingView alloc] initWithFrame:NSZeroRect];
+    view.hidden = YES;
+    [parent addSubview:view];
+
+    // Retain the view for the lifetime of the opaque handle; released in
+    // cpm_terminal_host_destroy. CFBridgingRetain gives us a +1 retain that
+    // balances the CFBridgingRelease in destroy.
+    return (cpm_terminal_host_t)CFBridgingRetain(view);
+}
+
+void cpm_terminal_host_set_frame(cpm_terminal_host_t host,
+                                  double x,
+                                  double y,
+                                  double width,
+                                  double height) {
+    if (host == NULL) {
+        return;
+    }
+    NSView *view = (__bridge NSView *)host;
+    [view setFrame:NSMakeRect(x, y, width, height)];
+}
+
+void *cpm_terminal_host_content_view(cpm_terminal_host_t host) {
+    // `host` already *is* an (Objective-C retained) NSView*, so no bridging
+    // is needed here. Callers must not release/free this pointer; its
+    // lifetime is owned by the host and ends at cpm_terminal_host_destroy.
+    return host;
+}
+
+void cpm_terminal_host_set_visible(cpm_terminal_host_t host, bool visible) {
+    if (host == NULL) {
+        return;
+    }
+    NSView *view = (__bridge NSView *)host;
+    view.hidden = !visible;
+}
+
+void cpm_terminal_host_set_focused(cpm_terminal_host_t host, bool focused) {
+    if (host == NULL) {
+        return;
+    }
+    NSView *view = (__bridge NSView *)host;
+    NSWindow *window = [view window];
+    if (window == nil) {
+        return;
+    }
+    if (focused) {
+        [window makeFirstResponder:view];
+    } else if ([window firstResponder] == view) {
+        // Give focus back to the window itself; there is no single
+        // "previous" responder to restore to in this minimal shim, and the
+        // plan explicitly says this shim must not know about application
+        // state (so it cannot remember what had focus before).
+        [window makeFirstResponder:nil];
+    }
+}
+
+void cpm_terminal_host_destroy(cpm_terminal_host_t host) {
+    if (host == NULL) {
+        return;
+    }
+    NSView *view = (__bridge NSView *)host;
+    [view removeFromSuperview];
+    // Balances the CFBridgingRetain in cpm_terminal_host_create.
+    CFBridgingRelease(host);
+}
+
+void cpm_terminal_host_set_key_event_callback(cpm_terminal_host_t host,
+                                               cpm_terminal_host_key_event_cb callback,
+                                               void *userdata) {
+    if (host == NULL) {
+        return;
+    }
+    CpmTerminalHostKeyForwardingView *view = (__bridge CpmTerminalHostKeyForwardingView *)host;
+    view.keyCallback = callback;
+    view.keyCallbackUserdata = userdata;
+}

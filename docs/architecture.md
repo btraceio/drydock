@@ -7,24 +7,63 @@ detailed investigation and `README.md` for how libghostty is currently
 built. It will grow into fuller architecture documentation as later
 milestones (Gate 0C onward) land.
 
-## Unresolved risks (as of Task 4)
+## Resolved in Task 5 (Gate 0C)
 
-- **Whether JavaFX can expose a real `NSView*` at all.** Plan rule 27.7
-  explicitly forbids assuming this without verification. `ghostty_surface_new`
-  requires a real, addressable `NSView*` (see `docs/native-integration.md`,
-  "Embedding examples" / "nsview embedding model"). If JavaFX has no public
-  API for this, the native macOS host shim anticipated by plan section 8
-  becomes mandatory, not a fallback. **Must be established in Gate 0C**,
-  not assumed.
-- **Exact create/destroy ordering and thread-affinity edge cases** for
-  `ghostty_app_t` / `ghostty_surface_t` teardown. `docs/native-integration.md`
-  documents the general contract (single "main"/UI-thread affinity,
-  `ghostty_init` once per process, `wakeup_cb` marshaling), but the header
-  does not fully document teardown ordering (surface-before-app; whether
-  `ghostty_app_tick` may still fire after `ghostty_surface_free`). **Must be
-  established empirically in Gates 0B–0D**; Gate 0B (Task 4) only exercised
-  `ghostty_init`/`ghostty_info`/`ghostty_config_new`/`ghostty_config_free`,
-  not the app/surface lifecycle.
+- **Whether JavaFX can expose a real `NSView*` at all.** Resolved: **no**,
+  not through any public API (verified via `javap` against the actual
+  `javafx-graphics-26-mac.jar`, not assumed). A native pointer is reachable
+  only through the internal, unsupported `com.sun.glass.ui` package. The
+  AppKit host shim from plan section 8 was therefore implemented (not just
+  anticipated) — see `native-host/CpmTerminalHost.{h,m}` and
+  `app.cpm.terminal.host`. Full writeup, including the qualified-export
+  detail and why no `--add-exports` flag is currently needed (classpath-mode
+  JavaFX, not module-path), in `docs/native-integration.md`, "Task 5 / Gate
+  0C".
+- **Create/destroy ordering for `ghostty_app_t`/`ghostty_surface_t`**:
+  partially established — `app.cpm.terminal.ghostty.GhosttyApp`/`GhosttySurface`
+  implement and exercise surface-before-app teardown
+  (`GhosttySurface#close` then `GhosttyApp#close`), verified crash-free in
+  the Gate 0C spike's shutdown path. **Still open**: whether
+  `ghostty_app_tick` can safely be called after (or concurrently with) a
+  `ghostty_surface_free` on the *same* app with *multiple* surfaces —
+  Gate 0C only ever has one surface, so this is untested.
+
+## Unresolved risks (as of Task 5)
+
+- **`action_cb` is a no-op stub that always returns `false` without reading
+  its payload.** See `docs/native-integration.md`, "What is and isn't wired
+  up for Gate 0C" — `ghostty_action_s` is a large tagged union covering
+  every UI-triggered action (new window/tab, OSC 52 clipboard writes,
+  fullscreen, quit confirmation, IPC, etc.). None of these are handled.
+  This is fine for Gate 0C's narrow scope (typing text, resizing, drawing)
+  but **must be implemented before real usage** (Gate 0D/0E and beyond) —
+  otherwise, e.g., `claude`'s use of OSC 52 clipboard writes, or a
+  keybinding-triggered action, will silently do nothing.
+- **JavaFX-Application-Thread-is-AppKit-main-thread was not independently
+  proven**, only exercised without incident. See
+  `docs/native-integration.md`'s threading-contract paragraph for the
+  specific cross-check (`Thread`/`NSThread` identity comparison) that would
+  make this airtight; recommended before Gate 0D introduces a real,
+  continuously-running child process and much higher event volume.
+- **`JavaFxNativeView`'s "most recently created window" heuristic** only
+  works for a single-window process (true of every Gate so far, false of
+  the eventual multi-repository/multi-session application). A real fix
+  needs a `Stage`-to-native-`Window` correlation this task deliberately did
+  not implement (see `docs/native-integration.md`).
+- **The Gate 0C spike's key-code mapping is intentionally minimal**
+  (printable text plus Enter/Backspace/Tab/Escape/arrows only) — it exists
+  to satisfy Gate 0C's "keyboard input reaches the terminal" criterion, not
+  Gate 0D's much larger checklist (modifiers, Ctrl+C/D, Option combos,
+  copy/paste, IME, function keys, etc.), which is explicitly out of scope
+  until Task 6.
+- **The Gate 0C automated run could not capture/verify a screenshot**: the
+  process lacks macOS Screen Recording permission (`screencapture` failed
+  with "could not create image from display", confirmed via a failed
+  `TCC.db` query, not just assumed). No agent/CI process can grant this
+  permission itself; a human must run `./gradlew gate0cSpike
+  -Papp.cpm.gate0c.interactive` locally once, with that permission granted,
+  to visually confirm actual terminal glyphs render (as opposed to just
+  "no crash while calling draw").
 - **Ghostty's own libtool-merged static archive silently drops archive
   members** (see `docs/native-integration.md`, "Task 4 update" section, and
   `third_party/patches/ghostty-install-macos-shared-lib.patch`). Worked
@@ -45,20 +84,42 @@ milestones (Gate 0C onward) land.
 
 ## Narrow native boundary (plan section 2.4 / 4.2)
 
-All libghostty interaction lives in `app.cpm.terminal.ghostty`
-(`app/src/main/java/app/cpm/terminal/ghostty/`):
+All native (libghostty + AppKit host shim) interaction lives in two
+sibling packages under `app/src/main/java/app/cpm/terminal/`:
 
+`app.cpm.terminal.ghostty/` (libghostty):
 - `GhosttyNativeLibrary` -- resolves and loads the architecture-matching
   `libghostty.dylib` (this is also the one place allowed to branch on
   `os.arch`, per the approved dual-architecture deviation in `README.md`).
-- `GhosttyBinding` -- hand-written FFM `MethodHandle`s for the minimal API
-  surface needed so far (`ghostty_init`, `ghostty_info`,
+- `GhosttyBinding` -- Gate 0B bindings (`ghostty_init`, `ghostty_info`,
   `ghostty_config_new`/`ghostty_config_free`).
+- `GhosttyAppBinding` -- Gate 0C struct layouts + downcall handles for the
+  app/surface API (`ghostty_app_*`, `ghostty_surface_*`).
+- `GhosttyApp` / `GhosttySurface` -- public, `MemorySegment`-free lifecycle
+  wrappers around one `ghostty_app_t`/`ghostty_surface_t`.
 - `GhosttySmokeTest` -- the Gate 0B command-line entry point
   (`./gradlew ffmSmokeTest`).
 
+`app.cpm.terminal.host/` (AppKit host shim, plan section 8):
+- `CpmTerminalHostLibrary` / `CpmTerminalHostBinding` -- loads
+  `libcpmterminalhost.dylib` and binds its 7 functions (6 from the plan's
+  suggested API + 1 documented key-event-forwarding extension; see
+  `docs/native-integration.md`).
+- `JavaFxNativeView` -- package-private; the *only* class anywhere in this
+  codebase that touches the internal `com.sun.glass.ui` API, and only to
+  obtain one `NSView*` pointer.
+- `CpmTerminalHost` -- public, `MemorySegment`-free (except
+  `contentViewHandle()`, callable only from the ghostty package) entry
+  point.
+
+The corresponding native sources are `third_party/ghostty` (vendored,
+patched per `third_party/patches/`) and `native-host/CpmTerminalHost.{h,m}`
+(this project's own tiny AppKit shim, with zero dependency on Ghostty).
+
 No other package may reference `MemorySegment`, `MethodHandle`, `Linker`,
-generated libghostty bindings, native pointers, or AppKit handles. If/when
-bindings are generated (e.g. via `jextract`) for the larger surface-
-embedding API needed from Gate 0C onward, they must live in a separate
-source set/package from the hand-written code above (plan rule 27.17).
+generated libghostty bindings, native pointers, or AppKit handles.
+`app.cpm.terminal.Gate0cSpike` (the Gate 0C composition root) only ever
+calls the public, pointer-free methods on `GhosttyApp`/`GhosttySurface`/
+`CpmTerminalHost`. If/when bindings are generated (e.g. via `jextract`) for
+a larger API surface, they must live in a separate source set/package from
+the hand-written code above (plan rule 27.17).
