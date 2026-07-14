@@ -154,15 +154,33 @@ public final class Gate0cSpike extends Application {
      * (Gate 0C's acceptance criterion); a full key-mapping table
      * (matching Gate 0D's much larger checklist) is out of scope for this
      * task. See docs/native-integration.md.
+     *
+     * <p><b>Task 6 (Gate 0D) correction:</b> {@code ghostty_input_key_s.keycode}
+     * is NOT a {@code GHOSTTY_KEY_*} C enum ordinal (this file originally,
+     * incorrectly, translated into one) -- {@code
+     * src/apprt/embedded.zig}'s {@code KeyEvent.core()} looks the incoming
+     * {@code keycode} up in {@code input.keycodes.entries[].native}, i.e. it
+     * must be the raw platform-native virtual keycode (exactly what this
+     * method already receives from AppKit). The previous {@code SPECIAL_KEYS}
+     * map translated to the wrong number space -- e.g. it sent 53
+     * ({@code GHOSTTY_KEY_BACKSPACE}'s ordinal) for the Backspace key, which
+     * native macOS keycode 53 actually means "Escape". This was never caught
+     * by Gate 0C's automated check because that check only exercised a plain
+     * typed character (which goes through the separate {@code
+     * ghostty_surface_text} codepath, not {@code keycode} at all); Task 6's
+     * headless {@code ghostty_surface_read_text} checks caught it. See
+     * docs/native-integration.md, "Task 6 / Gate 0D".</p>
      */
     private void onKeyEvent(int keyCode, int modifierFlags, boolean keyDown, String characters) {
         if (surface == null) {
             return;
         }
         int mods = translateModifiers(modifierFlags);
-        Integer ghosttyKey = SPECIAL_KEYS.get(keyCode);
-        if (ghosttyKey != null) {
-            surface.sendKey(ghosttyKey, mods, keyDown);
+        if (SPECIAL_KEYS.contains(keyCode)) {
+            // Pass the native AppKit keycode straight through -- see the
+            // Javadoc above for why no translation table is needed (or
+            // correct) here.
+            surface.sendKey(keyCode, mods, keyDown);
             log("key event: special keyCode=" + keyCode + " down=" + keyDown + " mods=" + mods);
             return;
         }
@@ -187,16 +205,20 @@ public final class Gate0cSpike extends Application {
         return mods;
     }
 
-    // macOS virtual key codes -> GHOSTTY_KEY_* ordinals (see ghostty.h).
-    private static final java.util.Map<Integer, Integer> SPECIAL_KEYS = java.util.Map.of(
-        36, 58, // Return -> GHOSTTY_KEY_ENTER
-        51, 53, // Delete (backspace) -> GHOSTTY_KEY_BACKSPACE
-        48, 64, // Tab -> GHOSTTY_KEY_TAB
-        53, 120, // Escape -> GHOSTTY_KEY_ESCAPE
-        123, 76, // Left arrow -> GHOSTTY_KEY_ARROW_LEFT
-        124, 77, // Right arrow -> GHOSTTY_KEY_ARROW_RIGHT
-        125, 75, // Down arrow -> GHOSTTY_KEY_ARROW_DOWN
-        126, 78  // Up arrow -> GHOSTTY_KEY_ARROW_UP
+    // Native macOS virtual keycodes this spike recognizes as "special" (not
+    // plain text) -- passed straight through to ghostty_surface_key's
+    // keycode field unmodified (see onKeyEvent's Javadoc). Verified against
+    // third_party/ghostty/src/input/keycodes.zig's macOS ("native", index 4)
+    // column, not hand-guessed.
+    private static final java.util.Set<Integer> SPECIAL_KEYS = java.util.Set.of(
+        36,  // Return / Enter
+        51,  // Delete (Backspace)
+        48,  // Tab
+        53,  // Escape
+        123, // Left arrow
+        124, // Right arrow
+        125, // Down arrow
+        126  // Up arrow
     );
 
     /**

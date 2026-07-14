@@ -148,3 +148,32 @@ tasks.register<JavaExec>("gate0cSpike") {
 
     workingDir = rootProject.projectDir
 }
+
+// Gate 0D (plan section 7 / 28 "Task 6"): spawns /bin/zsh -l inside the
+// Gate 0C terminal surface and works through the interactive-shell manual
+// checklist headlessly where possible. See app.cpm.terminal.Gate0dSpike,
+// docs/manual-terminal-checklist.md, and docs/native-integration.md.
+tasks.register<JavaExec>("gate0dSpike") {
+    group = "verification"
+    description = "Gate 0D: runs /bin/zsh -l in the embedded terminal and drives the interaction checklist."
+
+    dependsOn(rootProject.tasks.named("buildGhosttyNative"))
+    dependsOn(rootProject.tasks.named("buildNativeHost"))
+
+    classpath = sourceSets.main.get().runtimeClasspath
+    mainClass.set("app.cpm.terminal.Gate0dSpikeLauncher")
+    javaLauncher.set(javaToolchains.launcherFor(java.toolchain))
+
+    // See gate0cSpike's comment above for why ALL-UNNAMED (not
+    // --add-exports) is correct here.
+    jvmArgs = listOf("--enable-native-access=ALL-UNNAMED")
+
+    // Runs the scripted checklist sequence by default. Pass
+    // -Papp.cpm.gate0d.interactive to leave the window open with a live
+    // shell instead (for a human to drive the remaining checklist items).
+    if (!project.hasProperty("app.cpm.gate0d.interactive")) {
+        systemProperty("app.cpm.gate0d.autoExit", "true")
+    }
+
+    workingDir = rootProject.projectDir
+}

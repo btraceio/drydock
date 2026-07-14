@@ -728,3 +728,180 @@ close out with certainty.
 "JavaFX runtime components are missing" module-path detection even when
 everything needed is already on the classpath (verified empirically); a
 trivial indirection class avoids that check.
+
+## Task 6 / Gate 0D: running an interactive shell
+
+Plan section 7 ("Gate 0D") and section 28 ("Task 6"): spawn `/bin/zsh -l`
+inside the Gate 0C terminal surface and work through the manual checklist
+headlessly wherever genuinely possible. Full checklist results (with
+per-item VERIFIED/UNVERIFIABLE/NOT-YET-RUN status) live in
+docs/manual-terminal-checklist.md; this section covers the mechanism and
+the notable findings.
+
+### Making Gate 0C's evidence ceiling headless: `ghostty_surface_read_text`
+
+Gate 0C's evidence for "does keyboard input work" topped out at "the call
+didn't crash" / a screenshot a human would have to look at. Task 6 adds
+`GhosttySurface.readScreenText()`, wrapping `ghostty_surface_read_text`
+(struct layouts for `ghostty_text_s`/`ghostty_point_s`/`ghostty_selection_s`
+verified the same way as Task 5 -- a throwaway `sizeof()`/`offsetof()` C
+program against the pinned header, not hand-derived):
+
+```text
+sizeof(ghostty_text_s)=40 align=8         (tl_px_x@0, tl_px_y@8, offset_start@16,
+                                            offset_len@20, text@24, text_len@32)
+sizeof(ghostty_point_s)=16 align=4        (tag@0, coord@4, x@8, y@12)
+sizeof(ghostty_selection_s)=36 align=4    (top_left@0, bottom_right@16, rectangle@32)
+```
+
+This lets the spike read back the terminal's actual rendered cell grid as
+plain UTF-8 text (via `GHOSTTY_POINT_VIEWPORT`/`_COORD_TOP_LEFT`/`_BOTTOM_RIGHT`,
+i.e. "the whole visible viewport") after sending real input, and assert
+specific outcomes: a marker string appearing as its own output row (not
+just "somewhere on screen" -- see the false-positive note below), `$COLUMNS`
+changing after a resize, `ghostty_surface_process_exited()` flipping after
+Ctrl+D.
+
+**What this does NOT prove:** `read_text` returns decoded cell *text*, not
+pixels -- colour attributes, font shaping/rendering, and exact glyph
+positioning are outside what it can confirm. See
+docs/manual-terminal-checklist.md for exactly which checklist items this
+leaves for a human.
+
+### False-positive risk in "does the marker appear" checks
+
+An early version of this checklist asserted success via
+`screenText.contains("MARKER")`. This is unsound: the *typed* command line
+itself contains the marker string (e.g. typing `echo GATE0D_MARK1` renders
+the literal characters `echo GATE0D_MARK1` on screen) whether or not the
+command ever actually executed. A run where Enter did not work at all (see
+below) still passed several `contains`-based checks purely because the
+marker had been typed, never executed. Fixed by requiring an exact
+(trimmed) match against one whole terminal *row* (`hasOutputLine` in
+`Gate0dSpike`) -- a command's own output renders on a row by itself,
+distinct from the "prompt + typed command" row that precedes it, so an
+exact row match is real evidence the shell executed the command.
+
+### A real bug found and fixed: `ghostty_input_key_s.keycode` is a native platform keycode, not a `GHOSTTY_KEY_*` ordinal
+
+The first full automated run of the checklist showed every special key
+(Enter, Backspace, arrows, Ctrl+C, Ctrl+D) silently doing nothing or the
+wrong thing -- e.g. `[gate0d] DEBUG: Enter press NOT consumed by
+ghostty_surface_key` on every attempt, and Backspace producing garbled
+command lines instead of deleting characters. Investigated against the
+pinned source (not guessed): `src/apprt/embedded.zig`'s
+`KeyEvent.core()` resolves the incoming `keycode` field via
+
+```zig
+const physical_key = keycode: for (input.keycodes.entries) |entry| {
+    if (entry.native == self.keycode) break :keycode entry.key;
+} else .unidentified;
+```
+
+i.e. `keycode` must be the **native, platform-specific virtual keycode**
+(`src/input/keycodes.zig`'s macOS/`native` column), not a `GHOSTTY_KEY_*` C
+enum ordinal from `ghostty.h`. `Gate0cSpike`'s original `SPECIAL_KEYS` map
+(Task 5) got this wrong -- it translated a real AppKit keycode into a
+`GHOSTTY_KEY_*` ordinal and sent *that* as `keycode`, e.g. sending 53
+(`GHOSTTY_KEY_BACKSPACE`'s ordinal) for a Backspace press, and macOS
+keycode 53 actually means Escape. This was never caught by Gate 0C's
+automated run because that run only ever exercised one plain typed
+character (`'q'`, via `ghostty_surface_text`, a codepath that never
+touches `keycode`).
+
+Verified macOS-native keycodes (cross-checked against
+`third_party/ghostty/src/input/keycodes.zig`'s `native` column, not
+hand-counted): Enter=36 (0x24), Backspace/Delete=51 (0x33), Tab=48 (0x30),
+Escape=53 (0x35), Left=123 (0x7b), Right=124 (0x7c), Down=125 (0x7d),
+Up=126 (0x7e), Home=115 (0x73), PageUp=116 (0x74), End=119 (0x77),
+PageDown=121 (0x79), the `C` key=8 (0x08), the `D` key=2 (0x02).
+
+Fixed both `Gate0cSpike.SPECIAL_KEYS` (now a `Set` of recognized native
+keycodes, passed straight through unmodified -- no translation at all) and
+`Gate0dSpike`'s key constants. Re-ran `gate0cSpike` after the fix: still
+builds and runs to completion with no crash (regression-checked, though
+Gate 0C's own automated sequence never actually exercised a special key
+programmatically, only a plain character via a real OS keystroke, so this
+regression check is weaker evidence than Gate 0D's).
+
+### A second, related finding: `ghostty_surface_text` is paste semantics, not typing
+
+`Surface.zig`'s `textCallback` (the `ghostty_surface_text` C export) is
+documented as: "Sends text as-is to the terminal without triggering any
+keyboard protocol. This will treat the input text as if it was pasted from
+the clipboard." Once the shell enables bracketed-paste mode (which most
+shells, including this machine's zsh, do shortly after the prompt is
+ready), further `ghostty_surface_text` calls get wrapped in
+`\e[200~...\e[201~` bracketed-paste markers. In an early Gate 0D run this
+produced visibly corrupted command lines (`echo WRONGWORD[200~GATE0D_MARK2_RIGHT`,
+`zsh: bad pattern: ...`) because the calls simulating "ordinary typing" were
+using `ghostty_surface_text`, not the keyboard codepath.
+
+Fixed by adding `GhosttySurface.sendCharKey(codepoint, mods)` /
+`sendTypedText(String)`, which go through `ghostty_surface_key` with the
+resolved character in the event's `text` field (`keycode` set to
+`GHOSTTY_KEY_UNIDENTIFIED`) -- the same codepath a real AppKit `keyDown`
+with a resolved character uses per `Surface.zig`'s `encodeKey`. This is
+what a production implementation should use for ordinary typed input;
+`ghostty_surface_text`/`sendText` should be reserved for an actual paste
+operation (Cmd+V from the system pasteboard). Note `Gate0cSpike`'s
+production-shaped `onKeyEvent` still calls `surface.sendText(characters)`
+for plain typed characters, carried over unchanged from Task 5 -- this is a
+known follow-up, not fixed in this task (Gate 0C's own automated check
+never enables bracketed paste in the time it runs, so it did not surface
+this there; flagging it here for whoever builds the real terminal
+integration).
+
+### Final automated result (after fixes)
+
+`./gradlew gate0dSpike`, one full run: **12/12 checks passed**, 0 failed, 0
+skipped (vim was present in this environment so its check ran rather than
+being skipped). Representative evidence from the log:
+
+```text
+[gate0d] [PASS] shell prompt rendering -- terminal viewport has non-blank content after zsh startup
+[gate0d] [PASS] ordinary typing + Return -- a terminal row is exactly "GATE0D_MARK1" ...
+[gate0d] [PASS] Backspace -- corrected command's output row present, erased word absent anywhere on screen
+[gate0d] [PASS] arrow keys (Left x2 before insert) -- output row is "GATE0D_MARK3_AB" ...
+[gate0d] [PASS] coloured (SGR) output -- text survives escape parsing -- printf's own output row is exactly the marker ...
+[gate0d] [PASS] Unicode (accented char + snowman + emoji) -- echo's own output row exactly matches ... (accent=true snowman=true emoji=true)
+[gate0d] [PASS] resizing propagates to the shell ($COLUMNS) -- COLUMNS before=112 after=187 ...
+[gate0d] [PASS] vim / alternate-screen TUI launches -- screen content while vim was running looked like vim's alternate-screen UI ...
+[gate0d] [PASS] shell usable again after quitting vim -- shell echoed and ran a marker command normally after :q!
+[gate0d] [PASS] Ctrl+C interrupts a foreground command -- shell actually ran a new command ~2s after Ctrl+C ...
+[gate0d] [PASS] process alive before Ctrl+D -- ghostty_surface_process_exited() is false while zsh is still running
+[gate0d] [PASS] Ctrl+D exits the shell (process exit) -- ghostty_surface_process_exited() is true after sending Ctrl+D on an empty prompt line
+[gate0d] RESULTS: pass=12 fail=0 skip=0
+[gate0d] shutdown complete, no crash
+```
+
+The `vim` session's screen content, captured via `read_text` (not a
+screenshot -- see the caveats above about what this does and doesn't
+prove), included the genuine startup banner text, which is strong evidence
+a real `vim` process actually ran in the alternate screen:
+
+```text
+~                    VIM - Vi IMproved
+~                    version 9.1.1752
+~                by Bram Moolenaar et al.
+```
+
+### Running it
+
+```bash
+./gradlew gate0dSpike                              # scripted, auto-exits, safe for CI/agents
+./gradlew gate0dSpike -Papp.cpm.gate0d.interactive # leaves the window (and a live shell) open for a human
+```
+
+### What Task 6 did not attempt
+
+Per docs/manual-terminal-checklist.md: Claude Code itself (out of scope --
+that is plan section 7's separate Gate 0E), real selection/clipboard
+(needs the real macOS pasteboard, and clipboard callbacks are still
+no-ops -- a Gate 0C-era gap, not new), Cmd+C/Cmd+V/Option+arrow through the
+real AppKit responder chain (this spike drives ghostty's C API directly,
+bypassing AppKit -- faithful for keyboard *codepaths* but not real OS-level
+gestures), Home/End/Page Up/Page Down (native keycodes verified but not
+exercised -- mechanically identical to the already-proven arrow-key check,
+just not done here), and anything requiring real hardware/OS state changes
+(sleep/wake, external display disconnect, actually changing Retina scale).

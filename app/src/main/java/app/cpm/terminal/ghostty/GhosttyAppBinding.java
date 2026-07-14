@@ -100,6 +100,37 @@ final class GhosttyAppBinding {
         MemoryLayout.paddingLayout(3)
     ).withName("ghostty_input_key_s");
 
+    // ghostty_point_s { tag: i32; coord: i32; x: u32; y: u32 }
+    // Verified (Task 6, docs/native-integration.md "Struct layout
+    // verification"): sizeof == 16, alignof == 4.
+    static final StructLayout POINT_LAYOUT = MemoryLayout.structLayout(
+        ValueLayout.JAVA_INT.withName("tag"),
+        ValueLayout.JAVA_INT.withName("coord"),
+        ValueLayout.JAVA_INT.withName("x"),
+        ValueLayout.JAVA_INT.withName("y")
+    ).withName("ghostty_point_s");
+
+    // ghostty_selection_s { top_left: point; bottom_right: point; rectangle: bool; pad(3) }
+    // Verified: sizeof == 36, alignof == 4.
+    static final StructLayout SELECTION_LAYOUT = MemoryLayout.structLayout(
+        POINT_LAYOUT.withName("top_left"),
+        POINT_LAYOUT.withName("bottom_right"),
+        ValueLayout.JAVA_BOOLEAN.withName("rectangle"),
+        MemoryLayout.paddingLayout(3)
+    ).withName("ghostty_selection_s");
+
+    // ghostty_text_s { tl_px_x: f64; tl_px_y: f64; offset_start: u32; offset_len: u32;
+    //                  text: *const u8; text_len: uintptr_t }
+    // Verified: sizeof == 40, alignof == 8.
+    static final StructLayout TEXT_LAYOUT = MemoryLayout.structLayout(
+        ValueLayout.JAVA_DOUBLE.withName("tl_px_x"),
+        ValueLayout.JAVA_DOUBLE.withName("tl_px_y"),
+        ValueLayout.JAVA_INT.withName("offset_start"),
+        ValueLayout.JAVA_INT.withName("offset_len"),
+        ValueLayout.ADDRESS.withName("text"),
+        ValueLayout.JAVA_LONG.withName("text_len")
+    ).withName("ghostty_text_s");
+
     // Upcall descriptors, transcribed field-by-field from the typedefs in
     // ghostty.h (see the header comment above each function pointer field
     // in ghostty_runtime_config_s for the exact C signature).
@@ -133,6 +164,8 @@ final class GhosttyAppBinding {
     final MethodHandle surfaceText;
     final MethodHandle surfaceKey;
     final MethodHandle surfaceProcessExited;
+    final MethodHandle surfaceReadText;
+    final MethodHandle surfaceFreeText;
 
     GhosttyAppBinding(SymbolLookup lookup) {
         // ghostty_app_t ghostty_app_new(const ghostty_runtime_config_s*, ghostty_config_t);
@@ -204,6 +237,21 @@ final class GhosttyAppBinding {
         this.surfaceProcessExited = linker.downcallHandle(
             find(lookup, "ghostty_surface_process_exited"),
             FunctionDescriptor.of(ValueLayout.JAVA_BOOLEAN, ValueLayout.ADDRESS)
+        );
+        // bool ghostty_surface_read_text(ghostty_surface_t, ghostty_selection_s, ghostty_text_s*);
+        // Task 6 (Gate 0D): lets the spike read back the actual rendered
+        // screen/viewport cell text headlessly -- e.g. to confirm a prompt
+        // or an echoed command's output really appears -- instead of only
+        // being able to infer success from "no crash" or a screenshot a
+        // human has to look at.
+        this.surfaceReadText = linker.downcallHandle(
+            find(lookup, "ghostty_surface_read_text"),
+            FunctionDescriptor.of(ValueLayout.JAVA_BOOLEAN, ValueLayout.ADDRESS, SELECTION_LAYOUT, ValueLayout.ADDRESS)
+        );
+        // void ghostty_surface_free_text(ghostty_surface_t, ghostty_text_s*);
+        this.surfaceFreeText = linker.downcallHandle(
+            find(lookup, "ghostty_surface_free_text"),
+            FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
         );
     }
 
