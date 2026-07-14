@@ -448,16 +448,6 @@ Confirmed (verified in the pinned checkout or by direct command):
 - Required frameworks per the vendored `pkg/macos` package.
 
 Open / must be resolved empirically in later tasks, not guessed:
-- **No supported way to produce a loose `.dylib`** on macOS from this build
-  as-is — only a static `.a` inside an xcframework. Task 3 must design how we
-  get something FFM can `dlopen`: most likely a tiny shim dylib target that
-  links the static archive and exports its symbols (a natural fit for the
-  narrow native-boundary shim already anticipated by plan section 8) — but
-  this needs an actual attempt, since a symbol-visibility/export problem
-  could surface once real linking is attempted.
-- Whether extra explicit `-framework AppKit -framework Metal` linking is
-  required at our own link step, beyond what `pkg/macos`'s build.zig already
-  covers.
 - Whether JavaFX can expose an `NSView*` at all (plan rule 27.7 says this
   must be verified, not assumed) — if not, the AppKit host shim in plan
   section 8 becomes mandatory rather than a fallback, which the embedding
@@ -465,3 +455,40 @@ Open / must be resolved empirically in later tasks, not guessed:
 - Exact create/destroy ordering and thread-affinity edge cases for
   `ghostty_app_t`/`ghostty_surface_t` teardown — to be established in Gates
   0B–0D.
+
+## Task 4 update: how the `.dylib` gap and framework-linking risk were actually resolved
+
+Both items above ("no supported way to produce a loose `.dylib`" and
+"whether extra `-framework AppKit -framework Metal` linking is required")
+were resolved empirically in Task 4, and turned out to require a small,
+reviewed patch to the vendored submodule rather than an external shim —
+see `third_party/patches/ghostty-install-macos-shared-lib.patch` and the
+"Building libghostty" section of `README.md` for the full account. Summary:
+
+- A hand-rolled shim `.dylib` (linking `libghostty.a` plus every discoverable
+  Zig-cache dependency archive by hand) was attempted first and abandoned:
+  Apple's `libtool -static`, used internally by Ghostty's own
+  `GhosttyLib.zig` to merge the compiled module with its C dependencies,
+  silently **drops archive members it warns are "not 8-byte aligned"** —
+  including the object containing the entire public C API. This reproduced
+  identically across repeated clean rebuilds (confirmed via `nm -g` /
+  `ar -t` member-by-member diffing), so it is a real toolchain defect, not a
+  fluke, and not something fixable by relinking the already-broken archive.
+- The actually-correct artifact was hiding in plain sight: Ghostty's own
+  `build.zig` already builds a properly-linked **shared** library
+  (`GhosttyLib.initShared`, using Zig's own linker rather than `libtool`)
+  but never installs it on Darwin — its own comment admits this is a bug
+  ("We shouldn't have this guard... we need to fix that"). The patch simply
+  removes that guard for Darwin.
+- Building that shared lib standalone then failed with `undefined symbol:
+  _MTLCopyAllDevices` and several `_OBJC_CLASS_$_MTL*` errors — confirming
+  the flagged risk was real: nothing in this checkout calls
+  `linkFramework("Metal")` or `linkFramework("AppKit")` (pkg/macos's own
+  build.zig only covers CoreFoundation/CoreGraphics/CoreText/CoreVideo/
+  QuartzCore/IOSurface/Carbon). The patch adds both.
+- With both patch hunks applied, `zig build -Dtarget=<arch>-macos
+  -Demit-xcframework=false -Demit-macos-app=false` produces a correct,
+  fully-linked `libghostty.dylib` per architecture — verified with `nm -g`
+  (exports `ghostty_init`, `ghostty_config_new/free`, `ghostty_info`, etc.)
+  and by actually calling into it from Java via FFM (see
+  `app/src/main/java/app/cpm/terminal/ghostty/GhosttySmokeTest.java`).

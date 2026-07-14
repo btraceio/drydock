@@ -17,49 +17,93 @@ See `docs/native-integration.md` for the full findings on how to build
 libghostty from that checkout, its C API, required frameworks, and
 lifecycle/threading constraints.
 
-### Building libghostty (Task 3)
+### Building libghostty (Task 3, revised in Task 4)
 
 ```bash
 ./gradlew buildGhosttyNative
 ```
 
 runs `scripts/build-ghostty.sh`, which builds libghostty for **both**
-`macos-x86_64` and `macos-arm64` in one invocation (using Ghostty's
-`-Dxcframework-target=universal`, the only mode that can produce an
-`aarch64-macos` slice when building on an Intel host — `native` mode
-silently ignores `-Dtarget` and always builds the host's own architecture;
-see `docs/native-integration.md` for the empirical finding), then splits the
-resulting universal static library with `lipo -thin` into one archive per
-architecture. Deliverables:
+`macos-x86_64` and `macos-arm64` in one invocation and produces, per
+architecture:
 
 ```text
+build/native/macos-x86_64/libghostty.dylib
 build/native/macos-x86_64/libghostty.a
+build/native/macos-arm64/libghostty.dylib
 build/native/macos-arm64/libghostty.a
 build/native/include/ghostty.h            (+ include/ghostty/*, module.modulemap)
 build/generated/ghostty-version.properties
 ```
 
 Both architectures are built and verified on this (Intel) development
-machine — `lipo -info` was used to confirm each split archive actually
-contains only its own architecture's object code, not merely that the
-build reported success.
+machine: `file`/`nm -g` confirm each `.dylib` is single-architecture and
+exports the full public API (`ghostty_init`, `ghostty_config_*`, etc.), not
+merely that the build reported success.
 
-Rebuilding without source changes is a Gradle `UP-TO-DATE` no-op (inputs
-are the script and the submodule's tracked sources, excluding its own
-`.zig-cache`/`zig-out`/`macos/GhosttyKit.xcframework` build outputs); even
-a forced re-run is fast (a few seconds) because Zig's own build cache
-inside `third_party/ghostty/.zig-cache` avoids recompiling unchanged
-sources. A clean checkout with missing prerequisites fails immediately with
-a message naming exactly what's missing (wrong/missing Zig 0.15.x, missing
-Xcode, or an uninitialized submodule) rather than an opaque build error.
+**Task 3 originally** built the static xcframework
+(`-Dxcframework-target=universal`) and `lipo -thin`'d it per architecture.
+**Task 4 replaced that** after discovering two real defects while trying to
+get a `.dylib` (FFM's `SymbolLookup` needs a dlopen-able image; a `.a`
+cannot be dlopen'd) out of that static archive:
 
-**Known artifact limitation, not yet resolved:** Ghostty's `zig build` never
-installs a loose `.dylib` on macOS (only a static `.a`, see
-`docs/native-integration.md`). FFM's `SymbolLookup` needs a dynamically
-loadable image, so Task 4 (FFM smoke test) will need a small shim `.dylib`
-that statically links against these `.a` files and re-exports the
-`ghostty_*` symbols — this is a real, confirmed gap in Ghostty's own build,
-not something skipped here by mistake.
+1. Apple's `libtool -static` (invoked internally by Ghostty's own
+   `GhosttyLib.zig` to merge the compiled module with its C dependencies)
+   silently **drops** several archive members it warns are "not 8-byte
+   aligned" — including the one object containing the *entire public C
+   API*. The Task 3 archive linked but exported none of `ghostty_init`,
+   `ghostty_config_*`, etc. Reproduced identically across repeated clean
+   rebuilds — a real toolchain/upstream defect, not a fluke.
+2. On Darwin, `zig build` never installs a loose `.dylib` at all — Ghostty's
+   own `build.zig` comment says so explicitly ("We shouldn't have this
+   guard but we don't currently build on macOS this way ironically so we
+   need to fix that").
+
+Rather than hand-reconstruct Ghostty's entire dependency link line
+(glslang, spirv-cross, sentry, simdutf, libintl, freetype, harfbuzz, ...),
+`scripts/build-ghostty.sh` now applies a small, reviewed patch —
+`third_party/patches/ghostty-install-macos-shared-lib.patch` — to the
+checked-out submodule before building (idempotent: skipped if already
+applied). It:
+
+- removes the Darwin guard in `build.zig` so the *shared* library target
+  (already correctly linked by Zig's own linker, not Apple's buggy
+  `libtool` merge) gets installed as `libghostty.dylib`;
+- adds `linkFramework("Metal")` / `linkFramework("AppKit")` in
+  `src/build/SharedDeps.zig`, which nothing in this checkout does
+  explicitly (confirmed necessary empirically: omitting them fails with
+  `undefined symbol: _MTLCopyAllDevices` and several
+  `_OBJC_CLASS_$_MTL*` errors).
+
+The script also builds each architecture with a plain per-arch
+`zig build -Dtarget=<arch>-macos` (not the xcframework/lipo path), which
+sidesteps the `libtool` merge bug entirely, and hard-fails the whole build
+if `nm -g` doesn't find `ghostty_init` exported — a real acceptance gate,
+not just "the linker didn't error".
+
+Rebuilding without source changes is a Gradle `UP-TO-DATE` no-op; even a
+forced re-run is fast (well under 10s for both architectures) because
+Zig's own build cache inside `third_party/ghostty/.zig-cache` avoids
+recompiling unchanged sources. A clean checkout with missing prerequisites
+fails immediately with a message naming exactly what's missing (wrong/
+missing Zig 0.15.x, missing Xcode, an uninitialized submodule, or a patch
+that no longer applies cleanly) rather than an opaque build error.
+
+### FFM smoke test (Task 4, Gate 0B)
+
+```bash
+./gradlew ffmSmokeTest
+```
+
+loads the architecture-matching `libghostty.dylib` via the Java Foreign
+Function & Memory API, calls `ghostty_init`, `ghostty_info` (validating the
+returned version string), and `ghostty_config_new`/`ghostty_config_free`,
+then exits cleanly. All FFM/native-pointer code for this lives in
+`app/src/main/java/app/cpm/terminal/ghostty/` — the narrow native boundary
+package mandated by the plan (section 2.4/4.2) — and is also where the
+dual-architecture `os.arch` selection logic lives
+(`GhosttyNativeLibrary.detectArchDirectoryName()`), per the deviation
+below.
 
 ## Supported platforms
 

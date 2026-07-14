@@ -1,0 +1,56 @@
+diff --git a/build.zig b/build.zig
+index f9d861b19..4eab283d8 100644
+--- a/build.zig
++++ b/build.zig
+@@ -138,11 +138,20 @@ pub fn build(b: *std.Build) !void {
+ 
+         // We shouldn't have this guard but we don't currently
+         // build on macOS this way ironically so we need to fix that.
+-        if (!config.target.result.os.tag.isDarwin()) {
+-            libghostty_shared.installHeader(); // Only need one header
++        //
++        // PATCHED (claude-project-manager, see
++        // third_party/patches/ghostty-install-macos-shared-lib.patch):
++        // upstream's own comment above says this guard is a bug, not
++        // intentional design ("we shouldn't have this guard"). FFM needs a
++        // dlopen-able image, and a static .a cannot be dlopen'd, so this
++        // project needs the .dylib installed on Darwin too.
++        libghostty_shared.installHeader(); // Only need one header
++        if (config.target.result.os.tag.isDarwin()) {
++            libghostty_shared.install("libghostty.dylib");
++        } else {
+             libghostty_shared.install("libghostty.so");
+-            libghostty_static.install("libghostty.a");
+         }
++        libghostty_static.install("libghostty.a");
+     }
+ 
+     // macOS only artifacts. These will error if they're initialized for
+diff --git a/src/build/SharedDeps.zig b/src/build/SharedDeps.zig
+index 9276c9914..653921453 100644
+--- a/src/build/SharedDeps.zig
++++ b/src/build/SharedDeps.zig
+@@ -454,6 +454,23 @@ pub fn add(
+             step.linkFramework("OpenGL");
+         }
+ 
++        // PATCHED (claude-project-manager, see
++        // third_party/patches/ghostty-install-macos-shared-lib.patch):
++        // pkg/macos's own build.zig links CoreFoundation/CoreGraphics/
++        // CoreText/CoreVideo/QuartzCore/IOSurface/Carbon, but nothing in
++        // this checkout ever calls linkFramework("Metal") or
++        // linkFramework("AppKit") even though the default Darwin renderer
++        // (Metal) and its ImGui inspector overlay use both at runtime --
++        // this was never caught upstream because Darwin only ever links
++        // libghostty via Xcode's own project settings (which auto-link the
++        // default SDK frameworks for the Swift app target), never via a
++        // plain `zig build`. Confirmed necessary empirically: omitting
++        // these produces `undefined symbol: _MTLCopyAllDevices` and
++        // several `_OBJC_CLASS_$_MTL*` link errors when building
++        // libghostty_shared standalone.
++        step.linkFramework("Metal");
++        step.linkFramework("AppKit");
++
+         // Apple platforms do not include libc libintl so we bundle it.
+         // This is LGPL but since our source code is open source we are
+         // in compliance with the LGPL since end users can modify this

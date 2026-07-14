@@ -11,6 +11,17 @@ plugins {
     id("org.openjfx.javafxplugin") version "0.1.0" apply false
 }
 
+// Alias for the plan's literal Gate 0B task name
+// (":terminal-ghostty:ffmSmokeTest") -- the project is still a single
+// module ("app") during the Phase 0 feasibility spike (see section 5), so
+// the real task lives at :app:ffmSmokeTest; this just makes the top-level
+// spelling from section 7 / 28 work too: `./gradlew ffmSmokeTest`.
+tasks.register("ffmSmokeTest") {
+    group = "verification"
+    description = "Alias for :app:ffmSmokeTest (Gate 0B: libghostty FFM smoke test)."
+    dependsOn(":app:ffmSmokeTest")
+}
+
 tasks.register<Exec>("verifyEnvironment") {
     group = "verification"
     description = "Runs scripts/verify-environment.sh to check local dev prerequisites."

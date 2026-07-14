@@ -4,26 +4,15 @@
 # macOS architectures (arm64 and x86_64), per the approved dual-architecture
 # deviation documented in README.md / docs/implementation-plan.md.
 #
-# See docs/native-integration.md for the detailed findings this script is
-# based on:
-#   - Ghostty's build requires exactly Zig 0.15.x (not the 0.16.x that may be
-#     the default `zig` on PATH).
-#   - On macOS, `zig build` never installs a loose libghostty.dylib/.a; it
-#     only ever produces a static library inside macos/GhosttyKit.xcframework.
-#   - `-Dxcframework-target=native` silently ignores `-Dtarget` for the
-#     macOS "native" slice (Config.genericMacOSTarget(b, null) hardcodes the
-#     host architecture) -- confirmed empirically in Task 3. This means the
-#     *only* way to obtain an arm64 static library on this Intel host is via
-#     `-Dxcframework-target=universal` (the default), which explicitly builds
-#     both aarch64-macos and x86_64-macos slices (Config.genericMacOSTarget(b,
-#     .aarch64) / (b, .x86_64) in GhosttyLib.initMacOSUniversal) and lipo's
-#     them together. This script then un-lipo's ("thins") that universal
-#     archive back into one static library per architecture, matching the
-#     per-architecture deliverable layout this project needs.
+# See docs/native-integration.md for background, and the comment block below
+# ("Why this script patches the vendored submodule") for what changed in
+# Task 4 and why.
 #
 # Deliverables (all under $OUT_DIR, default build/native):
 #   macos-x86_64/libghostty.a
+#   macos-x86_64/libghostty.dylib
 #   macos-arm64/libghostty.a
+#   macos-arm64/libghostty.dylib
 #   include/ghostty.h (+ include/ghostty/*, include/module.modulemap)
 # and, under $GENERATED_DIR (default build/generated):
 #   ghostty-version.properties
@@ -39,6 +28,58 @@
 #   GENERATED_DIR   Where to place ghostty-version.properties.
 #                   Default: <repo-root>/build/generated
 #   GHOSTTY_OPTIMIZE Zig -Doptimize value. Default: ReleaseFast.
+#
+# --- Why this script patches the vendored submodule -------------------------
+#
+# Task 3 originally built the *static* xcframework (`-Dxcframework-target=
+# universal`) and lipo-thinned it into a per-arch libghostty.a. Task 4
+# (the FFM smoke test) discovered two things empirically while trying to
+# link a `.dylib` from that static archive (FFM's SymbolLookup needs a
+# dlopen-able image; a `.a` cannot be dlopen'd):
+#
+#   1. Apple's `libtool -static` (invoked internally by Ghostty's own
+#      GhosttyLib.zig to merge the compiled "ghostty" module with its C
+#      dependencies into one archive) silently *drops* several archive
+#      members it warns are "not 8-byte aligned" -- including
+#      libghostty_zcu.o, the object that contains the entire public C API
+#      (ghostty_init, ghostty_config_*, etc). The resulting libghostty.a
+#      built by Task 3 links, but exports none of the public API. This
+#      reproduced identically across repeated clean rebuilds, so it is a
+#      real toolchain/upstream defect, not a one-off fluke.
+#   2. On Darwin, `zig build` never installs a loose libghostty.dylib at
+#      all -- upstream's own build.zig comment says so explicitly:
+#      "We shouldn't have this guard but we don't currently build on macOS
+#      this way ironically so we need to fix that."
+#
+# Rather than reverse-engineer Ghostty's entire dependency link line by hand
+# (glslang, spirv-cross, sentry, simdutf, libintl, freetype, harfbuzz, ...),
+# this script applies a small, reviewed patch
+# (third_party/patches/ghostty-install-macos-shared-lib.patch) to the
+# checked-out submodule before building:
+#
+#   - build.zig: removes the Darwin guard mentioned above so the *shared*
+#     library target (already correctly linked by Zig's own linker, not
+#     Apple's buggy libtool merge) gets installed as libghostty.dylib.
+#   - src/build/SharedDeps.zig: adds `linkFramework("Metal")` and
+#     `linkFramework("AppKit")`, which nothing in this checkout does
+#     explicitly (pkg/macos's build.zig covers CoreFoundation/CoreGraphics/
+#     CoreText/CoreVideo/QuartzCore/IOSurface/Carbon, but not Metal/AppKit).
+#     Without this, linking the shared lib fails with
+#     `undefined symbol: _MTLCopyAllDevices` and several
+#     `_OBJC_CLASS_$_MTL*` errors -- this was never caught upstream because
+#     Darwin has only ever linked libghostty via Xcode's own project
+#     settings, never via a plain `zig build`.
+#
+# The patch is applied idempotently (skipped if already applied) so re-runs
+# and CI are safe. It only touches the *build graph*, not any runtime
+# behavior of libghostty itself.
+#
+# This script therefore no longer touches the xcframework/lipo path Task 3
+# used; it invokes a plain per-architecture `zig build` (via -Dtarget)
+# instead, which is simpler and sidesteps the libtool merge bug entirely for
+# the shared lib. The static libghostty.a is still produced and copied too
+# (for anything that later wants to statically link), but the primary,
+# verified-correct deliverable used by the FFM binding is the .dylib.
 
 set -euo pipefail
 
@@ -49,6 +90,7 @@ GHOSTTY_DIR="${GHOSTTY_DIR:-$repo_root/third_party/ghostty}"
 OUT_DIR="${OUT_DIR:-$repo_root/build/native}"
 GENERATED_DIR="${GENERATED_DIR:-$repo_root/build/generated}"
 GHOSTTY_OPTIMIZE="${GHOSTTY_OPTIMIZE:-ReleaseFast}"
+PATCH_FILE="$repo_root/third_party/patches/ghostty-install-macos-shared-lib.patch"
 
 fail() {
     echo "ERROR: $*" >&2
@@ -86,14 +128,12 @@ and re-run with ZIG_BIN=/usr/local/opt/zig@0.15/bin/zig (or let this script
 auto-detect that path)." ;;
 esac
 
-# --- Validate Xcode command line tools / Metal toolchain --------------------
+# --- Validate Xcode command line tools ---------------------------------------
 #
-# The macOS xcframework build shells out to `xcodebuild -create-xcframework`
-# and to `xcrun -sdk macosx metal` (to compile Ghostty's Metal shaders). Both
-# require a full Xcode install (not just the stand-alone CLT) with the Metal
-# Toolchain component downloaded (`xcodebuild -downloadComponent
-# MetalToolchain`); this was required on this machine even though a
-# CommandLineTools-only shell already reported a valid xcode-select path.
+# Building the shared lib still needs a full Xcode install (not just the
+# stand-alone CLT): compiling Ghostty's Metal shaders shells out to
+# `xcrun -sdk macosx metal`, which requires the Metal Toolchain component
+# (`xcodebuild -downloadComponent MetalToolchain`).
 command -v xcodebuild >/dev/null 2>&1 || fail "'xcodebuild' not found. Install Xcode (not just the Command Line
 Tools) from the App Store, then run: xcode-select -p
 to confirm it points at /Applications/Xcode.app/Contents/Developer."
@@ -116,6 +156,22 @@ if [[ "$actual_commit" != "$pinned_commit" ]]; then
     echo "Run: git submodule update --init" >&2
 fi
 
+# --- Apply the local build-graph patch, idempotently -------------------------
+[[ -f "$PATCH_FILE" ]] || fail "Missing patch file '$PATCH_FILE'."
+
+if git -C "$GHOSTTY_DIR" apply --check --reverse "$PATCH_FILE" >/dev/null 2>&1; then
+    echo "  patch already applied: $(basename "$PATCH_FILE")"
+elif git -C "$GHOSTTY_DIR" apply --check "$PATCH_FILE" >/dev/null 2>&1; then
+    git -C "$GHOSTTY_DIR" apply "$PATCH_FILE"
+    echo "  applied patch: $(basename "$PATCH_FILE")"
+else
+    fail "Patch '$PATCH_FILE' does not apply cleanly to '$GHOSTTY_DIR'
+(HEAD $actual_commit). This usually means the pinned Ghostty commit moved
+without updating the patch, or the submodule working tree has unrelated
+local edits. Inspect with:
+  git -C '$GHOSTTY_DIR' apply --check '$PATCH_FILE'"
+fi
+
 echo "== Building libghostty =="
 echo "  zig:          $ZIG_BIN ($zig_version)"
 echo "  ghostty dir:  $GHOSTTY_DIR"
@@ -123,66 +179,103 @@ echo "  commit:       $actual_commit"
 echo "  optimize:     $GHOSTTY_OPTIMIZE"
 echo "  out dir:      $OUT_DIR"
 
-# --- Run the actual zig build ------------------------------------------------
+mkdir -p "$OUT_DIR/macos-x86_64" "$OUT_DIR/macos-arm64" "$OUT_DIR/include" "$GENERATED_DIR"
+
+# --- Build once per architecture ---------------------------------------------
 #
-# -Dxcframework-target=universal (the default) is required -- not just
-# requested -- because it is the only mode that builds an aarch64-macos slice
-# from an x86_64 host (see header comment above). It also produces iOS /
-# iOS-simulator slices we don't need, but there is no supported way to ask
-# for "only the two macOS architectures" without patching build.zig, so we
-# accept the extra build cost and simply ignore those slices below.
-(
-    cd "$GHOSTTY_DIR"
-    "$ZIG_BIN" build \
-        -Doptimize="$GHOSTTY_OPTIMIZE" \
-        -Dxcframework-target=universal \
-        -Demit-xcframework=true \
-        -Demit-macos-app=false
-)
+# Plain (non-xcframework) build: `-Demit-xcframework=false -Demit-macos-app=
+# false` skips both the buggy libtool-merged static archive path and the
+# Xcode app step; `-Dtarget=<arch>-macos` cross-compiles the shared+static
+# libs for that architecture directly (this path does honor -Dtarget,
+# unlike the xcframework "native" slice Task 3 found ignores it).
+build_one_arch() {
+    local zig_target="$1"   # e.g. x86_64-macos or aarch64-macos
+    local out_subdir="$2"   # e.g. macos-x86_64 or macos-arm64
+    local prefix
+    prefix="$(mktemp -d "${TMPDIR:-/tmp}/ghostty-build-XXXXXX")"
 
-xcframework_dir="$GHOSTTY_DIR/macos/GhosttyKit.xcframework"
-universal_slice="$xcframework_dir/macos-arm64_x86_64"
-universal_lib="$universal_slice/libghostty.a"
+    echo "-- building $out_subdir (target=$zig_target) --"
+    (
+        cd "$GHOSTTY_DIR"
+        "$ZIG_BIN" build \
+            -Doptimize="$GHOSTTY_OPTIMIZE" \
+            -Dtarget="$zig_target" \
+            -Demit-xcframework=false \
+            -Demit-macos-app=false \
+            --prefix "$prefix"
+    )
 
-[[ -f "$universal_lib" ]] || fail "Expected universal static library not found at '$universal_lib'.
+    local dylib="$prefix/lib/libghostty.dylib"
+    local staticlib="$prefix/lib/libghostty.a"
+    local header="$prefix/include/ghostty.h"
+
+    [[ -f "$dylib" ]] || fail "Expected '$dylib' not found after build for $out_subdir.
 The zig build reported success but did not produce the expected artifact --
-this usually means Ghostty's build layout has changed since
-docs/native-integration.md was written; re-inspect
-third_party/ghostty/src/build/GhosttyXCFramework.zig."
+re-inspect third_party/ghostty/build.zig and the applied patch
+($PATCH_FILE); the build graph may have changed upstream."
+    [[ -f "$staticlib" ]] || fail "Expected '$staticlib' not found after build for $out_subdir."
+    [[ -f "$header" ]] || fail "Expected '$header' not found after build for $out_subdir."
 
-lipo_archs="$(lipo -archs "$universal_lib")"
-echo "  universal lib archs: $lipo_archs"
+    # Hard acceptance gate: verify the public C API is actually exported,
+    # not just that the linker succeeded. This is exactly the defect Task 4
+    # found in Task 3's static-archive-only build (ghostty_init silently
+    # missing), so never skip this check.
+    #
+    # NOTE: capture nm's output into a variable first, then grep it, rather
+    # than piping `nm ... | grep -q ...` directly. `grep -q` exits as soon
+    # as it finds a match, which can SIGPIPE the still-writing `nm` process;
+    # with `set -o pipefail` that makes the pipeline report failure (nm's
+    # non-zero/signal exit status) even though grep *did* find the symbol.
+    nm_output="$(nm -g "$dylib" 2>/dev/null || true)"
+    if ! grep -q ' T _ghostty_init$' <<<"$nm_output"; then
+        fail "'$dylib' was built but does not export ghostty_init.
+This is the exact defect this script's patch/build path was written to
+avoid (see the big comment at the top of this script) -- something about
+the build has changed. Inspect with: nm -g '$dylib' | grep ghostty_"
+    fi
 
-# --- Split the universal (fat) static library into per-arch outputs --------
-mkdir -p "$OUT_DIR/macos-x86_64" "$OUT_DIR/macos-arm64" "$OUT_DIR/include"
+    cp "$dylib" "$OUT_DIR/$out_subdir/libghostty.dylib"
+    cp "$staticlib" "$OUT_DIR/$out_subdir/libghostty.a"
+    # Not rewriting the install name (id) here: FFM loads this dylib by an
+    # explicit absolute path (SymbolLookup.libraryLookup), which does not
+    # consult the library's own install name -- that only matters for a
+    # *dependent* image resolving this one by name. (install_name_tool -id
+    # was tried and rejected: the header has no spare load-command room,
+    # so Apple's tool refuses with "the program must be relinked".)
 
-lipo -thin x86_64 "$universal_lib" -output "$OUT_DIR/macos-x86_64/libghostty.a"
-lipo -thin arm64  "$universal_lib" -output "$OUT_DIR/macos-arm64/libghostty.a"
+    # Headers are identical across architectures; copy once, from whichever
+    # arch builds first.
+    if [[ ! -f "$OUT_DIR/include/ghostty.h" ]]; then
+        rsync -a --delete "$prefix/include/" "$OUT_DIR/include/"
+    fi
+
+    rm -rf "$prefix"
+}
+
+build_one_arch "x86_64-macos"  "macos-x86_64"
+build_one_arch "aarch64-macos" "macos-arm64"
 
 for arch_dir in macos-x86_64 macos-arm64; do
-    file "$OUT_DIR/$arch_dir/libghostty.a" | grep -q 'ar archive' \
-        || fail "Split library '$OUT_DIR/$arch_dir/libghostty.a' does not look like a valid archive."
+    arch_name="${arch_dir#macos-}"
+    [[ "$arch_name" == "x86_64" ]] && expect="x86_64" || expect="arm64"
+    actual_arch="$(file -b "$OUT_DIR/$arch_dir/libghostty.dylib" | grep -oE 'x86_64|arm64')"
+    [[ "$actual_arch" == "$expect" ]] || fail "'$OUT_DIR/$arch_dir/libghostty.dylib' is architecture '$actual_arch', expected '$expect'."
 done
-
-# --- Copy public headers (identical across slices; take them from the
-#     universal slice) -------------------------------------------------------
-rsync -a --delete "$universal_slice/Headers/" "$OUT_DIR/include/"
 
 [[ -f "$OUT_DIR/include/ghostty.h" ]] || fail "ghostty.h missing from copied headers at '$OUT_DIR/include'."
 
 # --- Record build metadata ---------------------------------------------------
-mkdir -p "$GENERATED_DIR"
 cat > "$GENERATED_DIR/ghostty-version.properties" <<EOF
 # Generated by scripts/build-ghostty.sh. Do not edit by hand.
 ghostty.commit=$actual_commit
 ghostty.tag=v1.3.1
 ghostty.optimize=$GHOSTTY_OPTIMIZE
-ghostty.xcframework.target=universal
+ghostty.patch=third_party/patches/ghostty-install-macos-shared-lib.patch
 zig.version=$zig_version
 EOF
 
 echo "== libghostty build complete =="
-echo "  $OUT_DIR/macos-x86_64/libghostty.a"
-echo "  $OUT_DIR/macos-arm64/libghostty.a"
+echo "  $OUT_DIR/macos-x86_64/libghostty.dylib (+ libghostty.a)"
+echo "  $OUT_DIR/macos-arm64/libghostty.dylib (+ libghostty.a)"
 echo "  $OUT_DIR/include/ghostty.h"
 echo "  $GENERATED_DIR/ghostty-version.properties"
