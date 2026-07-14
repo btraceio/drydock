@@ -165,3 +165,44 @@ here per plan rule 15:
   the user's own Claude Code settings, which are explicitly out of this project's
   control (plan section 21). Needs a from-clean-account manual pass before v0.1
   ships, per the same rule that flagged this as unresolved rather than assumed-ok.
+
+## Resolved / added in Task 8 (Gate 0F, jlink runtime image)
+
+Full detail in `docs/runtime-image.md`. Summary:
+
+- The first self-contained `jlink` runtime image (`./gradlew runtimeImage`
+  -> `build/image/`) builds and runs the Gate 0C terminal spike end to end
+  with `JAVA_HOME` unset, no Gradle, and copied outside the source tree —
+  verified on this Intel Mac. `appImage`/`macApp`/`dmg` (plan section 6.3)
+  are registered as explicit not-yet-implemented no-ops (plan section 23.4
+  Stages 3-6 are out of scope for this phase).
+- **Real, packaging-only defect found and fixed:** `JavaFxNativeView`'s
+  reflective use of `com.sun.glass.ui.Window`/`View` (see above) throws
+  `IllegalAccessError` inside the jlink image, even though it works
+  unmodified in every dev-mode Gradle spike task. Cause: `jlink` links
+  `javafx.graphics` in as a real named module, while the application
+  itself still runs from `-cp` (unnamed module, not yet modularized) — a
+  module-boundary enforcement gap that classpath-mode dev execution simply
+  never exercises. Fixed with `--add-exports
+  javafx.graphics/com.sun.glass.ui=ALL-UNNAMED` on the generated launcher.
+  Flagged as new evidence for plan rule 27.8: this class of internal-API
+  risk was not just "unstable across JavaFX versions" but "silently
+  untested by any dev-mode task" until Task 8 built something with the
+  application's real production module topology.
+- Dual-architecture native library bundling (`lib/macos-x86_64/`,
+  `lib/macos-arm64/`) required a one-line semantic change to
+  `GhosttyNativeLibrary`/`CpmTerminalHostLibrary`'s previously-uncalled
+  `NATIVE_DIR_PROPERTY` override (root directory + arch subdirectory,
+  instead of pointing directly at the arch-specific directory) — no new
+  arch-branching code anywhere; the existing single `os.arch`-based
+  `detectArchDirectoryName()` method still makes the only decision.
+  Verified end-to-end for x86_64; the bundled arm64 `.dylib`s are
+  confirmed genuine and correctly tagged (`file(1)`) but unverified at
+  runtime (no Apple Silicon hardware available) — same gap already flagged
+  for Tasks 3-5 in `docs/native-integration.md`, not a new one.
+- `runtime/bin/java` itself is single-architecture (whatever `jlink` ran
+  on — x86_64 here); a literal copy of this image cannot run natively on
+  Apple Silicon. A true dual-arch *runtime* would need two separate jlink
+  outputs (one per JavaFX platform classifier) or a picking launcher;
+  left as explicit future work since Task 8's acceptance criteria only
+  require the image to work on the machine that built it.

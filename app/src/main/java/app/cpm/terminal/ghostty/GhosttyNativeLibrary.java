@@ -26,20 +26,24 @@ import java.nio.file.Path;
 public final class GhosttyNativeLibrary {
 
     /**
-     * System property that, if set, is used verbatim as the directory
-     * containing {@code libghostty.dylib} (and {@code ghostty.h}, though
-     * headers are not needed at runtime). Overrides all other discovery.
+     * System property that, if set, is used as the <b>root</b> native
+     * library directory: the directory that itself contains one
+     * {@code macos-x86_64}/{@code macos-arm64} subdirectory per
+     * architecture (the same layout {@code scripts/build-ghostty.sh}
+     * produces under {@code build/native/}), each holding
+     * {@code libghostty.dylib} for that architecture. Overrides the
+     * default {@code build/native} discovery below, but {@link
+     * #detectArchDirectoryName()} still makes the actual arch choice
+     * either way -- this property only relocates the root, it never
+     * bypasses arch detection.
      *
-     * <p>This exists because the project has not yet reached the packaging
-     * milestone (plan section 2.5 / Gate 0F): today, libghostty only exists
-     * under this Gradle project's {@code build/native/<arch>/} directories,
-     * produced by {@code scripts/build-ghostty.sh}. Once the jlink runtime
-     * image ships its own bundled native libraries, this property will
-     * become the packaging step's way of pointing at the bundled copy
-     * instead of a developer's local build output, and the classpath/
-     * resource-based fallback below can be added if needed. No behavior
-     * here should change for that future step except where the library is
-     * found -- the loading and arch-selection logic itself stays put.</p>
+     * <p>The jlink runtime image (Gate 0F / Task 8, see {@code
+     * docs/implementation-plan.md} section 23.1) sets this to its bundled
+     * {@code <image>/lib} directory, which ships both architectures'
+     * {@code libghostty.dylib} side by side precisely so this single
+     * property, plus this class's existing arch detection, is enough to
+     * pick the right one at launch on either machine -- no new
+     * arch-branching logic was needed for packaging.</p>
      */
     public static final String NATIVE_DIR_PROPERTY = "app.cpm.ghostty.nativeDir";
 
@@ -80,10 +84,15 @@ public final class GhosttyNativeLibrary {
     /**
      * Finds {@code libghostty.dylib} for the current architecture.
      *
-     * <p>Resolution order:</p>
+     * <p>Resolution order (both roots below are then joined with the
+     * arch-specific subdirectory from {@link #detectArchDirectoryName()} --
+     * this property never skips arch detection, it only relocates where
+     * the arch subdirectories are looked for):</p>
      * <ol>
-     *   <li>{@code -D}{@value #NATIVE_DIR_PROPERTY}{@code =<dir>} pointing
-     *       directly at a directory containing {@code libghostty.dylib};</li>
+     *   <li>{@code -D}{@value #NATIVE_DIR_PROPERTY}{@code =<root>}, i.e.
+     *       {@code <root>/<arch-dir>/libghostty.dylib} -- used by the jlink
+     *       runtime image, which bundles both architectures under its own
+     *       {@code lib/} directory;</li>
      *   <li>{@code <repo-root>/build/native/<arch-dir>/libghostty.dylib},
      *       located by walking up from the working directory to find a
      *       {@code build/native} directory -- this is where
@@ -97,13 +106,13 @@ public final class GhosttyNativeLibrary {
 
         String override = System.getProperty(NATIVE_DIR_PROPERTY);
         if (override != null && !override.isBlank()) {
-            Path candidate = Path.of(override).resolve(fileName);
+            Path candidate = Path.of(override).resolve(archDir).resolve(fileName);
             if (Files.isRegularFile(candidate)) {
                 return candidate;
             }
             throw new IllegalStateException(
                 "System property " + NATIVE_DIR_PROPERTY + "='" + override
-                    + "' does not contain " + fileName);
+                    + "' does not contain " + archDir + "/" + fileName);
         }
 
         Path buildNative = findBuildNativeDirectory();

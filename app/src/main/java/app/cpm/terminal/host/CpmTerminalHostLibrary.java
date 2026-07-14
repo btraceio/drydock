@@ -27,7 +27,14 @@ import java.util.Locale;
  */
 public final class CpmTerminalHostLibrary {
 
-    /** Mirrors {@code GhosttyNativeLibrary#NATIVE_DIR_PROPERTY}. */
+    /**
+     * Mirrors {@code GhosttyNativeLibrary#NATIVE_DIR_PROPERTY}: a
+     * <b>root</b> directory containing one {@code macos-x86_64}/{@code
+     * macos-arm64} subdirectory per architecture. Arch selection always
+     * goes through {@link #detectArchDirectoryName()}; this property only
+     * relocates the root it is resolved under (used by the jlink runtime
+     * image's bundled {@code <image>/lib} directory).
+     */
     public static final String NATIVE_DIR_PROPERTY = "app.cpm.terminalhost.nativeDir";
 
     private static volatile SymbolLookup lookup;
@@ -55,13 +62,13 @@ public final class CpmTerminalHostLibrary {
 
         String override = System.getProperty(NATIVE_DIR_PROPERTY);
         if (override != null && !override.isBlank()) {
-            Path candidate = Path.of(override).resolve(fileName);
+            Path candidate = Path.of(override).resolve(archDir).resolve(fileName);
             if (Files.isRegularFile(candidate)) {
                 return candidate;
             }
             throw new IllegalStateException(
                 "System property " + NATIVE_DIR_PROPERTY + "='" + override
-                    + "' does not contain " + fileName);
+                    + "' does not contain " + archDir + "/" + fileName);
         }
 
         Path buildNative = findBuildNativeDirectory();

@@ -5,11 +5,17 @@ A JavaFX desktop application for managing local Git repositories and the
 (no `tmux`, no external multiplexer). See `docs/implementation-plan.md`
 for the full design and scope.
 
-This repository is currently at **Milestone 1 (libghostty feasibility, in
-progress)**: a single-module Gradle project with JDK 26 + JavaFX 26, one
-empty window, unit-test infrastructure, and a working Gradle task that
-builds libghostty for both macOS architectures. Repository management, Git
-inspection, and packaging are not implemented yet.
+This repository is currently at **Milestone 3 (jlink runtime image) done,
+Phase 0 feasibility gates 0A-0F all passed**: a single-module Gradle
+project with JDK 26 + JavaFX 26, libghostty embedded in a JavaFX window via
+an AppKit host shim, the real `claude` CLI running in that embedded
+terminal, and a self-contained `jlink` runtime image
+(`./gradlew runtimeImage` -> `build/image/bin/claude-project-manager`) that
+runs without `JAVA_HOME`, without Gradle, and copied outside the source
+tree. Repository management, Git inspection, and `.app`/`.dmg` packaging
+are not implemented yet -- see `docs/implementation-plan.md` section 28
+"Task 8": project-management code does not start until that report
+(`docs/runtime-image.md`) is read.
 
 Ghostty is vendored as a pinned git submodule at `third_party/ghostty`
 (tag v1.3.1, see `.gitmodules`; clone with `git submodule update --init`).
@@ -149,6 +155,29 @@ including several real incompatibilities (most importantly: closing a
 terminal surface while `claude` is still running currently kills the whole
 JVM, which is why this task's Gradle invocation currently exits non-zero
 -- see that document for why this is being surfaced rather than hidden).
+
+### jlink runtime image (Task 8, Gate 0F)
+
+```bash
+./gradlew runtimeImage
+build/image/bin/claude-project-manager
+```
+
+Builds a self-contained runtime image at `build/image/` (JDK 26 + JavaFX 26
++ this application + libghostty + the AppKit host shim for **both** macOS
+architectures) and, by default, launches the Task 5 terminal spike
+(`Gate0cSpike`) through it -- the real application (`app.cpm.Main`) is
+still an empty window at this milestone, so it is not yet a meaningful
+default launch target; see `docs/runtime-image.md` for why, and
+`CPM_MAIN_CLASS=<class>` to launch a different spike through the same
+image. Verified to run with `JAVA_HOME` unset, no Gradle on `PATH`, and
+copied to `/tmp` outside this repository entirely (plan section 22.5).
+`./gradlew appImage` / `macApp` / `dmg` are registered (plan section 6.3)
+but intentionally fail with a "not implemented yet" message -- `.app`/
+`.dmg` packaging (plan section 23.3/23.4 Stages 3-6) is out of scope for
+this phase. Full report (exact layout, exact launcher JVM arguments, a
+real module-boundary bug found and fixed, what was and was not verified on
+Apple Silicon): `docs/runtime-image.md`.
 
 ## Supported platforms
 

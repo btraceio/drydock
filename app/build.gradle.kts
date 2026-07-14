@@ -218,3 +218,214 @@ tasks.register<JavaExec>("gate0eSpike") {
 
     workingDir = rootProject.projectDir
 }
+
+// Gate 0F (plan section 7 / 28 "Task 8"): the first self-contained jlink
+// runtime image. See docs/runtime-image.md for the full report (what
+// works, what does not, exact layout, exact launcher JVM arguments,
+// whether the architecture remains viable).
+//
+// The image is assembled by hand (delete -> jlink -> copy -> generate
+// launcher) rather than via a jlink/jpackage Gradle plugin: this project's
+// application module is still non-modular (classpath/ALL-UNNAMED, see the
+// gate0cSpike comment above and plan section 6.4 "prefer a modular
+// application once native loading is stable" -- not yet stable enough to
+// modularize), so a jlink-application-image plugin built around
+// module-path application jars does not fit cleanly yet. Doing it
+// explicitly also matches plan section 6.5's "implement the jlink command
+// explicitly if the plugin obscures the generated layout."
+// Lives under the *root* build directory (not app/build/image) so the
+// plan's literal acceptance command (section 7 "Gate 0F": `build/image/bin/
+// claude-project-manager`, run from the repo root) matches exactly, the
+// same way build/native (buildGhosttyNative/buildNativeHost, declared in
+// the root build file) already does.
+val runtimeImageDir = rootProject.layout.buildDirectory.dir("image")
+
+tasks.register("runtimeImage") {
+    group = "distribution"
+    description = "Gate 0F: builds a self-contained jlink runtime image at build/image."
+
+    dependsOn(rootProject.tasks.named("buildGhosttyNative"))
+    dependsOn(rootProject.tasks.named("buildNativeHost"))
+    dependsOn(tasks.named("jar"))
+
+    val toolchainService = project.extensions.getByType(JavaToolchainService::class.java)
+    val javaLauncherProvider = toolchainService.launcherFor(java.toolchain)
+    val jarTaskProvider = tasks.named<Jar>("jar")
+    val runtimeClasspathFiles = configurations.named("runtimeClasspath")
+    val nativeBuildDir = rootProject.layout.buildDirectory.dir("native")
+
+    inputs.file(jarTaskProvider.flatMap { it.archiveFile })
+    inputs.files(runtimeClasspathFiles)
+    inputs.dir(nativeBuildDir)
+    inputs.property("javaLauncher", javaLauncherProvider.map { it.metadata.installationPath.asFile.absolutePath })
+    outputs.dir(runtimeImageDir)
+
+    doLast {
+        val imageRoot = runtimeImageDir.get().asFile
+        project.delete(imageRoot)
+        imageRoot.mkdirs()
+
+        // 1. jlink the JDK + JavaFX module graph. jlink is invoked from the
+        // *JDK 26 toolchain's* own bin/ (not whatever JVM is running
+        // Gradle -- see the ffmSmokeTest comment above: Gradle 8.11.1 does
+        // not yet run on JDK 26 itself), so the runtime image's module set
+        // matches the JDK the application was actually compiled/run
+        // against. No --module-path entry for JDK modules is needed:
+        // jlink resolves java.*/jdk.* modules from the running JDK's own
+        // module graph (jrt:) when none is given -- verified empirically,
+        // since this Temurin 26.0.1 distribution ships no jmods/ directory
+        // at all (newer Temurin builds split jmods into a separate
+        // download). Only the JavaFX module jars need an explicit
+        // --module-path entry.
+        val javaHome = javaLauncherProvider.get().metadata.installationPath.asFile
+        val jlinkExe = File(javaHome, "bin/jlink")
+        val fxJars = runtimeClasspathFiles.get().files.filter { it.name.startsWith("javafx-") }
+        require(fxJars.size == 3) {
+            "Expected exactly 3 javafx-*.jar files (base/controls/graphics) on the runtime " +
+                "classpath, found: $fxJars"
+        }
+        val modulePath = fxJars.joinToString(File.pathSeparator) { it.absolutePath }
+        val runtimeOut = File(imageRoot, "runtime")
+
+        // Module list is the transitive closure of what jar
+        // --describe-module reports the javafx-*.jar files require, plus
+        // what `jdeps --print-module-deps` reports app.jar itself uses
+        // directly (java.base, java.desktop, jdk.jfr) -- verified by
+        // running both against this exact JDK/JavaFX pairing rather than
+        // guessed. jdk.unsupported is added defensively even though
+        // neither tool reported it as required: several JavaFX/AWT
+        // internals reach for sun.misc.Unsafe-family APIs reflectively,
+        // which jdeps/jar --describe-module cannot see; harmless to
+        // include if unused.
+        // project.exec {} is deprecated in Gradle 8.x (in favor of an
+        // injected ExecOperations, which is awkward to wire up for an
+        // ad-hoc tasks.register {} block in a build script) but still
+        // fully functional; not worth the extra indirection for one exec
+        // call at this stage. Revisit if/when this task is promoted to a
+        // real Task subclass.
+        @Suppress("DEPRECATION")
+        project.exec {
+            commandLine(
+                jlinkExe.absolutePath,
+                "--module-path", modulePath,
+                "--add-modules",
+                "java.base,java.desktop,java.xml,jdk.jfr,jdk.unsupported," +
+                    "javafx.base,javafx.controls,javafx.graphics",
+                "--output", runtimeOut.absolutePath,
+                "--no-header-files",
+                "--no-man-pages",
+                "--strip-debug",
+                "--compress", "zip-6"
+            )
+        }
+
+        // 2. Copy the application jar + JavaFX jars onto a plain classpath
+        // directory (app/), since the application is not yet modular (see
+        // the top-of-task comment).
+        val appLibDir = File(imageRoot, "app")
+        appLibDir.mkdirs()
+        project.copy {
+            from(jarTaskProvider.get().archiveFile)
+            from(fxJars)
+            into(appLibDir)
+        }
+
+        // 3. Copy libghostty + the AppKit host shim for BOTH architectures
+        // (the approved dual-arch deviation) into lib/<arch>/, mirroring
+        // the build/native/<arch>/ layout scripts/build-ghostty.sh and
+        // scripts/build-native-host.sh already produce. This machine can
+        // only ever load and test the macos-x86_64 copy (it is an Intel
+        // Mac), but the macos-arm64 copy is bundled unconditionally so
+        // that GhosttyNativeLibrary/CpmTerminalHostLibrary's existing
+        // os.arch-based selection (the one place in the codebase allowed
+        // to branch on CPU architecture, per plan section 2.4/4.2) would
+        // pick it correctly if this exact image were copied onto Apple
+        // Silicon hardware.
+        val nativeOut = nativeBuildDir.get().asFile
+        val libDir = File(imageRoot, "lib")
+        for (arch in listOf("macos-x86_64", "macos-arm64")) {
+            val src = File(nativeOut, arch)
+            val dst = File(libDir, arch)
+            dst.mkdirs()
+            for (name in listOf("libghostty.dylib", "libcpmterminalhost.dylib")) {
+                val source = File(src, name)
+                if (source.isFile) {
+                    source.copyTo(File(dst, name), overwrite = true)
+                } else {
+                    throw org.gradle.api.GradleException(
+                        "Missing $source -- run './gradlew buildGhosttyNative buildNativeHost' first."
+                    )
+                }
+            }
+        }
+
+        // 4. Generate the launcher (plan section 23.2).
+        val binDir = File(imageRoot, "bin")
+        binDir.mkdirs()
+        val launcher = File(binDir, "claude-project-manager")
+        launcher.writeText(runtimeImageLauncherScript())
+        launcher.setExecutable(true, false)
+    }
+}
+
+/**
+ * The generated `build/image/bin/claude-project-manager` launcher script.
+ *
+ * Deviations from the plan section 23.2 example worth noting explicitly:
+ *
+ * - No `-Djava.library.path=$APP_HOME/lib` is set. This project's native
+ *   loading (`GhosttyNativeLibrary`, `CpmTerminalHostLibrary`) always uses
+ *   `SymbolLookup.libraryLookup(<absolute path>, Arena.global())`, never
+ *   `System.loadLibrary`/`System.load` relative-name lookup, so
+ *   `java.library.path` is never consulted by this codebase. Setting it
+ *   anyway to a flat `$APP_HOME/lib` would also be actively wrong here,
+ *   since `lib/` contains `macos-x86_64/`/`macos-arm64/` subdirectories,
+ *   not the `.dylib` files directly. Plan section 23.2's own last line
+ *   ("do not add speculative JVM flags") is followed over the letter of
+ *   its example.
+ * - The entry point defaults to the Gate 0C terminal spike
+ *   (`app.cpm.terminal.Gate0cSpikeLauncher`), not `app.cpm.Main`. At this
+ *   point in the plan (Milestone 0 done, Milestones 1-2 in progress) the
+ *   real application is still an empty window (see `CpmApplication`'s own
+ *   Javadoc) and would prove nothing about native/terminal packaging; the
+ *   terminal spike is what plan section 7 "Gate 0F" and section 28 "Task 8"
+ *   actually ask this image to launch. `CPM_MAIN_CLASS` lets
+ *   `app.cpm.Main` (or any other class) be selected once it is worth
+ *   launching by default -- expected to become the default once the real
+ *   application embeds a terminal (Milestone 2 onward).
+ */
+fun runtimeImageLauncherScript(): String {
+    val d = "\$"
+    return """#!/bin/bash
+set -euo pipefail
+
+# Resolves the installation directory without depending on the current
+# working directory (plan section 23.2), following symlinks so this still
+# works if invoked through one (e.g. from /usr/local/bin).
+SOURCE="${d}{BASH_SOURCE[0]}"
+while [ -h "${d}SOURCE" ]; do
+  DIR="${d}(cd -P "${d}(dirname "${d}SOURCE")" >/dev/null 2>&1 && pwd)"
+  SOURCE="${d}(readlink "${d}SOURCE")"
+  [[ ${d}SOURCE != /* ]] && SOURCE="${d}DIR/${d}SOURCE"
+done
+BIN_DIR="${d}(cd -P "${d}(dirname "${d}SOURCE")" >/dev/null 2>&1 && pwd)"
+APP_HOME="${d}(cd -P "${d}BIN_DIR/.." >/dev/null 2>&1 && pwd)"
+
+# CPM_MAIN_CLASS / CPM_EXTRA_JVM_ARGS are internal escape hatches used only
+# by this project's own runtime-image smoke test (plan section 22.5); see
+# app/build.gradle.kts's runtimeImageLauncherScript() Javadoc for why the
+# default main class is the Gate 0C terminal spike, not app.cpm.Main.
+MAIN_CLASS="${d}{CPM_MAIN_CLASS:-app.cpm.terminal.Gate0cSpikeLauncher}"
+
+exec "${d}APP_HOME/runtime/bin/java" \
+  --enable-native-access=ALL-UNNAMED \
+  --add-exports javafx.graphics/com.sun.glass.ui=ALL-UNNAMED \
+  -Dfile.encoding=UTF-8 \
+  -Djava.awt.headless=false \
+  -Dapp.cpm.ghostty.nativeDir="${d}APP_HOME/lib" \
+  -Dapp.cpm.terminalhost.nativeDir="${d}APP_HOME/lib" \
+  ${d}{CPM_EXTRA_JVM_ARGS:-} \
+  -cp "${d}APP_HOME/app/*" \
+  "${d}MAIN_CLASS" "${d}@"
+"""
+}

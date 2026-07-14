@@ -22,6 +22,44 @@ tasks.register("ffmSmokeTest") {
     dependsOn(":app:ffmSmokeTest")
 }
 
+// Alias for the plan's literal top-level command name (section 6.3, 7
+// "Gate 0F", 28 "Task 8"): `./gradlew runtimeImage`. The real task lives
+// at :app:runtimeImage (see app/build.gradle.kts for the full jlink
+// image-assembly logic and docs/runtime-image.md for the report).
+tasks.register("runtimeImage") {
+    group = "distribution"
+    description = "Alias for :app:runtimeImage (Gate 0F: jlink runtime image)."
+    dependsOn(":app:runtimeImage")
+}
+
+// Plan section 6.3 also lists appImage / macApp / dmg as required
+// top-level command aliases. Per plan section 3 ("Initial Scope") and
+// section 28 "Task 8" ("Do not implement project management until this
+// report is complete"), packaging beyond the raw jlink image (macOS `.app`
+// wrapping, ad hoc/Developer ID signing, `.dmg` production -- plan
+// section 23.3/23.4 Stages 3-6) is out of scope for this phase. These are
+// registered now, as required, but as explicit no-ops that fail with a
+// clear message rather than being silently omitted or doing something
+// half-finished -- see docs/runtime-image.md "Packaging implications" for
+// what each one will need to do once its stage is reached.
+listOf(
+    "appImage" to "Stage 3 (plan section 23.4): produce an unsigned .app bundle.",
+    "macApp" to "Stage 3 (plan section 23.4): produce an unsigned .app bundle (alias).",
+    "dmg" to "Stage 4 (plan section 23.4): produce a local .dmg from the .app bundle."
+).forEach { (name, futureWork) ->
+    tasks.register(name) {
+        group = "distribution"
+        description = "Not yet implemented -- $futureWork"
+        doLast {
+            throw GradleException(
+                "'$name' is not implemented yet. $futureWork Currently only " +
+                    "'./gradlew runtimeImage' (the raw jlink image, plan section 23.4 Stage 2) " +
+                    "exists -- see docs/runtime-image.md."
+            )
+        }
+    }
+}
+
 tasks.register<Exec>("verifyEnvironment") {
     group = "verification"
     description = "Runs scripts/verify-environment.sh to check local dev prerequisites."
