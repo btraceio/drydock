@@ -275,7 +275,15 @@ public final class RepositorySidebar extends BorderPane {
                             + "\nWorking directory: " + session.workingDirectory()));
 
             ContextMenu sessionMenu = buildSessionContextMenu(session);
-            row.setOnContextMenuRequested(event -> sessionMenu.show(row, event.getScreenX(), event.getScreenY()));
+            row.setOnContextMenuRequested(event -> {
+                // Without consuming, this event bubbles up to the enclosing
+                // ListCell, which has its own repository-level context menu
+                // set via setContextMenu(...) -- Control's default handling
+                // shows THAT menu too, on top of this one, on every
+                // right-click of a session row.
+                sessionMenu.show(row, event.getScreenX(), event.getScreenY());
+                event.consume();
+            });
             row.setOnMouseClicked(event -> {
                 if (event.getButton() == MouseButton.PRIMARY && event.getClickCount() == 2) {
                     mainWorkspace.resumeSession(session);
