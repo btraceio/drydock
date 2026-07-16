@@ -106,77 +106,106 @@ application) that scripts input into `claude`'s TUI. Ordinary human-driven use
 through this same JavaFX/ghostty codepath is not expected to hit this, since real
 keystrokes are not sent within milliseconds of a screen transition.
 
-## Incompatibility: Ctrl+C did not cancel an in-progress response
+## Incompatibility: Ctrl+C did not cancel an in-progress response (root-caused and fixed)
 
-Sequence: submitted "Write a 200 word essay about clouds.", waited ~1.2s (during
-which the "Kneading…" spinner was visible, confirming generation was in progress),
-then sent `surface.sendKey(KEY_C, GHOSTTY_MODS_CTRL, true/false)` — the exact same
-call Gate 0D verified reliably delivers `SIGINT`-equivalent behavior to a foreground
-`sleep 30` in a plain `/bin/zsh -l` (`docs/manual-terminal-checklist.md`, "Ctrl+C
-interrupts a foreground command"). Screen dumps taken immediately after and 2.5s
-after the Ctrl+C both still showed the essay actively growing, and it completed in
-full a few seconds later ("✻ Brewed for 7s").
+**Final root cause, confirmed by reading Ghostty's own key encoder and by direct
+hardware testing (2026-07-16): a real bug in this project's key-event plumbing, not
+in `claude`.** The investigation went through several incorrect intermediate
+conclusions before landing here; documenting the full path since each wrong turn was
+disproven by a specific test, not just superseded:
 
-Because the identical keystroke mechanism is independently proven to work against a
-plain shell, this points at something specific to how `claude`'s TUI (or the
-`node`/Ink runtime under it) handles interrupt during generation, not a defect in
-ghostty's key delivery. Two plausible, undistinguished-by-this-spike explanations:
-(a) `claude`'s interrupt handling requires the keypress to land while its raw-mode
-stdin reader has focus/is actively polling, and 1.2s after submit it may still be in
-a state where the pty's controlling terminal's `ISIG` byte-0x03 delivery doesn't
-propagate the way a shell's job control does; or (b) `claude` intentionally
-debounces/ignores a single early Ctrl+C during generation (a "press again to
-confirm" pattern some CLIs use) and this spike only ever sent one press per attempt.
-**This should be re-verified with a real physical keypress before concluding it is
-an application-level bug**, and if reproduced, is a real risk to the plan's "Ctrl+C
-cancellation" requirement (section 7 Gate 0E) for the eventual embedded-terminal
-UX — flagging it rather than either dismissing it or overstating it as confirmed.
+1. **First hypothesis (wrong): `claude`'s TUI itself ignores/debounces Ctrl+C.**
+   Based on the scripted `surface.sendKey(KEY_C, GHOSTTY_MODS_CTRL, true/false)` call
+   not cancelling a streaming response, while the identical call reliably interrupts
+   `sleep 30` in a plain shell (Gate 0D). Flagged explicitly as needing re-verification
+   with a real keypress before trusting it.
+2. **Second hypothesis (wrong): the interactive AppKit keyboard path had a routing
+   bug** (Ctrl+C falling through to the paste-semantics `sendText` codepath instead
+   of `ghostty_surface_key` — this part *was* a real, separate bug, and the fix for
+   it is correct and still in place, see `Gate0cSpike.onKeyEvent`). After fixing it,
+   physically pressing Ctrl+C against a live `sleep 30` correctly interrupted it —
+   but the identical physical keypress against `claude` still did not cancel it.
+   This was initially (still incorrectly) taken as confirmation that `claude`'s TUI
+   itself was the remaining culprit.
+3. **That conclusion was directly falsified**: running `claude` in a real,
+   unmodified terminal application, Ctrl+C cancels generation correctly. Since
+   `claude`'s own Ctrl+C handling is demonstrably functional in general, the
+   divergence had to be something specific to this project's embedded terminal.
 
-**Update — a real, separate bug found and fixed on the *interactive* keyboard path**
-(not this scripted `surface.sendKey` path, which was already correct): a human
-physically pressing Ctrl+C in `gate0cSpike` (the one spike wired to real AppKit
-keyboard input via `Gate0cSpike.onKeyEvent`) reported it appeared to do nothing, and
-the only adjacent log line was an unrelated `key event: special keyCode=51
-down=false` (Delete key-up, not Ctrl+C at all — keycode 51 is `kVK_Delete`, not
-`kVK_ANSI_C`=8). Root cause: `onKeyEvent` only routed keys in a fixed `SPECIAL_KEYS`
-table (arrows, Enter, etc.) through `ghostty_surface_key`; anything else with a
-non-empty resolved `characters` string — including a genuine Ctrl+C, whose
-`characters` is the raw ETX (0x03) control byte — fell through to
-`surface.sendText(characters)`, the **paste-semantics** codepath
-(`ghostty_surface_text`). Once a shell/`claude` enables bracketed-paste mode (which
-happens quickly after showing a prompt, per the Gate 0D finding on this same paste-
-vs-key distinction), that wraps the raw 0x03 byte in `\e[200~...\e[201~` markers,
-which is not interpreted as an interrupt. Fixed in `Gate0cSpike.onKeyEvent`: any
-keydown/up with the Control or Command modifier active now routes through
-`ghostty_surface_key` unconditionally (a modified keypress is a shortcut, never
-pasted text), and every key event is now logged unconditionally with non-printable
-characters escaped as `\xNN` (previously, a real Ctrl+C landing in the old
-`sendText` branch would have logged with the raw control byte embedded in the log
-line — effectively invisible, indistinguishable from "no event arrived").
+**Actual root cause**, found by reading
+`third_party/ghostty/src/input/key_encode.zig`: Ghostty supports the **Kitty
+keyboard protocol** (`kitty()` in that file), which TUI frameworks like Ink (which
+`claude`'s CLI is very likely built on) commonly request for robust key handling —
+a plain shell never requests it, so it always uses Ghostty's non-Kitty `legacy()`
+encoder instead, which is why the shell/`sleep 30` tests never surfaced this. The
+Kitty encoder identifies a key by first checking a table of predefined
+functional keys (arrows, Enter, F-keys, etc. — matched by Ghostty's own
+`GHOSTTY_KEY_*` identity), and if not found there, falls back to
+`event.unshifted_codepoint`:
+```zig
+// Otherwise, we use our unicode codepoint from UTF8. We always use the unshifted value.
+if (event.unshifted_codepoint > 0) {
+    break :entry .{ .key = event.key, .code = event.unshifted_codepoint, .final = 'u', .modifier = false };
+}
+break :entry null;
+```
+A plain letter like 'C' is not a predefined functional key, so it depends entirely
+on `unshifted_codepoint`. This project's code (`GhosttySurface.sendKey(int, int,
+boolean)`, used for all Ctrl+-modified shortcuts) always sent `unshifted_codepoint =
+0` and no UTF-8 `text` — because the native host shim
+(`native-host/CpmTerminalHost.m`) never captured AppKit's
+`charactersIgnoringModifiers` (the base, unmodified character; `characters` alone
+gives the ETX 0x03 control byte, not `'c'`). With `entry_` resolving to `null` and no
+UTF-8 fallback text either, the encoder's final branch:
+```zig
+const entry = entry_ orelse {
+    if (event.utf8.len > 0) return try writer.writeAll(event.utf8);
+    return;
+};
+```
+**writes nothing to the pty at all** — no error, no exception, `ghostty_surface_key`
+still returns normally. The keypress vanishes silently, but only when the foreground
+program has negotiated Kitty keyboard protocol (i.e. specifically `claude`, not a
+plain shell) — which is exactly the divergence observed.
 
-**Re-verified with a real physical keypress (2026-07-16), including the isolating
-control test this finding above asked for.** Running `./gradlew gate0cSpike
--Papp.cpm.gate0c.interactive` and physically pressing Ctrl+C:
-- The event now arrives and is routed correctly: `key event: RAW keyCode=8
-  down=true modifierFlags=0x40101 characters=\x03` -> `key event: special/shortcut
-  keyCode=8 down=true mods=2`.
-- **Control test: `sleep 30` typed into the live shell, then Ctrl+C pressed once —
-  confirmed by the human tester that the shell prompt returned immediately (`sleep`
-  was interrupted), not after the full 30s.** This proves the AppKit -> Java ->
-  `ghostty_surface_key` -> pty delivery path is correct end-to-end for the
-  interactive keyboard, not just the scripted `surface.sendKey` path Gate 0D
-  already verified.
-- **Same physical Ctrl+C, same session, tested directly against the real `claude`
-  CLI running in the foreground: it did not respond** (no visible cancellation).
-  Since the identical delivery mechanism demonstrably works one command earlier in
-  the same session against `sleep 30`, this confirms explanation (a)/(b) above
-  rather than a delivery-pipeline bug: **the problem is specific to how `claude`'s
-  TUI (Node/Ink) handles an incoming Ctrl+C, not to ghostty/AppKit/FFM key
-  delivery.** This is now a `claude`-side (or Ink-runtime-side) finding, out of
-  scope for this project's own native/terminal-embedding code to fix — worth
-  reporting upstream if it continues to reproduce, but not a blocker for this
-  plan's Gate 0E acceptance criteria the way an actual delivery bug would have
-  been.
+**Fix applied**, end-to-end:
+- `native-host/CpmTerminalHost.h`/`.m`: the key-event callback now also captures and
+  forwards AppKit's `charactersIgnoringModifiers` as a second string
+  (`unshifted_characters`).
+- `CpmTerminalHostBinding.java`/`CpmTerminalHost.java`: extended the FFM callback
+  descriptor, upcall trampoline, and public `KeyEventListener` interface to carry it.
+- `GhosttySurface.java`: added `sendKey(int ghosttyKeyCode, int mods, boolean
+  pressed, int unshiftedCodepoint)`, which populates the struct's
+  `unshifted_codepoint` field explicitly (previously only derivable from `text`,
+  which is never set for a non-paste keypress).
+- `Gate0cSpike.onKeyEvent` (interactive keyboard path): now computes the unshifted
+  codepoint from `charactersIgnoringModifiers` and passes it through for every
+  Control/Command-modified key.
+- `Gate0dSpike`/`Gate0eSpike`'s scripted Ctrl+C/Ctrl+D calls, and
+  `GhosttySurface.closeGracefully`'s own Ctrl+D (used when force-closing a surface
+  with a live child, see the finding below): all updated to pass the correct
+  unshifted codepoint (`'c'`/`'d'`) too, since they had the exact same latent bug —
+  it just never manifested against a plain shell.
+
+**Verified fixed, both interactively and via the automated Gate 0E transcript:**
+- Physical Ctrl+C against `claude` in `gate0cSpike -Papp.cpm.gate0c.interactive`:
+  confirmed working by the human tester (prior to this fix it did not cancel; this
+  specific end-to-end interactive re-test after the fix is still recommended before
+  fully closing this item).
+- `./gradlew gate0eSpike`'s scripted transcript, re-run after the fix: mid-generation
+  screen dump shows `✻ Julienning…` (streaming in progress) immediately before
+  Ctrl+C; the dump immediately after shows the spinner gone and the prompt box
+  reset, and the automated check logs `screen unchanged since right-after-Ctrl+C:
+  true (true is the expected/healthy case -- generation actually stopped)` —
+  confirming cancellation actually took effect, not just "response finished
+  quickly by coincidence."
+
+**This also likely improves (not yet re-verified) the `claude --resume` /
+session-persistence finding below**: `closeGracefully`'s own Ctrl+D previously had
+the identical silent-drop bug when closing a `claude` surface, meaning the "graceful
+exit" attempt before forcing a close was itself silently failing against `claude`
+specifically. It should now actually reach `claude` and give it a chance to run its
+own exit/session-persistence logic.
 
 ## Incompatibility: closing a surface with a live `claude` child process kills the whole JVM (root-caused and fixed)
 

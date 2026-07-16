@@ -173,7 +173,8 @@ public final class Gate0cSpike extends Application {
      * headless {@code ghostty_surface_read_text} checks caught it. See
      * docs/native-integration.md, "Task 6 / Gate 0D".</p>
      */
-    private void onKeyEvent(int keyCode, int modifierFlags, boolean keyDown, String characters) {
+    private void onKeyEvent(int keyCode, int modifierFlags, boolean keyDown, String characters,
+                            String unshiftedCharacters) {
         // Unconditional logging of every event this method is called with,
         // requested to debug a real observation: pressing Ctrl+C on a
         // physical keyboard produced no visible effect, and the only
@@ -187,7 +188,8 @@ public final class Gate0cSpike extends Application {
         // escapes non-printable characters, so it can answer definitively
         // whether AppKit ever delivered the Ctrl+C keyDown to Java.
         log("key event: RAW keyCode=" + keyCode + " down=" + keyDown + " modifierFlags=0x"
-            + Integer.toHexString(modifierFlags) + " characters=" + escapeForLog(characters));
+            + Integer.toHexString(modifierFlags) + " characters=" + escapeForLog(characters)
+            + " unshiftedCharacters=" + escapeForLog(unshiftedCharacters));
 
         if (surface == null) {
             return;
@@ -208,11 +210,26 @@ public final class Gate0cSpike extends Application {
         // reaches this method.
         boolean isShortcut = (mods & (GHOSTTY_MODS_CTRL | GHOSTTY_MODS_SUPER)) != 0;
         if (SPECIAL_KEYS.contains(keyCode) || isShortcut) {
-            // Pass the native AppKit keycode straight through -- see the
-            // Javadoc above for why no translation table is needed (or
-            // correct) here.
-            surface.sendKey(keyCode, mods, keyDown);
-            log("key event: special/shortcut keyCode=" + keyCode + " down=" + keyDown + " mods=" + mods);
+            // unshiftedCharacters (AppKit's charactersIgnoringModifiers) is
+            // required, not optional, here: Ghostty's Kitty-keyboard-protocol
+            // encoder identifies non-functional keys (plain letters/digits,
+            // e.g. the 'C' in Ctrl+C) purely by unshifted_codepoint, and
+            // silently drops the whole event (writes nothing to the pty) if
+            // it's 0 with no fallback text -- see
+            // GhosttySurface.sendKey(int,int,boolean,int)'s Javadoc and
+            // docs/claude-integration.md ("Incompatibility: Ctrl+C did not
+            // cancel an in-progress response", root-caused). SPECIAL_KEYS
+            // entries (arrows/Enter/etc.) don't need this -- they're
+            // identified by native keycode -> GHOSTTY_KEY_* -> Kitty's own
+            // predefined-key table -- but passing it unconditionally here is
+            // harmless for them (unshifted defaults to 0 when
+            // charactersIgnoringModifiers is empty, identical to before).
+            int unshiftedCodepoint = (!keyDown || unshiftedCharacters.isEmpty())
+                ? 0
+                : unshiftedCharacters.codePointAt(0);
+            surface.sendKey(keyCode, mods, keyDown, unshiftedCodepoint);
+            log("key event: special/shortcut keyCode=" + keyCode + " down=" + keyDown + " mods=" + mods
+                + " unshiftedCodepoint=" + unshiftedCodepoint);
             return;
         }
         if (keyDown && !characters.isEmpty()) {

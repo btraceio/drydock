@@ -25,7 +25,8 @@ final class CpmTerminalHostBinding {
     /** Java-side shape of {@code cpm_terminal_host_key_event_cb}. */
     @FunctionalInterface
     interface KeyEventListener {
-        void onKeyEvent(int keyCode, int modifierFlags, boolean keyDown, String characters);
+        void onKeyEvent(int keyCode, int modifierFlags, boolean keyDown, String characters,
+                        String unshiftedCharacters);
     }
 
     private static final FunctionDescriptor KEY_EVENT_CB_DESCRIPTOR = FunctionDescriptor.ofVoid(
@@ -34,7 +35,9 @@ final class CpmTerminalHostBinding {
         ValueLayout.JAVA_INT,  // uint32_t modifier_flags
         ValueLayout.JAVA_INT,  // int is_key_down
         ValueLayout.ADDRESS,   // const char* characters
-        ValueLayout.JAVA_LONG  // size_t characters_len
+        ValueLayout.JAVA_LONG, // size_t characters_len
+        ValueLayout.ADDRESS,   // const char* unshifted_characters
+        ValueLayout.JAVA_LONG  // size_t unshifted_characters_len
     );
 
     private static final MethodHandle KEY_EVENT_TRAMPOLINE;
@@ -51,6 +54,8 @@ final class CpmTerminalHostBinding {
                     short.class,
                     int.class,
                     int.class,
+                    MemorySegment.class,
+                    long.class,
                     MemorySegment.class,
                     long.class
                 )
@@ -202,13 +207,20 @@ final class CpmTerminalHostBinding {
             int modifierFlags,
             int isKeyDown,
             MemorySegment characters,
-            long charactersLen) {
-        String text = "";
-        if (charactersLen > 0 && !characters.equals(MemorySegment.NULL)) {
-            MemorySegment bytes = characters.reinterpret(charactersLen);
-            text = new String(bytes.toArray(ValueLayout.JAVA_BYTE), StandardCharsets.UTF_8);
+            long charactersLen,
+            MemorySegment unshiftedCharacters,
+            long unshiftedCharactersLen) {
+        String text = decodeUtf8(characters, charactersLen);
+        String unshiftedText = decodeUtf8(unshiftedCharacters, unshiftedCharactersLen);
+        listener.onKeyEvent(keyCode & 0xFFFF, modifierFlags, isKeyDown != 0, text, unshiftedText);
+    }
+
+    private static String decodeUtf8(MemorySegment segment, long len) {
+        if (len <= 0 || segment.equals(MemorySegment.NULL)) {
+            return "";
         }
-        listener.onKeyEvent(keyCode & 0xFFFF, modifierFlags, isKeyDown != 0, text);
+        MemorySegment bytes = segment.reinterpret(len);
+        return new String(bytes.toArray(ValueLayout.JAVA_BYTE), StandardCharsets.UTF_8);
     }
 
     static final class HostNativeCallException extends RuntimeException {

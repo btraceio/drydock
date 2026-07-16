@@ -87,12 +87,26 @@ void cpm_terminal_host_destroy(cpm_terminal_host_t host);
 // ghostty_surface_key, etc.) happens entirely on the Java side in
 // app.cpm.terminal.ghostty, not here. See docs/native-integration.md,
 // "Why a key-event callback was added to the host shim".
+//
+// `unshifted_characters` is NSEvent's `charactersIgnoringModifiers` (the
+// base character the key would produce with no modifiers held, e.g. "c" for
+// a Ctrl+C press whose `characters` is the ETX 0x03 control byte). Ghostty's
+// Kitty-keyboard-protocol key encoder (src/input/key_encode.zig's `kitty()`)
+// needs this to identify non-functional keys (plain ASCII letters are not in
+// its predefined key table) -- without it, a Ctrl+<letter> shortcut is
+// silently dropped (not written to the pty at all) whenever the foreground
+// program has negotiated Kitty keyboard protocol, even though the legacy
+// (non-Kitty) encoding path used by e.g. a plain shell works fine without it.
+// See docs/claude-integration.md, "Incompatibility: Ctrl+C did not cancel an
+// in-progress response".
 typedef void (*cpm_terminal_host_key_event_cb)(void *userdata,
                                                 uint16_t key_code,
                                                 uint32_t modifier_flags,
                                                 int is_key_down,
                                                 const char *characters,
-                                                size_t characters_len);
+                                                size_t characters_len,
+                                                const char *unshifted_characters,
+                                                size_t unshifted_characters_len);
 
 // Registers (or clears, if callback is NULL) the key-event callback for
 // this host. Only one callback may be registered at a time.

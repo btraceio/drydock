@@ -166,12 +166,46 @@ public final class GhosttySurface implements AutoCloseable {
     /**
      * Sends a non-text key event (e.g. Enter, Backspace, an arrow key).
      *
+     * <p>Does not populate {@code unshifted_codepoint}. That is harmless for
+     * genuinely functional keys (Enter, arrows, etc. -- present in Ghostty's
+     * Kitty-protocol {@code kitty_entries} table by {@code event.key}, not by
+     * codepoint), but for a Ctrl/Cmd-modified <em>letter</em> key (e.g.
+     * Ctrl+C) this silently drops the event whenever the foreground program
+     * has negotiated Kitty keyboard protocol -- see {@link #sendKey(int, int,
+     * boolean, int)} and docs/claude-integration.md, "Incompatibility: Ctrl+C
+     * did not cancel an in-progress response". Prefer that overload for any
+     * modified letter/digit shortcut.</p>
+     *
      * @param ghosttyKeyCode one of the {@code GHOSTTY_KEY_*} ordinals from {@code ghostty.h}
      * @param mods           a bitwise-OR of {@code GHOSTTY_MODS_*}
      * @param pressed        {@code true} for key-down/repeat, {@code false} for key-up
      */
     public boolean sendKey(int ghosttyKeyCode, int mods, boolean pressed) {
-        return sendKey(ghosttyKeyCode, mods, pressed, null);
+        return sendKey(ghosttyKeyCode, mods, pressed, null, 0);
+    }
+
+    /**
+     * Sends a non-text key event, additionally specifying the key's
+     * unshifted base-character codepoint (e.g. {@code 'c'} = 99 for a Ctrl+C
+     * press -- AppKit's {@code NSEvent.charactersIgnoringModifiers}).
+     *
+     * <p>Required for correct behavior when the terminal has Kitty keyboard
+     * protocol active (common for TUI frameworks like Ink, which `claude`'s
+     * CLI is built on): Ghostty's Kitty encoder
+     * (third_party/ghostty/src/input/key_encode.zig's {@code kitty()})
+     * identifies non-functional keys (plain ASCII letters/digits) purely by
+     * {@code unshifted_codepoint}; a native macOS keycode alone is not
+     * enough. Without it, {@code entry_} resolves to {@code null} and (since
+     * there is also no UTF-8 {@code text} for a Ctrl-combo) the encoder
+     * writes nothing at all to the pty -- the keypress vanishes silently,
+     * with no error, no consumed=false signal a caller could detect. This was
+     * confirmed as the root cause of Ctrl+C appearing to do nothing against
+     * `claude` while working correctly against a plain shell (which uses
+     * Ghostty's non-Kitty "legacy" encoder instead, and does not need this
+     * field) -- see docs/claude-integration.md.</p>
+     */
+    public boolean sendKey(int ghosttyKeyCode, int mods, boolean pressed, int unshiftedCodepoint) {
+        return sendKey(ghosttyKeyCode, mods, pressed, null, unshiftedCodepoint);
     }
 
     // GHOSTTY_KEY_UNIDENTIFIED, verified against the pinned header (it is
@@ -203,8 +237,8 @@ public final class GhosttySurface implements AutoCloseable {
      */
     public boolean sendCharKey(int codepoint, int mods) {
         String text = new String(Character.toChars(codepoint));
-        boolean consumed = sendKey(GHOSTTY_KEY_UNIDENTIFIED, mods, true, text);
-        sendKey(GHOSTTY_KEY_UNIDENTIFIED, mods, false, null);
+        boolean consumed = sendKey(GHOSTTY_KEY_UNIDENTIFIED, mods, true, text, codepoint);
+        sendKey(GHOSTTY_KEY_UNIDENTIFIED, mods, false, null, 0);
         return consumed;
     }
 
@@ -213,7 +247,7 @@ public final class GhosttySurface implements AutoCloseable {
         text.codePoints().forEach(cp -> sendCharKey(cp, 0));
     }
 
-    private boolean sendKey(int ghosttyKeyCode, int mods, boolean pressed, String text) {
+    private boolean sendKey(int ghosttyKeyCode, int mods, boolean pressed, String text, int unshiftedCodepointOverride) {
         checkOpen();
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment keyStruct = arena.allocate(GhosttyAppBinding.INPUT_KEY_LAYOUT);
@@ -225,7 +259,9 @@ public final class GhosttySurface implements AutoCloseable {
                 ? GhosttyAppBinding.allocateCString(arena, text)
                 : MemorySegment.NULL;
             keyStruct.set(ValueLayout.ADDRESS, 16, textSegment); // text
-            int unshifted = (text != null && !text.isEmpty()) ? text.codePointAt(0) : 0;
+            int unshifted = unshiftedCodepointOverride != 0
+                ? unshiftedCodepointOverride
+                : (text != null && !text.isEmpty()) ? text.codePointAt(0) : 0;
             keyStruct.set(ValueLayout.JAVA_INT, 24, unshifted); // unshifted_codepoint
             keyStruct.set(ValueLayout.JAVA_BOOLEAN, 28, false); // composing
             return (boolean) binding.surfaceKey.invoke(surface, keyStruct);
@@ -382,8 +418,14 @@ public final class GhosttySurface implements AutoCloseable {
         }
         LOG.log(Logger.Level.INFO, "closeGracefully: child process still alive, requesting Ctrl+D exit"
             + " and waiting up to {0}ms before forcing close", gracePeriodMillis);
-        sendKey(KVK_ANSI_D, GHOSTTY_MODS_CTRL, true);
-        sendKey(KVK_ANSI_D, GHOSTTY_MODS_CTRL, false);
+        // Unshifted codepoint ('d'=100) required so Ghostty's Kitty-keyboard-
+        // protocol encoder can identify this key if the child program (e.g.
+        // claude) has negotiated that protocol -- see
+        // sendKey(int,int,boolean,int)'s Javadoc and
+        // docs/claude-integration.md. Without it this Ctrl+D would be
+        // silently dropped exactly like the Ctrl+C finding there.
+        sendKey(KVK_ANSI_D, GHOSTTY_MODS_CTRL, true, (int) 'd');
+        sendKey(KVK_ANSI_D, GHOSTTY_MODS_CTRL, false, (int) 'd');
         pollUntilExitedOrTimeout(System.currentTimeMillis() + gracePeriodMillis, pollIntervalMillis, onDone);
     }
 

@@ -125,7 +125,7 @@ public final class Gate0dSpike extends Application {
 
         resizeTo(scene.getWidth(), scene.getHeight(), scale);
         host.setVisible(true);
-        host.setKeyEventListener((keyCode, modifierFlags, keyDown, characters) -> { });
+        host.setKeyEventListener((keyCode, modifierFlags, keyDown, characters, unshiftedCharacters) -> { });
         host.setFocused(true);
         app.setFocus(true);
         surface.setFocus(true);
@@ -361,8 +361,13 @@ public final class Gate0dSpike extends Application {
             scheduleNext(1000);
         });
         steps.add(() -> {
-            surface.sendKey(KEY_C, MODS_CTRL, true);
-            surface.sendKey(KEY_C, MODS_CTRL, false);
+            // unshifted codepoint required for Ghostty's Kitty-keyboard-
+            // protocol encoder -- see GhosttySurface.sendKey(int,int,boolean,int)
+            // and docs/claude-integration.md. Harmless here (zsh doesn't
+            // negotiate Kitty protocol) but kept consistent with Gate 0E's
+            // identical fix.
+            surface.sendKey(KEY_C, MODS_CTRL, true, (int) 'c');
+            surface.sendKey(KEY_C, MODS_CTRL, false, (int) 'c');
             type("echo GATE0D_MARK8_AFTER_CTRLC");
             enter();
             scheduleNext(1200);
@@ -382,8 +387,8 @@ public final class Gate0dSpike extends Application {
         steps.add(() -> {
             check("process alive before Ctrl+D", !surface.processExited(),
                 "ghostty_surface_process_exited() is false while zsh is still running", null);
-            surface.sendKey(KEY_D, MODS_CTRL, true);
-            surface.sendKey(KEY_D, MODS_CTRL, false);
+            surface.sendKey(KEY_D, MODS_CTRL, true, (int) 'd');
+            surface.sendKey(KEY_D, MODS_CTRL, false, (int) 'd');
             scheduleNext(1200);
         });
         steps.add(() -> {

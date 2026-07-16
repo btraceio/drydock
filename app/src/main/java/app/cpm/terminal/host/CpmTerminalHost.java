@@ -74,8 +74,8 @@ public final class CpmTerminalHost implements AutoCloseable {
         checkNotDestroyed();
         binding.setKeyEventCallback(
             handle,
-            (keyCode, modifierFlags, keyDown, characters) ->
-                listener.onKeyEvent(keyCode, modifierFlags, keyDown, characters),
+            (keyCode, modifierFlags, keyDown, characters, unshiftedCharacters) ->
+                listener.onKeyEvent(keyCode, modifierFlags, keyDown, characters, unshiftedCharacters),
             keyCallbackArena
         );
     }
@@ -107,9 +107,22 @@ public final class CpmTerminalHost implements AutoCloseable {
         }
     }
 
-    /** Java-side shape of a raw, uninterpreted AppKit key event; see native-host/CpmTerminalHost.h. */
+    /**
+     * Java-side shape of a raw, uninterpreted AppKit key event; see
+     * native-host/CpmTerminalHost.h.
+     *
+     * @param unshiftedCharacters NSEvent's {@code charactersIgnoringModifiers}
+     *                            (e.g. {@code "c"} for a Ctrl+C press whose
+     *                            {@code characters} is the ETX 0x03 control
+     *                            byte) -- required to correctly encode
+     *                            Ctrl/Cmd-modified letter keys when the
+     *                            terminal has Kitty keyboard protocol active
+     *                            (see {@code GhosttySurface.sendKey}'s
+     *                            Javadoc).
+     */
     @FunctionalInterface
     public interface KeyEventListener {
-        void onKeyEvent(int keyCode, int modifierFlags, boolean keyDown, String characters);
+        void onKeyEvent(int keyCode, int modifierFlags, boolean keyDown, String characters,
+                        String unshiftedCharacters);
     }
 }

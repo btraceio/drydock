@@ -112,7 +112,7 @@ public final class Gate0eSpike extends Application {
         surface.setSize((int) Math.round(scene.getWidth() * scale), (int) Math.round(scene.getHeight() * scale));
         surface.draw();
         host.setVisible(true);
-        host.setKeyEventListener((keyCode, modifierFlags, keyDown, characters) -> { });
+        host.setKeyEventListener((keyCode, modifierFlags, keyDown, characters, unshiftedCharacters) -> { });
         host.setFocused(true);
         app.setFocus(true);
         surface.setFocus(true);
@@ -190,8 +190,12 @@ public final class Gate0eSpike extends Application {
         });
         dumpAfter(0, "~1.2s into a longer response (about to Ctrl+C)");
         steps.add(() -> {
-            surface.sendKey(KEY_C, MODS_CTRL, true);
-            surface.sendKey(KEY_C, MODS_CTRL, false);
+            // unshifted codepoint ('c'=99) required so Ghostty's Kitty-keyboard-
+            // protocol encoder can identify this key if claude has negotiated
+            // that protocol -- see GhosttySurface.sendKey(int,int,boolean,int)'s
+            // Javadoc and docs/claude-integration.md.
+            surface.sendKey(KEY_C, MODS_CTRL, true, (int) 'c');
+            surface.sendKey(KEY_C, MODS_CTRL, false, (int) 'c');
             scheduleNext(800);
         });
         final String[] rightAfterCtrlC = new String[1];

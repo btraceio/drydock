@@ -36,12 +36,20 @@
     NSString *chars = [event characters];
     const char *utf8 = chars != nil ? [chars UTF8String] : NULL;
     size_t len = utf8 != NULL ? strlen(utf8) : 0;
+    // See CpmTerminalHost.h's Javadoc-style comment on
+    // cpm_terminal_host_key_event_cb for why this is needed (Kitty keyboard
+    // protocol key encoding).
+    NSString *unshiftedChars = [event charactersIgnoringModifiers];
+    const char *unshiftedUtf8 = unshiftedChars != nil ? [unshiftedChars UTF8String] : NULL;
+    size_t unshiftedLen = unshiftedUtf8 != NULL ? strlen(unshiftedUtf8) : 0;
     self.keyCallback(self.keyCallbackUserdata,
                       (uint16_t)[event keyCode],
                       (uint32_t)[event modifierFlags],
                       down ? 1 : 0,
                       utf8,
-                      len);
+                      len,
+                      unshiftedUtf8,
+                      unshiftedLen);
 }
 
 - (void)keyDown:(NSEvent *)event {
