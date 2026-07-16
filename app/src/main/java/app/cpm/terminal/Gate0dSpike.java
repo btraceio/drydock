@@ -71,6 +71,7 @@ public final class Gate0dSpike extends Application {
     private CpmTerminalHost host;
     private GhosttyApp app;
     private GhosttySurface surface;
+    private Stage stage;
 
     private final List<Runnable> steps = new ArrayList<>();
     private int stepIndex;
@@ -80,6 +81,7 @@ public final class Gate0dSpike extends Application {
 
     @Override
     public void start(Stage stage) {
+        this.stage = stage;
         log("starting");
 
         var root = new StackPane();
@@ -393,7 +395,12 @@ public final class Gate0dSpike extends Application {
 
         steps.add(() -> {
             log("automated: closing");
-            stage.close();
+            // shutdown(), not stage.close() -- see Gate0eSpike's identical
+            // fix and docs/phase0-feasibility-report.md: Stage.close() does
+            // not fire setOnCloseRequest, so calling it directly here would
+            // skip closeGracefully() and let AppKit tear down the native
+            // view (and any still-live child process) out from under us.
+            shutdown();
         });
     }
 
@@ -500,13 +507,34 @@ public final class Gate0dSpike extends Application {
         log("[SKIP] " + name + " -- " + reason);
     }
 
+    private boolean shutdownStarted;
+
     private void shutdown() {
+        // Guard against re-entrancy -- see Gate0eSpike.shutdown()'s identical
+        // guard for why (stage.close() below triggers JavaFX's implicit-exit
+        // Platform.exit(), which re-invokes this class's stop() override).
+        if (shutdownStarted) {
+            return;
+        }
+        shutdownStarted = true;
         log("shutting down");
         log("RESULTS: pass=" + passCount + " fail=" + failCount + " skip=" + skipCount);
         if (surface != null) {
-            surface.close();
+            GhosttySurface s = surface;
             surface = null;
+            // Bounded-wait-then-force-close, see Gate0eSpike.shutdown() and
+            // docs/phase0-feasibility-report.md "What does not work": this
+            // checklist's own last step already exits the shell via Ctrl+D,
+            // but shutdown() can also run from a window-close event at any
+            // point (e.g. a human tester closing the window mid-checklist),
+            // so it must not assume the child has already exited.
+            s.closeGracefully(5000, 200, this::finishShutdown);
+            return;
         }
+        finishShutdown();
+    }
+
+    private void finishShutdown() {
         if (app != null) {
             app.close();
             app = null;
@@ -516,6 +544,7 @@ public final class Gate0dSpike extends Application {
             host = null;
         }
         log("shutdown complete, no crash");
+        stage.close();
     }
 
     @Override

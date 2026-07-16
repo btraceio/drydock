@@ -1,10 +1,13 @@
 package app.cpm.terminal.ghostty;
 
 import app.cpm.terminal.host.CpmTerminalHost;
+import javafx.animation.PauseTransition;
+import javafx.util.Duration;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
+import java.lang.System.Logger;
 
 /**
  * A running {@code ghostty_surface_t} attached to a caller-provided AppKit
@@ -20,7 +23,17 @@ import java.lang.foreign.ValueLayout;
  */
 public final class GhosttySurface implements AutoCloseable {
 
+    private static final Logger LOG = System.getLogger(GhosttySurface.class.getName());
+
     private static final int GHOSTTY_PLATFORM_MACOS = 1;
+
+    // Native macOS virtual keycodes (kVK_ANSI_D) and GHOSTTY_MODS_CTRL,
+    // verified working via Gate 0D's Ctrl+D-exits-the-shell check (see
+    // Gate0dSpike.KEY_D/MODS_CTRL) -- ghostty_input_key_s.keycode takes a
+    // native platform keycode, not a GHOSTTY_KEY_* ordinal (Task 6 finding,
+    // see docs/native-integration.md, "Struct layout verification").
+    private static final int KVK_ANSI_D = 2;
+    private static final int GHOSTTY_MODS_CTRL = 1 << 1;
 
     // GHOSTTY_POINT_VIEWPORT / GHOSTTY_POINT_COORD_TOP_LEFT / _BOTTOM_RIGHT,
     // verified against the pinned header (see docs/native-integration.md,
@@ -294,6 +307,25 @@ public final class GhosttySurface implements AutoCloseable {
         }
     }
 
+    /**
+     * Frees the surface immediately. Per the reproducible, documented defect
+     * in docs/phase0-feasibility-report.md ("What does not work") and
+     * docs/claude-integration.md ("Incompatibility: closing a surface with a
+     * live child process"), calling {@code ghostty_surface_free} while the
+     * spawned child process (shell/{@code claude}) is still alive has been
+     * observed to terminate the entire JVM process with no catchable Java
+     * exception -- most likely a Zig-level panic/abort inside libghostty's
+     * own teardown (the {@code renderer.threadEnter(...) catch unreachable}
+     * re-entry in {@code Surface.deinit()}, which is far more likely to fail
+     * while the renderer is still actively busy servicing a live child's
+     * output than when it is already idle).
+     *
+     * <p>Callers should prefer {@link #closeGracefully(long, long, Runnable)}
+     * for any surface that might still have a live process. This method
+     * remains available for the already-exited case (e.g. after {@link
+     * #processExited()} is confirmed {@code true}) and as the terminal step
+     * of {@code closeGracefully}.</p>
+     */
     @Override
     public void close() {
         if (closed) {
@@ -307,5 +339,77 @@ public final class GhosttySurface implements AutoCloseable {
         } finally {
             surface = MemorySegment.NULL;
         }
+    }
+
+    /**
+     * Non-blocking, JavaFX-Application-Thread-only graceful shutdown (plan
+     * section 9 "Lifecycle rules": "Closing a tab prompts before terminating
+     * a running process"; plan section 11.2's spirit of not silently killing
+     * work applies equally to closing).
+     *
+     * <p>Requests a graceful exit (Ctrl+D, matching Gate 0D's verified
+     * "Ctrl+D exits the shell" behavior on an assumed-idle prompt line), then
+     * polls {@link #processExited()} every {@code pollIntervalMillis} until
+     * either the process exits or {@code gracePeriodMillis} elapses, calling
+     * {@link #close()} only once the process is confirmed exited.</p>
+     *
+     * <p>If the grace period elapses with the process still alive, this
+     * still calls {@link #close()} as a last resort (a hung/unresponsive
+     * child must not permanently leak the surface), but that call carries
+     * the same crash risk documented on {@link #close()} -- there is no
+     * public libghostty API to forcibly kill the child process without
+     * freeing the surface (see docs/native-integration.md). Choose {@code
+     * gracePeriodMillis} generously enough that this fallback is a rare
+     * safety net, not the common path.</p>
+     *
+     * @param onDone invoked (still on the JavaFX Application Thread) once the
+     *               surface is closed, whether via graceful exit or timeout;
+     *               may be {@code null}.
+     */
+    public void closeGracefully(long gracePeriodMillis, long pollIntervalMillis, Runnable onDone) {
+        if (closed) {
+            if (onDone != null) {
+                onDone.run();
+            }
+            return;
+        }
+        if (processExited()) {
+            close();
+            if (onDone != null) {
+                onDone.run();
+            }
+            return;
+        }
+        LOG.log(Logger.Level.INFO, "closeGracefully: child process still alive, requesting Ctrl+D exit"
+            + " and waiting up to {0}ms before forcing close", gracePeriodMillis);
+        sendKey(KVK_ANSI_D, GHOSTTY_MODS_CTRL, true);
+        sendKey(KVK_ANSI_D, GHOSTTY_MODS_CTRL, false);
+        pollUntilExitedOrTimeout(System.currentTimeMillis() + gracePeriodMillis, pollIntervalMillis, onDone);
+    }
+
+    private void pollUntilExitedOrTimeout(long deadlineMillis, long pollIntervalMillis, Runnable onDone) {
+        if (closed) {
+            if (onDone != null) {
+                onDone.run();
+            }
+            return;
+        }
+        boolean exited = processExited();
+        boolean timedOut = System.currentTimeMillis() >= deadlineMillis;
+        if (exited || timedOut) {
+            if (!exited) {
+                LOG.log(Logger.Level.WARNING, "closeGracefully: grace period elapsed with the child process"
+                    + " still alive; forcing close (this carries the documented ghostty_surface_free"
+                    + " live-child crash risk -- see docs/phase0-feasibility-report.md)");
+            }
+            close();
+            if (onDone != null) {
+                onDone.run();
+            }
+            return;
+        }
+        PauseTransition pause = new PauseTransition(Duration.millis(pollIntervalMillis));
+        pause.setOnFinished(event -> pollUntilExitedOrTimeout(deadlineMillis, pollIntervalMillis, onDone));
+        pause.play();
     }
 }

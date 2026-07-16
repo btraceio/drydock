@@ -367,7 +367,15 @@ public final class Gate0eSpike extends Application {
 
         steps.add(() -> {
             log("automated: closing");
-            stage.close();
+            // Call shutdown() directly, NOT stage.close(): JavaFX's
+            // Stage.close() does not fire setOnCloseRequest (that handler
+            // only runs for user/OS-initiated close requests), so calling
+            // it here would skip surface.closeGracefully() entirely and let
+            // AppKit tear down the native view (and the still-live Ghostty
+            // surface/child process attached to it) out from under us --
+            // which is what was actually crashing the JVM, not a gap in the
+            // close-fix logic itself. See docs/phase0-feasibility-report.md.
+            shutdown();
         });
     }
 
@@ -414,12 +422,35 @@ public final class Gate0eSpike extends Application {
         }
     }
 
+    private boolean shutdownStarted;
+
     private void shutdown() {
+        // Guard against re-entrancy: stage.close() in finishShutdown() below
+        // triggers JavaFX's implicit-exit Platform.exit() (last window
+        // closed), which calls this class's own stop() override, which
+        // calls shutdown() again -- without this guard that second call
+        // would re-run finishShutdown()/stage.close() while the first call
+        // is still unwinding.
+        if (shutdownStarted) {
+            return;
+        }
+        shutdownStarted = true;
         log("shutting down");
         if (surface != null) {
-            surface.close();
+            GhosttySurface s = surface;
             surface = null;
+            // Bounded-wait-then-force-close (docs/phase0-feasibility-report.md
+            // "What does not work"): closing a surface via close() while its
+            // child process is still alive has been observed to kill the
+            // whole JVM. closeGracefully requests Ctrl+D and waits up to 5s
+            // for the process to actually exit before falling back to close().
+            s.closeGracefully(5000, 200, () -> finishShutdown());
+            return;
         }
+        finishShutdown();
+    }
+
+    private void finishShutdown() {
         if (app != null) {
             app.close();
             app = null;
@@ -429,6 +460,7 @@ public final class Gate0eSpike extends Application {
             host = null;
         }
         log("shutdown complete, no crash");
+        stage.close();
     }
 
     @Override

@@ -132,52 +132,98 @@ an application-level bug**, and if reproduced, is a real risk to the plan's "Ctr
 cancellation" requirement (section 7 Gate 0E) for the eventual embedded-terminal
 UX — flagging it rather than either dismissing it or overstating it as confirmed.
 
-## Incompatibility: closing a surface with a live `claude` child process kills the whole JVM
+**Update — a real, separate bug found and fixed on the *interactive* keyboard path**
+(not this scripted `surface.sendKey` path, which was already correct): a human
+physically pressing Ctrl+C in `gate0cSpike` (the one spike wired to real AppKit
+keyboard input via `Gate0cSpike.onKeyEvent`) reported it appeared to do nothing, and
+the only adjacent log line was an unrelated `key event: special keyCode=51
+down=false` (Delete key-up, not Ctrl+C at all — keycode 51 is `kVK_Delete`, not
+`kVK_ANSI_C`=8). Root cause: `onKeyEvent` only routed keys in a fixed `SPECIAL_KEYS`
+table (arrows, Enter, etc.) through `ghostty_surface_key`; anything else with a
+non-empty resolved `characters` string — including a genuine Ctrl+C, whose
+`characters` is the raw ETX (0x03) control byte — fell through to
+`surface.sendText(characters)`, the **paste-semantics** codepath
+(`ghostty_surface_text`). Once a shell/`claude` enables bracketed-paste mode (which
+happens quickly after showing a prompt, per the Gate 0D finding on this same paste-
+vs-key distinction), that wraps the raw 0x03 byte in `\e[200~...\e[201~` markers,
+which is not interpreted as an interrupt. Fixed in `Gate0cSpike.onKeyEvent`: any
+keydown/up with the Control or Command modifier active now routes through
+`ghostty_surface_key` unconditionally (a modified keypress is a shortcut, never
+pasted text), and every key event is now logged unconditionally with non-printable
+characters escaped as `\xNN` (previously, a real Ctrl+C landing in the old
+`sendText` branch would have logged with the raw control byte embedded in the log
+line — effectively invisible, indistinguishable from "no event arrived"). This fix
+has **not yet been re-verified with a real physical Ctrl+C keypress** — that
+requires a human running `./gradlew gate0cSpike -Papp.cpm.gate0c.interactive` and
+watching the log.
 
-Reproduced identically across both runs, both times at the very end of the scripted
-transcript: after the final `/exit` attempts (which — per the dropped-Enter finding
-above — did not reliably terminate the `claude` process; `surface.processExited()`
-still read `false` going into shutdown both times), calling `stage.close()` (which
-triggers this spike's `shutdown()`, which calls `surface.close()` while `claude` is
-still alive) caused the **entire JVM process to exit with status 1** — not a caught
-Java exception (both runs' full output, including a `--stacktrace` run, show no
-Java-level stack trace or logged exception from this project's own code before the
-process disappears), which points at something in libghostty's or AppKit's own
-surface/child-process teardown path exiting the process directly rather than
-returning control to the JVM.
+## Incompatibility: closing a surface with a live `claude` child process kills the whole JVM (root-caused and fixed)
 
-Notably: `GhosttySurface.create`'s `command` override (used for every surface in
-this spike) causes `src/apprt/embedded.zig` to automatically set
-`config.@"wait-after-command" = true` (see that file, "If we have a command from
-the options... `config.@"wait-after-command" = true;`") — a "wait after command
-exits" behavior this spike never intentionally exercises, since it always closes the
-surface itself rather than letting the child exit and the surface then wait. Gate 0D
-never hit this scenario because its checklist always drove the shell to a clean
-`Ctrl+D` exit (confirmed via `processExited()`) *before* closing the surface;
-Gate 0E's scripted transcript is the first spike to close a surface while its child
-process is still running, and it does so reproducibly.
+**Root cause found, and it was not what the original report guessed.** The
+crash was never really "inside libghostty's or AppKit's own surface/child-process
+teardown path" as such — it was that **`stage.close()` never ran this spike's own
+`shutdown()`/`GhosttySurface.close()` logic at all**. `javafx.stage.Stage.close()`
+does not fire `setOnCloseRequest` (that handler only runs for user/OS-initiated
+close requests, e.g. clicking the window's close button) — so every "automated:
+closing" scripted step across Gate 0C/0D/0E was calling `stage.close()` directly,
+which let JavaFX/AppKit tear down the native view (and, in Gate 0E, the still-live
+`claude` child attached to it) completely outside this project's own Java code, with
+no graceful shutdown attempted at all. Gate 0D never hit the crash only because its
+checklist always drove the shell to a clean `Ctrl+D` exit *before* that direct
+`stage.close()` call, not because its shutdown path was actually being exercised
+differently.
+
+**Fix applied** (`GhosttySurface.closeGracefully(long, long, Runnable)`,
+`app/src/main/java/app/cpm/terminal/ghostty/GhosttySurface.java`): sends a
+graceful-exit Ctrl+D and polls `processExited()` on the JavaFX Application Thread
+(via `PauseTransition`, non-blocking) for up to a caller-supplied grace period before
+falling back to `close()` (`ghostty_surface_free`). All three spikes'
+scripted "automated: closing" steps now call `shutdown()` directly instead of
+`stage.close()`, and `shutdown()`/`finishShutdown()` are now reentrancy-guarded
+(closing the last `Stage` triggers JavaFX's implicit-exit path, which re-invokes
+`Application.stop()`, which called `shutdown()` again before this guard existed).
+
+**Verified after the fix:**
+- Gate 0D (`./gradlew gate0dSpike`): 12/12 checks pass, **exits 0**, full clean
+  `shutdown() -> closeGracefully (already exited) -> close() -> finishShutdown() ->
+  stage.close()` sequence logged.
+- Gate 0E (`./gradlew gate0eSpike -Papp.cpm.gate0e.repo=<repo>`): the crash — an
+  abrupt process death with **zero** shutdown logging — is gone. The full sequence
+  now runs and logs: `shutting down` -> `closeGracefully: child process still alive,
+  requesting Ctrl+D...` -> (5s grace period; `claude` did not exit on Ctrl+D within
+  it) -> `grace period elapsed... forcing close` -> `shutdown complete, no crash`.
+  `ghostty_surface_free` on a still-alive child, called deliberately from this
+  project's own code with full logging around it, does **not** crash.
+
+**Residual, separate, and much less severe issue, not yet root-caused:** even
+after that fully clean, logged shutdown sequence, the raw `java` process itself
+(confirmed via a direct `java -cp ...` invocation, bypassing Gradle) still exits
+with status 1 — with no exception, no stack trace, no further output of any kind
+after `shutdown complete, no crash`. This only reproduces in the forced-close path
+(a child that had to be killed rather than exiting on its own); Gate 0D, where the
+shell always exits on its own before `close()` runs, exits 0. Hypotheses not yet
+confirmed: Zig's `Subprocess.stop()` (`src/termio/Exec.zig`'s `killCommand`) sending
+`SIGHUP` and synchronously `wait()`-ing on the child may propagate the child's
+signal-terminated status somewhere up through libghostty's own process exit path;
+this needs a native-side (Zig/lldb) investigation, not just Java-side logging, to
+pin down further. Treat this as a follow-up item — it no longer causes silent,
+unlogged process death, which was the actual severity-defining part of the original
+finding.
 
 **This also plausibly explains the `claude --resume` finding above** ("No
 conversations found in this project" despite a real prior session): if closing a
 surface with a live child does not give `claude` a chance to run its own
-session-persistence-on-exit logic (only a graceful `/exit`, complete Ctrl+D, or a
-delivered `SIGTERM` with the process actually observed to exit would), then a
-transcript never gets written to disk for `--resume` to find later. Both effects
-share the same root cause candidate: this spike routinely tore down surfaces without
-confirming the child had actually exited first.
+session-persistence-on-exit logic, a transcript never gets written to disk for
+`--resume` to find later. This should be re-tested now that closing no longer skips
+the graceful-exit attempt entirely.
 
 **This is a load-bearing finding for the rest of the plan.** Section 29's definition
 of v0.1 complete requires "closing and reopening the app does not lose
 application-managed session metadata," and plan rule 27.14 requires "a focused
-regression test for every native crash or lifecycle bug." Recommendation for the
-application development phase (not implemented here — Task 7 is investigation, this
-is a spike, not the real session-lifecycle code): closing a managed Claude session
-tab must be a two-step, awaited operation — request a graceful exit (e.g. simulate
-`Ctrl+D`/`/exit` or send an actual `SIGTERM` to the child pid) and **wait for
-`ghostty_surface_process_exited()` to become true (with a bounded timeout and a
-forceful fallback)** before calling `ghostty_surface_free`/closing the host view,
-never an unconditional immediate free. This needs its own focused regression test
-once that lifecycle code exists, per rule 27.14.
+regression test for every native crash or lifecycle bug." The real application's
+session-close code (not yet written — this is still a spike) should follow the same
+graceful-then-forced pattern as `GhosttySurface.closeGracefully`, and needs its own
+focused regression test once that lifecycle code exists, per rule 27.14.
 
 ## Running it
 

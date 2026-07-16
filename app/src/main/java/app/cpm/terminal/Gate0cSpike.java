@@ -44,9 +44,11 @@ public final class Gate0cSpike extends Application {
     private CpmTerminalHost host;
     private GhosttyApp app;
     private GhosttySurface surface;
+    private Stage stage;
 
     @Override
     public void start(Stage stage) {
+        this.stage = stage;
         log("starting");
 
         var root = new StackPane();
@@ -172,22 +174,65 @@ public final class Gate0cSpike extends Application {
      * docs/native-integration.md, "Task 6 / Gate 0D".</p>
      */
     private void onKeyEvent(int keyCode, int modifierFlags, boolean keyDown, String characters) {
+        // Unconditional logging of every event this method is called with,
+        // requested to debug a real observation: pressing Ctrl+C on a
+        // physical keyboard produced no visible effect, and the only
+        // adjacent log line was an unrelated "special keyCode=51" (Delete)
+        // event. Without this, a genuine Ctrl+C keyDown that produces a
+        // non-printable "characters" string (the raw 0x03 ETX byte) would
+        // previously log via the "text=" branch below with that control
+        // byte embedded literally in the log line -- effectively invisible
+        // in a terminal/log viewer, which is indistinguishable from "no
+        // event arrived at all". This line always fires first and always
+        // escapes non-printable characters, so it can answer definitively
+        // whether AppKit ever delivered the Ctrl+C keyDown to Java.
+        log("key event: RAW keyCode=" + keyCode + " down=" + keyDown + " modifierFlags=0x"
+            + Integer.toHexString(modifierFlags) + " characters=" + escapeForLog(characters));
+
         if (surface == null) {
             return;
         }
         int mods = translateModifiers(modifierFlags);
-        if (SPECIAL_KEYS.contains(keyCode)) {
+        // Any Control/Command combination is a keyboard shortcut (e.g.
+        // Ctrl+C for SIGINT, Cmd+C for copy), not typed text -- it must go
+        // through ghostty_surface_key (with the modifier bits set), never
+        // ghostty_surface_text. Previously, a Ctrl+<letter> combination not
+        // in SPECIAL_KEYS fell through to the "characters non-empty" branch
+        // below and was sent via sendText -- semantically "pasted" text
+        // (see GhosttySurface.sendCharKey's Javadoc on why sendText is paste
+        // semantics), and once a shell enables bracketed-paste mode (as
+        // observed in Gate 0D), that wraps the raw control byte in
+        // `\e[200~...\e[201~` markers, which most shells/programs do not
+        // interpret as an interrupt -- a plausible second cause of Ctrl+C
+        // appearing to do nothing, independent of whether the event even
+        // reaches this method.
+        boolean isShortcut = (mods & (GHOSTTY_MODS_CTRL | GHOSTTY_MODS_SUPER)) != 0;
+        if (SPECIAL_KEYS.contains(keyCode) || isShortcut) {
             // Pass the native AppKit keycode straight through -- see the
             // Javadoc above for why no translation table is needed (or
             // correct) here.
             surface.sendKey(keyCode, mods, keyDown);
-            log("key event: special keyCode=" + keyCode + " down=" + keyDown + " mods=" + mods);
+            log("key event: special/shortcut keyCode=" + keyCode + " down=" + keyDown + " mods=" + mods);
             return;
         }
         if (keyDown && !characters.isEmpty()) {
             surface.sendText(characters);
-            log("key event: text=\"" + characters.replace("\r", "\\r").replace("\n", "\\n") + "\"");
+            log("key event: text=\"" + escapeForLog(characters) + "\"");
         }
+    }
+
+    /** Renders control/non-printable characters visibly instead of embedding raw bytes in log output. */
+    private static String escapeForLog(String s) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c < 0x20 || c == 0x7f) {
+                sb.append(String.format("\\x%02x", (int) c));
+            } else {
+                sb.append(c);
+            }
+        }
+        return sb.toString();
     }
 
     // NSEventModifierFlags bit positions (AppKit) -> GHOSTTY_MODS_* bit positions.
@@ -195,6 +240,10 @@ public final class Gate0cSpike extends Application {
     private static final int NS_CONTROL = 1 << 18;
     private static final int NS_OPTION = 1 << 19;
     private static final int NS_COMMAND = 1 << 20;
+
+    // GHOSTTY_MODS_* bit values, as produced by translateModifiers below.
+    private static final int GHOSTTY_MODS_CTRL = 2;
+    private static final int GHOSTTY_MODS_SUPER = 8;
 
     private static int translateModifiers(int nsModifierFlags) {
         int mods = 0;
@@ -248,7 +297,12 @@ public final class Gate0cSpike extends Application {
             new javafx.animation.KeyFrame(javafx.util.Duration.seconds(4), e -> captureScreenshot()),
             new javafx.animation.KeyFrame(javafx.util.Duration.seconds(5), e -> {
                 log("automated: closing");
-                stage.close();
+                // shutdown(), not stage.close() -- see Gate0eSpike's
+                // identical fix and docs/phase0-feasibility-report.md:
+                // Stage.close() does not fire setOnCloseRequest, so this
+                // would skip surface.closeGracefully() and let AppKit tear
+                // down the native view (and any live child) directly.
+                shutdown();
             })
         );
         timeline.play();
@@ -295,12 +349,29 @@ public final class Gate0cSpike extends Application {
         }
     }
 
+    private boolean shutdownStarted;
+
     private void shutdown() {
+        // Guard against re-entrancy -- see Gate0eSpike.shutdown()'s identical
+        // guard for why (stage.close() below triggers JavaFX's implicit-exit
+        // Platform.exit(), which re-invokes this class's stop() override).
+        if (shutdownStarted) {
+            return;
+        }
+        shutdownStarted = true;
         log("shutting down");
         if (surface != null) {
-            surface.close();
+            GhosttySurface s = surface;
             surface = null;
+            // Bounded-wait-then-force-close, see Gate0eSpike.shutdown() and
+            // docs/phase0-feasibility-report.md "What does not work".
+            s.closeGracefully(5000, 200, this::finishShutdown);
+            return;
         }
+        finishShutdown();
+    }
+
+    private void finishShutdown() {
         if (app != null) {
             app.close();
             app = null;
@@ -310,6 +381,7 @@ public final class Gate0cSpike extends Application {
             host = null;
         }
         log("shutdown complete, no crash");
+        stage.close();
     }
 
     @Override
