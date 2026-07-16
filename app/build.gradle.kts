@@ -397,21 +397,17 @@ tasks.register("runtimeImage") {
  *   not the `.dylib` files directly. Plan section 23.2's own last line
  *   ("do not add speculative JVM flags") is followed over the letter of
  *   its example.
- * - The entry point defaults to the Gate 0C terminal spike
- *   (`app.cpm.terminal.Gate0cSpikeLauncher`), not `app.cpm.Main`. This
- *   default was set when Gate 0F / Task 8 was built (Milestone 0 done,
- *   Milestones 1-2 in progress), and would then have proven nothing about
- *   native/terminal packaging since the real application was still an
- *   empty window; the terminal spike is what plan section 7 "Gate 0F" and
- *   section 28 "Task 8" actually ask this image to launch. `app.cpm.Main`
- *   is a real application as of Milestone 4 (a repository sidebar with
- *   persisted state -- see `CpmApplication`'s own Javadoc) but does not yet
- *   embed a terminal, so this default has deliberately been left alone
- *   rather than switched as part of Milestone 4 (out of scope -- changing
- *   the packaging/launch-target default is a Milestone 5+/packaging-phase
- *   decision). `CPM_MAIN_CLASS=app.cpm.Main` selects it manually in the
- *   meantime; expected to become the default once the real application
- *   embeds a terminal (Milestone 5 onward).
+ * - The entry point defaults to `app.cpm.Main`, the real application. Earlier
+ *   (Gate 0F / Task 8, Milestones 0-4) this defaulted to the Gate 0C terminal
+ *   spike (`app.cpm.terminal.Gate0cSpikeLauncher`) instead, since the real
+ *   application was still an empty window (Milestones 0-3) or had no
+ *   embedded terminal yet (Milestone 4's repository sidebar). Flipped now
+ *   that Milestone 5 gives `app.cpm.Main` a real embedded terminal (managed
+ *   Claude sessions in tabs), as anticipated by this comment's prior
+ *   revision. `CPM_MAIN_CLASS=app.cpm.terminal.Gate0cSpikeLauncher` (or any
+ *   other `gateNSpikeLauncher`) still selects a Phase 0 spike manually if
+ *   needed for native/terminal-packaging-only verification (plan section 7
+ *   "Gate 0F" / section 28 "Task 8").
  */
 fun runtimeImageLauncherScript(): String {
     val d = "\$"
@@ -430,11 +426,12 @@ done
 BIN_DIR="${d}(cd -P "${d}(dirname "${d}SOURCE")" >/dev/null 2>&1 && pwd)"
 APP_HOME="${d}(cd -P "${d}BIN_DIR/.." >/dev/null 2>&1 && pwd)"
 
-# CPM_MAIN_CLASS / CPM_EXTRA_JVM_ARGS are internal escape hatches used only
-# by this project's own runtime-image smoke test (plan section 22.5); see
+# CPM_MAIN_CLASS / CPM_EXTRA_JVM_ARGS are internal escape hatches, e.g. to
+# launch a Phase 0 gateNSpikeLauncher instead of the real app for
+# native/terminal-packaging-only verification (plan section 22.5); see
 # app/build.gradle.kts's runtimeImageLauncherScript() Javadoc for why the
-# default main class is the Gate 0C terminal spike, not app.cpm.Main.
-MAIN_CLASS="${d}{CPM_MAIN_CLASS:-app.cpm.terminal.Gate0cSpikeLauncher}"
+# default main class is app.cpm.Main (the real application).
+MAIN_CLASS="${d}{CPM_MAIN_CLASS:-app.cpm.Main}"
 
 exec "${d}APP_HOME/runtime/bin/java" \
   --enable-native-access=ALL-UNNAMED \
