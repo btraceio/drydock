@@ -90,6 +90,34 @@ class SessionManagerTest {
                 Optional.empty());
     }
 
+    // ---- startup normalization of stale statuses ---------------------------
+
+    @Test
+    void loadNormalizesStaleRunningAndStartingSessionsToInactive() {
+        ManagedClaudeSession wasRunning = sessionWith(Path.of("/tmp"), Optional.empty(), Optional.empty())
+                .withStatus(SessionStatus.RUNNING);
+        ManagedClaudeSession wasStarting = sessionWith(Path.of("/tmp"), Optional.empty(), Optional.empty())
+                .withStatus(SessionStatus.STARTING);
+        ManagedClaudeSession wasExited = sessionWith(Path.of("/tmp"), Optional.empty(), Optional.empty())
+                .withStatus(SessionStatus.EXITED);
+
+        SessionManager manager = newManager(new InMemoryStateRepository(List.of(wasRunning, wasStarting, wasExited)));
+
+        assertEquals(SessionStatus.INACTIVE, statusOf(manager, wasRunning.id()),
+                "a session persisted as RUNNING by a previous app run has no surviving process");
+        assertEquals(SessionStatus.INACTIVE, statusOf(manager, wasStarting.id()));
+        assertEquals(SessionStatus.EXITED, statusOf(manager, wasExited.id()),
+                "terminal statuses must pass through unchanged");
+    }
+
+    private static SessionStatus statusOf(SessionManager manager, ManagedSessionId id) {
+        return manager.sessions().stream()
+                .filter(s -> s.id().equals(id))
+                .findFirst()
+                .orElseThrow()
+                .status();
+    }
+
     // ---- 11.2 resume fallback chain (pure command construction) -----------
 
     @Test

@@ -98,7 +98,26 @@ public final class SessionManager implements AutoCloseable {
         this.capabilityService = capabilityService;
         this.backgroundExecutor = backgroundExecutor;
         this.ownsExecutor = ownsExecutor;
-        this.state = stateRepository.load();
+        this.state = normalizeLoadedState(stateRepository.load());
+    }
+
+    /**
+     * A freshly loaded state can contain sessions persisted as {@link
+     * SessionStatus#RUNNING}/{@link SessionStatus#STARTING} by a previous
+     * app run (e.g. the app quit, crashed, or was killed while sessions were
+     * open). No terminal process survives an app restart, so presenting
+     * those statuses would show "running" indicators for processes that do
+     * not exist; normalize them to {@link SessionStatus#INACTIVE} before
+     * anything reads them.
+     */
+    private static ApplicationState normalizeLoadedState(ApplicationState loaded) {
+        List<ManagedClaudeSession> normalized = loaded.sessions().stream()
+                .map(session -> switch (session.status()) {
+                    case RUNNING, STARTING -> session.withStatus(SessionStatus.INACTIVE);
+                    default -> session;
+                })
+                .toList();
+        return loaded.withSessions(normalized);
     }
 
     public synchronized ApplicationState state() {
@@ -273,6 +292,27 @@ public final class SessionManager implements AutoCloseable {
             future.complete(null);
         }));
         return future;
+    }
+
+    /**
+     * Records that a session's child process exited on its own (detected by
+     * the UI polling {@link GhosttySurface#processExited()}), without
+     * closing the surface -- the terminal stays open so the user can read
+     * the final output. Only a {@link SessionStatus#RUNNING} session is
+     * updated (idempotent; racing with {@link #closeSession}'s own EXITED
+     * update is harmless).
+     *
+     * @return the updated session, or empty if the session no longer exists
+     *         or was not RUNNING
+     */
+    public synchronized Optional<ManagedClaudeSession> markSessionExited(ManagedSessionId sessionId) {
+        return findSession(sessionId)
+                .filter(session -> session.status() == SessionStatus.RUNNING)
+                .map(session -> {
+                    ManagedClaudeSession updated = session.withStatus(SessionStatus.EXITED);
+                    persistUpdatedSessionLocked(updated);
+                    return updated;
+                });
     }
 
     private synchronized void onSurfaceClosed(ManagedSessionId sessionId, GhosttySurface surface) {

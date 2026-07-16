@@ -183,6 +183,23 @@ final class OpenSessionTab {
         }
     }
 
+    /**
+     * Whether this tab's child process has exited while the surface is
+     * still open (polled by {@code MainWorkspace}'s exit watcher). Returns
+     * {@code false} during/after teardown -- those paths already record the
+     * exit through {@code SessionManager.closeSession}.
+     */
+    boolean isProcessExited() {
+        if (disposed || surfaceClosing || surface == null) {
+            return false;
+        }
+        try {
+            return surface.processExited();
+        } catch (IllegalStateException e) {
+            return false; // surface closed out from under us; closeSession's path owns the status update.
+        }
+    }
+
     private void updateGeometry() {
         if (disposed || surfaceClosing || surface == null || placeholder.getScene() == null) {
             return;

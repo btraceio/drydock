@@ -57,6 +57,18 @@ public final class MainWorkspace extends BorderPane {
     /** Every currently open tab, keyed by the managed session it hosts. */
     private final Map<ManagedSessionId, OpenSessionTab> openTabs = new LinkedHashMap<>();
 
+    /** Sessions whose self-exit has already been recorded, so the watcher fires once per exit. */
+    private final java.util.Set<ManagedSessionId> exitRecorded = new java.util.HashSet<>();
+
+    /**
+     * Polls every open tab for a self-exited child process (the user typed
+     * {@code exit} / {@code claude} finished on its own -- nothing else in
+     * the app observes that). Without this, a session whose process died
+     * stays {@code RUNNING} in the sidebar indefinitely.
+     */
+    private final javafx.animation.Timeline exitWatcher = new javafx.animation.Timeline(
+            new javafx.animation.KeyFrame(javafx.util.Duration.seconds(1), e -> pollForExitedProcesses()));
+
     private Runnable onSessionsChanged = () -> { };
 
     public MainWorkspace(SessionManager sessionManager, Stage stage) {
@@ -76,6 +88,25 @@ public final class MainWorkspace extends BorderPane {
         });
 
         setCenter(tabPane);
+
+        exitWatcher.setCycleCount(javafx.animation.Animation.INDEFINITE);
+        exitWatcher.play();
+    }
+
+    private void pollForExitedProcesses() {
+        for (Map.Entry<ManagedSessionId, OpenSessionTab> entry : openTabs.entrySet()) {
+            ManagedSessionId sessionId = entry.getKey();
+            OpenSessionTab open = entry.getValue();
+            if (exitRecorded.contains(sessionId) || !open.isProcessExited()) {
+                continue;
+            }
+            exitRecorded.add(sessionId);
+            sessionManager.markSessionExited(sessionId).ifPresent(updated -> {
+                LOG.log(Level.INFO, "Session {0} child process exited on its own", sessionId);
+                open.setDisplayName(updated.displayName() + " (exited)");
+                onSessionsChanged.run();
+            });
+        }
     }
 
     /** Invoked (on the FX Application Thread) whenever a session is opened, closed, or renamed. */
@@ -286,6 +317,7 @@ public final class MainWorkspace extends BorderPane {
         openTab.markSurfaceClosing();
         tabPane.getTabs().remove(openTab.tab);
         openTabs.remove(openTab.sessionId, openTab);
+        exitRecorded.remove(openTab.sessionId);
         openTab.disposeNativeResources();
     }
 

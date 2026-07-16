@@ -13,6 +13,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
  * Orchestrates add/remove of registered repositories: validates a candidate
@@ -34,6 +35,16 @@ public final class RepositoryManager {
     private final ApplicationStateRepository stateRepository;
     private final GitStatusService gitStatusService;
     private ApplicationState state;
+
+    /**
+     * Notified after every successful repository add/remove. Listeners may
+     * be invoked on any thread ({@link #addRepository} completes on {@link
+     * GitStatusService}'s background executor); UI listeners must hop to
+     * the FX application thread themselves. Registered listeners let UI
+     * components stay in sync with mutations they did not initiate (the
+     * sidebar previously only refreshed after its own button handlers).
+     */
+    private final List<Runnable> changeListeners = new CopyOnWriteArrayList<>();
 
     public RepositoryManager(ApplicationStateRepository stateRepository, GitStatusService gitStatusService) {
         this.stateRepository = stateRepository;
@@ -83,7 +94,16 @@ public final class RepositoryManager {
         updated.add(repository);
         state = mergeRepositoriesOntoLatestDiskState(updated);
         stateRepository.save(state);
+        notifyChanged();
         return repository;
+    }
+
+    public void addChangeListener(Runnable listener) {
+        changeListeners.add(listener);
+    }
+
+    private void notifyChanged() {
+        changeListeners.forEach(Runnable::run);
     }
 
     /** Removes only this application's metadata; never touches the filesystem (plan section 21). */
@@ -96,6 +116,7 @@ public final class RepositoryManager {
         }
         state = mergeRepositoriesOntoLatestDiskState(updated);
         stateRepository.save(state);
+        notifyChanged();
     }
 
     /**

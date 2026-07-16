@@ -86,6 +86,13 @@ public final class RepositorySidebar extends BorderPane {
 
         repositories.setAll(sorted(repositoryManager.repositories()));
 
+        // Keep the displayed list in sync with EVERY repository mutation,
+        // not just the ones initiated by this sidebar's own button/menu
+        // handlers -- without this, a repository added through any other
+        // code path never appears until restart. The listener may fire on a
+        // background thread (see RepositoryManager.addChangeListener).
+        repositoryManager.addChangeListener(() -> Platform.runLater(this::reloadRepositories));
+
         listView.setCellFactory(view -> new RepositoryCell());
         listView.setPlaceholder(new Label("No repositories yet. Use \"Add repository...\" to get started."));
 
@@ -105,6 +112,20 @@ public final class RepositorySidebar extends BorderPane {
         return source.stream()
                 .sorted(Comparator.comparing(Repository::displayName, String.CASE_INSENSITIVE_ORDER))
                 .toList();
+    }
+
+    /** Re-reads the repository list from {@link RepositoryManager} and refreshes Git status for any new rows. */
+    private void reloadRepositories() {
+        List<Repository> latest = sorted(repositoryManager.repositories());
+        if (latest.equals(repositories)) {
+            return;
+        }
+        repositories.setAll(latest);
+        for (Repository repository : latest) {
+            if (!statuses.containsKey(repository.id()) && !statusFailures.containsKey(repository.id())) {
+                refreshStatus(repository);
+            }
+        }
     }
 
     private void refreshAllStatuses() {
@@ -209,17 +230,31 @@ public final class RepositorySidebar extends BorderPane {
         private final Label nameLabel = new Label();
         private final Label branchLabel = new Label();
         private final Label sessionsLabel = new Label("0 running sessions");
+        private final Button newSessionButton = new Button("+");
         private final VBox sessionsBox = new VBox(1);
         private final VBox container;
+
+        /** The repository this cell currently renders; targeted by {@link #newSessionButton}. */
+        private Repository currentRepository;
 
         RepositoryCell() {
             nameLabel.getStyleClass().add("repository-name");
             branchLabel.getStyleClass().add("repository-branch");
             sessionsLabel.getStyleClass().add("repository-sessions");
 
-            HBox topRow = new HBox(6, nameLabel);
+            newSessionButton.getStyleClass().add("new-session-button");
+            newSessionButton.setTooltip(new javafx.scene.control.Tooltip("New Claude session"));
+            newSessionButton.setFocusTraversable(false);
+            newSessionButton.setOnAction(e -> {
+                if (currentRepository != null) {
+                    mainWorkspace.openNewSession(currentRepository);
+                }
+            });
+
+            HBox topRow = new HBox(6, nameLabel, newSessionButton);
             topRow.setAlignment(Pos.CENTER_LEFT);
             HBox.setHgrow(nameLabel, Priority.ALWAYS);
+            nameLabel.setMaxWidth(Double.MAX_VALUE);
 
             HBox bottomRow = new HBox(10, branchLabel, sessionsLabel);
             bottomRow.setAlignment(Pos.CENTER_LEFT);
@@ -234,12 +269,14 @@ public final class RepositorySidebar extends BorderPane {
         protected void updateItem(Repository repository, boolean empty) {
             super.updateItem(repository, empty);
             if (empty || repository == null) {
+                currentRepository = null;
                 setText(null);
                 setGraphic(null);
                 setContextMenu(null);
                 return;
             }
 
+            currentRepository = repository;
             nameLabel.setText(repository.displayName());
 
             List<ManagedClaudeSession> sessions = sessionsFor(repository);
@@ -269,6 +306,8 @@ public final class RepositorySidebar extends BorderPane {
             Label nameLabel = new Label(statusIcon(session) + " " + session.displayName());
             nameLabel.getStyleClass().add("session-row-name");
             HBox row = new HBox(6, nameLabel);
+            row.getStyleClass().add("session-row");
+            row.setCursor(javafx.scene.Cursor.HAND);
             row.setAlignment(Pos.CENTER_LEFT);
             javafx.scene.control.Tooltip.install(row, new javafx.scene.control.Tooltip(
                     "Status: " + session.status() + "\nLast opened: " + session.lastOpenedAt()

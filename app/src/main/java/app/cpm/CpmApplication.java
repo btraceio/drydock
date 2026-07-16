@@ -59,7 +59,17 @@ public final class CpmApplication extends Application {
 
     @Override
     public void start(Stage primaryStage) {
-        JsonApplicationStateRepository stateRepository = JsonApplicationStateRepository.atDefaultLocation();
+        // Diagnostic override (see the app.cpm.diag.* section in
+        // app/build.gradle.kts): lets automated visual verification run
+        // against a throwaway state file instead of the user's real
+        // ~/Library/Application Support state.
+        String diagStateFile = System.getProperty("app.cpm.diag.stateFile");
+        JsonApplicationStateRepository stateRepository = diagStateFile != null
+                ? new JsonApplicationStateRepository(java.nio.file.Path.of(diagStateFile))
+                : JsonApplicationStateRepository.atDefaultLocation();
+        if (diagStateFile != null) {
+            System.out.println("[diag] state file: " + stateRepository.stateFile());
+        }
 
         gitStatusService = new GitStatusService();
         claudeCapabilityService = new ClaudeCapabilityService();
@@ -74,6 +84,7 @@ public final class CpmApplication extends Application {
         splitPane.setDividerPositions(restoredDividerPosition());
 
         var scene = new Scene(splitPane, DEFAULT_SCENE_WIDTH, DEFAULT_SCENE_HEIGHT);
+        scene.getStylesheets().add(getClass().getResource("/app/cpm/ui/app.css").toExternalForm());
 
         primaryStage.setTitle(WINDOW_TITLE);
         primaryStage.setScene(scene);
@@ -88,6 +99,25 @@ public final class CpmApplication extends Application {
         primaryStage.setOnCloseRequest(this::onCloseRequest);
 
         primaryStage.show();
+
+        // Diagnostic hook for automated visual verification (screenshot
+        // tests): registers app.cpm.diag.repo and immediately opens a new
+        // Claude session in it, so a headless driver can exercise the real
+        // repository-add + session-open + terminal-render path without GUI
+        // automation. Inert unless -Dapp.cpm.diag.autoCreateSession=true.
+        if (Boolean.getBoolean("app.cpm.diag.autoCreateSession")) {
+            Platform.runLater(() -> repositoryManager.addRepository(
+                    java.nio.file.Path.of(System.getProperty("app.cpm.diag.repo")))
+                .whenComplete((repo, ex) -> Platform.runLater(() -> {
+                    if (ex != null) {
+                        System.out.println("[diag] addRepository failed: " + ex);
+                        return;
+                    }
+                    System.out.println("[diag] repo added: " + repo);
+                    mainWorkspace.openNewSession(repo);
+                    System.out.println("[diag] openNewSession called");
+                })));
+        }
     }
 
     private void onCloseRequest(WindowEvent event) {

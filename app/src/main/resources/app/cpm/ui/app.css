@@ -1,0 +1,46 @@
+/*
+ * Application-wide stylesheet (loaded by CpmApplication). The sidebar's
+ * style classes (.repository-name etc.) are assigned in RepositorySidebar;
+ * without this file they were unstyled, leaving repository rows and their
+ * nested session rows visually indistinguishable -- no hierarchy, no hint
+ * of what is clickable.
+ */
+
+.repository-name {
+    -fx-font-weight: bold;
+    -fx-font-size: 13px;
+}
+
+.repository-branch {
+    -fx-text-fill: #7a7a7a;
+    -fx-font-size: 11px;
+}
+
+.repository-sessions {
+    -fx-text-fill: #7a7a7a;
+    -fx-font-size: 11px;
+}
+
+/* One nested session row inside a repository cell. Hover feedback plus a
+ * hand cursor (set in code) make the double-click/right-click target
+ * obvious. */
+.session-row {
+    -fx-padding: 3 6 3 6;
+    -fx-background-radius: 4;
+}
+
+.session-row:hover {
+    -fx-background-color: -fx-selection-bar-non-focused;
+}
+
+.session-row-name {
+    -fx-font-size: 12px;
+}
+
+/* The small per-repository "+" button (New Claude session). Kept compact so
+ * the row stays one line high. */
+.new-session-button {
+    -fx-font-size: 11px;
+    -fx-padding: 0 6 0 6;
+    -fx-background-radius: 4;
+}

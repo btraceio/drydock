@@ -55,6 +55,22 @@ application {
     )
 }
 
+// Diagnostic support: forward -Papp.cpm.diag.* project properties to the
+// run task's application JVM as system properties (the Gradle client's own
+// -D flags never reach the forked app JVM; same pattern as gate0eSpike's
+// project.property forwarding below). Used by automated visual
+// verification: app.cpm.diag.stateFile isolates persisted state to a
+// throwaway file, and app.cpm.diag.autoCreateSession=true plus
+// app.cpm.diag.repo=<path> auto-registers a repository and opens a session
+// in it on startup (see CpmApplication.start).
+tasks.named<JavaExec>("run") {
+    project.properties.forEach { (key, value) ->
+        if (key.startsWith("app.cpm.diag.") && value != null) {
+            systemProperty(key, value.toString())
+        }
+    }
+}
+
 repositories {
     mavenCentral()
 }
