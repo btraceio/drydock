@@ -147,6 +147,32 @@ class GitStatusServiceTest {
         assertEquals(0, status.upstream().get().behind());
     }
 
+    @Test
+    void resolveRepositoryRootReturnsTheTopLevelForARepositoryRoot(@TempDir Path repo) throws Exception {
+        initRepo(repo, "main");
+
+        Path resolved = service.resolveRepositoryRoot(repo).get();
+
+        assertEquals(repo.toRealPath(), resolved.toRealPath());
+    }
+
+    @Test
+    void resolveRepositoryRootReturnsTheTopLevelFromASubdirectory(@TempDir Path repo) throws Exception {
+        initRepo(repo, "main");
+        Path subdirectory = Files.createDirectories(repo.resolve("src/main"));
+
+        Path resolved = service.resolveRepositoryRoot(subdirectory).get();
+
+        assertEquals(repo.toRealPath(), resolved.toRealPath());
+    }
+
+    @Test
+    void resolveRepositoryRootRejectsANonGitDirectory(@TempDir Path plainDir) {
+        CompletionException completion = assertThrows(CompletionException.class,
+                () -> service.resolveRepositoryRoot(plainDir).join());
+        assertInstanceOf(NotAGitRepositoryException.class, completion.getCause());
+    }
+
     private GitStatus getStatus(Path repo) throws ExecutionException, InterruptedException {
         CompletableFuture<GitStatus> future = service.getStatus(repo);
         return future.get();
