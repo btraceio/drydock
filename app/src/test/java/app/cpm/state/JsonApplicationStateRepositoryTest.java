@@ -1,9 +1,12 @@
 package app.cpm.state;
 
 import app.cpm.domain.ApplicationState;
+import app.cpm.domain.ManagedClaudeSession;
+import app.cpm.domain.ManagedSessionId;
 import app.cpm.domain.Repository;
 import app.cpm.domain.RepositoryId;
 import app.cpm.domain.RepositorySettings;
+import app.cpm.domain.SessionStatus;
 import app.cpm.domain.WorkspaceUiState;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -55,7 +58,7 @@ class JsonApplicationStateRepositoryTest {
         Repository repo = sampleRepository(repoRoot);
         WorkspaceUiState ui = new WorkspaceUiState(
                 Optional.of(repo.id()), 321.0, Set.of(repo.id()));
-        ApplicationState state = new ApplicationState(List.of(repo), ui);
+        ApplicationState state = new ApplicationState(List.of(repo), List.of(), ui);
 
         JsonApplicationStateRepository repository = new JsonApplicationStateRepository(stateFile());
         repository.save(state);
@@ -115,12 +118,102 @@ class JsonApplicationStateRepositoryTest {
     }
 
     @Test
+    void saveThenLoadRoundTripsManagedClaudeSessions() throws IOException {
+        Path repoRoot = Files.createDirectory(tempDir.resolve("repo-root"));
+        Repository repo = sampleRepository(repoRoot);
+        Path workingDirectory = Files.createDirectory(tempDir.resolve("session-working-dir"));
+        Path worktreeRoot = Files.createDirectory(tempDir.resolve("session-worktree"));
+        ManagedClaudeSession session = new ManagedClaudeSession(
+                ManagedSessionId.newId(),
+                repo.id(),
+                "my session",
+                Optional.of("claude-session-id-abc"),
+                Optional.of("claude-session-name"),
+                workingDirectory,
+                Optional.of(worktreeRoot),
+                SessionStatus.EXITED,
+                Instant.parse("2026-01-03T00:00:00Z"),
+                Instant.parse("2026-01-04T00:00:00Z"),
+                Optional.of(1));
+        ApplicationState state = new ApplicationState(List.of(repo), List.of(session), WorkspaceUiState.empty());
+
+        JsonApplicationStateRepository repository = new JsonApplicationStateRepository(stateFile());
+        repository.save(state);
+
+        ApplicationState loaded = repository.load();
+
+        assertEquals(state, loaded);
+    }
+
+    @Test
+    void saveThenLoadRoundTripsSessionWithNoOptionalFieldsSet() throws IOException {
+        Path repoRoot = Files.createDirectory(tempDir.resolve("repo-root"));
+        Repository repo = sampleRepository(repoRoot);
+        Path workingDirectory = Files.createDirectory(tempDir.resolve("session-working-dir"));
+        ManagedClaudeSession session = new ManagedClaudeSession(
+                ManagedSessionId.newId(),
+                repo.id(),
+                "bare session",
+                Optional.empty(),
+                Optional.empty(),
+                workingDirectory,
+                Optional.empty(),
+                SessionStatus.INACTIVE,
+                Instant.parse("2026-01-03T00:00:00Z"),
+                Instant.parse("2026-01-04T00:00:00Z"),
+                Optional.empty());
+        ApplicationState state = new ApplicationState(List.of(repo), List.of(session), WorkspaceUiState.empty());
+
+        JsonApplicationStateRepository repository = new JsonApplicationStateRepository(stateFile());
+        repository.save(state);
+
+        assertEquals(state, repository.load());
+    }
+
+    @Test
+    void loadsOldSchemaVersionOneStateFileWithoutSessionsFieldAsEmptySessionList() throws IOException {
+        Path file = stateFile();
+        Path repoRoot = Files.createDirectory(tempDir.resolve("repo-root"));
+        // Hand-written schemaVersion-1 document (Milestone 4 shape, before
+        // "sessions" existed) -- this must load successfully with an empty
+        // session list rather than crashing or requiring a user-visible
+        // migration step.
+        String oldSchemaJson = """
+                {
+                  "schemaVersion": 1,
+                  "repositories": [
+                    {
+                      "id": "%s",
+                      "root": "%s",
+                      "displayName": "old-repo",
+                      "addedAt": "2026-01-01T00:00:00Z",
+                      "lastOpenedAt": "2026-01-02T00:00:00Z",
+                      "settings": {}
+                    }
+                  ],
+                  "ui": {
+                    "selectedRepositoryId": null,
+                    "sidebarWidth": 260.0,
+                    "expandedRepositoryIds": []
+                  }
+                }
+                """.formatted(RepositoryId.newId(), repoRoot.toString().replace("\\", "\\\\"));
+        Files.writeString(file, oldSchemaJson, StandardCharsets.UTF_8);
+
+        JsonApplicationStateRepository repository = new JsonApplicationStateRepository(file);
+        ApplicationState loaded = repository.load();
+
+        assertEquals(1, loaded.repositories().size());
+        assertTrue(loaded.sessions().isEmpty());
+    }
+
+    @Test
     void saveRetainsBackupOfPreviousStateFile() throws IOException {
         JsonApplicationStateRepository repository = new JsonApplicationStateRepository(stateFile());
         repository.save(ApplicationState.empty());
 
         Path repoRoot = Files.createDirectory(tempDir.resolve("second-root"));
-        ApplicationState secondState = new ApplicationState(List.of(sampleRepository(repoRoot)), WorkspaceUiState.empty());
+        ApplicationState secondState = new ApplicationState(List.of(sampleRepository(repoRoot)), List.of(), WorkspaceUiState.empty());
         repository.save(secondState);
 
         Path backup = stateFile().resolveSibling("state.json.bak");
