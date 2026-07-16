@@ -88,12 +88,21 @@ final class OpenSessionTab {
         tab.setText(displayName);
     }
 
-    /** Attaches the now-running {@link GhosttySurface} and starts forwarding keyboard input to it. */
+    /**
+     * Attaches the now-running {@link GhosttySurface} and starts forwarding
+     * keyboard input to it. Deliberately does NOT draw yet: the native host
+     * view is still hidden at this point (it only becomes visible via a
+     * subsequent {@link #setVisible(boolean)} call from {@code
+     * MainWorkspace.attachOpenedSession}), and drawing into a layer-backed
+     * {@code NSView} before it is ever shown, then only toggling visibility
+     * afterward, is a known way for the first frame to never actually
+     * composite. {@link #setVisible(boolean)} performs the real first
+     * geometry/draw, in the correct order (become visible, then draw).
+     */
     void attachSurface(GhosttySurface surface) {
         this.surface = surface;
         placeholder.getChildren().remove(statusLabel);
         host.setKeyEventListener(this::onKeyEvent);
-        updateGeometry();
     }
 
     GhosttyApp app() {
@@ -119,6 +128,11 @@ final class OpenSessionTab {
         }
     }
 
+    /**
+     * Shows or hides this tab's native view. When becoming visible, unhides
+     * the view <em>before</em> computing geometry/drawing (see {@link
+     * #attachSurface}'s Javadoc for why that order matters), then focuses it.
+     */
     void setVisible(boolean visible) {
         if (disposed) {
             return;
