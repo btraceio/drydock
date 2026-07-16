@@ -152,10 +152,31 @@ keydown/up with the Control or Command modifier active now routes through
 pasted text), and every key event is now logged unconditionally with non-printable
 characters escaped as `\xNN` (previously, a real Ctrl+C landing in the old
 `sendText` branch would have logged with the raw control byte embedded in the log
-line — effectively invisible, indistinguishable from "no event arrived"). This fix
-has **not yet been re-verified with a real physical Ctrl+C keypress** — that
-requires a human running `./gradlew gate0cSpike -Papp.cpm.gate0c.interactive` and
-watching the log.
+line — effectively invisible, indistinguishable from "no event arrived").
+
+**Re-verified with a real physical keypress (2026-07-16), including the isolating
+control test this finding above asked for.** Running `./gradlew gate0cSpike
+-Papp.cpm.gate0c.interactive` and physically pressing Ctrl+C:
+- The event now arrives and is routed correctly: `key event: RAW keyCode=8
+  down=true modifierFlags=0x40101 characters=\x03` -> `key event: special/shortcut
+  keyCode=8 down=true mods=2`.
+- **Control test: `sleep 30` typed into the live shell, then Ctrl+C pressed once —
+  confirmed by the human tester that the shell prompt returned immediately (`sleep`
+  was interrupted), not after the full 30s.** This proves the AppKit -> Java ->
+  `ghostty_surface_key` -> pty delivery path is correct end-to-end for the
+  interactive keyboard, not just the scripted `surface.sendKey` path Gate 0D
+  already verified.
+- **Same physical Ctrl+C, same session, tested directly against the real `claude`
+  CLI running in the foreground: it did not respond** (no visible cancellation).
+  Since the identical delivery mechanism demonstrably works one command earlier in
+  the same session against `sleep 30`, this confirms explanation (a)/(b) above
+  rather than a delivery-pipeline bug: **the problem is specific to how `claude`'s
+  TUI (Node/Ink) handles an incoming Ctrl+C, not to ghostty/AppKit/FFM key
+  delivery.** This is now a `claude`-side (or Ink-runtime-side) finding, out of
+  scope for this project's own native/terminal-embedding code to fix — worth
+  reporting upstream if it continues to reproduce, but not a blocker for this
+  plan's Gate 0E acceptance criteria the way an actual delivery bug would have
+  been.
 
 ## Incompatibility: closing a surface with a live `claude` child process kills the whole JVM (root-caused and fixed)
 
