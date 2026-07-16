@@ -101,6 +101,14 @@ void cpm_terminal_host_set_frame(cpm_terminal_host_t host,
     }
     NSView *view = (__bridge NSView *)host;
     [view setFrame:NSMakeRect(x, y, width, height)];
+    if (!view.hidden && view.superview != nil) {
+        // See cpm_terminal_host_set_visible's identical comment: re-assert
+        // topmost z-order on every geometry update too (called far more
+        // often than set_visible -- every resize/tab-switch/layout pass),
+        // since that is where JavaFX's own re-rendering is most likely to
+        // have buried this overlay view again since the last time it drew.
+        [view.superview addSubview:view];
+    }
 }
 
 void *cpm_terminal_host_content_view(cpm_terminal_host_t host) {
@@ -116,6 +124,17 @@ void cpm_terminal_host_set_visible(cpm_terminal_host_t host, bool visible) {
     }
     NSView *view = (__bridge NSView *)host;
     view.hidden = !visible;
+    if (visible && view.superview != nil) {
+        // JavaFX's own Glass/Prism rendering owns the parent content view
+        // and can re-render its full backing layer on its own animation
+        // pulse (scene changes elsewhere in the window -- e.g. the sidebar,
+        // a TabPane selection, anything animating). Re-adding this
+        // already-attached view to the same superview moves it back to the
+        // end of the subviews array (topmost z-order in AppKit) without
+        // otherwise changing anything, guarding against JavaFX burying this
+        // overlay behind a subsequent repaint of its own view.
+        [view.superview addSubview:view];
+    }
 }
 
 void cpm_terminal_host_set_focused(cpm_terminal_host_t host, bool focused) {
