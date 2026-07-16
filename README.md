@@ -5,14 +5,19 @@ A JavaFX desktop application for managing local Git repositories and the
 (no `tmux`, no external multiplexer). See `docs/implementation-plan.md`
 for the full design and scope.
 
-This repository is currently at **Milestone 3 (jlink runtime image) done,
-Phase 0 feasibility gates 0A-0F all passed**: a single-module Gradle
-project with JDK 26 + JavaFX 26, libghostty embedded in a JavaFX window via
-an AppKit host shim, the real `claude` CLI running in that embedded
-terminal, and a self-contained `jlink` runtime image
+This repository is currently at **Milestone 4 (repository manager) done**,
+on top of Phase 0 (feasibility gates 0A-0F, all passed) and Milestone 3
+(jlink runtime image): a single-module Gradle project with JDK 26 +
+JavaFX 26, libghostty embedded in a JavaFX window via an AppKit host
+shim, the real `claude` CLI running in that embedded terminal, a
+self-contained `jlink` runtime image
 (`./gradlew runtimeImage` -> `build/image/bin/claude-project-manager`) that
 runs without `JAVA_HOME`, without Gradle, and copied outside the source
-tree. Repository management, Git inspection, and `.app`/`.dmg` packaging
+tree, and now the real application entry point (`app.cpm.Main`): a
+repository sidebar (add/remove a Git repository, branch and dirty
+indicators, open in Finder/external editor) backed by a JSON-file
+application state that persists across restarts (plan section 25). Managed
+Claude sessions / terminal tabs (Milestone 5) and `.app`/`.dmg` packaging
 are not implemented yet -- see `docs/implementation-plan.md` section 28
 "Task 8": project-management code does not start until that report
 (`docs/runtime-image.md`) is read.
@@ -166,11 +171,13 @@ build/image/bin/claude-project-manager
 Builds a self-contained runtime image at `build/image/` (JDK 26 + JavaFX 26
 + this application + libghostty + the AppKit host shim for **both** macOS
 architectures) and, by default, launches the Task 5 terminal spike
-(`Gate0cSpike`) through it -- the real application (`app.cpm.Main`) is
-still an empty window at this milestone, so it is not yet a meaningful
-default launch target; see `docs/runtime-image.md` for why, and
-`CPM_MAIN_CLASS=<class>` to launch a different spike through the same
-image. Verified to run with `JAVA_HOME` unset, no Gradle on `PATH`, and
+(`Gate0cSpike`) through it rather than the real application
+(`app.cpm.Main`) -- this default was set back in Milestone 3, before the
+real application (Milestone 4) had a repository sidebar, and has been left
+alone since changing the runtime-image default launch target is out of
+scope for Milestone 4; see `docs/runtime-image.md` for why, and
+`CPM_MAIN_CLASS=app.cpm.Main` to launch the real application through the
+jlink image instead of a spike. Verified to run with `JAVA_HOME` unset, no Gradle on `PATH`, and
 copied to `/tmp` outside this repository entirely (plan section 22.5).
 `./gradlew appImage` / `macApp` / `dmg` are registered (plan section 6.3)
 but intentionally fail with a "not implemented yet" message -- `.app`/
@@ -266,20 +273,28 @@ gradle wrapper --gradle-version 8.11.1
 # Verify local prerequisites
 ./scripts/verify-environment.sh
 
-# Compile, run unit tests, and launch the (currently empty) JavaFX window
+# Compile, run unit tests, and launch the application
 ./gradlew clean test run
 ```
 
-`./gradlew run` opens a single blank JavaFX window titled
-"Claude Project Manager". Close the window (or `Cmd+Q`) to exit; the
-process exits cleanly.
+`./gradlew run` opens the real application window, titled
+"Claude Project Manager": a repository sidebar (empty, with an "Add
+repository..." button, on first run) on the left and a placeholder main
+area on the right (terminal tabs are Milestone 5+ scope, not yet
+implemented). Registered repositories, and the sidebar width, persist
+across restarts in
+`~/Library/Application Support/ClaudeProjectManager/state.json` (plan
+section 17); add/remove a repository is saved immediately, the sidebar
+width only on clean shutdown (see `RepositoryManager`'s Javadoc for why).
+Close the window (or `Cmd+Q`) to exit; the process exits cleanly.
 
-For CI or headless environments, pass `-PheadlessTest` to run with
-software rendering / Monocle instead of a real display:
-
-```bash
-./gradlew run -PheadlessTest
-```
+`-PheadlessTest` sets `java.awt.headless`/`testfx.headless`/`prism.order=sw`/
+`glass.platform=Monocle` system properties, but **does not currently work**:
+this project has no `org.testfx:openjfx-monocle` (or equivalent) dependency
+on the classpath, so JavaFX fails to find a Glass platform implementation
+and the JVM exits non-zero before `Application.start()` runs. Verifying a
+real launch/crash-free startup currently requires an actual on-screen
+window until that dependency is added.
 
 ## Repository layout (current)
 
@@ -289,6 +304,12 @@ software rendering / Monocle instead of a real display:
 │   ├── build.gradle.kts
 │   └── src/
 │       ├── main/java/app/cpm/                 # application code
+│       │   ├── Main.java / CpmApplication.java   # real application entry point (Milestone 4)
+│       │   ├── app/            # RepositoryManager, launchers (Finder/external editor)
+│       │   ├── domain/         # Repository, ApplicationState, WorkspaceUiState, ...
+│       │   ├── state/          # ApplicationStateRepository + JSON codec (plan section 17)
+│       │   ├── git/            # GitStatusService (branch/dirty, repo-root resolution)
+│       │   ├── ui/             # RepositorySidebar, UiErrors
 │       │   └── terminal/
 │       │       ├── ghostty/    # narrow native boundary: libghostty FFM bindings
 │       │       ├── host/       # narrow native boundary: AppKit host shim FFM bindings

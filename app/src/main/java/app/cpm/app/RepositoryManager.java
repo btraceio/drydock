@@ -98,6 +98,20 @@ public final class RepositoryManager {
         stateRepository.save(state);
     }
 
+    /**
+     * Updates only the sidebar width in the persisted workspace UI state
+     * (plan section 10.3) and saves immediately. Called once, from {@code
+     * CpmApplication.stop()}, rather than on every divider-drag tick: the
+     * divider position changes continuously while dragging, and persisting
+     * on every intermediate value would mean far more disk writes for no
+     * benefit -- only the final width when the window closes matters for
+     * "restore previous window layout" (plan section 25 Milestone 4).
+     */
+    public synchronized void updateSidebarWidth(double sidebarWidth) {
+        state = state.withUi(state.ui().withSidebarWidth(sidebarWidth));
+        stateRepository.save(state);
+    }
+
     private static String defaultDisplayName(Path root) {
         Path fileName = root.getFileName();
         return fileName == null ? root.toString() : fileName.toString();

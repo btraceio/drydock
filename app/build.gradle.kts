@@ -384,15 +384,20 @@ tasks.register("runtimeImage") {
  *   ("do not add speculative JVM flags") is followed over the letter of
  *   its example.
  * - The entry point defaults to the Gate 0C terminal spike
- *   (`app.cpm.terminal.Gate0cSpikeLauncher`), not `app.cpm.Main`. At this
- *   point in the plan (Milestone 0 done, Milestones 1-2 in progress) the
- *   real application is still an empty window (see `CpmApplication`'s own
- *   Javadoc) and would prove nothing about native/terminal packaging; the
- *   terminal spike is what plan section 7 "Gate 0F" and section 28 "Task 8"
- *   actually ask this image to launch. `CPM_MAIN_CLASS` lets
- *   `app.cpm.Main` (or any other class) be selected once it is worth
- *   launching by default -- expected to become the default once the real
- *   application embeds a terminal (Milestone 2 onward).
+ *   (`app.cpm.terminal.Gate0cSpikeLauncher`), not `app.cpm.Main`. This
+ *   default was set when Gate 0F / Task 8 was built (Milestone 0 done,
+ *   Milestones 1-2 in progress), and would then have proven nothing about
+ *   native/terminal packaging since the real application was still an
+ *   empty window; the terminal spike is what plan section 7 "Gate 0F" and
+ *   section 28 "Task 8" actually ask this image to launch. `app.cpm.Main`
+ *   is a real application as of Milestone 4 (a repository sidebar with
+ *   persisted state -- see `CpmApplication`'s own Javadoc) but does not yet
+ *   embed a terminal, so this default has deliberately been left alone
+ *   rather than switched as part of Milestone 4 (out of scope -- changing
+ *   the packaging/launch-target default is a Milestone 5+/packaging-phase
+ *   decision). `CPM_MAIN_CLASS=app.cpm.Main` selects it manually in the
+ *   meantime; expected to become the default once the real application
+ *   embeds a terminal (Milestone 5 onward).
  */
 fun runtimeImageLauncherScript(): String {
     val d = "\$"
