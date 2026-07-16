@@ -70,6 +70,7 @@ final class OpenSessionTab {
 
     private GhosttySurface surface;
     private boolean disposed;
+    private boolean surfaceClosing;
 
     OpenSessionTab(ManagedSessionId sessionId, String displayName, Stage stage, GhosttyApp app, CpmTerminalHost host) {
         this.sessionId = sessionId;
@@ -113,9 +114,27 @@ final class OpenSessionTab {
         return host;
     }
 
+    /**
+     * Marks this tab's surface as being torn down. Must be called (by {@code
+     * MainWorkspace.removeTab}) <em>before</em> removing this tab's node
+     * from the {@code TabPane} -- doing so fires JavaFX property-
+     * invalidation listeners (e.g. {@code localToSceneTransformProperty})
+     * synchronously, which would otherwise call back into {@link
+     * #updateGeometry()} against a surface that {@code SessionManager}'s
+     * {@code closeGracefully} has *already* closed by this point (session
+     * close and tab removal are two separate async hops -- see {@code
+     * MainWorkspace.closeSession}). Distinct from {@link #disposed} (which
+     * {@link #disposeNativeResources()} uses for its own idempotency) so
+     * that flag isn't set before this tab's {@code GhosttyApp}/{@code
+     * CpmTerminalHost} are actually closed.
+     */
+    void markSurfaceClosing() {
+        surfaceClosing = true;
+    }
+
     /** Calls {@code ghostty_app_tick} + draw; bound to this tab's own {@code GhosttyApp}'s wakeup callback. */
     void tickAndDraw() {
-        if (disposed) {
+        if (disposed || surfaceClosing) {
             return;
         }
         try {
@@ -123,6 +142,12 @@ final class OpenSessionTab {
             if (surface != null) {
                 surface.draw();
             }
+        } catch (IllegalStateException e) {
+            // Surface was closed (SessionManager.closeSession's
+            // closeGracefully) in the gap between this tick firing and
+            // MainWorkspace calling markSurfaceClosing() -- benign, not a
+            // bug in itself (the guard above closes this window going
+            // forward, this catch handles the unavoidable race remnant).
         } catch (RuntimeException e) {
             LOG.log(Logger.Level.WARNING, "tick/draw failed for session " + sessionId, e);
         }
@@ -134,7 +159,7 @@ final class OpenSessionTab {
      * #attachSurface}'s Javadoc for why that order matters), then focuses it.
      */
     void setVisible(boolean visible) {
-        if (disposed) {
+        if (disposed || surfaceClosing) {
             return;
         }
         host.setVisible(visible);
@@ -145,26 +170,43 @@ final class OpenSessionTab {
     }
 
     void focus() {
-        if (disposed || surface == null) {
+        if (disposed || surfaceClosing || surface == null) {
             return;
         }
-        host.setFocused(true);
-        app.setFocus(true);
-        surface.setFocus(true);
+        try {
+            host.setFocused(true);
+            app.setFocus(true);
+            surface.setFocus(true);
+        } catch (IllegalStateException e) {
+            // See tickAndDraw's identical catch: surface closed out from
+            // under this tab in the gap before markSurfaceClosing() runs.
+        }
     }
 
     private void updateGeometry() {
-        if (disposed || surface == null || placeholder.getScene() == null) {
+        if (disposed || surfaceClosing || surface == null || placeholder.getScene() == null) {
             return;
         }
         Bounds sceneBounds = placeholder.localToScene(placeholder.getBoundsInLocal());
         if (sceneBounds.getWidth() <= 0 || sceneBounds.getHeight() <= 0) {
             return;
         }
-        double scale = stage.getOutputScaleX();
-        host.setFrame(sceneBounds.getMinX(), sceneBounds.getMinY(), sceneBounds.getWidth(), sceneBounds.getHeight());
-        surface.setSize((int) Math.round(sceneBounds.getWidth() * scale), (int) Math.round(sceneBounds.getHeight() * scale));
-        surface.draw();
+        try {
+            double scale = stage.getOutputScaleX();
+            host.setFrame(sceneBounds.getMinX(), sceneBounds.getMinY(), sceneBounds.getWidth(), sceneBounds.getHeight());
+            surface.setSize((int) Math.round(sceneBounds.getWidth() * scale), (int) Math.round(sceneBounds.getHeight() * scale));
+            surface.draw();
+        } catch (IllegalStateException e) {
+            // See tickAndDraw's identical catch: surface closed out from
+            // under this tab in the gap before markSurfaceClosing() runs.
+            // Without this catch, an uncaught IllegalStateException thrown
+            // from here (reachable via placeholder's
+            // localToSceneTransformProperty listener, itself fired
+            // synchronously while MainWorkspace.removeTab() removes this
+            // tab's node from the TabPane) propagates out of JavaFX's
+            // property-invalidation machinery mid-removal, on the JavaFX
+            // Application Thread, with no caller able to catch it.
+        }
     }
 
     /**

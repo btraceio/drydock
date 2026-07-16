@@ -276,6 +276,14 @@ public final class MainWorkspace extends BorderPane {
     }
 
     private void removeTab(OpenSessionTab openTab) {
+        // Must run before removing the tab's node from the TabPane below:
+        // that removal synchronously fires JavaFX property-invalidation
+        // listeners (e.g. the placeholder's localToSceneTransformProperty)
+        // which would otherwise call back into this tab's updateGeometry()
+        // against a surface SessionManager.closeSession's closeGracefully
+        // has (in the closing case) already closed by this point -- see
+        // OpenSessionTab.markSurfaceClosing()'s Javadoc.
+        openTab.markSurfaceClosing();
         tabPane.getTabs().remove(openTab.tab);
         openTabs.remove(openTab.sessionId, openTab);
         openTab.disposeNativeResources();
