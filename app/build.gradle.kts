@@ -33,11 +33,25 @@ application {
         "-Dfile.encoding=UTF-8",
         "-Djava.awt.headless=false",
         // Required now that CpmApplication (Milestone 5's terminal-tabs UI)
-        // loads libghostty/the native host shim via FFM -- see the
-        // gate0cSpike task's comment for why ALL-UNNAMED (not
-        // --add-exports) is correct for this project's current
-        // classpath-mode (non-modular) setup.
-        "--enable-native-access=ALL-UNNAMED"
+        // loads libghostty/the native host shim via FFM.
+        "--enable-native-access=ALL-UNNAMED",
+        // Unlike the gateNSpike tasks below (which force classpath-mode
+        // JavaFX via `classpath = sourceSets.main.get().runtimeClasspath`,
+        // avoiding JPMS enforcement entirely), the `application`/`javafx`
+        // Gradle plugins configure `run` to launch JavaFX on the *module
+        // path* (--module-path + --add-modules), matching the jlink runtime
+        // image's own module-path setup. That means
+        // app.cpm.terminal.host.JavaFxNativeView (in this app's classes,
+        // an unnamed module since the app itself isn't modularized) needs
+        // an explicit --add-exports to reach into javafx.graphics's
+        // internal com.sun.glass.ui package -- exactly the same flag
+        // runtimeImageLauncherScript() already carries for the jlink image.
+        // Without this, `./gradlew run` throws IllegalAccessError the first
+        // time a terminal tab is opened (this was missed when Milestone 5
+        // wired the terminal-tabs UI into the real app, since the `run`
+        // task's module-path-vs-classpath distinction from the spike tasks
+        // was overlooked).
+        "--add-exports=javafx.graphics/com.sun.glass.ui=ALL-UNNAMED"
     )
 }
 
