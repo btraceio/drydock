@@ -31,7 +31,13 @@ application {
     // in version-controlled build configuration").
     applicationDefaultJvmArgs = listOf(
         "-Dfile.encoding=UTF-8",
-        "-Djava.awt.headless=false"
+        "-Djava.awt.headless=false",
+        // Required now that CpmApplication (Milestone 5's terminal-tabs UI)
+        // loads libghostty/the native host shim via FFM -- see the
+        // gate0cSpike task's comment for why ALL-UNNAMED (not
+        // --add-exports) is correct for this project's current
+        // classpath-mode (non-modular) setup.
+        "--enable-native-access=ALL-UNNAMED"
     )
 }
 
@@ -50,6 +56,14 @@ tasks.test {
 }
 
 tasks.named<JavaExec>("run") {
+    // The real application now embeds Ghostty terminal surfaces (Milestone
+    // 5's terminal-tabs UI), so `run` needs both native libraries built
+    // first, same as every gateNSpike task below.
+    dependsOn(rootProject.tasks.named("buildGhosttyNative"))
+    dependsOn(rootProject.tasks.named("buildNativeHost"))
+    javaLauncher.set(javaToolchains.launcherFor(java.toolchain))
+    workingDir = rootProject.projectDir
+
     // Allow running headless/offscreen for CI, e.g.:
     //   ./gradlew run -PheadlessTest
     if (project.hasProperty("headlessTest")) {
@@ -434,3 +448,4 @@ exec "${d}APP_HOME/runtime/bin/java" \
   "${d}MAIN_CLASS" "${d}@"
 """
 }
+

@@ -1,39 +1,44 @@
 package app.cpm;
 
 import app.cpm.app.RepositoryManager;
+import app.cpm.app.SessionManager;
+import app.cpm.claude.ClaudeCapabilityService;
 import app.cpm.git.GitStatusService;
 import app.cpm.state.JsonApplicationStateRepository;
+import app.cpm.ui.MainWorkspace;
 import app.cpm.ui.RepositorySidebar;
 import javafx.application.Application;
+import javafx.application.Platform;
 import javafx.scene.Scene;
-import javafx.scene.control.Label;
+import javafx.scene.control.Alert;
+import javafx.scene.control.ButtonType;
 import javafx.scene.control.SplitPane;
-import javafx.scene.layout.StackPane;
 import javafx.stage.Stage;
+import javafx.stage.WindowEvent;
+
+import java.util.Optional;
 
 /**
- * Milestone 4 main window: a {@link SplitPane} with the repository sidebar
- * (plan section 12) on the left and an empty placeholder main area on the
- * right (plan section 13 -- terminal tabs are Milestone 5+ scope, not
- * scaffolded here per plan rule 27.2).
+ * The main window: a {@link SplitPane} with the repository sidebar (plan
+ * section 12) on the left and the terminal-tabs main workspace (plan
+ * section 13, {@link MainWorkspace}) on the right.
  *
  * <p>On startup, loads persisted {@link app.cpm.domain.ApplicationState}
- * (plan section 17) -- the registered-repositories list (restored by
- * {@link RepositoryManager}'s constructor) and the sidebar width (plan
- * section 10.3 "Workspace state"; only sidebar width and the
- * registered-repositories list are in scope for Milestone 4 -- selected
- * session, open tabs, and the other 10.3 fields are later-milestone state
- * and are deliberately left alone).</p>
+ * (plan section 17) -- the registered-repositories list and sidebar width
+ * (restored by {@link RepositoryManager}) and the managed-session metadata
+ * list (restored by {@link SessionManager}). Per plan section 10.3 and this
+ * milestone step's explicit scope, restoring which tabs were actually open
+ * across a restart is deliberately NOT implemented (see {@code
+ * docs/milestone5-report.md}, "Deferred"): only session <em>metadata</em>
+ * persists/restores, not live terminal surfaces, and this class never
+ * re-launches a {@code claude} process on startup without the user asking
+ * (plan section 21 "no unexpected process launches").</p>
  *
- * <p>Every repository add/remove is already saved immediately by {@link
- * RepositoryManager} (simplest choice: those are rare, explicit user
- * actions, so there is no reason to batch or delay persisting them, and a
- * crash between add/remove and a periodic save would otherwise lose a
- * registration). The sidebar width, in contrast, changes continuously
- * while the user drags the divider, so it is only captured once, on clean
- * shutdown ({@link #stop()}), rather than on every drag tick or on a
- * periodic timer -- a lost sidebar-width tweak from a hard kill is a minor
- * cosmetic issue, unlike a lost repository registration.</p>
+ * <p>Every repository add/remove and every session create/resume/close/
+ * rename is already saved immediately by {@link RepositoryManager} /
+ * {@link SessionManager} respectively. The sidebar width, in contrast,
+ * changes continuously while the user drags the divider, so it is only
+ * captured once, on clean shutdown ({@link #stop()}).</p>
  */
 public final class CpmApplication extends Application {
 
@@ -45,27 +50,74 @@ public final class CpmApplication extends Application {
     private static final double MAX_DIVIDER_POSITION = 0.6;
 
     private GitStatusService gitStatusService;
+    private ClaudeCapabilityService claudeCapabilityService;
     private RepositoryManager repositoryManager;
+    private SessionManager sessionManager;
     private SplitPane splitPane;
+
+    private boolean shutdownConfirmed;
 
     @Override
     public void start(Stage primaryStage) {
+        JsonApplicationStateRepository stateRepository = JsonApplicationStateRepository.atDefaultLocation();
+
         gitStatusService = new GitStatusService();
-        repositoryManager = new RepositoryManager(
-                JsonApplicationStateRepository.atDefaultLocation(), gitStatusService);
+        claudeCapabilityService = new ClaudeCapabilityService();
+        repositoryManager = new RepositoryManager(stateRepository, gitStatusService);
+        sessionManager = new SessionManager(stateRepository, claudeCapabilityService);
 
-        RepositorySidebar sidebar = new RepositorySidebar(repositoryManager, gitStatusService);
+        MainWorkspace mainWorkspace = new MainWorkspace(sessionManager, primaryStage);
+        RepositorySidebar sidebar = new RepositorySidebar(repositoryManager, gitStatusService, sessionManager, mainWorkspace);
+        mainWorkspace.setOnSessionsChanged(sidebar::refreshSessions);
 
-        StackPane mainArea = new StackPane(new Label("Select a repository to get started."));
-
-        splitPane = new SplitPane(sidebar, mainArea);
+        splitPane = new SplitPane(sidebar, mainWorkspace);
         splitPane.setDividerPositions(restoredDividerPosition());
 
         var scene = new Scene(splitPane, DEFAULT_SCENE_WIDTH, DEFAULT_SCENE_HEIGHT);
 
         primaryStage.setTitle(WINDOW_TITLE);
         primaryStage.setScene(scene);
+
+        // Plan section 9 "Application shutdown prompts once for all active
+        // processes": intercept the window close request (covers the
+        // titlebar close button, Cmd+Q, and Cmd+W) rather than relying on
+        // stop() -- stop() runs on the JavaFX Application Thread with no
+        // safe way to block-wait for closeSession's own Platform.runLater
+        // hops to complete (see Gate0eSpike.shutdown()'s identical
+        // stage.setOnCloseRequest pattern, which this mirrors).
+        primaryStage.setOnCloseRequest(this::onCloseRequest);
+
         primaryStage.show();
+    }
+
+    private void onCloseRequest(WindowEvent event) {
+        if (shutdownConfirmed) {
+            return; // already confirmed once; let this second close proceed (e.g. after closeAllSessions completes).
+        }
+
+        // MainWorkspace is the SplitPane's right item.
+        MainWorkspace mainWorkspace = (MainWorkspace) splitPane.getItems().get(1);
+        if (!mainWorkspace.hasOpenSessions()) {
+            return; // nothing running; let the window close immediately.
+        }
+
+        event.consume();
+
+        Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
+        confirm.setTitle("Quit Claude Project Manager");
+        confirm.setHeaderText("One or more Claude sessions are still running");
+        confirm.setContentText("Closing will stop every running session's terminal (each is asked to exit "
+                + "gracefully first). Continue?");
+        Optional<ButtonType> choice = confirm.showAndWait();
+        if (choice.isEmpty() || choice.get() != ButtonType.OK) {
+            return;
+        }
+
+        Stage stage = (Stage) event.getSource();
+        mainWorkspace.closeAllSessions().whenComplete((v, ex) -> Platform.runLater(() -> {
+            shutdownConfirmed = true;
+            stage.close(); // Stage.close() does not re-fire setOnCloseRequest -- see Gate0eSpike's shutdown().
+        }));
     }
 
     /**
@@ -90,6 +142,12 @@ public final class CpmApplication extends Application {
             if (sidebarWidth > 0) {
                 repositoryManager.updateSidebarWidth(sidebarWidth);
             }
+        }
+        if (sessionManager != null) {
+            sessionManager.close();
+        }
+        if (claudeCapabilityService != null) {
+            claudeCapabilityService.close();
         }
         if (gitStatusService != null) {
             gitStatusService.close();

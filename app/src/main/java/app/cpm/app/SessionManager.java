@@ -355,7 +355,7 @@ public final class SessionManager implements AutoCloseable {
     private synchronized void persistNewSession(ManagedClaudeSession session) {
         List<ManagedClaudeSession> updated = new ArrayList<>(state.sessions());
         updated.add(session);
-        state = state.withSessions(updated);
+        state = mergeSessionsOntoLatestDiskState(updated);
         stateRepository.save(state);
     }
 
@@ -369,8 +369,36 @@ public final class SessionManager implements AutoCloseable {
         List<ManagedClaudeSession> updated = state.sessions().stream()
                 .map(existing -> existing.id().equals(updatedSession.id()) ? updatedSession : existing)
                 .toList();
-        state = state.withSessions(updated);
+        state = mergeSessionsOntoLatestDiskState(updated);
         stateRepository.save(state);
+    }
+
+    /**
+     * Re-reads the freshest persisted state from disk and applies only
+     * this class's own {@code sessions} delta on top of it, rather than
+     * writing back {@link #state}'s (possibly stale) cached {@code
+     * repositories}/{@code ui} fields verbatim.
+     *
+     * <p><b>Why this exists (an integration bug found while wiring up the
+     * terminal-tabs UI, not a change to this class's public API):</b> {@link
+     * app.cpm.app.RepositoryManager} and this class each independently load
+     * and cache their own in-memory {@link ApplicationState} snapshot from
+     * the same {@link ApplicationStateRepository} file, and each mutator on
+     * either class previously wrote its entire cached snapshot back
+     * unconditionally on every save (plan section 17 -- both were already
+     * written this way before this class existed). In the terminal-tabs UI
+     * both managers now run in the same process against the same on-disk
+     * file: adding a repository via {@code RepositoryManager} after this
+     * class's own snapshot was loaded, followed by creating a session here,
+     * would otherwise silently revert that just-added repository out of the
+     * persisted file the next time this class saved (its cached {@code
+     * state.repositories()} predates the addition) -- a real, reproducible
+     * data-loss bug hit while driving exactly this milestone's "add
+     * repository, then create a session in it" acceptance flow. See
+     * docs/milestone5-report.md.</p>
+     */
+    private ApplicationState mergeSessionsOntoLatestDiskState(List<ManagedClaudeSession> sessions) {
+        return stateRepository.load().withSessions(sessions);
     }
 
     private synchronized ManagedClaudeSession requireSession(ManagedSessionId sessionId) {

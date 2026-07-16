@@ -81,7 +81,7 @@ public final class RepositoryManager {
 
         List<Repository> updated = new ArrayList<>(state.repositories());
         updated.add(repository);
-        state = state.withRepositories(updated);
+        state = mergeRepositoriesOntoLatestDiskState(updated);
         stateRepository.save(state);
         return repository;
     }
@@ -94,8 +94,22 @@ public final class RepositoryManager {
         if (updated.size() == state.repositories().size()) {
             return;
         }
-        state = state.withRepositories(updated);
+        state = mergeRepositoriesOntoLatestDiskState(updated);
         stateRepository.save(state);
+    }
+
+    /**
+     * Re-reads the freshest persisted state from disk and applies only
+     * this class's own {@code repositories} delta on top of it, instead of
+     * writing back {@link #state}'s cached {@code sessions} field verbatim
+     * (which may be stale relative to {@code app.cpm.app.SessionManager}'s
+     * own concurrent writes to that same file -- see the parallel fix and
+     * full writeup on {@code SessionManager.mergeSessionsOntoLatestDiskState}
+     * and docs/milestone5-report.md; this is the other half of the same
+     * cross-manager overwrite bug).
+     */
+    private ApplicationState mergeRepositoriesOntoLatestDiskState(List<Repository> repositories) {
+        return stateRepository.load().withRepositories(repositories);
     }
 
     /**
@@ -108,7 +122,7 @@ public final class RepositoryManager {
      * "restore previous window layout" (plan section 25 Milestone 4).
      */
     public synchronized void updateSidebarWidth(double sidebarWidth) {
-        state = state.withUi(state.ui().withSidebarWidth(sidebarWidth));
+        state = stateRepository.load().withUi(state.ui().withSidebarWidth(sidebarWidth));
         stateRepository.save(state);
     }
 
