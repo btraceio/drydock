@@ -1,0 +1,391 @@
+package app.cpm.app;
+
+import app.cpm.claude.ClaudeCapabilities;
+import app.cpm.claude.ClaudeCapabilityService;
+import app.cpm.domain.ApplicationState;
+import app.cpm.domain.ManagedClaudeSession;
+import app.cpm.domain.ManagedSessionId;
+import app.cpm.domain.Repository;
+import app.cpm.domain.SessionStatus;
+import app.cpm.state.ApplicationStateRepository;
+import app.cpm.terminal.ghostty.GhosttyApp;
+import app.cpm.terminal.ghostty.GhosttySurface;
+import app.cpm.terminal.host.CpmTerminalHost;
+import javafx.application.Platform;
+
+import java.lang.System.Logger;
+import java.lang.System.Logger.Level;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+/**
+ * Orchestrates creating and resuming {@link ManagedClaudeSession}s (plan
+ * section 11): generates/persists session metadata via {@link
+ * ApplicationStateRepository}, launches the real {@code claude} CLI inside a
+ * {@link GhosttySurface}, enforces duplicate-open protection (plan section
+ * 11.3), and closes sessions using {@link
+ * GhosttySurface#closeGracefully(long, long, Runnable)}.
+ *
+ * <p><b>Threading (plan section 18):</b> {@link #createSession} and {@link
+ * #resumeSession} do their slow work -- {@link ClaudeCapabilityService}
+ * detection and persistence I/O -- on a background executor, and only touch
+ * {@link GhosttySurface}/{@link GhosttyApp}/{@link CpmTerminalHost} via
+ * {@link Platform#runLater}, per {@link CpmTerminalHost}'s own documented
+ * "JavaFX Application Thread only" constraint. Callers get back a {@link
+ * CompletableFuture}; if the caller needs to touch UI with the result, it is
+ * the caller's responsibility to hop back onto the FX thread (this class
+ * does not assume the completion thread is the FX thread for anything
+ * except the {@link GhosttySurface} calls it makes itself).</p>
+ *
+ * <p><b>Deviation from a literal reading of plan section 21</b> ("argument
+ * list, never a shell string"): {@link GhosttySurface#create} (Phase 0's
+ * already-fixed, narrow terminal API -- not modified here) only accepts a
+ * single shell command string, which libghostty always runs via {@code
+ * /bin/sh -c "<command>"}. There is no argument-list overload to call
+ * instead. This class therefore builds the command as a single
+ * single-quoted-argument string ({@link #shellQuote}) rather than an actual
+ * {@code String[]}/{@code List<String>} argument vector; every dynamic value
+ * placed into it (display name, Claude session id/name) is quoted so it
+ * cannot be interpreted as additional shell syntax. Likewise, plan section
+ * 11.1's "add only application-specific environment variables that are
+ * strictly necessary" is not implemented: {@code GhosttySurface.create} has
+ * no environment-map parameter at all, so the spawned {@code claude}
+ * process's environment is simply whatever the embedded shell inherits from
+ * this application's own process (which does satisfy "inherit the
+ * application environment").</p>
+ */
+public final class SessionManager implements AutoCloseable {
+
+    private static final Logger LOG = System.getLogger(SessionManager.class.getName());
+
+    /** Default grace period for {@link #closeSession}, matching Gate 0D's verified Ctrl+D-exit timing headroom. */
+    private static final long DEFAULT_GRACE_PERIOD_MILLIS = 3000;
+    private static final long DEFAULT_POLL_INTERVAL_MILLIS = 100;
+
+    private final ApplicationStateRepository stateRepository;
+    private final ClaudeCapabilityService capabilityService;
+    private final ExecutorService backgroundExecutor;
+    private final boolean ownsExecutor;
+
+    private final ActiveSessionRegistry activeRegistry = new ActiveSessionRegistry();
+    private final Map<ManagedSessionId, GhosttySurface> activeSurfaces = new ConcurrentHashMap<>();
+
+    private ApplicationState state;
+
+    public SessionManager(ApplicationStateRepository stateRepository, ClaudeCapabilityService capabilityService) {
+        this(stateRepository, capabilityService, Executors.newVirtualThreadPerTaskExecutor(), true);
+    }
+
+    /** For callers/tests that want to supply (and own the shutdown of) their own executor. */
+    public SessionManager(ApplicationStateRepository stateRepository, ClaudeCapabilityService capabilityService,
+                           ExecutorService backgroundExecutor) {
+        this(stateRepository, capabilityService, backgroundExecutor, false);
+    }
+
+    private SessionManager(ApplicationStateRepository stateRepository, ClaudeCapabilityService capabilityService,
+                            ExecutorService backgroundExecutor, boolean ownsExecutor) {
+        this.stateRepository = stateRepository;
+        this.capabilityService = capabilityService;
+        this.backgroundExecutor = backgroundExecutor;
+        this.ownsExecutor = ownsExecutor;
+        this.state = stateRepository.load();
+    }
+
+    public synchronized ApplicationState state() {
+        return state;
+    }
+
+    public synchronized List<ManagedClaudeSession> sessions() {
+        return state.sessions();
+    }
+
+    // ---- 11.1 Create a new session ----------------------------------------
+
+    /** Creates a new session with a generated default display name (plan section 11.1). */
+    public CompletableFuture<SessionOpenResult> createSession(Repository repository, GhosttyApp app,
+                                                               CpmTerminalHost host, double scaleFactor) {
+        return createSession(repository, defaultDisplayName(repository), app, host, scaleFactor);
+    }
+
+    /**
+     * Creates a new session with an explicit display name (plan section
+     * 11.1's "allow immediate renaming" -- a caller can generate its own
+     * name, or rename after the fact via {@link #renameSession}, which this
+     * step does not itself provide UI for).
+     */
+    public CompletableFuture<SessionOpenResult> createSession(Repository repository, String displayName,
+                                                               GhosttyApp app, CpmTerminalHost host,
+                                                               double scaleFactor) {
+        ManagedClaudeSession initial = newSessionMetadata(repository, displayName);
+        persistNewSession(initial);
+
+        return capabilityService.detectCapabilities()
+                .thenApplyAsync(caps -> buildCreateCommand(caps, displayName), backgroundExecutor)
+                .thenCompose(command -> createSurfaceOnFxThread(app, host, scaleFactor, command,
+                        initial.workingDirectory().toString()))
+                .handleAsync((surface, ex) -> finalizeCreate(initial, surface, ex), backgroundExecutor);
+    }
+
+    private SessionOpenResult finalizeCreate(ManagedClaudeSession initial, GhosttySurface surface, Throwable ex) {
+        if (ex != null) {
+            Throwable cause = unwrap(ex);
+            LOG.log(Level.WARNING, () -> "Failed to start session " + initial.id() + ": " + cause.getMessage());
+            persistUpdatedSession(initial.withStatus(SessionStatus.FAILED));
+            throw wrap(cause);
+        }
+        ManagedClaudeSession running = initial.withStatus(SessionStatus.RUNNING).withLastOpenedAt(Instant.now());
+        persistUpdatedSession(running);
+        activeSurfaces.put(running.id(), surface);
+        return new SessionOpenResult.Opened(running, surface);
+    }
+
+    // ---- 11.2 Resume a session ---------------------------------------------
+
+    /**
+     * Resumes an existing session (plan section 11.2): {@code claude
+     * --resume '<id>'} if a trusted Claude session id is known, else {@code
+     * claude --resume '<name>'} if an assigned name is known, else plain
+     * {@code claude --resume} (the official picker). Always launches from
+     * the session's stored working directory; never silently substitutes a
+     * different one (see {@link #reassignWorkingDirectory}).
+     */
+    public CompletableFuture<SessionOpenResult> resumeSession(ManagedSessionId sessionId, GhosttyApp app,
+                                                               CpmTerminalHost host, double scaleFactor) {
+        Optional<SessionOpenResult> blocked = checkResumeBlocked(sessionId);
+        if (blocked.isPresent()) {
+            return CompletableFuture.completedFuture(blocked.get());
+        }
+
+        ManagedClaudeSession session = requireSession(sessionId);
+        String command = buildResumeCommand(session);
+
+        return capabilityService.detectCapabilities()
+                .thenApplyAsync(caps -> command, backgroundExecutor)
+                .thenCompose(cmd -> createSurfaceOnFxThread(app, host, scaleFactor, cmd,
+                        session.workingDirectory().toString()))
+                .handleAsync((surface, ex) -> finalizeResume(session, surface, ex), backgroundExecutor);
+    }
+
+    private SessionOpenResult finalizeResume(ManagedClaudeSession session, GhosttySurface surface, Throwable ex) {
+        if (ex != null) {
+            Throwable cause = unwrap(ex);
+            LOG.log(Level.WARNING, () -> "Failed to resume session " + session.id() + ": " + cause.getMessage());
+            persistUpdatedSession(session.withStatus(SessionStatus.FAILED));
+            throw wrap(cause);
+        }
+        ManagedClaudeSession running = session.withStatus(SessionStatus.RUNNING).withLastOpenedAt(Instant.now());
+        persistUpdatedSession(running);
+        activeSurfaces.put(running.id(), surface);
+        session.claudeSessionId().ifPresent(claudeId -> activeRegistry.tryMarkActive(claudeId, running.id()));
+        return new SessionOpenResult.Opened(running, surface);
+    }
+
+    /**
+     * Checks the two "do not launch a surface" preconditions from plan
+     * section 11.2/11.3 without touching any terminal object -- pure
+     * metadata/bookkeeping, so it is directly unit-testable without a real
+     * window (see class Javadoc and the accompanying test).
+     *
+     * @return a present {@link SessionOpenResult.AlreadyOpen} or {@link
+     *         SessionOpenResult.MissingWorkingDirectory} if launching should
+     *         not proceed, or {@link Optional#empty()} if the session is
+     *         clear to launch (working directory exists, and either it has
+     *         no Claude session id yet or that id is not already active
+     *         elsewhere).
+     */
+    synchronized Optional<SessionOpenResult> checkResumeBlocked(ManagedSessionId sessionId) {
+        ManagedClaudeSession session = requireSession(sessionId);
+
+        Optional<String> claudeSessionId = session.claudeSessionId();
+        if (claudeSessionId.isPresent()) {
+            Optional<ManagedSessionId> active = activeRegistry.activeSessionId(claudeSessionId.get());
+            if (active.isPresent() && !active.get().equals(sessionId)) {
+                GhosttySurface activeSurface = activeSurfaces.get(active.get());
+                if (activeSurface != null) {
+                    return Optional.of(new SessionOpenResult.AlreadyOpen(session, active.get(), activeSurface));
+                }
+            }
+        }
+
+        if (Files.notExists(session.workingDirectory())) {
+            ManagedClaudeSession missing = session.withStatus(SessionStatus.MISSING_WORKING_DIRECTORY);
+            persistUpdatedSessionLocked(missing);
+            return Optional.of(new SessionOpenResult.MissingWorkingDirectory(missing));
+        }
+
+        return Optional.empty();
+    }
+
+    /** Explicitly reassigns a session's working directory (plan section 11.2), e.g. after the user picks a replacement. */
+    public synchronized ManagedClaudeSession reassignWorkingDirectory(ManagedSessionId sessionId, Path newWorkingDirectory) {
+        ManagedClaudeSession session = requireSession(sessionId);
+        Path normalized = newWorkingDirectory.toAbsolutePath().normalize();
+        ManagedClaudeSession updated = session.withWorkingDirectory(normalized).withStatus(SessionStatus.INACTIVE);
+        persistUpdatedSessionLocked(updated);
+        return updated;
+    }
+
+    public synchronized ManagedClaudeSession renameSession(ManagedSessionId sessionId, String newDisplayName) {
+        ManagedClaudeSession session = requireSession(sessionId);
+        ManagedClaudeSession updated = session.withDisplayName(newDisplayName);
+        persistUpdatedSessionLocked(updated);
+        return updated;
+    }
+
+    // ---- Close --------------------------------------------------------------
+
+    /** Closes a session's surface (if any is active) using the grace-period defaults. */
+    public CompletableFuture<Void> closeSession(ManagedSessionId sessionId) {
+        return closeSession(sessionId, DEFAULT_GRACE_PERIOD_MILLIS, DEFAULT_POLL_INTERVAL_MILLIS);
+    }
+
+    /**
+     * Closes a session's active surface via {@link
+     * GhosttySurface#closeGracefully(long, long, Runnable)} -- never {@link
+     * GhosttySurface#close()} directly, per the documented live-child-process
+     * crash risk -- and updates the persisted session's status/lastOpenedAt
+     * afterward. A no-op (completes immediately) if the session has no
+     * active surface.
+     *
+     * <p>{@code lastExitCode} is deliberately left unchanged: {@link
+     * GhosttySurface} exposes only {@link GhosttySurface#processExited()}
+     * (a boolean), not an actual exit code, so there is nothing more precise
+     * to persist here.</p>
+     */
+    public CompletableFuture<Void> closeSession(ManagedSessionId sessionId, long gracePeriodMillis, long pollIntervalMillis) {
+        GhosttySurface surface = activeSurfaces.get(sessionId);
+        if (surface == null) {
+            return CompletableFuture.completedFuture(null);
+        }
+        CompletableFuture<Void> future = new CompletableFuture<>();
+        Platform.runLater(() -> surface.closeGracefully(gracePeriodMillis, pollIntervalMillis, () -> {
+            onSurfaceClosed(sessionId, surface);
+            future.complete(null);
+        }));
+        return future;
+    }
+
+    private synchronized void onSurfaceClosed(ManagedSessionId sessionId, GhosttySurface surface) {
+        activeSurfaces.remove(sessionId, surface);
+        findSession(sessionId).ifPresent(session -> {
+            session.claudeSessionId().ifPresent(activeRegistry::release);
+            persistUpdatedSessionLocked(session.withStatus(SessionStatus.EXITED));
+        });
+    }
+
+    @Override
+    public void close() {
+        if (ownsExecutor) {
+            backgroundExecutor.shutdown();
+        }
+    }
+
+    // ---- Command construction (pure; unit-testable without a window) ------
+
+    /** Plan section 11.1: {@code claude -n '<name>'} if supported, else plain {@code claude}. */
+    static String buildCreateCommand(ClaudeCapabilities capabilities, String displayName) {
+        return capabilities.supportsName() ? "claude -n " + shellQuote(displayName) : "claude";
+    }
+
+    /** Plan section 11.2's exact fallback chain: id, then name, then bare {@code --resume}. */
+    static String buildResumeCommand(ManagedClaudeSession session) {
+        if (session.claudeSessionId().isPresent()) {
+            return "claude --resume " + shellQuote(session.claudeSessionId().get());
+        }
+        if (session.claudeSessionName().isPresent()) {
+            return "claude --resume " + shellQuote(session.claudeSessionName().get());
+        }
+        return "claude --resume";
+    }
+
+    /** Wraps {@code value} as a single POSIX shell single-quoted argument, safe against embedded shell metacharacters. */
+    static String shellQuote(String value) {
+        return "'" + value.replace("'", "'\\''") + "'";
+    }
+
+    // ---- Helpers ------------------------------------------------------------
+
+    private CompletableFuture<GhosttySurface> createSurfaceOnFxThread(GhosttyApp app, CpmTerminalHost host,
+                                                                       double scaleFactor, String command,
+                                                                       String workingDirectory) {
+        CompletableFuture<GhosttySurface> future = new CompletableFuture<>();
+        Platform.runLater(() -> {
+            try {
+                future.complete(GhosttySurface.create(app, host, scaleFactor, command, workingDirectory));
+            } catch (Throwable t) {
+                future.completeExceptionally(t);
+            }
+        });
+        return future;
+    }
+
+    private synchronized String defaultDisplayName(Repository repository) {
+        long existing = state.sessions().stream()
+                .filter(session -> session.repositoryId().equals(repository.id()))
+                .count();
+        return "Session " + (existing + 1);
+    }
+
+    private ManagedClaudeSession newSessionMetadata(Repository repository, String displayName) {
+        Instant now = Instant.now();
+        return new ManagedClaudeSession(
+                ManagedSessionId.newId(),
+                repository.id(),
+                displayName,
+                Optional.empty(),
+                Optional.empty(),
+                repository.root(),
+                Optional.empty(),
+                SessionStatus.INACTIVE,
+                now,
+                now,
+                Optional.empty());
+    }
+
+    private synchronized void persistNewSession(ManagedClaudeSession session) {
+        List<ManagedClaudeSession> updated = new ArrayList<>(state.sessions());
+        updated.add(session);
+        state = state.withSessions(updated);
+        stateRepository.save(state);
+    }
+
+    private void persistUpdatedSession(ManagedClaudeSession updatedSession) {
+        synchronized (this) {
+            persistUpdatedSessionLocked(updatedSession);
+        }
+    }
+
+    private void persistUpdatedSessionLocked(ManagedClaudeSession updatedSession) {
+        List<ManagedClaudeSession> updated = state.sessions().stream()
+                .map(existing -> existing.id().equals(updatedSession.id()) ? updatedSession : existing)
+                .toList();
+        state = state.withSessions(updated);
+        stateRepository.save(state);
+    }
+
+    private synchronized ManagedClaudeSession requireSession(ManagedSessionId sessionId) {
+        return findSession(sessionId).orElseThrow(() -> new UnknownSessionException(sessionId));
+    }
+
+    private synchronized Optional<ManagedClaudeSession> findSession(ManagedSessionId sessionId) {
+        return state.sessions().stream().filter(session -> session.id().equals(sessionId)).findFirst();
+    }
+
+    private static Throwable unwrap(Throwable t) {
+        return (t instanceof CompletionException && t.getCause() != null) ? t.getCause() : t;
+    }
+
+    private static CompletionException wrap(Throwable cause) {
+        return (cause instanceof CompletionException completionException) ? completionException : new CompletionException(cause);
+    }
+}
