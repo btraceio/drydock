@@ -176,19 +176,17 @@ subprocesses/temp Git repos/real files, not mocks, per plan section 22.2.
    new test dependency, out of scope for a verification pass); still an
    accurate, documented known issue rather than something silently assumed to
    work.
-3. **`./gradlew test` cannot run under the committed `gradle.properties`
+3. **`./gradlew test` could not run under the committed `gradle.properties`
    (`org.gradle.java.home` pinned to JDK 24) on this machine** — Gradle
-   8.11.1's `Test` task fails to configure under a JDK 24 daemon
+   8.11.1's `Test` task failed to configure under a JDK 24 daemon
    (`TypeNotPresentException` in `DefaultReportContainer` class generation).
-   This was discovered in Step 1, confirmed there to reproduce identically on
-   the pre-existing codebase with zero Milestone 4 files present (via
-   `git stash`), and is **not** something Milestone 4 introduced or fixes. I
-   used `-Dorg.gradle.java.home=<jdk-17>` as a one-off, non-persisted override
-   to actually run `test` in this and every prior step, as documented. This
-   needs to be resolved (fixed daemon JDK for `test` specifically, or a Gradle
-   upgrade) before relying on plain `./gradlew test` in CI or future milestones.
-   `compileJava`, `run`, and `gate0dSpike` are all unaffected and run fine under
-   the committed default settings.
+   Discovered in Step 1, confirmed to reproduce identically on the
+   pre-existing codebase with zero Milestone 4 files present (via
+   `git stash`) — a Gradle/JDK-24 incompatibility, not something Milestone 4
+   introduced. **Fixed after this report was first written**: `gradle.properties`
+   now pins Gradle's own daemon to JDK 17 instead (commit `6a2f5f6`), which
+   does not hit this issue; `compileJava`, `test`, `run`, and `gate0dSpike` all
+   now work under the plain committed defaults with no `-D` override needed.
 
 ## Explicitly deferred to Milestone 5 or later
 
