@@ -13,6 +13,19 @@
 @interface CpmTerminalHostKeyForwardingView : NSView
 @property(nonatomic, assign) cpm_terminal_host_key_event_cb keyCallback;
 @property(nonatomic, assign) void *keyCallbackUserdata;
+/// Local NSEvent monitor installed while this view exists (see
+/// cpm_terminal_host_create). JavaFX's Glass layer intercepts some key
+/// events (notably arrow keys, which it treats as focus-traversal) in its
+/// NSWindow/NSApplication event handling BEFORE they would reach this
+/// view's keyDown: via the normal first-responder dispatch -- verified
+/// empirically: with this view as firstResponder, letter keys arrive at
+/// keyDown: but arrow keys never do. A local monitor runs before that
+/// dispatch, so it sees every key event regardless of what Glass does
+/// afterward; when this view is the intended target we forward the event
+/// to libghostty ourselves and swallow it (returning nil also stops
+/// JavaFX from scrolling/moving its own focus in response to terminal
+/// keystrokes).
+@property(nonatomic, strong) id keyMonitor;
 @end
 
 @implementation CpmTerminalHostKeyForwardingView
@@ -84,6 +97,30 @@ cpm_terminal_host_t cpm_terminal_host_create(void *parent_nsview) {
         [[CpmTerminalHostKeyForwardingView alloc] initWithFrame:NSZeroRect];
     view.hidden = YES;
     [parent addSubview:view];
+
+    // See the keyMonitor property's comment for why the normal
+    // first-responder keyDown: path is not sufficient here. Command-modified
+    // events are deliberately left alone: they must keep flowing to the
+    // menu bar / key-equivalent machinery (Cmd+Q, Cmd+W, ...) even while
+    // the terminal is focused.
+    __weak CpmTerminalHostKeyForwardingView *weakView = view;
+    view.keyMonitor = [NSEvent
+        addLocalMonitorForEventsMatchingMask:(NSEventMaskKeyDown | NSEventMaskKeyUp)
+                                     handler:^NSEvent *(NSEvent *event) {
+        CpmTerminalHostKeyForwardingView *strongView = weakView;
+        if (strongView == nil || strongView.window == nil) {
+            return event;
+        }
+        if (event.window != strongView.window ||
+            strongView.window.firstResponder != strongView) {
+            return event;
+        }
+        if ((event.modifierFlags & NSEventModifierFlagCommand) != 0) {
+            return event;
+        }
+        [strongView forwardKeyEvent:event down:(event.type == NSEventTypeKeyDown)];
+        return nil;
+    }];
 
     // Retain the view for the lifetime of the opaque handle; released in
     // cpm_terminal_host_destroy. CFBridgingRetain gives us a +1 retain that
@@ -161,7 +198,11 @@ void cpm_terminal_host_destroy(cpm_terminal_host_t host) {
     if (host == NULL) {
         return;
     }
-    NSView *view = (__bridge NSView *)host;
+    CpmTerminalHostKeyForwardingView *view = (__bridge CpmTerminalHostKeyForwardingView *)host;
+    if (view.keyMonitor != nil) {
+        [NSEvent removeMonitor:view.keyMonitor];
+        view.keyMonitor = nil;
+    }
     [view removeFromSuperview];
     // Balances the CFBridgingRetain in cpm_terminal_host_create.
     CFBridgingRelease(host);
