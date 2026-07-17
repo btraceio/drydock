@@ -51,7 +51,6 @@ public final class AppShell {
         shell.setCenter(splitPane);
 
         StackPane root = new StackPane(shell, modalLayer);
-        modalLayer.bindTo(root);
 
         scene = new Scene(root, sceneWidth, sceneHeight);
         themeManager = new ThemeManager(scene, initialTheme, theme -> {

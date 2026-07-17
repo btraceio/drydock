@@ -23,8 +23,12 @@ public final class ModalLayer extends StackPane {
 
     ModalLayer() {
         getStyleClass().add("modal-backdrop");
+        // Stays managed: the parent StackPane sizes it to fill the scene
+        // (an unmanaged overlay is NOT laid out by its parent -- it sat at
+        // 0x0, so the "centered" modal hung off the window's top-left with
+        // only its lower-right corner visible). visible=false while closed
+        // already removes it from painting and mouse picking.
         setVisible(false);
-        setManaged(false);
         setAlignment(Pos.CENTER);
 
         addEventHandler(MouseEvent.MOUSE_CLICKED, event -> {
@@ -67,12 +71,4 @@ public final class ModalLayer extends StackPane {
         callback.run();
     }
 
-    /** Keeps the overlay sized to the scene despite {@code managed=false}. */
-    void bindTo(Region parent) {
-        prefWidthProperty().bind(parent.widthProperty());
-        prefHeightProperty().bind(parent.heightProperty());
-        minWidthProperty().bind(parent.widthProperty());
-        minHeightProperty().bind(parent.heightProperty());
-        resize(parent.getWidth(), parent.getHeight());
-    }
 }

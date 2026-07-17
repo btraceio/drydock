@@ -58,22 +58,29 @@ final class JavaFxNativeView {
     }
 
     /**
-     * Returns the {@code NSView*} of the most-recently-created still-open
-     * Glass window, wrapped as a zero-length {@link MemorySegment} (callers
-     * must not read/write through it directly -- it is an opaque native
-     * pointer, handed straight to {@link CpmTerminalHost#create}).
+     * Returns the {@code NSView*} of the application's main Glass window,
+     * wrapped as a zero-length {@link MemorySegment} (callers must not
+     * read/write through it directly -- it is an opaque native pointer,
+     * handed straight to {@link CpmTerminalHost#create}).
      *
      * <p>This must be called after the corresponding {@code javafx.stage.Stage}
      * has been shown ({@code Stage#show()}); before that, Glass has not yet
      * created a native window and {@link Window#getWindows()} is empty.</p>
      *
-     * <p>Picking "the most recently created window" is a simplification
-     * valid only for this single-window spike; a real multi-window
-     * application would need to correlate a specific {@code Stage} to its
-     * Glass {@code Window} (e.g. via {@code com.sun.javafx.stage.WindowHelper},
-     * which is qualified-exported even more narrowly than {@code
-     * com.sun.glass.ui} and was deliberately avoided here for that reason
-     * -- see docs/native-integration.md).</p>
+     * <p><b>Window selection:</b> the first OWNERLESS window in {@link
+     * Window#getWindows()} (creation order). It must NOT be the most
+     * recently created window: JavaFX creates a real Glass window for every
+     * tooltip, context menu, and MenuButton popup, each OWNED by the window
+     * that spawned it. Attaching the terminal to whichever popup happened
+     * to be created last rendered it into a window that immediately
+     * disappears -- the real-world "new session opens a tab but no
+     * terminal" bug (popups are unavoidable in any mouse-driven flow, e.g.
+     * the Add-repository menu or a hover tooltip). The main stage is the
+     * only long-lived ownerless window in this single-main-window
+     * application; a future multi-window application would need to
+     * correlate a specific {@code Stage} to its Glass {@code Window}
+     * (e.g. via {@code com.sun.javafx.stage.WindowHelper}, deliberately
+     * avoided here -- see docs/native-integration.md).</p>
      */
     static MemorySegment currentWindowNsView() {
         List<Window> windows = Window.getWindows();
@@ -82,11 +89,14 @@ final class JavaFxNativeView {
                 "com.sun.glass.ui.Window.getWindows() returned no windows. "
                     + "Call this only after the Stage has been shown.");
         }
-        Window window = windows.get(windows.size() - 1);
+        Window window = windows.stream()
+                .filter(w -> w.getOwner() == null)
+                .findFirst()
+                .orElse(windows.get(0));
         View view = window.getView();
         if (view == null) {
             throw new IllegalStateException(
-                "The most recent Glass Window has no View yet (Stage not fully realized).");
+                "The main Glass Window has no View yet (Stage not fully realized).");
         }
         long nativeViewPointer = view.getNativeView();
         if (nativeViewPointer == 0L) {

@@ -115,6 +115,17 @@ public final class CpmApplication extends Application {
         // separated seconds), so automated verification can screenshot the
         // dark->light->dark round trip without injecting any input. Inert
         // unless -Dapp.cpm.diag.toggleThemeSeconds is set.
+        // Diagnostic hook: opens the Clone-from-GitHub modal shortly after
+        // startup so automated verification can screenshot its placement.
+        // Inert unless -Dapp.cpm.diag.openGithubModal=true.
+        if (Boolean.getBoolean("app.cpm.diag.openGithubModal")) {
+            Platform.runLater(() -> {
+                appShell.modalLayer().show(new app.cpm.ui.GitHubCloneModal(
+                        gitHubService, repositoryManager, appShell.modalLayer()::close));
+                System.out.println("[diag] github modal opened");
+            });
+        }
+
         String toggleThemeSeconds = System.getProperty("app.cpm.diag.toggleThemeSeconds");
         if (toggleThemeSeconds != null) {
             Thread toggler = new Thread(() -> {
@@ -259,8 +270,23 @@ public final class CpmApplication extends Application {
                                 return;
                             }
                             System.out.println("[diag] repo added: " + repo);
+                            // -Dapp.cpm.diag.popupBeforeSession=true: show a
+                            // real Glass popup window (tooltip) and open the
+                            // session WHILE it is showing -- reproduces the
+                            // mouse-driven flows (menu, hover tooltip) where
+                            // the terminal host used to attach to the popup's
+                            // window instead of the main one.
+                            javafx.scene.control.Tooltip diagPopup = null;
+                            if (Boolean.getBoolean("app.cpm.diag.popupBeforeSession")) {
+                                diagPopup = new javafx.scene.control.Tooltip("diag popup");
+                                diagPopup.show(primaryStage, primaryStage.getX() + 40, primaryStage.getY() + 80);
+                                System.out.println("[diag] popup shown before session");
+                            }
                             mainWorkspace.openNewSession(repo);
                             System.out.println("[diag] openNewSession called for " + repo.displayName());
+                            if (diagPopup != null) {
+                                diagPopup.hide();
+                            }
                         })));
                     try {
                         Thread.sleep(8_000);
