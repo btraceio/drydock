@@ -75,7 +75,25 @@
     [self forwardKeyEvent:event down:NO];
 }
 
+// Route ALL mouse-derived events (scrollWheel included) to this view even
+// when the renderer (libghostty) has installed its own subview/layer tree
+// inside it: AppKit dispatches scroll/click events to the deepest view
+// under the cursor, which would be ghostty's internal view -- a view that
+// silently ignores them -- and NOT this one. Key events never noticed
+// (they follow the first responder, which IS this view); scrollWheel did.
+// Returning self for any point inside collapses the whole subtree into a
+// single mouse target; no child view needs AppKit mouse events (all
+// terminal input goes through the ghostty C API).
+- (NSView *)hitTest:(NSPoint)point {
+    NSView *result = [super hitTest:point];
+    return result != nil ? self : nil;
+}
+
 - (void)scrollWheel:(NSEvent *)event {
+    if (getenv("CPM_DIAG_SCROLL_LOG") != NULL) {
+        NSLog(@"cpm scrollWheel: dy=%f precise=%d cb=%p", event.scrollingDeltaY,
+              (int)event.hasPreciseScrollingDeltas, (void *)self.scrollCallback);
+    }
     if (self.scrollCallback == NULL) {
         return;
     }

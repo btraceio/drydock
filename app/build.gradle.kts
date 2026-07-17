@@ -404,12 +404,67 @@ tasks.register("runtimeImage") {
             }
         }
 
+        // 3b. Bundle the dock icon (assets/app-icon.icns, generated clay
+        // rounded-square + prompt glyph) so the launcher's -Xdock:icon can
+        // reference it. The real fix for dock identity is a jpackage .app
+        // bundle (future); -Xdock:* covers the bare-JVM launch until then.
+        val iconSource = rootProject.file("assets/app-icon.icns")
+        if (iconSource.isFile) {
+            iconSource.copyTo(File(libDir, "app-icon.icns"), overwrite = true)
+        }
+
         // 4. Generate the launcher (plan section 23.2).
         val binDir = File(imageRoot, "bin")
         binDir.mkdirs()
         val launcher = File(binDir, "claude-project-manager")
         launcher.writeText(runtimeImageLauncherScript())
         launcher.setExecutable(true, false)
+
+        // 5. Wrap the launcher in a minimal .app bundle so macOS shows the
+        // real name + icon in the Dock/app switcher. A bare `java` process
+        // is registered with LaunchServices as "java" with the generic
+        // icon, and JavaFX never applies -Xdock:* (that path is AWT-only),
+        // so Info.plist metadata is the only public mechanism. Launch the
+        // bundle (Finder or `open`) for correct Dock identity; the plain
+        // bin/ launcher stays for the diag harness, which needs inherited
+        // environment variables that `open` would drop.
+        val appBundle = File(imageRoot, "Claude Project Manager.app")
+        val contentsDir = File(appBundle, "Contents")
+        val macosDir = File(contentsDir, "MacOS").apply { mkdirs() }
+        val resourcesDir = File(contentsDir, "Resources").apply { mkdirs() }
+        if (iconSource.isFile) {
+            iconSource.copyTo(File(resourcesDir, "app-icon.icns"), overwrite = true)
+        }
+        File(contentsDir, "Info.plist").writeText(
+            """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+            <plist version="1.0">
+            <dict>
+                <key>CFBundleName</key><string>Claude Project Manager</string>
+                <key>CFBundleDisplayName</key><string>Claude Project Manager</string>
+                <key>CFBundleIdentifier</key><string>app.cpm.claude-project-manager</string>
+                <key>CFBundleExecutable</key><string>claude-project-manager</string>
+                <key>CFBundleIconFile</key><string>app-icon</string>
+                <key>CFBundlePackageType</key><string>APPL</string>
+                <key>CFBundleShortVersionString</key><string>0.1</string>
+                <key>NSHighResolutionCapable</key><true/>
+            </dict>
+            </plist>
+            """.trimIndent() + "\n"
+        )
+        val bundleLauncher = File(macosDir, "claude-project-manager")
+        bundleLauncher.writeText(
+            """
+            #!/bin/bash
+            # Thin trampoline: the bundle lives inside the runtime image, so
+            # the real launcher is three levels up. exec keeps the pid (and
+            # therefore the Dock entry) on the java process's ancestry.
+            DIR="$(dirname "${'$'}{BASH_SOURCE[0]}")"
+            exec "${'$'}DIR/../../../bin/claude-project-manager" "${'$'}@"
+            """.trimIndent() + "\n"
+        )
+        bundleLauncher.setExecutable(true, false)
     }
 }
 
@@ -469,6 +524,8 @@ exec "${d}APP_HOME/runtime/bin/java" \
   --add-exports javafx.graphics/com.sun.glass.ui=ALL-UNNAMED \
   -Dfile.encoding=UTF-8 \
   -Djava.awt.headless=false \
+  -Xdock:name="Claude Project Manager" \
+  -Xdock:icon="${d}APP_HOME/lib/app-icon.icns" \
   -Dapp.cpm.ghostty.nativeDir="${d}APP_HOME/lib" \
   -Dapp.cpm.terminalhost.nativeDir="${d}APP_HOME/lib" \
   ${d}{CPM_EXTRA_JVM_ARGS:-} \
