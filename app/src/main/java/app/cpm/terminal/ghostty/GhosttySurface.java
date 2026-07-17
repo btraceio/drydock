@@ -138,6 +138,20 @@ public final class GhosttySurface implements AutoCloseable {
         }
     }
 
+    /**
+     * Applies {@code app}'s current config to this live surface via
+     * {@code ghostty_surface_update_config} (used for theme switches --
+     * call after {@link GhosttyApp#updateConfig}).
+     */
+    public void applyConfig(GhosttyApp app) {
+        checkOpen();
+        try {
+            binding.surfaceUpdateConfig.invoke(surface, app.configHandle());
+        } catch (Throwable t) {
+            throw new GhosttyBinding.GhosttyNativeCallException("ghostty_surface_update_config", t);
+        }
+    }
+
     public void refresh() {
         checkOpen();
         try {

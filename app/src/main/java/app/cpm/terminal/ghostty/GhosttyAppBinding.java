@@ -167,11 +167,24 @@ final class GhosttyAppBinding {
     final MethodHandle surfaceReadText;
     final MethodHandle surfaceFreeText;
 
+    final MethodHandle appUpdateConfig;
+    final MethodHandle surfaceUpdateConfig;
+
     GhosttyAppBinding(SymbolLookup lookup) {
         // ghostty_app_t ghostty_app_new(const ghostty_runtime_config_s*, ghostty_config_t);
         this.appNew = linker.downcallHandle(
             find(lookup, "ghostty_app_new"),
             FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
+        );
+        // void ghostty_app_update_config(ghostty_app_t, ghostty_config_t);
+        this.appUpdateConfig = linker.downcallHandle(
+            find(lookup, "ghostty_app_update_config"),
+            FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
+        );
+        // void ghostty_surface_update_config(ghostty_surface_t, ghostty_config_t);
+        this.surfaceUpdateConfig = linker.downcallHandle(
+            find(lookup, "ghostty_surface_update_config"),
+            FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
         );
         // void ghostty_app_free(ghostty_app_t);
         this.appFree = linker.downcallHandle(

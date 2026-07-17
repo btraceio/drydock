@@ -290,16 +290,18 @@
     -fx-border-width: 0 0 1 0;
 }
 .session-tabs > .tab-header-area > .headers-region {
-    -fx-padding: 8 0 0 8; /* 50px strip, 42px tabs bottom-aligned */
+    -fx-padding: 6 0 0 8; /* 50px strip, 44px tabs bottom-aligned */
 }
 .session-tabs > .tab-header-area > .headers-region > .tab {
-    -fx-min-height: 42px; -fx-max-height: 42px;
+    /* 44px + real vertical padding: the two-line label needs breathing
+     * room, otherwise the title sits squeezed against the tab edges. */
+    -fx-min-height: 44px; -fx-max-height: 44px;
     -fx-background-color: -cpm-tabbar;
     -fx-background-radius: 8 8 0 0;
     -fx-border-color: transparent;
     -fx-border-width: 1 1 0 1;
     -fx-border-radius: 8 8 0 0;
-    -fx-padding: 0 10 0 12;
+    -fx-padding: 5 10 5 12;
 }
 .session-tabs > .tab-header-area > .headers-region > .tab:hover {
     -fx-background-color: -cpm-hover;
@@ -441,9 +443,11 @@
     -fx-text-fill: -cpm-error;
 }
 
-/* The ghostty host region behind/around the native terminal view. */
+/* The ghostty host region behind/around the native terminal view. Matches
+ * -cpm-main (and the background in terminal-{dark,light}.conf) so the
+ * terminal blends into the pane instead of standing out as a darker box. */
 .terminal-region {
-    -fx-background-color: -cpm-terminal-bg;
+    -fx-background-color: -cpm-main;
 }
 
 /* ---- Resume picker (README section 6) ----------------------------------- */

@@ -88,6 +88,9 @@ public final class MainWorkspace extends BorderPane {
 
     private Runnable onSessionsChanged = () -> { };
 
+    /** Current UI theme, for terminal config selection; wired by CpmApplication once the shell exists. */
+    private java.util.function.Supplier<app.cpm.domain.UiTheme> themeProvider = () -> app.cpm.domain.UiTheme.DARK;
+
     public MainWorkspace(SessionManager sessionManager, RepositoryManager repositoryManager,
                           GitStatusService gitStatusService, Stage stage) {
         this.sessionManager = sessionManager;
@@ -173,6 +176,19 @@ public final class MainWorkspace extends BorderPane {
         picker.setManaged(showPicker);
         if (showPicker) {
             Platform.runLater(picker::focusSearch);
+        }
+    }
+
+    /** Wires where new terminals read the current theme from (design: terminal follows the app theme). */
+    public void setThemeProvider(java.util.function.Supplier<app.cpm.domain.UiTheme> provider) {
+        this.themeProvider = provider == null ? () -> app.cpm.domain.UiTheme.DARK : provider;
+    }
+
+    /** Re-themes every open terminal to {@code theme} (called on the FX thread by the theme toggle). */
+    public void applyTerminalTheme(app.cpm.domain.UiTheme theme) {
+        java.nio.file.Path configFile = TerminalThemes.configFileFor(theme);
+        for (OpenSessionTab open : openTabs.values()) {
+            open.applyTerminalTheme(configFile);
         }
     }
 
@@ -450,7 +466,7 @@ public final class MainWorkspace extends BorderPane {
             if (holder[0] != null) {
                 holder[0].tickAndDraw();
             }
-        }));
+        }), Optional.of(TerminalThemes.configFileFor(themeProvider.get())));
         CpmTerminalHost host;
         try {
             host = CpmTerminalHost.createForCurrentWindow();

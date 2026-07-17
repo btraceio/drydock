@@ -84,8 +84,15 @@ public final class CpmApplication extends Application {
         appShell = new AppShell(primaryStage, WINDOW_TITLE, sidebar, mainWorkspace,
                 repositoryManager.state().ui().sidebarWidth(),
                 repositoryManager.state().ui().theme(),
-                theme -> repositoryManager.updateTheme(theme),
+                theme -> {
+                    repositoryManager.updateTheme(theme);
+                    // Terminals follow the app theme: re-theme every live
+                    // ghostty surface in place (no session restart needed).
+                    mainWorkspace.applyTerminalTheme(theme);
+                },
                 DEFAULT_SCENE_WIDTH, DEFAULT_SCENE_HEIGHT);
+
+        mainWorkspace.setThemeProvider(() -> appShell.themeManager().theme());
 
         gitHubService = new app.cpm.github.GitHubService();
         sidebar.setOnCloneFromGitHub(() -> appShell.modalLayer().show(
@@ -103,6 +110,32 @@ public final class CpmApplication extends Application {
         // hops to complete (see Gate0eSpike.shutdown()'s identical
         // stage.setOnCloseRequest pattern, which this mirrors).
         primaryStage.setOnCloseRequest(this::onCloseRequest);
+
+        // Diagnostic hook: self-toggle the theme at the given delays (comma-
+        // separated seconds), so automated verification can screenshot the
+        // dark->light->dark round trip without injecting any input. Inert
+        // unless -Dapp.cpm.diag.toggleThemeSeconds is set.
+        String toggleThemeSeconds = System.getProperty("app.cpm.diag.toggleThemeSeconds");
+        if (toggleThemeSeconds != null) {
+            Thread toggler = new Thread(() -> {
+                long previous = 0;
+                for (String part : toggleThemeSeconds.split(",")) {
+                    long at = Long.parseLong(part.strip());
+                    try {
+                        Thread.sleep((at - previous) * 1000);
+                    } catch (InterruptedException e) {
+                        return;
+                    }
+                    previous = at;
+                    Platform.runLater(() -> {
+                        appShell.toggleTheme();
+                        System.out.println("[diag] theme toggled -> " + appShell.themeManager().theme());
+                    });
+                }
+            });
+            toggler.setDaemon(true);
+            toggler.start();
+        }
 
         primaryStage.show();
 

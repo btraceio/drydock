@@ -70,6 +70,8 @@ final class GhosttyBinding {
     private final MethodHandle ghosttyInfo;
     private final MethodHandle ghosttyConfigNew;
     private final MethodHandle ghosttyConfigFree;
+    private final MethodHandle ghosttyConfigLoadFile;
+    private final MethodHandle ghosttyConfigFinalize;
 
     GhosttyBinding(java.lang.foreign.SymbolLookup lookup) {
         Linker linker = Linker.nativeLinker();
@@ -103,6 +105,18 @@ final class GhosttyBinding {
         // void ghostty_config_free(ghostty_config_t);
         this.ghosttyConfigFree = linker.downcallHandle(
             find(lookup, "ghostty_config_free"),
+            FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)
+        );
+
+        // void ghostty_config_load_file(ghostty_config_t, const char*);
+        this.ghosttyConfigLoadFile = linker.downcallHandle(
+            find(lookup, "ghostty_config_load_file"),
+            FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
+        );
+
+        // void ghostty_config_finalize(ghostty_config_t);
+        this.ghosttyConfigFinalize = linker.downcallHandle(
+            find(lookup, "ghostty_config_finalize"),
             FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)
         );
     }
@@ -162,6 +176,27 @@ final class GhosttyBinding {
             return (MemorySegment) ghosttyConfigNew.invoke();
         } catch (Throwable t) {
             throw new GhosttyNativeCallException("ghostty_config_new", t);
+        }
+    }
+
+    /**
+     * Calls {@code ghostty_config_load_file(config, path)}. The path string
+     * is copied into a transient confined arena for the duration of the call.
+     */
+    void configLoadFile(MemorySegment config, String path) {
+        try (java.lang.foreign.Arena arena = java.lang.foreign.Arena.ofConfined()) {
+            ghosttyConfigLoadFile.invoke(config, arena.allocateFrom(path));
+        } catch (Throwable t) {
+            throw new GhosttyNativeCallException("ghostty_config_load_file", t);
+        }
+    }
+
+    /** Calls {@code ghostty_config_finalize(config)} (must run after all loads, before use). */
+    void configFinalize(MemorySegment config) {
+        try {
+            ghosttyConfigFinalize.invoke(config);
+        } catch (Throwable t) {
+            throw new GhosttyNativeCallException("ghostty_config_finalize", t);
         }
     }
 

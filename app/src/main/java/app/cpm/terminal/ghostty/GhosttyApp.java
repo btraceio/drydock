@@ -78,9 +78,21 @@ public final class GhosttyApp implements AutoCloseable {
      *                 whenever libghostty wants {@link #tick()} called again.
      */
     public static GhosttyApp create(java.lang.foreign.SymbolLookup lookup, Runnable onWakeup) {
+        return create(lookup, onWakeup, java.util.Optional.empty());
+    }
+
+    /**
+     * Variant that loads a ghostty config file (theme colors, padding --
+     * see {@code app.cpm.ui.TerminalThemes}) into the app's config before
+     * {@code ghostty_app_new}. Only the given file is loaded; the user's
+     * own {@code ~/.config/ghostty} is deliberately never read, so managed
+     * terminals always match the app theme deterministically.
+     */
+    public static GhosttyApp create(java.lang.foreign.SymbolLookup lookup, Runnable onWakeup,
+                                     java.util.Optional<java.nio.file.Path> configFile) {
         GhosttyAppBinding binding = new GhosttyAppBinding(lookup);
         GhosttyBinding coreBinding = new GhosttyBinding(lookup);
-        MemorySegment config = coreBinding.configNew();
+        MemorySegment config = loadedConfig(coreBinding, configFile);
         Arena arena = Arena.ofShared();
 
         MemorySegment wakeupStub = boundUpcall(binding, arena,
@@ -130,9 +142,51 @@ public final class GhosttyApp implements AutoCloseable {
         return new GhosttyApp(binding, coreBinding, arena, config, app);
     }
 
+    private static MemorySegment loadedConfig(GhosttyBinding coreBinding,
+                                               java.util.Optional<java.nio.file.Path> configFile) {
+        MemorySegment config = coreBinding.configNew();
+        try {
+            configFile.ifPresent(path -> coreBinding.configLoadFile(config, path.toString()));
+            coreBinding.configFinalize(config);
+        } catch (RuntimeException e) {
+            coreBinding.configFree(config);
+            throw e;
+        }
+        return config;
+    }
+
+    /**
+     * Replaces this app's config with one loaded from {@code configFile}
+     * (theme switch) via {@code ghostty_app_update_config}. The previous
+     * config handle is freed only after libghostty has taken what it needs
+     * from the new one (it derives internal copies; the caller-owned handle
+     * must stay valid while it is the app's current config -- mirrors
+     * Ghostty's own macOS app, which keeps the latest config alive and
+     * frees the replaced one). Existing surfaces still need {@link
+     * GhosttySurface#applyConfig(GhosttyApp)} to pick the change up.
+     */
+    public void updateConfig(java.nio.file.Path configFile) {
+        checkOpen();
+        MemorySegment newConfig = loadedConfig(coreBinding, java.util.Optional.of(configFile));
+        try {
+            binding.appUpdateConfig.invoke(app, newConfig);
+        } catch (Throwable t) {
+            coreBinding.configFree(newConfig);
+            throw new GhosttyBinding.GhosttyNativeCallException("ghostty_app_update_config", t);
+        }
+        MemorySegment oldConfig = config;
+        config = newConfig;
+        coreBinding.configFree(oldConfig);
+    }
+
     /** Package-visible: needed by {@link GhosttySurface} to call {@code ghostty_surface_new}. */
     GhosttyAppBinding binding() {
         return binding;
+    }
+
+    /** Package-visible: the app's current (finalized) config, for {@code ghostty_surface_update_config}. */
+    MemorySegment configHandle() {
+        return config;
     }
 
     MemorySegment handle() {

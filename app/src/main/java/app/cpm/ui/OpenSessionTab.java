@@ -278,6 +278,27 @@ final class OpenSessionTab {
     }
 
     /**
+     * Re-themes this tab's live terminal (app theme toggle): loads the new
+     * ghostty config into the app and pushes it to the running surface.
+     * Safe to call before the surface is attached -- a surface created
+     * later inherits the app's (already updated) config.
+     */
+    void applyTerminalTheme(java.nio.file.Path configFile) {
+        if (disposed || surfaceClosing) {
+            return;
+        }
+        try {
+            app.updateConfig(configFile);
+            if (surface != null) {
+                surface.applyConfig(app);
+                surface.draw();
+            }
+        } catch (RuntimeException e) {
+            LOG.log(Logger.Level.WARNING, "Could not re-theme terminal for session " + sessionId, e);
+        }
+    }
+
+    /**
      * Attaches the now-running {@link GhosttySurface} and starts forwarding
      * keyboard input to it. Deliberately does NOT draw yet: the native host
      * view is still hidden at this point (it only becomes visible via a
