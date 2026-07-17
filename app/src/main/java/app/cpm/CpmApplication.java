@@ -105,6 +105,47 @@ public final class CpmApplication extends Application {
         // Claude session in it, so a headless driver can exercise the real
         // repository-add + session-open + terminal-render path without GUI
         // automation. Inert unless -Dapp.cpm.diag.autoCreateSession=true.
+        // Companion diagnostic hook: resume the first persisted session on
+        // startup, exercising the same MainWorkspace.resumeSession path the
+        // sidebar's double-click/Resume menu uses. Inert unless
+        // -Dapp.cpm.diag.autoResumeFirst=true.
+        if (Boolean.getBoolean("app.cpm.diag.autoResumeFirst")) {
+            Platform.runLater(() -> sessionManager.sessions().stream().findFirst().ifPresentOrElse(
+                    session -> {
+                        System.out.println("[diag] resuming session: " + session.id() + " " + session.displayName());
+                        mainWorkspace.resumeSession(session);
+                    },
+                    () -> System.out.println("[diag] autoResumeFirst: no persisted sessions")));
+        }
+
+        // Companion diagnostic hook: ~12s after startup, injects three
+        // Down-arrow presses into the selected tab's key-translation path.
+        // app.cpm.diag.arrowMode=pua mimics real AppKit values (arrows
+        // report Apple's private-use codepoint U+F701 in
+        // charactersIgnoringModifiers); arrowMode=zero sends empty
+        // characters instead. Comparing the two isolates whether the PUA
+        // codepoint breaks ghostty's key encoding.
+        String arrowMode = System.getProperty("app.cpm.diag.arrowMode");
+        if (arrowMode != null) {
+            MainWorkspace workspace = mainWorkspace;
+            Thread t = new Thread(() -> {
+                try {
+                    Thread.sleep(12_000);
+                } catch (InterruptedException e) {
+                    return;
+                }
+                String chars = "pua".equals(arrowMode) ? "\uF701" : "";
+                Platform.runLater(() -> {
+                    for (int i = 0; i < 3; i++) {
+                        workspace.diagPressKey(125, chars, chars); // 125 = Down arrow
+                    }
+                    System.out.println("[diag] sent 3 Down-arrow presses, mode=" + arrowMode);
+                });
+            });
+            t.setDaemon(true);
+            t.start();
+        }
+
         if (Boolean.getBoolean("app.cpm.diag.autoCreateSession")) {
             Platform.runLater(() -> repositoryManager.addRepository(
                     java.nio.file.Path.of(System.getProperty("app.cpm.diag.repo")))

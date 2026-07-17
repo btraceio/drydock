@@ -200,6 +200,17 @@ final class OpenSessionTab {
         }
     }
 
+    /**
+     * Diagnostic-only: feeds a synthetic key event through the exact same
+     * {@link #onKeyEvent} translation path a real AppKit key event takes
+     * (used by the {@code app.cpm.diag.*} harness, which cannot inject real
+     * NSEvents without an Accessibility permission grant).
+     */
+    void diagPressKey(int keyCode, String characters, String unshiftedCharacters) {
+        onKeyEvent(keyCode, 0, true, characters, unshiftedCharacters);
+        onKeyEvent(keyCode, 0, false, characters, unshiftedCharacters);
+    }
+
     private void updateGeometry() {
         if (disposed || surfaceClosing || surface == null || placeholder.getScene() == null) {
             return;
@@ -235,8 +246,16 @@ final class OpenSessionTab {
      * see that method's Javadoc and docs/claude-integration.md for the
      * history of that finding.
      */
+    /** Diagnostic: -Dapp.cpm.diag.logKeys=true logs every raw AppKit key event reaching this tab. */
+    private static final boolean LOG_KEYS = Boolean.getBoolean("app.cpm.diag.logKeys");
+
     private void onKeyEvent(int keyCode, int modifierFlags, boolean keyDown, String characters,
                              String unshiftedCharacters) {
+        if (LOG_KEYS) {
+            System.out.println("[diag] key event: keyCode=" + keyCode + " mods=0x" + Integer.toHexString(modifierFlags)
+                    + " down=" + keyDown + " chars=" + toCodepoints(characters)
+                    + " unshifted=" + toCodepoints(unshiftedCharacters));
+        }
         if (disposed || surface == null) {
             return;
         }
@@ -250,6 +269,15 @@ final class OpenSessionTab {
         if (keyDown && !characters.isEmpty()) {
             characters.codePoints().forEach(cp -> surface.sendCharKey(cp, mods));
         }
+    }
+
+    private static String toCodepoints(String s) {
+        if (s == null || s.isEmpty()) {
+            return "<empty>";
+        }
+        StringBuilder sb = new StringBuilder();
+        s.codePoints().forEach(cp -> sb.append("U+").append(Integer.toHexString(cp)).append(' '));
+        return sb.toString().trim();
     }
 
     private static int translateModifiers(int nsModifierFlags) {

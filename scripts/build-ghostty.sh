@@ -197,11 +197,21 @@ build_one_arch() {
     echo "-- building $out_subdir (target=$zig_target) --"
     (
         cd "$GHOSTTY_DIR"
+        # -Dsentry=false is REQUIRED for embedding in a JVM: ghostty's
+        # bundled Sentry/Breakpad crash handler installs a task-level Mach
+        # exception handler that intercepts EXC_BAD_ACCESS before the JVM's
+        # own handlers. The JVM triggers such exceptions ROUTINELY and
+        # recovers from them (safepoint polls, implicit null checks);
+        # Breakpad misreads the first one as a fatal crash, writes a
+        # minidump, and _exit(1)s the whole process -- observed as the app
+        # silently quitting (no hs_err, no crash report) the moment a
+        # session's child process exited.
         "$ZIG_BIN" build \
             -Doptimize="$GHOSTTY_OPTIMIZE" \
             -Dtarget="$zig_target" \
             -Demit-xcframework=false \
             -Demit-macos-app=false \
+            -Dsentry=false \
             --prefix "$prefix"
     )
 

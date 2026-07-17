@@ -149,7 +149,8 @@ public final class SessionManager implements AutoCloseable {
         persistNewSession(initial);
 
         return capabilityService.detectCapabilities()
-                .thenApplyAsync(caps -> buildCreateCommand(caps, displayName), backgroundExecutor)
+                .thenApplyAsync(caps -> System.getProperty("app.cpm.diag.command",
+                        buildCreateCommand(caps, displayName)), backgroundExecutor)
                 .thenCompose(command -> createSurfaceOnFxThread(app, host, scaleFactor, command,
                         initial.workingDirectory().toString()))
                 .handleAsync((surface, ex) -> finalizeCreate(initial, surface, ex), backgroundExecutor);

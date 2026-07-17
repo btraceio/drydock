@@ -289,6 +289,11 @@ public final class MainWorkspace extends BorderPane {
                 .ifPresent(name -> renameSession(session.id(), name));
     }
 
+    /** Diagnostic-only (see OpenSessionTab.diagPressKey): sends a key through the selected tab's key path. */
+    public void diagPressKey(int keyCode, String characters, String unshiftedCharacters) {
+        currentlySelected().ifPresent(open -> open.diagPressKey(keyCode, characters, unshiftedCharacters));
+    }
+
     // ---- Helpers ------------------------------------------------------------
 
     private Optional<OpenSessionTab> currentlySelected() {
