@@ -57,7 +57,7 @@ class JsonApplicationStateRepositoryTest {
         Path repoRoot = Files.createDirectory(tempDir.resolve("repo-root"));
         Repository repo = sampleRepository(repoRoot);
         WorkspaceUiState ui = new WorkspaceUiState(
-                Optional.of(repo.id()), 321.0, Set.of(repo.id()));
+                Optional.of(repo.id()), 321.0, Set.of(repo.id()), app.cpm.domain.UiTheme.LIGHT);
         ApplicationState state = new ApplicationState(List.of(repo), List.of(), ui);
 
         JsonApplicationStateRepository repository = new JsonApplicationStateRepository(stateFile());

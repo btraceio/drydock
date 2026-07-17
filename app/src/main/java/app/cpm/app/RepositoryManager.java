@@ -147,6 +147,16 @@ public final class RepositoryManager {
         stateRepository.save(state);
     }
 
+    /**
+     * Persists the chosen UI theme immediately (unlike the sidebar width,
+     * a theme toggle is a discrete user action, so save-on-change is cheap
+     * and means a crash never loses it).
+     */
+    public synchronized void updateTheme(app.cpm.domain.UiTheme theme) {
+        state = stateRepository.load().withUi(state.ui().withTheme(theme));
+        stateRepository.save(state);
+    }
+
     private static String defaultDisplayName(Path root) {
         Path fileName = root.getFileName();
         return fileName == null ? root.toString() : fileName.toString();

@@ -1,6 +1,5 @@
 package app.cpm.ui;
 
-import app.cpm.app.DuplicateRepositoryException;
 import app.cpm.app.ExternalEditorLauncher;
 import app.cpm.app.FinderLauncher;
 import app.cpm.app.RepositoryManager;
@@ -8,12 +7,12 @@ import app.cpm.app.SessionManager;
 import app.cpm.domain.ManagedClaudeSession;
 import app.cpm.domain.Repository;
 import app.cpm.domain.RepositoryId;
+import app.cpm.domain.SessionStatus;
 import app.cpm.git.GitBranchState;
 import app.cpm.git.GitStatus;
 import app.cpm.git.GitStatusService;
+import javafx.animation.RotateTransition;
 import javafx.application.Platform;
-import javafx.collections.FXCollections;
-import javafx.collections.ObservableList;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.control.Alert;
@@ -22,44 +21,49 @@ import javafx.scene.control.Button;
 import javafx.scene.control.ButtonType;
 import javafx.scene.control.ContextMenu;
 import javafx.scene.control.Label;
-import javafx.scene.control.ListCell;
-import javafx.scene.control.ListView;
+import javafx.scene.control.MenuButton;
 import javafx.scene.control.MenuItem;
 import javafx.scene.control.SeparatorMenuItem;
+import javafx.scene.control.TextField;
+import javafx.scene.control.Tooltip;
+import javafx.scene.control.TreeCell;
+import javafx.scene.control.TreeItem;
+import javafx.scene.control.TreeView;
 import javafx.scene.input.MouseButton;
-import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
+import javafx.scene.layout.Region;
 import javafx.scene.layout.VBox;
 import javafx.stage.DirectoryChooser;
 import javafx.stage.Window;
+import javafx.util.Duration;
 
 import java.io.IOException;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * The repository sidebar (plan section 12): a list of registered
- * repositories with a branch/dirty indicator per row, an "Add
- * repository..." action, a per-repository context menu (including "New
- * Claude session"), and -- since Milestone 5's terminal-tabs step -- a
- * nested list of that repository's {@link ManagedClaudeSession} rows
- * (double-click or "Resume" to open/focus a tab; per-session context menu
- * for rename/stop/reveal), approximating plan section 12's two-level tree
- * sketch using a single flat {@link ListView} whose cells render their own
- * child rows, rather than an actual {@code TreeView}.</p>
+ * The repository sidebar, rebuilt to the design handoff (README section 2):
+ * an accent "Add repository" menu button (open from disk / clone from
+ * GitHub), a live filter field, a {@link TreeView} of repositories with
+ * their sessions as children (custom cells: carets, status dots, hover
+ * quick-actions), and a footer status line.
  *
- * <p>Session state itself is not cached here: every row is rendered
- * directly from {@link SessionManager#sessions()} each time a cell
- * updates, and {@link #refreshSessions()} (called by {@link MainWorkspace}
- * after any open/resume/close/rename) simply forces a re-render.</p>
+ * <p>Data still comes straight from {@link RepositoryManager} /
+ * {@link SessionManager} on every rebuild -- nothing is cached here beyond
+ * the tree items currently displayed. {@link #refreshSessions()} (called
+ * by {@link MainWorkspace} after any session change) rebuilds the tree.</p>
  */
-public final class RepositorySidebar extends BorderPane {
+public final class RepositorySidebar extends VBox {
 
     private static final Logger LOG = System.getLogger(RepositorySidebar.class.getName());
 
@@ -69,13 +73,27 @@ public final class RepositorySidebar extends BorderPane {
     private final MainWorkspace mainWorkspace;
     private final ExternalEditorLauncher editorLauncher = new ExternalEditorLauncher();
 
-    private final ObservableList<Repository> repositories = FXCollections.observableArrayList();
-    private final ListView<Repository> listView = new ListView<>(repositories);
+    private final TextField filterField = new TextField();
+    private final TreeItem<SidebarNode> treeRoot = new TreeItem<>();
+    private final TreeView<SidebarNode> tree = new TreeView<>(treeRoot);
+    private final Label footerLabel = new Label();
+    private final Region footerDot = new Region();
+
+    /** Which repository subtrees are expanded; new repositories start expanded. */
+    private final Set<RepositoryId> collapsed = new HashSet<>();
 
     /** Latest known Git status per repository, populated asynchronously; absent until the first refresh completes. */
     private final Map<RepositoryId, GitStatus> statuses = new ConcurrentHashMap<>();
     /** The most recent Git-status failure per repository (e.g. the directory vanished), if any. */
     private final Map<RepositoryId, Throwable> statusFailures = new ConcurrentHashMap<>();
+
+    private Runnable onCloneFromGitHub = () -> { };
+
+    /** Tree node payload: either a repository row or one of its session rows. */
+    sealed interface SidebarNode {
+        record RepoNode(Repository repository) implements SidebarNode { }
+        record SessionNode(ManagedClaudeSession session, Repository repository) implements SidebarNode { }
+    }
 
     public RepositorySidebar(RepositoryManager repositoryManager, GitStatusService gitStatusService,
                               SessionManager sessionManager, MainWorkspace mainWorkspace) {
@@ -84,29 +102,63 @@ public final class RepositorySidebar extends BorderPane {
         this.sessionManager = sessionManager;
         this.mainWorkspace = mainWorkspace;
 
-        repositories.setAll(sorted(repositoryManager.repositories()));
+        getStyleClass().add("sidebar");
+
+        // -- Header: add-repository menu + filter field ---------------------
+        MenuItem openFromDisk = new MenuItem("Open from disk…");
+        openFromDisk.setOnAction(e -> onAddRepositoryFromDisk());
+        MenuItem cloneFromGitHub = new MenuItem("Clone from GitHub…");
+        cloneFromGitHub.setOnAction(e -> onCloneFromGitHub.run());
+        MenuButton addButton = new MenuButton("＋  Add repository", null, openFromDisk, cloneFromGitHub);
+        addButton.getStyleClass().add("add-repo-button");
+        addButton.setMaxWidth(Double.MAX_VALUE);
+
+        filterField.getStyleClass().add("filter-field");
+        filterField.setPromptText("⌕  Filter repositories…");
+        filterField.textProperty().addListener((obs, oldText, newText) -> rebuildTree());
+
+        VBox header = new VBox(addButton, filterField);
+        header.getStyleClass().add("sidebar-header");
+
+        // -- Tree -----------------------------------------------------------
+        tree.getStyleClass().add("repo-tree");
+        tree.setShowRoot(false);
+        tree.setCellFactory(view -> new SidebarTreeCell());
+        VBox.setVgrow(tree, Priority.ALWAYS);
+
+        // -- Footer ---------------------------------------------------------
+        footerDot.getStyleClass().addAll("status-dot", "dot-5");
+        HBox footer = new HBox(footerDot, footerLabel);
+        footer.getStyleClass().add("sidebar-footer");
+
+        getChildren().addAll(header, tree, footer);
 
         // Keep the displayed list in sync with EVERY repository mutation,
-        // not just the ones initiated by this sidebar's own button/menu
-        // handlers -- without this, a repository added through any other
-        // code path never appears until restart. The listener may fire on a
-        // background thread (see RepositoryManager.addChangeListener).
-        repositoryManager.addChangeListener(() -> Platform.runLater(this::reloadRepositories));
+        // not just the ones initiated by this sidebar's own handlers. The
+        // listener may fire on a background thread.
+        repositoryManager.addChangeListener(() -> Platform.runLater(this::onRepositoriesChanged));
 
-        listView.setCellFactory(view -> new RepositoryCell());
-        listView.setPlaceholder(new Label("No repositories yet. Use \"Add repository...\" to get started."));
-
-        Button addButton = new Button("Add repository...");
-        addButton.setOnAction(e -> onAddRepository());
-        HBox toolbar = new HBox(addButton);
-        toolbar.setPadding(new Insets(8));
-        toolbar.setAlignment(Pos.CENTER_LEFT);
-
-        setTop(toolbar);
-        setCenter(listView);
-
+        rebuildTree();
         refreshAllStatuses();
     }
+
+    /** Wired by the application shell to open the Clone-from-GitHub modal (design section 7). */
+    public void setOnCloneFromGitHub(Runnable handler) {
+        this.onCloneFromGitHub = handler == null ? () -> { } : handler;
+    }
+
+    /** Focuses the filter field (⌘F). */
+    public void focusFilter() {
+        filterField.requestFocus();
+        filterField.selectAll();
+    }
+
+    /** Rebuilds the tree from current manager state; called after any session change. */
+    public void refreshSessions() {
+        rebuildTree();
+    }
+
+    // ---- Tree building ------------------------------------------------------
 
     private static List<Repository> sorted(List<Repository> source) {
         return source.stream()
@@ -114,22 +166,73 @@ public final class RepositorySidebar extends BorderPane {
                 .toList();
     }
 
-    /** Re-reads the repository list from {@link RepositoryManager} and refreshes Git status for any new rows. */
-    private void reloadRepositories() {
-        List<Repository> latest = sorted(repositoryManager.repositories());
-        if (latest.equals(repositories)) {
-            return;
-        }
-        repositories.setAll(latest);
-        for (Repository repository : latest) {
+    private void onRepositoriesChanged() {
+        for (Repository repository : repositoryManager.repositories()) {
             if (!statuses.containsKey(repository.id()) && !statusFailures.containsKey(repository.id())) {
                 refreshStatus(repository);
             }
         }
+        rebuildTree();
     }
 
-    private void refreshAllStatuses() {
+    private void rebuildTree() {
+        String query = filterField.getText() == null ? "" : filterField.getText().strip().toLowerCase(Locale.ROOT);
+
+        List<Repository> repositories = sorted(repositoryManager.repositories());
+        List<TreeItem<SidebarNode>> repoItems = new java.util.ArrayList<>();
+        int runningTotal = 0;
+
         for (Repository repository : repositories) {
+            if (!query.isEmpty() && !matchesFilter(repository, query)) {
+                continue;
+            }
+            TreeItem<SidebarNode> repoItem = new TreeItem<>(new SidebarNode.RepoNode(repository));
+            for (ManagedClaudeSession session : sessionsFor(repository)) {
+                repoItem.getChildren().add(new TreeItem<>(new SidebarNode.SessionNode(session, repository)));
+            }
+            repoItem.setExpanded(!collapsed.contains(repository.id()));
+            repoItem.expandedProperty().addListener((obs, was, is) -> {
+                if (is) {
+                    collapsed.remove(repository.id());
+                } else {
+                    collapsed.add(repository.id());
+                }
+            });
+            repoItems.add(repoItem);
+        }
+
+        for (ManagedClaudeSession session : sessionManager.sessions()) {
+            if (session.status() == SessionStatus.RUNNING || session.status() == SessionStatus.STARTING) {
+                runningTotal++;
+            }
+        }
+
+        treeRoot.getChildren().setAll(repoItems);
+
+        footerLabel.setText(runningTotal + " running · " + repositories.size()
+                + (repositories.size() == 1 ? " repository" : " repositories"));
+        SessionStatusStyles.updateDot(footerDot, runningTotal > 0 ? SessionStatus.RUNNING : SessionStatus.INACTIVE);
+    }
+
+    private boolean matchesFilter(Repository repository, String query) {
+        if (repository.displayName().toLowerCase(Locale.ROOT).contains(query)) {
+            return true;
+        }
+        GitStatus status = statuses.get(repository.id());
+        return status != null && branchText(status).toLowerCase(Locale.ROOT).contains(query);
+    }
+
+    private List<ManagedClaudeSession> sessionsFor(Repository repository) {
+        return sessionManager.sessions().stream()
+                .filter(session -> session.repositoryId().equals(repository.id()))
+                .sorted(Comparator.comparing(ManagedClaudeSession::displayName, String.CASE_INSENSITIVE_ORDER))
+                .toList();
+    }
+
+    // ---- Git status ---------------------------------------------------------
+
+    private void refreshAllStatuses() {
+        for (Repository repository : repositoryManager.repositories()) {
             refreshStatus(repository);
         }
     }
@@ -145,11 +248,32 @@ public final class RepositorySidebar extends BorderPane {
                         statuses.put(repository.id(), status);
                         statusFailures.remove(repository.id());
                     }
-                    listView.refresh();
+                    rebuildTree();
                 }));
     }
 
-    private void onAddRepository() {
+    private String branchText(GitStatus status) {
+        if (status.branch() instanceof GitBranchState.OnBranch onBranch) {
+            return onBranch.name();
+        }
+        if (status.branch() instanceof GitBranchState.Detached detached) {
+            String oid = detached.commitOid();
+            return "detached@" + (oid.length() > 7 ? oid.substring(0, 7) : oid);
+        }
+        return "(unknown)";
+    }
+
+    private String branchTextFor(Repository repository) {
+        GitStatus status = statuses.get(repository.id());
+        if (status != null) {
+            return branchText(status) + (status.dirty() ? " *" : "");
+        }
+        return statusFailures.containsKey(repository.id()) ? "(status unavailable)" : "…";
+    }
+
+    // ---- Actions ------------------------------------------------------------
+
+    private void onAddRepositoryFromDisk() {
         DirectoryChooser chooser = new DirectoryChooser();
         chooser.setTitle("Add repository");
         Window ownerWindow = getScene() == null ? null : getScene().getWindow();
@@ -164,9 +288,7 @@ public final class RepositorySidebar extends BorderPane {
                 UiErrors.show("Could not add repository", failure);
                 return;
             }
-            repositories.setAll(sorted(repositoryManager.repositories()));
             refreshStatus(repository);
-            listView.getSelectionModel().select(repository);
         }));
     }
 
@@ -180,8 +302,24 @@ public final class RepositorySidebar extends BorderPane {
             repositoryManager.removeRepository(repository.id());
             statuses.remove(repository.id());
             statusFailures.remove(repository.id());
-            repositories.setAll(sorted(repositoryManager.repositories()));
+            rebuildTree();
         });
+    }
+
+    private void onDeleteSession(ManagedClaudeSession session) {
+        Alert confirm = new Alert(AlertType.CONFIRMATION);
+        confirm.setTitle("Delete session");
+        confirm.setHeaderText("Delete session \"" + session.displayName() + "\"?");
+        confirm.setContentText("This removes the session from the manager (stopping it first if running). "
+                + "Claude's own conversation history on disk is not deleted.");
+        confirm.showAndWait().filter(button -> button == ButtonType.OK).ifPresent(button ->
+                sessionManager.deleteSession(session.id()).whenComplete((v, ex) -> Platform.runLater(() -> {
+                    if (ex != null) {
+                        UiErrors.show("Could not delete session", ex);
+                    }
+                    mainWorkspace.noteSessionDeleted(session.id());
+                    rebuildTree();
+                })));
     }
 
     private void onOpenInFinder(Repository repository) {
@@ -200,158 +338,164 @@ public final class RepositorySidebar extends BorderPane {
         }
     }
 
-    /** Exposed for tests: the repositories currently displayed, in display order. */
-    ObservableList<Repository> displayedRepositories() {
-        return repositories;
-    }
+    // ---- Cells --------------------------------------------------------------
 
-    /**
-     * Re-renders every row's session sub-list from {@link SessionManager}'s
-     * current in-memory state. Called by {@link MainWorkspace} (via {@link
-     * MainWorkspace#setOnSessionsChanged}) after any session is opened,
-     * resumed, closed, or renamed -- session metadata itself lives in
-     * {@link SessionManager}, not a local cache here, so a plain {@link
-     * ListView#refresh()} (forcing every visible cell's {@code
-     * updateItem} to re-run) is sufficient.
-     */
-    public void refreshSessions() {
-        listView.refresh();
-    }
-
-    private List<ManagedClaudeSession> sessionsFor(Repository repository) {
-        return sessionManager.sessions().stream()
-                .filter(session -> session.repositoryId().equals(repository.id()))
-                .sorted(Comparator.comparing(ManagedClaudeSession::displayName, String.CASE_INSENSITIVE_ORDER))
-                .toList();
-    }
-
-    private final class RepositoryCell extends ListCell<Repository> {
-
-        private final Label nameLabel = new Label();
-        private final Label branchLabel = new Label();
-        private final Label sessionsLabel = new Label("0 running sessions");
-        private final Button newSessionButton = new Button("+");
-        private final VBox sessionsBox = new VBox(1);
-        private final VBox container;
-
-        /** The repository this cell currently renders; targeted by {@link #newSessionButton}. */
-        private Repository currentRepository;
-
-        RepositoryCell() {
-            nameLabel.getStyleClass().add("repository-name");
-            branchLabel.getStyleClass().add("repository-branch");
-            sessionsLabel.getStyleClass().add("repository-sessions");
-
-            newSessionButton.getStyleClass().add("new-session-button");
-            newSessionButton.setTooltip(new javafx.scene.control.Tooltip("New Claude session"));
-            newSessionButton.setFocusTraversable(false);
-            newSessionButton.setOnAction(e -> {
-                if (currentRepository != null) {
-                    mainWorkspace.openNewSession(currentRepository);
-                }
-            });
-
-            HBox topRow = new HBox(6, nameLabel, newSessionButton);
-            topRow.setAlignment(Pos.CENTER_LEFT);
-            HBox.setHgrow(nameLabel, Priority.ALWAYS);
-            nameLabel.setMaxWidth(Double.MAX_VALUE);
-
-            HBox bottomRow = new HBox(10, branchLabel, sessionsLabel);
-            bottomRow.setAlignment(Pos.CENTER_LEFT);
-
-            sessionsBox.setPadding(new Insets(2, 0, 0, 14));
-
-            container = new VBox(2, topRow, bottomRow, sessionsBox);
-            container.setPadding(new Insets(4, 8, 4, 8));
+    /** Relative "time ago" for session meta lines (design: `branch · 2h ago`). */
+    private static String relativeTime(Instant instant) {
+        long seconds = Math.max(0, java.time.Duration.between(instant, Instant.now()).getSeconds());
+        if (seconds < 60) {
+            return "now";
         }
+        if (seconds < 3600) {
+            return (seconds / 60) + "m ago";
+        }
+        if (seconds < 86400) {
+            return (seconds / 3600) + "h ago";
+        }
+        return (seconds / 86400) + "d ago";
+    }
+
+    private final class SidebarTreeCell extends TreeCell<SidebarNode> {
 
         @Override
-        protected void updateItem(Repository repository, boolean empty) {
-            super.updateItem(repository, empty);
-            if (empty || repository == null) {
-                currentRepository = null;
+        protected void updateItem(SidebarNode node, boolean empty) {
+            super.updateItem(node, empty);
+            if (empty || node == null) {
                 setText(null);
                 setGraphic(null);
                 setContextMenu(null);
                 return;
             }
-
-            currentRepository = repository;
-            nameLabel.setText(repository.displayName());
-
-            List<ManagedClaudeSession> sessions = sessionsFor(repository);
-            long running = sessions.stream().filter(s -> s.status() == app.cpm.domain.SessionStatus.RUNNING).count();
-            sessionsLabel.setText(running + " running session" + (running == 1 ? "" : "s"));
-            sessionsBox.getChildren().setAll(sessions.stream().map(this::buildSessionRow).toList());
-
-            GitStatus status = statuses.get(repository.id());
-            Throwable failure = statusFailures.get(repository.id());
-            if (status != null) {
-                branchLabel.setText(branchText(status) + (status.dirty() ? " *" : ""));
-                setTooltip(null);
-            } else if (failure != null) {
-                branchLabel.setText("(status unavailable)");
-                setTooltip(new javafx.scene.control.Tooltip(String.valueOf(failure.getMessage())));
-            } else {
-                branchLabel.setText("(checking...)");
-                setTooltip(null);
-            }
-
             setText(null);
-            setGraphic(container);
-            setContextMenu(buildContextMenu(repository));
+            switch (node) {
+                case SidebarNode.RepoNode repoNode -> {
+                    setGraphic(buildRepoRow(repoNode.repository()));
+                    setContextMenu(buildRepoContextMenu(repoNode.repository()));
+                }
+                case SidebarNode.SessionNode sessionNode -> {
+                    setGraphic(buildSessionRow(sessionNode.session(), sessionNode.repository()));
+                    setContextMenu(buildSessionContextMenu(sessionNode.session()));
+                }
+            }
         }
 
-        private HBox buildSessionRow(ManagedClaudeSession session) {
-            Label nameLabel = new Label(statusIcon(session) + " " + session.displayName());
-            nameLabel.getStyleClass().add("session-row-name");
-            HBox row = new HBox(6, nameLabel);
-            row.getStyleClass().add("session-row");
-            row.setCursor(javafx.scene.Cursor.HAND);
-            row.setAlignment(Pos.CENTER_LEFT);
-            javafx.scene.control.Tooltip.install(row, new javafx.scene.control.Tooltip(
-                    "Status: " + session.status() + "\nLast opened: " + session.lastOpenedAt()
-                            + "\nWorking directory: " + session.workingDirectory()));
+        private HBox buildRepoRow(Repository repository) {
+            Label caret = new Label("▶");
+            caret.getStyleClass().add("repo-caret");
+            boolean expanded = getTreeItem() != null && getTreeItem().isExpanded();
+            caret.setRotate(expanded ? 90 : 0);
 
-            ContextMenu sessionMenu = buildSessionContextMenu(session);
-            row.setOnContextMenuRequested(event -> {
-                // Without consuming, this event bubbles up to the enclosing
-                // ListCell, which has its own repository-level context menu
-                // set via setContextMenu(...) -- Control's default handling
-                // shows THAT menu too, on top of this one, on every
-                // right-click of a session row.
-                sessionMenu.show(row, event.getScreenX(), event.getScreenY());
-                event.consume();
-            });
+            Label name = new Label(repository.displayName());
+            name.getStyleClass().add("repo-name");
+
+            Label branch = new Label("⎇ " + branchTextFor(repository));
+            branch.getStyleClass().add("repo-branch");
+            Throwable failure = statusFailures.get(repository.id());
+            if (failure != null) {
+                branch.setTooltip(new Tooltip(String.valueOf(failure.getMessage())));
+            }
+
+            List<ManagedClaudeSession> sessions = sessionsFor(repository);
+            boolean anyRunning = sessions.stream().anyMatch(s -> SessionStatusStyles.isRunning(s.status()));
+            HBox branchRow = new HBox(6, branch);
+            branchRow.setAlignment(Pos.CENTER_LEFT);
+            if (anyRunning) {
+                branchRow.getChildren().add(SessionStatusStyles.createDot(5, SessionStatus.RUNNING));
+            }
+
+            VBox text = new VBox(1, name, branchRow);
+            HBox.setHgrow(text, Priority.ALWAYS);
+
+            Label count = new Label(String.valueOf(sessions.size()));
+            count.getStyleClass().add("repo-count");
+
+            Button newSession = new Button("+");
+            newSession.getStyleClass().add("row-action-button");
+            newSession.setTooltip(new Tooltip("New Claude session"));
+            newSession.setFocusTraversable(false);
+            newSession.visibleProperty().bind(hoverProperty());
+            newSession.setOnAction(e -> mainWorkspace.openNewSession(repository));
+
+            HBox row = new HBox(7, caret, text, count, newSession);
+            row.getStyleClass().add("repo-row");
+            row.setAlignment(Pos.CENTER_LEFT);
             row.setOnMouseClicked(event -> {
-                if (event.getButton() == MouseButton.PRIMARY && event.getClickCount() == 2) {
-                    mainWorkspace.resumeSession(session);
+                if (event.getButton() == MouseButton.PRIMARY && getTreeItem() != null) {
+                    boolean nowExpanded = !getTreeItem().isExpanded();
+                    getTreeItem().setExpanded(nowExpanded);
+                    RotateTransition rotate = new RotateTransition(Duration.seconds(0.12), caret);
+                    rotate.setToAngle(nowExpanded ? 90 : 0);
+                    rotate.play();
+                    event.consume();
                 }
             });
             return row;
         }
 
-        private String statusIcon(ManagedClaudeSession session) {
-            return switch (session.status()) {
-                case RUNNING -> "●"; // filled circle
-                case STARTING -> "◐";
-                case FAILED, MISSING_WORKING_DIRECTORY -> "⚠"; // warning
-                case EXITED, INACTIVE -> "○"; // hollow circle
-            };
+        private HBox buildSessionRow(ManagedClaudeSession session, Repository repository) {
+            Region dot = SessionStatusStyles.createDot(8, session.status());
+
+            Label name = new Label(session.displayName());
+            name.getStyleClass().add("session-name");
+
+            String branch = branchTextFor(repository);
+            Label meta = new Label(branch + " · " + relativeTime(session.lastOpenedAt()));
+            meta.getStyleClass().add("session-meta");
+
+            VBox text = new VBox(1, name, meta);
+            HBox.setHgrow(text, Priority.ALWAYS);
+
+            Button open = quickAction("↗", "Open", false, () -> mainWorkspace.resumeSession(session));
+            Button stop = quickAction("■", "Stop process", true, () -> mainWorkspace.closeSession(session.id()));
+            stop.setDisable(!SessionStatusStyles.isRunning(session.status()));
+            Button delete = quickAction("×", "Delete session", true, () -> onDeleteSession(session));
+            HBox actions = new HBox(2, open, stop, delete);
+            actions.setAlignment(Pos.CENTER_RIGHT);
+            actions.visibleProperty().bind(hoverProperty());
+
+            HBox row = new HBox(8, dot, text, actions);
+            row.getStyleClass().add("session-row");
+            row.setAlignment(Pos.CENTER_LEFT);
+            row.setPadding(new Insets(5, 8, 5, 16));
+            if (mainWorkspace.activeSessionId().filter(session.id()::equals).isPresent()) {
+                row.getStyleClass().add("active");
+            }
+            Tooltip.install(row, new Tooltip(
+                    "Status: " + session.status() + "\nLast opened: " + session.lastOpenedAt()
+                            + "\nWorking directory: " + session.workingDirectory()));
+            row.setOnMouseClicked(event -> {
+                if (event.getButton() == MouseButton.PRIMARY) {
+                    mainWorkspace.resumeSession(session);
+                    event.consume();
+                }
+            });
+            return row;
+        }
+
+        private Button quickAction(String glyph, String tooltip, boolean destructive, Runnable action) {
+            Button button = new Button(glyph);
+            button.getStyleClass().add("row-action-button");
+            if (destructive) {
+                button.getStyleClass().add("destructive");
+            }
+            button.setTooltip(new Tooltip(tooltip));
+            button.setFocusTraversable(false);
+            button.setOnAction(e -> action.run());
+            return button;
         }
 
         private ContextMenu buildSessionContextMenu(ManagedClaudeSession session) {
             MenuItem resume = new MenuItem("Resume");
             resume.setOnAction(e -> mainWorkspace.resumeSession(session));
 
-            MenuItem rename = new MenuItem("Rename...");
+            MenuItem rename = new MenuItem("Rename…");
             rename.setOnAction(e -> mainWorkspace.promptRenameSession(session));
 
             MenuItem stop = new MenuItem("Stop process");
-            stop.setOnAction(e -> {
-                mainWorkspace.closeSession(session.id());
-                refreshSessions();
-            });
+            stop.setOnAction(e -> mainWorkspace.closeSession(session.id()));
+
+            MenuItem delete = new MenuItem("Delete session");
+            delete.setOnAction(e -> onDeleteSession(session));
 
             MenuItem reveal = new MenuItem("Reveal working directory");
             reveal.setOnAction(e -> {
@@ -363,24 +507,11 @@ public final class RepositorySidebar extends BorderPane {
             });
 
             ContextMenu menu = new ContextMenu();
-            menu.getItems().addAll(resume, rename, stop, new SeparatorMenuItem(), reveal);
+            menu.getItems().addAll(resume, rename, stop, delete, new SeparatorMenuItem(), reveal);
             return menu;
         }
 
-        private String branchText(GitStatus status) {
-            if (status.branch() instanceof GitBranchState.OnBranch onBranch) {
-                return onBranch.name();
-            }
-            if (status.branch() instanceof GitBranchState.Detached detached) {
-                String oid = detached.commitOid();
-                return "detached@" + (oid.length() > 7 ? oid.substring(0, 7) : oid);
-            }
-            return "(unknown)";
-        }
-
-        private ContextMenu buildContextMenu(Repository repository) {
-            ContextMenu menu = new ContextMenu();
-
+        private ContextMenu buildRepoContextMenu(Repository repository) {
             MenuItem newSession = new MenuItem("New Claude session");
             newSession.setOnAction(e -> mainWorkspace.openNewSession(repository));
 
@@ -396,6 +527,7 @@ public final class RepositorySidebar extends BorderPane {
             MenuItem remove = new MenuItem("Remove from manager");
             remove.setOnAction(e -> onRemoveRepository(repository));
 
+            ContextMenu menu = new ContextMenu();
             menu.getItems().addAll(newSession, new SeparatorMenuItem(), refresh, openFinder, openEditor,
                     new SeparatorMenuItem(), remove);
             return menu;

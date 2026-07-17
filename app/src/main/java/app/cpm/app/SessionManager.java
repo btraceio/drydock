@@ -292,6 +292,50 @@ public final class SessionManager implements AutoCloseable {
         return updated;
     }
 
+    /**
+     * Registers an existing on-disk Claude conversation (discovered by the
+     * resume picker in {@code ~/.claude/projects}) as a managed session, so
+     * the normal {@link #resumeSession} path can reopen that exact
+     * conversation via {@code claude --resume '<id>'}. Idempotent per
+     * Claude session id: if a managed session already tracks {@code
+     * claudeSessionId}, that session is returned unchanged instead of
+     * creating a duplicate row.
+     */
+    public synchronized ManagedClaudeSession adoptConversation(Repository repository, String claudeSessionId,
+                                                                String displayName) {
+        Optional<ManagedClaudeSession> existing = state.sessions().stream()
+                .filter(session -> session.claudeSessionId().map(claudeSessionId::equals).orElse(false))
+                .findFirst();
+        if (existing.isPresent()) {
+            return existing.get();
+        }
+        ManagedClaudeSession adopted = newSessionMetadata(repository, displayName)
+                .withClaudeSessionId(Optional.of(claudeSessionId));
+        persistNewSession(adopted);
+        return adopted;
+    }
+
+    /**
+     * Deletes a session's metadata entirely (sidebar quick-action "Delete"),
+     * first closing its surface gracefully if one is active. Only this
+     * manager's metadata is removed; nothing of claude's own on-disk
+     * transcript is touched (plan section 21: never destroy user data).
+     */
+    public CompletableFuture<Void> deleteSession(ManagedSessionId sessionId) {
+        return closeSession(sessionId).thenRun(() -> {
+            synchronized (this) {
+                List<ManagedClaudeSession> remaining = state.sessions().stream()
+                        .filter(session -> !session.id().equals(sessionId))
+                        .toList();
+                if (remaining.size() == state.sessions().size()) {
+                    return;
+                }
+                state = mergeSessionsOntoLatestDiskState(remaining);
+                stateRepository.save(state);
+            }
+        });
+    }
+
     // ---- Close --------------------------------------------------------------
 
     /** Closes a session's surface (if any is active) using the grace-period defaults. */

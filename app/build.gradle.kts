@@ -353,7 +353,8 @@ tasks.register("runtimeImage") {
                 jlinkExe.absolutePath,
                 "--module-path", modulePath,
                 "--add-modules",
-                "java.base,java.desktop,java.xml,jdk.jfr,jdk.unsupported," +
+                // java.net.http: GitHubService's search client (Clone-from-GitHub modal).
+                "java.base,java.desktop,java.net.http,java.xml,jdk.jfr,jdk.unsupported," +
                     "javafx.base,javafx.controls,javafx.graphics",
                 "--output", runtimeOut.absolutePath,
                 "--no-header-files",

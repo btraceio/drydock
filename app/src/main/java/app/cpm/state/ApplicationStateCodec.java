@@ -7,6 +7,7 @@ import app.cpm.domain.Repository;
 import app.cpm.domain.RepositoryId;
 import app.cpm.domain.RepositorySettings;
 import app.cpm.domain.SessionStatus;
+import app.cpm.domain.UiTheme;
 import app.cpm.domain.WorkspaceUiState;
 import app.cpm.state.json.JsonValue;
 import app.cpm.state.json.JsonValue.JsonArray;
@@ -153,6 +154,7 @@ public final class ApplicationStateCodec {
             expanded.add(new JsonString(id.value().toString()));
         }
         obj.put("expandedRepositoryIds", new JsonArray(expanded));
+        obj.put("theme", new JsonString(ui.theme().name()));
         return obj;
     }
 
@@ -252,7 +254,13 @@ public final class ApplicationStateCodec {
             }
         }
 
-        return new WorkspaceUiState(selected, sidebarWidth, expanded);
+        // Absent in documents written before the theme existed; defaults to
+        // DARK (matches WorkspaceUiState.empty()) rather than failing.
+        UiTheme theme = obj.get("theme") instanceof JsonString s
+                ? UiTheme.fromPersisted(s.value())
+                : UiTheme.DARK;
+
+        return new WorkspaceUiState(selected, sidebarWidth, expanded, theme);
     }
 
     private static int readSchemaVersion(JsonObject root) {

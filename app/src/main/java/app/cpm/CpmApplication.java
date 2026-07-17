@@ -5,15 +5,15 @@ import app.cpm.app.SessionManager;
 import app.cpm.claude.ClaudeCapabilityService;
 import app.cpm.git.GitStatusService;
 import app.cpm.state.JsonApplicationStateRepository;
+import app.cpm.ui.AppShell;
 import app.cpm.ui.MainWorkspace;
-import app.cpm.ui.RepositorySidebar;
 import javafx.application.Application;
 import javafx.application.Platform;
 import javafx.scene.Scene;
 import javafx.scene.control.Alert;
 import javafx.scene.control.ButtonType;
-import javafx.scene.control.SplitPane;
 import javafx.stage.Stage;
+import javafx.stage.StageStyle;
 import javafx.stage.WindowEvent;
 
 import java.util.Optional;
@@ -44,16 +44,16 @@ public final class CpmApplication extends Application {
 
     static final String WINDOW_TITLE = "Claude Project Manager";
 
-    private static final double DEFAULT_SCENE_WIDTH = 900;
-    private static final double DEFAULT_SCENE_HEIGHT = 600;
-    private static final double MIN_DIVIDER_POSITION = 0.12;
-    private static final double MAX_DIVIDER_POSITION = 0.6;
+    private static final double DEFAULT_SCENE_WIDTH = 1100;
+    private static final double DEFAULT_SCENE_HEIGHT = 720;
 
     private GitStatusService gitStatusService;
     private ClaudeCapabilityService claudeCapabilityService;
     private RepositoryManager repositoryManager;
     private SessionManager sessionManager;
-    private SplitPane splitPane;
+    private MainWorkspace mainWorkspace;
+    private AppShell appShell;
+    private app.cpm.github.GitHubService gitHubService;
 
     private boolean shutdownConfirmed;
 
@@ -76,18 +76,24 @@ public final class CpmApplication extends Application {
         repositoryManager = new RepositoryManager(stateRepository, gitStatusService);
         sessionManager = new SessionManager(stateRepository, claudeCapabilityService);
 
-        MainWorkspace mainWorkspace = new MainWorkspace(sessionManager, primaryStage);
-        RepositorySidebar sidebar = new RepositorySidebar(repositoryManager, gitStatusService, sessionManager, mainWorkspace);
+        mainWorkspace = new MainWorkspace(sessionManager, repositoryManager, gitStatusService, primaryStage);
+        app.cpm.ui.RepositorySidebar sidebar =
+                new app.cpm.ui.RepositorySidebar(repositoryManager, gitStatusService, sessionManager, mainWorkspace);
         mainWorkspace.setOnSessionsChanged(sidebar::refreshSessions);
 
-        splitPane = new SplitPane(sidebar, mainWorkspace);
-        splitPane.setDividerPositions(restoredDividerPosition());
+        appShell = new AppShell(primaryStage, WINDOW_TITLE, sidebar, mainWorkspace,
+                repositoryManager.state().ui().sidebarWidth(),
+                repositoryManager.state().ui().theme(),
+                theme -> repositoryManager.updateTheme(theme),
+                DEFAULT_SCENE_WIDTH, DEFAULT_SCENE_HEIGHT);
 
-        var scene = new Scene(splitPane, DEFAULT_SCENE_WIDTH, DEFAULT_SCENE_HEIGHT);
-        scene.getStylesheets().add(getClass().getResource("/app/cpm/ui/app.css").toExternalForm());
+        gitHubService = new app.cpm.github.GitHubService();
+        sidebar.setOnCloneFromGitHub(() -> appShell.modalLayer().show(
+                new app.cpm.ui.GitHubCloneModal(gitHubService, repositoryManager, appShell.modalLayer()::close)));
+
+        installGlobalShortcuts(sidebar);
 
         primaryStage.setTitle(WINDOW_TITLE);
-        primaryStage.setScene(scene);
 
         // Plan section 9 "Application shutdown prompts once for all active
         // processes": intercept the window close request (covers the
@@ -161,13 +167,70 @@ public final class CpmApplication extends Application {
         }
     }
 
+    /**
+     * Global keyboard shortcuts (design handoff "Keyboard"): installed as a
+     * scene-level filter rather than accelerators so text-input focus can
+     * veto them (typing "?" in the search field must not open the shortcuts
+     * modal, Esc in the inline tab-rename field must cancel the rename, not
+     * navigate). Keys aimed at the terminal never reach JavaFX at all --
+     * the native host's NSEvent monitor consumes them first.
+     */
+    private void installGlobalShortcuts(app.cpm.ui.RepositorySidebar sidebar) {
+        appShell.scene().addEventFilter(javafx.scene.input.KeyEvent.KEY_PRESSED, event -> {
+            boolean inTextInput = appShell.scene().getFocusOwner()
+                    instanceof javafx.scene.control.TextInputControl;
+            boolean cmd = event.isShortcutDown();
+
+            if (event.getCode() == javafx.scene.input.KeyCode.ESCAPE) {
+                if (appShell.modalLayer().isShowingModal()) {
+                    appShell.modalLayer().close();
+                    event.consume();
+                } else if (!inTextInput) {
+                    mainWorkspace.showPicker();
+                    event.consume();
+                }
+                return;
+            }
+            if (cmd && event.isShiftDown() && event.getCode() == javafx.scene.input.KeyCode.L) {
+                appShell.toggleTheme();
+                event.consume();
+            } else if (cmd && event.getCode() == javafx.scene.input.KeyCode.F) {
+                sidebar.focusFilter();
+                event.consume();
+            } else if (cmd && event.getCode() == javafx.scene.input.KeyCode.N) {
+                activeOrFirstRepository().ifPresent(mainWorkspace::openNewSession);
+                event.consume();
+            } else if (cmd && event.getCode() == javafx.scene.input.KeyCode.R) {
+                mainWorkspace.activeSessionId().flatMap(id -> sessionManager.sessions().stream()
+                                .filter(s -> s.id().equals(id)).findFirst())
+                        .ifPresent(mainWorkspace::promptRenameSession);
+                event.consume();
+            } else if (!inTextInput && !cmd && event.isShiftDown()
+                    && event.getCode() == javafx.scene.input.KeyCode.SLASH) {
+                appShell.showShortcutsOverlay();
+                event.consume();
+            }
+        });
+    }
+
+    /** ⌘N target: the active tab's repository, else the first registered one. */
+    private Optional<app.cpm.domain.Repository> activeOrFirstRepository() {
+        Optional<app.cpm.domain.Repository> active = mainWorkspace.activeSessionId()
+                .flatMap(id -> sessionManager.sessions().stream()
+                        .filter(s -> s.id().equals(id)).findFirst())
+                .flatMap(session -> repositoryManager.repositories().stream()
+                        .filter(repo -> repo.id().equals(session.repositoryId())).findFirst());
+        if (active.isPresent()) {
+            return active;
+        }
+        return repositoryManager.repositories().stream().findFirst();
+    }
+
     private void onCloseRequest(WindowEvent event) {
         if (shutdownConfirmed) {
             return; // already confirmed once; let this second close proceed (e.g. after closeAllSessions completes).
         }
 
-        // MainWorkspace is the SplitPane's right item.
-        MainWorkspace mainWorkspace = (MainWorkspace) splitPane.getItems().get(1);
         if (!mainWorkspace.hasOpenSessions()) {
             return; // nothing running; let the window close immediately.
         }
@@ -191,28 +254,16 @@ public final class CpmApplication extends Application {
         }));
     }
 
-    /**
-     * Converts the persisted absolute sidebar width (plan section 10.3) into
-     * a {@link SplitPane} divider fraction of the default scene width, since
-     * {@link SplitPane} only exposes divider position as a 0-1 fraction, not
-     * an absolute pixel width of the left pane. Clamped to a sane range so a
-     * corrupt or extreme persisted value cannot render the sidebar
-     * unusably thin or wide.
-     */
-    private double restoredDividerPosition() {
-        double sidebarWidth = repositoryManager.state().ui().sidebarWidth();
-        double fraction = sidebarWidth / DEFAULT_SCENE_WIDTH;
-        return Math.clamp(fraction, MIN_DIVIDER_POSITION, MAX_DIVIDER_POSITION);
-    }
-
     @Override
     public void stop() {
-        if (splitPane != null && repositoryManager != null && !splitPane.getDividers().isEmpty()) {
-            double dividerPosition = splitPane.getDividers().get(0).getPosition();
-            double sidebarWidth = dividerPosition * splitPane.getWidth();
+        if (appShell != null && repositoryManager != null) {
+            double sidebarWidth = appShell.sidebarWidth();
             if (sidebarWidth > 0) {
                 repositoryManager.updateSidebarWidth(sidebarWidth);
             }
+        }
+        if (gitHubService != null) {
+            gitHubService.close();
         }
         if (sessionManager != null) {
             sessionManager.close();

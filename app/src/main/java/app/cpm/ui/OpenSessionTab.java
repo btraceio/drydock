@@ -1,18 +1,33 @@
 package app.cpm.ui;
 
 import app.cpm.domain.ManagedSessionId;
+import app.cpm.domain.Repository;
+import app.cpm.domain.SessionStatus;
 import app.cpm.terminal.ghostty.GhosttyApp;
 import app.cpm.terminal.ghostty.GhosttySurface;
 import app.cpm.terminal.host.CpmTerminalHost;
 import javafx.application.Platform;
 import javafx.geometry.Bounds;
+import javafx.geometry.Pos;
+import javafx.scene.control.Button;
 import javafx.scene.control.Label;
 import javafx.scene.control.Tab;
+import javafx.scene.control.TextField;
+import javafx.scene.control.Tooltip;
+import javafx.scene.input.KeyCode;
+import javafx.scene.input.MouseButton;
+import javafx.scene.layout.BorderPane;
+import javafx.scene.layout.HBox;
+import javafx.scene.layout.Priority;
+import javafx.scene.layout.Region;
 import javafx.scene.layout.StackPane;
+import javafx.scene.layout.VBox;
 import javafx.stage.Stage;
 
 import java.lang.System.Logger;
+import java.util.Optional;
 import java.util.Set;
+import java.util.function.Consumer;
 
 /**
  * One open terminal tab (plan section 13): owns its own {@link GhosttyApp} +
@@ -21,6 +36,12 @@ import java.util.Set;
  * {@code start()}/{@code onKeyEvent} methods, which this class's geometry
  * and key-forwarding logic is deliberately modeled on, without modifying
  * those spike files).
+ *
+ * <p>Since the design-handoff rebuild this class also owns this tab's
+ * visual chrome: the two-line tab header graphic (repo name over session
+ * title, status dot, close button, double-click inline rename -- handoff
+ * README section 4) and the session-view header (back, title + meta,
+ * status pill, rename -- section 5) sitting above the terminal region.</p>
  *
  * <p>Ghostty does not render into the JavaFX scene graph: {@link
  * CpmTerminalHost} attaches a real AppKit {@code NSView} as a sibling
@@ -68,25 +89,192 @@ final class OpenSessionTab {
     private final StackPane placeholder = new StackPane();
     private final Label statusLabel = new Label("Starting session...");
 
+    // -- Tab header graphic (two-line label + dot + close; handoff 4) -------
+    private final Region tabDot = SessionStatusStyles.createDot(7, SessionStatus.STARTING);
+    private final Label tabRepoLabel = new Label();
+    private final Label tabTitleLabel = new Label();
+    private final TextField renameField = new TextField();
+    private final VBox tabLabels = new VBox(0);
+
+    // -- Session-view header (handoff 5) ------------------------------------
+    private final Label headerTitle = new Label();
+    private final Label headerMeta = new Label();
+    private final HBox statusPill = new HBox(6);
+    private final Label pillLabel = new Label("idle");
+    private final Region pillDot = SessionStatusStyles.createDot(7, SessionStatus.INACTIVE);
+
+    private Runnable onCloseRequested = () -> { };
+    private Consumer<String> onRenamed = name -> { };
+    private Runnable onBack = () -> { };
+
+    private String displayName;
     private GhosttySurface surface;
     private boolean disposed;
     private boolean surfaceClosing;
 
-    OpenSessionTab(ManagedSessionId sessionId, String displayName, Stage stage, GhosttyApp app, CpmTerminalHost host) {
+    OpenSessionTab(ManagedSessionId sessionId, String displayName, Optional<Repository> repository,
+                   Stage stage, GhosttyApp app, CpmTerminalHost host) {
         this.sessionId = sessionId;
+        this.displayName = displayName;
         this.stage = stage;
         this.app = app;
         this.host = host;
 
+        placeholder.getStyleClass().add("terminal-region");
         placeholder.getChildren().add(statusLabel);
+        statusLabel.getStyleClass().add("session-meta");
         placeholder.boundsInLocalProperty().addListener((obs, oldV, newV) -> updateGeometry());
         placeholder.localToSceneTransformProperty().addListener((obs, oldV, newV) -> updateGeometry());
 
-        this.tab = new Tab(displayName, placeholder);
+        this.tab = new Tab();
+        tab.setClosable(false); // the graphic carries its own close button (17px ×, handoff 4)
+        tab.setGraphic(buildTabGraphic(repository));
+
+        BorderPane content = new BorderPane();
+        content.setTop(buildSessionHeader(repository));
+        content.setCenter(placeholder);
+        tab.setContent(content);
+
+        setDisplayName(displayName);
+        repository.ifPresent(repo -> {
+            tabRepoLabel.setText(repo.displayName());
+            headerMeta.setText("⎇ … · " + repo.displayName());
+        });
+        tabRepoLabel.setVisible(repository.isPresent());
+        tabRepoLabel.setManaged(repository.isPresent());
+    }
+
+    /** Fills the header meta line once the repository's branch is known (fetched async by MainWorkspace). */
+    void setHeaderBranch(String branch, String repoName) {
+        headerMeta.setText("⎇ " + branch + " · " + repoName);
+    }
+
+    private HBox buildTabGraphic(Optional<Repository> repository) {
+        tabRepoLabel.getStyleClass().add("tab-repo-label");
+        tabRepoLabel.setMaxWidth(160);
+        tabTitleLabel.getStyleClass().add("tab-title-label");
+        tabTitleLabel.setMaxWidth(160);
+
+        renameField.getStyleClass().add("tab-rename-field");
+        renameField.setPrefWidth(140);
+
+        tabLabels.getChildren().setAll(tabRepoLabel, tabTitleLabel);
+        tabLabels.setAlignment(Pos.CENTER_LEFT);
+
+        Button close = new Button("×");
+        close.getStyleClass().add("tab-close-button");
+        close.setFocusTraversable(false);
+        close.setOnAction(e -> onCloseRequested.run());
+
+        HBox graphic = new HBox(8, tabDot, tabLabels, close);
+        graphic.setAlignment(Pos.CENTER_LEFT);
+
+        // Double-click the tab -> inline rename (Enter/blur commits, Esc cancels).
+        graphic.setOnMouseClicked(event -> {
+            if (event.getButton() == MouseButton.PRIMARY && event.getClickCount() == 2) {
+                startInlineRename();
+                event.consume();
+            }
+        });
+        renameField.setOnAction(e -> commitInlineRename());
+        renameField.focusedProperty().addListener((obs, was, is) -> {
+            if (!is && tabLabels.getChildren().contains(renameField)) {
+                commitInlineRename();
+            }
+        });
+        renameField.setOnKeyPressed(event -> {
+            if (event.getCode() == KeyCode.ESCAPE) {
+                cancelInlineRename();
+                event.consume();
+            }
+        });
+        return graphic;
+    }
+
+    private javafx.scene.layout.Region buildSessionHeader(Optional<Repository> repository) {
+        Button back = new Button("←");
+        back.getStyleClass().add("header-icon-button");
+        back.setTooltip(new Tooltip("Back to resume picker (Esc)"));
+        back.setFocusTraversable(false);
+        back.setOnAction(e -> onBack.run());
+
+        headerTitle.getStyleClass().add("session-title");
+        headerMeta.getStyleClass().add("session-meta-line");
+        VBox titles = new VBox(1, headerTitle, headerMeta);
+        HBox.setHgrow(titles, Priority.ALWAYS);
+
+        statusPill.getStyleClass().add("status-pill");
+        statusPill.setAlignment(Pos.CENTER);
+        statusPill.getChildren().setAll(pillDot, pillLabel);
+
+        Button rename = new Button("✎");
+        rename.getStyleClass().add("header-icon-button");
+        rename.setTooltip(new Tooltip("Rename session (⌘R)"));
+        rename.setFocusTraversable(false);
+        rename.setOnAction(e -> startInlineRename());
+
+        HBox header = new HBox(12, back, titles, statusPill, rename);
+        header.getStyleClass().add("session-header");
+        return header;
+    }
+
+    // ---- Rename -------------------------------------------------------------
+
+    private void startInlineRename() {
+        if (tabLabels.getChildren().contains(renameField)) {
+            return;
+        }
+        renameField.setText(displayName);
+        tabLabels.getChildren().set(tabLabels.getChildren().indexOf(tabTitleLabel), renameField);
+        renameField.requestFocus();
+        renameField.selectAll();
+    }
+
+    private void commitInlineRename() {
+        String newName = renameField.getText() == null ? "" : renameField.getText().strip();
+        cancelInlineRename();
+        if (!newName.isEmpty() && !newName.equals(displayName)) {
+            onRenamed.accept(newName);
+        }
+    }
+
+    private void cancelInlineRename() {
+        int index = tabLabels.getChildren().indexOf(renameField);
+        if (index >= 0) {
+            tabLabels.getChildren().set(index, tabTitleLabel);
+        }
+    }
+
+    // ---- Wiring from MainWorkspace ------------------------------------------
+
+    void setOnCloseRequested(Runnable handler) {
+        this.onCloseRequested = handler == null ? () -> { } : handler;
+    }
+
+    void setOnRenamed(Consumer<String> handler) {
+        this.onRenamed = handler == null ? name -> { } : handler;
+    }
+
+    void setOnBack(Runnable handler) {
+        this.onBack = handler == null ? () -> { } : handler;
     }
 
     void setDisplayName(String displayName) {
-        tab.setText(displayName);
+        this.displayName = displayName;
+        tabTitleLabel.setText(displayName);
+        headerTitle.setText(displayName);
+    }
+
+    String displayName() {
+        return displayName;
+    }
+
+    /** Drives the tab dot + header pill from the session's real status (handoff "Critical behaviors"). */
+    void setStatus(SessionStatus status) {
+        SessionStatusStyles.updateDot(tabDot, status);
+        SessionStatusStyles.updateDot(pillDot, status);
+        SessionStatusStyles.applyStatus(statusPill, status);
+        pillLabel.setText(SessionStatusStyles.designLabel(status));
     }
 
     /**
@@ -121,9 +309,8 @@ final class OpenSessionTab {
      * invalidation listeners (e.g. {@code localToSceneTransformProperty})
      * synchronously, which would otherwise call back into {@link
      * #updateGeometry()} against a surface that {@code SessionManager}'s
-     * {@code closeGracefully} has *already* closed by this point (session
-     * close and tab removal are two separate async hops -- see {@code
-     * MainWorkspace.closeSession}). Distinct from {@link #disposed} (which
+     * {@code closeGracefully} has (in the closing case) already closed by
+     * this point. Distinct from {@link #disposed} (which
      * {@link #disposeNativeResources()} uses for its own idempotency) so
      * that flag isn't set before this tab's {@code GhosttyApp}/{@code
      * CpmTerminalHost} are actually closed.

@@ -20,28 +20,35 @@ import java.util.Set;
 public record WorkspaceUiState(
         Optional<RepositoryId> selectedRepositoryId,
         double sidebarWidth,
-        Set<RepositoryId> expandedRepositoryIds
+        Set<RepositoryId> expandedRepositoryIds,
+        UiTheme theme
 ) {
-    public static final double DEFAULT_SIDEBAR_WIDTH = 260.0;
+    /** Design default 288px (handoff README section 2), clamped 220-520 at the SplitPane. */
+    public static final double DEFAULT_SIDEBAR_WIDTH = 288.0;
 
     public WorkspaceUiState {
         Objects.requireNonNull(selectedRepositoryId, "selectedRepositoryId");
         expandedRepositoryIds = Set.copyOf(Objects.requireNonNull(expandedRepositoryIds, "expandedRepositoryIds"));
+        Objects.requireNonNull(theme, "theme");
     }
 
     public static WorkspaceUiState empty() {
-        return new WorkspaceUiState(Optional.empty(), DEFAULT_SIDEBAR_WIDTH, Set.of());
+        return new WorkspaceUiState(Optional.empty(), DEFAULT_SIDEBAR_WIDTH, Set.of(), UiTheme.DARK);
     }
 
     public WorkspaceUiState withSelectedRepositoryId(Optional<RepositoryId> newSelectedRepositoryId) {
-        return new WorkspaceUiState(newSelectedRepositoryId, sidebarWidth, expandedRepositoryIds);
+        return new WorkspaceUiState(newSelectedRepositoryId, sidebarWidth, expandedRepositoryIds, theme);
     }
 
     public WorkspaceUiState withSidebarWidth(double newSidebarWidth) {
-        return new WorkspaceUiState(selectedRepositoryId, newSidebarWidth, expandedRepositoryIds);
+        return new WorkspaceUiState(selectedRepositoryId, newSidebarWidth, expandedRepositoryIds, theme);
     }
 
     public WorkspaceUiState withExpandedRepositoryIds(Set<RepositoryId> newExpandedRepositoryIds) {
-        return new WorkspaceUiState(selectedRepositoryId, sidebarWidth, newExpandedRepositoryIds);
+        return new WorkspaceUiState(selectedRepositoryId, sidebarWidth, newExpandedRepositoryIds, theme);
+    }
+
+    public WorkspaceUiState withTheme(UiTheme newTheme) {
+        return new WorkspaceUiState(selectedRepositoryId, sidebarWidth, expandedRepositoryIds, newTheme);
     }
 }
