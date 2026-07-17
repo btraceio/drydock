@@ -22,6 +22,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
@@ -148,15 +149,37 @@ public final class SessionManager implements AutoCloseable {
         ManagedClaudeSession initial = newSessionMetadata(repository, displayName);
         persistNewSession(initial);
 
+        // Generated up front so this app -- not claude -- decides the Claude
+        // session id: launching with `claude --session-id '<uuid>'` (when the
+        // installed claude supports it) makes the session id known without
+        // having to scrape it from claude's output or state files, so a
+        // later resume can target this EXACT conversation via
+        // `claude --resume '<uuid>'` (see buildResumeCommand's fallback
+        // chain) instead of dropping the user into the interactive picker.
+        String claudeSessionId = UUID.randomUUID().toString();
+
         return capabilityService.detectCapabilities()
-                .thenApplyAsync(caps -> System.getProperty("app.cpm.diag.command",
-                        buildCreateCommand(caps, displayName)), backgroundExecutor)
-                .thenCompose(command -> createSurfaceOnFxThread(app, host, scaleFactor, command,
-                        initial.workingDirectory().toString()))
-                .handleAsync((surface, ex) -> finalizeCreate(initial, surface, ex), backgroundExecutor);
+                .thenApplyAsync(caps -> {
+                    String command = System.getProperty("app.cpm.diag.command",
+                            buildCreateCommand(caps, displayName, claudeSessionId));
+                    // contains() rather than caps.supportsSessionId(): a
+                    // diag command override never carries the id even when
+                    // the flag is supported.
+                    return new CreatePlan(command, command.contains(claudeSessionId));
+                }, backgroundExecutor)
+                .thenCompose(plan -> createSurfaceOnFxThread(app, host, scaleFactor, plan.command(),
+                        initial.workingDirectory().toString())
+                        .thenApply(surface -> new CreateLaunch(plan, surface)))
+                .handleAsync((launch, ex) -> finalizeCreate(initial, claudeSessionId, launch, ex), backgroundExecutor);
     }
 
-    private SessionOpenResult finalizeCreate(ManagedClaudeSession initial, GhosttySurface surface, Throwable ex) {
+    /** The launch command plus whether it actually carries the pre-generated {@code --session-id}. */
+    private record CreatePlan(String command, boolean sessionIdUsed) { }
+
+    private record CreateLaunch(CreatePlan plan, GhosttySurface surface) { }
+
+    private SessionOpenResult finalizeCreate(ManagedClaudeSession initial, String claudeSessionId,
+                                              CreateLaunch launch, Throwable ex) {
         if (ex != null) {
             Throwable cause = unwrap(ex);
             LOG.log(Level.WARNING, () -> "Failed to start session " + initial.id() + ": " + cause.getMessage());
@@ -164,9 +187,16 @@ public final class SessionManager implements AutoCloseable {
             throw wrap(cause);
         }
         ManagedClaudeSession running = initial.withStatus(SessionStatus.RUNNING).withLastOpenedAt(Instant.now());
+        // Only persist the Claude session id if the launch command actually
+        // used it -- persisting an id claude never saw would make a later
+        // resume target a nonexistent conversation.
+        if (launch.plan().sessionIdUsed()) {
+            running = running.withClaudeSessionId(Optional.of(claudeSessionId));
+            activeRegistry.tryMarkActive(claudeSessionId, running.id());
+        }
         persistUpdatedSession(running);
-        activeSurfaces.put(running.id(), surface);
-        return new SessionOpenResult.Opened(running, surface);
+        activeSurfaces.put(running.id(), launch.surface());
+        return new SessionOpenResult.Opened(running, launch.surface());
     }
 
     // ---- 11.2 Resume a session ---------------------------------------------
@@ -333,20 +363,50 @@ public final class SessionManager implements AutoCloseable {
 
     // ---- Command construction (pure; unit-testable without a window) ------
 
-    /** Plan section 11.1: {@code claude -n '<name>'} if supported, else plain {@code claude}. */
-    static String buildCreateCommand(ClaudeCapabilities capabilities, String displayName) {
-        return capabilities.supportsName() ? "claude -n " + shellQuote(displayName) : "claude";
+    /**
+     * Strips the nested-Claude-Code environment markers before launching
+     * {@code claude}. When these variables are present (i.e. this app was
+     * itself launched from inside a Claude Code session -- a terminal
+     * driven by claude, a dev workflow, etc.), the spawned interactive
+     * claude detects the nesting and does NOT persist its transcript: the
+     * session then cannot be resumed later ("No conversation found with
+     * session ID ..."), silently defeating this manager's whole
+     * resume-exact-session feature. Verified empirically: an interactive
+     * {@code claude --session-id <uuid>} run with these variables present
+     * saves nothing under any id; the identical run with them stripped
+     * saves and resumes normally. Managed sessions must always behave like
+     * real standalone sessions, so they are unconditionally stripped.
+     */
+    static final String ENV_CLEANUP_PREFIX = "env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT"
+            + " -u CLAUDE_CODE_EXECPATH -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION"
+            + " -u CLAUDE_EFFORT ";
+
+    /**
+     * Plan section 11.1: {@code claude -n '<name>'} if supported, else plain
+     * {@code claude}; additionally {@code --session-id '<uuid>'} when
+     * supported, so the exact Claude conversation is known up front and a
+     * later resume can target it directly (see {@link #buildResumeCommand}).
+     */
+    static String buildCreateCommand(ClaudeCapabilities capabilities, String displayName, String claudeSessionId) {
+        StringBuilder command = new StringBuilder(ENV_CLEANUP_PREFIX).append("claude");
+        if (capabilities.supportsName()) {
+            command.append(" -n ").append(shellQuote(displayName));
+        }
+        if (capabilities.supportsSessionId()) {
+            command.append(" --session-id ").append(shellQuote(claudeSessionId));
+        }
+        return command.toString();
     }
 
     /** Plan section 11.2's exact fallback chain: id, then name, then bare {@code --resume}. */
     static String buildResumeCommand(ManagedClaudeSession session) {
         if (session.claudeSessionId().isPresent()) {
-            return "claude --resume " + shellQuote(session.claudeSessionId().get());
+            return ENV_CLEANUP_PREFIX + "claude --resume " + shellQuote(session.claudeSessionId().get());
         }
         if (session.claudeSessionName().isPresent()) {
-            return "claude --resume " + shellQuote(session.claudeSessionName().get());
+            return ENV_CLEANUP_PREFIX + "claude --resume " + shellQuote(session.claudeSessionName().get());
         }
-        return "claude --resume";
+        return ENV_CLEANUP_PREFIX + "claude --resume";
     }
 
     /** Wraps {@code value} as a single POSIX shell single-quoted argument, safe against embedded shell metacharacters. */

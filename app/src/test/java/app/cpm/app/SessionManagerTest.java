@@ -124,44 +124,60 @@ class SessionManagerTest {
     void resumeCommandPrefersTheClaudeSessionIdWhenKnown() {
         ManagedClaudeSession session = sessionWith(Path.of("/tmp"), Optional.of("abc-123"), Optional.of("ignored-name"));
 
-        assertEquals("claude --resume 'abc-123'", SessionManager.buildResumeCommand(session));
+        assertEquals(SessionManager.ENV_CLEANUP_PREFIX + "claude --resume 'abc-123'", SessionManager.buildResumeCommand(session));
     }
 
     @Test
     void resumeCommandFallsBackToTheClaudeSessionNameWhenNoIdIsKnown() {
         ManagedClaudeSession session = sessionWith(Path.of("/tmp"), Optional.empty(), Optional.of("my-name"));
 
-        assertEquals("claude --resume 'my-name'", SessionManager.buildResumeCommand(session));
+        assertEquals(SessionManager.ENV_CLEANUP_PREFIX + "claude --resume 'my-name'", SessionManager.buildResumeCommand(session));
     }
 
     @Test
     void resumeCommandFallsBackToTheBareOfficialPickerWhenNeitherIsKnown() {
         ManagedClaudeSession session = sessionWith(Path.of("/tmp"), Optional.empty(), Optional.empty());
 
-        assertEquals("claude --resume", SessionManager.buildResumeCommand(session));
+        assertEquals(SessionManager.ENV_CLEANUP_PREFIX + "claude --resume", SessionManager.buildResumeCommand(session));
     }
 
     @Test
     void resumeCommandShellQuotesAnIdContainingASingleQuote() {
         ManagedClaudeSession session = sessionWith(Path.of("/tmp"), Optional.of("weird'id"), Optional.empty());
 
-        assertEquals("claude --resume 'weird'\\''id'", SessionManager.buildResumeCommand(session));
+        assertEquals(SessionManager.ENV_CLEANUP_PREFIX + "claude --resume 'weird'\\''id'", SessionManager.buildResumeCommand(session));
     }
 
     // ---- 11.1 create command -------------------------------------------------
 
     @Test
     void createCommandIncludesNameFlagWhenSupported() {
-        ClaudeCapabilities capabilities = new ClaudeCapabilities(true, true, false, "1.0.0");
+        ClaudeCapabilities capabilities = new ClaudeCapabilities(true, true, false, false, "1.0.0");
 
-        assertEquals("claude -n 'my session'", SessionManager.buildCreateCommand(capabilities, "my session"));
+        assertEquals(SessionManager.ENV_CLEANUP_PREFIX + "claude -n 'my session'",
+                SessionManager.buildCreateCommand(capabilities, "my session", "uuid-1"));
     }
 
     @Test
     void createCommandOmitsNameFlagWhenNotSupported() {
-        ClaudeCapabilities capabilities = new ClaudeCapabilities(false, true, false, "0.9.0");
+        ClaudeCapabilities capabilities = new ClaudeCapabilities(false, true, false, false, "0.9.0");
 
-        assertEquals("claude", SessionManager.buildCreateCommand(capabilities, "my session"));
+        assertEquals(SessionManager.ENV_CLEANUP_PREFIX + "claude", SessionManager.buildCreateCommand(capabilities, "my session", "uuid-1"));
+    }
+
+    @Test
+    void createCommandPinsTheSessionIdWhenSupported() {
+        ClaudeCapabilities capabilities = new ClaudeCapabilities(true, true, false, true, "1.0.0");
+
+        assertEquals(SessionManager.ENV_CLEANUP_PREFIX + "claude -n 'my session' --session-id 'uuid-1'",
+                SessionManager.buildCreateCommand(capabilities, "my session", "uuid-1"));
+    }
+
+    @Test
+    void createCommandOmitsTheSessionIdWhenNotSupported() {
+        ClaudeCapabilities capabilities = new ClaudeCapabilities(false, true, false, false, "0.9.0");
+
+        assertEquals(SessionManager.ENV_CLEANUP_PREFIX + "claude", SessionManager.buildCreateCommand(capabilities, "my session", "uuid-1"));
     }
 
     // ---- MISSING_WORKING_DIRECTORY detection --------------------------------
