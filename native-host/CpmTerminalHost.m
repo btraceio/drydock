@@ -15,6 +15,9 @@
 @property(nonatomic, assign) void *keyCallbackUserdata;
 @property(nonatomic, assign) cpm_terminal_host_scroll_event_cb scrollCallback;
 @property(nonatomic, assign) void *scrollCallbackUserdata;
+@property(nonatomic, assign) cpm_terminal_host_mouse_pos_event_cb mousePosCallback;
+@property(nonatomic, assign) void *mousePosCallbackUserdata;
+@property(nonatomic, strong) NSTrackingArea *cpmTrackingArea;
 /// Local NSEvent monitor installed while this view exists (see
 /// cpm_terminal_host_create). JavaFX's Glass layer intercepts some key
 /// events (notably arrow keys, which it treats as focus-traversal) in its
@@ -89,11 +92,44 @@
     return result != nil ? self : nil;
 }
 
+// mouseMoved: events require a tracking area; activeAlways so position
+// reporting works even while the JavaFX window is not key.
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    if (self.cpmTrackingArea != nil) {
+        [self removeTrackingArea:self.cpmTrackingArea];
+    }
+    self.cpmTrackingArea = [[NSTrackingArea alloc]
+        initWithRect:NSZeroRect
+             options:(NSTrackingMouseMoved | NSTrackingActiveAlways | NSTrackingInVisibleRect)
+               owner:self
+            userInfo:nil];
+    [self addTrackingArea:self.cpmTrackingArea];
+}
+
+// Reports the event's position in this view's coordinate space (isFlipped
+// => already top-left origin, matching Ghostty's convention).
+- (void)forwardMousePos:(NSEvent *)event {
+    if (self.mousePosCallback == NULL) {
+        return;
+    }
+    NSPoint pos = [self convertPoint:event.locationInWindow fromView:nil];
+    self.mousePosCallback(self.mousePosCallbackUserdata, pos.x, pos.y,
+                          (uint32_t)event.modifierFlags);
+}
+
+- (void)mouseMoved:(NSEvent *)event {
+    [self forwardMousePos:event];
+}
+
 - (void)scrollWheel:(NSEvent *)event {
     if (getenv("CPM_DIAG_SCROLL_LOG") != NULL) {
         NSLog(@"cpm scrollWheel: dy=%f precise=%d cb=%p", event.scrollingDeltaY,
               (int)event.hasPreciseScrollingDeltas, (void *)self.scrollCallback);
     }
+    // Position first: mouse-reporting TUIs hit-test the wheel event against
+    // the last reported position (see the header's comment).
+    [self forwardMousePos:event];
     if (self.scrollCallback == NULL) {
         return;
     }
@@ -276,4 +312,15 @@ void cpm_terminal_host_set_scroll_event_callback(cpm_terminal_host_t host,
     CpmTerminalHostKeyForwardingView *view = (__bridge CpmTerminalHostKeyForwardingView *)host;
     view.scrollCallback = callback;
     view.scrollCallbackUserdata = userdata;
+}
+
+void cpm_terminal_host_set_mouse_pos_event_callback(cpm_terminal_host_t host,
+                                                     cpm_terminal_host_mouse_pos_event_cb callback,
+                                                     void *userdata) {
+    if (host == NULL) {
+        return;
+    }
+    CpmTerminalHostKeyForwardingView *view = (__bridge CpmTerminalHostKeyForwardingView *)host;
+    view.mousePosCallback = callback;
+    view.mousePosCallbackUserdata = userdata;
 }

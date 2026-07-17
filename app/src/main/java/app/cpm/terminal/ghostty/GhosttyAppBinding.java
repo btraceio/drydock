@@ -164,6 +164,7 @@ final class GhosttyAppBinding {
     final MethodHandle surfaceText;
     final MethodHandle surfaceKey;
     final MethodHandle surfaceMouseScroll;
+    final MethodHandle surfaceMousePos;
     final MethodHandle surfaceProcessExited;
     final MethodHandle surfaceReadText;
     final MethodHandle surfaceFreeText;
@@ -252,6 +253,13 @@ final class GhosttyAppBinding {
         // scroll_mods is `typedef int` in ghostty.h (packed ScrollMods).
         this.surfaceMouseScroll = linker.downcallHandle(
             find(lookup, "ghostty_surface_mouse_scroll"),
+            FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.JAVA_DOUBLE,
+                ValueLayout.JAVA_DOUBLE, ValueLayout.JAVA_INT)
+        );
+        // void ghostty_surface_mouse_pos(ghostty_surface_t, double, double,
+        //                                ghostty_input_mods_e);
+        this.surfaceMousePos = linker.downcallHandle(
+            find(lookup, "ghostty_surface_mouse_pos"),
             FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.JAVA_DOUBLE,
                 ValueLayout.JAVA_DOUBLE, ValueLayout.JAVA_INT)
         );

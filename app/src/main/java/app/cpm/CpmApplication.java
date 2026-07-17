@@ -185,22 +185,52 @@ public final class CpmApplication extends Application {
             t.start();
         }
 
-        // Diagnostic hook: ~14s after startup, sends N synthetic scroll-up
-        // events through the selected tab's scroll path (verifies the
-        // Java -> ghostty_surface_mouse_scroll pipeline without real
-        // NSEvents). Inert unless -Dapp.cpm.diag.scrollTest is set to the
-        // per-event pixel delta (e.g. 40).
+        // Diagnostic hook: types a line of text (base64-encoded, so it can
+        // ride CPM_EXTRA_JVM_ARGS without word-splitting) into the selected
+        // tab ~12s after startup, followed by Enter -- through the exact
+        // same key-translation path real AppKit key events take. Inert
+        // unless -Dapp.cpm.diag.typeText is set.
+        String typeText = System.getProperty("app.cpm.diag.typeText");
+        if (typeText != null) {
+            String decoded = new String(java.util.Base64.getDecoder().decode(typeText),
+                    java.nio.charset.StandardCharsets.UTF_8);
+            Thread typer = new Thread(() -> {
+                try {
+                    Thread.sleep(12_000);
+                } catch (InterruptedException e) {
+                    return;
+                }
+                Platform.runLater(() -> {
+                    decoded.codePoints().forEach(cp -> {
+                        String ch = new String(Character.toChars(cp));
+                        mainWorkspace.diagPressKey(0, ch, ch);
+                    });
+                    mainWorkspace.diagPressKey(36, "\r", "\r"); // Return
+                    System.out.println("[diag] typed " + decoded.length() + " chars + Enter");
+                });
+            });
+            typer.setDaemon(true);
+            typer.start();
+        }
+
+        // Diagnostic hook: sends 10 synthetic scroll-up events through the
+        // selected tab's scroll path (verifies the Java ->
+        // ghostty_surface_mouse_scroll pipeline without real NSEvents).
+        // Value is "<delaySeconds>,<pixelDelta>" (e.g. "14,40"); inert
+        // unless -Dapp.cpm.diag.scrollTest is set.
         String scrollTest = System.getProperty("app.cpm.diag.scrollTest");
         if (scrollTest != null) {
-            double delta = Double.parseDouble(scrollTest);
-            System.out.println("[diag] scrollTest armed, delta=" + delta);
+            String[] parts = scrollTest.split(",");
+            long delaySeconds = parts.length > 1 ? Long.parseLong(parts[0]) : 14;
+            double delta = Double.parseDouble(parts[parts.length - 1]);
+            System.out.println("[diag] scrollTest armed, delay=" + delaySeconds + "s delta=" + delta);
             // NOTE for future diag hooks: macOS App Nap freezes this sleep
             // when the app is fully occluded AND its pty is silent -- pair
             // this hook with a command that emits periodic (even invisible)
             // output, or the wake never happens. Found empirically.
             Thread scroller = new Thread(() -> {
                 try {
-                    Thread.sleep(14_000);
+                    Thread.sleep(delaySeconds * 1000);
                 } catch (InterruptedException e) {
                     return;
                 }

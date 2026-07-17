@@ -139,6 +139,22 @@ public final class GhosttySurface implements AutoCloseable {
     }
 
     /**
+     * Reports the mouse position over the surface (view-local points,
+     * top-left origin -- Ghostty's own SurfaceView convention). Required
+     * for mouse-reporting TUIs, which hit-test wheel/click events against
+     * the last reported position. {@code mods} is a ghostty mods bitmask
+     * (same encoding as {@code sendKey}).
+     */
+    public void sendMousePos(double x, double y, int mods) {
+        checkOpen();
+        try {
+            binding.surfaceMousePos.invoke(surface, x, y, mods);
+        } catch (Throwable t) {
+            throw new GhosttyBinding.GhosttyNativeCallException("ghostty_surface_mouse_pos", t);
+        }
+    }
+
+    /**
      * Forwards a mouse-wheel/trackpad scroll to the terminal (scrollback in
      * the shell, or mouse-scroll reporting to a TUI that enabled it).
      * {@code scrollMods} is the packed {@code ghostty_input_scroll_mods_t}

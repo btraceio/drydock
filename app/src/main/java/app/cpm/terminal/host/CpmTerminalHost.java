@@ -90,6 +90,16 @@ public final class CpmTerminalHost implements AutoCloseable {
         );
     }
 
+    /** Registers the callback invoked for mouseMoved events (and immediately before each scroll). */
+    public void setMousePosEventListener(MousePosEventListener listener) {
+        checkNotDestroyed();
+        binding.setMousePosEventCallback(
+            handle,
+            (x, y, modifierFlags) -> listener.onMousePosEvent(x, y, modifierFlags),
+            keyCallbackArena
+        );
+    }
+
     /**
      * Returns the raw {@code NSView*} that a renderer (e.g. libghostty via
      * the Ghostty adapter) should target. Restricted, by convention, to
@@ -145,5 +155,15 @@ public final class CpmTerminalHost implements AutoCloseable {
     @FunctionalInterface
     public interface ScrollEventListener {
         void onScrollEvent(double deltaX, double deltaY, int scrollMods);
+    }
+
+    /**
+     * Java-side shape of a mouse-position event: view-local coordinates,
+     * top-left origin, in points (Ghostty's {@code ghostty_surface_mouse_pos}
+     * convention); {@code modifierFlags} is the raw NSEvent modifierFlags.
+     */
+    @FunctionalInterface
+    public interface MousePosEventListener {
+        void onMousePosEvent(double x, double y, int modifierFlags);
     }
 }

@@ -133,6 +133,25 @@ void cpm_terminal_host_set_scroll_event_callback(cpm_terminal_host_t host,
                                                   cpm_terminal_host_scroll_event_cb callback,
                                                   void *userdata);
 
+// Mouse-position forwarding. `x`/`y` are in the host view's coordinate
+// space, top-left origin, in points (the same convention Ghostty's own
+// macOS SurfaceView uses for ghostty_surface_mouse_pos). Fired on
+// mouseMoved (via an always-active tracking area) AND immediately before
+// every scroll callback -- terminal programs that enable mouse reporting
+// (e.g. claude's TUI) hit-test wheel events against the reported
+// position, so scrolls without a fresh position land at (0,0) and get
+// dropped. `modifier_flags` is the raw NSEvent modifierFlags.
+typedef void (*cpm_terminal_host_mouse_pos_event_cb)(void *userdata,
+                                                      double x,
+                                                      double y,
+                                                      uint32_t modifier_flags);
+
+// Registers (or clears, if callback is NULL) the mouse-position callback
+// for this host. Only one callback may be registered at a time.
+void cpm_terminal_host_set_mouse_pos_event_callback(cpm_terminal_host_t host,
+                                                     cpm_terminal_host_mouse_pos_event_cb callback,
+                                                     void *userdata);
+
 #ifdef __cplusplus
 }
 #endif

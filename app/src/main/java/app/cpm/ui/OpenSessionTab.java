@@ -314,10 +314,27 @@ final class OpenSessionTab {
         placeholder.getChildren().remove(statusLabel);
         host.setKeyEventListener(this::onKeyEvent);
         host.setScrollEventListener(this::onScrollEvent);
+        host.setMousePosEventListener(this::onMousePosEvent);
+    }
+
+    /** Forwards the mouse position (view points, top-left origin) to the surface. */
+    private void onMousePosEvent(double x, double y, int modifierFlags) {
+        if (disposed || surfaceClosing || surface == null) {
+            return;
+        }
+        try {
+            surface.sendMousePos(x, y, translateModifiers(modifierFlags));
+        } catch (IllegalStateException e) {
+            // Surface closed in the teardown gap; see tickAndDraw's identical catch.
+        }
     }
 
     /** Diagnostic-only: feeds a synthetic scroll through the same path a real scrollWheel takes. */
     void diagScroll(double deltaY) {
+        // Real scrollWheel events report the position first (see the host
+        // shim); mirror that with the terminal-region center so
+        // mouse-reporting TUIs hit-test the scroll as inside the content.
+        onMousePosEvent(placeholder.getWidth() / 2, placeholder.getHeight() / 2, 0);
         onScrollEvent(0, deltaY, 1);
     }
 

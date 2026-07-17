@@ -53,8 +53,22 @@ final class CpmTerminalHostBinding {
         ValueLayout.JAVA_BYTE    // uint8_t scroll_mods (packed ghostty ScrollMods)
     );
 
+    /** Java-side shape of {@code cpm_terminal_host_mouse_pos_event_cb}. */
+    @FunctionalInterface
+    interface MousePosEventListener {
+        void onMousePosEvent(double x, double y, int modifierFlags);
+    }
+
+    private static final FunctionDescriptor MOUSE_POS_EVENT_CB_DESCRIPTOR = FunctionDescriptor.ofVoid(
+        ValueLayout.ADDRESS,     // void* userdata
+        ValueLayout.JAVA_DOUBLE, // double x (view-local, top-left origin, points)
+        ValueLayout.JAVA_DOUBLE, // double y
+        ValueLayout.JAVA_INT     // uint32_t modifier_flags
+    );
+
     private static final MethodHandle KEY_EVENT_TRAMPOLINE;
     private static final MethodHandle SCROLL_EVENT_TRAMPOLINE;
+    private static final MethodHandle MOUSE_POS_EVENT_TRAMPOLINE;
 
     static {
         try {
@@ -86,6 +100,18 @@ final class CpmTerminalHostBinding {
                     byte.class
                 )
             );
+            MOUSE_POS_EVENT_TRAMPOLINE = MethodHandles.lookup().findStatic(
+                CpmTerminalHostBinding.class,
+                "dispatchMousePosEvent",
+                MethodType.methodType(
+                    void.class,
+                    MousePosEventListener.class,
+                    MemorySegment.class,
+                    double.class,
+                    double.class,
+                    int.class
+                )
+            );
         } catch (ReflectiveOperationException e) {
             throw new ExceptionInInitializerError(e);
         }
@@ -101,6 +127,7 @@ final class CpmTerminalHostBinding {
     private final MethodHandle destroy;
     private final MethodHandle setKeyEventCallback;
     private final MethodHandle setScrollEventCallback;
+    private final MethodHandle setMousePosEventCallback;
 
     CpmTerminalHostBinding(SymbolLookup lookup) {
         // cpm_terminal_host_t cpm_terminal_host_create(void* parent_nsview);
@@ -154,6 +181,12 @@ final class CpmTerminalHostBinding {
         // void cpm_terminal_host_set_scroll_event_callback(host, cb, userdata);
         this.setScrollEventCallback = linker.downcallHandle(
             find(lookup, "cpm_terminal_host_set_scroll_event_callback"),
+            FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
+        );
+
+        // void cpm_terminal_host_set_mouse_pos_event_callback(host, cb, userdata);
+        this.setMousePosEventCallback = linker.downcallHandle(
+            find(lookup, "cpm_terminal_host_set_mouse_pos_event_callback"),
             FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
         );
     }
@@ -243,6 +276,31 @@ final class CpmTerminalHostBinding {
         } catch (Throwable t) {
             throw new HostNativeCallException("cpm_terminal_host_set_scroll_event_callback", t);
         }
+    }
+
+    /**
+     * Registers {@code listener} as the host's mouse-position callback; same
+     * arena-lifetime contract as {@link #setKeyEventCallback}.
+     */
+    void setMousePosEventCallback(MemorySegment host, MousePosEventListener listener, Arena arena) {
+        MethodHandle bound = MethodHandles.insertArguments(MOUSE_POS_EVENT_TRAMPOLINE, 0, listener);
+        MemorySegment stub = linker.upcallStub(bound, MOUSE_POS_EVENT_CB_DESCRIPTOR, arena);
+        try {
+            setMousePosEventCallback.invoke(host, stub, MemorySegment.NULL);
+        } catch (Throwable t) {
+            throw new HostNativeCallException("cpm_terminal_host_set_mouse_pos_event_callback", t);
+        }
+    }
+
+    /** Upcall trampoline invoked directly by native code; see MOUSE_POS_EVENT_TRAMPOLINE. */
+    @SuppressWarnings("unused")
+    private static void dispatchMousePosEvent(
+            MousePosEventListener listener,
+            MemorySegment userdata,
+            double x,
+            double y,
+            int modifierFlags) {
+        listener.onMousePosEvent(x, y, modifierFlags);
     }
 
     /** Upcall trampoline invoked directly by native code; see SCROLL_EVENT_TRAMPOLINE. */
