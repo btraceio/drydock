@@ -313,6 +313,24 @@ final class OpenSessionTab {
         this.surface = surface;
         placeholder.getChildren().remove(statusLabel);
         host.setKeyEventListener(this::onKeyEvent);
+        host.setScrollEventListener(this::onScrollEvent);
+    }
+
+    /** Diagnostic-only: feeds a synthetic scroll through the same path a real scrollWheel takes. */
+    void diagScroll(double deltaY) {
+        onScrollEvent(0, deltaY, 1);
+    }
+
+    /** Forwards a raw scrollWheel event (already in ghostty's units/mods) to the surface. */
+    private void onScrollEvent(double deltaX, double deltaY, int scrollMods) {
+        if (disposed || surfaceClosing || surface == null) {
+            return;
+        }
+        try {
+            surface.sendMouseScroll(deltaX, deltaY, scrollMods);
+        } catch (IllegalStateException e) {
+            // Surface closed in the teardown gap; see tickAndDraw's identical catch.
+        }
     }
 
     GhosttyApp app() {

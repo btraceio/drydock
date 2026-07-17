@@ -139,6 +139,21 @@ public final class GhosttySurface implements AutoCloseable {
     }
 
     /**
+     * Forwards a mouse-wheel/trackpad scroll to the terminal (scrollback in
+     * the shell, or mouse-scroll reporting to a TUI that enabled it).
+     * {@code scrollMods} is the packed {@code ghostty_input_scroll_mods_t}
+     * produced by the host shim's scrollWheel handler.
+     */
+    public void sendMouseScroll(double deltaX, double deltaY, int scrollMods) {
+        checkOpen();
+        try {
+            binding.surfaceMouseScroll.invoke(surface, deltaX, deltaY, scrollMods);
+        } catch (Throwable t) {
+            throw new GhosttyBinding.GhosttyNativeCallException("ghostty_surface_mouse_scroll", t);
+        }
+    }
+
+    /**
      * Applies {@code app}'s current config to this live surface via
      * {@code ghostty_surface_update_config} (used for theme switches --
      * call after {@link GhosttyApp#updateConfig}).

@@ -40,7 +40,21 @@ final class CpmTerminalHostBinding {
         ValueLayout.JAVA_LONG  // size_t unshifted_characters_len
     );
 
+    /** Java-side shape of {@code cpm_terminal_host_scroll_event_cb}. */
+    @FunctionalInterface
+    interface ScrollEventListener {
+        void onScrollEvent(double deltaX, double deltaY, int scrollMods);
+    }
+
+    private static final FunctionDescriptor SCROLL_EVENT_CB_DESCRIPTOR = FunctionDescriptor.ofVoid(
+        ValueLayout.ADDRESS,     // void* userdata
+        ValueLayout.JAVA_DOUBLE, // double delta_x
+        ValueLayout.JAVA_DOUBLE, // double delta_y
+        ValueLayout.JAVA_BYTE    // uint8_t scroll_mods (packed ghostty ScrollMods)
+    );
+
     private static final MethodHandle KEY_EVENT_TRAMPOLINE;
+    private static final MethodHandle SCROLL_EVENT_TRAMPOLINE;
 
     static {
         try {
@@ -60,6 +74,18 @@ final class CpmTerminalHostBinding {
                     long.class
                 )
             );
+            SCROLL_EVENT_TRAMPOLINE = MethodHandles.lookup().findStatic(
+                CpmTerminalHostBinding.class,
+                "dispatchScrollEvent",
+                MethodType.methodType(
+                    void.class,
+                    ScrollEventListener.class,
+                    MemorySegment.class,
+                    double.class,
+                    double.class,
+                    byte.class
+                )
+            );
         } catch (ReflectiveOperationException e) {
             throw new ExceptionInInitializerError(e);
         }
@@ -74,6 +100,7 @@ final class CpmTerminalHostBinding {
     private final MethodHandle setFocused;
     private final MethodHandle destroy;
     private final MethodHandle setKeyEventCallback;
+    private final MethodHandle setScrollEventCallback;
 
     CpmTerminalHostBinding(SymbolLookup lookup) {
         // cpm_terminal_host_t cpm_terminal_host_create(void* parent_nsview);
@@ -121,6 +148,12 @@ final class CpmTerminalHostBinding {
         // void cpm_terminal_host_set_key_event_callback(host, cb, userdata);
         this.setKeyEventCallback = linker.downcallHandle(
             find(lookup, "cpm_terminal_host_set_key_event_callback"),
+            FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
+        );
+
+        // void cpm_terminal_host_set_scroll_event_callback(host, cb, userdata);
+        this.setScrollEventCallback = linker.downcallHandle(
+            find(lookup, "cpm_terminal_host_set_scroll_event_callback"),
             FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
         );
     }
@@ -196,6 +229,31 @@ final class CpmTerminalHostBinding {
         } catch (Throwable t) {
             throw new HostNativeCallException("cpm_terminal_host_set_key_event_callback", t);
         }
+    }
+
+    /**
+     * Registers {@code listener} as the host's scroll-event callback; same
+     * arena-lifetime contract as {@link #setKeyEventCallback}.
+     */
+    void setScrollEventCallback(MemorySegment host, ScrollEventListener listener, Arena arena) {
+        MethodHandle bound = MethodHandles.insertArguments(SCROLL_EVENT_TRAMPOLINE, 0, listener);
+        MemorySegment stub = linker.upcallStub(bound, SCROLL_EVENT_CB_DESCRIPTOR, arena);
+        try {
+            setScrollEventCallback.invoke(host, stub, MemorySegment.NULL);
+        } catch (Throwable t) {
+            throw new HostNativeCallException("cpm_terminal_host_set_scroll_event_callback", t);
+        }
+    }
+
+    /** Upcall trampoline invoked directly by native code; see SCROLL_EVENT_TRAMPOLINE. */
+    @SuppressWarnings("unused")
+    private static void dispatchScrollEvent(
+            ScrollEventListener listener,
+            MemorySegment userdata,
+            double deltaX,
+            double deltaY,
+            byte scrollMods) {
+        listener.onScrollEvent(deltaX, deltaY, scrollMods & 0xFF);
     }
 
     /** Upcall trampoline invoked directly by native code; see KEY_EVENT_TRAMPOLINE. */

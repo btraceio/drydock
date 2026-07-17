@@ -401,6 +401,11 @@ public final class MainWorkspace extends BorderPane {
         currentlySelected().ifPresent(open -> open.diagPressKey(keyCode, characters, unshiftedCharacters));
     }
 
+    /** Diagnostic-only: sends a scroll through the selected tab's scroll path. */
+    public void diagScroll(double deltaY) {
+        currentlySelected().ifPresent(open -> open.diagScroll(deltaY));
+    }
+
     // ---- Exit watcher --------------------------------------------------------
 
     private void pollForExitedProcesses() {

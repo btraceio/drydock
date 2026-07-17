@@ -185,18 +185,62 @@ public final class CpmApplication extends Application {
             t.start();
         }
 
+        // Diagnostic hook: ~14s after startup, sends N synthetic scroll-up
+        // events through the selected tab's scroll path (verifies the
+        // Java -> ghostty_surface_mouse_scroll pipeline without real
+        // NSEvents). Inert unless -Dapp.cpm.diag.scrollTest is set to the
+        // per-event pixel delta (e.g. 40).
+        String scrollTest = System.getProperty("app.cpm.diag.scrollTest");
+        if (scrollTest != null) {
+            double delta = Double.parseDouble(scrollTest);
+            System.out.println("[diag] scrollTest armed, delta=" + delta);
+            // NOTE for future diag hooks: macOS App Nap freezes this sleep
+            // when the app is fully occluded AND its pty is silent -- pair
+            // this hook with a command that emits periodic (even invisible)
+            // output, or the wake never happens. Found empirically.
+            Thread scroller = new Thread(() -> {
+                try {
+                    Thread.sleep(14_000);
+                } catch (InterruptedException e) {
+                    return;
+                }
+                Platform.runLater(() -> {
+                    for (int i = 0; i < 10; i++) {
+                        mainWorkspace.diagScroll(delta);
+                    }
+                    System.out.println("[diag] sent 10 scroll events, delta=" + delta);
+                });
+            });
+            scroller.setDaemon(true);
+            scroller.start();
+        }
+
         if (Boolean.getBoolean("app.cpm.diag.autoCreateSession")) {
-            Platform.runLater(() -> repositoryManager.addRepository(
-                    java.nio.file.Path.of(System.getProperty("app.cpm.diag.repo")))
-                .whenComplete((repo, ex) -> Platform.runLater(() -> {
-                    if (ex != null) {
-                        System.out.println("[diag] addRepository failed: " + ex);
+            // app.cpm.diag.repo accepts a comma-separated list; each entry is
+            // registered and gets a session, staggered 8s apart -- exercises
+            // MULTIPLE simultaneous ghostty surfaces, not just the first.
+            String[] diagRepos = System.getProperty("app.cpm.diag.repo").split(",");
+            Thread creator = new Thread(() -> {
+                for (String repoPath : diagRepos) {
+                    Platform.runLater(() -> repositoryManager.addRepository(java.nio.file.Path.of(repoPath.strip()))
+                        .whenComplete((repo, ex) -> Platform.runLater(() -> {
+                            if (ex != null) {
+                                System.out.println("[diag] addRepository failed: " + ex);
+                                return;
+                            }
+                            System.out.println("[diag] repo added: " + repo);
+                            mainWorkspace.openNewSession(repo);
+                            System.out.println("[diag] openNewSession called for " + repo.displayName());
+                        })));
+                    try {
+                        Thread.sleep(8_000);
+                    } catch (InterruptedException e) {
                         return;
                     }
-                    System.out.println("[diag] repo added: " + repo);
-                    mainWorkspace.openNewSession(repo);
-                    System.out.println("[diag] openNewSession called");
-                })));
+                }
+            });
+            creator.setDaemon(true);
+            creator.start();
         }
     }
 

@@ -13,6 +13,8 @@
 @interface CpmTerminalHostKeyForwardingView : NSView
 @property(nonatomic, assign) cpm_terminal_host_key_event_cb keyCallback;
 @property(nonatomic, assign) void *keyCallbackUserdata;
+@property(nonatomic, assign) cpm_terminal_host_scroll_event_cb scrollCallback;
+@property(nonatomic, assign) void *scrollCallbackUserdata;
 /// Local NSEvent monitor installed while this view exists (see
 /// cpm_terminal_host_create). JavaFX's Glass layer intercepts some key
 /// events (notably arrow keys, which it treats as focus-traversal) in its
@@ -71,6 +73,34 @@
 
 - (void)keyUp:(NSEvent *)event {
     [self forwardKeyEvent:event down:NO];
+}
+
+- (void)scrollWheel:(NSEvent *)event {
+    if (self.scrollCallback == NULL) {
+        return;
+    }
+    // Mirrors Ghostty's own macOS SurfaceView.scrollWheel: raw scrolling
+    // deltas, 2x'd for high-precision devices, momentum phase packed into
+    // ghostty's ScrollMods bit layout (see the header's comment).
+    double x = event.scrollingDeltaX;
+    double y = event.scrollingDeltaY;
+    bool precision = event.hasPreciseScrollingDeltas;
+    if (precision) {
+        x *= 2;
+        y *= 2;
+    }
+    uint8_t momentum = 0;
+    switch (event.momentumPhase) {
+        case NSEventPhaseBegan: momentum = 1; break;
+        case NSEventPhaseStationary: momentum = 2; break;
+        case NSEventPhaseChanged: momentum = 3; break;
+        case NSEventPhaseEnded: momentum = 4; break;
+        case NSEventPhaseCancelled: momentum = 5; break;
+        case NSEventPhaseMayBegin: momentum = 6; break;
+        default: momentum = 0; break;
+    }
+    uint8_t mods = (uint8_t)((precision ? 1 : 0) | (momentum << 1));
+    self.scrollCallback(self.scrollCallbackUserdata, x, y, mods);
 }
 
 - (void)flagsChanged:(NSEvent *)event {
@@ -217,4 +247,15 @@ void cpm_terminal_host_set_key_event_callback(cpm_terminal_host_t host,
     CpmTerminalHostKeyForwardingView *view = (__bridge CpmTerminalHostKeyForwardingView *)host;
     view.keyCallback = callback;
     view.keyCallbackUserdata = userdata;
+}
+
+void cpm_terminal_host_set_scroll_event_callback(cpm_terminal_host_t host,
+                                                  cpm_terminal_host_scroll_event_cb callback,
+                                                  void *userdata) {
+    if (host == NULL) {
+        return;
+    }
+    CpmTerminalHostKeyForwardingView *view = (__bridge CpmTerminalHostKeyForwardingView *)host;
+    view.scrollCallback = callback;
+    view.scrollCallbackUserdata = userdata;
 }

@@ -80,6 +80,16 @@ public final class CpmTerminalHost implements AutoCloseable {
         );
     }
 
+    /** Registers the callback invoked for every scrollWheel event the host view receives. */
+    public void setScrollEventListener(ScrollEventListener listener) {
+        checkNotDestroyed();
+        binding.setScrollEventCallback(
+            handle,
+            (deltaX, deltaY, scrollMods) -> listener.onScrollEvent(deltaX, deltaY, scrollMods),
+            keyCallbackArena
+        );
+    }
+
     /**
      * Returns the raw {@code NSView*} that a renderer (e.g. libghostty via
      * the Ghostty adapter) should target. Restricted, by convention, to
@@ -124,5 +134,16 @@ public final class CpmTerminalHost implements AutoCloseable {
     public interface KeyEventListener {
         void onKeyEvent(int keyCode, int modifierFlags, boolean keyDown, String characters,
                         String unshiftedCharacters);
+    }
+
+    /**
+     * Java-side shape of a raw scrollWheel event; {@code scrollMods} is a
+     * pre-packed {@code ghostty_input_scroll_mods_t} (see
+     * native-host/CpmTerminalHost.h) ready to pass to
+     * {@code ghostty_surface_mouse_scroll} verbatim.
+     */
+    @FunctionalInterface
+    public interface ScrollEventListener {
+        void onScrollEvent(double deltaX, double deltaY, int scrollMods);
     }
 }

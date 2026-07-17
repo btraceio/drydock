@@ -114,6 +114,25 @@ void cpm_terminal_host_set_key_event_callback(cpm_terminal_host_t host,
                                                cpm_terminal_host_key_event_cb callback,
                                                void *userdata);
 
+// Raw scrollWheel forwarding (terminal scrollback / TUI mouse scroll).
+// `delta_x`/`delta_y` are NSEvent's scrollingDeltaX/Y, pre-multiplied by 2
+// for high-precision (trackpad/Magic Mouse) events -- the same subjective
+// speed factor Ghostty's own macOS SurfaceView applies. `scroll_mods` is a
+// ready-packed ghostty_input_scroll_mods_t (src/input/mouse.zig ScrollMods,
+// packed u8): bit 0 = precision, bits 1-3 = momentum phase enum
+// (none/began/stationary/changed/ended/cancelled/may_begin), packed here so
+// the Java side can hand it to ghostty_surface_mouse_scroll verbatim.
+typedef void (*cpm_terminal_host_scroll_event_cb)(void *userdata,
+                                                   double delta_x,
+                                                   double delta_y,
+                                                   uint8_t scroll_mods);
+
+// Registers (or clears, if callback is NULL) the scroll-event callback for
+// this host. Only one callback may be registered at a time.
+void cpm_terminal_host_set_scroll_event_callback(cpm_terminal_host_t host,
+                                                  cpm_terminal_host_scroll_event_cb callback,
+                                                  void *userdata);
+
 #ifdef __cplusplus
 }
 #endif
