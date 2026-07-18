@@ -9,16 +9,22 @@ import app.cpm.domain.ManagedClaudeSession;
 import app.cpm.domain.ManagedSessionId;
 import app.cpm.domain.Repository;
 import app.cpm.domain.SessionStatus;
+import app.cpm.domain.UiTheme;
 import app.cpm.git.GitBranchState;
 import app.cpm.git.GitStatusService;
 import app.cpm.terminal.ghostty.GhosttyApp;
 import app.cpm.terminal.ghostty.GhosttyNativeLibrary;
 import app.cpm.terminal.host.CpmTerminalHost;
+import javafx.animation.Animation;
+import javafx.animation.KeyFrame;
+import javafx.animation.Timeline;
 import javafx.application.Platform;
+import javafx.collections.ListChangeListener;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.control.Alert;
 import javafx.scene.control.ButtonType;
+import javafx.scene.control.Label;
 import javafx.scene.control.MenuButton;
 import javafx.scene.control.MenuItem;
 import javafx.scene.control.Tab;
@@ -26,18 +32,25 @@ import javafx.scene.control.TabPane;
 import javafx.scene.control.TextInputDialog;
 import javafx.scene.control.Tooltip;
 import javafx.scene.layout.BorderPane;
+import javafx.scene.layout.Region;
 import javafx.scene.layout.StackPane;
+import javafx.scene.layout.VBox;
 import javafx.stage.DirectoryChooser;
 import javafx.stage.Stage;
 import javafx.stage.Window;
+import javafx.util.Duration;
 
 import java.io.File;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
+import java.nio.file.Path;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Supplier;
 
 /**
  * The main pane (design handoff section 4): a {@link TabPane} of terminal
@@ -68,14 +81,14 @@ public final class MainWorkspace extends BorderPane {
     private final GitStatusService gitStatusService;
     private final Stage stage;
     private final TabPane tabPane = new TabPane();
-    private final ResumePickerView picker;
+    private final Region emptyState;
     private final MenuButton newTabButton = new MenuButton("＋");
 
     /** Every currently open tab, keyed by the managed session it hosts. */
     private final Map<ManagedSessionId, OpenSessionTab> openTabs = new LinkedHashMap<>();
 
     /** Sessions whose self-exit has already been recorded, so the watcher fires once per exit. */
-    private final java.util.Set<ManagedSessionId> exitRecorded = new java.util.HashSet<>();
+    private final Set<ManagedSessionId> exitRecorded = new HashSet<>();
 
     /**
      * Polls every open tab for a self-exited child process (the user typed
@@ -83,13 +96,13 @@ public final class MainWorkspace extends BorderPane {
      * the app observes that). Without this, a session whose process died
      * stays {@code RUNNING} in the sidebar indefinitely.
      */
-    private final javafx.animation.Timeline exitWatcher = new javafx.animation.Timeline(
-            new javafx.animation.KeyFrame(javafx.util.Duration.seconds(1), e -> pollForExitedProcesses()));
+    private final Timeline exitWatcher = new Timeline(
+            new KeyFrame(Duration.seconds(1), e -> pollForExitedProcesses()));
 
     private Runnable onSessionsChanged = () -> { };
 
     /** Current UI theme, for terminal config selection; wired by CpmApplication once the shell exists. */
-    private java.util.function.Supplier<app.cpm.domain.UiTheme> themeProvider = () -> app.cpm.domain.UiTheme.DARK;
+    private Supplier<UiTheme> themeProvider = () -> UiTheme.DARK;
 
     public MainWorkspace(SessionManager sessionManager, RepositoryManager repositoryManager,
                           GitStatusService gitStatusService, Stage stage) {
@@ -103,8 +116,10 @@ public final class MainWorkspace extends BorderPane {
         tabPane.getStyleClass().add("session-tabs");
         tabPane.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE); // tabs carry their own close button
 
-        picker = new ResumePickerView(repositoryManager, gitStatusService, new ConversationCatalog(),
-                this::resumeConversation);
+        // The design's resume picker (ResumePickerView) is parked for now:
+        // sessions are already persisted per repository in the sidebar, so
+        // the default no-tab state is a plain empty pane instead.
+        emptyState = buildEmptyState();
 
         newTabButton.getStyleClass().add("new-tab-button");
         newTabButton.setTooltip(new Tooltip("New session in…"));
@@ -115,7 +130,7 @@ public final class MainWorkspace extends BorderPane {
             }
         });
 
-        StackPane center = new StackPane(tabPane, picker, newTabButton);
+        StackPane center = new StackPane(tabPane, emptyState, newTabButton);
         StackPane.setAlignment(newTabButton, Pos.TOP_RIGHT);
         StackPane.setMargin(newTabButton, new Insets(10, 10, 0, 0));
         setCenter(center);
@@ -127,7 +142,7 @@ public final class MainWorkspace extends BorderPane {
             updatePickerVisibility();
             onSessionsChanged.run();
         });
-        tabPane.getTabs().addListener((javafx.collections.ListChangeListener<Tab>) change -> updatePickerVisibility());
+        tabPane.getTabs().addListener((ListChangeListener<Tab>) change -> updatePickerVisibility());
         stage.focusedProperty().addListener((obs, wasFocused, isFocused) -> {
             if (isFocused) {
                 currentlySelected().ifPresent(OpenSessionTab::focus);
@@ -135,10 +150,24 @@ public final class MainWorkspace extends BorderPane {
         });
 
         updatePickerVisibility();
-        picker.refresh();
 
-        exitWatcher.setCycleCount(javafx.animation.Animation.INDEFINITE);
+        exitWatcher.setCycleCount(Animation.INDEFINITE);
         exitWatcher.play();
+    }
+
+    /** The no-session-selected placeholder (the design's resume picker is parked; see constructor). */
+    private Region buildEmptyState() {
+        Label glyph = new Label("❯");
+        glyph.getStyleClass().add("picker-empty-glyph");
+        Label title = new Label("No session open");
+        title.getStyleClass().add("picker-empty-title");
+        Label hint = new Label(
+                "Pick a session in the sidebar, or start a new one with the + button (⌘N).");
+        hint.getStyleClass().add("picker-empty-hint");
+        VBox box = new VBox(8, glyph, title, hint);
+        box.setAlignment(Pos.CENTER);
+        box.getStyleClass().add("main-pane");
+        return box;
     }
 
     private void populateNewTabMenu() {
@@ -161,32 +190,26 @@ public final class MainWorkspace extends BorderPane {
     }
 
     /**
-     * The picker shows whenever no tab is selected. While tabs exist it
-     * starts below the tab strip (so the strip stays clickable); with no
+     * The empty state shows whenever no tab is selected. While tabs exist
+     * it starts below the tab strip (so the strip stays clickable); with no
      * tabs at all it fills the pane.
      */
     private void updatePickerVisibility() {
-        boolean showPicker = tabPane.getSelectionModel().getSelectedItem() == null;
+        boolean show = tabPane.getSelectionModel().getSelectedItem() == null;
         boolean hasTabs = !tabPane.getTabs().isEmpty();
-        StackPane.setMargin(picker, new Insets(hasTabs ? TAB_STRIP_HEIGHT : 0, 0, 0, 0));
-        if (showPicker && !picker.isVisible()) {
-            picker.refresh();
-        }
-        picker.setVisible(showPicker);
-        picker.setManaged(showPicker);
-        if (showPicker) {
-            Platform.runLater(picker::focusSearch);
-        }
+        StackPane.setMargin(emptyState, new Insets(hasTabs ? TAB_STRIP_HEIGHT : 0, 0, 0, 0));
+        emptyState.setVisible(show);
+        emptyState.setManaged(show);
     }
 
     /** Wires where new terminals read the current theme from (design: terminal follows the app theme). */
-    public void setThemeProvider(java.util.function.Supplier<app.cpm.domain.UiTheme> provider) {
-        this.themeProvider = provider == null ? () -> app.cpm.domain.UiTheme.DARK : provider;
+    public void setThemeProvider(Supplier<UiTheme> provider) {
+        this.themeProvider = provider == null ? () -> UiTheme.DARK : provider;
     }
 
     /** Re-themes every open terminal to {@code theme} (called on the FX thread by the theme toggle). */
-    public void applyTerminalTheme(app.cpm.domain.UiTheme theme) {
-        java.nio.file.Path configFile = TerminalThemes.configFileFor(theme);
+    public void applyTerminalTheme(UiTheme theme) {
+        Path configFile = TerminalThemes.configFileFor(theme);
         for (OpenSessionTab open : openTabs.values()) {
             open.applyTerminalTheme(configFile);
         }
@@ -303,7 +326,54 @@ public final class MainWorkspace extends BorderPane {
                 removeTab(placeholderTab);
                 promptForReplacementDirectory(missing.session());
             }
+            case SessionOpenResult.MissingConversation missing -> {
+                removeTab(placeholderTab);
+                promptForMissingConversation(missing.session());
+            }
         }
+    }
+
+    /**
+     * The session is pinned to a Claude conversation whose transcript no
+     * longer exists (claude would just exit with "No conversation found"):
+     * offer a fresh conversation under the same name, or deleting the
+     * session -- never a dead terminal.
+     */
+    private void promptForMissingConversation(ManagedClaudeSession session) {
+        ButtonType startFresh = new ButtonType("Start new conversation");
+        ButtonType delete = new ButtonType("Delete session");
+
+        Alert prompt = new Alert(Alert.AlertType.CONFIRMATION);
+        prompt.setTitle("Conversation not found");
+        prompt.setHeaderText("The conversation for \"" + session.displayName() + "\" no longer exists");
+        prompt.setContentText("Claude has no stored history for this session's conversation id anymore "
+                + "(it may have been cleaned up). Start a fresh conversation under the same name, "
+                + "or delete the session?");
+        prompt.getButtonTypes().setAll(startFresh, delete, ButtonType.CANCEL);
+
+        Optional<ButtonType> choice = prompt.showAndWait();
+        if (choice.isEmpty() || choice.get() == ButtonType.CANCEL) {
+            onSessionsChanged.run();
+            return;
+        }
+        if (choice.get() == delete) {
+            sessionManager.deleteSession(session.id()).whenComplete((v, ex) -> Platform.runLater(() -> {
+                if (ex != null) {
+                    UiErrors.show("Could not delete session", ex);
+                }
+                noteSessionDeleted(session.id());
+                onSessionsChanged.run();
+            }));
+            return;
+        }
+
+        // Start fresh: reuse the managed session row, new claude conversation.
+        OpenSessionTab placeholderTab = createOpenSessionTab(session.id(), session.displayName(),
+                repositoryFor(session));
+        addAndSelect(placeholderTab);
+        double scale = stage.getOutputScaleX();
+        sessionManager.startFreshConversation(session.id(), placeholderTab.app(), placeholderTab.host(), scale)
+                .whenComplete((result, ex) -> Platform.runLater(() -> handleOpenResult(placeholderTab, result, ex)));
     }
 
     private void attachOpenedSession(OpenSessionTab placeholderTab, SessionOpenResult.Opened opened) {

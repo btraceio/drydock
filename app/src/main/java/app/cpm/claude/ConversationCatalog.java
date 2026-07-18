@@ -18,6 +18,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Optional;
 
 /**
  * Discovers resumable Claude conversations for a repository by scanning
@@ -89,7 +90,7 @@ public final class ConversationCatalog {
         return List.copyOf(conversations);
     }
 
-    private java.util.Optional<Conversation> readConversation(Path transcript) {
+    private Optional<Conversation> readConversation(Path transcript) {
         String fileName = transcript.getFileName().toString();
         String sessionId = fileName.substring(0, fileName.length() - ".jsonl".length());
 
@@ -117,11 +118,11 @@ public final class ConversationCatalog {
             }
         } catch (IOException | UncheckedIOException e) {
             LOG.log(Level.DEBUG, "Skipping unreadable transcript " + transcript, e);
-            return java.util.Optional.empty();
+            return Optional.empty();
         }
 
         if (messageCount == 0) {
-            return java.util.Optional.empty();
+            return Optional.empty();
         }
 
         String title = summaryTitle != null ? summaryTitle
@@ -133,7 +134,7 @@ public final class ConversationCatalog {
         } catch (IOException e) {
             lastModified = Instant.EPOCH;
         }
-        return java.util.Optional.of(new Conversation(sessionId, truncate(title), messageCount, lastModified));
+        return Optional.of(new Conversation(sessionId, truncate(title), messageCount, lastModified));
     }
 
     private static String extractSummary(String line) {

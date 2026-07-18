@@ -25,6 +25,7 @@ import javafx.scene.layout.VBox;
 import javafx.stage.Stage;
 
 import java.lang.System.Logger;
+import java.nio.file.Path;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Consumer;
@@ -191,7 +192,7 @@ final class OpenSessionTab {
         return graphic;
     }
 
-    private javafx.scene.layout.Region buildSessionHeader(Optional<Repository> repository) {
+    private Region buildSessionHeader(Optional<Repository> repository) {
         Button back = new Button("←");
         back.getStyleClass().add("header-icon-button");
         back.setTooltip(new Tooltip("Back to resume picker (Esc)"));
@@ -283,7 +284,7 @@ final class OpenSessionTab {
      * Safe to call before the surface is attached -- a surface created
      * later inherits the app's (already updated) config.
      */
-    void applyTerminalTheme(java.nio.file.Path configFile) {
+    void applyTerminalTheme(Path configFile) {
         if (disposed || surfaceClosing) {
             return;
         }

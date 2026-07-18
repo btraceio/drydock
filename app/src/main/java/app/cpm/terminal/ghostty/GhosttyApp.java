@@ -1,12 +1,15 @@
 package app.cpm.terminal.ghostty;
 
 import java.lang.foreign.Arena;
+import java.lang.foreign.SymbolLookup;
 import java.lang.foreign.FunctionDescriptor;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
+import java.nio.file.Path;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -37,9 +40,9 @@ public final class GhosttyApp implements AutoCloseable {
      * docs/native-integration.md ("Lifecycle and thread constraints"),
      * {@code ghostty_init} must be called exactly once before any other
      * libghostty API -- callers should invoke this before {@link
-     * #create(java.lang.foreign.SymbolLookup, Runnable)}.
+     * #create(SymbolLookup, Runnable)}.
      */
-    public static void ensureProcessInitialized(java.lang.foreign.SymbolLookup lookup) {
+    public static void ensureProcessInitialized(SymbolLookup lookup) {
         if (PROCESS_INITIALIZED.compareAndSet(false, true)) {
             int result = new GhosttyBinding(lookup).init();
             if (result != 0) {
@@ -77,8 +80,8 @@ public final class GhosttyApp implements AutoCloseable {
      *                 the correct thread itself, e.g. {@code () -> Platform.runLater(...)})
      *                 whenever libghostty wants {@link #tick()} called again.
      */
-    public static GhosttyApp create(java.lang.foreign.SymbolLookup lookup, Runnable onWakeup) {
-        return create(lookup, onWakeup, java.util.Optional.empty());
+    public static GhosttyApp create(SymbolLookup lookup, Runnable onWakeup) {
+        return create(lookup, onWakeup, Optional.empty());
     }
 
     /**
@@ -88,8 +91,8 @@ public final class GhosttyApp implements AutoCloseable {
      * own {@code ~/.config/ghostty} is deliberately never read, so managed
      * terminals always match the app theme deterministically.
      */
-    public static GhosttyApp create(java.lang.foreign.SymbolLookup lookup, Runnable onWakeup,
-                                     java.util.Optional<java.nio.file.Path> configFile) {
+    public static GhosttyApp create(SymbolLookup lookup, Runnable onWakeup,
+                                     Optional<Path> configFile) {
         GhosttyAppBinding binding = new GhosttyAppBinding(lookup);
         GhosttyBinding coreBinding = new GhosttyBinding(lookup);
         MemorySegment config = loadedConfig(coreBinding, configFile);
@@ -143,7 +146,7 @@ public final class GhosttyApp implements AutoCloseable {
     }
 
     private static MemorySegment loadedConfig(GhosttyBinding coreBinding,
-                                               java.util.Optional<java.nio.file.Path> configFile) {
+                                               Optional<Path> configFile) {
         MemorySegment config = coreBinding.configNew();
         try {
             configFile.ifPresent(path -> coreBinding.configLoadFile(config, path.toString()));
@@ -165,9 +168,9 @@ public final class GhosttyApp implements AutoCloseable {
      * frees the replaced one). Existing surfaces still need {@link
      * GhosttySurface#applyConfig(GhosttyApp)} to pick the change up.
      */
-    public void updateConfig(java.nio.file.Path configFile) {
+    public void updateConfig(Path configFile) {
         checkOpen();
-        MemorySegment newConfig = loadedConfig(coreBinding, java.util.Optional.of(configFile));
+        MemorySegment newConfig = loadedConfig(coreBinding, Optional.of(configFile));
         try {
             binding.appUpdateConfig.invoke(app, newConfig);
         } catch (Throwable t) {

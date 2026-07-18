@@ -8,6 +8,7 @@ import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.lang.System.Logger;
+import java.nio.charset.StandardCharsets;
 
 /**
  * A running {@code ghostty_surface_t} attached to a caller-provided AppKit
@@ -361,7 +362,7 @@ public final class GhosttySurface implements AutoCloseable {
                     return "";
                 }
                 byte[] bytes = textPtr.reinterpret(textLen).toArray(ValueLayout.JAVA_BYTE);
-                return new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
+                return new String(bytes, StandardCharsets.UTF_8);
             } finally {
                 binding.surfaceFreeText.invoke(surface, text);
             }

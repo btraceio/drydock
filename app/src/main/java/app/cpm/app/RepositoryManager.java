@@ -1,6 +1,7 @@
 package app.cpm.app;
 
 import app.cpm.domain.ApplicationState;
+import app.cpm.domain.UiTheme;
 import app.cpm.domain.Repository;
 import app.cpm.domain.RepositoryCatalog;
 import app.cpm.domain.RepositoryId;
@@ -152,7 +153,7 @@ public final class RepositoryManager {
      * a theme toggle is a discrete user action, so save-on-change is cheap
      * and means a crash never loses it).
      */
-    public synchronized void updateTheme(app.cpm.domain.UiTheme theme) {
+    public synchronized void updateTheme(UiTheme theme) {
         state = stateRepository.load().withUi(state.ui().withTheme(theme));
         stateRepository.save(state);
     }

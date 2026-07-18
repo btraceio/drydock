@@ -22,6 +22,12 @@ import app.cpm.terminal.ghostty.GhosttySurface;
  *       stored working directory no longer exists; no surface was created.
  *       Offer the user a replacement directory and call {@link
  *       SessionManager#reassignWorkingDirectory} before retrying.</li>
+ *   <li>{@link MissingConversation} -- the session is pinned to a Claude
+ *       conversation id whose transcript no longer exists on disk (claude
+ *       would exit immediately with "No conversation found"); no surface
+ *       was created. Offer to start a fresh conversation under the same
+ *       name ({@link SessionManager#startFreshConversation}) or delete the
+ *       session.</li>
  * </ul>
  */
 public sealed interface SessionOpenResult {
@@ -36,5 +42,8 @@ public sealed interface SessionOpenResult {
     }
 
     record MissingWorkingDirectory(ManagedClaudeSession session) implements SessionOpenResult {
+    }
+
+    record MissingConversation(ManagedClaudeSession session) implements SessionOpenResult {
     }
 }

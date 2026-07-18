@@ -3,6 +3,7 @@ package app.cpm.ui;
 import app.cpm.domain.UiTheme;
 import javafx.scene.Scene;
 import javafx.scene.control.SplitPane;
+import javafx.stage.StageStyle;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.Region;
 import javafx.scene.layout.StackPane;
@@ -59,7 +60,7 @@ public final class AppShell {
         });
         titleBar.showThemeGlyphFor(initialTheme);
 
-        stage.initStyle(javafx.stage.StageStyle.UNDECORATED);
+        stage.initStyle(StageStyle.UNDECORATED);
         stage.setMinWidth(MIN_WINDOW_WIDTH);
         stage.setMinHeight(MIN_WINDOW_HEIGHT);
         stage.setScene(scene);

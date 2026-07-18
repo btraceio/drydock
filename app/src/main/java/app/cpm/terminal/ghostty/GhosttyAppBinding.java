@@ -296,7 +296,7 @@ final class GhosttyAppBinding {
         return linker;
     }
 
-    static MemorySegment allocateCString(java.lang.foreign.Arena arena, String value) {
+    static MemorySegment allocateCString(Arena arena, String value) {
         byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
         MemorySegment segment = arena.allocate(bytes.length + 1L);
         MemorySegment.copy(bytes, 0, segment, ValueLayout.JAVA_BYTE, 0, bytes.length);

@@ -43,6 +43,7 @@ import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
@@ -179,7 +180,7 @@ public final class RepositorySidebar extends VBox {
         String query = filterField.getText() == null ? "" : filterField.getText().strip().toLowerCase(Locale.ROOT);
 
         List<Repository> repositories = sorted(repositoryManager.repositories());
-        List<TreeItem<SidebarNode>> repoItems = new java.util.ArrayList<>();
+        List<TreeItem<SidebarNode>> repoItems = new ArrayList<>();
         int runningTotal = 0;
 
         for (Repository repository : repositories) {

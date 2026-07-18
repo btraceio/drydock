@@ -1,10 +1,13 @@
 package app.cpm.ui;
 
+import app.cpm.domain.UiTheme;
 import javafx.geometry.Pos;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
 import javafx.scene.control.Tooltip;
 import javafx.scene.layout.HBox;
+import javafx.scene.layout.Priority;
+import javafx.scene.layout.Region;
 import javafx.scene.layout.StackPane;
 import javafx.stage.Stage;
 import javafx.stage.WindowEvent;
@@ -71,8 +74,8 @@ final class TitleBar extends StackPane {
     }
 
     /** Updates the theme toggle glyph: shows the theme you would switch TO. */
-    void showThemeGlyphFor(app.cpm.domain.UiTheme current) {
-        themeButton.setText(current == app.cpm.domain.UiTheme.DARK ? "☀" : "☾");
+    void showThemeGlyphFor(UiTheme current) {
+        themeButton.setText(current == UiTheme.DARK ? "☀" : "☾");
     }
 
     private static Button trafficLight(String role, Runnable action) {
@@ -91,9 +94,9 @@ final class TitleBar extends StackPane {
         return button;
     }
 
-    private static javafx.scene.layout.Region spacer() {
-        javafx.scene.layout.Region spacer = new javafx.scene.layout.Region();
-        HBox.setHgrow(spacer, javafx.scene.layout.Priority.ALWAYS);
+    private static Region spacer() {
+        Region spacer = new Region();
+        HBox.setHgrow(spacer, Priority.ALWAYS);
         return spacer;
     }
 }

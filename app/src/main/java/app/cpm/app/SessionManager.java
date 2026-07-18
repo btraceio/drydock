@@ -2,6 +2,7 @@ package app.cpm.app;
 
 import app.cpm.claude.ClaudeCapabilities;
 import app.cpm.claude.ClaudeCapabilityService;
+import app.cpm.claude.ConversationCatalog;
 import app.cpm.domain.ApplicationState;
 import app.cpm.domain.ManagedClaudeSession;
 import app.cpm.domain.ManagedSessionId;
@@ -120,6 +121,9 @@ public final class SessionManager implements AutoCloseable {
                 .toList();
         return loaded.withSessions(normalized);
     }
+
+    /** Read-only view into claude's transcript store, for {@code checkResumeBlocked}'s missing-conversation probe. */
+    private final ConversationCatalog conversationCatalog = new ConversationCatalog();
 
     public synchronized ApplicationState state() {
         return state;
@@ -273,7 +277,45 @@ public final class SessionManager implements AutoCloseable {
             return Optional.of(new SessionOpenResult.MissingWorkingDirectory(missing));
         }
 
+        // A pinned conversation id whose transcript claude no longer has on
+        // disk would make `claude --resume '<id>'` exit immediately with "No
+        // conversation found" -- detect it up front (same transcript layout
+        // ConversationCatalog reads) so the UI can offer a fresh start or
+        // deletion instead of presenting a dead terminal.
+        if (claudeSessionId.isPresent()) {
+            Path transcript = conversationCatalog.projectDirFor(session.workingDirectory())
+                    .resolve(claudeSessionId.get() + ".jsonl");
+            if (Files.notExists(transcript)) {
+                return Optional.of(new SessionOpenResult.MissingConversation(session));
+            }
+        }
+
         return Optional.empty();
+    }
+
+    /**
+     * Relaunches a session whose pinned conversation vanished (see {@link
+     * SessionOpenResult.MissingConversation}) as a BRAND-NEW claude
+     * conversation under the same display name and working directory: the
+     * managed session row is kept, its stale Claude session id replaced by
+     * a freshly pinned one.
+     */
+    public CompletableFuture<SessionOpenResult> startFreshConversation(ManagedSessionId sessionId, GhosttyApp app,
+                                                                        CpmTerminalHost host, double scaleFactor) {
+        ManagedClaudeSession session = requireSession(sessionId);
+        ManagedClaudeSession cleared = session.withClaudeSessionId(Optional.empty());
+        persistUpdatedSession(cleared);
+
+        String claudeSessionId = UUID.randomUUID().toString();
+        return capabilityService.detectCapabilities()
+                .thenApplyAsync(caps -> {
+                    String command = buildCreateCommand(caps, cleared.displayName(), claudeSessionId);
+                    return new CreatePlan(command, command.contains(claudeSessionId));
+                }, backgroundExecutor)
+                .thenCompose(plan -> createSurfaceOnFxThread(app, host, scaleFactor, plan.command(),
+                        cleared.workingDirectory().toString())
+                        .thenApply(surface -> new CreateLaunch(plan, surface)))
+                .handleAsync((launch, ex) -> finalizeCreate(cleared, claudeSessionId, launch, ex), backgroundExecutor);
     }
 
     /** Explicitly reassigns a session's working directory (plan section 11.2), e.g. after the user picks a replacement. */

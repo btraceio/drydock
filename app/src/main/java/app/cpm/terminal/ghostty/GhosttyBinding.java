@@ -1,11 +1,13 @@
 package app.cpm.terminal.ghostty;
 
+import java.lang.foreign.Arena;
 import java.lang.foreign.FunctionDescriptor;
 import java.lang.foreign.Linker;
 import java.lang.foreign.MemoryLayout;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.SegmentAllocator;
 import java.lang.foreign.StructLayout;
+import java.lang.foreign.SymbolLookup;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
 import java.nio.charset.StandardCharsets;
@@ -73,7 +75,7 @@ final class GhosttyBinding {
     private final MethodHandle ghosttyConfigLoadFile;
     private final MethodHandle ghosttyConfigFinalize;
 
-    GhosttyBinding(java.lang.foreign.SymbolLookup lookup) {
+    GhosttyBinding(SymbolLookup lookup) {
         Linker linker = Linker.nativeLinker();
 
         // int ghostty_init(uintptr_t argc, char** argv);
@@ -121,7 +123,7 @@ final class GhosttyBinding {
         );
     }
 
-    private static MemorySegment find(java.lang.foreign.SymbolLookup lookup, String name) {
+    private static MemorySegment find(SymbolLookup lookup, String name) {
         return lookup.find(name)
             .orElseThrow(() -> new IllegalStateException(
                 "Symbol '" + name + "' not found in libghostty. This usually means the pinned "
@@ -184,7 +186,7 @@ final class GhosttyBinding {
      * is copied into a transient confined arena for the duration of the call.
      */
     void configLoadFile(MemorySegment config, String path) {
-        try (java.lang.foreign.Arena arena = java.lang.foreign.Arena.ofConfined()) {
+        try (Arena arena = Arena.ofConfined()) {
             ghosttyConfigLoadFile.invoke(config, arena.allocateFrom(path));
         } catch (Throwable t) {
             throw new GhosttyNativeCallException("ghostty_config_load_file", t);

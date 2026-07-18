@@ -3,19 +3,28 @@ package app.cpm;
 import app.cpm.app.RepositoryManager;
 import app.cpm.app.SessionManager;
 import app.cpm.claude.ClaudeCapabilityService;
+import app.cpm.domain.Repository;
 import app.cpm.git.GitStatusService;
+import app.cpm.github.GitHubService;
 import app.cpm.state.JsonApplicationStateRepository;
 import app.cpm.ui.AppShell;
+import app.cpm.ui.GitHubCloneModal;
 import app.cpm.ui.MainWorkspace;
+import app.cpm.ui.RepositorySidebar;
 import javafx.application.Application;
 import javafx.application.Platform;
-import javafx.scene.Scene;
 import javafx.scene.control.Alert;
 import javafx.scene.control.ButtonType;
+import javafx.scene.control.TextInputControl;
+import javafx.scene.control.Tooltip;
+import javafx.scene.input.KeyCode;
+import javafx.scene.input.KeyEvent;
 import javafx.stage.Stage;
-import javafx.stage.StageStyle;
 import javafx.stage.WindowEvent;
 
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.util.Base64;
 import java.util.Optional;
 
 /**
@@ -53,7 +62,7 @@ public final class CpmApplication extends Application {
     private SessionManager sessionManager;
     private MainWorkspace mainWorkspace;
     private AppShell appShell;
-    private app.cpm.github.GitHubService gitHubService;
+    private GitHubService gitHubService;
 
     private boolean shutdownConfirmed;
 
@@ -65,7 +74,7 @@ public final class CpmApplication extends Application {
         // ~/Library/Application Support state.
         String diagStateFile = System.getProperty("app.cpm.diag.stateFile");
         JsonApplicationStateRepository stateRepository = diagStateFile != null
-                ? new JsonApplicationStateRepository(java.nio.file.Path.of(diagStateFile))
+                ? new JsonApplicationStateRepository(Path.of(diagStateFile))
                 : JsonApplicationStateRepository.atDefaultLocation();
         if (diagStateFile != null) {
             System.out.println("[diag] state file: " + stateRepository.stateFile());
@@ -77,8 +86,8 @@ public final class CpmApplication extends Application {
         sessionManager = new SessionManager(stateRepository, claudeCapabilityService);
 
         mainWorkspace = new MainWorkspace(sessionManager, repositoryManager, gitStatusService, primaryStage);
-        app.cpm.ui.RepositorySidebar sidebar =
-                new app.cpm.ui.RepositorySidebar(repositoryManager, gitStatusService, sessionManager, mainWorkspace);
+        RepositorySidebar sidebar =
+                new RepositorySidebar(repositoryManager, gitStatusService, sessionManager, mainWorkspace);
         mainWorkspace.setOnSessionsChanged(sidebar::refreshSessions);
 
         appShell = new AppShell(primaryStage, WINDOW_TITLE, sidebar, mainWorkspace,
@@ -94,9 +103,9 @@ public final class CpmApplication extends Application {
 
         mainWorkspace.setThemeProvider(() -> appShell.themeManager().theme());
 
-        gitHubService = new app.cpm.github.GitHubService();
+        gitHubService = new GitHubService();
         sidebar.setOnCloneFromGitHub(() -> appShell.modalLayer().show(
-                new app.cpm.ui.GitHubCloneModal(gitHubService, repositoryManager, appShell.modalLayer()::close)));
+                new GitHubCloneModal(gitHubService, repositoryManager, appShell.modalLayer()::close)));
 
         installGlobalShortcuts(sidebar);
 
@@ -120,7 +129,7 @@ public final class CpmApplication extends Application {
         // Inert unless -Dapp.cpm.diag.openGithubModal=true.
         if (Boolean.getBoolean("app.cpm.diag.openGithubModal")) {
             Platform.runLater(() -> {
-                appShell.modalLayer().show(new app.cpm.ui.GitHubCloneModal(
+                appShell.modalLayer().show(new GitHubCloneModal(
                         gitHubService, repositoryManager, appShell.modalLayer()::close));
                 System.out.println("[diag] github modal opened");
             });
@@ -203,8 +212,8 @@ public final class CpmApplication extends Application {
         // unless -Dapp.cpm.diag.typeText is set.
         String typeText = System.getProperty("app.cpm.diag.typeText");
         if (typeText != null) {
-            String decoded = new String(java.util.Base64.getDecoder().decode(typeText),
-                    java.nio.charset.StandardCharsets.UTF_8);
+            String decoded = new String(Base64.getDecoder().decode(typeText),
+                    StandardCharsets.UTF_8);
             Thread typer = new Thread(() -> {
                 try {
                     Thread.sleep(12_000);
@@ -263,7 +272,7 @@ public final class CpmApplication extends Application {
             String[] diagRepos = System.getProperty("app.cpm.diag.repo").split(",");
             Thread creator = new Thread(() -> {
                 for (String repoPath : diagRepos) {
-                    Platform.runLater(() -> repositoryManager.addRepository(java.nio.file.Path.of(repoPath.strip()))
+                    Platform.runLater(() -> repositoryManager.addRepository(Path.of(repoPath.strip()))
                         .whenComplete((repo, ex) -> Platform.runLater(() -> {
                             if (ex != null) {
                                 System.out.println("[diag] addRepository failed: " + ex);
@@ -276,9 +285,9 @@ public final class CpmApplication extends Application {
                             // mouse-driven flows (menu, hover tooltip) where
                             // the terminal host used to attach to the popup's
                             // window instead of the main one.
-                            javafx.scene.control.Tooltip diagPopup = null;
+                            Tooltip diagPopup = null;
                             if (Boolean.getBoolean("app.cpm.diag.popupBeforeSession")) {
-                                diagPopup = new javafx.scene.control.Tooltip("diag popup");
+                                diagPopup = new Tooltip("diag popup");
                                 diagPopup.show(primaryStage, primaryStage.getX() + 40, primaryStage.getY() + 80);
                                 System.out.println("[diag] popup shown before session");
                             }
@@ -308,13 +317,13 @@ public final class CpmApplication extends Application {
      * navigate). Keys aimed at the terminal never reach JavaFX at all --
      * the native host's NSEvent monitor consumes them first.
      */
-    private void installGlobalShortcuts(app.cpm.ui.RepositorySidebar sidebar) {
-        appShell.scene().addEventFilter(javafx.scene.input.KeyEvent.KEY_PRESSED, event -> {
+    private void installGlobalShortcuts(RepositorySidebar sidebar) {
+        appShell.scene().addEventFilter(KeyEvent.KEY_PRESSED, event -> {
             boolean inTextInput = appShell.scene().getFocusOwner()
-                    instanceof javafx.scene.control.TextInputControl;
+                    instanceof TextInputControl;
             boolean cmd = event.isShortcutDown();
 
-            if (event.getCode() == javafx.scene.input.KeyCode.ESCAPE) {
+            if (event.getCode() == KeyCode.ESCAPE) {
                 if (appShell.modalLayer().isShowingModal()) {
                     appShell.modalLayer().close();
                     event.consume();
@@ -324,22 +333,22 @@ public final class CpmApplication extends Application {
                 }
                 return;
             }
-            if (cmd && event.isShiftDown() && event.getCode() == javafx.scene.input.KeyCode.L) {
+            if (cmd && event.isShiftDown() && event.getCode() == KeyCode.L) {
                 appShell.toggleTheme();
                 event.consume();
-            } else if (cmd && event.getCode() == javafx.scene.input.KeyCode.F) {
+            } else if (cmd && event.getCode() == KeyCode.F) {
                 sidebar.focusFilter();
                 event.consume();
-            } else if (cmd && event.getCode() == javafx.scene.input.KeyCode.N) {
+            } else if (cmd && event.getCode() == KeyCode.N) {
                 activeOrFirstRepository().ifPresent(mainWorkspace::openNewSession);
                 event.consume();
-            } else if (cmd && event.getCode() == javafx.scene.input.KeyCode.R) {
+            } else if (cmd && event.getCode() == KeyCode.R) {
                 mainWorkspace.activeSessionId().flatMap(id -> sessionManager.sessions().stream()
                                 .filter(s -> s.id().equals(id)).findFirst())
                         .ifPresent(mainWorkspace::promptRenameSession);
                 event.consume();
             } else if (!inTextInput && !cmd && event.isShiftDown()
-                    && event.getCode() == javafx.scene.input.KeyCode.SLASH) {
+                    && event.getCode() == KeyCode.SLASH) {
                 appShell.showShortcutsOverlay();
                 event.consume();
             }
@@ -347,8 +356,8 @@ public final class CpmApplication extends Application {
     }
 
     /** ⌘N target: the active tab's repository, else the first registered one. */
-    private Optional<app.cpm.domain.Repository> activeOrFirstRepository() {
-        Optional<app.cpm.domain.Repository> active = mainWorkspace.activeSessionId()
+    private Optional<Repository> activeOrFirstRepository() {
+        Optional<Repository> active = mainWorkspace.activeSessionId()
                 .flatMap(id -> sessionManager.sessions().stream()
                         .filter(s -> s.id().equals(id)).findFirst())
                 .flatMap(session -> repositoryManager.repositories().stream()
