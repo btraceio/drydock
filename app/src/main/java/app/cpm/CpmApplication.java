@@ -4,8 +4,10 @@ import app.cpm.app.RepositoryManager;
 import app.cpm.app.SessionManager;
 import app.cpm.claude.ClaudeCapabilityService;
 import app.cpm.domain.Repository;
+import app.cpm.git.GhCliService;
 import app.cpm.git.GitStatusService;
 import app.cpm.github.GitHubService;
+import app.cpm.search.SessionSearchService;
 import app.cpm.state.JsonApplicationStateRepository;
 import app.cpm.ui.AppShell;
 import app.cpm.ui.GitHubCloneModal;
@@ -57,6 +59,8 @@ public final class CpmApplication extends Application {
     private static final double DEFAULT_SCENE_HEIGHT = 720;
 
     private GitStatusService gitStatusService;
+    private SessionSearchService searchService;
+    private GhCliService ghCliService;
     private ClaudeCapabilityService claudeCapabilityService;
     private RepositoryManager repositoryManager;
     private SessionManager sessionManager;
@@ -81,11 +85,14 @@ public final class CpmApplication extends Application {
         }
 
         gitStatusService = new GitStatusService();
+        searchService = new SessionSearchService();
+        ghCliService = new GhCliService();
         claudeCapabilityService = new ClaudeCapabilityService();
         repositoryManager = new RepositoryManager(stateRepository, gitStatusService);
         sessionManager = new SessionManager(stateRepository, claudeCapabilityService);
 
-        mainWorkspace = new MainWorkspace(sessionManager, repositoryManager, gitStatusService, primaryStage);
+        mainWorkspace = new MainWorkspace(sessionManager, repositoryManager, gitStatusService, searchService,
+                ghCliService, primaryStage);
         RepositorySidebar sidebar =
                 new RepositorySidebar(repositoryManager, gitStatusService, sessionManager, mainWorkspace);
         mainWorkspace.setOnSessionsChanged(sidebar::refreshSessions);
@@ -102,6 +109,7 @@ public final class CpmApplication extends Application {
                 DEFAULT_SCENE_WIDTH, DEFAULT_SCENE_HEIGHT);
 
         mainWorkspace.setThemeProvider(() -> appShell.themeManager().theme());
+        mainWorkspace.setModalLayer(appShell.modalLayer());
         // The native ghostty view paints over in-scene modals; hide it while
         // any modal is showing (see MainWorkspace.setTerminalsObscured).
         appShell.modalLayer().setOnShowingChanged(mainWorkspace::setTerminalsObscured);
@@ -109,6 +117,8 @@ public final class CpmApplication extends Application {
         gitHubService = new GitHubService();
         sidebar.setOnCloneFromGitHub(() -> appShell.modalLayer().show(
                 new GitHubCloneModal(gitHubService, repositoryManager, appShell.modalLayer()::close)));
+        sidebar.setOnNewWorktree(repository ->
+                mainWorkspace.promptNewWorktree(repository, appShell.modalLayer()));
 
         installGlobalShortcuts(sidebar);
 
@@ -358,6 +368,12 @@ public final class CpmApplication extends Application {
             } else if (cmd && event.getCode() == KeyCode.N) {
                 activeOrFirstRepository().ifPresent(mainWorkspace::openNewSession);
                 event.consume();
+            } else if (cmd && event.getCode() == KeyCode.DIGIT1) {
+                mainWorkspace.showTerminalSubTab();
+                event.consume();
+            } else if (cmd && event.getCode() == KeyCode.DIGIT2) {
+                mainWorkspace.showExplorerSubTab();
+                event.consume();
             } else if (cmd && event.getCode() == KeyCode.R) {
                 mainWorkspace.activeSessionId().flatMap(id -> sessionManager.sessions().stream()
                                 .filter(s -> s.id().equals(id)).findFirst())
@@ -431,6 +447,12 @@ public final class CpmApplication extends Application {
         }
         if (gitStatusService != null) {
             gitStatusService.close();
+        }
+        if (searchService != null) {
+            searchService.close();
+        }
+        if (ghCliService != null) {
+            ghCliService.close();
         }
     }
 

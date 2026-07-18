@@ -1,6 +1,7 @@
 package app.cpm.ui;
 
 import app.cpm.domain.ManagedSessionId;
+import app.cpm.domain.PrState;
 import app.cpm.domain.Repository;
 import app.cpm.domain.SessionStatus;
 import app.cpm.terminal.ghostty.GhosttyApp;
@@ -11,8 +12,10 @@ import javafx.geometry.Bounds;
 import javafx.geometry.Pos;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
+import javafx.scene.control.ProgressIndicator;
 import javafx.scene.control.Tab;
 import javafx.scene.control.TextField;
+import javafx.scene.control.ToggleButton;
 import javafx.scene.control.Tooltip;
 import javafx.scene.input.KeyCode;
 import javafx.scene.input.MouseButton;
@@ -29,6 +32,7 @@ import java.nio.file.Path;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 /**
  * One open terminal tab (plan section 13): owns its own {@link GhosttyApp} +
@@ -82,6 +86,9 @@ final class OpenSessionTab {
     private static final int GHOSTTY_MODS_ALT = 1 << 2;
     private static final int GHOSTTY_MODS_SUPER = 1 << 3;
 
+    /** The two views a session tab can show in its content area (design handoff "Session Explorer"). */
+    enum SubTab { TERMINAL, EXPLORER }
+
     final ManagedSessionId sessionId;
     final Tab tab;
     private final Stage stage;
@@ -89,6 +96,18 @@ final class OpenSessionTab {
     private final CpmTerminalHost host;
     private final StackPane placeholder = new StackPane();
     private final Label statusLabel = new Label("Starting session...");
+    private final BorderPane content = new BorderPane();
+
+    // -- Bottom Terminal/Explorer sub-tab bar (handoff "Session Explorer") --
+    private final ToggleButton terminalSubTabButton = new ToggleButton("❯_  Terminal");
+    private final ToggleButton explorerSubTabButton = new ToggleButton("▤  Explorer");
+    private final Label subTabContext = new Label();
+    private SubTab activeSubTab = SubTab.TERMINAL;
+    /** Built on first switch to Explorer, via {@link #setExplorerFactory}. */
+    private Region explorerView;
+    private Supplier<Region> explorerFactory;
+    /** Whether MainWorkspace wants this tab's terminal shown (selected tab, no modal). */
+    private boolean workspaceWantsVisible;
 
     // -- Tab header graphic (two-line label + dot + close; handoff 4) -------
     private final Region tabDot = SessionStatusStyles.createDot(7, SessionStatus.STARTING);
@@ -100,9 +119,21 @@ final class OpenSessionTab {
     // -- Session-view header (handoff 5) ------------------------------------
     private final Label headerTitle = new Label();
     private final Label headerMeta = new Label();
+    private final VBox headerTitles = new VBox(1);
     private final HBox statusPill = new HBox(6);
     private final Label pillLabel = new Label("idle");
     private final Region pillDot = SessionStatusStyles.createDot(7, SessionStatus.INACTIVE);
+
+    // -- Worktree context + chips + Finish (worktree handoff, section B) ----
+    private final Label worktreeContextLine = new Label();
+    private final Label aheadChip = new Label();
+    private final Label dirtyPill = new Label();
+    private final Label headerPrChip = new Label();
+    private final HBox worktreeChips = new HBox(6);
+    private final Button finishButton = new Button("Finish ▸");
+    private final Label handoffLabel = new Label();
+    private final HBox handoffPill = new HBox(6);
+    private final StackPane finishBox = new StackPane();
 
     private Runnable onCloseRequested = () -> { };
     private Consumer<String> onRenamed = name -> { };
@@ -131,9 +162,9 @@ final class OpenSessionTab {
         tab.setClosable(false); // the graphic carries its own close button (17px ×, handoff 4)
         tab.setGraphic(buildTabGraphic(repository));
 
-        BorderPane content = new BorderPane();
         content.setTop(buildSessionHeader(repository));
         content.setCenter(placeholder);
+        content.setBottom(buildSubTabBar());
         tab.setContent(content);
 
         setDisplayName(displayName);
@@ -148,6 +179,77 @@ final class OpenSessionTab {
     /** Fills the header meta line once the repository's branch is known (fetched async by MainWorkspace). */
     void setHeaderBranch(String branch, String repoName) {
         headerMeta.setText("⎇ " + branch + " · " + repoName);
+        subTabContext.setText("⎇ " + branch + " · " + repoName);
+    }
+
+    // ---- Bottom Terminal/Explorer sub-tab bar -------------------------------
+
+    private Region buildSubTabBar() {
+        terminalSubTabButton.getStyleClass().add("session-subtab");
+        terminalSubTabButton.setFocusTraversable(false);
+        terminalSubTabButton.setTooltip(new Tooltip("Terminal (⌘1)"));
+        terminalSubTabButton.setSelected(true);
+        terminalSubTabButton.setOnAction(e -> showSubTab(SubTab.TERMINAL));
+
+        explorerSubTabButton.getStyleClass().add("session-subtab");
+        explorerSubTabButton.setFocusTraversable(false);
+        explorerSubTabButton.setTooltip(new Tooltip("Explorer (⌘2)"));
+        explorerSubTabButton.setOnAction(e -> showSubTab(SubTab.EXPLORER));
+
+        subTabContext.getStyleClass().add("session-subtab-context");
+
+        Region spacer = new Region();
+        HBox.setHgrow(spacer, Priority.ALWAYS);
+
+        HBox bar = new HBox(4, terminalSubTabButton, explorerSubTabButton, spacer, subTabContext);
+        bar.setAlignment(Pos.CENTER_LEFT);
+        bar.getStyleClass().add("session-subtab-bar");
+        return bar;
+    }
+
+    /** Supplies the Explorer view on first use (MainWorkspace wires this; it knows the session's search root). */
+    void setExplorerFactory(Supplier<Region> factory) {
+        this.explorerFactory = factory;
+    }
+
+    SubTab activeSubTab() {
+        return activeSubTab;
+    }
+
+    /**
+     * Switches between the terminal and the Explorer. The terminal is a
+     * NATIVE view overlaying the scene, so showing the Explorer must both
+     * swap the center node AND hide the native host (else it keeps painting
+     * over the Explorer); switching back restores the placeholder center
+     * first and re-runs geometry after the layout pass so the native frame
+     * tracks the placeholder's fresh bounds.
+     */
+    void showSubTab(SubTab subTab) {
+        terminalSubTabButton.setSelected(subTab == SubTab.TERMINAL);
+        explorerSubTabButton.setSelected(subTab == SubTab.EXPLORER);
+        if (subTab == activeSubTab) {
+            return;
+        }
+        if (subTab == SubTab.EXPLORER) {
+            if (explorerView == null && explorerFactory != null) {
+                explorerView = explorerFactory.get();
+            }
+            if (explorerView == null) {
+                terminalSubTabButton.setSelected(true);
+                explorerSubTabButton.setSelected(false);
+                return;
+            }
+            activeSubTab = SubTab.EXPLORER;
+            content.setCenter(explorerView);
+            applyTerminalVisibility();
+        } else {
+            activeSubTab = SubTab.TERMINAL;
+            content.setCenter(placeholder);
+            applyTerminalVisibility();
+            // The center swap invalidates the placeholder's bounds only on
+            // the next layout pass; recompute the native frame after it.
+            Platform.runLater(this::updateGeometry);
+        }
     }
 
     private HBox buildTabGraphic(Optional<Repository> repository) {
@@ -201,12 +303,40 @@ final class OpenSessionTab {
 
         headerTitle.getStyleClass().add("session-title");
         headerMeta.getStyleClass().add("session-meta-line");
-        VBox titles = new VBox(1, headerTitle, headerMeta);
-        HBox.setHgrow(titles, Priority.ALWAYS);
+        headerTitles.getChildren().setAll(headerTitle, headerMeta);
+        HBox.setHgrow(headerTitles, Priority.ALWAYS);
 
         statusPill.getStyleClass().add("status-pill");
         statusPill.setAlignment(Pos.CENTER);
         statusPill.getChildren().setAll(pillDot, pillLabel);
+
+        // Worktree-only elements; hidden until configureWorktree runs.
+        worktreeContextLine.getStyleClass().add("worktree-context-line");
+        aheadChip.getStyleClass().add("chip-ahead");
+        dirtyPill.getStyleClass().add("chip-dirty");
+        headerPrChip.getStyleClass().add("pr-chip");
+        worktreeChips.getChildren().setAll(aheadChip, dirtyPill, headerPrChip);
+        worktreeChips.setAlignment(Pos.CENTER);
+        aheadChip.setVisible(false);
+        aheadChip.setManaged(false);
+        dirtyPill.setVisible(false);
+        dirtyPill.setManaged(false);
+        headerPrChip.setVisible(false);
+        headerPrChip.setManaged(false);
+
+        finishButton.getStyleClass().add("finish-button");
+        finishButton.setFocusTraversable(false);
+        ProgressIndicator spinner = new ProgressIndicator();
+        spinner.setPrefSize(12, 12);
+        handoffLabel.getStyleClass().add("handoff-label");
+        handoffPill.getChildren().setAll(spinner, handoffLabel);
+        handoffPill.setAlignment(Pos.CENTER);
+        handoffPill.getStyleClass().add("handoff-pill");
+        finishBox.getChildren().setAll(finishButton, handoffPill);
+        finishButton.setVisible(false);
+        finishButton.setManaged(false);
+        handoffPill.setVisible(false);
+        handoffPill.setManaged(false);
 
         Button rename = new Button("✎");
         rename.getStyleClass().add("header-icon-button");
@@ -214,9 +344,90 @@ final class OpenSessionTab {
         rename.setFocusTraversable(false);
         rename.setOnAction(e -> startInlineRename());
 
-        HBox header = new HBox(12, back, titles, statusPill, rename);
+        HBox header = new HBox(12, back, headerTitles, worktreeChips, finishBox, statusPill, rename);
         header.getStyleClass().add("session-header");
         return header;
+    }
+
+    // ---- Worktree context + Finish (worktree handoff, section B) ------------
+
+    /**
+     * Marks this tab as hosting a worktree session: shows the monospace
+     * context line ({@code ◫ branch → ⎇ base · path}) under the title and
+     * the {@code Finish ▸} button. Idempotent; safe to re-run when branch/
+     * base resolve later.
+     */
+    void configureWorktree(String branch, String base, Path worktreeRoot, Runnable onFinish) {
+        worktreeContextLine.setText("◫ " + branch + "  →  ⎇ " + base + "  ·  " + worktreeRoot);
+        if (!headerTitles.getChildren().contains(worktreeContextLine)) {
+            headerTitles.getChildren().add(worktreeContextLine);
+        }
+        finishButton.setOnAction(e -> onFinish.run());
+        if (!handoffPill.isVisible()) {
+            finishButton.setVisible(true);
+            finishButton.setManaged(true);
+        }
+    }
+
+    /** Updates the ↑n-ahead chip + dirty/clean pill from the worktree's observed state. */
+    void updateWorktreeStatus(boolean dirty, int commitsAhead) {
+        aheadChip.setText("↑" + commitsAhead + " ahead");
+        aheadChip.setVisible(commitsAhead > 0);
+        aheadChip.setManaged(commitsAhead > 0);
+        dirtyPill.setText(dirty ? "uncommitted" : "clean");
+        dirtyPill.getStyleClass().removeAll("chip-dirty", "chip-clean");
+        dirtyPill.getStyleClass().add(dirty ? "chip-dirty" : "chip-clean");
+        dirtyPill.setVisible(true);
+        dirtyPill.setManaged(true);
+    }
+
+    /** Updates the header PR chip ({@code PR #n} blue / {@code merged} purple / hidden). */
+    void updatePrChip(PrState prState, Optional<Integer> prNumber) {
+        headerPrChip.getStyleClass().removeAll("pr-chip", "pr-chip-merged");
+        switch (prState) {
+            case NONE -> {
+                headerPrChip.setVisible(false);
+                headerPrChip.setManaged(false);
+            }
+            case OPEN -> {
+                headerPrChip.setText(prNumber.map(n -> "PR #" + n).orElse("PR"));
+                headerPrChip.getStyleClass().add("pr-chip");
+                headerPrChip.setVisible(true);
+                headerPrChip.setManaged(true);
+            }
+            case MERGED -> {
+                headerPrChip.setText("merged");
+                headerPrChip.getStyleClass().add("pr-chip-merged");
+                headerPrChip.setVisible(true);
+                headerPrChip.setManaged(true);
+            }
+        }
+    }
+
+    /** Swaps Finish ▸ for the spinner pill ({@code Claude is merging…} etc.) while a hand-off runs. */
+    void showHandoffRunning(String label) {
+        handoffLabel.setText(label);
+        handoffPill.setVisible(true);
+        handoffPill.setManaged(true);
+        finishButton.setVisible(false);
+        finishButton.setManaged(false);
+    }
+
+    /** Flips the pill to its done state ({@code ✓ Merged} etc.); the spinner hides, the label stays. */
+    void showHandoffDone(String label) {
+        handoffLabel.setText("✓ " + label);
+        handoffPill.getChildren().getFirst().setVisible(false);
+        handoffPill.getChildren().getFirst().setManaged(false);
+    }
+
+    /** Restores the Finish ▸ button (hand-off finished or timed out). */
+    void restoreFinishButton() {
+        handoffPill.setVisible(false);
+        handoffPill.setManaged(false);
+        handoffPill.getChildren().getFirst().setVisible(true);
+        handoffPill.getChildren().getFirst().setManaged(true);
+        finishButton.setVisible(true);
+        finishButton.setManaged(true);
     }
 
     // ---- Rename -------------------------------------------------------------
@@ -398,18 +609,55 @@ final class OpenSessionTab {
     }
 
     /**
-     * Shows or hides this tab's native view. When becoming visible, unhides
-     * the view <em>before</em> computing geometry/drawing (see {@link
-     * #attachSurface}'s Javadoc for why that order matters), then focuses it.
+     * Records whether MainWorkspace wants this tab's native view shown
+     * (selected tab, no modal open) and applies the combined visibility.
+     * The view is actually shown only while the Terminal sub-tab is active
+     * -- the Explorer replaces the terminal region, so the native overlay
+     * must stay hidden even for the selected tab (see {@link #showSubTab}).
      */
     void setVisible(boolean visible) {
+        workspaceWantsVisible = visible;
+        applyTerminalVisibility();
+    }
+
+    /**
+     * Shows/hides the native view from the AND of every visibility input.
+     * When becoming visible, unhides the view <em>before</em> computing
+     * geometry/drawing (see {@link #attachSurface}'s Javadoc for why that
+     * order matters), then focuses it.
+     */
+    private void applyTerminalVisibility() {
         if (disposed || surfaceClosing) {
             return;
         }
+        boolean visible = workspaceWantsVisible && activeSubTab == SubTab.TERMINAL;
         host.setVisible(visible);
         if (visible) {
             updateGeometry();
             focus();
+        }
+    }
+
+    /**
+     * Types {@code instruction} into the live claude process as real
+     * keystrokes, then submits it with Return. Uses {@link
+     * GhosttySurface#sendTypedText} (the per-codepoint keyboard codepath),
+     * NOT {@link GhosttySurface#sendText} -- paste semantics corrupt input
+     * once claude enables bracketed paste (see onKeyEvent's Javadoc). The
+     * instruction must be a single line: an embedded newline would submit
+     * early.
+     */
+    void sendPrompt(String instruction) {
+        if (disposed || surfaceClosing || surface == null) {
+            return;
+        }
+        try {
+            surface.sendTypedText(instruction);
+            // Return keypress (raw macOS keycode 36, see SPECIAL_KEYS).
+            surface.sendKey(36, 0, true, 0);
+            surface.sendKey(36, 0, false, 0);
+        } catch (IllegalStateException e) {
+            // Surface closed in the teardown gap; see tickAndDraw's identical catch.
         }
     }
 
@@ -504,6 +752,20 @@ final class OpenSessionTab {
             return;
         }
         int mods = translateModifiers(modifierFlags);
+        // ⌘1/⌘2 (Terminal/Explorer sub-tabs) are app shortcuts, but while
+        // the terminal is focused its native NSEvent monitor sees every key
+        // BEFORE JavaFX's scene filter -- intercept them here so they switch
+        // views instead of being typed into claude.
+        String shortcutChars = characters.isEmpty() ? unshiftedCharacters : characters;
+        if ((mods & GHOSTTY_MODS_SUPER) != 0 && !shortcutChars.isEmpty()) {
+            int cp = shortcutChars.codePointAt(0);
+            if (cp == '1' || cp == '2') {
+                if (keyDown) {
+                    showSubTab(cp == '1' ? SubTab.TERMINAL : SubTab.EXPLORER);
+                }
+                return;
+            }
+        }
         boolean isShortcut = (mods & (GHOSTTY_MODS_CTRL | GHOSTTY_MODS_SUPER)) != 0;
         if (SPECIAL_KEYS.contains(keyCode) || isShortcut) {
             int unshiftedCodepoint = (!keyDown || unshiftedCharacters.isEmpty()) ? 0 : unshiftedCharacters.codePointAt(0);

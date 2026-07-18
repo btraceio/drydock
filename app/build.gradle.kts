@@ -76,6 +76,11 @@ repositories {
 }
 
 dependencies {
+    // Read-only code viewer in the Session Explorer (syntax highlighting +
+    // line-number gutter). Pulls flowless/reactfx/undofx/wellbehavedfx
+    // transitively; all run from the plain classpath like the JavaFX jars.
+    implementation("org.fxmisc.richtext:richtextfx:0.11.5")
+
     testImplementation(platform("org.junit:junit-bom:5.11.4"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
@@ -364,14 +369,15 @@ tasks.register("runtimeImage") {
             )
         }
 
-        // 2. Copy the application jar + JavaFX jars onto a plain classpath
-        // directory (app/), since the application is not yet modular (see
-        // the top-of-task comment).
+        // 2. Copy the application jar + every runtime-classpath jar (JavaFX
+        // plus third-party libraries such as RichTextFX and its transitive
+        // deps) onto a plain classpath directory (app/), since the
+        // application is not yet modular (see the top-of-task comment).
         val appLibDir = File(imageRoot, "app")
         appLibDir.mkdirs()
         project.copy {
             from(jarTaskProvider.get().archiveFile)
-            from(fxJars)
+            from(runtimeClasspathFiles.get().files.filter { it.name.endsWith(".jar") })
             into(appLibDir)
         }
 

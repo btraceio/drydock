@@ -6,6 +6,7 @@ import app.cpm.claude.ConversationCatalog;
 import app.cpm.domain.ApplicationState;
 import app.cpm.domain.ManagedClaudeSession;
 import app.cpm.domain.ManagedSessionId;
+import app.cpm.domain.PrState;
 import app.cpm.domain.Repository;
 import app.cpm.domain.SessionStatus;
 import app.cpm.state.ApplicationStateRepository;
@@ -150,7 +151,26 @@ public final class SessionManager implements AutoCloseable {
     public CompletableFuture<SessionOpenResult> createSession(Repository repository, String displayName,
                                                                GhosttyApp app, CpmTerminalHost host,
                                                                double scaleFactor) {
-        ManagedClaudeSession initial = newSessionMetadata(repository, displayName);
+        return launchNewSession(newSessionMetadata(repository, displayName), displayName, app, host, scaleFactor);
+    }
+
+    /**
+     * Creates a session living inside an (already-created) git worktree
+     * checkout: claude launches from {@code worktreeRoot}, and the session
+     * is tagged with it so the UI can render branch/dirty/PR metadata.
+     * Creating the worktree itself ({@code git worktree add}) is the
+     * caller's job, via {@link app.cpm.git.GitStatusService#createWorktree}.
+     */
+    public CompletableFuture<SessionOpenResult> createWorktreeSession(Repository repository, String displayName,
+                                                                       Path worktreeRoot, GhosttyApp app,
+                                                                       CpmTerminalHost host, double scaleFactor) {
+        ManagedClaudeSession initial = newSessionMetadata(repository, displayName, Optional.of(worktreeRoot));
+        return launchNewSession(initial, displayName, app, host, scaleFactor);
+    }
+
+    private CompletableFuture<SessionOpenResult> launchNewSession(ManagedClaudeSession initial, String displayName,
+                                                                  GhosttyApp app, CpmTerminalHost host,
+                                                                  double scaleFactor) {
         persistNewSession(initial);
 
         // Generated up front so this app -- not claude -- decides the Claude
@@ -330,6 +350,15 @@ public final class SessionManager implements AutoCloseable {
     public synchronized ManagedClaudeSession renameSession(ManagedSessionId sessionId, String newDisplayName) {
         ManagedClaudeSession session = requireSession(sessionId);
         ManagedClaudeSession updated = session.withDisplayName(newDisplayName);
+        persistUpdatedSessionLocked(updated);
+        return updated;
+    }
+
+    /** Records the observed PR lifecycle state of a worktree session's branch (Finish-panel reconciliation). */
+    public synchronized ManagedClaudeSession updatePrState(ManagedSessionId sessionId, PrState prState,
+                                                           Optional<Integer> prNumber) {
+        ManagedClaudeSession session = requireSession(sessionId);
+        ManagedClaudeSession updated = session.withPr(prState, prNumber);
         persistUpdatedSessionLocked(updated);
         return updated;
     }
@@ -524,6 +553,16 @@ public final class SessionManager implements AutoCloseable {
     }
 
     private ManagedClaudeSession newSessionMetadata(Repository repository, String displayName) {
+        return newSessionMetadata(repository, displayName, Optional.empty());
+    }
+
+    /**
+     * When {@code worktreeRoot} is present the session lives (and launches
+     * claude) inside that worktree checkout rather than the repository's
+     * main checkout -- {@code workingDirectory} IS the worktree directory.
+     */
+    private ManagedClaudeSession newSessionMetadata(Repository repository, String displayName,
+                                                    Optional<Path> worktreeRoot) {
         Instant now = Instant.now();
         return new ManagedClaudeSession(
                 ManagedSessionId.newId(),
@@ -531,11 +570,13 @@ public final class SessionManager implements AutoCloseable {
                 displayName,
                 Optional.empty(),
                 Optional.empty(),
-                repository.root(),
-                Optional.empty(),
+                worktreeRoot.orElse(repository.root()),
+                worktreeRoot,
                 SessionStatus.INACTIVE,
                 now,
                 now,
+                Optional.empty(),
+                PrState.NONE,
                 Optional.empty());
     }
 

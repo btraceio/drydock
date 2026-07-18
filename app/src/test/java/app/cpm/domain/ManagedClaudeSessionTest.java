@@ -28,6 +28,8 @@ class ManagedClaudeSessionTest {
                 SessionStatus.INACTIVE,
                 Instant.now(),
                 Instant.now(),
+                Optional.empty(),
+                PrState.NONE,
                 Optional.empty());
     }
 
@@ -55,7 +57,8 @@ class ManagedClaudeSessionTest {
         Path notNormalized = tempDir.toAbsolutePath().resolve("child/../child");
         assertThrows(IllegalArgumentException.class, () -> new ManagedClaudeSession(
                 ManagedSessionId.newId(), RepositoryId.newId(), "example", Optional.empty(), Optional.empty(),
-                dir, Optional.of(notNormalized), SessionStatus.INACTIVE, Instant.now(), Instant.now(), Optional.empty()));
+                dir, Optional.of(notNormalized), SessionStatus.INACTIVE, Instant.now(), Instant.now(), Optional.empty(),
+                PrState.NONE, Optional.empty()));
     }
 
     @Test
@@ -63,7 +66,8 @@ class ManagedClaudeSessionTest {
         Path dir = tempDir.toAbsolutePath().normalize();
         assertThrows(IllegalArgumentException.class, () -> new ManagedClaudeSession(
                 ManagedSessionId.newId(), RepositoryId.newId(), "   ", Optional.empty(), Optional.empty(),
-                dir, Optional.empty(), SessionStatus.INACTIVE, Instant.now(), Instant.now(), Optional.empty()));
+                dir, Optional.empty(), SessionStatus.INACTIVE, Instant.now(), Instant.now(), Optional.empty(),
+                PrState.NONE, Optional.empty()));
     }
 
     @Test
@@ -95,5 +99,42 @@ class ManagedClaudeSessionTest {
 
         assertEquals(1, reassigned.lastExitCode().orElseThrow());
         assertEquals(original.displayName(), reassigned.displayName());
+    }
+
+    @Test
+    void withPrSetsStateAndNumberTogetherAndPreservesOtherFields() {
+        Path dir = tempDir.toAbsolutePath().normalize();
+        ManagedClaudeSession original = sessionAt(dir);
+
+        ManagedClaudeSession withPr = original.withPr(PrState.OPEN, Optional.of(128));
+
+        assertEquals(PrState.OPEN, withPr.prState());
+        assertEquals(128, withPr.prNumber().orElseThrow());
+        assertEquals(original.id(), withPr.id());
+        assertEquals(original.displayName(), withPr.displayName());
+    }
+
+    @Test
+    void otherWithersPreservePrStateAndNumber() {
+        Path dir = tempDir.toAbsolutePath().normalize();
+        ManagedClaudeSession original = sessionAt(dir).withPr(PrState.MERGED, Optional.of(7));
+
+        ManagedClaudeSession renamed = original.withDisplayName("renamed").withStatus(SessionStatus.RUNNING);
+
+        assertEquals(PrState.MERGED, renamed.prState());
+        assertEquals(7, renamed.prNumber().orElseThrow());
+    }
+
+    @Test
+    void withWorktreeRootPreservesOtherFieldsAndValidatesPath() {
+        Path dir = tempDir.toAbsolutePath().normalize();
+        ManagedClaudeSession original = sessionAt(dir);
+
+        ManagedClaudeSession tagged = original.withWorktreeRoot(Optional.of(dir));
+        assertEquals(dir, tagged.worktreeRoot().orElseThrow());
+        assertEquals(original.id(), tagged.id());
+
+        Path notNormalized = tempDir.toAbsolutePath().resolve("child/../child");
+        assertThrows(IllegalArgumentException.class, () -> original.withWorktreeRoot(Optional.of(notNormalized)));
     }
 }

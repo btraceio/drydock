@@ -11,7 +11,7 @@
     -cpm-main: #161514;
     -cpm-tabbar: #1c1b1a;
     -cpm-input-bg: #141312;
-    -cpm-code-bg: #0f0e0d;
+    -cpm-code-bg: #141312;
     -cpm-keycap-bg: #23211f;
     -cpm-terminal-bg: #0c0c0f;
 
@@ -35,4 +35,25 @@
     /* Non-token helper: subtle row background for unselected picker rows
      * (prototype uses rgba(255,255,255,.02) dark / #ffffff light). */
     -cpm-row-bg: rgba(255, 255, 255, 0.02);
+
+    /* Worktree lifecycle (design handoff "Worktrees & Session Explorer"). */
+    -cpm-dirty: #d9a03a;
+    -cpm-dirty-soft: rgba(217, 160, 58, 0.16);
+    -cpm-pr: #6c9ce0;
+    -cpm-pr-soft: rgba(108, 156, 224, 0.16);
+    -cpm-merged: #b07ad9;
+    -cpm-merged-soft: rgba(176, 122, 217, 0.16);
+    -cpm-match-bg: rgba(217, 119, 87, 0.32);
+
+    /* Read-only code viewer palette. */
+    -cpm-code-text: #c9ccd3;
+    -cpm-code-kw: #c678dd;
+    -cpm-code-str: #98c379;
+    -cpm-code-com: #6f6a63;
+    -cpm-code-num: #d19a66;
+    -cpm-code-type: #e5c07b;
+    -cpm-code-fn: #61afef;
+    -cpm-code-anno: #56b6c2;
+    -cpm-code-punct: #8f9099;
+    -cpm-code-gutter: #5c5852;
 }

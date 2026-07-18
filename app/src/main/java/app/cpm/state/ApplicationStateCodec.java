@@ -3,6 +3,7 @@ package app.cpm.state;
 import app.cpm.domain.ApplicationState;
 import app.cpm.domain.ManagedClaudeSession;
 import app.cpm.domain.ManagedSessionId;
+import app.cpm.domain.PrState;
 import app.cpm.domain.Repository;
 import app.cpm.domain.RepositoryId;
 import app.cpm.domain.RepositorySettings;
@@ -54,7 +55,9 @@ import java.util.Set;
  *       "status": "INACTIVE" | "STARTING" | "RUNNING" | "EXITED" | "FAILED" | "MISSING_WORKING_DIRECTORY",
  *       "createdAt": "<ISO-8601 instant>",
  *       "lastOpenedAt": "<ISO-8601 instant>",
- *       "lastExitCode": <int> | null
+ *       "lastExitCode": <int> | null,
+ *       "prState": "NONE" | "OPEN" | "MERGED",
+ *       "prNumber": <int> | null
  *     }
  *   ],
  *   "ui": {
@@ -71,7 +74,10 @@ import java.util.Set;
  * like a schemaVersion-2 document that merely omits the (optional) {@code
  * sessions} member -- it decodes to an empty session list rather than
  * failing. No other field changed shape between version 1 and 2, so no
- * further per-field migration is needed. {@link #toJson} always writes the
+ * further per-field migration is needed. The {@code prState}/{@code
+ * prNumber} members (worktree lifecycle) were added later within version 2:
+ * both decode leniently -- a document without them yields {@code NONE} /
+ * empty, so no version bump was needed. {@link #toJson} always writes the
  * current version. Any {@code schemaVersion} other than 1 or 2 is treated
  * as malformed input (throws {@link StateDecodeException}), consistent
  * with how unknown versions were already rejected before this change.</p>
@@ -133,6 +139,10 @@ public final class ApplicationStateCodec {
         obj.put("lastOpenedAt", new JsonString(session.lastOpenedAt().toString()));
         obj.put("lastExitCode", session.lastExitCode()
                 .<JsonValue>map(code -> JsonNumber.of((long) code))
+                .orElse(JsonValue.JsonNull.INSTANCE));
+        obj.put("prState", new JsonString(session.prState().name()));
+        obj.put("prNumber", session.prNumber()
+                .<JsonValue>map(number -> JsonNumber.of((long) number))
                 .orElse(JsonValue.JsonNull.INSTANCE));
         return obj;
     }
@@ -215,8 +225,16 @@ public final class ApplicationStateCodec {
             Optional<Integer> lastExitCode = obj.get("lastExitCode") instanceof JsonNumber n
                     ? Optional.of(n.asInt())
                     : Optional.empty();
+            // Lenient: documents written before the worktree lifecycle
+            // existed have neither member; they decode to NONE / empty.
+            PrState prState = obj.get("prState") instanceof JsonString s
+                    ? PrState.fromPersisted(s.value())
+                    : PrState.NONE;
+            Optional<Integer> prNumber = obj.get("prNumber") instanceof JsonNumber pn
+                    ? Optional.of(pn.asInt())
+                    : Optional.empty();
             return new ManagedClaudeSession(id, repositoryId, displayName, claudeSessionId, claudeSessionName,
-                    workingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, lastExitCode);
+                    workingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, lastExitCode, prState, prNumber);
         } catch (IllegalArgumentException | DateTimeException e) {
             throw new StateDecodeException("Malformed session entry: " + e.getMessage());
         }

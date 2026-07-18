@@ -763,3 +763,565 @@
     -fx-font-size: 11.5px;
     -fx-padding: 6 10 6 10;
 }
+
+/* ---- Session sub-tabs (Terminal / Explorer, handoff "Session Explorer") -- */
+
+.session-subtab-bar {
+    -fx-background-color: -cpm-tabbar;
+    -fx-border-color: -cpm-border transparent transparent transparent;
+    -fx-border-width: 1 0 0 0;
+    -fx-min-height: 40px;
+    -fx-pref-height: 40px;
+    -fx-max-height: 40px;
+    -fx-padding: 0 12 0 8;
+}
+.session-subtab {
+    -fx-background-color: transparent;
+    -fx-background-radius: 6px;
+    -fx-text-fill: -cpm-text-dim;
+    -fx-font-size: 12px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-padding: 5 12 5 12;
+    -fx-cursor: hand;
+}
+.session-subtab:hover {
+    -fx-background-color: -cpm-hover;
+}
+.session-subtab:selected {
+    -fx-background-color: -cpm-active-bg;
+    -fx-text-fill: -cpm-text;
+}
+.session-subtab-context {
+    -fx-text-fill: -cpm-text-faint;
+    -fx-font-size: 11.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+
+/* ---- Session Explorer: search rail -------------------------------------- */
+
+.explorer-root {
+    -fx-background-color: -cpm-main;
+}
+.search-rail {
+    -fx-background-color: -cpm-sidebar;
+    -fx-border-color: transparent -cpm-border transparent transparent;
+    -fx-border-width: 0 1 0 0;
+}
+.search-rail-content {
+    -fx-padding: 12;
+    -fx-spacing: 10;
+}
+.search-rail-collapsed {
+    -fx-padding: 10 0 10 0;
+    -fx-spacing: 14;
+}
+.search-rail-title {
+    -fx-text-fill: -cpm-text-faint;
+    -fx-font-size: 11px;
+}
+.rail-collapse-button, .rail-expand-button, .viewer-gutter-toggle {
+    -fx-background-color: transparent;
+    -fx-background-radius: 6px;
+    -fx-text-fill: -cpm-text-dim;
+    -fx-font-size: 13px;
+    -fx-padding: 2 8 2 8;
+    -fx-cursor: hand;
+}
+.rail-collapse-button:hover, .rail-expand-button:hover, .viewer-gutter-toggle:hover {
+    -fx-background-color: -cpm-hover;
+    -fx-text-fill: -cpm-text;
+}
+.rail-vertical-label {
+    -fx-text-fill: -cpm-text-faint;
+    -fx-font-size: 11px;
+}
+.seg-toggle {
+    -fx-background-color: -cpm-input-bg;
+    -fx-background-radius: 7px;
+    -fx-border-color: -cpm-border;
+    -fx-border-radius: 7px;
+    -fx-padding: 2;
+}
+.seg-toggle-button {
+    -fx-background-color: transparent;
+    -fx-background-radius: 5px;
+    -fx-text-fill: -cpm-text-dim;
+    -fx-font-size: 12px;
+    -fx-padding: 3 14 3 14;
+    -fx-cursor: hand;
+}
+.seg-toggle-button:selected {
+    -fx-background-color: -cpm-accent-soft;
+    -fx-text-fill: -cpm-text;
+}
+.explorer-search-row {
+    -fx-background-color: -cpm-input-bg;
+    -fx-background-radius: 7px;
+    -fx-border-color: -cpm-border;
+    -fx-border-radius: 7px;
+    -fx-padding: 2 8 2 8;
+}
+.search-field-icon {
+    -fx-text-fill: -cpm-text-faint;
+    -fx-font-size: 13px;
+}
+.explorer-search-field {
+    -fx-background-color: transparent;
+    -fx-text-fill: -cpm-text;
+    -fx-prompt-text-fill: -cpm-text-faint;
+    -fx-font-size: 12.5px;
+    -fx-padding: 4 0 4 0;
+    -fx-background-insets: 0;
+    -fx-highlight-fill: -cpm-accent-soft;
+}
+.search-results-scroll {
+    -fx-background-color: transparent;
+}
+.search-results-scroll > .viewport {
+    -fx-background-color: transparent;
+}
+.search-results {
+    -fx-background-color: transparent;
+}
+.result-file-row {
+    -fx-background-radius: 6px;
+    -fx-padding: 3 6 3 2;
+    -fx-cursor: hand;
+}
+.result-file-row:hover {
+    -fx-background-color: -cpm-hover;
+}
+.result-check {
+    -fx-padding: 0;
+}
+.result-check .box {
+    -fx-background-color: -cpm-input-bg;
+    -fx-background-radius: 4px;
+    -fx-border-color: -cpm-border-strong;
+    -fx-border-radius: 4px;
+    -fx-padding: 2;
+}
+.result-check:selected .box {
+    -fx-background-color: -cpm-accent;
+    -fx-border-color: -cpm-accent;
+}
+.result-check:selected .mark {
+    -fx-background-color: white;
+}
+.result-caret {
+    -fx-background-color: transparent;
+    -fx-text-fill: -cpm-text-faint;
+    -fx-font-size: 10px;
+    -fx-padding: 0 2 0 2;
+    -fx-cursor: hand;
+}
+.filetype-badge {
+    -fx-background-color: -cpm-active-bg;
+    -fx-background-radius: 4px;
+    -fx-text-fill: -cpm-text-dim;
+    -fx-font-size: 9.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-padding: 1 5 1 5;
+}
+.result-file-name {
+    -fx-text-fill: -cpm-text;
+    -fx-font-size: 12.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.result-file-path {
+    -fx-text-fill: -cpm-text-faint;
+    -fx-font-size: 11px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.match-count-pill {
+    -fx-background-color: -cpm-accent-soft;
+    -fx-background-radius: 100px;
+    -fx-text-fill: -cpm-accent;
+    -fx-font-size: 10.5px;
+    -fx-padding: 1 7 1 7;
+}
+.result-match-lines {
+    -fx-padding: 0 0 4 26;
+}
+.result-match-line {
+    -fx-background-radius: 5px;
+    -fx-padding: 2 6 2 4;
+    -fx-cursor: hand;
+}
+.result-match-line:hover {
+    -fx-background-color: -cpm-hover;
+}
+.match-line-number {
+    -fx-text-fill: -cpm-code-gutter;
+    -fx-font-size: 11px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-min-width: 26px;
+}
+.match-line-text {
+    -fx-max-height: 18px;
+}
+.match-line-plain {
+    -fx-fill: -cpm-text-dim;
+    -fx-font-size: 11.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.match-line-highlight {
+    -fx-background-color: -cpm-match-bg;
+    -fx-background-radius: 3px;
+    -fx-text-fill: -cpm-text;
+    -fx-font-weight: bold;
+    -fx-font-size: 11.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-padding: 0 1 0 1;
+}
+.open-selected-bar {
+    -fx-padding: 8 0 0 0;
+    -fx-border-color: -cpm-border transparent transparent transparent;
+    -fx-border-width: 1 0 0 0;
+}
+.open-selected-count {
+    -fx-text-fill: -cpm-text-dim;
+    -fx-font-size: 11.5px;
+}
+.open-selected-button {
+    -fx-background-color: -cpm-accent;
+    -fx-background-radius: 7px;
+    -fx-text-fill: white;
+    -fx-font-size: 12px;
+    -fx-padding: 5 12 5 12;
+    -fx-cursor: hand;
+}
+.open-selected-button:hover {
+    -fx-opacity: 0.9;
+}
+
+/* ---- Session Explorer: viewer ------------------------------------------- */
+
+.file-viewer {
+    -fx-background-color: -cpm-code-bg;
+}
+.viewer-tabs {
+    -fx-background-color: -cpm-tabbar;
+}
+.viewer-tabs .tab-header-area .tab-header-background {
+    -fx-background-color: -cpm-tabbar;
+}
+.viewer-tabs .tab {
+    -fx-background-color: transparent;
+    -fx-background-radius: 0;
+    -fx-padding: 4 10 4 10;
+}
+.viewer-tabs .tab:selected {
+    -fx-background-color: -cpm-code-bg;
+}
+.viewer-tabs .tab .focus-indicator {
+    -fx-border-color: transparent;
+}
+.viewer-tab-label {
+    -fx-text-fill: -cpm-text-dim;
+    -fx-font-size: 12px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.viewer-tabs .tab:selected .viewer-tab-label {
+    -fx-text-fill: -cpm-text;
+}
+.viewer-breadcrumb {
+    -fx-background-color: -cpm-code-bg;
+    -fx-border-color: transparent transparent -cpm-border transparent;
+    -fx-border-width: 0 0 1 0;
+    -fx-padding: 6 12 6 12;
+}
+.breadcrumb-segment {
+    -fx-text-fill: -cpm-text-dim;
+    -fx-font-size: 11.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.breadcrumb-separator {
+    -fx-text-fill: -cpm-text-faint;
+    -fx-font-size: 11.5px;
+}
+.read-only-chip {
+    -fx-background-color: -cpm-active-bg;
+    -fx-background-radius: 100px;
+    -fx-text-fill: -cpm-text-dim;
+    -fx-font-size: 10px;
+    -fx-padding: 1 8 1 8;
+}
+.viewer-empty {
+    -fx-text-fill: -cpm-text-faint;
+    -fx-font-size: 13px;
+}
+
+/* ---- Code area (RichTextFX, -cpm-code-* palette) ------------------------- */
+
+.code-area {
+    -fx-background-color: -cpm-code-bg;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 12px;
+}
+.code-area .text {
+    -fx-fill: -cpm-code-text;
+}
+.code-area .caret {
+    -fx-stroke: transparent;
+}
+.code-area .lineno {
+    -fx-background-color: -cpm-code-bg;
+    -fx-text-fill: -cpm-code-gutter;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 11px;
+    -fx-padding: 0 8 0 8;
+}
+.code-area .selection {
+    -fx-fill: -cpm-accent-soft;
+}
+.code-area .code-kw { -fx-fill: -cpm-code-kw; }
+.code-area .code-str { -fx-fill: -cpm-code-str; }
+.code-area .code-com { -fx-fill: -cpm-code-com; }
+.code-area .code-num { -fx-fill: -cpm-code-num; }
+.code-area .code-type { -fx-fill: -cpm-code-type; }
+.code-area .code-fn { -fx-fill: -cpm-code-fn; }
+.code-area .code-anno { -fx-fill: -cpm-code-anno; }
+.code-area .code-punct { -fx-fill: -cpm-code-punct; }
+.code-area .code-match { -rtfx-background-color: -cpm-match-bg; }
+
+/* ---- Worktree lifecycle: sidebar tags + chips ---------------------------- */
+
+.branch-tag, .branch-tag-worktree {
+    -fx-font-size: 10.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-background-radius: 4px;
+    -fx-padding: 0 5 0 5;
+}
+.branch-tag {
+    -fx-text-fill: -cpm-text-faint;
+    -fx-background-color: -cpm-hover;
+}
+.branch-tag-worktree {
+    -fx-text-fill: -cpm-accent;
+    -fx-background-color: -cpm-accent-soft;
+}
+.dirty-dot {
+    -fx-background-color: -cpm-dirty;
+    -fx-background-radius: 100px;
+    -fx-min-width: 5px;
+    -fx-min-height: 5px;
+    -fx-max-width: 5px;
+    -fx-max-height: 5px;
+}
+.pr-chip, .pr-chip-merged {
+    -fx-font-size: 10px;
+    -fx-background-radius: 100px;
+    -fx-padding: 1 7 1 7;
+}
+.pr-chip {
+    -fx-background-color: -cpm-pr-soft;
+    -fx-text-fill: -cpm-pr;
+}
+.pr-chip-merged {
+    -fx-background-color: -cpm-merged-soft;
+    -fx-text-fill: -cpm-merged;
+}
+
+/* ---- Worktree lifecycle: create modal ------------------------------------ */
+
+.worktree-field-label {
+    -fx-text-fill: -cpm-text-faint;
+    -fx-font-size: 11px;
+}
+.worktree-field {
+    -fx-background-color: -cpm-input-bg;
+    -fx-background-radius: 7px;
+    -fx-border-color: -cpm-border;
+    -fx-border-radius: 7px;
+    -fx-text-fill: -cpm-text;
+    -fx-font-size: 12.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-padding: 7 10 7 10;
+    -fx-highlight-fill: -cpm-accent-soft;
+}
+.worktree-base-chip {
+    -fx-background-color: -cpm-active-bg;
+    -fx-background-radius: 6px;
+    -fx-text-fill: -cpm-text-dim;
+    -fx-font-size: 12px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-padding: 5 10 5 10;
+}
+.worktree-task {
+    -fx-background-color: -cpm-input-bg;
+    -fx-background-radius: 7px;
+    -fx-border-color: -cpm-border;
+    -fx-border-radius: 7px;
+    -fx-text-fill: -cpm-text;
+    -fx-font-size: 12.5px;
+    -fx-highlight-fill: -cpm-accent-soft;
+}
+.worktree-task .content {
+    -fx-background-color: transparent;
+}
+.worktree-command-preview {
+    -fx-text-fill: -cpm-text-faint;
+    -fx-font-size: 11.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-background-color: -cpm-code-bg;
+    -fx-background-radius: 6px;
+    -fx-padding: 7 10 7 10;
+}
+.worktree-error {
+    -fx-text-fill: -cpm-error;
+    -fx-font-size: 11.5px;
+}
+.worktree-create-button {
+    -fx-background-color: -cpm-accent;
+    -fx-background-radius: 7px;
+    -fx-text-fill: white;
+    -fx-font-size: 12.5px;
+    -fx-padding: 6 14 6 14;
+    -fx-cursor: hand;
+}
+.worktree-create-button:hover {
+    -fx-opacity: 0.9;
+}
+.worktree-create-button:disabled {
+    -fx-opacity: 0.5;
+}
+.worktree-cancel-button {
+    -fx-background-color: transparent;
+    -fx-background-radius: 7px;
+    -fx-border-color: -cpm-border-strong;
+    -fx-border-radius: 7px;
+    -fx-text-fill: -cpm-text-dim;
+    -fx-font-size: 12.5px;
+    -fx-padding: 5 13 5 13;
+    -fx-cursor: hand;
+}
+.worktree-cancel-button:hover {
+    -fx-background-color: -cpm-hover;
+}
+
+/* ---- Worktree lifecycle: session header + Finish -------------------------- */
+
+.worktree-context-line {
+    -fx-text-fill: -cpm-text-faint;
+    -fx-font-size: 11px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.chip-ahead {
+    -fx-background-color: -cpm-active-bg;
+    -fx-background-radius: 100px;
+    -fx-text-fill: -cpm-text-dim;
+    -fx-font-size: 10px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-padding: 1 7 1 7;
+}
+.chip-dirty {
+    -fx-background-color: -cpm-dirty-soft;
+    -fx-background-radius: 100px;
+    -fx-text-fill: -cpm-dirty;
+    -fx-font-size: 10px;
+    -fx-padding: 1 7 1 7;
+}
+.chip-clean {
+    -fx-background-color: -cpm-running-soft;
+    -fx-background-radius: 100px;
+    -fx-text-fill: -cpm-running;
+    -fx-font-size: 10px;
+    -fx-padding: 1 7 1 7;
+}
+.finish-button {
+    -fx-background-color: -cpm-accent;
+    -fx-background-radius: 7px;
+    -fx-text-fill: white;
+    -fx-font-size: 12px;
+    -fx-padding: 5 12 5 12;
+    -fx-cursor: hand;
+}
+.finish-button:hover {
+    -fx-opacity: 0.9;
+}
+.handoff-pill {
+    -fx-background-color: -cpm-active-bg;
+    -fx-background-radius: 100px;
+    -fx-padding: 3 10 3 10;
+}
+.handoff-pill .progress-indicator {
+    -fx-progress-color: -cpm-accent;
+}
+.handoff-label {
+    -fx-text-fill: -cpm-text-dim;
+    -fx-font-size: 11.5px;
+}
+
+/* ---- Finish panel --------------------------------------------------------- */
+
+.finish-summary {
+    -fx-background-color: -cpm-input-bg;
+    -fx-background-radius: 8px;
+    -fx-border-color: -cpm-border;
+    -fx-border-radius: 8px;
+    -fx-padding: 10 12 10 12;
+}
+.finish-summary-headline {
+    -fx-text-fill: -cpm-text;
+    -fx-font-size: 12px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.finish-summary-row {
+    -fx-padding: 1 0 1 0;
+}
+.finish-file-marker {
+    -fx-font-size: 10.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-min-width: 14px;
+}
+.marker-added { -fx-text-fill: -cpm-running; }
+.marker-deleted { -fx-text-fill: -cpm-error; }
+.marker-modified { -fx-text-fill: -cpm-dirty; }
+.finish-file-path {
+    -fx-text-fill: -cpm-text-dim;
+    -fx-font-size: 11.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.finish-file-stat {
+    -fx-text-fill: -cpm-text-faint;
+    -fx-font-size: 11px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.finish-action-box {
+    -fx-background-radius: 8px;
+    -fx-border-radius: 8px;
+    -fx-border-color: -cpm-border;
+    -fx-padding: 10 12 10 12;
+    -fx-cursor: hand;
+}
+.finish-action-box:hover {
+    -fx-background-color: -cpm-hover;
+}
+.finish-action-accent {
+    -fx-border-color: -cpm-accent;
+    -fx-background-color: -cpm-accent-soft;
+}
+.finish-action-destructive:hover {
+    -fx-background-color: -cpm-error-soft;
+}
+.finish-action-title {
+    -fx-text-fill: -cpm-text;
+    -fx-font-size: 13px;
+}
+.finish-action-destructive .finish-action-title {
+    -fx-text-fill: -cpm-error;
+}
+.finish-action-caption {
+    -fx-text-fill: -cpm-text-faint;
+    -fx-font-size: 11px;
+}
+.finish-waiting {
+    -fx-background-color: -cpm-pr-soft;
+    -fx-background-radius: 8px;
+    -fx-padding: 10 12 10 12;
+}
+.finish-waiting-title {
+    -fx-text-fill: -cpm-pr;
+    -fx-font-size: 13px;
+}

@@ -31,4 +31,25 @@
     -cpm-accent-soft: rgba(217, 119, 87, 0.15);
 
     -cpm-row-bg: #ffffff;
+
+    /* Worktree lifecycle (design handoff "Worktrees & Session Explorer"). */
+    -cpm-dirty: #b07c1e;
+    -cpm-dirty-soft: rgba(176, 124, 30, 0.14);
+    -cpm-pr: #3b6cb7;
+    -cpm-pr-soft: rgba(59, 108, 183, 0.14);
+    -cpm-merged: #8a4fb5;
+    -cpm-merged-soft: rgba(138, 79, 181, 0.14);
+    -cpm-match-bg: rgba(217, 119, 87, 0.28);
+
+    /* Read-only code viewer palette (light equivalents of the dark set). */
+    -cpm-code-text: #3b3d44;
+    -cpm-code-kw: #a626a4;
+    -cpm-code-str: #50a14f;
+    -cpm-code-com: #9c958b;
+    -cpm-code-num: #b76b01;
+    -cpm-code-type: #c18401;
+    -cpm-code-fn: #4078f2;
+    -cpm-code-anno: #0184bc;
+    -cpm-code-punct: #6b655d;
+    -cpm-code-gutter: #a8a29b;
 }

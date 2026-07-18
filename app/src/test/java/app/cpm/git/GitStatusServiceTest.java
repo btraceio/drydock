@@ -173,6 +173,79 @@ class GitStatusServiceTest {
         assertInstanceOf(NotAGitRepositoryException.class, completion.getCause());
     }
 
+    @Test
+    void createWorktreeCreatesDirectoryAndNewBranch(@TempDir Path repoDir, @TempDir Path worktreeParent) throws Exception {
+        Path repo = repoDir.resolve("repo");
+        Files.createDirectory(repo);
+        initRepo(repo, "main");
+        writeFile(repo, "README.md", "hello\n");
+        runGit(repo, "add", "README.md");
+        commit(repo, "initial commit");
+
+        Path worktreeDir = worktreeParent.resolve("wt/repo-feature");
+        Path created = service.createWorktree(repo, worktreeDir, "feat/feature").get();
+
+        assertTrue(Files.isDirectory(created));
+        assertTrue(Files.exists(created.resolve("README.md")));
+        GitStatus status = getStatus(created);
+        assertEquals(new GitBranchState.OnBranch("feat/feature"), status.branch());
+        assertFalse(status.dirty());
+        assertTrue(runGitCapture(repo, "worktree", "list").contains("feat/feature"));
+    }
+
+    @Test
+    void createWorktreeFailsWhenBranchAlreadyExists(@TempDir Path repoDir, @TempDir Path worktreeParent) throws Exception {
+        Path repo = repoDir.resolve("repo");
+        Files.createDirectory(repo);
+        initRepo(repo, "main");
+        writeFile(repo, "README.md", "hello\n");
+        runGit(repo, "add", "README.md");
+        commit(repo, "initial commit");
+        runGit(repo, "branch", "feat/taken");
+
+        CompletionException completion = assertThrows(CompletionException.class,
+                () -> service.createWorktree(repo, worktreeParent.resolve("wt-taken"), "feat/taken").join());
+        assertInstanceOf(GitCommandFailedException.class, completion.getCause());
+    }
+
+    @Test
+    void createWorktreeOnNonGitDirectoryThrowsNotAGitRepositoryException(@TempDir Path notARepo,
+                                                                          @TempDir Path worktreeParent) {
+        CompletionException completion = assertThrows(CompletionException.class,
+                () -> service.createWorktree(notARepo, worktreeParent.resolve("wt"), "feat/x").join());
+        assertInstanceOf(NotAGitRepositoryException.class, completion.getCause());
+    }
+
+    @Test
+    void changeSummaryReportsCommitsAheadAndPerFileStats(@TempDir Path repoDir, @TempDir Path worktreeParent)
+            throws Exception {
+        Path repo = repoDir.resolve("repo");
+        Files.createDirectory(repo);
+        initRepo(repo, "main");
+        writeFile(repo, "README.md", "line1\nline2\n");
+        runGit(repo, "add", "README.md");
+        commit(repo, "initial commit");
+
+        Path worktree = service.createWorktree(repo, worktreeParent.resolve("wt"), "feat/change").get();
+        writeFile(worktree, "README.md", "line1\nchanged\n");
+        writeFile(worktree, "New.java", "class New {}\n");
+        runGit(worktree, "add", "README.md", "New.java");
+        commit(worktree, "change things");
+
+        GitChangeSummary summary = service.getChangeSummary(worktree, "main").get();
+
+        assertEquals(1, summary.commitsAhead());
+        assertEquals(2, summary.files().size());
+        GitChangeSummary.ChangedFile added = summary.files().stream()
+                .filter(f -> f.path().equals("New.java")).findFirst().orElseThrow();
+        assertEquals("A", added.kind());
+        GitChangeSummary.ChangedFile modified = summary.files().stream()
+                .filter(f -> f.path().equals("README.md")).findFirst().orElseThrow();
+        assertEquals("M", modified.kind());
+        assertEquals(1, modified.insertions());
+        assertEquals(1, modified.deletions());
+    }
+
     private GitStatus getStatus(Path repo) throws ExecutionException, InterruptedException {
         CompletableFuture<GitStatus> future = service.getStatus(repo);
         return future.get();

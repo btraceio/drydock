@@ -6,6 +6,7 @@ import app.cpm.claude.ClaudeExecutableLocator;
 import app.cpm.domain.ApplicationState;
 import app.cpm.domain.ManagedClaudeSession;
 import app.cpm.domain.ManagedSessionId;
+import app.cpm.domain.PrState;
 import app.cpm.domain.RepositoryId;
 import app.cpm.domain.SessionStatus;
 import app.cpm.state.ApplicationStateRepository;
@@ -87,6 +88,8 @@ class SessionManagerTest {
                 SessionStatus.INACTIVE,
                 now,
                 now,
+                Optional.empty(),
+                PrState.NONE,
                 Optional.empty());
     }
 
@@ -251,6 +254,20 @@ class SessionManagerTest {
 
         assertEquals("new name", renamed.displayName());
         assertEquals("new name", stateRepository.savedState().sessions().get(0).displayName());
+    }
+
+    @Test
+    void updatePrStateUpdatesAndPersistsStateAndNumber(@TempDir Path tempDir) {
+        ManagedClaudeSession session = sessionWith(tempDir, Optional.empty(), Optional.empty());
+        InMemoryStateRepository stateRepository = new InMemoryStateRepository(List.of(session));
+        SessionManager manager = newManager(stateRepository);
+
+        ManagedClaudeSession updated = manager.updatePrState(session.id(), PrState.OPEN, Optional.of(129));
+
+        assertEquals(PrState.OPEN, updated.prState());
+        assertEquals(129, updated.prNumber().orElseThrow());
+        assertEquals(PrState.OPEN, stateRepository.savedState().sessions().get(0).prState());
+        assertEquals(129, stateRepository.savedState().sessions().get(0).prNumber().orElseThrow());
     }
 
     private static final class InMemoryStateRepository implements ApplicationStateRepository {

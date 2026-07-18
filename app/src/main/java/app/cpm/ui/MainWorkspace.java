@@ -10,13 +10,20 @@ import app.cpm.domain.ManagedSessionId;
 import app.cpm.domain.Repository;
 import app.cpm.domain.SessionStatus;
 import app.cpm.domain.UiTheme;
+import app.cpm.domain.PrState;
+import app.cpm.git.GhCliService;
 import app.cpm.git.GitBranchState;
+import app.cpm.git.GitChangeSummary;
+import app.cpm.git.GitStatus;
 import app.cpm.git.GitStatusService;
+import app.cpm.search.SessionSearchService;
+import app.cpm.ui.explorer.SessionExplorerView;
 import app.cpm.terminal.ghostty.GhosttyApp;
 import app.cpm.terminal.ghostty.GhosttyNativeLibrary;
 import app.cpm.terminal.host.CpmTerminalHost;
 import javafx.animation.Animation;
 import javafx.animation.KeyFrame;
+import javafx.animation.PauseTransition;
 import javafx.animation.Timeline;
 import javafx.application.Platform;
 import javafx.collections.ListChangeListener;
@@ -41,15 +48,19 @@ import javafx.stage.Window;
 import javafx.util.Duration;
 
 import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.Path;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 /**
@@ -79,7 +90,12 @@ public final class MainWorkspace extends BorderPane {
     private final SessionManager sessionManager;
     private final RepositoryManager repositoryManager;
     private final GitStatusService gitStatusService;
+    private final SessionSearchService searchService;
+    private final GhCliService ghCliService;
     private final Stage stage;
+
+    /** The app shell's modal layer; wired by CpmApplication (worktree create/Finish panels show through it). */
+    private ModalLayer modalLayer;
     private final TabPane tabPane = new TabPane();
     private final Region emptyState;
     private final MenuButton newTabButton = new MenuButton("＋");
@@ -113,10 +129,13 @@ public final class MainWorkspace extends BorderPane {
     private boolean terminalsObscured;
 
     public MainWorkspace(SessionManager sessionManager, RepositoryManager repositoryManager,
-                          GitStatusService gitStatusService, Stage stage) {
+                          GitStatusService gitStatusService, SessionSearchService searchService,
+                          GhCliService ghCliService, Stage stage) {
         this.sessionManager = sessionManager;
         this.repositoryManager = repositoryManager;
         this.gitStatusService = gitStatusService;
+        this.searchService = searchService;
+        this.ghCliService = ghCliService;
         this.stage = stage;
 
         getStyleClass().add("main-pane");
@@ -242,6 +261,16 @@ public final class MainWorkspace extends BorderPane {
         tabPane.getSelectionModel().clearSelection();
     }
 
+    /** ⌘1: switches the selected session tab to its Terminal sub-tab. */
+    public void showTerminalSubTab() {
+        currentlySelected().ifPresent(open -> open.showSubTab(OpenSessionTab.SubTab.TERMINAL));
+    }
+
+    /** ⌘2: switches the selected session tab to its Explorer sub-tab. */
+    public void showExplorerSubTab() {
+        currentlySelected().ifPresent(open -> open.showSubTab(OpenSessionTab.SubTab.EXPLORER));
+    }
+
     /** Hides/restores every native terminal view while a modal is showing (see {@link #terminalsObscured}). */
     public void setTerminalsObscured(boolean obscured) {
         this.terminalsObscured = obscured;
@@ -256,12 +285,65 @@ public final class MainWorkspace extends BorderPane {
     /** Plan section 11.1 / 12 "New Claude session": creates a brand-new session and opens it in a new tab. */
     public void openNewSession(Repository repository) {
         OpenSessionTab placeholderTab = createOpenSessionTab(ManagedSessionId.newId(), "Starting...",
-                Optional.of(repository));
+                Optional.of(repository), repository.root());
         addAndSelect(placeholderTab);
 
         double scale = stage.getOutputScaleX();
         sessionManager.createSession(repository, placeholderTab.app(), placeholderTab.host(), scale)
                 .whenComplete((result, ex) -> Platform.runLater(() -> handleOpenResult(placeholderTab, result, ex)));
+    }
+
+    /**
+     * Shows the create-worktree modal for {@code repository} (worktree
+     * handoff "Creating"): on Create, runs {@code git worktree add} (the
+     * app's one direct git mutation) and opens a session in the fresh
+     * worktree; failures show inline and keep the modal open.
+     */
+    public void promptNewWorktree(Repository repository, ModalLayer modalLayer) {
+        NewWorktreeModal[] holder = new NewWorktreeModal[1];
+        holder[0] = new NewWorktreeModal(repository, gitStatusService, modalLayer::close,
+                (branch, directory, task) -> {
+                    holder[0].showCreating();
+                    gitStatusService.createWorktree(repository.root(), directory, branch)
+                            .whenComplete((created, ex) -> Platform.runLater(() -> {
+                                if (ex != null) {
+                                    holder[0].showError(String.valueOf(UiErrors.unwrap(ex).getMessage()));
+                                    return;
+                                }
+                                modalLayer.close();
+                                openNewWorktreeSession(repository, branch, created, task);
+                            }));
+                });
+        modalLayer.show(holder[0]);
+    }
+
+    /**
+     * Opens a new session living inside an already-created git worktree
+     * (design handoff section B "Creating"): the session launches claude
+     * from the worktree directory, is tagged with it, and -- when a task
+     * was given -- gets the task typed into its terminal once the surface
+     * is up.
+     */
+    public void openNewWorktreeSession(Repository repository, String branch, Path worktreeRoot,
+                                       Optional<String> task) {
+        OpenSessionTab placeholderTab = createOpenSessionTab(ManagedSessionId.newId(), branch,
+                Optional.of(repository), worktreeRoot);
+        addAndSelect(placeholderTab);
+
+        double scale = stage.getOutputScaleX();
+        sessionManager.createWorktreeSession(repository, branch, worktreeRoot, placeholderTab.app(),
+                        placeholderTab.host(), scale)
+                .whenComplete((result, ex) -> Platform.runLater(() -> {
+                    handleOpenResult(placeholderTab, result, ex);
+                    if (ex == null && result instanceof SessionOpenResult.Opened && task.isPresent()) {
+                        // Single line only (an embedded newline would submit
+                        // early); give claude a moment to finish starting up.
+                        String instruction = task.get().replaceAll("\\s+", " ").strip();
+                        PauseTransition delay = new PauseTransition(Duration.seconds(1.5));
+                        delay.setOnFinished(e -> placeholderTab.sendPrompt(instruction));
+                        delay.play();
+                    }
+                }));
     }
 
     /**
@@ -277,7 +359,7 @@ public final class MainWorkspace extends BorderPane {
         }
 
         OpenSessionTab placeholderTab = createOpenSessionTab(session.id(), session.displayName(),
-                repositoryFor(session));
+                repositoryFor(session), session.workingDirectory());
         addAndSelect(placeholderTab);
 
         double scale = stage.getOutputScaleX();
@@ -386,7 +468,7 @@ public final class MainWorkspace extends BorderPane {
 
         // Start fresh: reuse the managed session row, new claude conversation.
         OpenSessionTab placeholderTab = createOpenSessionTab(session.id(), session.displayName(),
-                repositoryFor(session));
+                repositoryFor(session), session.workingDirectory());
         addAndSelect(placeholderTab);
         double scale = stage.getOutputScaleX();
         sessionManager.startFreshConversation(session.id(), placeholderTab.app(), placeholderTab.host(), scale)
@@ -400,7 +482,300 @@ public final class MainWorkspace extends BorderPane {
         openTabs.put(opened.session().id(), placeholderTab);
         placeholderTab.setVisible(!terminalsObscured
                 && tabPane.getSelectionModel().getSelectedItem() == placeholderTab.tab);
+        opened.session().worktreeRoot().ifPresent(root ->
+                setupWorktreeHeader(placeholderTab, opened.session().id(), root));
         onSessionsChanged.run();
+    }
+
+    // ---- Worktree lifecycle (handoff section B) -----------------------------
+
+    public void setModalLayer(ModalLayer modalLayer) {
+        this.modalLayer = modalLayer;
+    }
+
+    /**
+     * Fills a worktree session tab's header: the ◫ context line, the
+     * ↑ahead/dirty/PR chips, and the Finish ▸ button. Branch/base resolve
+     * asynchronously (worktree checkout vs the repository's main checkout).
+     */
+    private void setupWorktreeHeader(OpenSessionTab tab, ManagedSessionId sessionId, Path worktreeRoot) {
+        ManagedClaudeSession session = sessionById(sessionId).orElse(null);
+        Repository repository = session == null ? null : repositoryFor(session).orElse(null);
+        if (session == null || repository == null) {
+            return;
+        }
+        tab.updatePrChip(session.prState(), session.prNumber());
+        gitStatusService.getStatus(worktreeRoot).thenCombine(gitStatusService.getStatus(repository.root()),
+                        (worktreeStatus, baseStatus) -> new String[] {
+                                branchNameOf(worktreeStatus), branchNameOf(baseStatus)})
+                .whenComplete((branches, ex) -> Platform.runLater(() -> {
+                    if (ex != null || !openTabs.containsKey(sessionId)) {
+                        return;
+                    }
+                    String branch = branches[0];
+                    String base = branches[1];
+                    tab.configureWorktree(branch, base, worktreeRoot,
+                            () -> showFinishPanel(sessionId, worktreeRoot, branch, base));
+                    refreshWorktreeChips(tab, sessionId, worktreeRoot, base);
+                }));
+    }
+
+    /** Refreshes the ↑ahead + dirty/clean chips from the worktree's current git state. */
+    private void refreshWorktreeChips(OpenSessionTab tab, ManagedSessionId sessionId, Path worktreeRoot,
+                                      String base) {
+        gitStatusService.getStatus(worktreeRoot)
+                .thenCombine(gitStatusService.getChangeSummary(worktreeRoot, base),
+                        (status, summary) -> new Object[] {status, summary})
+                .whenComplete((pair, ex) -> Platform.runLater(() -> {
+                    if (ex != null || !openTabs.containsKey(sessionId)) {
+                        return;
+                    }
+                    GitStatus status = (GitStatus) pair[0];
+                    GitChangeSummary summary = (GitChangeSummary) pair[1];
+                    tab.updateWorktreeStatus(status.dirty(), summary.commitsAhead());
+                }));
+    }
+
+    private Optional<ManagedClaudeSession> sessionById(ManagedSessionId sessionId) {
+        return sessionManager.sessions().stream().filter(s -> s.id().equals(sessionId)).findFirst();
+    }
+
+    private static String branchNameOf(GitStatus status) {
+        return status.branch() instanceof GitBranchState.OnBranch onBranch ? onBranch.name() : "(detached)";
+    }
+
+    /**
+     * Opens the state-aware Finish panel. For an OPEN PR the observed state
+     * is first re-checked via read-only {@code gh pr view} (the PR may have
+     * merged since), then the panel renders the actions for the (possibly
+     * updated) state.
+     */
+    private void showFinishPanel(ManagedSessionId sessionId, Path worktreeRoot, String branch, String base) {
+        ManagedClaudeSession session = sessionById(sessionId).orElse(null);
+        if (session == null || modalLayer == null) {
+            return;
+        }
+        CompletableFuture<Optional<GhCliService.PrInfo>> prRefresh =
+                session.prState() == PrState.OPEN && ghCliService.isAvailable()
+                        ? ghCliService.viewPr(worktreeRoot, branch)
+                        : CompletableFuture.completedFuture(Optional.empty());
+
+        gitStatusService.getStatus(worktreeRoot)
+                .thenCombine(gitStatusService.getChangeSummary(worktreeRoot, base)
+                                .exceptionally(ex -> new GitChangeSummary(0, List.of())),
+                        (status, summary) -> new Object[] {status, summary})
+                .thenCombine(prRefresh, (pair, prInfo) -> new Object[] {pair[0], pair[1], prInfo})
+                .whenComplete((data, ex) -> Platform.runLater(() -> {
+                    if (ex != null) {
+                        UiErrors.show("Could not inspect the worktree", ex);
+                        return;
+                    }
+                    GitStatus status = (GitStatus) data[0];
+                    GitChangeSummary summary = (GitChangeSummary) data[1];
+                    @SuppressWarnings("unchecked")
+                    Optional<GhCliService.PrInfo> prInfo = (Optional<GhCliService.PrInfo>) data[2];
+
+                    ManagedClaudeSession current = sessionById(sessionId).orElse(null);
+                    if (current == null) {
+                        return;
+                    }
+                    // Reconcile an externally merged PR before choosing actions.
+                    if (prInfo.isPresent()
+                            && prInfo.get().state() == GhCliService.PrInfo.PrLifecycle.MERGED) {
+                        current = sessionManager.updatePrState(sessionId, PrState.MERGED,
+                                Optional.of(prInfo.get().number()));
+                        OpenSessionTab tab = openTabs.get(sessionId);
+                        if (tab != null) {
+                            tab.updatePrChip(current.prState(), current.prNumber());
+                        }
+                        onSessionsChanged.run();
+                    }
+
+                    FinishWorktreePanel.Context context = new FinishWorktreePanel.Context(
+                            branch, base, worktreeRoot, current.prState(), current.prNumber(),
+                            Optional.empty(), Optional.of(summary), status.dirty());
+                    FinishWorktreePanel panel = new FinishWorktreePanel(context, new FinishWorktreePanel.Actions() {
+                        @Override
+                        public void mergeIntoBase() {
+                            handoffMerge(sessionId, worktreeRoot, branch, base);
+                        }
+
+                        @Override
+                        public void createPullRequest() {
+                            handoffCreatePr(sessionId, worktreeRoot, branch);
+                        }
+
+                        @Override
+                        public void deleteWorktree() {
+                            handoffDelete(sessionId, worktreeRoot, branch);
+                        }
+
+                        @Override
+                        public void viewPullRequest(String url) {
+                            openInBrowser(url);
+                        }
+                    }, modalLayer::close);
+                    modalLayer.show(panel);
+                }));
+    }
+
+    // ---- Hand-off: every action is executed by Claude in the terminal -------
+
+    private void handoffMerge(ManagedSessionId sessionId, Path worktreeRoot, String branch, String base) {
+        OpenSessionTab tab = openTabs.get(sessionId);
+        if (tab == null) {
+            return;
+        }
+        Repository repository = sessionById(sessionId).flatMap(this::repositoryFor).orElse(null);
+        String mainCheckout = repository == null ? "the main checkout" : repository.root().toString();
+        tab.showHandoffRunning("Claude is merging…");
+        tab.sendPrompt("Merge this worktree's branch '" + branch + "' into '" + base + "' in the main checkout at "
+                + mainCheckout + " (use git -C, merge with --no-ff, and resolve any merge conflicts yourself "
+                + "without asking me), then report the result briefly.");
+        pollHandoff(sessionId,
+                () -> gitStatusService.getChangeSummary(worktreeRoot, base)
+                        .thenApply(summary -> summary.commitsAhead() == 0),
+                () -> {
+                    tab.showHandoffDone("Merged");
+                    refreshWorktreeChipsLater(sessionId, worktreeRoot, base);
+                    restoreFinishLater(tab, sessionId);
+                });
+    }
+
+    private void handoffCreatePr(ManagedSessionId sessionId, Path worktreeRoot, String branch) {
+        OpenSessionTab tab = openTabs.get(sessionId);
+        if (tab == null) {
+            return;
+        }
+        tab.showHandoffRunning("Claude is opening a PR…");
+        tab.sendPrompt("Push this worktree's branch '" + branch + "' to origin (git push -u origin " + branch
+                + ") and open a pull request with gh pr create --fill, then report the PR number.");
+        if (!ghCliService.isAvailable()) {
+            // No gh to observe with: optimistic OPEN (chip without a number)
+            // after a grace period, per the agreed fallback.
+            PauseTransition optimistic = new PauseTransition(Duration.seconds(30));
+            optimistic.setOnFinished(e -> {
+                if (!openTabs.containsKey(sessionId)) {
+                    return;
+                }
+                applyPrState(sessionId, PrState.OPEN, Optional.empty());
+                tab.showHandoffDone("PR opened");
+                restoreFinishLater(tab, sessionId);
+            });
+            optimistic.play();
+            return;
+        }
+        pollHandoffResult(sessionId,
+                () -> ghCliService.viewPr(worktreeRoot, branch),
+                prInfo -> {
+                    PrState state = prInfo.state() == GhCliService.PrInfo.PrLifecycle.MERGED
+                            ? PrState.MERGED : PrState.OPEN;
+                    applyPrState(sessionId, state, Optional.of(prInfo.number()));
+                    tab.showHandoffDone("PR opened");
+                    restoreFinishLater(tab, sessionId);
+                });
+    }
+
+    private void handoffDelete(ManagedSessionId sessionId, Path worktreeRoot, String branch) {
+        OpenSessionTab tab = openTabs.get(sessionId);
+        if (tab == null) {
+            return;
+        }
+        Repository repository = sessionById(sessionId).flatMap(this::repositoryFor).orElse(null);
+        String mainCheckout = repository == null ? "the main checkout" : repository.root().toString();
+        tab.showHandoffRunning("Claude is cleaning up…");
+        tab.sendPrompt("Clean up this worktree: from the main checkout at " + mainCheckout
+                + " run git worktree remove " + worktreeRoot + " (add --force if it refuses) and delete the branch "
+                + "with git branch -D " + branch + ", then confirm.");
+        pollHandoff(sessionId,
+                () -> CompletableFuture.completedFuture(!Files.exists(worktreeRoot)),
+                () -> {
+                    tab.showHandoffDone("Removed");
+                    PauseTransition removeRow = new PauseTransition(Duration.seconds(1.2));
+                    removeRow.setOnFinished(e -> sessionManager.deleteSession(sessionId)
+                            .whenComplete((v, ex) -> Platform.runLater(() -> {
+                                noteSessionDeleted(sessionId);
+                                onSessionsChanged.run();
+                            })));
+                    removeRow.play();
+                });
+    }
+
+    private void applyPrState(ManagedSessionId sessionId, PrState state, Optional<Integer> number) {
+        sessionManager.updatePrState(sessionId, state, number);
+        OpenSessionTab tab = openTabs.get(sessionId);
+        if (tab != null) {
+            tab.updatePrChip(state, number);
+        }
+        onSessionsChanged.run();
+    }
+
+    private void refreshWorktreeChipsLater(ManagedSessionId sessionId, Path worktreeRoot, String base) {
+        OpenSessionTab tab = openTabs.get(sessionId);
+        if (tab != null) {
+            refreshWorktreeChips(tab, sessionId, worktreeRoot, base);
+        }
+    }
+
+    /** Leaves the ✓ pill visible briefly, then restores the Finish ▸ button. */
+    private void restoreFinishLater(OpenSessionTab tab, ManagedSessionId sessionId) {
+        PauseTransition pause = new PauseTransition(Duration.seconds(4));
+        pause.setOnFinished(e -> {
+            if (openTabs.containsKey(sessionId)) {
+                tab.restoreFinishButton();
+            }
+        });
+        pause.play();
+    }
+
+    /** Handoff polling caps: every 4s, up to 5 minutes; on timeout the Finish button quietly returns. */
+    private static final Duration HANDOFF_POLL_INTERVAL = Duration.seconds(4);
+    private static final int HANDOFF_POLL_MAX_ATTEMPTS = 75;
+
+    private void pollHandoff(ManagedSessionId sessionId, Supplier<CompletableFuture<Boolean>> probe,
+                             Runnable onConfirmed) {
+        pollHandoffStep(sessionId, () -> probe.get().thenApply(done ->
+                Boolean.TRUE.equals(done) ? Optional.of(Boolean.TRUE) : Optional.<Boolean>empty()),
+                ignored -> onConfirmed.run(), 0);
+    }
+
+    private <T> void pollHandoffResult(ManagedSessionId sessionId,
+                                       Supplier<CompletableFuture<Optional<T>>> probe,
+                                       Consumer<T> onConfirmed) {
+        pollHandoffStep(sessionId, probe, onConfirmed, 0);
+    }
+
+    private <T> void pollHandoffStep(ManagedSessionId sessionId,
+                                     Supplier<CompletableFuture<Optional<T>>> probe,
+                                     Consumer<T> onConfirmed, int attempt) {
+        if (attempt >= HANDOFF_POLL_MAX_ATTEMPTS) {
+            OpenSessionTab tab = openTabs.get(sessionId);
+            if (tab != null) {
+                tab.restoreFinishButton();
+            }
+            return;
+        }
+        PauseTransition wait = new PauseTransition(HANDOFF_POLL_INTERVAL);
+        wait.setOnFinished(e -> probe.get().whenComplete((result, ex) -> Platform.runLater(() -> {
+            if (!openTabs.containsKey(sessionId)) {
+                return; // tab closed mid-handoff; nothing left to update
+            }
+            if (ex == null && result != null && result.isPresent()) {
+                onConfirmed.accept(result.get());
+            } else {
+                pollHandoffStep(sessionId, probe, onConfirmed, attempt + 1);
+            }
+        })));
+        wait.play();
+    }
+
+    /** macOS-native URL open (the app is macOS-only; ProcessBuilder avoids an AWT dependency). */
+    private void openInBrowser(String url) {
+        try {
+            new ProcessBuilder("open", url).start();
+        } catch (IOException e) {
+            LOG.log(Level.WARNING, "Could not open " + url, e);
+        }
     }
 
     /** Plan section 11.2 / 20: a real, specific dialog for a session whose working directory vanished. */
@@ -550,7 +925,7 @@ public final class MainWorkspace extends BorderPane {
      * needs to call back into can exist.
      */
     private OpenSessionTab createOpenSessionTab(ManagedSessionId sessionId, String displayName,
-                                                 Optional<Repository> repository) {
+                                                 Optional<Repository> repository, Path searchRoot) {
         var lookup = GhosttyNativeLibrary.lookup();
         GhosttyApp.ensureProcessInitialized(lookup);
 
@@ -573,8 +948,12 @@ public final class MainWorkspace extends BorderPane {
         openTab.setOnCloseRequested(() -> closeSession(sessionId));
         openTab.setOnRenamed(name -> renameSession(sessionId, name));
         openTab.setOnBack(this::showPicker);
+        openTab.setExplorerFactory(() -> new SessionExplorerView(searchRoot, searchService));
 
-        repository.ifPresent(repo -> gitStatusService.getStatus(repo.root())
+        // Branch of the session's own checkout: for a worktree session the
+        // search root IS the worktree, so its branch (not the main
+        // checkout's) fills the header/sub-tab context lines.
+        repository.ifPresent(repo -> gitStatusService.getStatus(searchRoot)
                 .whenComplete((status, failure) -> Platform.runLater(() -> {
                     if (failure == null && status.branch() instanceof GitBranchState.OnBranch onBranch) {
                         openTab.setHeaderBranch(onBranch.name(), repo.displayName());

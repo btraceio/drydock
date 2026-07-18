@@ -20,6 +20,8 @@ final class ShortcutsOverlay {
             {"Show all branches", "⌘B"},
             {"New session", "⌘N"},
             {"Rename session", "⌘R"},
+            {"Terminal view", "⌘1"},
+            {"Explorer view", "⌘2"},
             {"Filter repositories", "⌘F"},
             {"Preview conversation", "Space"},
             {"Navigate list", "↑ / ↓"},

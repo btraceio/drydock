@@ -3,6 +3,7 @@ package app.cpm.state;
 import app.cpm.domain.ApplicationState;
 import app.cpm.domain.ManagedClaudeSession;
 import app.cpm.domain.ManagedSessionId;
+import app.cpm.domain.PrState;
 import app.cpm.domain.Repository;
 import app.cpm.domain.RepositoryId;
 import app.cpm.domain.RepositorySettings;
@@ -134,7 +135,9 @@ class JsonApplicationStateRepositoryTest {
                 SessionStatus.EXITED,
                 Instant.parse("2026-01-03T00:00:00Z"),
                 Instant.parse("2026-01-04T00:00:00Z"),
-                Optional.of(1));
+                Optional.of(1),
+                PrState.OPEN,
+                Optional.of(128));
         ApplicationState state = new ApplicationState(List.of(repo), List.of(session), WorkspaceUiState.empty());
 
         JsonApplicationStateRepository repository = new JsonApplicationStateRepository(stateFile());
@@ -161,6 +164,8 @@ class JsonApplicationStateRepositoryTest {
                 SessionStatus.INACTIVE,
                 Instant.parse("2026-01-03T00:00:00Z"),
                 Instant.parse("2026-01-04T00:00:00Z"),
+                Optional.empty(),
+                PrState.NONE,
                 Optional.empty());
         ApplicationState state = new ApplicationState(List.of(repo), List.of(session), WorkspaceUiState.empty());
 
@@ -205,6 +210,59 @@ class JsonApplicationStateRepositoryTest {
 
         assertEquals(1, loaded.repositories().size());
         assertTrue(loaded.sessions().isEmpty());
+    }
+
+    @Test
+    void loadsSessionEntryWithoutPrFieldsAsPrStateNone() throws IOException {
+        Path file = stateFile();
+        Path repoRoot = Files.createDirectory(tempDir.resolve("repo-root"));
+        Path workingDirectory = Files.createDirectory(tempDir.resolve("session-working-dir"));
+        RepositoryId repoId = RepositoryId.newId();
+        // Hand-written schemaVersion-2 session written before prState /
+        // prNumber existed -- must decode leniently to NONE / empty.
+        String json = """
+                {
+                  "schemaVersion": 2,
+                  "repositories": [
+                    {
+                      "id": "%s",
+                      "root": "%s",
+                      "displayName": "repo",
+                      "addedAt": "2026-01-01T00:00:00Z",
+                      "lastOpenedAt": "2026-01-02T00:00:00Z",
+                      "settings": {}
+                    }
+                  ],
+                  "sessions": [
+                    {
+                      "id": "%s",
+                      "repositoryId": "%s",
+                      "displayName": "pre-pr session",
+                      "claudeSessionId": null,
+                      "claudeSessionName": null,
+                      "workingDirectory": "%s",
+                      "worktreeRoot": null,
+                      "status": "INACTIVE",
+                      "createdAt": "2026-01-03T00:00:00Z",
+                      "lastOpenedAt": "2026-01-04T00:00:00Z",
+                      "lastExitCode": null
+                    }
+                  ],
+                  "ui": {
+                    "selectedRepositoryId": null,
+                    "sidebarWidth": 260.0,
+                    "expandedRepositoryIds": []
+                  }
+                }
+                """.formatted(repoId, repoRoot.toString().replace("\\", "\\\\"),
+                ManagedSessionId.newId(), repoId, workingDirectory.toString().replace("\\", "\\\\"));
+        Files.writeString(file, json, StandardCharsets.UTF_8);
+
+        ApplicationState loaded = new JsonApplicationStateRepository(file).load();
+
+        assertEquals(1, loaded.sessions().size());
+        assertEquals(PrState.NONE, loaded.sessions().get(0).prState());
+        assertTrue(loaded.sessions().get(0).prNumber().isEmpty());
     }
 
     @Test

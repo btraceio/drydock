@@ -105,6 +105,123 @@ public final class GitStatusService implements AutoCloseable {
     }
 
     /**
+     * Creates a new git worktree at {@code worktreeDirectory} with a new
+     * branch {@code branch} ({@code git worktree add <dir> -b <branch>}),
+     * on this service's background executor. This is deliberately the ONLY
+     * mutating git command the application ever runs itself -- every other
+     * worktree lifecycle action (merge, PR, delete) is handed off to the
+     * Claude session in the terminal (design handoff "Worktrees &amp;
+     * Session Explorer", "Everything is delegated to Claude").
+     */
+    public CompletableFuture<Path> createWorktree(Path repositoryRoot, Path worktreeDirectory, String branch) {
+        return CompletableFuture.supplyAsync(() -> createWorktreeBlocking(repositoryRoot, worktreeDirectory, branch),
+                executor);
+    }
+
+    /**
+     * Synchronous form, exposed package-private so tests can assert on the
+     * thrown exception type directly instead of unwrapping a
+     * {@code CompletionException}. Must never be called from the JavaFX
+     * application thread.
+     */
+    Path createWorktreeBlocking(Path repositoryRoot, Path worktreeDirectory, String branch) {
+        Path git = locator.locate()
+                .orElseThrow(() -> new GitExecutableNotFoundException(locator.describeSearched()));
+
+        Path normalizedDir = worktreeDirectory.toAbsolutePath().normalize();
+        Path parent = normalizedDir.getParent();
+        if (parent != null) {
+            try {
+                java.nio.file.Files.createDirectories(parent);
+            } catch (IOException e) {
+                throw new GitCommandFailedException(
+                        List.of("mkdir", parent.toString()), -1,
+                        e.getMessage() == null ? "could not create parent directory" : e.getMessage());
+            }
+        }
+
+        List<String> command = List.of(
+                git.toString(), "-C", repositoryRoot.toString(),
+                "worktree", "add", normalizedDir.toString(), "-b", branch);
+
+        ProcessResult result = run(command);
+        if (result.exitCode() != 0) {
+            if (result.stderr().toLowerCase(java.util.Locale.ROOT).contains("not a git repository")) {
+                throw new NotAGitRepositoryException(repositoryRoot);
+            }
+            throw new GitCommandFailedException(command, result.exitCode(), excerpt(result.stderr()));
+        }
+        return normalizedDir;
+    }
+
+    /**
+     * Summarizes what a worktree branch changes relative to {@code
+     * baseBranch} (Finish-panel change summary): commits ahead plus the
+     * per-file kind/insertions/deletions of {@code git diff base...HEAD}.
+     * Read-only, like {@link #getStatus}.
+     */
+    public CompletableFuture<GitChangeSummary> getChangeSummary(Path worktreeRoot, String baseBranch) {
+        return CompletableFuture.supplyAsync(() -> getChangeSummaryBlocking(worktreeRoot, baseBranch), executor);
+    }
+
+    /** Synchronous form of {@link #getChangeSummary}, package-private for tests. */
+    GitChangeSummary getChangeSummaryBlocking(Path worktreeRoot, String baseBranch) {
+        Path git = locator.locate()
+                .orElseThrow(() -> new GitExecutableNotFoundException(locator.describeSearched()));
+
+        int commitsAhead = 0;
+        List<String> countCommand = List.of(
+                git.toString(), "-C", worktreeRoot.toString(),
+                "rev-list", "--count", baseBranch + "..HEAD");
+        ProcessResult countResult = run(countCommand);
+        if (countResult.exitCode() == 0) {
+            commitsAhead = parseCountOrZero(countResult.stdout().strip());
+        }
+
+        // Two read-only diffs against the merge base: --numstat for per-file
+        // +/- counts, --name-status for the M/A/D kind letter; merged by path.
+        List<String> numstatCommand = List.of(
+                git.toString(), "-C", worktreeRoot.toString(),
+                "diff", "--numstat", baseBranch + "...HEAD");
+        ProcessResult numstat = run(numstatCommand);
+        if (numstat.exitCode() != 0) {
+            if (numstat.stderr().toLowerCase(java.util.Locale.ROOT).contains("not a git repository")) {
+                throw new NotAGitRepositoryException(worktreeRoot);
+            }
+            throw new GitCommandFailedException(numstatCommand, numstat.exitCode(), excerpt(numstat.stderr()));
+        }
+        List<String> nameStatusCommand = List.of(
+                git.toString(), "-C", worktreeRoot.toString(),
+                "diff", "--name-status", baseBranch + "...HEAD");
+        ProcessResult nameStatus = run(nameStatusCommand);
+
+        Map<String, String> kinds = new LinkedHashMap<>();
+        if (nameStatus.exitCode() == 0) {
+            for (String line : nameStatus.stdout().split("\n")) {
+                String[] parts = line.split("\t");
+                if (parts.length >= 2 && !parts[0].isBlank()) {
+                    // Renames (R100\told\tnew) report the new path last.
+                    kinds.put(parts[parts.length - 1], parts[0].substring(0, 1));
+                }
+            }
+        }
+
+        List<GitChangeSummary.ChangedFile> files = new java.util.ArrayList<>();
+        for (String line : numstat.stdout().split("\n")) {
+            String[] parts = line.split("\t");
+            if (parts.length < 3 || parts[0].isBlank()) {
+                continue;
+            }
+            // Binary files report "-" for both counts.
+            int insertions = parseCountOrZero(parts[0]);
+            int deletions = parseCountOrZero(parts[1]);
+            String path = parts[parts.length - 1];
+            files.add(new GitChangeSummary.ChangedFile(kinds.getOrDefault(path, "M"), path, insertions, deletions));
+        }
+        return new GitChangeSummary(commitsAhead, List.copyOf(files));
+    }
+
+    /**
      * Synchronous form, exposed package-private so tests can assert on the
      * thrown exception type directly instead of unwrapping a
      * {@code CompletionException}. Must never be called from the JavaFX

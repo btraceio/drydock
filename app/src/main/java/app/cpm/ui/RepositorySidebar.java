@@ -5,6 +5,7 @@ import app.cpm.app.FinderLauncher;
 import app.cpm.app.RepositoryManager;
 import app.cpm.app.SessionManager;
 import app.cpm.domain.ManagedClaudeSession;
+import app.cpm.domain.PrState;
 import app.cpm.domain.Repository;
 import app.cpm.domain.RepositoryId;
 import app.cpm.domain.SessionStatus;
@@ -15,6 +16,7 @@ import javafx.animation.RotateTransition;
 import javafx.application.Platform;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
+import javafx.geometry.Side;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Alert.AlertType;
 import javafx.scene.control.Button;
@@ -51,6 +53,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
 
 /**
  * The repository sidebar, rebuilt to the design handoff (README section 2):
@@ -87,8 +90,11 @@ public final class RepositorySidebar extends VBox {
     private final Map<RepositoryId, GitStatus> statuses = new ConcurrentHashMap<>();
     /** The most recent Git-status failure per repository (e.g. the directory vanished), if any. */
     private final Map<RepositoryId, Throwable> statusFailures = new ConcurrentHashMap<>();
+    /** Latest known Git status per worktree root (worktree sessions have their own checkout + branch). */
+    private final Map<Path, GitStatus> worktreeStatuses = new ConcurrentHashMap<>();
 
     private Runnable onCloneFromGitHub = () -> { };
+    private Consumer<Repository> onNewWorktree = repository -> { };
 
     /** Tree node payload: either a repository row or one of its session rows. */
     sealed interface SidebarNode {
@@ -148,6 +154,11 @@ public final class RepositorySidebar extends VBox {
         this.onCloneFromGitHub = handler == null ? () -> { } : handler;
     }
 
+    /** Wired by the application shell to open the create-worktree modal (worktree handoff, section B). */
+    public void setOnNewWorktree(Consumer<Repository> handler) {
+        this.onNewWorktree = handler == null ? repository -> { } : handler;
+    }
+
     /** Focuses the filter field (⌘F). */
     public void focusFilter() {
         filterField.requestFocus();
@@ -156,6 +167,7 @@ public final class RepositorySidebar extends VBox {
 
     /** Rebuilds the tree from current manager state; called after any session change. */
     public void refreshSessions() {
+        refreshWorktreeStatuses();
         rebuildTree();
     }
 
@@ -210,8 +222,11 @@ public final class RepositorySidebar extends VBox {
 
         treeRoot.getChildren().setAll(repoItems);
 
-        footerLabel.setText(runningTotal + " running · " + repositories.size()
-                + (repositories.size() == 1 ? " repository" : " repositories"));
+        long worktreeTotal = sessionManager.sessions().stream()
+                .filter(session -> session.worktreeRoot().isPresent())
+                .count();
+        footerLabel.setText(runningTotal + " running · " + worktreeTotal
+                + (worktreeTotal == 1 ? " worktree" : " worktrees"));
         SessionStatusStyles.updateDot(footerDot, runningTotal > 0 ? SessionStatus.RUNNING : SessionStatus.INACTIVE);
     }
 
@@ -236,6 +251,31 @@ public final class RepositorySidebar extends VBox {
         for (Repository repository : repositoryManager.repositories()) {
             refreshStatus(repository);
         }
+        refreshWorktreeStatuses();
+    }
+
+    /** Fetches per-worktree status for sessions not yet covered (branch tag + dirty dot per worktree checkout). */
+    private void refreshWorktreeStatuses() {
+        for (ManagedClaudeSession session : sessionManager.sessions()) {
+            session.worktreeRoot().ifPresent(root -> {
+                if (!worktreeStatuses.containsKey(root)) {
+                    refreshWorktreeStatus(root);
+                }
+            });
+        }
+    }
+
+    private void refreshWorktreeStatus(Path worktreeRoot) {
+        gitStatusService.getStatus(worktreeRoot)
+                .whenComplete((status, failure) -> Platform.runLater(() -> {
+                    if (failure != null) {
+                        worktreeStatuses.remove(worktreeRoot);
+                        LOG.log(Level.DEBUG, "Git status refresh failed for worktree " + worktreeRoot, failure);
+                    } else {
+                        worktreeStatuses.put(worktreeRoot, status);
+                    }
+                    rebuildTree();
+                }));
     }
 
     private void refreshStatus(Repository repository) {
@@ -412,10 +452,11 @@ public final class RepositorySidebar extends VBox {
 
             Button newSession = new Button("+");
             newSession.getStyleClass().add("row-action-button");
-            newSession.setTooltip(new Tooltip("New Claude session"));
+            newSession.setTooltip(new Tooltip("New session or worktree…"));
             newSession.setFocusTraversable(false);
             newSession.visibleProperty().bind(hoverProperty());
-            newSession.setOnAction(e -> mainWorkspace.openNewSession(repository));
+            ContextMenu newMenu = buildNewSessionMenu(repository);
+            newSession.setOnAction(e -> newMenu.show(newSession, Side.BOTTOM, 0, 4));
 
             HBox row = new HBox(7, caret, text, count, newSession);
             row.getStyleClass().add("repo-row");
@@ -439,12 +480,40 @@ public final class RepositorySidebar extends VBox {
             Label name = new Label(session.displayName());
             name.getStyleClass().add("session-name");
 
-            String branch = branchTextFor(repository);
-            Label meta = new Label(branch + " · " + relativeTime(session.lastOpenedAt()));
+            // Branch tag (worktree handoff "Sidebar session rows"): ◫ accent
+            // for a worktree checkout, ⎇ dim for the current checkout.
+            boolean isWorktree = session.worktreeRoot().isPresent();
+            GitStatus checkoutStatus = session.worktreeRoot()
+                    .map(worktreeStatuses::get)
+                    .orElseGet(() -> statuses.get(repository.id()));
+            String branch = checkoutStatus != null ? branchText(checkoutStatus) : "…";
+            Label branchTag = new Label((isWorktree ? "◫ " : "⎇ ") + branch);
+            branchTag.getStyleClass().add(isWorktree ? "branch-tag-worktree" : "branch-tag");
+
+            HBox nameRow = new HBox(6, name, branchTag);
+            nameRow.setAlignment(Pos.CENTER_LEFT);
+            if (checkoutStatus != null && checkoutStatus.dirty()) {
+                Region dirtyDot = new Region();
+                dirtyDot.getStyleClass().add("dirty-dot");
+                nameRow.getChildren().add(dirtyDot);
+            }
+
+            Label meta = new Label(relativeTime(session.lastOpenedAt()));
             meta.getStyleClass().add("session-meta");
 
-            VBox text = new VBox(1, name, meta);
+            VBox text = new VBox(1, nameRow, meta);
             HBox.setHgrow(text, Priority.ALWAYS);
+
+            // Right-aligned PR chip: `PR #n` while open, `merged` after.
+            Label prChip = switch (session.prState()) {
+                case OPEN -> new Label(session.prNumber().map(n -> "PR #" + n).orElse("PR"));
+                case MERGED -> new Label("merged");
+                case NONE -> null;
+            };
+            if (prChip != null) {
+                prChip.getStyleClass().add(session.prState() == PrState.MERGED
+                        ? "pr-chip-merged" : "pr-chip");
+            }
 
             Button open = quickAction("↗", "Open", false, () -> mainWorkspace.resumeSession(session));
             Button stop = quickAction("■", "Stop process", true, () -> mainWorkspace.closeSession(session.id()));
@@ -455,6 +524,9 @@ public final class RepositorySidebar extends VBox {
             actions.visibleProperty().bind(hoverProperty());
 
             HBox row = new HBox(8, dot, text, actions);
+            if (prChip != null) {
+                row.getChildren().add(row.getChildren().indexOf(actions), prChip);
+            }
             row.getStyleClass().add("session-row");
             row.setAlignment(Pos.CENTER_LEFT);
             row.setPadding(new Insets(5, 8, 5, 16));
@@ -512,9 +584,20 @@ public final class RepositorySidebar extends VBox {
             return menu;
         }
 
+        /** The repo "+" menu (worktree handoff "Creating"): current checkout vs a fresh worktree. */
+        private ContextMenu buildNewSessionMenu(Repository repository) {
+            MenuItem inCheckout = new MenuItem("❯_  Session in current checkout");
+            inCheckout.setOnAction(e -> mainWorkspace.openNewSession(repository));
+            MenuItem newWorktree = new MenuItem("◫  New worktree…");
+            newWorktree.setOnAction(e -> onNewWorktree.accept(repository));
+            return new ContextMenu(inCheckout, newWorktree);
+        }
+
         private ContextMenu buildRepoContextMenu(Repository repository) {
             MenuItem newSession = new MenuItem("New Claude session");
             newSession.setOnAction(e -> mainWorkspace.openNewSession(repository));
+            MenuItem newWorktree = new MenuItem("New worktree…");
+            newWorktree.setOnAction(e -> onNewWorktree.accept(repository));
 
             MenuItem refresh = new MenuItem("Refresh");
             refresh.setOnAction(e -> refreshStatus(repository));
@@ -529,7 +612,7 @@ public final class RepositorySidebar extends VBox {
             remove.setOnAction(e -> onRemoveRepository(repository));
 
             ContextMenu menu = new ContextMenu();
-            menu.getItems().addAll(newSession, new SeparatorMenuItem(), refresh, openFinder, openEditor,
+            menu.getItems().addAll(newSession, newWorktree, new SeparatorMenuItem(), refresh, openFinder, openEditor,
                     new SeparatorMenuItem(), remove);
             return menu;
         }

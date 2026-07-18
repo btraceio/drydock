@@ -44,7 +44,9 @@ public record ManagedClaudeSession(
         SessionStatus status,
         Instant createdAt,
         Instant lastOpenedAt,
-        Optional<Integer> lastExitCode
+        Optional<Integer> lastExitCode,
+        PrState prState,
+        Optional<Integer> prNumber
 ) {
 
     public ManagedClaudeSession {
@@ -59,6 +61,8 @@ public record ManagedClaudeSession(
         Objects.requireNonNull(createdAt, "createdAt");
         Objects.requireNonNull(lastOpenedAt, "lastOpenedAt");
         Objects.requireNonNull(lastExitCode, "lastExitCode");
+        Objects.requireNonNull(prState, "prState");
+        Objects.requireNonNull(prNumber, "prNumber");
 
         if (displayName.isBlank()) {
             throw new IllegalArgumentException("ManagedClaudeSession displayName must not be blank");
@@ -83,36 +87,47 @@ public record ManagedClaudeSession(
 
     public ManagedClaudeSession withDisplayName(String newDisplayName) {
         return new ManagedClaudeSession(id, repositoryId, newDisplayName, claudeSessionId, claudeSessionName,
-                workingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, lastExitCode);
+                workingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, lastExitCode, prState, prNumber);
     }
 
     public ManagedClaudeSession withClaudeSessionId(Optional<String> newClaudeSessionId) {
         return new ManagedClaudeSession(id, repositoryId, displayName, newClaudeSessionId, claudeSessionName,
-                workingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, lastExitCode);
+                workingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, lastExitCode, prState, prNumber);
     }
 
     public ManagedClaudeSession withClaudeSessionName(Optional<String> newClaudeSessionName) {
         return new ManagedClaudeSession(id, repositoryId, displayName, claudeSessionId, newClaudeSessionName,
-                workingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, lastExitCode);
+                workingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, lastExitCode, prState, prNumber);
     }
 
     public ManagedClaudeSession withWorkingDirectory(Path newWorkingDirectory) {
         return new ManagedClaudeSession(id, repositoryId, displayName, claudeSessionId, claudeSessionName,
-                newWorkingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, lastExitCode);
+                newWorkingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, lastExitCode, prState, prNumber);
     }
 
     public ManagedClaudeSession withStatus(SessionStatus newStatus) {
         return new ManagedClaudeSession(id, repositoryId, displayName, claudeSessionId, claudeSessionName,
-                workingDirectory, worktreeRoot, newStatus, createdAt, lastOpenedAt, lastExitCode);
+                workingDirectory, worktreeRoot, newStatus, createdAt, lastOpenedAt, lastExitCode, prState, prNumber);
     }
 
     public ManagedClaudeSession withLastOpenedAt(Instant newLastOpenedAt) {
         return new ManagedClaudeSession(id, repositoryId, displayName, claudeSessionId, claudeSessionName,
-                workingDirectory, worktreeRoot, status, createdAt, newLastOpenedAt, lastExitCode);
+                workingDirectory, worktreeRoot, status, createdAt, newLastOpenedAt, lastExitCode, prState, prNumber);
     }
 
     public ManagedClaudeSession withLastExitCode(Optional<Integer> newLastExitCode) {
         return new ManagedClaudeSession(id, repositoryId, displayName, claudeSessionId, claudeSessionName,
-                workingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, newLastExitCode);
+                workingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, newLastExitCode, prState, prNumber);
+    }
+
+    public ManagedClaudeSession withWorktreeRoot(Optional<Path> newWorktreeRoot) {
+        return new ManagedClaudeSession(id, repositoryId, displayName, claudeSessionId, claudeSessionName,
+                workingDirectory, newWorktreeRoot, status, createdAt, lastOpenedAt, lastExitCode, prState, prNumber);
+    }
+
+    /** PR state and number always change together (a number is meaningless without OPEN/MERGED). */
+    public ManagedClaudeSession withPr(PrState newPrState, Optional<Integer> newPrNumber) {
+        return new ManagedClaudeSession(id, repositoryId, displayName, claudeSessionId, claudeSessionName,
+                workingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, lastExitCode, newPrState, newPrNumber);
     }
 }
