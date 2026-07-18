@@ -102,6 +102,9 @@ public final class CpmApplication extends Application {
                 DEFAULT_SCENE_WIDTH, DEFAULT_SCENE_HEIGHT);
 
         mainWorkspace.setThemeProvider(() -> appShell.themeManager().theme());
+        // The native ghostty view paints over in-scene modals; hide it while
+        // any modal is showing (see MainWorkspace.setTerminalsObscured).
+        appShell.modalLayer().setOnShowingChanged(mainWorkspace::setTerminalsObscured);
 
         gitHubService = new GitHubService();
         sidebar.setOnCloneFromGitHub(() -> appShell.modalLayer().show(
@@ -124,15 +127,28 @@ public final class CpmApplication extends Application {
         // separated seconds), so automated verification can screenshot the
         // dark->light->dark round trip without injecting any input. Inert
         // unless -Dapp.cpm.diag.toggleThemeSeconds is set.
-        // Diagnostic hook: opens the Clone-from-GitHub modal shortly after
-        // startup so automated verification can screenshot its placement.
-        // Inert unless -Dapp.cpm.diag.openGithubModal=true.
-        if (Boolean.getBoolean("app.cpm.diag.openGithubModal")) {
-            Platform.runLater(() -> {
-                appShell.modalLayer().show(new GitHubCloneModal(
-                        gitHubService, repositoryManager, appShell.modalLayer()::close));
-                System.out.println("[diag] github modal opened");
+        // Diagnostic hook: opens the Clone-from-GitHub modal so automated
+        // verification can screenshot its placement. Value is "true"
+        // (immediately) or a delay in seconds (e.g. to open it OVER an
+        // already-rendering terminal). Inert unless
+        // -Dapp.cpm.diag.openGithubModal is set.
+        String openGithubModal = System.getProperty("app.cpm.diag.openGithubModal");
+        if (openGithubModal != null) {
+            long delaySeconds = "true".equals(openGithubModal) ? 0 : Long.parseLong(openGithubModal);
+            Thread opener = new Thread(() -> {
+                try {
+                    Thread.sleep(delaySeconds * 1000);
+                } catch (InterruptedException e) {
+                    return;
+                }
+                Platform.runLater(() -> {
+                    appShell.modalLayer().show(new GitHubCloneModal(
+                            gitHubService, repositoryManager, appShell.modalLayer()::close));
+                    System.out.println("[diag] github modal opened");
+                });
             });
+            opener.setDaemon(true);
+            opener.start();
         }
 
         String toggleThemeSeconds = System.getProperty("app.cpm.diag.toggleThemeSeconds");

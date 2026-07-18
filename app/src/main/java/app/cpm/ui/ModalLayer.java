@@ -7,6 +7,8 @@ import javafx.scene.input.MouseEvent;
 import javafx.scene.layout.Region;
 import javafx.scene.layout.StackPane;
 
+import java.util.function.Consumer;
+
 /**
  * The in-scene modal layer (design handoff sections 7/8): a dimmed
  * backdrop stacked over the whole app shell, hosting one centered modal
@@ -20,6 +22,7 @@ import javafx.scene.layout.StackPane;
 public final class ModalLayer extends StackPane {
 
     private Runnable onClosed = () -> { };
+    private Consumer<Boolean> onShowingChanged = showing -> { };
 
     ModalLayer() {
         getStyleClass().add("modal-backdrop");
@@ -48,11 +51,22 @@ public final class ModalLayer extends StackPane {
         return isVisible();
     }
 
+    /**
+     * Notified with {@code true}/{@code false} when a modal opens/closes.
+     * Needed because the ghostty terminal is a NATIVE view stacked above
+     * the whole JavaFX scene -- an in-scene modal would render underneath
+     * it, so the workspace hides the native view(s) while a modal shows.
+     */
+    public void setOnShowingChanged(Consumer<Boolean> listener) {
+        this.onShowingChanged = listener == null ? showing -> { } : listener;
+    }
+
     /** Shows {@code modal} centered; replaces any modal already showing. */
     public void show(Region modal, Runnable onClosed) {
         this.onClosed = onClosed == null ? () -> { } : onClosed;
         getChildren().setAll(modal);
         setVisible(true);
+        onShowingChanged.accept(true);
         modal.requestFocus();
     }
 
@@ -66,6 +80,7 @@ public final class ModalLayer extends StackPane {
         }
         setVisible(false);
         getChildren().clear();
+        onShowingChanged.accept(false);
         Runnable callback = onClosed;
         onClosed = () -> { };
         callback.run();

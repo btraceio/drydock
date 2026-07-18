@@ -104,6 +104,14 @@ public final class MainWorkspace extends BorderPane {
     /** Current UI theme, for terminal config selection; wired by CpmApplication once the shell exists. */
     private Supplier<UiTheme> themeProvider = () -> UiTheme.DARK;
 
+    /**
+     * True while a modal is showing. The ghostty terminal is a NATIVE view
+     * stacked above the whole JavaFX scene, so it would paint over any
+     * in-scene modal; while obscured, every tab's native view stays hidden
+     * (the process keeps running -- only painting is suppressed).
+     */
+    private boolean terminalsObscured;
+
     public MainWorkspace(SessionManager sessionManager, RepositoryManager repositoryManager,
                           GitStatusService gitStatusService, Stage stage) {
         this.sessionManager = sessionManager;
@@ -137,7 +145,7 @@ public final class MainWorkspace extends BorderPane {
 
         tabPane.getSelectionModel().selectedItemProperty().addListener((obs, oldTab, newTab) -> {
             for (OpenSessionTab open : openTabs.values()) {
-                open.setVisible(open.tab == newTab);
+                open.setVisible(!terminalsObscured && open.tab == newTab);
             }
             updatePickerVisibility();
             onSessionsChanged.run();
@@ -232,6 +240,15 @@ public final class MainWorkspace extends BorderPane {
     /** Back / Esc from a session: deselect the tab, revealing the resume picker (handoff section 6). */
     public void showPicker() {
         tabPane.getSelectionModel().clearSelection();
+    }
+
+    /** Hides/restores every native terminal view while a modal is showing (see {@link #terminalsObscured}). */
+    public void setTerminalsObscured(boolean obscured) {
+        this.terminalsObscured = obscured;
+        Tab selected = tabPane.getSelectionModel().getSelectedItem();
+        for (OpenSessionTab open : openTabs.values()) {
+            open.setVisible(!obscured && open.tab == selected);
+        }
     }
 
     // ---- Opening ------------------------------------------------------------
@@ -381,7 +398,8 @@ public final class MainWorkspace extends BorderPane {
         placeholderTab.setDisplayName(opened.session().displayName());
         placeholderTab.setStatus(opened.session().status());
         openTabs.put(opened.session().id(), placeholderTab);
-        placeholderTab.setVisible(tabPane.getSelectionModel().getSelectedItem() == placeholderTab.tab);
+        placeholderTab.setVisible(!terminalsObscured
+                && tabPane.getSelectionModel().getSelectedItem() == placeholderTab.tab);
         onSessionsChanged.run();
     }
 
