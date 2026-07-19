@@ -43,8 +43,8 @@ public final class GhCliService implements AutoCloseable {
             Path.of("/usr/local/bin/gh"),
             Path.of("/opt/homebrew/bin/gh"));
 
-    /** The bits of {@code gh pr view --json number,state} the app cares about. */
-    public record PrInfo(int number, PrLifecycle state) {
+    /** The bits of {@code gh pr view --json number,state,url} the app cares about. */
+    public record PrInfo(int number, PrLifecycle state, Optional<String> url) {
         public enum PrLifecycle { OPEN, MERGED, CLOSED, UNKNOWN }
     }
 
@@ -87,7 +87,7 @@ public final class GhCliService implements AutoCloseable {
             return Optional.empty();
         }
         ProcessResult result = runIn(root,
-                List.of(gh.toString(), "pr", "view", branch, "--json", "number,state"));
+                List.of(gh.toString(), "pr", "view", branch, "--json", "number,state,url"));
         if (result == null || result.exitCode() != 0) {
             return Optional.empty();
         }
@@ -102,7 +102,10 @@ public final class GhCliService implements AutoCloseable {
             PrInfo.PrLifecycle state = obj.get("state") instanceof JsonString s
                     ? lifecycleOf(s.value())
                     : PrInfo.PrLifecycle.UNKNOWN;
-            return Optional.of(new PrInfo(number.asInt(), state));
+            Optional<String> url = obj.get("url") instanceof JsonString u
+                    ? Optional.of(u.value())
+                    : Optional.empty();
+            return Optional.of(new PrInfo(number.asInt(), state, url));
         } catch (JsonParseException | NumberFormatException e) {
             LOG.log(Level.DEBUG, "Unparseable gh pr view output", e);
             return Optional.empty();

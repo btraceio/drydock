@@ -1,5 +1,9 @@
 package app.cpm.terminal.ghostty;
 
+import javafx.application.Platform;
+import javafx.scene.input.Clipboard;
+import javafx.scene.input.ClipboardContent;
+
 import java.lang.foreign.Arena;
 import java.lang.foreign.SymbolLookup;
 import java.lang.foreign.FunctionDescriptor;
@@ -121,7 +125,10 @@ public final class GhosttyApp implements AutoCloseable {
 
         MemorySegment runtimeConfig = arena.allocate(GhosttyAppBinding.RUNTIME_CONFIG_LAYOUT);
         runtimeConfig.set(ValueLayout.ADDRESS, 0, MemorySegment.NULL); // userdata (unused; closures capture state instead)
-        runtimeConfig.set(ValueLayout.JAVA_BOOLEAN, 8, true); // supports_selection_clipboard
+        // macOS has no X11-style selection clipboard, and JavaFX exposes only
+        // the one system clipboard; advertising selection support would make
+        // ghostty's copy-on-select clobber the real clipboard on every drag.
+        runtimeConfig.set(ValueLayout.JAVA_BOOLEAN, 8, false); // supports_selection_clipboard
         runtimeConfig.set(ValueLayout.ADDRESS, 16, wakeupStub);
         runtimeConfig.set(ValueLayout.ADDRESS, 24, actionStub);
         runtimeConfig.set(ValueLayout.ADDRESS, 32, readClipboardStub);
@@ -259,21 +266,101 @@ public final class GhosttyApp implements AutoCloseable {
         return false;
     }
 
+    /**
+     * {@code read_clipboard_cb}: a paste (or OSC 52 read) wants the system
+     * clipboard's contents. {@code userdata} is the surface-config token
+     * {@link GhosttySurface} planted, resolved back to the surface so the
+     * request can be completed via {@code
+     * ghostty_surface_complete_clipboard_request}. Completing synchronously
+     * from inside the callback is the normal embedded-runtime pattern
+     * (Ghostty's own macOS app does the same when the pasteboard is readily
+     * readable); the JavaFX clipboard requires the FX thread, which is where
+     * every callback-triggering native call (surface_key, tick) is made.
+     */
     @SuppressWarnings("unused")
     private static boolean handleReadClipboard(MemorySegment userdata, int location, MemorySegment state) {
-        return false; // clipboard reads are not implemented in this spike.
+        GhosttySurface surface = GhosttySurface.byClipboardToken(userdata.address());
+        if (surface == null) {
+            return false;
+        }
+        Runnable complete = () -> {
+            String text = Clipboard.getSystemClipboard().getString();
+            surface.completeClipboardRequest(text == null ? "" : text, state, false);
+        };
+        if (Platform.isFxApplicationThread()) {
+            complete.run();
+        } else {
+            Platform.runLater(complete);
+        }
+        return true;
     }
 
+    /**
+     * {@code confirm_read_clipboard_cb}: ghostty's safe-paste check flagged
+     * the pending paste (multi-line text, control characters). The managed
+     * terminal always hosts a full-screen TUI (claude) where multi-line
+     * pastes are routine, so auto-confirm instead of interrupting with a
+     * dialog. Completion is deferred to {@code Platform.runLater} so the
+     * re-entrant complete call runs after the current native call unwinds.
+     */
     @SuppressWarnings("unused")
     private static void handleConfirmReadClipboard(MemorySegment userdata, MemorySegment string,
                                                     MemorySegment state, int request) {
-        // no-op: this spike never issues a read-clipboard request that would need confirmation.
+        GhosttySurface surface = GhosttySurface.byClipboardToken(userdata.address());
+        if (surface == null) {
+            return;
+        }
+        String text = string.equals(MemorySegment.NULL)
+                ? "" : string.reinterpret(Long.MAX_VALUE).getString(0);
+        Platform.runLater(() -> surface.completeClipboardRequest(text, state, true));
     }
 
+    /**
+     * {@code write_clipboard_cb}: copy-to-clipboard (or an OSC 52 write)
+     * publishes terminal text. {@code content} is an array of {@code len}
+     * {@code ghostty_clipboard_content_s} entries ({mime, data} C-string
+     * pairs); the plain-text entry wins. {@code confirm} (OSC 52
+     * ask-before-write) is not surfaced as a dialog -- the write simply
+     * proceeds, matching the copy semantics a terminal user expects.
+     */
     @SuppressWarnings("unused")
     private static void handleWriteClipboard(MemorySegment userdata, int location,
                                               MemorySegment content, long len, boolean confirm) {
-        // no-op: clipboard writes are not implemented in this spike.
+        if (len <= 0 || content.equals(MemorySegment.NULL)) {
+            return;
+        }
+        MemorySegment entries = content.reinterpret(len * 16);
+        String text = null;
+        for (long i = 0; i < len; i++) {
+            MemorySegment mimePtr = entries.get(ValueLayout.ADDRESS, i * 16);
+            MemorySegment dataPtr = entries.get(ValueLayout.ADDRESS, i * 16 + 8);
+            if (dataPtr.equals(MemorySegment.NULL)) {
+                continue;
+            }
+            String mime = mimePtr.equals(MemorySegment.NULL)
+                    ? "" : mimePtr.reinterpret(Long.MAX_VALUE).getString(0);
+            String data = dataPtr.reinterpret(Long.MAX_VALUE).getString(0);
+            if (text == null || mime.startsWith("text/plain")) {
+                text = data;
+            }
+            if (mime.startsWith("text/plain")) {
+                break;
+            }
+        }
+        if (text == null) {
+            return;
+        }
+        String value = text;
+        Runnable set = () -> {
+            ClipboardContent clipboardContent = new ClipboardContent();
+            clipboardContent.putString(value);
+            Clipboard.getSystemClipboard().setContent(clipboardContent);
+        };
+        if (Platform.isFxApplicationThread()) {
+            set.run();
+        } else {
+            Platform.runLater(set);
+        }
     }
 
     @SuppressWarnings("unused")

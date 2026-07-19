@@ -33,6 +33,10 @@ public final class AppShell {
     private final ThemeManager themeManager;
     private final TitleBar titleBar;
 
+    /** Collapse state (⌘0 / title-bar toggle); the last expanded width is restored on expand. */
+    private boolean sidebarCollapsed;
+    private double savedSidebarWidth = -1;
+
     public AppShell(Stage stage, String title, Region sidebar, Region mainPane,
                     double initialSidebarWidth, UiTheme initialTheme, Consumer<UiTheme> onThemeChanged,
                     double sceneWidth, double sceneHeight) {
@@ -45,7 +49,8 @@ public final class AppShell {
 
         titleBar = new TitleBar(stage, title,
                 () -> showShortcutsOverlay(),
-                () -> toggleTheme());
+                () -> toggleTheme(),
+                () -> toggleSidebar());
 
         BorderPane shell = new BorderPane();
         shell.setTop(titleBar);
@@ -82,9 +87,30 @@ public final class AppShell {
         return themeManager;
     }
 
-    /** Current absolute sidebar width in px, for persistence on shutdown. */
+    /** Current absolute sidebar width in px, for persistence on shutdown (the pre-collapse width while collapsed). */
     public double sidebarWidth() {
-        return sidebar.getWidth();
+        return sidebarCollapsed ? savedSidebarWidth : sidebar.getWidth();
+    }
+
+    /**
+     * Collapses/restores the sidebar (⌘0 / title-bar toggle). Collapsing
+     * removes it from the {@link SplitPane} entirely (a JavaFX SplitPane has
+     * no zero-width divider state); expanding re-inserts it at its previous
+     * width.
+     */
+    public void toggleSidebar() {
+        if (sidebarCollapsed) {
+            splitPane.getItems().add(0, sidebar);
+            SplitPane.setResizableWithParent(sidebar, false);
+            double width = Math.clamp(savedSidebarWidth > 0 ? savedSidebarWidth : SIDEBAR_MIN,
+                    SIDEBAR_MIN, SIDEBAR_MAX);
+            splitPane.setDividerPositions(width / Math.max(1, splitPane.getWidth()));
+            sidebarCollapsed = false;
+        } else {
+            savedSidebarWidth = sidebar.getWidth();
+            splitPane.getItems().remove(sidebar);
+            sidebarCollapsed = true;
+        }
     }
 
     public void toggleTheme() {

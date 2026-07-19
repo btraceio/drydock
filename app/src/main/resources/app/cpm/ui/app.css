@@ -1325,3 +1325,438 @@
     -fx-text-fill: -cpm-pr;
     -fx-font-size: 13px;
 }
+
+/* ---- Worktree discovery: unopened rows, Start/Resume pills, rescan ------- */
+
+.worktree-unopened-row {
+    -fx-background-radius: 6px;
+    -fx-cursor: hand;
+}
+.worktree-unopened-row:hover {
+    -fx-background-color: -cpm-hover;
+}
+.worktree-unopened-icon {
+    -fx-text-fill: -cpm-text-faint;
+    -fx-font-size: 12px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.worktree-unopened-branch {
+    -fx-text-fill: -cpm-text-dim;
+    -fx-font-size: 12.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.worktree-discovered {
+    -fx-border-color: -cpm-accent;
+    -fx-border-radius: 6px;
+    -fx-background-color: -cpm-accent-soft;
+}
+.start-pill {
+    -fx-background-color: -cpm-accent-soft;
+    -fx-background-radius: 100px;
+    -fx-text-fill: -cpm-accent;
+    -fx-font-size: 11px;
+    -fx-padding: 2 9 2 9;
+    -fx-cursor: hand;
+}
+.start-pill:hover {
+    -fx-background-color: -cpm-accent;
+    -fx-text-fill: white;
+}
+.resume-pill {
+    -fx-background-color: transparent;
+    -fx-background-radius: 100px;
+    -fx-border-color: -cpm-border-strong;
+    -fx-border-radius: 100px;
+    -fx-text-fill: -cpm-text-faint;
+    -fx-font-size: 10.5px;
+    -fx-padding: 1 8 1 8;
+}
+.worktree-delete-button:hover {
+    -fx-background-color: -cpm-error-soft;
+}
+
+/* ---- Diff Review tab (design handoff section C) -------------------------- */
+
+.review-root {
+    -fx-background-color: -cpm-main;
+}
+.review-scope-bar {
+    -fx-background-color: -cpm-tabbar;
+    -fx-border-color: transparent transparent -cpm-border transparent;
+    -fx-border-width: 0 0 1 0;
+    -fx-padding: 6 12 6 12;
+}
+.review-scope-pill {
+    -fx-background-color: transparent;
+    -fx-background-radius: 7px;
+    -fx-border-color: -cpm-border;
+    -fx-border-radius: 7px;
+    -fx-padding: 4 12 4 12;
+    -fx-cursor: hand;
+}
+.review-scope-pill:hover {
+    -fx-background-color: -cpm-hover;
+}
+.review-scope-pill:selected {
+    -fx-background-color: -cpm-accent-soft;
+    -fx-border-color: -cpm-accent;
+}
+.review-scope-title {
+    -fx-text-fill: -cpm-text;
+    -fx-font-size: 12px;
+}
+.review-scope-sub {
+    -fx-text-fill: -cpm-text-faint;
+    -fx-font-size: 10px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-token-chip {
+    -fx-background-color: -cpm-accent-soft;
+    -fx-background-radius: 100px;
+    -fx-padding: 2 4 2 10;
+}
+.review-token-label {
+    -fx-text-fill: -cpm-text;
+    -fx-font-size: 11px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-token-search {
+    -fx-background-color: transparent;
+    -fx-background-radius: 100px;
+    -fx-text-fill: -cpm-accent;
+    -fx-font-size: 11px;
+    -fx-padding: 1 8 1 8;
+    -fx-cursor: hand;
+}
+.review-token-search:hover {
+    -fx-background-color: -cpm-accent;
+    -fx-text-fill: white;
+}
+.review-files-scroll {
+    -fx-background-color: transparent;
+    -fx-border-color: transparent -cpm-border transparent transparent;
+    -fx-border-width: 0 1 0 0;
+}
+.review-files-scroll > .viewport {
+    -fx-background-color: transparent;
+}
+.review-files {
+    -fx-background-color: -cpm-sidebar;
+    -fx-padding: 8;
+}
+.review-files-empty {
+    -fx-text-fill: -cpm-text-faint;
+    -fx-font-size: 12px;
+    -fx-padding: 8;
+}
+.review-file-row {
+    -fx-background-radius: 6px;
+    -fx-padding: 4 8 4 8;
+    -fx-cursor: hand;
+}
+.review-file-row:hover {
+    -fx-background-color: -cpm-hover;
+}
+.review-file-row.active {
+    -fx-background-color: -cpm-active-bg;
+}
+.review-file-marker {
+    -fx-font-size: 10.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-min-width: 12px;
+}
+.review-file-name {
+    -fx-text-fill: -cpm-text;
+    -fx-font-size: 12px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-file-stats {
+    -fx-text-fill: -cpm-text-faint;
+    -fx-font-size: 10.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-staged-chip, .review-unstaged-chip {
+    -fx-background-radius: 100px;
+    -fx-font-size: 9.5px;
+    -fx-padding: 0 6 0 6;
+}
+.review-staged-chip {
+    -fx-background-color: -cpm-running-soft;
+    -fx-text-fill: -cpm-running;
+}
+.review-unstaged-chip {
+    -fx-background-color: -cpm-dirty-soft;
+    -fx-text-fill: -cpm-dirty;
+}
+.review-annotation-count {
+    -fx-background-color: -cpm-accent-soft;
+    -fx-background-radius: 100px;
+    -fx-text-fill: -cpm-accent;
+    -fx-font-size: 10px;
+    -fx-padding: 0 6 0 6;
+}
+.review-diff-scroll {
+    -fx-background-color: transparent;
+}
+.review-diff-scroll > .viewport {
+    -fx-background-color: transparent;
+}
+.review-diff {
+    -fx-background-color: -cpm-code-bg;
+    -fx-padding: 0 0 20 0;
+}
+.review-diff-message {
+    -fx-text-fill: -cpm-text-faint;
+    -fx-font-size: 12px;
+    -fx-padding: 12;
+}
+.review-hunk-header {
+    -fx-background-color: -cpm-active-bg;
+    -fx-text-fill: -cpm-text-faint;
+    -fx-font-size: 11px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-padding: 3 12 3 12;
+}
+.review-diff-row {
+    -fx-padding: 0 8 0 0;
+}
+.row-add {
+    -fx-background-color: -cpm-add-bg;
+    -fx-border-color: transparent transparent transparent -cpm-add-bar;
+    -fx-border-width: 0 0 0 2;
+}
+.row-del {
+    -fx-background-color: -cpm-del-bg;
+    -fx-border-color: transparent transparent transparent -cpm-del-bar;
+    -fx-border-width: 0 0 0 2;
+}
+.row-context {
+    -fx-border-color: transparent transparent transparent transparent;
+    -fx-border-width: 0 0 0 2;
+}
+.review-diff-row.row-selected {
+    -fx-background-color: -cpm-sel-bg;
+    -fx-border-color: transparent transparent transparent -cpm-accent;
+    -fx-border-width: 0 0 0 2;
+}
+.review-annotate-handle {
+    -fx-text-fill: transparent;
+    -fx-background-radius: 4px;
+    -fx-font-size: 11px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-min-width: 18px;
+    -fx-alignment: center;
+    -fx-cursor: hand;
+}
+.review-diff-row:hover .review-annotate-handle {
+    -fx-text-fill: -cpm-accent;
+    -fx-background-color: -cpm-accent-soft;
+}
+.review-line-number {
+    -fx-text-fill: -cpm-code-gutter;
+    -fx-font-size: 11px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-min-width: 38px;
+    -fx-alignment: center-right;
+    -fx-padding: 0 6 0 0;
+}
+.review-line-sign {
+    -fx-font-size: 12px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-min-width: 16px;
+    -fx-alignment: center;
+}
+.sign-add { -fx-text-fill: -cpm-add-sign; }
+.sign-del { -fx-text-fill: -cpm-del-sign; }
+.sign-context { -fx-text-fill: -cpm-code-gutter; }
+.review-line-text {
+    -fx-fill: -cpm-code-text;
+    -fx-font-size: 12px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-open-in-explorer {
+    -fx-background-color: transparent;
+    -fx-background-radius: 4px;
+    -fx-text-fill: -cpm-text-dim;
+    -fx-font-size: 11px;
+    -fx-padding: 0 6 0 6;
+    -fx-cursor: hand;
+}
+.review-open-in-explorer:hover {
+    -fx-background-color: -cpm-hover;
+    -fx-text-fill: -cpm-text;
+}
+.review-composer {
+    -fx-background-color: -cpm-sidebar;
+    -fx-border-color: -cpm-accent;
+    -fx-border-width: 0 0 0 2;
+    -fx-padding: 10 12 10 12;
+}
+.review-composer-input {
+    -fx-background-color: -cpm-input-bg;
+    -fx-background-radius: 7px;
+    -fx-border-color: -cpm-border;
+    -fx-border-radius: 7px;
+    -fx-text-fill: -cpm-text;
+    -fx-prompt-text-fill: -cpm-text-faint;
+    -fx-font-size: 12px;
+    -fx-highlight-fill: -cpm-accent-soft;
+}
+.review-composer-input .content {
+    -fx-background-color: transparent;
+}
+.review-range-chip {
+    -fx-background-color: -cpm-accent-soft;
+    -fx-background-radius: 100px;
+    -fx-text-fill: -cpm-accent;
+    -fx-font-size: 10.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-padding: 1 8 1 8;
+}
+.review-add-annotation {
+    -fx-background-color: -cpm-accent;
+    -fx-background-radius: 7px;
+    -fx-text-fill: white;
+    -fx-font-size: 12px;
+    -fx-padding: 4 12 4 12;
+    -fx-cursor: hand;
+}
+.review-add-annotation:hover {
+    -fx-opacity: 0.9;
+}
+.review-thread-card {
+    -fx-background-color: -cpm-sidebar;
+    -fx-background-radius: 8px;
+    -fx-border-radius: 8px;
+    -fx-border-color: -cpm-border;
+    -fx-padding: 10 12 10 12;
+}
+.review-thread-card.thread-fixed {
+    -fx-border-color: -cpm-running;
+}
+.review-status-pill {
+    -fx-background-radius: 100px;
+    -fx-font-size: 9.5px;
+    -fx-padding: 0 7 0 7;
+}
+.status-open {
+    -fx-background-color: -cpm-accent-soft;
+    -fx-text-fill: -cpm-accent;
+}
+.status-resolved {
+    -fx-background-color: -cpm-active-bg;
+    -fx-text-fill: -cpm-text-dim;
+}
+.status-fixed {
+    -fx-background-color: -cpm-running-soft;
+    -fx-text-fill: -cpm-running;
+}
+.review-thread-author {
+    -fx-font-size: 11px;
+}
+.author-you { -fx-text-fill: -cpm-text-dim; }
+.author-claude { -fx-text-fill: -cpm-accent; }
+.review-thread-text {
+    -fx-text-fill: -cpm-text;
+    -fx-font-size: 12px;
+}
+.review-thread-action {
+    -fx-background-color: transparent;
+    -fx-background-radius: 6px;
+    -fx-border-color: -cpm-border-strong;
+    -fx-border-radius: 6px;
+    -fx-text-fill: -cpm-text-dim;
+    -fx-font-size: 11px;
+    -fx-padding: 2 9 2 9;
+    -fx-cursor: hand;
+}
+.review-thread-action:hover {
+    -fx-background-color: -cpm-hover;
+    -fx-text-fill: -cpm-text;
+}
+.review-footer {
+    -fx-background-color: -cpm-tabbar;
+    -fx-border-color: -cpm-border transparent transparent transparent;
+    -fx-border-width: 1 0 0 0;
+    -fx-padding: 6 12 6 12;
+}
+.review-summary {
+    -fx-text-fill: -cpm-text-dim;
+    -fx-font-size: 11.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-send-button {
+    -fx-background-color: -cpm-accent;
+    -fx-background-radius: 7px;
+    -fx-text-fill: white;
+    -fx-font-size: 12px;
+    -fx-padding: 5 14 5 14;
+    -fx-cursor: hand;
+}
+.review-send-button:hover {
+    -fx-opacity: 0.9;
+}
+.review-send-button:disabled {
+    -fx-opacity: 0.45;
+}
+.review-banner {
+    -fx-background-color: -cpm-running-soft;
+    -fx-background-radius: 7px;
+    -fx-padding: 3 10 3 10;
+}
+.review-banner-label {
+    -fx-text-fill: -cpm-running;
+    -fx-font-size: 11.5px;
+}
+.review-rerun-button {
+    -fx-background-color: transparent;
+    -fx-text-fill: -cpm-running;
+    -fx-font-size: 11.5px;
+    -fx-underline: true;
+    -fx-padding: 0 4 0 4;
+    -fx-cursor: hand;
+}
+
+/* ---- Explorer diff overlay (handoff section C "Explorer integration") ---- */
+
+.viewer-diff-banner {
+    -fx-background-color: -cpm-running-soft;
+    -fx-border-color: transparent transparent -cpm-border transparent;
+    -fx-border-width: 0 0 1 0;
+    -fx-padding: 4 12 4 12;
+}
+.viewer-diff-banner-label {
+    -fx-text-fill: -cpm-running;
+    -fx-font-size: 11.5px;
+}
+.viewer-diff-base-switch {
+    -fx-background-color: transparent;
+    -fx-background-radius: 6px;
+    -fx-border-color: -cpm-border-strong;
+    -fx-border-radius: 6px;
+    -fx-text-fill: -cpm-text-dim;
+    -fx-font-size: 10.5px;
+    -fx-padding: 1 8 1 8;
+    -fx-cursor: hand;
+}
+.viewer-diff-base-switch:hover {
+    -fx-background-color: -cpm-hover;
+    -fx-text-fill: -cpm-text;
+}
+.changed-line-marker {
+    -fx-min-width: 3px;
+    -fx-pref-width: 3px;
+    -fx-max-width: 3px;
+    -fx-min-height: 14px;
+    -fx-background-color: transparent;
+}
+.changed-line-marker.on {
+    -fx-background-color: -cpm-changed-gutter;
+}
+.diff-chip {
+    -fx-background-color: -cpm-running-soft;
+    -fx-background-radius: 100px;
+    -fx-text-fill: -cpm-changed-gutter;
+    -fx-font-size: 9.5px;
+    -fx-padding: 0 6 0 6;
+}

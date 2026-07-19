@@ -41,6 +41,16 @@
     -cpm-merged-soft: rgba(138, 79, 181, 0.14);
     -cpm-match-bg: rgba(217, 119, 87, 0.28);
 
+    /* Diff Review (light equivalents of the dark set). */
+    -cpm-add-bg: rgba(76, 157, 94, 0.12);
+    -cpm-add-bar: #4c9d5e;
+    -cpm-add-sign: #3e8450;
+    -cpm-del-bg: rgba(198, 73, 63, 0.10);
+    -cpm-del-bar: #c6493f;
+    -cpm-del-sign: #c6493f;
+    -cpm-sel-bg: rgba(217, 119, 87, 0.16);
+    -cpm-changed-gutter: #4c9d5e;
+
     /* Read-only code viewer palette (light equivalents of the dark set). */
     -cpm-code-text: #3b3d44;
     -cpm-code-kw: #a626a4;

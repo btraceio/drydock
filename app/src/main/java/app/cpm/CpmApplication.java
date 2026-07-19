@@ -4,9 +4,13 @@ import app.cpm.app.RepositoryManager;
 import app.cpm.app.SessionManager;
 import app.cpm.claude.ClaudeCapabilityService;
 import app.cpm.domain.Repository;
+import app.cpm.git.ChangedLineService;
+import app.cpm.git.DiffService;
 import app.cpm.git.GhCliService;
 import app.cpm.git.GitStatusService;
+import app.cpm.git.WorktreeService;
 import app.cpm.github.GitHubService;
+import app.cpm.review.AnnotationStore;
 import app.cpm.search.SessionSearchService;
 import app.cpm.state.JsonApplicationStateRepository;
 import app.cpm.ui.AppShell;
@@ -59,6 +63,8 @@ public final class CpmApplication extends Application {
     private static final double DEFAULT_SCENE_HEIGHT = 720;
 
     private GitStatusService gitStatusService;
+    private WorktreeService worktreeService;
+    private DiffService diffService;
     private SessionSearchService searchService;
     private GhCliService ghCliService;
     private ClaudeCapabilityService claudeCapabilityService;
@@ -67,6 +73,7 @@ public final class CpmApplication extends Application {
     private MainWorkspace mainWorkspace;
     private AppShell appShell;
     private GitHubService gitHubService;
+    private AnnotationStore annotationStore;
 
     private boolean shutdownConfirmed;
 
@@ -85,16 +92,21 @@ public final class CpmApplication extends Application {
         }
 
         gitStatusService = new GitStatusService();
+        worktreeService = new WorktreeService();
+        diffService = new DiffService();
         searchService = new SessionSearchService();
         ghCliService = new GhCliService();
         claudeCapabilityService = new ClaudeCapabilityService();
         repositoryManager = new RepositoryManager(stateRepository, gitStatusService);
         sessionManager = new SessionManager(stateRepository, claudeCapabilityService);
+        ChangedLineService changedLineService = new ChangedLineService(diffService);
+        annotationStore = new AnnotationStore(AnnotationStore.siblingOf(stateRepository.stateFile()));
 
         mainWorkspace = new MainWorkspace(sessionManager, repositoryManager, gitStatusService, searchService,
-                ghCliService, primaryStage);
+                ghCliService, diffService, changedLineService, annotationStore, primaryStage);
         RepositorySidebar sidebar =
-                new RepositorySidebar(repositoryManager, gitStatusService, sessionManager, mainWorkspace);
+                new RepositorySidebar(repositoryManager, gitStatusService, worktreeService, sessionManager,
+                        mainWorkspace);
         mainWorkspace.setOnSessionsChanged(sidebar::refreshSessions);
 
         appShell = new AppShell(primaryStage, WINDOW_TITLE, sidebar, mainWorkspace,
@@ -110,6 +122,7 @@ public final class CpmApplication extends Application {
 
         mainWorkspace.setThemeProvider(() -> appShell.themeManager().theme());
         mainWorkspace.setModalLayer(appShell.modalLayer());
+        mainWorkspace.setOnToggleSidebar(appShell::toggleSidebar);
         // The native ghostty view paints over in-scene modals; hide it while
         // any modal is showing (see MainWorkspace.setTerminalsObscured).
         appShell.modalLayer().setOnShowingChanged(mainWorkspace::setTerminalsObscured);
@@ -362,6 +375,15 @@ public final class CpmApplication extends Application {
             if (cmd && event.isShiftDown() && event.getCode() == KeyCode.L) {
                 appShell.toggleTheme();
                 event.consume();
+            } else if (cmd && event.getCode() == KeyCode.OPEN_BRACKET) {
+                mainWorkspace.selectPreviousSessionTab();
+                event.consume();
+            } else if (cmd && event.getCode() == KeyCode.CLOSE_BRACKET) {
+                mainWorkspace.selectNextSessionTab();
+                event.consume();
+            } else if (cmd && event.getCode() == KeyCode.DIGIT0) {
+                appShell.toggleSidebar();
+                event.consume();
             } else if (cmd && event.getCode() == KeyCode.F) {
                 sidebar.focusFilter();
                 event.consume();
@@ -373,6 +395,9 @@ public final class CpmApplication extends Application {
                 event.consume();
             } else if (cmd && event.getCode() == KeyCode.DIGIT2) {
                 mainWorkspace.showExplorerSubTab();
+                event.consume();
+            } else if (cmd && event.getCode() == KeyCode.DIGIT3) {
+                mainWorkspace.showReviewSubTab();
                 event.consume();
             } else if (cmd && event.getCode() == KeyCode.R) {
                 mainWorkspace.activeSessionId().flatMap(id -> sessionManager.sessions().stream()
@@ -439,6 +464,9 @@ public final class CpmApplication extends Application {
         if (gitHubService != null) {
             gitHubService.close();
         }
+        if (annotationStore != null) {
+            annotationStore.flushPendingSaves(); // don't lose a review note queued moments before quit
+        }
         if (sessionManager != null) {
             sessionManager.close();
         }
@@ -447,6 +475,12 @@ public final class CpmApplication extends Application {
         }
         if (gitStatusService != null) {
             gitStatusService.close();
+        }
+        if (worktreeService != null) {
+            worktreeService.close();
+        }
+        if (diffService != null) {
+            diffService.close();
         }
         if (searchService != null) {
             searchService.close();

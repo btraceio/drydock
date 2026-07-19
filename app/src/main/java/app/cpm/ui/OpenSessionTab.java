@@ -6,7 +6,9 @@ import app.cpm.domain.Repository;
 import app.cpm.domain.SessionStatus;
 import app.cpm.terminal.ghostty.GhosttyApp;
 import app.cpm.terminal.ghostty.GhosttySurface;
+import app.cpm.ui.explorer.SessionExplorerView;
 import app.cpm.terminal.host.CpmTerminalHost;
+import javafx.animation.PauseTransition;
 import javafx.application.Platform;
 import javafx.geometry.Bounds;
 import javafx.geometry.Pos;
@@ -26,6 +28,7 @@ import javafx.scene.layout.Region;
 import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
 import javafx.stage.Stage;
+import javafx.util.Duration;
 
 import java.lang.System.Logger;
 import java.nio.file.Path;
@@ -86,8 +89,8 @@ final class OpenSessionTab {
     private static final int GHOSTTY_MODS_ALT = 1 << 2;
     private static final int GHOSTTY_MODS_SUPER = 1 << 3;
 
-    /** The two views a session tab can show in its content area (design handoff "Session Explorer"). */
-    enum SubTab { TERMINAL, EXPLORER }
+    /** The three views a session tab can show in its content area (design handoff "Session Explorer" / "Diff Review"). */
+    enum SubTab { TERMINAL, EXPLORER, REVIEW }
 
     final ManagedSessionId sessionId;
     final Tab tab;
@@ -98,14 +101,18 @@ final class OpenSessionTab {
     private final Label statusLabel = new Label("Starting session...");
     private final BorderPane content = new BorderPane();
 
-    // -- Bottom Terminal/Explorer sub-tab bar (handoff "Session Explorer") --
+    // -- Bottom Terminal/Explorer/Review sub-tab bar (handoff "Session Explorer" / "Diff Review") --
     private final ToggleButton terminalSubTabButton = new ToggleButton("❯_  Terminal");
     private final ToggleButton explorerSubTabButton = new ToggleButton("▤  Explorer");
+    private final ToggleButton reviewSubTabButton = new ToggleButton("◨  Review");
     private final Label subTabContext = new Label();
     private SubTab activeSubTab = SubTab.TERMINAL;
     /** Built on first switch to Explorer, via {@link #setExplorerFactory}. */
     private Region explorerView;
     private Supplier<Region> explorerFactory;
+    /** Built on first switch to Review, via {@link #setReviewFactory}. */
+    private Region reviewView;
+    private Supplier<Region> reviewFactory;
     /** Whether MainWorkspace wants this tab's terminal shown (selected tab, no modal). */
     private boolean workspaceWantsVisible;
 
@@ -113,6 +120,7 @@ final class OpenSessionTab {
     private final Region tabDot = SessionStatusStyles.createDot(7, SessionStatus.STARTING);
     private final Label tabRepoLabel = new Label();
     private final Label tabTitleLabel = new Label();
+    private final Button tabCloseButton = new Button("×");
     private final TextField renameField = new TextField();
     private final VBox tabLabels = new VBox(0);
 
@@ -138,6 +146,9 @@ final class OpenSessionTab {
     private Runnable onCloseRequested = () -> { };
     private Consumer<String> onRenamed = name -> { };
     private Runnable onBack = () -> { };
+    private Runnable onPreviousSessionTab = () -> { };
+    private Runnable onNextSessionTab = () -> { };
+    private Runnable onToggleSidebar = () -> { };
 
     private String displayName;
     private GhosttySurface surface;
@@ -182,6 +193,25 @@ final class OpenSessionTab {
         subTabContext.setText("⎇ " + branch + " · " + repoName);
     }
 
+    /**
+     * Briefly replaces the header meta line with {@code notice} (e.g. the
+     * "⏺ Resumed session — restored N earlier messages…" resume banner),
+     * restoring the regular text after a few seconds.
+     */
+    void showTransientNotice(String notice) {
+        String previous = headerMeta.getText();
+        headerMeta.setText(notice);
+        PauseTransition restore = new PauseTransition(Duration.seconds(5));
+        restore.setOnFinished(e -> {
+            // Only restore if nothing else (e.g. setHeaderBranch resolving)
+            // replaced the notice meanwhile.
+            if (notice.equals(headerMeta.getText())) {
+                headerMeta.setText(previous);
+            }
+        });
+        restore.play();
+    }
+
     // ---- Bottom Terminal/Explorer sub-tab bar -------------------------------
 
     private Region buildSubTabBar() {
@@ -196,12 +226,17 @@ final class OpenSessionTab {
         explorerSubTabButton.setTooltip(new Tooltip("Explorer (⌘2)"));
         explorerSubTabButton.setOnAction(e -> showSubTab(SubTab.EXPLORER));
 
+        reviewSubTabButton.getStyleClass().add("session-subtab");
+        reviewSubTabButton.setFocusTraversable(false);
+        reviewSubTabButton.setTooltip(new Tooltip("Review (⌘3)"));
+        reviewSubTabButton.setOnAction(e -> showSubTab(SubTab.REVIEW));
+
         subTabContext.getStyleClass().add("session-subtab-context");
 
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
 
-        HBox bar = new HBox(4, terminalSubTabButton, explorerSubTabButton, spacer, subTabContext);
+        HBox bar = new HBox(4, terminalSubTabButton, explorerSubTabButton, reviewSubTabButton, spacer, subTabContext);
         bar.setAlignment(Pos.CENTER_LEFT);
         bar.getStyleClass().add("session-subtab-bar");
         return bar;
@@ -210,6 +245,31 @@ final class OpenSessionTab {
     /** Supplies the Explorer view on first use (MainWorkspace wires this; it knows the session's search root). */
     void setExplorerFactory(Supplier<Region> factory) {
         this.explorerFactory = factory;
+    }
+
+    /** Supplies the Review view on first use (MainWorkspace wires this; it knows the session's checkout + services). */
+    void setReviewFactory(Supplier<Region> factory) {
+        this.reviewFactory = factory;
+    }
+
+    /**
+     * Explorer bridge for the Review tab (design handoff section C
+     * "Explorer integration"): builds the Explorer if needed, switches to
+     * it, and opens {@code relativeFile} at a 1-based line.
+     */
+    void openExplorerAt(Path relativeFile, int line) {
+        showSubTab(SubTab.EXPLORER);
+        if (explorerView instanceof SessionExplorerView explorer) {
+            explorer.openFileAtLine(relativeFile, line);
+        }
+    }
+
+    /** Explorer bridge for the Review tab: switches to the Explorer and runs a text search for {@code token}. */
+    void searchInExplorer(String token) {
+        showSubTab(SubTab.EXPLORER);
+        if (explorerView instanceof SessionExplorerView explorer) {
+            explorer.searchText(token);
+        }
     }
 
     SubTab activeSubTab() {
@@ -227,20 +287,20 @@ final class OpenSessionTab {
     void showSubTab(SubTab subTab) {
         terminalSubTabButton.setSelected(subTab == SubTab.TERMINAL);
         explorerSubTabButton.setSelected(subTab == SubTab.EXPLORER);
+        reviewSubTabButton.setSelected(subTab == SubTab.REVIEW);
         if (subTab == activeSubTab) {
             return;
         }
-        if (subTab == SubTab.EXPLORER) {
-            if (explorerView == null && explorerFactory != null) {
-                explorerView = explorerFactory.get();
-            }
-            if (explorerView == null) {
+        if (subTab == SubTab.EXPLORER || subTab == SubTab.REVIEW) {
+            Region view = subTab == SubTab.EXPLORER ? explorerViewOrBuild() : reviewViewOrBuild();
+            if (view == null) {
                 terminalSubTabButton.setSelected(true);
                 explorerSubTabButton.setSelected(false);
+                reviewSubTabButton.setSelected(false);
                 return;
             }
-            activeSubTab = SubTab.EXPLORER;
-            content.setCenter(explorerView);
+            activeSubTab = subTab;
+            content.setCenter(view);
             applyTerminalVisibility();
         } else {
             activeSubTab = SubTab.TERMINAL;
@@ -250,6 +310,20 @@ final class OpenSessionTab {
             // the next layout pass; recompute the native frame after it.
             Platform.runLater(this::updateGeometry);
         }
+    }
+
+    private Region explorerViewOrBuild() {
+        if (explorerView == null && explorerFactory != null) {
+            explorerView = explorerFactory.get();
+        }
+        return explorerView;
+    }
+
+    private Region reviewViewOrBuild() {
+        if (reviewView == null && reviewFactory != null) {
+            reviewView = reviewFactory.get();
+        }
+        return reviewView;
     }
 
     private HBox buildTabGraphic(Optional<Repository> repository) {
@@ -264,12 +338,11 @@ final class OpenSessionTab {
         tabLabels.getChildren().setAll(tabRepoLabel, tabTitleLabel);
         tabLabels.setAlignment(Pos.CENTER_LEFT);
 
-        Button close = new Button("×");
-        close.getStyleClass().add("tab-close-button");
-        close.setFocusTraversable(false);
-        close.setOnAction(e -> onCloseRequested.run());
+        tabCloseButton.getStyleClass().add("tab-close-button");
+        tabCloseButton.setFocusTraversable(false);
+        tabCloseButton.setOnAction(e -> onCloseRequested.run());
 
-        HBox graphic = new HBox(8, tabDot, tabLabels, close);
+        HBox graphic = new HBox(8, tabDot, tabLabels, tabCloseButton);
         graphic.setAlignment(Pos.CENTER_LEFT);
 
         // Double-click the tab -> inline rename (Enter/blur commits, Esc cancels).
@@ -436,6 +509,12 @@ final class OpenSessionTab {
         if (tabLabels.getChildren().contains(renameField)) {
             return;
         }
+        // The native terminal view is the AppKit first responder while a
+        // session runs, and its NSEvent monitor feeds EVERY keystroke to
+        // libghostty -- JavaFX focus on the rename field alone is not
+        // enough; the native side must let go first or typing lands in
+        // claude instead of the field.
+        releaseTerminalFocus();
         renameField.setText(displayName);
         tabLabels.getChildren().set(tabLabels.getChildren().indexOf(tabTitleLabel), renameField);
         renameField.requestFocus();
@@ -454,6 +533,24 @@ final class OpenSessionTab {
         int index = tabLabels.getChildren().indexOf(renameField);
         if (index >= 0) {
             tabLabels.getChildren().set(index, tabTitleLabel);
+            // Rename over: give the terminal its key routing back (no-op
+            // when another sub-tab is showing).
+            applyTerminalVisibility();
+        }
+    }
+
+    /** Releases the terminal's AppKit first-responder status so JavaFX text inputs receive keys. */
+    private void releaseTerminalFocus() {
+        if (disposed || surfaceClosing) {
+            return;
+        }
+        try {
+            host.setFocused(false);
+            if (surface != null) {
+                surface.setFocus(false);
+            }
+        } catch (IllegalStateException e) {
+            // Surface closed in the teardown gap; see tickAndDraw's identical catch.
         }
     }
 
@@ -469,6 +566,28 @@ final class OpenSessionTab {
 
     void setOnBack(Runnable handler) {
         this.onBack = handler == null ? () -> { } : handler;
+    }
+
+    void setOnPreviousSessionTab(Runnable handler) {
+        this.onPreviousSessionTab = handler == null ? () -> { } : handler;
+    }
+
+    void setOnNextSessionTab(Runnable handler) {
+        this.onNextSessionTab = handler == null ? () -> { } : handler;
+    }
+
+    void setOnToggleSidebar(Runnable handler) {
+        this.onToggleSidebar = handler == null ? () -> { } : handler;
+    }
+
+    /**
+     * Immediate visual feedback while the session's graceful close runs
+     * (up to the multi-second Ctrl+D grace period): without it the close
+     * button appears dead until the tab finally disappears.
+     */
+    void showClosingState() {
+        tabTitleLabel.setText("Closing…");
+        tabCloseButton.setDisable(true);
     }
 
     void setDisplayName(String displayName) {
@@ -752,16 +871,42 @@ final class OpenSessionTab {
             return;
         }
         int mods = translateModifiers(modifierFlags);
-        // ⌘1/⌘2 (Terminal/Explorer sub-tabs) are app shortcuts, but while
-        // the terminal is focused its native NSEvent monitor sees every key
-        // BEFORE JavaFX's scene filter -- intercept them here so they switch
-        // views instead of being typed into claude.
+        // ⌘1/⌘2/⌘3 (Terminal/Explorer/Review sub-tabs) are app shortcuts,
+        // but while the terminal is focused its native NSEvent monitor sees
+        // every key BEFORE JavaFX's scene filter -- intercept them here so
+        // they switch views instead of being typed into claude.
         String shortcutChars = characters.isEmpty() ? unshiftedCharacters : characters;
         if ((mods & GHOSTTY_MODS_SUPER) != 0 && !shortcutChars.isEmpty()) {
             int cp = shortcutChars.codePointAt(0);
-            if (cp == '1' || cp == '2') {
+            if (cp == '1' || cp == '2' || cp == '3') {
                 if (keyDown) {
-                    showSubTab(cp == '1' ? SubTab.TERMINAL : SubTab.EXPLORER);
+                    showSubTab(switch (cp) {
+                        case '1' -> SubTab.TERMINAL;
+                        case '2' -> SubTab.EXPLORER;
+                        default -> SubTab.REVIEW;
+                    });
+                }
+                return;
+            }
+            // ⌘⇧[ / ⌘⇧] session-tab cycling and ⌘0 sidebar toggle: same
+            // reasoning as ⌘1/⌘2/⌘3 above -- with the terminal focused these
+            // never reach the JavaFX scene filter. With ⇧ held the resolved
+            // character is '{'/'}', so both forms are accepted.
+            if (cp == '[' || cp == '{') {
+                if (keyDown) {
+                    onPreviousSessionTab.run();
+                }
+                return;
+            }
+            if (cp == ']' || cp == '}') {
+                if (keyDown) {
+                    onNextSessionTab.run();
+                }
+                return;
+            }
+            if (cp == '0') {
+                if (keyDown) {
+                    onToggleSidebar.run();
                 }
                 return;
             }

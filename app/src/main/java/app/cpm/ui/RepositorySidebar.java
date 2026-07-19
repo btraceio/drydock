@@ -12,6 +12,8 @@ import app.cpm.domain.SessionStatus;
 import app.cpm.git.GitBranchState;
 import app.cpm.git.GitStatus;
 import app.cpm.git.GitStatusService;
+import app.cpm.git.WorktreeService;
+import javafx.animation.PauseTransition;
 import javafx.animation.RotateTransition;
 import javafx.application.Platform;
 import javafx.geometry.Insets;
@@ -48,31 +50,44 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 
 /**
- * The repository sidebar, rebuilt to the design handoff (README section 2):
- * an accent "Add repository" menu button (open from disk / clone from
- * GitHub), a live filter field, a {@link TreeView} of repositories with
- * their sessions as children (custom cells: carets, status dots, hover
- * quick-actions), and a footer status line.
+ * The repository sidebar, rebuilt to the design handoff (README section 2)
+ * and remodeled WORKTREE-FIRST for the worktree lifecycle handoff (section
+ * B "Discovering worktrees"): expanding a repository lists every worktree
+ * {@code git worktree list} finds on disk -- including worktrees created
+ * outside this app -- reconciled against the managed sessions by
+ * {@code worktreeRoot}. Worktrees WITH a session render as session rows
+ * (status dot, branch tag, dirty dot, PR chip, idle Resume pill);
+ * worktrees WITHOUT one render UNOPENED (branch + short path + an accent
+ * "Start ▸" pill + a one-click 🗑 delete, guarded off the main checkout).
+ * Each repo header gains a ⟳ rescan that re-runs discovery; newly-found
+ * rows get a one-shot highlight.
  *
  * <p>Data still comes straight from {@link RepositoryManager} /
- * {@link SessionManager} on every rebuild -- nothing is cached here beyond
- * the tree items currently displayed. {@link #refreshSessions()} (called
- * by {@link MainWorkspace} after any session change) rebuilds the tree.</p>
+ * {@link SessionManager} / {@link WorktreeService} on every rebuild --
+ * nothing is cached here beyond the current discovery results. {@link
+ * #refreshSessions()} (called by {@link MainWorkspace} after any session
+ * change) rebuilds the tree.</p>
  */
 public final class RepositorySidebar extends VBox {
 
     private static final Logger LOG = System.getLogger(RepositorySidebar.class.getName());
 
+    /** How long a freshly discovered worktree row keeps its highlight ring. */
+    private static final Duration DISCOVERY_HIGHLIGHT = Duration.seconds(2.4);
+
     private final RepositoryManager repositoryManager;
     private final GitStatusService gitStatusService;
+    private final WorktreeService worktreeService;
     private final SessionManager sessionManager;
     private final MainWorkspace mainWorkspace;
     private final ExternalEditorLauncher editorLauncher = new ExternalEditorLauncher();
@@ -93,19 +108,32 @@ public final class RepositorySidebar extends VBox {
     /** Latest known Git status per worktree root (worktree sessions have their own checkout + branch). */
     private final Map<Path, GitStatus> worktreeStatuses = new ConcurrentHashMap<>();
 
+    /** Latest worktree discovery per repository ({@code git worktree list --porcelain}); absent until the first scan. */
+    private final Map<RepositoryId, List<WorktreeService.Worktree>> worktreeLists = new ConcurrentHashMap<>();
+    /** Repositories with a rescan in flight (spins the ⟳ button, prevents double-scans). */
+    private final Set<RepositoryId> scanning = ConcurrentHashMap.newKeySet();
+    /** Worktree paths discovered by the latest rescan, highlighted one-shot until the timer clears them. */
+    private final Set<Path> recentlyDiscovered = new HashSet<>();
+    /** Transient per-repo meta note ("Already up to date — no new worktrees") shown briefly after a rescan. */
+    private final Map<RepositoryId, String> rescanNotes = new ConcurrentHashMap<>();
+
     private Runnable onCloneFromGitHub = () -> { };
     private Consumer<Repository> onNewWorktree = repository -> { };
 
-    /** Tree node payload: either a repository row or one of its session rows. */
+    /** Tree node payload: a repository row, a session row, or an unopened (discovered) worktree row. */
     sealed interface SidebarNode {
         record RepoNode(Repository repository) implements SidebarNode { }
         record SessionNode(ManagedClaudeSession session, Repository repository) implements SidebarNode { }
+        record UnopenedWorktreeNode(WorktreeService.Worktree worktree, Repository repository)
+                implements SidebarNode { }
     }
 
     public RepositorySidebar(RepositoryManager repositoryManager, GitStatusService gitStatusService,
-                              SessionManager sessionManager, MainWorkspace mainWorkspace) {
+                              WorktreeService worktreeService, SessionManager sessionManager,
+                              MainWorkspace mainWorkspace) {
         this.repositoryManager = repositoryManager;
         this.gitStatusService = gitStatusService;
+        this.worktreeService = worktreeService;
         this.sessionManager = sessionManager;
         this.mainWorkspace = mainWorkspace;
 
@@ -194,15 +222,21 @@ public final class RepositorySidebar extends VBox {
         List<Repository> repositories = sorted(repositoryManager.repositories());
         List<TreeItem<SidebarNode>> repoItems = new ArrayList<>();
         int runningTotal = 0;
+        int worktreeTotal = 0;
+        int unopenedTotal = 0;
 
         for (Repository repository : repositories) {
             if (!query.isEmpty() && !matchesFilter(repository, query)) {
                 continue;
             }
             TreeItem<SidebarNode> repoItem = new TreeItem<>(new SidebarNode.RepoNode(repository));
-            for (ManagedClaudeSession session : sessionsFor(repository)) {
-                repoItem.getChildren().add(new TreeItem<>(new SidebarNode.SessionNode(session, repository)));
+            for (SidebarNode child : childNodesFor(repository)) {
+                repoItem.getChildren().add(new TreeItem<>(child));
+                if (child instanceof SidebarNode.UnopenedWorktreeNode) {
+                    unopenedTotal++;
+                }
             }
+            worktreeTotal += additionalWorktreeCount(repository);
             repoItem.setExpanded(!collapsed.contains(repository.id()));
             repoItem.expandedProperty().addListener((obs, was, is) -> {
                 if (is) {
@@ -222,12 +256,87 @@ public final class RepositorySidebar extends VBox {
 
         treeRoot.getChildren().setAll(repoItems);
 
-        long worktreeTotal = sessionManager.sessions().stream()
-                .filter(session -> session.worktreeRoot().isPresent())
-                .count();
-        footerLabel.setText(runningTotal + " running · " + worktreeTotal
-                + (worktreeTotal == 1 ? " worktree" : " worktrees"));
+        // Footer status line (worktree handoff): N running · M worktrees ·
+        // K unopened. Until a repo's discovery has run, fall back to the
+        // session-derived worktree count so the line never reads "0".
+        if (worktreeLists.isEmpty()) {
+            worktreeTotal = (int) sessionManager.sessions().stream()
+                    .filter(session -> session.worktreeRoot().isPresent())
+                    .count();
+        }
+        String footerText = runningTotal + " running · " + worktreeTotal
+                + (worktreeTotal == 1 ? " worktree" : " worktrees");
+        if (unopenedTotal > 0) {
+            footerText += " · " + unopenedTotal + " unopened";
+        }
+        footerLabel.setText(footerText);
         SessionStatusStyles.updateDot(footerDot, runningTotal > 0 ? SessionStatus.RUNNING : SessionStatus.INACTIVE);
+    }
+
+    /**
+     * The worktree-first children of one repository row: the main checkout's
+     * sessions (or the main checkout itself, unopened), then every
+     * additional worktree on disk -- as a session row when a managed
+     * session lives in it, else as an unopened row -- then any worktree
+     * session whose directory discovery no longer reports (e.g. removed
+     * outside the app; kept visible so it can still be cleaned up).
+     */
+    private List<SidebarNode> childNodesFor(Repository repository) {
+        List<ManagedClaudeSession> sessions = sessionsFor(repository);
+        List<WorktreeService.Worktree> worktrees = worktreeLists.get(repository.id());
+        if (worktrees == null) {
+            // Discovery hasn't run yet for this repo: kick it off and show
+            // the session-derived rows meanwhile.
+            refreshWorktrees(repository, false);
+            return new ArrayList<>(sessions.stream()
+                    .map(session -> (SidebarNode) new SidebarNode.SessionNode(session, repository))
+                    .toList());
+        }
+
+        List<SidebarNode> children = new ArrayList<>();
+        Set<ManagedClaudeSession> placed = new LinkedHashSet<>();
+        for (WorktreeService.Worktree worktree : worktrees) {
+            if (worktree.mainCheckout()) {
+                List<ManagedClaudeSession> mainSessions = sessions.stream()
+                        .filter(session -> session.worktreeRoot().isEmpty())
+                        .toList();
+                if (mainSessions.isEmpty()) {
+                    children.add(new SidebarNode.UnopenedWorktreeNode(worktree, repository));
+                } else {
+                    for (ManagedClaudeSession session : mainSessions) {
+                        children.add(new SidebarNode.SessionNode(session, repository));
+                        placed.add(session);
+                    }
+                }
+            } else {
+                Optional<ManagedClaudeSession> match = sessions.stream()
+                        .filter(session -> session.worktreeRoot()
+                                .map(root -> root.equals(worktree.path()))
+                                .orElse(false))
+                        .findFirst();
+                if (match.isPresent()) {
+                    children.add(new SidebarNode.SessionNode(match.get(), repository));
+                    placed.add(match.get());
+                } else {
+                    children.add(new SidebarNode.UnopenedWorktreeNode(worktree, repository));
+                }
+            }
+        }
+        for (ManagedClaudeSession session : sessions) {
+            if (!placed.contains(session) && session.worktreeRoot().isPresent()) {
+                children.add(new SidebarNode.SessionNode(session, repository));
+            }
+        }
+        return children;
+    }
+
+    /** Count of additional (non-main) worktrees on disk, once discovery has run. */
+    private int additionalWorktreeCount(Repository repository) {
+        List<WorktreeService.Worktree> worktrees = worktreeLists.get(repository.id());
+        if (worktrees == null) {
+            return 0;
+        }
+        return (int) worktrees.stream().filter(worktree -> !worktree.mainCheckout()).count();
     }
 
     private boolean matchesFilter(Repository repository, String query) {
@@ -243,6 +352,79 @@ public final class RepositorySidebar extends VBox {
                 .filter(session -> session.repositoryId().equals(repository.id()))
                 .sorted(Comparator.comparing(ManagedClaudeSession::displayName, String.CASE_INSENSITIVE_ORDER))
                 .toList();
+    }
+
+    // ---- Worktree discovery (worktree handoff, section B) -------------------
+
+    /**
+     * Re-runs {@code git worktree list} for {@code repository}. A
+     * user-initiated rescan (the ⟳ button/menu item) additionally
+     * highlights newly appearing rows and, when nothing new appeared,
+     * briefly notes "Already up to date" in the repo meta line.
+     */
+    private void refreshWorktrees(Repository repository, boolean userInitiated) {
+        if (!scanning.add(repository.id())) {
+            return;
+        }
+        List<WorktreeService.Worktree> previous = worktreeLists.get(repository.id());
+        worktreeService.list(repository.root())
+                .whenComplete((worktrees, failure) -> Platform.runLater(() -> {
+                    scanning.remove(repository.id());
+                    if (failure != null) {
+                        LOG.log(Level.DEBUG, "Worktree discovery failed for " + repository.root(), failure);
+                        if (userInitiated) {
+                            UiErrors.show("Could not rescan worktrees", failure);
+                        }
+                        return;
+                    }
+                    worktreeLists.put(repository.id(), worktrees);
+                    for (WorktreeService.Worktree worktree : worktrees) {
+                        if (!worktree.mainCheckout() && !worktreeStatuses.containsKey(worktree.path())) {
+                            refreshWorktreeStatus(worktree.path());
+                        }
+                    }
+                    if (userInitiated && previous != null) {
+                        Set<Path> known = new HashSet<>();
+                        for (WorktreeService.Worktree worktree : previous) {
+                            known.add(worktree.path());
+                        }
+                        List<Path> fresh = worktrees.stream()
+                                .map(WorktreeService.Worktree::path)
+                                .filter(path -> !known.contains(path))
+                                .toList();
+                        if (fresh.isEmpty()) {
+                            rescanNotes.put(repository.id(), "Already up to date — no new worktrees");
+                            PauseTransition clearNote = new PauseTransition(Duration.seconds(2.4));
+                            clearNote.setOnFinished(e -> {
+                                rescanNotes.remove(repository.id());
+                                rebuildTree();
+                            });
+                            clearNote.play();
+                        } else {
+                            recentlyDiscovered.addAll(fresh);
+                            PauseTransition clearHighlight = new PauseTransition(DISCOVERY_HIGHLIGHT);
+                            clearHighlight.setOnFinished(e -> {
+                                fresh.forEach(recentlyDiscovered::remove);
+                                rebuildTree();
+                            });
+                            clearHighlight.play();
+                        }
+                    }
+                    rebuildTree();
+                }));
+    }
+
+    /** One-click 🗑 of an unopened worktree: {@code git worktree remove} + {@code git branch -D}. */
+    private void onDeleteUnopenedWorktree(Repository repository, WorktreeService.Worktree worktree) {
+        worktreeService.remove(repository.root(), worktree.path(), worktree.branch())
+                .whenComplete((v, failure) -> Platform.runLater(() -> {
+                    if (failure != null) {
+                        UiErrors.show("Could not delete worktree", failure);
+                        return;
+                    }
+                    worktreeStatuses.remove(worktree.path());
+                    refreshWorktrees(repository, false);
+                }));
     }
 
     // ---- Git status ---------------------------------------------------------
@@ -343,6 +525,7 @@ public final class RepositorySidebar extends VBox {
             repositoryManager.removeRepository(repository.id());
             statuses.remove(repository.id());
             statusFailures.remove(repository.id());
+            worktreeLists.remove(repository.id());
             rebuildTree();
         });
     }
@@ -396,6 +579,13 @@ public final class RepositorySidebar extends VBox {
         return (seconds / 86400) + "d ago";
     }
 
+    /** Abbreviates the user's home directory to {@code ~} for compact worktree paths. */
+    private static String shortPath(Path path) {
+        String home = System.getProperty("user.home");
+        String text = path.toString();
+        return home != null && text.startsWith(home) ? "~" + text.substring(home.length()) : text;
+    }
+
     private final class SidebarTreeCell extends TreeCell<SidebarNode> {
 
         @Override
@@ -417,6 +607,10 @@ public final class RepositorySidebar extends VBox {
                     setGraphic(buildSessionRow(sessionNode.session(), sessionNode.repository()));
                     setContextMenu(buildSessionContextMenu(sessionNode.session()));
                 }
+                case SidebarNode.UnopenedWorktreeNode worktreeNode -> {
+                    setGraphic(buildUnopenedRow(worktreeNode.worktree(), worktreeNode.repository()));
+                    setContextMenu(null);
+                }
             }
         }
 
@@ -429,7 +623,7 @@ public final class RepositorySidebar extends VBox {
             Label name = new Label(repository.displayName());
             name.getStyleClass().add("repo-name");
 
-            Label branch = new Label("⎇ " + branchTextFor(repository));
+            Label branch = new Label(repoMetaText(repository));
             branch.getStyleClass().add("repo-branch");
             Throwable failure = statusFailures.get(repository.id());
             if (failure != null) {
@@ -450,6 +644,22 @@ public final class RepositorySidebar extends VBox {
             Label count = new Label(String.valueOf(sessions.size()));
             count.getStyleClass().add("repo-count");
 
+            Button rescan = new Button("⟳");
+            rescan.getStyleClass().add("row-action-button");
+            rescan.setTooltip(new Tooltip("Rescan worktrees"));
+            rescan.setFocusTraversable(false);
+            rescan.visibleProperty().bind(hoverProperty());
+            if (scanning.contains(repository.id())) {
+                RotateTransition spin = new RotateTransition(Duration.seconds(0.8), rescan);
+                spin.setByAngle(360);
+                spin.setCycleCount(RotateTransition.INDEFINITE);
+                spin.play();
+            }
+            rescan.setOnAction(e -> {
+                refreshStatus(repository);
+                refreshWorktrees(repository, true);
+            });
+
             Button newSession = new Button("+");
             newSession.getStyleClass().add("row-action-button");
             newSession.setTooltip(new Tooltip("New session or worktree…"));
@@ -458,7 +668,7 @@ public final class RepositorySidebar extends VBox {
             ContextMenu newMenu = buildNewSessionMenu(repository);
             newSession.setOnAction(e -> newMenu.show(newSession, Side.BOTTOM, 0, 4));
 
-            HBox row = new HBox(7, caret, text, count, newSession);
+            HBox row = new HBox(7, caret, text, count, rescan, newSession);
             row.getStyleClass().add("repo-row");
             row.setAlignment(Pos.CENTER_LEFT);
             row.setOnMouseClicked(event -> {
@@ -472,6 +682,27 @@ public final class RepositorySidebar extends VBox {
                 }
             });
             return row;
+        }
+
+        /** Repo meta line: {@code ⎇ <base> · <n> worktrees · <m> unopened} once discovery has run. */
+        private String repoMetaText(Repository repository) {
+            String note = rescanNotes.get(repository.id());
+            if (note != null) {
+                return note;
+            }
+            StringBuilder meta = new StringBuilder("⎇ ").append(branchTextFor(repository));
+            List<WorktreeService.Worktree> worktrees = worktreeLists.get(repository.id());
+            if (worktrees != null) {
+                int additional = additionalWorktreeCount(repository);
+                meta.append(" · ").append(additional).append(additional == 1 ? " worktree" : " worktrees");
+                long unopened = childNodesFor(repository).stream()
+                        .filter(child -> child instanceof SidebarNode.UnopenedWorktreeNode)
+                        .count();
+                if (unopened > 0) {
+                    meta.append(" · ").append(unopened).append(" unopened");
+                }
+            }
+            return meta.toString();
         }
 
         private HBox buildSessionRow(ManagedClaudeSession session, Repository repository) {
@@ -527,6 +758,13 @@ public final class RepositorySidebar extends VBox {
             if (prChip != null) {
                 row.getChildren().add(row.getChildren().indexOf(actions), prChip);
             }
+            // An IDLE session advertises resumability with a ghost Resume
+            // pill (worktree handoff: clicking the row resumes it).
+            if (!SessionStatusStyles.isRunning(session.status())) {
+                Label resumePill = new Label("Resume");
+                resumePill.getStyleClass().add("resume-pill");
+                row.getChildren().add(row.getChildren().indexOf(actions), resumePill);
+            }
             row.getStyleClass().add("session-row");
             row.setAlignment(Pos.CENTER_LEFT);
             row.setPadding(new Insets(5, 8, 5, 16));
@@ -539,6 +777,58 @@ public final class RepositorySidebar extends VBox {
             row.setOnMouseClicked(event -> {
                 if (event.getButton() == MouseButton.PRIMARY) {
                     mainWorkspace.resumeSession(session);
+                    event.consume();
+                }
+            });
+            return row;
+        }
+
+        /**
+         * A discovered worktree with no session (worktree handoff): faint
+         * icon, branch as the primary line, short path as the sub line, an
+         * accent Start ▸ pill and -- never on the main checkout -- a
+         * one-click 🗑 that removes worktree + branch.
+         */
+        private HBox buildUnopenedRow(WorktreeService.Worktree worktree, Repository repository) {
+            Label icon = new Label(worktree.mainCheckout() ? "⎇" : "◫");
+            icon.getStyleClass().add("worktree-unopened-icon");
+
+            String branch = worktree.branch().orElse(worktree.detached() ? "(detached)" : "(no branch)");
+            Label name = new Label(branch);
+            name.getStyleClass().add("worktree-unopened-branch");
+
+            Label meta = new Label(shortPath(worktree.path()));
+            meta.getStyleClass().add("session-meta");
+
+            VBox text = new VBox(1, name, meta);
+            HBox.setHgrow(text, Priority.ALWAYS);
+
+            Label startPill = new Label("Start ▸");
+            startPill.getStyleClass().add("start-pill");
+            startPill.setOnMouseClicked(event -> {
+                if (event.getButton() == MouseButton.PRIMARY) {
+                    mainWorkspace.promptStartWorktreeSession(repository, worktree);
+                    event.consume();
+                }
+            });
+
+            HBox row = new HBox(8, icon, text, startPill);
+            if (!worktree.mainCheckout()) {
+                Button delete = quickAction("🗑", "Delete worktree & branch", true,
+                        () -> onDeleteUnopenedWorktree(repository, worktree));
+                delete.getStyleClass().add("worktree-delete-button");
+                row.getChildren().add(delete);
+            }
+            row.getStyleClass().add("worktree-unopened-row");
+            if (recentlyDiscovered.contains(worktree.path())) {
+                row.getStyleClass().add("worktree-discovered");
+            }
+            row.setAlignment(Pos.CENTER_LEFT);
+            row.setPadding(new Insets(5, 8, 5, 16));
+            Tooltip.install(row, new Tooltip("Discovered via git worktree list\n" + worktree.path()));
+            row.setOnMouseClicked(event -> {
+                if (event.getButton() == MouseButton.PRIMARY) {
+                    mainWorkspace.showUnopenedWorktree(repository, worktree);
                     event.consume();
                 }
             });
@@ -584,13 +874,15 @@ public final class RepositorySidebar extends VBox {
             return menu;
         }
 
-        /** The repo "+" menu (worktree handoff "Creating"): current checkout vs a fresh worktree. */
+        /** The repo "+" menu (worktree handoff "Creating"): checkout session / new worktree / rescan. */
         private ContextMenu buildNewSessionMenu(Repository repository) {
-            MenuItem inCheckout = new MenuItem("❯_  Session in current checkout");
+            MenuItem inCheckout = new MenuItem("❯_  Session on main checkout");
             inCheckout.setOnAction(e -> mainWorkspace.openNewSession(repository));
             MenuItem newWorktree = new MenuItem("◫  New worktree…");
             newWorktree.setOnAction(e -> onNewWorktree.accept(repository));
-            return new ContextMenu(inCheckout, newWorktree);
+            MenuItem rescan = new MenuItem("⟳  Rescan worktrees");
+            rescan.setOnAction(e -> refreshWorktrees(repository, true));
+            return new ContextMenu(inCheckout, newWorktree, rescan);
         }
 
         private ContextMenu buildRepoContextMenu(Repository repository) {
@@ -599,8 +891,14 @@ public final class RepositorySidebar extends VBox {
             MenuItem newWorktree = new MenuItem("New worktree…");
             newWorktree.setOnAction(e -> onNewWorktree.accept(repository));
 
+            MenuItem rescan = new MenuItem("Rescan worktrees");
+            rescan.setOnAction(e -> refreshWorktrees(repository, true));
+
             MenuItem refresh = new MenuItem("Refresh");
-            refresh.setOnAction(e -> refreshStatus(repository));
+            refresh.setOnAction(e -> {
+                refreshStatus(repository);
+                refreshWorktrees(repository, true);
+            });
 
             MenuItem openFinder = new MenuItem("Open in Finder");
             openFinder.setOnAction(e -> onOpenInFinder(repository));
@@ -612,8 +910,8 @@ public final class RepositorySidebar extends VBox {
             remove.setOnAction(e -> onRemoveRepository(repository));
 
             ContextMenu menu = new ContextMenu();
-            menu.getItems().addAll(newSession, newWorktree, new SeparatorMenuItem(), refresh, openFinder, openEditor,
-                    new SeparatorMenuItem(), remove);
+            menu.getItems().addAll(newSession, newWorktree, rescan, new SeparatorMenuItem(), refresh, openFinder,
+                    openEditor, new SeparatorMenuItem(), remove);
             return menu;
         }
     }

@@ -171,8 +171,6 @@ public final class SessionManager implements AutoCloseable {
     private CompletableFuture<SessionOpenResult> launchNewSession(ManagedClaudeSession initial, String displayName,
                                                                   GhosttyApp app, CpmTerminalHost host,
                                                                   double scaleFactor) {
-        persistNewSession(initial);
-
         // Generated up front so this app -- not claude -- decides the Claude
         // session id: launching with `claude --session-id '<uuid>'` (when the
         // installed claude supports it) makes the session id known without
@@ -182,7 +180,9 @@ public final class SessionManager implements AutoCloseable {
         // chain) instead of dropping the user into the interactive picker.
         String claudeSessionId = UUID.randomUUID().toString();
 
-        return capabilityService.detectCapabilities()
+        // Metadata persistence is disk I/O; keep it off the (FX) caller thread.
+        return CompletableFuture.runAsync(() -> persistNewSession(initial), backgroundExecutor)
+                .thenCompose(ignored -> capabilityService.detectCapabilities())
                 .thenApplyAsync(caps -> {
                     String command = System.getProperty("app.cpm.diag.command",
                             buildCreateCommand(caps, displayName, claudeSessionId));
@@ -235,19 +235,22 @@ public final class SessionManager implements AutoCloseable {
      */
     public CompletableFuture<SessionOpenResult> resumeSession(ManagedSessionId sessionId, GhosttyApp app,
                                                                CpmTerminalHost host, double scaleFactor) {
-        Optional<SessionOpenResult> blocked = checkResumeBlocked(sessionId);
-        if (blocked.isPresent()) {
-            return CompletableFuture.completedFuture(blocked.get());
-        }
-
-        ManagedClaudeSession session = requireSession(sessionId);
-        String command = buildResumeCommand(session);
-
-        return capabilityService.detectCapabilities()
-                .thenApplyAsync(caps -> command, backgroundExecutor)
-                .thenCompose(cmd -> createSurfaceOnFxThread(app, host, scaleFactor, cmd,
-                        session.workingDirectory().toString()))
-                .handleAsync((surface, ex) -> finalizeResume(session, surface, ex), backgroundExecutor);
+        // checkResumeBlocked touches the filesystem (working-directory and
+        // transcript existence probes, potentially persistence) -- run it on
+        // the background executor, never the calling (FX) thread.
+        return CompletableFuture.supplyAsync(() -> checkResumeBlocked(sessionId), backgroundExecutor)
+                .thenCompose(blocked -> {
+                    if (blocked.isPresent()) {
+                        return CompletableFuture.completedFuture(blocked.get());
+                    }
+                    ManagedClaudeSession session = requireSession(sessionId);
+                    String command = buildResumeCommand(session);
+                    return capabilityService.detectCapabilities()
+                            .thenApplyAsync(caps -> command, backgroundExecutor)
+                            .thenCompose(cmd -> createSurfaceOnFxThread(app, host, scaleFactor, cmd,
+                                    session.workingDirectory().toString()))
+                            .handleAsync((surface, ex) -> finalizeResume(session, surface, ex), backgroundExecutor);
+                });
     }
 
     private SessionOpenResult finalizeResume(ManagedClaudeSession session, GhosttySurface surface, Throwable ex) {
@@ -322,20 +325,23 @@ public final class SessionManager implements AutoCloseable {
      */
     public CompletableFuture<SessionOpenResult> startFreshConversation(ManagedSessionId sessionId, GhosttyApp app,
                                                                         CpmTerminalHost host, double scaleFactor) {
-        ManagedClaudeSession session = requireSession(sessionId);
-        ManagedClaudeSession cleared = session.withClaudeSessionId(Optional.empty());
-        persistUpdatedSession(cleared);
-
         String claudeSessionId = UUID.randomUUID().toString();
-        return capabilityService.detectCapabilities()
-                .thenApplyAsync(caps -> {
-                    String command = buildCreateCommand(caps, cleared.displayName(), claudeSessionId);
-                    return new CreatePlan(command, command.contains(claudeSessionId));
+        // The stale-id clear persists to disk; keep it off the (FX) caller thread.
+        return CompletableFuture.supplyAsync(() -> {
+                    ManagedClaudeSession cleared = requireSession(sessionId).withClaudeSessionId(Optional.empty());
+                    persistUpdatedSession(cleared);
+                    return cleared;
                 }, backgroundExecutor)
-                .thenCompose(plan -> createSurfaceOnFxThread(app, host, scaleFactor, plan.command(),
-                        cleared.workingDirectory().toString())
-                        .thenApply(surface -> new CreateLaunch(plan, surface)))
-                .handleAsync((launch, ex) -> finalizeCreate(cleared, claudeSessionId, launch, ex), backgroundExecutor);
+                .thenCompose(cleared -> capabilityService.detectCapabilities()
+                        .thenApplyAsync(caps -> {
+                            String command = buildCreateCommand(caps, cleared.displayName(), claudeSessionId);
+                            return new CreatePlan(command, command.contains(claudeSessionId));
+                        }, backgroundExecutor)
+                        .thenCompose(plan -> createSurfaceOnFxThread(app, host, scaleFactor, plan.command(),
+                                cleared.workingDirectory().toString())
+                                .thenApply(surface -> new CreateLaunch(plan, surface)))
+                        .handleAsync((launch, ex) -> finalizeCreate(cleared, claudeSessionId, launch, ex),
+                                backgroundExecutor));
     }
 
     /** Explicitly reassigns a session's working directory (plan section 11.2), e.g. after the user picks a replacement. */

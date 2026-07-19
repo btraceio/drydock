@@ -1,6 +1,7 @@
 package app.cpm.ui;
 
 import app.cpm.domain.UiTheme;
+import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
@@ -30,15 +31,20 @@ final class TitleBar extends StackPane {
     private double dragOffsetX;
     private double dragOffsetY;
 
-    TitleBar(Stage stage, String title, Runnable onHelp, Runnable onThemeToggle) {
+    TitleBar(Stage stage, String title, Runnable onHelp, Runnable onThemeToggle,
+             Runnable onSidebarToggle) {
         getStyleClass().add("title-bar");
 
         Button close = trafficLight("close", () ->
                 stage.fireEvent(new WindowEvent(stage, WindowEvent.WINDOW_CLOSE_REQUEST)));
         Button minimize = trafficLight("minimize", () -> stage.setIconified(true));
         Button zoom = trafficLight("zoom", () -> stage.setMaximized(!stage.isMaximized()));
+        Button sidebarButton = iconButton("◧", "Toggle sidebar (⌘0)");
+        sidebarButton.setOnAction(e -> onSidebarToggle.run());
         HBox lights = new HBox(8, close, minimize, zoom);
         lights.setAlignment(Pos.CENTER_LEFT);
+        HBox.setMargin(sidebarButton, new Insets(0, 0, 0, 10));
+        lights.getChildren().add(sidebarButton);
 
         Label titleLabel = new Label(title);
         titleLabel.getStyleClass().add("title-bar-title");

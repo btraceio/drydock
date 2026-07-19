@@ -9,6 +9,9 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.lang.System.Logger;
 import java.nio.charset.StandardCharsets;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * A running {@code ghostty_surface_t} attached to a caller-provided AppKit
@@ -43,13 +46,32 @@ public final class GhosttySurface implements AutoCloseable {
     private static final int GHOSTTY_POINT_COORD_TOP_LEFT = 1;
     private static final int GHOSTTY_POINT_COORD_BOTTOM_RIGHT = 2;
 
+    /**
+     * Maps the opaque token planted in each surface config's {@code
+     * userdata} back to its {@link GhosttySurface}. libghostty hands that
+     * userdata (and nothing else identifying the surface) to the app-level
+     * clipboard callbacks ({@link GhosttyApp}); completing a paste request
+     * needs the surface handle, so the callbacks resolve it here. The token
+     * is a plain counter value smuggled through the pointer -- libghostty
+     * never dereferences userdata.
+     */
+    private static final Map<Long, GhosttySurface> CLIPBOARD_REGISTRY = new ConcurrentHashMap<>();
+    private static final AtomicLong NEXT_CLIPBOARD_TOKEN = new AtomicLong(1);
+
     private final GhosttyAppBinding binding;
+    private final long clipboardToken;
     private MemorySegment surface;
     private boolean closed;
 
-    private GhosttySurface(GhosttyAppBinding binding, MemorySegment surface) {
+    private GhosttySurface(GhosttyAppBinding binding, MemorySegment surface, long clipboardToken) {
         this.binding = binding;
         this.surface = surface;
+        this.clipboardToken = clipboardToken;
+    }
+
+    /** The surface registered under a clipboard-callback userdata token, or {@code null}. */
+    static GhosttySurface byClipboardToken(long token) {
+        return CLIPBOARD_REGISTRY.get(token);
     }
 
     /**
@@ -91,6 +113,8 @@ public final class GhosttySurface implements AutoCloseable {
             // re-assigning fields below mutates it in place).
             config.set(ValueLayout.JAVA_INT, 0, GHOSTTY_PLATFORM_MACOS); // platform_tag
             config.set(ValueLayout.ADDRESS, 8, nsView);                  // platform.macos.nsview
+            long clipboardToken = NEXT_CLIPBOARD_TOKEN.getAndIncrement();
+            config.set(ValueLayout.ADDRESS, 16, MemorySegment.ofAddress(clipboardToken)); // userdata
             config.set(ValueLayout.JAVA_DOUBLE, 24, scaleFactor);        // scale_factor
             if (workingDirectory != null) {
                 config.set(ValueLayout.ADDRESS, 40, GhosttyAppBinding.allocateCString(tmp, workingDirectory));
@@ -103,7 +127,9 @@ public final class GhosttySurface implements AutoCloseable {
             if (surface.equals(MemorySegment.NULL)) {
                 throw new IllegalStateException("ghostty_surface_new returned NULL");
             }
-            return new GhosttySurface(binding, surface);
+            GhosttySurface created = new GhosttySurface(binding, surface, clipboardToken);
+            CLIPBOARD_REGISTRY.put(clipboardToken, created);
+            return created;
         } catch (Throwable t) {
             if (t instanceof RuntimeException re) {
                 throw re;
@@ -374,6 +400,31 @@ public final class GhosttySurface implements AutoCloseable {
         }
     }
 
+    /**
+     * Completes a pending clipboard read request (paste) with the given
+     * text. {@code state} is the opaque request pointer libghostty handed to
+     * the app runtime's {@code read_clipboard_cb}/{@code
+     * confirm_read_clipboard_cb} (see {@link GhosttyApp}); libghostty owns
+     * and frees it once this call completes the request. {@code confirmed}
+     * marks a paste the app vouches for even if ghostty's safe-paste check
+     * flagged it (e.g. multi-line text).
+     *
+     * <p>Silently drops the request if this surface is already closed (the
+     * request state then leaks a few bytes inside libghostty, which beats
+     * calling into a freed surface).</p>
+     */
+    void completeClipboardRequest(String text, MemorySegment state, boolean confirmed) {
+        if (closed) {
+            return;
+        }
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment cstring = GhosttyAppBinding.allocateCString(arena, text);
+            binding.surfaceCompleteClipboardRequest.invoke(surface, cstring, state, confirmed);
+        } catch (Throwable t) {
+            throw new GhosttyBinding.GhosttyNativeCallException("ghostty_surface_complete_clipboard_request", t);
+        }
+    }
+
     public boolean processExited() {
         checkOpen();
         try {
@@ -414,6 +465,7 @@ public final class GhosttySurface implements AutoCloseable {
             return;
         }
         closed = true;
+        CLIPBOARD_REGISTRY.remove(clipboardToken);
         try {
             binding.surfaceFree.invoke(surface);
         } catch (Throwable t) {

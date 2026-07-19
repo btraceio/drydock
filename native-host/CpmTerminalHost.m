@@ -270,11 +270,13 @@ void cpm_terminal_host_set_focused(cpm_terminal_host_t host, bool focused) {
     if (focused) {
         [window makeFirstResponder:view];
     } else if ([window firstResponder] == view) {
-        // Give focus back to the window itself; there is no single
-        // "previous" responder to restore to in this minimal shim, and the
-        // plan explicitly says this shim must not know about application
-        // state (so it cannot remember what had focus before).
-        [window makeFirstResponder:nil];
+        // Hand key routing back to JavaFX: its Glass NSView is the window's
+        // contentView, and it must be the first responder for JavaFX
+        // controls (e.g. the inline tab-rename TextField) to receive key
+        // events again. makeFirstResponder:nil would leave the WINDOW as
+        // responder, where keystrokes dead-end -- observed as "cannot type
+        // into the rename field while a terminal session is open".
+        [window makeFirstResponder:[window contentView]];
     }
 }
 

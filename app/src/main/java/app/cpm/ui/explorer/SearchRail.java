@@ -39,6 +39,7 @@ import java.util.Map;
 import java.util.OptionalInt;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Predicate;
 
 /**
  * The Session Explorer's search rail (design handoff section A): a
@@ -90,6 +91,8 @@ final class SearchRail extends VBox {
     private Mode mode = Mode.TEXT;
     private Runnable onCollapseRequested = () -> { };
     private Runnable onExpandRequested = () -> { };
+    /** Whether a file (by relative path) carries diff lines in the active overlay scope (`diff` chip). */
+    private Predicate<Path> diffFileTest = relativePath -> false;
 
     SearchRail(Path searchRoot, SessionSearchService searchService, FileOpener opener) {
         this.searchRoot = searchRoot;
@@ -115,6 +118,19 @@ final class SearchRail extends VBox {
 
     void setOnExpandRequested(Runnable handler) {
         this.onExpandRequested = handler == null ? () -> { } : handler;
+    }
+
+    /** Wires the diff-overlay test tagging Text-search files that carry diff lines (handoff section C). */
+    void setDiffFileTest(Predicate<Path> test) {
+        this.diffFileTest = test == null ? relativePath -> false : test;
+    }
+
+    /** Programmatic Text-mode search (the Review tab's "Search in Explorer" chip). */
+    void setSearch(String query) {
+        textToggle.setSelected(true);
+        searchField.setText(query);
+        searchField.requestFocus();
+        searchField.positionCaret(query == null ? 0 : query.length());
     }
 
     /** Swaps to the full rail content (SessionExplorerView animates the width). */
@@ -308,6 +324,11 @@ final class SearchRail extends VBox {
         row.getStyleClass().add("result-file-row");
 
         if (matchCount >= 0) {
+            if (diffFileTest.test(relativePath)) {
+                Label diffChip = new Label("diff");
+                diffChip.getStyleClass().add("diff-chip");
+                row.getChildren().add(diffChip);
+            }
             Label pill = new Label(Integer.toString(matchCount));
             pill.getStyleClass().add("match-count-pill");
             row.getChildren().add(pill);

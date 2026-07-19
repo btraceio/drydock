@@ -168,6 +168,7 @@ final class GhosttyAppBinding {
     final MethodHandle surfaceProcessExited;
     final MethodHandle surfaceReadText;
     final MethodHandle surfaceFreeText;
+    final MethodHandle surfaceCompleteClipboardRequest;
 
     final MethodHandle appUpdateConfig;
     final MethodHandle surfaceUpdateConfig;
@@ -282,6 +283,13 @@ final class GhosttyAppBinding {
         this.surfaceFreeText = linker.downcallHandle(
             find(lookup, "ghostty_surface_free_text"),
             FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
+        );
+        // void ghostty_surface_complete_clipboard_request(ghostty_surface_t, const char*,
+        //                                                 void*, bool);
+        this.surfaceCompleteClipboardRequest = linker.downcallHandle(
+            find(lookup, "ghostty_surface_complete_clipboard_request"),
+            FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                ValueLayout.JAVA_BOOLEAN)
         );
     }
 
