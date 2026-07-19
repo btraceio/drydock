@@ -142,7 +142,23 @@ public final class WorktreeService implements AutoCloseable {
                 "worktree", "remove", normalizedTarget.toString());
         ProcessResult removed = run(removeCommand);
         if (removed.exitCode() != 0) {
-            throw new GitCommandFailedException(removeCommand, removed.exitCode(), excerpt(removed.stderr()));
+            // Directory already gone/corrupted on disk (e.g. rm -rf'd
+            // outside the app): git refuses the plain remove with
+            // "validation failed, cannot remove working tree: '<path>/.git'
+            // does not exist". Safe to retry with --force here since the
+            // worktree's files are already missing -- there's no working
+            // copy left to lose.
+            if (!java.nio.file.Files.exists(normalizedTarget.resolve(".git"))) {
+                List<String> forceRemoveCommand = List.of(
+                        git.toString(), "-C", repositoryRoot.toString(),
+                        "worktree", "remove", "--force", normalizedTarget.toString());
+                ProcessResult forced = run(forceRemoveCommand);
+                if (forced.exitCode() != 0) {
+                    throw new GitCommandFailedException(forceRemoveCommand, forced.exitCode(), excerpt(forced.stderr()));
+                }
+            } else {
+                throw new GitCommandFailedException(removeCommand, removed.exitCode(), excerpt(removed.stderr()));
+            }
         }
 
         if (branch.isPresent() && !branch.get().isBlank()) {
