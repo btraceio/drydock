@@ -4,8 +4,10 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletionException;
@@ -167,11 +169,11 @@ class WorktreeServiceTest {
 
     private static void deleteRecursively(Path root) throws IOException {
         try (var paths = Files.walk(root)) {
-            paths.sorted(java.util.Comparator.reverseOrder()).forEach(path -> {
+            paths.sorted(Comparator.reverseOrder()).forEach(path -> {
                 try {
                     Files.delete(path);
                 } catch (IOException e) {
-                    throw new java.io.UncheckedIOException(e);
+                    throw new UncheckedIOException(e);
                 }
             });
         }

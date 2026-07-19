@@ -5,6 +5,7 @@ import java.io.InputStream;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -148,7 +149,7 @@ public final class WorktreeService implements AutoCloseable {
             // does not exist". Safe to retry with --force here since the
             // worktree's files are already missing -- there's no working
             // copy left to lose.
-            if (!java.nio.file.Files.exists(normalizedTarget.resolve(".git"))) {
+            if (!Files.exists(normalizedTarget.resolve(".git"))) {
                 List<String> forceRemoveCommand = List.of(
                         git.toString(), "-C", repositoryRoot.toString(),
                         "worktree", "remove", "--force", normalizedTarget.toString());
