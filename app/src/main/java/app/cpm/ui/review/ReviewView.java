@@ -13,13 +13,21 @@ import app.cpm.review.AnnotationStore;
 import app.cpm.review.ReviewAnnotation;
 import app.cpm.ui.UiErrors;
 import app.cpm.ui.UiFormats;
-import javafx.animation.PauseTransition;
 import javafx.application.Platform;
+import javafx.beans.InvalidationListener;
+import javafx.beans.property.BooleanProperty;
+import javafx.beans.property.IntegerProperty;
+import javafx.beans.property.SimpleBooleanProperty;
+import javafx.beans.property.SimpleIntegerProperty;
+import javafx.collections.FXCollections;
+import javafx.collections.ObservableList;
 import javafx.geometry.Point2D;
 import javafx.geometry.Pos;
 import javafx.scene.Node;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
+import javafx.scene.control.ListCell;
+import javafx.scene.control.ListView;
 import javafx.scene.control.ScrollPane;
 import javafx.scene.control.TextArea;
 import javafx.scene.control.ToggleButton;
@@ -31,15 +39,16 @@ import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
 import javafx.scene.layout.VBox;
 import javafx.scene.text.Text;
-import javafx.util.Duration;
 
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 import java.util.function.Consumer;
 
@@ -48,11 +57,17 @@ import java.util.function.Consumer;
  * (working tree / upstream / base), a changed-files list, a unified diff
  * with a GitHub-style gutter-annotation interaction (click or drag the
  * {@code +} handle across lines, one composer per range), inline threaded
- * annotation cards, and a send-to-Claude validation loop that -- like
- * every worktree action -- hands the actual work to the live Claude
- * session in the terminal. Shown as the session tab's center while the
- * ◨ Review sub-tab is active (the native terminal overlay is hidden
- * meanwhile).
+ * annotation cards, and a send-to-Claude hand-off that -- like every
+ * worktree action -- hands the actual work to the live Claude session in
+ * the terminal. Shown as the session tab's center while the ◨ Review
+ * sub-tab is active (the native terminal overlay is hidden meanwhile).
+ *
+ * <p>The diff pane is virtualized: a {@link ListView} over the pure
+ * {@link ReviewRow} model built by {@link ReviewRowModels}, so only the
+ * visible cells exist. Gutter visibility and range-selection styling are
+ * property-driven cell updates; composer and annotation-card changes are
+ * index operations on the items list -- never scene-graph rebuilds of the
+ * whole diff (see docs/plans/review-virtualization-design.md).</p>
  */
 public final class ReviewView extends BorderPane {
 
@@ -90,9 +105,8 @@ public final class ReviewView extends BorderPane {
     private final Button gutterToggle = new Button("#");
 
     private final VBox filesBox = new VBox(2);
-    private final VBox diffBox = new VBox(0);
-    private final ScrollPane diffScroll = new ScrollPane(diffBox);
-    private final Label diffMessage = new Label();
+    private final ObservableList<ReviewRow> diffRows = FXCollections.observableArrayList();
+    private final ListView<ReviewRow> diffList = new ListView<>(diffRows);
 
     private final Label summaryLabel = new Label();
     private final Button sendButton = new Button("Send to Claude");
@@ -103,18 +117,31 @@ public final class ReviewView extends BorderPane {
     private String baseBranch = "master";
     private UnifiedDiff currentDiff = new UnifiedDiff(List.of());
     private UnifiedDiff.FileDiff selectedFile;
-    private boolean gutterVisible = true;
 
-    /** Rows of the currently rendered file, in render order (for range selection). */
-    private final List<DiffRow> rows = new ArrayList<>();
-    private int dragAnchor = -1;
-    private int dragHead = -1;
+    /** Cell-observed presentation state: line-number gutter visibility. */
+    private final BooleanProperty gutterVisible = new SimpleBooleanProperty(true);
+
+    /**
+     * Cell-observed range selection, as diff-line ordinals ({@code -1} =
+     * none). Cells restyle themselves when these change; dragging the
+     * {@code +} handle only updates these properties.
+     */
+    private final IntegerProperty selectionAnchor = new SimpleIntegerProperty(-1);
+    private final IntegerProperty selectionHead = new SimpleIntegerProperty(-1);
     private boolean dragging;
-    private Node composer;
 
-    /** One rendered diff line row plus its model line. */
-    private record DiffRow(UnifiedDiff.Line line, HBox node) {
-    }
+    /** The rendered diff lines by ordinal (for range labels and line keys). */
+    private List<UnifiedDiff.Line> lineByOrdinal = List.of();
+    /** Items-list index of each diff-line ordinal; adjusted on extra-row insert/remove. */
+    private int[] itemIndexByOrdinal = new int[0];
+
+    /** The single open composer: its model row plus its view-owned node (survives cell recycling). */
+    private ReviewRow.Composer composerRow;
+    private Node composerNode;
+    private int composerItemIndex = -1;
+
+    /** View-owned annotation-card nodes by annotation id, so reply drafts survive cell recycling. */
+    private final Map<String, Node> cardNodes = new HashMap<>();
 
     public ReviewView(ManagedSessionId sessionId, Path checkoutRoot, Path repositoryRoot,
                       DiffService diffService, ChangedLineService changedLineService,
@@ -138,10 +165,7 @@ public final class ReviewView extends BorderPane {
         gutterToggle.getStyleClass().add("viewer-gutter-toggle");
         gutterToggle.setFocusTraversable(false);
         gutterToggle.setTooltip(new Tooltip("Toggle line numbers"));
-        gutterToggle.setOnAction(e -> {
-            gutterVisible = !gutterVisible;
-            renderSelectedFile();
-        });
+        gutterToggle.setOnAction(e -> gutterVisible.set(!gutterVisible.get()));
 
         selectedTokenLabel.getStyleClass().add("review-token-label");
         searchTokenButton.getStyleClass().add("review-token-search");
@@ -168,12 +192,10 @@ public final class ReviewView extends BorderPane {
         filesScroll.setMinWidth(220);
         setLeft(filesScroll);
 
-        diffBox.getStyleClass().add("review-diff");
-        diffScroll.setFitToWidth(true);
-        diffScroll.getStyleClass().add("review-diff-scroll");
-        diffMessage.getStyleClass().add("review-diff-message");
-        diffMessage.setWrapText(true);
-        setCenter(diffScroll);
+        diffList.getStyleClass().add("review-diff-list");
+        diffList.setFocusTraversable(false);
+        diffList.setCellFactory(v -> new ReviewDiffCell());
+        setCenter(diffList);
 
         summaryLabel.getStyleClass().add("review-summary");
         sendButton.getStyleClass().add("review-send-button");
@@ -294,9 +316,8 @@ public final class ReviewView extends BorderPane {
     }
 
     private void showDiffMessage(String message) {
-        diffMessage.setText(message);
-        rows.clear();
-        diffBox.getChildren().setAll(diffMessage);
+        resetRowState();
+        diffRows.setAll(List.of(new ReviewRow.Message(message)));
     }
 
     // ---- Changed-files list -------------------------------------------------
@@ -356,45 +377,157 @@ public final class ReviewView extends BorderPane {
         return row;
     }
 
-    // ---- Unified diff -------------------------------------------------------
+    // ---- Unified diff (virtualized) -----------------------------------------
 
+    /**
+     * Rebuilds the diff list model for the selected file. This is the only
+     * "rebuild the model" path -- and it runs only when the underlying data
+     * changed (new diff or file selection); all other interactions are
+     * cell-level or single-index updates.
+     */
     private void renderSelectedFile() {
-        rows.clear();
-        composer = null;
-        diffBox.getChildren().clear();
+        resetRowState();
         if (selectedFile == null) {
             showDiffMessage(currentDiff.files().isEmpty() ? "No changes in this scope." : "Select a changed file.");
             return;
         }
-
-        diffBox.getChildren().add(buildBreadcrumb(selectedFile.path()));
-
-        int rendered = 0;
-        for (UnifiedDiff.Hunk hunk : selectedFile.hunks()) {
-            Label header = new Label(hunk.header());
-            header.getStyleClass().add("review-hunk-header");
-            header.setMaxWidth(Double.MAX_VALUE);
-            diffBox.getChildren().add(header);
-            for (UnifiedDiff.Line line : hunk.lines()) {
-                if (rendered >= MAX_RENDERED_ROWS) {
-                    break;
-                }
-                HBox rowNode = buildDiffRow(line, rows.size());
-                rows.add(new DiffRow(line, rowNode));
-                diffBox.getChildren().add(rowNode);
-                rendered++;
-            }
-            if (rendered >= MAX_RENDERED_ROWS) {
-                Label truncated = new Label("… diff truncated at " + MAX_RENDERED_ROWS + " lines");
-                truncated.getStyleClass().add("review-diff-message");
-                diffBox.getChildren().add(truncated);
-                break;
-            }
-        }
-        renderAnnotations();
+        diffRows.setAll(ReviewRowModels.build(
+                selectedFile, annotationStore.forScope(sessionId, scope), MAX_RENDERED_ROWS));
+        reindexRows();
+        diffList.scrollTo(0);
     }
 
-    private Region buildBreadcrumb(String path) {
+    /** Drops per-file row state: selection, ordinal indexes, cached card/composer nodes. */
+    private void resetRowState() {
+        // Stale ordinals must not re-highlight rows of a rebuilt model.
+        dragging = false;
+        selectionAnchor.set(-1);
+        selectionHead.set(-1);
+        lineByOrdinal = List.of();
+        itemIndexByOrdinal = new int[0];
+        composerRow = null;
+        composerNode = null;
+        composerItemIndex = -1;
+        cardNodes.clear();
+    }
+
+    /** Recomputes the ordinal → items-index map after a full model build. */
+    private void reindexRows() {
+        List<UnifiedDiff.Line> lines = new ArrayList<>();
+        List<Integer> indexes = new ArrayList<>();
+        for (int i = 0; i < diffRows.size(); i++) {
+            if (diffRows.get(i) instanceof ReviewRow.DiffLine diffLine) {
+                lines.add(diffLine.line());
+                indexes.add(i);
+            }
+        }
+        lineByOrdinal = List.copyOf(lines);
+        itemIndexByOrdinal = indexes.stream().mapToInt(Integer::intValue).toArray();
+    }
+
+    private int lineCount() {
+        return itemIndexByOrdinal.length;
+    }
+
+    /** Adjusts the ordinal index map after inserting/removing one extra row at {@code itemsIndex}. */
+    private void shiftOrdinalIndexesFrom(int itemsIndex, int delta) {
+        for (int i = 0; i < itemIndexByOrdinal.length; i++) {
+            if (itemIndexByOrdinal[i] >= itemsIndex) {
+                itemIndexByOrdinal[i] += delta;
+            }
+        }
+        if (composerItemIndex >= itemsIndex) {
+            composerItemIndex += delta;
+        }
+    }
+
+    // ---- Cells --------------------------------------------------------------
+
+    /**
+     * Renders one {@link ReviewRow}. Diff-line content is cheap and rebuilt
+     * on item change; annotation cards and the composer mount view-owned
+     * nodes so typed text survives cell recycling. The cell observes the
+     * selection-range and gutter properties and restyles itself in place.
+     */
+    private final class ReviewDiffCell extends ListCell<ReviewRow> {
+
+        private HBox lineRowNode;
+        private int ordinal = -1;
+
+        ReviewDiffCell() {
+            getStyleClass().add("review-diff-cell");
+            InvalidationListener onSelectionChange = obs -> applySelectionStyle();
+            // The cell lives exactly as long as the ListView (and the view),
+            // so plain listeners on the view's properties cannot leak.
+            selectionAnchor.addListener(onSelectionChange);
+            selectionHead.addListener(onSelectionChange);
+        }
+
+        @Override
+        protected void updateItem(ReviewRow row, boolean empty) {
+            super.updateItem(row, empty);
+            lineRowNode = null;
+            ordinal = -1;
+            if (empty || row == null) {
+                setGraphic(null);
+                return;
+            }
+            Node node = switch (row) {
+                case ReviewRow.Message message -> messageLabel(message.text());
+                case ReviewRow.Truncation truncation ->
+                        messageLabel("… diff truncated at " + truncation.limit() + " lines");
+                case ReviewRow.Breadcrumb breadcrumb -> buildBreadcrumb(breadcrumb.path());
+                case ReviewRow.HunkHeader header -> hunkHeaderLabel(header.text());
+                case ReviewRow.DiffLine diffLine -> {
+                    lineRowNode = buildDiffRow(diffLine.line(), diffLine.ordinal());
+                    ordinal = diffLine.ordinal();
+                    applySelectionStyle();
+                    yield lineRowNode;
+                }
+                case ReviewRow.AnnotationCard card -> cardNode(card.annotation());
+                // A stale composer row (node already discarded) renders empty.
+                case ReviewRow.Composer c -> composerNode != null ? composerNode : new Region();
+            };
+            if (node instanceof Region region) {
+                // Cells do not stretch their graphic; full-width row
+                // backgrounds (row-add/del, hunk headers) need the bind.
+                region.prefWidthProperty().bind(widthProperty());
+            }
+            setGraphic(node);
+        }
+
+        private void applySelectionStyle() {
+            if (lineRowNode == null) {
+                return;
+            }
+            int anchor = selectionAnchor.get();
+            int head = selectionHead.get();
+            boolean selected = anchor >= 0 && head >= 0
+                    && ordinal >= Math.min(anchor, head) && ordinal <= Math.max(anchor, head);
+            List<String> classes = lineRowNode.getStyleClass();
+            if (selected && !classes.contains("row-selected")) {
+                classes.add("row-selected");
+            } else if (!selected) {
+                classes.remove("row-selected");
+            }
+        }
+    }
+
+    private static Label messageLabel(String text) {
+        Label label = new Label(text);
+        label.getStyleClass().add("review-diff-message");
+        label.setWrapText(true);
+        return label;
+    }
+
+    private static Label hunkHeaderLabel(String text) {
+        Label header = new Label(text);
+        header.getStyleClass().add("review-hunk-header");
+        header.setMaxWidth(Double.MAX_VALUE);
+        return header;
+    }
+
+    private static Region buildBreadcrumb(String path) {
         HBox breadcrumb = new HBox(4);
         breadcrumb.getStyleClass().add("viewer-breadcrumb");
         breadcrumb.setAlignment(Pos.CENTER_LEFT);
@@ -402,7 +535,7 @@ public final class ReviewView extends BorderPane {
         return breadcrumb;
     }
 
-    private HBox buildDiffRow(UnifiedDiff.Line line, int rowIndex) {
+    private HBox buildDiffRow(UnifiedDiff.Line line, int rowOrdinal) {
         // The annotation handle: a faint accent + that brightens on hover;
         // click = single line, drag across rows (or Shift-click) = range.
         Label handle = new Label("+");
@@ -411,14 +544,13 @@ public final class ReviewView extends BorderPane {
             if (e.getButton() != MouseButton.PRIMARY) {
                 return;
             }
-            if (e.isShiftDown() && dragAnchor >= 0) {
-                dragHead = rowIndex;
+            if (e.isShiftDown() && selectionAnchor.get() >= 0) {
+                selectionHead.set(rowOrdinal);
             } else {
-                dragAnchor = rowIndex;
-                dragHead = rowIndex;
+                selectionAnchor.set(rowOrdinal);
+                selectionHead.set(rowOrdinal);
             }
             dragging = true;
-            applySelectionStyles();
             e.consume();
         });
         // startFullDrag() may only be called from a DRAG_DETECTED handler
@@ -435,6 +567,11 @@ public final class ReviewView extends BorderPane {
         oldNumber.getStyleClass().add("review-line-number");
         Label newNumber = new Label(line.newLine().isPresent() ? String.valueOf(line.newLine().getAsInt()) : "");
         newNumber.getStyleClass().add("review-line-number");
+        // The gutter toggle is a pure cell-level update: no rebuild.
+        oldNumber.visibleProperty().bind(gutterVisible);
+        oldNumber.managedProperty().bind(gutterVisible);
+        newNumber.visibleProperty().bind(gutterVisible);
+        newNumber.managedProperty().bind(gutterVisible);
 
         Label sign = new Label(switch (line.kind()) {
             case ADD -> "+";
@@ -454,7 +591,7 @@ public final class ReviewView extends BorderPane {
         text.setOnMouseClicked(e -> {
             if (e.getClickCount() == 2) {
                 int charIndex = text.hitTest(new Point2D(e.getX(), e.getY())).getCharIndex();
-                tokenAt(line.text(), charIndex).ifPresent(this::showTokenChip);
+                tokenAt(line.text(), charIndex).ifPresent(ReviewView.this::showTokenChip);
                 e.consume();
             }
         });
@@ -469,13 +606,9 @@ public final class ReviewView extends BorderPane {
             case DEL -> "row-del";
             case CONTEXT -> "row-context";
         });
-        oldNumber.setVisible(gutterVisible);
-        oldNumber.setManaged(gutterVisible);
-        newNumber.setVisible(gutterVisible);
-        newNumber.setManaged(gutterVisible);
 
         // Changed lines that exist in the new file expose ⤢ open-in-Explorer.
-        if (line.kind() == UnifiedDiff.Line.Kind.ADD && line.newLine().isPresent()) {
+        if (line.kind() == UnifiedDiff.Line.Kind.ADD && line.newLine().isPresent() && selectedFile != null) {
             Button openInExplorer = new Button("⤢");
             openInExplorer.getStyleClass().add("review-open-in-explorer");
             openInExplorer.setFocusTraversable(false);
@@ -490,8 +623,7 @@ public final class ReviewView extends BorderPane {
         // Range selection: dragging the + across rows extends the head.
         row.setOnMouseDragEntered(e -> {
             if (dragging) {
-                dragHead = rowIndex;
-                applySelectionStyles();
+                selectionHead.set(rowOrdinal);
             }
         });
         row.setOnMouseReleased(e -> endDrag());
@@ -553,51 +685,47 @@ public final class ReviewView extends BorderPane {
             return;
         }
         dragging = false;
-        if (dragAnchor < 0 || dragHead < 0) {
+        int anchor = selectionAnchor.get();
+        int head = selectionHead.get();
+        if (anchor < 0 || head < 0) {
             return;
         }
-        int start = Math.min(dragAnchor, dragHead);
-        int end = Math.max(dragAnchor, dragHead);
-        openComposer(start, end);
-    }
-
-    private void applySelectionStyles() {
-        int start = Math.min(dragAnchor, dragHead);
-        int end = Math.max(dragAnchor, dragHead);
-        for (int i = 0; i < rows.size(); i++) {
-            boolean selected = dragAnchor >= 0 && i >= start && i <= end;
-            List<String> classes = rows.get(i).node().getStyleClass();
-            if (selected && !classes.contains("row-selected")) {
-                classes.add("row-selected");
-            } else if (!selected) {
-                classes.remove("row-selected");
-            }
-        }
+        openComposer(Math.min(anchor, head), Math.max(anchor, head));
     }
 
     private void clearSelection() {
-        dragAnchor = -1;
-        dragHead = -1;
         dragging = false;
+        selectionAnchor.set(-1);
+        selectionHead.set(-1);
         removeComposer();
-        applySelectionStyles();
     }
 
+    /** Removes the composer's model row (a single index operation) and drops its node. */
     private void removeComposer() {
-        if (composer != null) {
-            diffBox.getChildren().remove(composer);
-            composer = null;
+        if (composerRow == null) {
+            return;
+        }
+        int index = composerItemIndex >= 0 && composerItemIndex < diffRows.size()
+                && diffRows.get(composerItemIndex) == composerRow
+                ? composerItemIndex
+                : diffRows.indexOf(composerRow);
+        composerRow = null;
+        composerNode = null;
+        composerItemIndex = -1;
+        if (index >= 0) {
+            diffRows.remove(index);
+            shiftOrdinalIndexesFrom(index, -1);
         }
     }
 
     /** Opens ONE composer for the whole span, under the range's last row (design: header shows La–b). */
-    private void openComposer(int startRow, int endRow) {
+    private void openComposer(int startOrdinal, int endOrdinal) {
         removeComposer();
-        if (startRow < 0 || endRow >= rows.size() || selectedFile == null) {
+        if (startOrdinal < 0 || endOrdinal >= lineCount() || selectedFile == null) {
             return;
         }
 
-        Label rangeChip = new Label(rangeLabel(startRow, endRow));
+        Label rangeChip = new Label(rangeLabel(startOrdinal, endOrdinal));
         rangeChip.getStyleClass().add("review-range-chip");
 
         TextArea input = new TextArea();
@@ -618,12 +746,13 @@ public final class ReviewView extends BorderPane {
             if (message.isEmpty()) {
                 return;
             }
-            annotationStore.add(ReviewAnnotation.create(sessionId, scope, selectedFile.path(),
-                    rows.get(startRow).line().lineKey(), rows.get(endRow).line().lineKey(),
-                    new ReviewAnnotation.Message("You", Instant.now(), message)));
+            ReviewAnnotation annotation = ReviewAnnotation.create(sessionId, scope, selectedFile.path(),
+                    lineByOrdinal.get(startOrdinal).lineKey(), lineByOrdinal.get(endOrdinal).lineKey(),
+                    new ReviewAnnotation.Message("You", Instant.now(), message));
+            annotationStore.add(annotation);
             clearSelection();
+            insertCardRow(annotation, endOrdinal);
             renderFileList();
-            renderSelectedFile();
             updateSummary();
         });
         Region spacer = new Region();
@@ -633,49 +762,56 @@ public final class ReviewView extends BorderPane {
 
         VBox box = new VBox(8, buttons, input);
         box.getStyleClass().add("review-composer");
-        composer = box;
-        int insertAt = diffBox.getChildren().indexOf(rows.get(endRow).node()) + 1;
-        diffBox.getChildren().add(insertAt, box);
-        input.requestFocus();
+        composerNode = box;
+        composerRow = new ReviewRow.Composer(startOrdinal, endOrdinal);
+        int insertAt = itemIndexByOrdinal[endOrdinal] + 1;
+        diffRows.add(insertAt, composerRow);
+        // composerItemIndex is still -1 here, so the shift cannot touch it.
+        shiftOrdinalIndexesFrom(insertAt, +1);
+        composerItemIndex = insertAt;
+        diffList.scrollTo(insertAt);
+        // The cell mounts the node on the next pulse; focus after that.
+        Platform.runLater(input::requestFocus);
     }
 
-    private String rangeLabel(int startRow, int endRow) {
-        UnifiedDiff.Line start = rows.get(startRow).line();
-        UnifiedDiff.Line end = rows.get(endRow).line();
+    private String rangeLabel(int startOrdinal, int endOrdinal) {
+        UnifiedDiff.Line start = lineByOrdinal.get(startOrdinal);
+        UnifiedDiff.Line end = lineByOrdinal.get(endOrdinal);
         int a = start.newLine().orElse(start.oldLine().orElse(0));
         int b = end.newLine().orElse(end.oldLine().orElse(0));
-        return startRow == endRow ? "L" + a : "L" + a + "–" + b;
+        return startOrdinal == endOrdinal ? "L" + a : "L" + a + "–" + b;
     }
 
     // ---- Threaded annotation cards ------------------------------------------
 
-    /** Renders every annotation of the current scope+file as an inline card under its range's last line. */
-    private void renderAnnotations() {
-        if (selectedFile == null) {
+    /** Inserts one card row after {@code endOrdinal}'s line (behind any cards already anchored there). */
+    private void insertCardRow(ReviewAnnotation annotation, int endOrdinal) {
+        if (endOrdinal < 0 || endOrdinal >= lineCount()) {
             return;
         }
-        for (ReviewAnnotation annotation : annotationStore.forScope(sessionId, scope)) {
-            if (!annotation.file().equals(selectedFile.path())) {
-                continue;
+        int at = itemIndexByOrdinal[endOrdinal] + 1;
+        while (at < diffRows.size() && diffRows.get(at) instanceof ReviewRow.AnnotationCard) {
+            at++;
+        }
+        diffRows.add(at, new ReviewRow.AnnotationCard(annotation));
+        shiftOrdinalIndexesFrom(at, +1);
+    }
+
+    /** Swaps the card row (and drops the cached node) of {@code updated}; single-index model update. */
+    private void replaceCardRow(ReviewAnnotation updated) {
+        cardNodes.remove(updated.id());
+        for (int i = 0; i < diffRows.size(); i++) {
+            if (diffRows.get(i) instanceof ReviewRow.AnnotationCard card
+                    && card.annotation().id().equals(updated.id())) {
+                diffRows.set(i, new ReviewRow.AnnotationCard(updated));
+                return;
             }
-            int anchorRow = rowIndexForKey(annotation.endKey())
-                    .orElseGet(() -> rowIndexForKey(annotation.startKey()).orElse(-1));
-            if (anchorRow < 0) {
-                continue; // range no longer in this diff; counts still include it
-            }
-            Node card = buildAnnotationCard(annotation);
-            int insertAt = diffBox.getChildren().indexOf(rows.get(anchorRow).node()) + 1;
-            diffBox.getChildren().add(insertAt, card);
         }
     }
 
-    private Optional<Integer> rowIndexForKey(String key) {
-        for (int i = 0; i < rows.size(); i++) {
-            if (rows.get(i).line().lineKey().equals(key)) {
-                return Optional.of(i);
-            }
-        }
-        return Optional.empty();
+    /** The view-owned card node for {@code annotation} (built once per annotation version). */
+    private Node cardNode(ReviewAnnotation annotation) {
+        return cardNodes.computeIfAbsent(annotation.id(), id -> buildAnnotationCard(annotation));
     }
 
     private Node buildAnnotationCard(ReviewAnnotation annotation) {
@@ -687,6 +823,7 @@ public final class ReviewView extends BorderPane {
         Label status = new Label(annotation.status().name().toLowerCase(Locale.ROOT));
         status.getStyleClass().addAll("review-status-pill", switch (annotation.status()) {
             case OPEN -> "status-open";
+            case SENT -> "status-sent";
             case RESOLVED -> "status-resolved";
             case FIXED -> "status-fixed";
         });
@@ -695,11 +832,11 @@ public final class ReviewView extends BorderPane {
         toggle.getStyleClass().add("review-thread-action");
         toggle.setFocusTraversable(false);
         toggle.setOnAction(e -> {
-            annotationStore.update(annotation.withStatus(annotation.status() == AnnotationStatus.OPEN
+            ReviewAnnotation updated = annotation.withStatus(annotation.status() == AnnotationStatus.OPEN
                     ? AnnotationStatus.RESOLVED
-                    : AnnotationStatus.OPEN));
-            renderFileList();
-            renderSelectedFile();
+                    : AnnotationStatus.OPEN);
+            annotationStore.update(updated);
+            replaceCardRow(updated);
             updateSummary();
         });
 
@@ -735,9 +872,10 @@ public final class ReviewView extends BorderPane {
             if (message.isEmpty()) {
                 return;
             }
-            annotationStore.update(annotation.withReply(
-                    new ReviewAnnotation.Message("You", Instant.now(), message)));
-            renderSelectedFile();
+            ReviewAnnotation updated = annotation.withReply(
+                    new ReviewAnnotation.Message("You", Instant.now(), message));
+            annotationStore.update(updated);
+            replaceCardRow(updated);
         });
         HBox replyRow = new HBox(8, reply, replyButton);
         HBox.setHgrow(reply, Priority.ALWAYS);
@@ -750,23 +888,24 @@ public final class ReviewView extends BorderPane {
         return "L" + (key.length() > 1 ? key.substring(1) : key);
     }
 
-    // ---- Send-to-Claude validation loop -------------------------------------
+    // ---- Send-to-Claude hand-off --------------------------------------------
 
     private void updateSummary() {
         List<ReviewAnnotation> annotations = annotationStore.forScope(sessionId, scope);
         long open = annotations.stream().filter(a -> a.status() == AnnotationStatus.OPEN).count();
-        long fixed = annotations.stream().filter(a -> a.status() == AnnotationStatus.FIXED).count();
+        long sent = annotations.stream().filter(a -> a.status() == AnnotationStatus.SENT).count();
         summaryLabel.setText(open + " open · " + annotations.size()
-                + (annotations.size() == 1 ? " annotation" : " annotations") + " · " + fixed + " fixed");
+                + (annotations.size() == 1 ? " annotation" : " annotations") + " · " + sent + " sent");
         sendButton.setDisable(open == 0);
     }
 
     /**
      * Posts the diff scope + every OPEN annotation into the session's live
      * Claude terminal (the same hand-off principle as the worktree Finish
-     * actions -- the app does not validate anything itself). Each open
-     * thread then gets a hand-off reply and flips to FIXED, and the banner
-     * offers a re-diff.
+     * actions -- the app does not validate anything itself). Each sent
+     * thread is marked {@link AnnotationStatus#SENT} immediately -- the app
+     * records only what it knows (the hand-off happened), never a fabricated
+     * outcome -- and the banner offers a re-diff to see the real result.
      */
     private void sendToClaude() {
         List<ReviewAnnotation> open = annotationStore.forScope(sessionId, scope).stream()
@@ -789,28 +928,19 @@ public final class ReviewView extends BorderPane {
         }
         promptSender.accept(prompt.toString().strip());
 
-        sendButton.setDisable(true);
-        sendButton.setText("Sent — Claude is validating…");
         // The app does NOT validate -- Claude does, in the live terminal.
-        // After a grace period each open thread records the hand-off and
-        // flips to FIXED; the banner's "Re-run diff" shows the real result.
-        PauseTransition settle = new PauseTransition(Duration.seconds(8));
-        settle.setOnFinished(e -> {
-            for (ReviewAnnotation annotation : open) {
-                annotationStore.update(annotation
-                        .withReply(new ReviewAnnotation.Message("Claude", Instant.now(),
-                                "Addressed in the terminal — re-run the diff to verify."))
-                        .withStatus(AnnotationStatus.FIXED));
-            }
-            sendButton.setText("Send to Claude");
-            bannerLabel.setText(open.size() + (open.size() == 1 ? " annotation" : " annotations") + " addressed");
-            banner.setVisible(true);
-            banner.setManaged(true);
-            renderFileList();
-            renderSelectedFile();
-            updateSummary();
-        });
-        settle.play();
+        // Record only the hand-off (SENT, no fabricated reply, no timer);
+        // the banner's "Re-run diff" shows the real result.
+        for (ReviewAnnotation annotation : open) {
+            ReviewAnnotation updated = annotation.withStatus(AnnotationStatus.SENT);
+            annotationStore.update(updated);
+            replaceCardRow(updated);
+        }
+        bannerLabel.setText(open.size() + (open.size() == 1 ? " annotation" : " annotations")
+                + " sent to Claude");
+        banner.setVisible(true);
+        banner.setManaged(true);
+        updateSummary();
     }
 
     private String scopeDescription() {

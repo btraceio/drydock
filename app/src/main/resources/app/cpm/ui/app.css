@@ -1512,15 +1512,22 @@
     -fx-font-size: 10px;
     -fx-padding: 0 6 0 6;
 }
-.review-diff-scroll {
-    -fx-background-color: transparent;
-}
-.review-diff-scroll > .viewport {
-    -fx-background-color: transparent;
-}
-.review-diff {
+/* The virtualized diff pane: a ListView whose chrome is neutralized so
+   cells look exactly like the pre-virtualization VBox rows. */
+.review-diff-list {
     -fx-background-color: -cpm-code-bg;
+    -fx-background-insets: 0;
     -fx-padding: 0 0 20 0;
+}
+.review-diff-list .list-cell {
+    -fx-background-color: transparent;
+    -fx-padding: 0;
+}
+.review-diff-list .list-cell:filled:selected,
+.review-diff-list .list-cell:filled:selected:hover,
+.review-diff-list:focused .list-cell:filled:selected {
+    -fx-background-color: transparent;
+    -fx-background-insets: 0;
 }
 .review-diff-message {
     -fx-text-fill: -cpm-text-faint;
@@ -1659,6 +1666,10 @@
 .status-open {
     -fx-background-color: -cpm-accent-soft;
     -fx-text-fill: -cpm-accent;
+}
+.status-sent {
+    -fx-background-color: -cpm-running-soft;
+    -fx-text-fill: -cpm-running;
 }
 .status-resolved {
     -fx-background-color: -cpm-active-bg;

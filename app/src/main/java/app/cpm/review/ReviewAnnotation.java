@@ -4,6 +4,7 @@ import app.cpm.domain.ManagedSessionId;
 import app.cpm.git.DiffScope;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
@@ -59,7 +60,7 @@ public record ReviewAnnotation(
     }
 
     public ReviewAnnotation withReply(Message reply) {
-        List<Message> extended = new java.util.ArrayList<>(thread);
+        List<Message> extended = new ArrayList<>(thread);
         extended.add(reply);
         return new ReviewAnnotation(id, sessionId, scope, file, startKey, endKey, status, extended);
     }
