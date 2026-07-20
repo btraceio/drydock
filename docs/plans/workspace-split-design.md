@@ -157,3 +157,33 @@ kept; `OpenSessionTab`'s package-private API is kept via delegation.
   exact decision order (shortcut interception before the special-key
   check, `characters`-empty fallback to `unshiftedCharacters`, both-edge
   swallowing) — covered by unit tests.
+
+## Step plan
+
+Each step keeps the build green (`./gradlew compileJava test`) and lands
+as its own commit.
+
+1. **Extract `GhosttyKeyTranslator`** into `app.cpm.terminal.ghostty`
+   with the keycode/modifier constants, special-key set, modifier
+   translation, and the full `translate(...)` classification (sealed
+   `KeyAction`). Rewire `OpenSessionTab.onKeyEvent`/`sendPrompt` and
+   `GhosttySurface.closeGracefully` onto it; delete the duplicated
+   private constants. Add `GhosttyKeyTranslatorTest` covering modifier
+   translation, special keys, the shortcut table (shifted forms
+   included), unshifted-codepoint policy, and key-up swallowing.
+2. **Extract `TerminalBridge`** into `app.cpm.ui`: move the native
+   fields, guards, listener handlers, geometry sync, visibility, focus,
+   theming, prompt typing, tick/draw, and disposal out of
+   `OpenSessionTab`, leaving delegating methods so `MainWorkspace`'s
+   call sites are untouched. Verify listener registration order and
+   teardown guards match the originals line-for-line.
+3. **Extract `WorktreeLifecycleController`** into `app.cpm.ui`: move the
+   Finish-panel wiring, handoff prompts + polling, PR-state
+   reconciliation, inspection records, busy modal, and browser-open out
+   of `MainWorkspace`, injected with services + tab/repository lookups +
+   change/delete notifiers + the modal layer. `MainWorkspace` keeps its
+   public surface and forwards `setModalLayer` and the
+   worktree-header setup.
+4. **Self-review** the full branch diff for accidental behavior change
+   (listener order, FX-thread hops, progress-state clearing, liveness
+   guards); fix findings. Final verification run.
