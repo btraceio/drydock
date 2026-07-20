@@ -250,7 +250,7 @@ Gradle, no sdkman on `PATH` at all):
   `os.arch: x86_64` confirms the right architecture subdirectory was
   selected.
 - `/tmp/cpm-image-test/bin/claude-project-manager` (defaults to
-  `app.cpm.Main`, the real application) — after the `--add-exports` fix above, runs the
+  `Gate0cSpikeLauncher`) — after the `--add-exports` fix above, runs the
   full Gate 0C sequence successfully end to end: `ghostty_init`, AppKit host
   view created and attached to the JavaFX window's `NSView`,
   `ghostty_app_new`, `ghostty_surface_new` (`scale=2.0`, i.e. real
