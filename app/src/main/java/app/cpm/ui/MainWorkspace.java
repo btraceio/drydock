@@ -90,7 +90,7 @@ import java.util.function.Supplier;
  * closeGracefully} (plan section 9's documented live-child-process crash
  * risk).</p>
  */
-public final class MainWorkspace extends BorderPane {
+public final class MainWorkspace extends BorderPane implements WorkspaceNavigator {
 
     private static final Logger LOG = System.getLogger(MainWorkspace.class.getName());
 
@@ -282,6 +282,7 @@ public final class MainWorkspace extends BorderPane {
      * note that it came from {@code git worktree list}, and a Start button
      * opening the Start-session modal.
      */
+    @Override
     public void showUnopenedWorktree(Repository repository, WorktreeService.Worktree worktree) {
         clearUnopenedWorktreeState();
         tabPane.getSelectionModel().clearSelection();
@@ -321,6 +322,7 @@ public final class MainWorkspace extends BorderPane {
      * on that checkout -- no {@code git worktree add} anywhere. On the main
      * checkout it starts a plain (non-worktree) session.
      */
+    @Override
     public void promptStartWorktreeSession(Repository repository, WorktreeService.Worktree worktree) {
         if (modalLayer == null) {
             return;
@@ -360,6 +362,7 @@ public final class MainWorkspace extends BorderPane {
     }
 
     /** The session backing the currently selected tab, if any (drives the sidebar's active row). */
+    @Override
     public Optional<ManagedSessionId> activeSessionId() {
         return currentlySelected().map(OpenSessionTab::sessionId);
     }
@@ -425,6 +428,7 @@ public final class MainWorkspace extends BorderPane {
     // ---- Opening ------------------------------------------------------------
 
     /** Plan section 11.1 / 12 "New Claude session": creates a brand-new session and opens it in a new tab. */
+    @Override
     public void openNewSession(Repository repository) {
         openNewSession(repository, Optional.empty());
     }
@@ -512,6 +516,7 @@ public final class MainWorkspace extends BorderPane {
      * in this application instance, focuses its existing tab instead of
      * starting a second surface for it.
      */
+    @Override
     public void resumeSession(ManagedClaudeSession session) {
         OpenSessionTab alreadyOpen = openTabs.containsKey(session.id())
                 ? openTabs.get(session.id()) : pendingTabs.get(session.id());
@@ -1065,6 +1070,7 @@ public final class MainWorkspace extends BorderPane {
     // ---- Closing --------------------------------------------------------------
 
     /** Closes one session's tab via {@link SessionManager#closeSession} (never {@code GhosttySurface#close()} directly). */
+    @Override
     public CompletableFuture<Void> closeSession(ManagedSessionId sessionId) {
         OpenSessionTab open = openTabs.get(sessionId);
         if (open == null) {
@@ -1098,6 +1104,7 @@ public final class MainWorkspace extends BorderPane {
     }
 
     /** Called by the sidebar after {@link SessionManager#deleteSession} so any open tab disappears too. */
+    @Override
     public void noteSessionDeleted(ManagedSessionId sessionId) {
         annotationStore.removeSession(sessionId);
         OpenSessionTab open = openTabs.get(sessionId);
@@ -1120,6 +1127,7 @@ public final class MainWorkspace extends BorderPane {
     }
 
     /** Convenience for a rename UI trigger (context menu / ⌘R): prompts for the new name in a dialog. */
+    @Override
     public void promptRenameSession(ManagedClaudeSession session) {
         TextInputDialog dialog = new TextInputDialog(session.displayName());
         dialog.setTitle("Rename session");

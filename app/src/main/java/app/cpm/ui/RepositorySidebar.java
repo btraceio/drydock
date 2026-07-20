@@ -93,7 +93,7 @@ public final class RepositorySidebar extends VBox {
     private final GitStatusService gitStatusService;
     private final WorktreeService worktreeService;
     private final SessionManager sessionManager;
-    private final MainWorkspace mainWorkspace;
+    private final WorkspaceNavigator navigator;
     private final ExternalEditorLauncher editorLauncher = new ExternalEditorLauncher();
 
     private final TextField filterField = new TextField();
@@ -147,12 +147,12 @@ public final class RepositorySidebar extends VBox {
 
     public RepositorySidebar(RepositoryManager repositoryManager, GitStatusService gitStatusService,
                               WorktreeService worktreeService, SessionManager sessionManager,
-                              MainWorkspace mainWorkspace) {
+                              WorkspaceNavigator navigator) {
         this.repositoryManager = repositoryManager;
         this.gitStatusService = gitStatusService;
         this.worktreeService = worktreeService;
         this.sessionManager = sessionManager;
-        this.mainWorkspace = mainWorkspace;
+        this.navigator = navigator;
 
         getStyleClass().add("sidebar");
 
@@ -333,7 +333,7 @@ public final class RepositorySidebar extends VBox {
      * once per active-session change, not on every status-refresh rebuild.
      */
     private void syncActiveSelection() {
-        ManagedSessionId active = mainWorkspace.activeSessionId().orElse(null);
+        ManagedSessionId active = navigator.activeSessionId().orElse(null);
         if (active == null) {
             lastRevealedSession = null;
             tree.getSelectionModel().clearSelection();
@@ -660,7 +660,7 @@ public final class RepositorySidebar extends VBox {
                     if (ex != null) {
                         UiErrors.show("Could not delete session", ex);
                     }
-                    mainWorkspace.noteSessionDeleted(session.id());
+                    navigator.noteSessionDeleted(session.id());
                     rebuildTree();
                 })));
     }
@@ -886,8 +886,8 @@ public final class RepositorySidebar extends VBox {
                         ? "pr-chip-merged" : "pr-chip");
             }
 
-            Button open = quickAction("↗", "Open", false, () -> mainWorkspace.resumeSession(session));
-            Button stop = quickAction("■", "Stop process", true, () -> mainWorkspace.closeSession(session.id()));
+            Button open = quickAction("↗", "Open", false, () -> navigator.resumeSession(session));
+            Button stop = quickAction("■", "Stop process", true, () -> navigator.closeSession(session.id()));
             stop.setDisable(!SessionStatusStyles.isRunning(session.status()));
             Button delete = quickAction("×", "Delete session", true, () -> onDeleteSession(session));
             HBox actions = new HBox(2, open, stop, delete);
@@ -908,7 +908,7 @@ public final class RepositorySidebar extends VBox {
             row.getStyleClass().add("session-row");
             row.setAlignment(Pos.CENTER_LEFT);
             row.setPadding(new Insets(5, 8, 5, 16));
-            if (mainWorkspace.activeSessionId().filter(session.id()::equals).isPresent()) {
+            if (navigator.activeSessionId().filter(session.id()::equals).isPresent()) {
                 row.getStyleClass().add("active");
             }
             Tooltip.install(row, new Tooltip(
@@ -916,7 +916,7 @@ public final class RepositorySidebar extends VBox {
                             + "\nWorking directory: " + session.workingDirectory()));
             row.setOnMouseClicked(event -> {
                 if (event.getButton() == MouseButton.PRIMARY) {
-                    mainWorkspace.resumeSession(session);
+                    navigator.resumeSession(session);
                     event.consume();
                 }
             });
@@ -947,7 +947,7 @@ public final class RepositorySidebar extends VBox {
             startPill.getStyleClass().add("start-pill");
             startPill.setOnMouseClicked(event -> {
                 if (event.getButton() == MouseButton.PRIMARY) {
-                    mainWorkspace.promptStartWorktreeSession(repository, worktree);
+                    navigator.promptStartWorktreeSession(repository, worktree);
                     event.consume();
                 }
             });
@@ -968,7 +968,7 @@ public final class RepositorySidebar extends VBox {
             Tooltip.install(row, new Tooltip("Discovered via git worktree list\n" + worktree.path()));
             row.setOnMouseClicked(event -> {
                 if (event.getButton() == MouseButton.PRIMARY) {
-                    mainWorkspace.showUnopenedWorktree(repository, worktree);
+                    navigator.showUnopenedWorktree(repository, worktree);
                     event.consume();
                 }
             });
@@ -989,13 +989,13 @@ public final class RepositorySidebar extends VBox {
 
         private ContextMenu buildSessionContextMenu(ManagedClaudeSession session) {
             MenuItem resume = new MenuItem("Resume");
-            resume.setOnAction(e -> mainWorkspace.resumeSession(session));
+            resume.setOnAction(e -> navigator.resumeSession(session));
 
             MenuItem rename = new MenuItem("Rename…");
-            rename.setOnAction(e -> mainWorkspace.promptRenameSession(session));
+            rename.setOnAction(e -> navigator.promptRenameSession(session));
 
             MenuItem stop = new MenuItem("Stop process");
-            stop.setOnAction(e -> mainWorkspace.closeSession(session.id()));
+            stop.setOnAction(e -> navigator.closeSession(session.id()));
 
             MenuItem delete = new MenuItem("Delete session");
             delete.setOnAction(e -> onDeleteSession(session));
@@ -1012,7 +1012,7 @@ public final class RepositorySidebar extends VBox {
         /** The repo "+" menu (worktree handoff "Creating"): checkout session / new worktree / rescan. */
         private ContextMenu buildNewSessionMenu(Repository repository) {
             MenuItem inCheckout = new MenuItem("❯_  Session on main checkout");
-            inCheckout.setOnAction(e -> mainWorkspace.openNewSession(repository));
+            inCheckout.setOnAction(e -> navigator.openNewSession(repository));
             MenuItem newWorktree = new MenuItem("◫  New worktree…");
             newWorktree.setOnAction(e -> onNewWorktree.accept(repository));
             MenuItem rescan = new MenuItem("⟳  Rescan worktrees");
@@ -1022,7 +1022,7 @@ public final class RepositorySidebar extends VBox {
 
         private ContextMenu buildRepoContextMenu(Repository repository) {
             MenuItem newSession = new MenuItem("New Claude session");
-            newSession.setOnAction(e -> mainWorkspace.openNewSession(repository));
+            newSession.setOnAction(e -> navigator.openNewSession(repository));
             MenuItem newWorktree = new MenuItem("New worktree…");
             newWorktree.setOnAction(e -> onNewWorktree.accept(repository));
 
