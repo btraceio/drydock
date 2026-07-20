@@ -148,3 +148,40 @@ error and machine independence.
 - **`zsh -c` fix limits**: quoting (not argv-list) is the strongest fix
   available through libghostty's shell-string `command` field; the spike
   documents this constraint at the call site.
+
+## Step plan (build stays green after every step)
+
+1. **Daemon JVM criteria.** Add `gradle/gradle-daemon-jvm.properties`
+   (`toolchainVersion=17` + migrated comment), drop `org.gradle.java.home`
+   from `gradle.properties`. Verify: `./gradlew help compileJava`.
+2. **Spike source set + move (in `app/build.gradle.kts` first).** Create
+   the `spike` source set inline, `git mv` the six `Gate0*` files and
+   `GhosttySmokeTest` to `app/src/spike/java/...`, fix `Gate0cSpike`'s
+   inline FQNs and `Gate0eSpike`'s unquoted `CLAUDE_BIN` interpolation,
+   repoint the four gate tasks at the spike runtime classpath. Verify:
+   `./gradlew compileJava compileSpikeJava test`, `jar tf` shows no
+   `Gate0`/`GhosttySmokeTest` classes, gate tasks configure (`--dry-run`).
+3. **buildSrc + `cpm.spikes`.** Introduce `buildSrc` (kotlin-dsl), move
+   the source-set creation and the four gate task registrations into the
+   `cpm.spikes` precompiled plugin; apply it from `app`. Verify: same as
+   step 2.
+4. **`cpm.packaging` templates + typed tasks.** Extract `launcher.sh`,
+   `Info.plist`, `bundle-trampoline.sh`, `dist-trampoline.sh` to
+   `app/packaging/`; add `RuntimeImageTask`/`AppBundleTask` (injected
+   `ExecOperations`/`FileSystemOperations`); register both tasks from the
+   `cpm.packaging` plugin; delete the old ad-hoc `doLast` tasks and the
+   two Kotlin string builders. Verify: `compileJava test`,
+   `runtimeImage`/`appImage` (executed if native libs built, else
+   `--dry-run`), output layout diffed against the pre-refactor image if
+   executed.
+5. **Native loader dedup.** Add `app.cpm.terminal.NativeLibraryLocator`;
+   shrink `GhosttyNativeLibrary`/`CpmTerminalHostLibrary` to facades.
+   Verify: `compileJava compileSpikeJava test`.
+6. **Binding singletons.** `of(SymbolLookup)` +
+   `ConcurrentHashMap` for `GhosttyBinding`/`GhosttyAppBinding`/
+   `CpmTerminalHostBinding`; private constructors; update call sites.
+   Verify: `compileJava compileSpikeJava test`.
+7. **Self-review + verify.** Branch diff read-through; `jar tf` check;
+   `./gradlew --configuration-cache help` (document what remains
+   incompatible); final `compileJava compileTestJava test`; report which
+   packaging tasks executed vs only configured.
