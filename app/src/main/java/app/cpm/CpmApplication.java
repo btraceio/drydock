@@ -17,6 +17,7 @@ import app.cpm.ui.AppShell;
 import app.cpm.ui.GitHubCloneModal;
 import app.cpm.ui.MainWorkspace;
 import app.cpm.ui.RepositorySidebar;
+import app.cpm.ui.model.WorkspaceViewModel;
 import javafx.application.Application;
 import javafx.application.Platform;
 import javafx.scene.control.Alert;
@@ -145,12 +146,16 @@ public final class CpmApplication extends Application {
         ChangedLineService changedLineService = new ChangedLineService(diffService);
         annotationStore = new AnnotationStore(AnnotationStore.siblingOf(stateRepository.stateFile()));
 
+        // The observable store both the sidebar and the tab headers render
+        // from; seeded before any UI reads it.
+        WorkspaceViewModel viewModel = new WorkspaceViewModel();
+        viewModel.setSessions(sessionManager.sessions());
+
         mainWorkspace = new MainWorkspace(sessionManager, repositoryManager, gitStatusService, searchService,
-                ghCliService, diffService, changedLineService, annotationStore, primaryStage);
+                ghCliService, diffService, changedLineService, annotationStore, viewModel, primaryStage);
         RepositorySidebar sidebar =
                 new RepositorySidebar(repositoryManager, gitStatusService, worktreeService, sessionManager,
-                        mainWorkspace);
-        mainWorkspace.setOnSessionsChanged(sidebar::refreshSessions);
+                        mainWorkspace, viewModel);
 
         appShell = new AppShell(primaryStage, WINDOW_TITLE, sidebar, mainWorkspace,
                 repositoryManager.state().ui().sidebarWidth(),
