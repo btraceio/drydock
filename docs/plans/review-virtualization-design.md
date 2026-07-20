@@ -158,3 +158,27 @@ retroactively rewritten by a stale timer.
 - **Behavior change visibility** — users accustomed to threads auto-flipping
   to "fixed" now see "sent"; this is the point, and the banner + re-run diff
   path communicates the honest next step.
+## Plan
+
+1. **Row model + builder.** Add `ReviewRow` (sealed interface + records) and
+   `ReviewRowModels.build(...)` in `app.cpm.ui.review`; pure data, no JavaFX
+   scene-graph types beyond `UnifiedDiff`/`ReviewAnnotation` references. Unit
+   tests: ordering (breadcrumb/header/lines), truncation at cap, annotation
+   card placement after end-key anchor, start-key fallback, missing-anchor
+   skip, ordinals contiguous. Run `./gradlew compileJava test`. Commit.
+2. **Honest annotation state.** Add `AnnotationStatus.SENT`; rewrite
+   `sendToClaude()` (no `PauseTransition`, no fabricated reply, immediate
+   `SENT` + button restore + banner); update status pill/summary rendering
+   and CSS for the sent pill. Unit tests: `fromPersisted("SENT")`, store
+   round-trip with `SENT`. Run `./gradlew compileJava test`. Commit.
+3. **Virtualize the diff pane.** Replace `diffBox`/`diffScroll` with
+   `ListView<ReviewRow>` + custom cell; gutter/selection as property-driven
+   cell updates; composer + annotation mutations as model index operations
+   (`rowItemIndex` bookkeeping); node cache for composer/cards; ListView CSS.
+   Run `./gradlew compileJava test`. Commit.
+4. **Self-review.** Diff the branch against AGENTS.md (no FQNs, no
+   INDEFINITE animations, rebuild-the-world only where data changed, keyboard
+   access preserved) and against this document; fix findings. Commit if
+   changes.
+5. **Verify.** `./gradlew compileJava compileTestJava test` green; record
+   evidence.
