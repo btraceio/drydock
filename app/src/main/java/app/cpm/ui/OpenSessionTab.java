@@ -5,6 +5,12 @@ import app.cpm.domain.PrState;
 import app.cpm.domain.Repository;
 import app.cpm.domain.SessionStatus;
 import app.cpm.terminal.ghostty.GhosttyApp;
+import app.cpm.terminal.ghostty.GhosttyKeyTranslator;
+import app.cpm.terminal.ghostty.GhosttyKeyTranslator.AppShortcut;
+import app.cpm.terminal.ghostty.GhosttyKeyTranslator.ForwardKey;
+import app.cpm.terminal.ghostty.GhosttyKeyTranslator.Ignore;
+import app.cpm.terminal.ghostty.GhosttyKeyTranslator.Shortcut;
+import app.cpm.terminal.ghostty.GhosttyKeyTranslator.TypeCharacters;
 import app.cpm.terminal.ghostty.GhosttySurface;
 import app.cpm.ui.explorer.SessionExplorerView;
 import app.cpm.terminal.host.CpmTerminalHost;
@@ -33,7 +39,6 @@ import javafx.util.Duration;
 import java.lang.System.Logger;
 import java.nio.file.Path;
 import java.util.Optional;
-import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
@@ -64,35 +69,6 @@ import java.util.function.Supplier;
 final class OpenSessionTab {
 
     private static final Logger LOG = System.getLogger(OpenSessionTab.class.getName());
-
-    // Native macOS virtual keycodes -- see Gate0cSpike.SPECIAL_KEYS's
-    // Javadoc for why these are raw platform keycodes, not GHOSTTY_KEY_*
-    // ordinals (ghostty_input_key_s.keycode expects the former).
-    private static final Set<Integer> SPECIAL_KEYS = Set.of(
-            36,  // Return / Enter
-            51,  // Delete (Backspace)
-            48,  // Tab
-            53,  // Escape
-            123, // Left arrow
-            124, // Right arrow
-            125, // Down arrow
-            126, // Up arrow
-            115, // Home
-            119, // End
-            116, // Page Up
-            121, // Page Down
-            117  // Forward Delete (fn+Delete)
-    );
-
-    private static final int NS_SHIFT = 1 << 17;
-    private static final int NS_CONTROL = 1 << 18;
-    private static final int NS_OPTION = 1 << 19;
-    private static final int NS_COMMAND = 1 << 20;
-
-    private static final int GHOSTTY_MODS_SHIFT = 1;
-    private static final int GHOSTTY_MODS_CTRL = 1 << 1;
-    private static final int GHOSTTY_MODS_ALT = 1 << 2;
-    private static final int GHOSTTY_MODS_SUPER = 1 << 3;
 
     /** The three views a session tab can show in its content area (design handoff "Session Explorer" / "Diff Review"). */
     enum SubTab { TERMINAL, EXPLORER, REVIEW }
@@ -676,7 +652,7 @@ final class OpenSessionTab {
             return;
         }
         try {
-            surface.sendMousePos(x, y, translateModifiers(modifierFlags));
+            surface.sendMousePos(x, y, GhosttyKeyTranslator.translateModifiers(modifierFlags));
         } catch (IllegalStateException e) {
             // Surface closed in the teardown gap; see tickAndDraw's identical catch.
         }
@@ -695,7 +671,7 @@ final class OpenSessionTab {
             focus();
         }
         try {
-            surface.sendMouseButton(state, button, translateModifiers(modifierFlags));
+            surface.sendMouseButton(state, button, GhosttyKeyTranslator.translateModifiers(modifierFlags));
         } catch (IllegalStateException e) {
             // Surface closed in the teardown gap; see tickAndDraw's identical catch.
         }
@@ -813,9 +789,9 @@ final class OpenSessionTab {
         }
         try {
             surface.sendTypedText(instruction);
-            // Return keypress (raw macOS keycode 36, see SPECIAL_KEYS).
-            surface.sendKey(36, 0, true, 0);
-            surface.sendKey(36, 0, false, 0);
+            // Return keypress (raw macOS keycode; see GhosttyKeyTranslator).
+            surface.sendKey(GhosttyKeyTranslator.KEY_RETURN, 0, true, 0);
+            surface.sendKey(GhosttyKeyTranslator.KEY_RETURN, 0, false, 0);
         } catch (IllegalStateException e) {
             // Surface closed in the teardown gap; see tickAndDraw's identical catch.
         }
@@ -911,55 +887,36 @@ final class OpenSessionTab {
         if (disposed || surface == null) {
             return;
         }
-        int mods = translateModifiers(modifierFlags);
-        // ⌘1/⌘2/⌘3 (Terminal/Explorer/Review sub-tabs) are app shortcuts,
-        // but while the terminal is focused its native NSEvent monitor sees
-        // every key BEFORE JavaFX's scene filter -- intercept them here so
-        // they switch views instead of being typed into claude.
-        String shortcutChars = characters.isEmpty() ? unshiftedCharacters : characters;
-        if ((mods & GHOSTTY_MODS_SUPER) != 0 && !shortcutChars.isEmpty()) {
-            int cp = shortcutChars.codePointAt(0);
-            if (cp == '1' || cp == '2' || cp == '3') {
-                if (keyDown) {
-                    showSubTab(switch (cp) {
-                        case '1' -> SubTab.TERMINAL;
-                        case '2' -> SubTab.EXPLORER;
-                        default -> SubTab.REVIEW;
-                    });
+        // The classification policy (app-shortcut interception, special-key
+        // vs typed-character split, unshifted-codepoint rule) lives in
+        // GhosttyKeyTranslator; this method only performs the effects.
+        switch (GhosttyKeyTranslator.translate(keyCode, modifierFlags, keyDown, characters, unshiftedCharacters)) {
+            case AppShortcut(Shortcut shortcut, boolean down) -> {
+                // App shortcuts are intercepted here because while the
+                // terminal is focused its native NSEvent monitor sees every
+                // key BEFORE JavaFX's scene filter -- they must switch views
+                // instead of being typed into claude. Both edges are
+                // swallowed; the action runs on key-down only.
+                if (down) {
+                    runShortcut(shortcut);
                 }
-                return;
             }
-            // ⌘⇧[ / ⌘⇧] session-tab cycling and ⌘0 sidebar toggle: same
-            // reasoning as ⌘1/⌘2/⌘3 above -- with the terminal focused these
-            // never reach the JavaFX scene filter. With ⇧ held the resolved
-            // character is '{'/'}', so both forms are accepted.
-            if (cp == '[' || cp == '{') {
-                if (keyDown) {
-                    onPreviousSessionTab.run();
-                }
-                return;
-            }
-            if (cp == ']' || cp == '}') {
-                if (keyDown) {
-                    onNextSessionTab.run();
-                }
-                return;
-            }
-            if (cp == '0') {
-                if (keyDown) {
-                    onToggleSidebar.run();
-                }
-                return;
-            }
+            case ForwardKey(int code, int mods, boolean down, int unshiftedCodepoint) ->
+                    surface.sendKey(code, mods, down, unshiftedCodepoint);
+            case TypeCharacters(String typed, int mods) ->
+                    typed.codePoints().forEach(cp -> surface.sendCharKey(cp, mods));
+            case Ignore ignored -> { }
         }
-        boolean isShortcut = (mods & (GHOSTTY_MODS_CTRL | GHOSTTY_MODS_SUPER)) != 0;
-        if (SPECIAL_KEYS.contains(keyCode) || isShortcut) {
-            int unshiftedCodepoint = (!keyDown || unshiftedCharacters.isEmpty()) ? 0 : unshiftedCharacters.codePointAt(0);
-            surface.sendKey(keyCode, mods, keyDown, unshiftedCodepoint);
-            return;
-        }
-        if (keyDown && !characters.isEmpty()) {
-            characters.codePoints().forEach(cp -> surface.sendCharKey(cp, mods));
+    }
+
+    private void runShortcut(Shortcut shortcut) {
+        switch (shortcut) {
+            case TERMINAL_SUB_TAB -> showSubTab(SubTab.TERMINAL);
+            case EXPLORER_SUB_TAB -> showSubTab(SubTab.EXPLORER);
+            case REVIEW_SUB_TAB -> showSubTab(SubTab.REVIEW);
+            case PREVIOUS_SESSION_TAB -> onPreviousSessionTab.run();
+            case NEXT_SESSION_TAB -> onNextSessionTab.run();
+            case TOGGLE_SIDEBAR -> onToggleSidebar.run();
         }
     }
 
@@ -970,15 +927,6 @@ final class OpenSessionTab {
         StringBuilder sb = new StringBuilder();
         s.codePoints().forEach(cp -> sb.append("U+").append(Integer.toHexString(cp)).append(' '));
         return sb.toString().trim();
-    }
-
-    private static int translateModifiers(int nsModifierFlags) {
-        int mods = 0;
-        if ((nsModifierFlags & NS_SHIFT) != 0) mods |= GHOSTTY_MODS_SHIFT;
-        if ((nsModifierFlags & NS_CONTROL) != 0) mods |= GHOSTTY_MODS_CTRL;
-        if ((nsModifierFlags & NS_OPTION) != 0) mods |= GHOSTTY_MODS_ALT;
-        if ((nsModifierFlags & NS_COMMAND) != 0) mods |= GHOSTTY_MODS_SUPER;
-        return mods;
     }
 
     /**

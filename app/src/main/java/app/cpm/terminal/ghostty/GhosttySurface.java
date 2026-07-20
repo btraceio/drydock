@@ -32,14 +32,6 @@ public final class GhosttySurface implements AutoCloseable {
 
     private static final int GHOSTTY_PLATFORM_MACOS = 1;
 
-    // Native macOS virtual keycodes (kVK_ANSI_D) and GHOSTTY_MODS_CTRL,
-    // verified working via Gate 0D's Ctrl+D-exits-the-shell check (see
-    // Gate0dSpike.KEY_D/MODS_CTRL) -- ghostty_input_key_s.keycode takes a
-    // native platform keycode, not a GHOSTTY_KEY_* ordinal (Task 6 finding,
-    // see docs/native-integration.md, "Struct layout verification").
-    private static final int KVK_ANSI_D = 2;
-    private static final int GHOSTTY_MODS_CTRL = 1 << 1;
-
     // GHOSTTY_POINT_VIEWPORT / GHOSTTY_POINT_COORD_TOP_LEFT / _BOTTOM_RIGHT,
     // verified against the pinned header (see docs/native-integration.md,
     // "Struct layout verification", Task 6 addendum) rather than guessed.
@@ -559,8 +551,12 @@ public final class GhosttySurface implements AutoCloseable {
         // sendKey(int,int,boolean,int)'s Javadoc and
         // docs/claude-integration.md. Without it this Ctrl+D would be
         // silently dropped exactly like the Ctrl+C finding there.
-        sendKey(KVK_ANSI_D, GHOSTTY_MODS_CTRL, true, (int) 'd');
-        sendKey(KVK_ANSI_D, GHOSTTY_MODS_CTRL, false, (int) 'd');
+        // KEY_D is the raw kVK_ANSI_D platform keycode (not a GHOSTTY_KEY_*
+        // ordinal -- Task 6 finding, see docs/native-integration.md,
+        // "Struct layout verification"), verified working via Gate 0D's
+        // Ctrl+D-exits-the-shell check.
+        sendKey(GhosttyKeyTranslator.KEY_D, GhosttyKeyTranslator.MODS_CTRL, true, (int) 'd');
+        sendKey(GhosttyKeyTranslator.KEY_D, GhosttyKeyTranslator.MODS_CTRL, false, (int) 'd');
         pollUntilExitedOrTimeout(System.currentTimeMillis() + gracePeriodMillis, pollIntervalMillis, onDone);
     }
 
