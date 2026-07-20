@@ -5,12 +5,12 @@ import app.cpm.domain.PrState;
 import app.cpm.domain.Repository;
 import app.cpm.domain.SessionStatus;
 import app.cpm.terminal.ghostty.GhosttyApp;
+import app.cpm.terminal.ghostty.GhosttyKeyTranslator.Shortcut;
 import app.cpm.terminal.ghostty.GhosttySurface;
 import app.cpm.ui.explorer.SessionExplorerView;
 import app.cpm.terminal.host.CpmTerminalHost;
 import javafx.animation.PauseTransition;
 import javafx.application.Platform;
-import javafx.geometry.Bounds;
 import javafx.geometry.Pos;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
@@ -30,69 +30,37 @@ import javafx.scene.layout.VBox;
 import javafx.stage.Stage;
 import javafx.util.Duration;
 
-import java.lang.System.Logger;
 import java.nio.file.Path;
 import java.util.Optional;
-import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 /**
- * One open terminal tab (plan section 13): owns its own {@link GhosttyApp} +
- * {@link CpmTerminalHost} + {@link GhosttySurface} (per Gate 0C/0D/0E's
- * established one-surface-per-window/view pattern -- see those spikes'
- * {@code start()}/{@code onKeyEvent} methods, which this class's geometry
+ * One open terminal tab (plan section 13): the tab's JavaFX chrome and
+ * sub-tab hosting. The native-terminal side -- the tab's own {@link
+ * GhosttyApp} + {@link CpmTerminalHost} + {@link GhosttySurface} trio and
+ * everything that talks to it (input forwarding, geometry sync, focus,
+ * visibility, disposal) -- lives in this tab's {@link TerminalBridge},
+ * to which the methods below delegate (per Gate 0C/0D/0E's established
+ * one-surface-per-window/view pattern -- see those spikes'
+ * {@code start()}/{@code onKeyEvent} methods, which the bridge's geometry
  * and key-forwarding logic is deliberately modeled on, without modifying
  * those spike files).
  *
- * <p>Since the design-handoff rebuild this class also owns this tab's
- * visual chrome: the two-line tab header graphic (repo name over session
- * title, status dot, close button, double-click inline rename -- handoff
- * README section 4) and the session-view header (back, title + meta,
- * status pill, rename -- section 5) sitting above the terminal region.</p>
+ * <p>Since the design-handoff rebuild this class owns this tab's visual
+ * chrome: the two-line tab header graphic (repo name over session title,
+ * status dot, close button, double-click inline rename -- handoff README
+ * section 4) and the session-view header (back, title + meta, status
+ * pill, rename -- section 5) sitting above the terminal region.</p>
  *
- * <p>Ghostty does not render into the JavaFX scene graph: {@link
- * CpmTerminalHost} attaches a real AppKit {@code NSView} as a sibling
- * overlay on the current window's content view, positioned in that
- * window's own pixel coordinate space via {@link CpmTerminalHost#setFrame}.
- * This class's {@link #placeholder} is therefore an otherwise-empty {@link
- * StackPane} used purely as a JavaFX layout anchor: its on-screen bounds
- * (via {@link javafx.scene.Node#localToScene}) tell this class where to
- * move the native view so it visually tracks the tab's content area as the
- * window resizes, the sidebar divider moves, etc.</p>
+ * <p>Ghostty does not render into the JavaFX scene graph (see {@link
+ * TerminalBridge}'s class Javadoc). This class's {@link #placeholder} is
+ * an otherwise-empty {@link StackPane} used purely as a JavaFX layout
+ * anchor: its on-screen bounds tell the bridge where to move the native
+ * view so it visually tracks the tab's content area as the window
+ * resizes, the sidebar divider moves, etc.</p>
  */
 final class OpenSessionTab {
-
-    private static final Logger LOG = System.getLogger(OpenSessionTab.class.getName());
-
-    // Native macOS virtual keycodes -- see Gate0cSpike.SPECIAL_KEYS's
-    // Javadoc for why these are raw platform keycodes, not GHOSTTY_KEY_*
-    // ordinals (ghostty_input_key_s.keycode expects the former).
-    private static final Set<Integer> SPECIAL_KEYS = Set.of(
-            36,  // Return / Enter
-            51,  // Delete (Backspace)
-            48,  // Tab
-            53,  // Escape
-            123, // Left arrow
-            124, // Right arrow
-            125, // Down arrow
-            126, // Up arrow
-            115, // Home
-            119, // End
-            116, // Page Up
-            121, // Page Down
-            117  // Forward Delete (fn+Delete)
-    );
-
-    private static final int NS_SHIFT = 1 << 17;
-    private static final int NS_CONTROL = 1 << 18;
-    private static final int NS_OPTION = 1 << 19;
-    private static final int NS_COMMAND = 1 << 20;
-
-    private static final int GHOSTTY_MODS_SHIFT = 1;
-    private static final int GHOSTTY_MODS_CTRL = 1 << 1;
-    private static final int GHOSTTY_MODS_ALT = 1 << 2;
-    private static final int GHOSTTY_MODS_SUPER = 1 << 3;
 
     /** The three views a session tab can show in its content area (design handoff "Session Explorer" / "Diff Review"). */
     enum SubTab { TERMINAL, EXPLORER, REVIEW }
@@ -106,9 +74,7 @@ final class OpenSessionTab {
      */
     private ManagedSessionId sessionId;
     final Tab tab;
-    private final Stage stage;
-    private final GhosttyApp app;
-    private final CpmTerminalHost host;
+    private final TerminalBridge bridge;
     private final StackPane placeholder = new StackPane();
     private final Label statusLabel = new Label("Starting session...");
     private final BorderPane content = new BorderPane();
@@ -125,8 +91,6 @@ final class OpenSessionTab {
     /** Built on first switch to Review, via {@link #setReviewFactory}. */
     private Region reviewView;
     private Supplier<Region> reviewFactory;
-    /** Whether MainWorkspace wants this tab's terminal shown (selected tab, no modal). */
-    private boolean workspaceWantsVisible;
 
     // -- Tab header graphic (two-line label + dot + close; handoff 4) -------
     private final Region tabDot = SessionStatusStyles.createDot(7, SessionStatus.STARTING);
@@ -164,23 +128,19 @@ final class OpenSessionTab {
     private Runnable onToggleSidebar = () -> { };
 
     private String displayName;
-    private GhosttySurface surface;
-    private boolean disposed;
-    private boolean surfaceClosing;
 
     OpenSessionTab(ManagedSessionId sessionId, String displayName, Optional<Repository> repository,
                    Stage stage, GhosttyApp app, CpmTerminalHost host) {
         this.sessionId = sessionId;
         this.displayName = displayName;
-        this.stage = stage;
-        this.app = app;
-        this.host = host;
+        this.bridge = new TerminalBridge(app, host, placeholder, stage::getOutputScaleX,
+                this::sessionId, this::runShortcut);
 
         placeholder.getStyleClass().add("terminal-region");
         placeholder.getChildren().add(statusLabel);
         statusLabel.getStyleClass().add("session-meta");
-        placeholder.boundsInLocalProperty().addListener((obs, oldV, newV) -> updateGeometry());
-        placeholder.localToSceneTransformProperty().addListener((obs, oldV, newV) -> updateGeometry());
+        placeholder.boundsInLocalProperty().addListener((obs, oldV, newV) -> bridge.updateGeometry());
+        placeholder.localToSceneTransformProperty().addListener((obs, oldV, newV) -> bridge.updateGeometry());
 
         this.tab = new Tab();
         tab.setClosable(false); // the graphic carries its own close button (17px ×, handoff 4)
@@ -323,14 +283,26 @@ final class OpenSessionTab {
             }
             activeSubTab = subTab;
             content.setCenter(view);
-            applyTerminalVisibility();
+            bridge.setTerminalSubTabActive(false);
         } else {
             activeSubTab = SubTab.TERMINAL;
             content.setCenter(placeholder);
-            applyTerminalVisibility();
+            bridge.setTerminalSubTabActive(true);
             // The center swap invalidates the placeholder's bounds only on
             // the next layout pass; recompute the native frame after it.
-            Platform.runLater(this::updateGeometry);
+            Platform.runLater(bridge::updateGeometry);
+        }
+    }
+
+    /** Maps an intercepted terminal app-shortcut (see {@link TerminalBridge}) to this tab's handlers. */
+    private void runShortcut(Shortcut shortcut) {
+        switch (shortcut) {
+            case TERMINAL_SUB_TAB -> showSubTab(SubTab.TERMINAL);
+            case EXPLORER_SUB_TAB -> showSubTab(SubTab.EXPLORER);
+            case REVIEW_SUB_TAB -> showSubTab(SubTab.REVIEW);
+            case PREVIOUS_SESSION_TAB -> onPreviousSessionTab.run();
+            case NEXT_SESSION_TAB -> onNextSessionTab.run();
+            case TOGGLE_SIDEBAR -> onToggleSidebar.run();
         }
     }
 
@@ -556,23 +528,13 @@ final class OpenSessionTab {
             tabLabels.getChildren().set(index, tabTitleLabel);
             // Rename over: give the terminal its key routing back (no-op
             // when another sub-tab is showing).
-            applyTerminalVisibility();
+            bridge.applyVisibility();
         }
     }
 
     /** Releases the terminal's AppKit first-responder status so JavaFX text inputs receive keys. */
     void releaseTerminalFocus() {
-        if (disposed || surfaceClosing) {
-            return;
-        }
-        try {
-            host.setFocused(false);
-            if (surface != null) {
-                surface.setFocus(false);
-            }
-        } catch (IllegalStateException e) {
-            // Surface closed in the teardown gap; see tickAndDraw's identical catch.
-        }
+        bridge.releaseFocus();
     }
 
     // ---- Wiring from MainWorkspace ------------------------------------------
@@ -629,380 +591,98 @@ final class OpenSessionTab {
         pillLabel.setText(SessionStatusStyles.designLabel(status));
     }
 
-    /**
-     * Re-themes this tab's live terminal (app theme toggle): loads the new
-     * ghostty config into the app and pushes it to the running surface.
-     * Safe to call before the surface is attached -- a surface created
-     * later inherits the app's (already updated) config.
-     */
+    /** Re-themes this tab's live terminal (app theme toggle); see {@link TerminalBridge#applyTerminalTheme}. */
     void applyTerminalTheme(Path configFile) {
-        if (disposed || surfaceClosing) {
-            return;
-        }
-        try {
-            app.updateConfig(configFile);
-            if (surface != null) {
-                surface.applyConfig(app);
-                surface.draw();
-            }
-        } catch (RuntimeException e) {
-            LOG.log(Logger.Level.WARNING, "Could not re-theme terminal for session " + sessionId, e);
-        }
+        bridge.applyTerminalTheme(configFile);
     }
 
     /**
      * Attaches the now-running {@link GhosttySurface} and starts forwarding
-     * keyboard input to it. Deliberately does NOT draw yet: the native host
-     * view is still hidden at this point (it only becomes visible via a
-     * subsequent {@link #setVisible(boolean)} call from {@code
-     * MainWorkspace.attachOpenedSession}), and drawing into a layer-backed
-     * {@code NSView} before it is ever shown, then only toggling visibility
-     * afterward, is a known way for the first frame to never actually
-     * composite. {@link #setVisible(boolean)} performs the real first
-     * geometry/draw, in the correct order (become visible, then draw).
+     * keyboard input to it (see {@link TerminalBridge#adoptSurface}'s
+     * Javadoc for why nothing is drawn yet). The "Starting session..."
+     * label is removed between surface adoption and input wiring,
+     * preserving the original statement order.
      */
     void attachSurface(GhosttySurface surface) {
-        this.surface = surface;
+        bridge.adoptSurface(surface);
         placeholder.getChildren().remove(statusLabel);
-        host.setKeyEventListener(this::onKeyEvent);
-        host.setScrollEventListener(this::onScrollEvent);
-        host.setMousePosEventListener(this::onMousePosEvent);
-        host.setMouseButtonEventListener(this::onMouseButtonEvent);
-    }
-
-    /** Forwards the mouse position (view points, top-left origin) to the surface. */
-    private void onMousePosEvent(double x, double y, int modifierFlags) {
-        if (disposed || surfaceClosing || surface == null) {
-            return;
-        }
-        try {
-            surface.sendMousePos(x, y, translateModifiers(modifierFlags));
-        } catch (IllegalStateException e) {
-            // Surface closed in the teardown gap; see tickAndDraw's identical catch.
-        }
-    }
-
-    /**
-     * Forwards a mouse button press/release to the surface (text selection,
-     * click reporting). A press also refocuses the terminal -- clicking
-     * into a terminal is the universal "type here now" gesture.
-     */
-    private void onMouseButtonEvent(int state, int button, int modifierFlags) {
-        if (disposed || surfaceClosing || surface == null) {
-            return;
-        }
-        if (state == 1) {
-            focus();
-        }
-        try {
-            surface.sendMouseButton(state, button, translateModifiers(modifierFlags));
-        } catch (IllegalStateException e) {
-            // Surface closed in the teardown gap; see tickAndDraw's identical catch.
-        }
+        bridge.wireInputListeners();
     }
 
     /** Diagnostic-only: feeds a synthetic scroll through the same path a real scrollWheel takes. */
     void diagScroll(double deltaY) {
-        // Real scrollWheel events report the position first (see the host
-        // shim); mirror that with the terminal-region center so
-        // mouse-reporting TUIs hit-test the scroll as inside the content.
-        onMousePosEvent(placeholder.getWidth() / 2, placeholder.getHeight() / 2, 0);
-        onScrollEvent(0, deltaY, 1);
-    }
-
-    /** Forwards a raw scrollWheel event (already in ghostty's units/mods) to the surface. */
-    private void onScrollEvent(double deltaX, double deltaY, int scrollMods) {
-        if (disposed || surfaceClosing || surface == null) {
-            return;
-        }
-        try {
-            surface.sendMouseScroll(deltaX, deltaY, scrollMods);
-        } catch (IllegalStateException e) {
-            // Surface closed in the teardown gap; see tickAndDraw's identical catch.
-        }
+        bridge.diagScroll(deltaY);
     }
 
     GhosttyApp app() {
-        return app;
+        return bridge.app();
     }
 
     CpmTerminalHost host() {
-        return host;
+        return bridge.host();
     }
 
     /**
      * Marks this tab's surface as being torn down. Must be called (by {@code
      * MainWorkspace.removeTab}) <em>before</em> removing this tab's node
-     * from the {@code TabPane} -- doing so fires JavaFX property-
-     * invalidation listeners (e.g. {@code localToSceneTransformProperty})
-     * synchronously, which would otherwise call back into {@link
-     * #updateGeometry()} against a surface that {@code SessionManager}'s
-     * {@code closeGracefully} has (in the closing case) already closed by
-     * this point. Distinct from {@link #disposed} (which
-     * {@link #disposeNativeResources()} uses for its own idempotency) so
-     * that flag isn't set before this tab's {@code GhosttyApp}/{@code
-     * CpmTerminalHost} are actually closed.
+     * from the {@code TabPane} -- see {@link TerminalBridge#markSurfaceClosing}.
      */
     void markSurfaceClosing() {
-        surfaceClosing = true;
+        bridge.markSurfaceClosing();
     }
 
     /** Calls {@code ghostty_app_tick} + draw; bound to this tab's own {@code GhosttyApp}'s wakeup callback. */
     void tickAndDraw() {
-        if (disposed || surfaceClosing) {
-            return;
-        }
-        try {
-            app.tick();
-            if (surface != null) {
-                surface.draw();
-            }
-        } catch (IllegalStateException e) {
-            // Surface was closed (SessionManager.closeSession's
-            // closeGracefully) in the gap between this tick firing and
-            // MainWorkspace calling markSurfaceClosing() -- benign, not a
-            // bug in itself (the guard above closes this window going
-            // forward, this catch handles the unavoidable race remnant).
-        } catch (RuntimeException e) {
-            LOG.log(Logger.Level.WARNING, "tick/draw failed for session " + sessionId, e);
-        }
+        bridge.tickAndDraw();
     }
 
     /**
      * Records whether MainWorkspace wants this tab's native view shown
-     * (selected tab, no modal open) and applies the combined visibility.
-     * The view is actually shown only while the Terminal sub-tab is active
-     * -- the Explorer replaces the terminal region, so the native overlay
-     * must stay hidden even for the selected tab (see {@link #showSubTab}).
+     * (selected tab, no modal open); see {@link TerminalBridge#setWorkspaceVisible}.
      */
     void setVisible(boolean visible) {
-        workspaceWantsVisible = visible;
-        applyTerminalVisibility();
-    }
-
-    /**
-     * Shows/hides the native view from the AND of every visibility input.
-     * When becoming visible, unhides the view <em>before</em> computing
-     * geometry/drawing (see {@link #attachSurface}'s Javadoc for why that
-     * order matters), then focuses it.
-     */
-    private void applyTerminalVisibility() {
-        if (disposed || surfaceClosing) {
-            return;
-        }
-        boolean visible = workspaceWantsVisible && activeSubTab == SubTab.TERMINAL;
-        host.setVisible(visible);
-        if (visible) {
-            updateGeometry();
-            focus();
-        }
+        bridge.setWorkspaceVisible(visible);
     }
 
     /**
      * Types {@code instruction} into the live claude process as real
-     * keystrokes, then submits it with Return. Uses {@link
-     * GhosttySurface#sendTypedText} (the per-codepoint keyboard codepath),
-     * NOT {@link GhosttySurface#sendText} -- paste semantics corrupt input
-     * once claude enables bracketed paste (see onKeyEvent's Javadoc). The
-     * instruction must be a single line: an embedded newline would submit
-     * early.
+     * keystrokes, then submits it with Return; see {@link TerminalBridge#sendPrompt}.
+     * The instruction must be a single line: an embedded newline would
+     * submit early.
      */
     void sendPrompt(String instruction) {
-        if (disposed || surfaceClosing || surface == null) {
-            return;
-        }
-        try {
-            surface.sendTypedText(instruction);
-            // Return keypress (raw macOS keycode 36, see SPECIAL_KEYS).
-            surface.sendKey(36, 0, true, 0);
-            surface.sendKey(36, 0, false, 0);
-        } catch (IllegalStateException e) {
-            // Surface closed in the teardown gap; see tickAndDraw's identical catch.
-        }
+        bridge.sendPrompt(instruction);
     }
 
     void focus() {
-        if (disposed || surfaceClosing || surface == null) {
-            return;
-        }
-        try {
-            host.setFocused(true);
-            app.setFocus(true);
-            surface.setFocus(true);
-        } catch (IllegalStateException e) {
-            // See tickAndDraw's identical catch: surface closed out from
-            // under this tab in the gap before markSurfaceClosing() runs.
-        }
+        bridge.focus();
     }
 
     /**
      * Whether this tab's child process has exited while the surface is
-     * still open (polled by {@code MainWorkspace}'s exit watcher). Returns
-     * {@code false} during/after teardown -- those paths already record the
-     * exit through {@code SessionManager.closeSession}.
+     * still open (polled by {@code MainWorkspace}'s exit watcher); see
+     * {@link TerminalBridge#isProcessExited}.
      */
     boolean isProcessExited() {
-        if (disposed || surfaceClosing || surface == null) {
-            return false;
-        }
-        try {
-            return surface.processExited();
-        } catch (IllegalStateException e) {
-            return false; // surface closed out from under us; closeSession's path owns the status update.
-        }
+        return bridge.isProcessExited();
     }
 
     /**
      * Diagnostic-only: feeds a synthetic key event through the exact same
-     * {@link #onKeyEvent} translation path a real AppKit key event takes
-     * (used by the {@code app.cpm.diag.*} harness, which cannot inject real
-     * NSEvents without an Accessibility permission grant).
+     * translation path a real AppKit key event takes (used by the {@code
+     * app.cpm.diag.*} harness, which cannot inject real NSEvents without an
+     * Accessibility permission grant).
      */
     void diagPressKey(int keyCode, String characters, String unshiftedCharacters) {
-        onKeyEvent(keyCode, 0, true, characters, unshiftedCharacters);
-        onKeyEvent(keyCode, 0, false, characters, unshiftedCharacters);
-    }
-
-    private void updateGeometry() {
-        if (disposed || surfaceClosing || surface == null || placeholder.getScene() == null) {
-            return;
-        }
-        Bounds sceneBounds = placeholder.localToScene(placeholder.getBoundsInLocal());
-        if (sceneBounds.getWidth() <= 0 || sceneBounds.getHeight() <= 0) {
-            return;
-        }
-        try {
-            double scale = stage.getOutputScaleX();
-            host.setFrame(sceneBounds.getMinX(), sceneBounds.getMinY(), sceneBounds.getWidth(), sceneBounds.getHeight());
-            surface.setSize((int) Math.round(sceneBounds.getWidth() * scale), (int) Math.round(sceneBounds.getHeight() * scale));
-            surface.draw();
-        } catch (IllegalStateException e) {
-            // See tickAndDraw's identical catch: surface closed out from
-            // under this tab in the gap before markSurfaceClosing() runs.
-            // Without this catch, an uncaught IllegalStateException thrown
-            // from here (reachable via placeholder's
-            // localToSceneTransformProperty listener, itself fired
-            // synchronously while MainWorkspace.removeTab() removes this
-            // tab's node from the TabPane) propagates out of JavaFX's
-            // property-invalidation machinery mid-removal, on the JavaFX
-            // Application Thread, with no caller able to catch it.
-        }
-    }
-
-    /**
-     * Translates a raw AppKit key event into ghostty calls, matching the
-     * corrected approach documented on {@link GhosttySurface#sendCharKey}
-     * (per-character typing goes through the real keyboard codepath, not
-     * {@link GhosttySurface#sendText}, which is paste semantics and
-     * corrupts input once a foreground program enables bracketed paste) --
-     * see that method's Javadoc and docs/claude-integration.md for the
-     * history of that finding.
-     */
-    /** Diagnostic: -Dapp.cpm.diag.logKeys=true logs every raw AppKit key event reaching this tab. */
-    private static final boolean LOG_KEYS = Boolean.getBoolean("app.cpm.diag.logKeys");
-
-    private void onKeyEvent(int keyCode, int modifierFlags, boolean keyDown, String characters,
-                             String unshiftedCharacters) {
-        if (LOG_KEYS) {
-            System.out.println("[diag] key event: keyCode=" + keyCode + " mods=0x" + Integer.toHexString(modifierFlags)
-                    + " down=" + keyDown + " chars=" + toCodepoints(characters)
-                    + " unshifted=" + toCodepoints(unshiftedCharacters));
-        }
-        if (disposed || surface == null) {
-            return;
-        }
-        int mods = translateModifiers(modifierFlags);
-        // ⌘1/⌘2/⌘3 (Terminal/Explorer/Review sub-tabs) are app shortcuts,
-        // but while the terminal is focused its native NSEvent monitor sees
-        // every key BEFORE JavaFX's scene filter -- intercept them here so
-        // they switch views instead of being typed into claude.
-        String shortcutChars = characters.isEmpty() ? unshiftedCharacters : characters;
-        if ((mods & GHOSTTY_MODS_SUPER) != 0 && !shortcutChars.isEmpty()) {
-            int cp = shortcutChars.codePointAt(0);
-            if (cp == '1' || cp == '2' || cp == '3') {
-                if (keyDown) {
-                    showSubTab(switch (cp) {
-                        case '1' -> SubTab.TERMINAL;
-                        case '2' -> SubTab.EXPLORER;
-                        default -> SubTab.REVIEW;
-                    });
-                }
-                return;
-            }
-            // ⌘⇧[ / ⌘⇧] session-tab cycling and ⌘0 sidebar toggle: same
-            // reasoning as ⌘1/⌘2/⌘3 above -- with the terminal focused these
-            // never reach the JavaFX scene filter. With ⇧ held the resolved
-            // character is '{'/'}', so both forms are accepted.
-            if (cp == '[' || cp == '{') {
-                if (keyDown) {
-                    onPreviousSessionTab.run();
-                }
-                return;
-            }
-            if (cp == ']' || cp == '}') {
-                if (keyDown) {
-                    onNextSessionTab.run();
-                }
-                return;
-            }
-            if (cp == '0') {
-                if (keyDown) {
-                    onToggleSidebar.run();
-                }
-                return;
-            }
-        }
-        boolean isShortcut = (mods & (GHOSTTY_MODS_CTRL | GHOSTTY_MODS_SUPER)) != 0;
-        if (SPECIAL_KEYS.contains(keyCode) || isShortcut) {
-            int unshiftedCodepoint = (!keyDown || unshiftedCharacters.isEmpty()) ? 0 : unshiftedCharacters.codePointAt(0);
-            surface.sendKey(keyCode, mods, keyDown, unshiftedCodepoint);
-            return;
-        }
-        if (keyDown && !characters.isEmpty()) {
-            characters.codePoints().forEach(cp -> surface.sendCharKey(cp, mods));
-        }
-    }
-
-    private static String toCodepoints(String s) {
-        if (s == null || s.isEmpty()) {
-            return "<empty>";
-        }
-        StringBuilder sb = new StringBuilder();
-        s.codePoints().forEach(cp -> sb.append("U+").append(Integer.toHexString(cp)).append(' '));
-        return sb.toString().trim();
-    }
-
-    private static int translateModifiers(int nsModifierFlags) {
-        int mods = 0;
-        if ((nsModifierFlags & NS_SHIFT) != 0) mods |= GHOSTTY_MODS_SHIFT;
-        if ((nsModifierFlags & NS_CONTROL) != 0) mods |= GHOSTTY_MODS_CTRL;
-        if ((nsModifierFlags & NS_OPTION) != 0) mods |= GHOSTTY_MODS_ALT;
-        if ((nsModifierFlags & NS_COMMAND) != 0) mods |= GHOSTTY_MODS_SUPER;
-        return mods;
+        bridge.diagPressKey(keyCode, characters, unshiftedCharacters);
     }
 
     /**
      * Frees this tab's native resources. Must be called only after the
-     * session's {@link GhosttySurface} is already confirmed closed (e.g.
-     * via {@code SessionManager#closeSession}, which uses {@code
-     * GhosttySurface#closeGracefully} internally) -- never call this to
-     * bypass that graceful shutdown.
+     * session's {@link GhosttySurface} is already confirmed closed; see
+     * {@link TerminalBridge#disposeNativeResources}.
      */
     void disposeNativeResources() {
-        if (disposed) {
-            return;
-        }
-        disposed = true;
-        assert Platform.isFxApplicationThread() : "native resource teardown must run on the FX Application Thread";
-        try {
-            host.close();
-        } catch (RuntimeException e) {
-            LOG.log(Logger.Level.WARNING, "Failed to close CpmTerminalHost for session " + sessionId, e);
-        }
-        try {
-            app.close();
-        } catch (RuntimeException e) {
-            LOG.log(Logger.Level.WARNING, "Failed to close GhosttyApp for session " + sessionId, e);
-        }
+        bridge.disposeNativeResources();
     }
 }

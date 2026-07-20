@@ -10,13 +10,10 @@ import app.cpm.domain.ManagedSessionId;
 import app.cpm.domain.Repository;
 import app.cpm.domain.SessionStatus;
 import app.cpm.domain.UiTheme;
-import app.cpm.domain.PrState;
 import app.cpm.git.ChangedLineService;
 import app.cpm.git.DiffService;
 import app.cpm.git.GhCliService;
 import app.cpm.git.GitBranchState;
-import app.cpm.git.GitChangeSummary;
-import app.cpm.git.GitStatus;
 import app.cpm.git.GitStatusService;
 import app.cpm.git.WorktreeService;
 import app.cpm.review.AnnotationStore;
@@ -42,7 +39,6 @@ import javafx.scene.control.ButtonType;
 import javafx.scene.control.Label;
 import javafx.scene.control.MenuButton;
 import javafx.scene.control.MenuItem;
-import javafx.scene.control.ProgressIndicator;
 import javafx.scene.control.Tab;
 import javafx.scene.control.TabPane;
 import javafx.scene.control.TextInputControl;
@@ -58,19 +54,15 @@ import javafx.stage.Window;
 import javafx.util.Duration;
 
 import java.io.File;
-import java.io.IOException;
-import java.nio.file.Files;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.Path;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 /**
@@ -109,6 +101,9 @@ public final class MainWorkspace extends BorderPane {
 
     /** The app shell's modal layer; wired by CpmApplication (worktree create/Finish panels show through it). */
     private ModalLayer modalLayer;
+
+    /** The worktree-finish lifecycle (Finish panel, hand-offs, PR reconciliation), extracted per docs/plans/workspace-split-design.md. */
+    private final WorktreeLifecycleController worktreeLifecycle;
     private final TabPane tabPane = new TabPane();
     private final Region emptyState;
     private final StackPane centerStack;
@@ -175,6 +170,12 @@ public final class MainWorkspace extends BorderPane {
         this.changedLineService = changedLineService;
         this.annotationStore = annotationStore;
         this.stage = stage;
+        // The lifecycle controller reads the workspace's listener at call
+        // time (not construction time -- setOnSessionsChanged is wired
+        // later), hence the indirection lambdas.
+        this.worktreeLifecycle = new WorktreeLifecycleController(sessionManager, gitStatusService,
+                ghCliService, openTabs::get, this::repositoryFor,
+                () -> onSessionsChanged.run(), this::noteSessionDeleted);
 
         getStyleClass().add("main-pane");
 
@@ -688,7 +689,7 @@ public final class MainWorkspace extends BorderPane {
         placeholderTab.setVisible(!terminalsObscured
                 && tabPane.getSelectionModel().getSelectedItem() == placeholderTab.tab);
         opened.session().worktreeRoot().ifPresent(root ->
-                setupWorktreeHeader(placeholderTab, opened.session().id(), root));
+                worktreeLifecycle.setupWorktreeHeader(placeholderTab, opened.session().id(), root));
         onSessionsChanged.run();
     }
 
@@ -696,342 +697,7 @@ public final class MainWorkspace extends BorderPane {
 
     public void setModalLayer(ModalLayer modalLayer) {
         this.modalLayer = modalLayer;
-    }
-
-    /**
-     * Fills a worktree session tab's header: the ◫ context line, the
-     * ↑ahead/dirty/PR chips, and the Finish ▸ button. Branch/base resolve
-     * asynchronously (worktree checkout vs the repository's main checkout).
-     */
-    private void setupWorktreeHeader(OpenSessionTab tab, ManagedSessionId sessionId, Path worktreeRoot) {
-        ManagedClaudeSession session = sessionById(sessionId).orElse(null);
-        Repository repository = session == null ? null : repositoryFor(session).orElse(null);
-        if (session == null || repository == null) {
-            return;
-        }
-        tab.updatePrChip(session.prState(), session.prNumber());
-        record Branches(String branch, String base) { }
-        gitStatusService.getStatus(worktreeRoot).thenCombine(gitStatusService.getStatus(repository.root()),
-                        (worktreeStatus, baseStatus) ->
-                                new Branches(branchNameOf(worktreeStatus), branchNameOf(baseStatus)))
-                .whenComplete((branches, ex) -> Platform.runLater(() -> {
-                    if (ex != null || !openTabs.containsKey(sessionId)) {
-                        return;
-                    }
-                    tab.configureWorktree(branches.branch(), branches.base(), worktreeRoot,
-                            () -> showFinishPanel(sessionId, worktreeRoot, branches.branch(), branches.base()));
-                    refreshWorktreeChips(tab, sessionId, worktreeRoot, branches.base());
-                }));
-    }
-
-    /** Refreshes the ↑ahead + dirty/clean chips from the worktree's current git state. */
-    private void refreshWorktreeChips(OpenSessionTab tab, ManagedSessionId sessionId, Path worktreeRoot,
-                                      String base) {
-        record StatusAndSummary(GitStatus status, GitChangeSummary summary) { }
-        gitStatusService.getStatus(worktreeRoot)
-                .thenCombine(gitStatusService.getChangeSummary(worktreeRoot, base), StatusAndSummary::new)
-                .whenComplete((pair, ex) -> Platform.runLater(() -> {
-                    if (ex != null || !openTabs.containsKey(sessionId)) {
-                        return;
-                    }
-                    tab.updateWorktreeStatus(pair.status().dirty(), pair.summary().commitsAhead());
-                }));
-    }
-
-    private Optional<ManagedClaudeSession> sessionById(ManagedSessionId sessionId) {
-        return sessionManager.sessions().stream().filter(s -> s.id().equals(sessionId)).findFirst();
-    }
-
-    private static String branchNameOf(GitStatus status) {
-        return status.branch() instanceof GitBranchState.OnBranch onBranch ? onBranch.name() : "(detached)";
-    }
-
-    /**
-     * Opens the state-aware Finish panel. The branch's PR state is ALWAYS
-     * re-checked first via read-only {@code gh pr view} (when {@code gh} is
-     * available) -- not just for sessions already tracked as OPEN: a PR may
-     * have been opened outside the app entirely (or merged since), and the
-     * panel must not offer "Merge into base"/"Create pull request" for a
-     * branch that already has one. The panel then renders the actions for
-     * the reconciled state.
-     */
-    private void showFinishPanel(ManagedSessionId sessionId, Path worktreeRoot, String branch, String base) {
-        ManagedClaudeSession session = sessionById(sessionId).orElse(null);
-        if (session == null || modalLayer == null) {
-            return;
-        }
-        // The pre-panel inspection (git status + change summary + gh pr
-        // view) can take seconds; show a busy modal IMMEDIATELY so the
-        // Finish click visibly did something, then swap in the real panel.
-        Region busy = busyModal("Inspecting worktree & checking PR state…");
-        modalLayer.show(busy);
-
-        CompletableFuture<Optional<GhCliService.PrInfo>> prRefresh =
-                ghCliService.isAvailable()
-                        ? ghCliService.viewPr(worktreeRoot, branch)
-                        : CompletableFuture.completedFuture(Optional.empty());
-
-        record StatusAndSummary(GitStatus status, GitChangeSummary summary) { }
-        record Inspection(GitStatus status, GitChangeSummary summary, Optional<GhCliService.PrInfo> prInfo) { }
-        gitStatusService.getStatus(worktreeRoot)
-                .thenCombine(gitStatusService.getChangeSummary(worktreeRoot, base)
-                                .exceptionally(ex -> new GitChangeSummary(0, List.of())),
-                        StatusAndSummary::new)
-                .thenCombine(prRefresh, (pair, prInfo) -> new Inspection(pair.status(), pair.summary(), prInfo))
-                .whenComplete((data, ex) -> Platform.runLater(() -> {
-                    if (busy.getParent() == null) {
-                        return; // the user dismissed the busy modal; don't pop the panel open later
-                    }
-                    if (ex != null) {
-                        modalLayer.close();
-                        UiErrors.show("Could not inspect the worktree", ex);
-                        return;
-                    }
-                    GitStatus status = data.status();
-                    GitChangeSummary summary = data.summary();
-                    Optional<GhCliService.PrInfo> prInfo = data.prInfo();
-
-                    ManagedClaudeSession current = sessionById(sessionId).orElse(null);
-                    if (current == null) {
-                        modalLayer.close();
-                        return;
-                    }
-                    // Reconcile the observed PR (opened externally, merged
-                    // since, number drift) before choosing actions. CLOSED/
-                    // UNKNOWN make no lifecycle claim: a closed-unmerged PR
-                    // leaves the branch free to merge or re-PR, so the
-                    // tracked state stands.
-                    if (prInfo.isPresent()) {
-                        GhCliService.PrInfo info = prInfo.get();
-                        PrState observed = switch (info.state()) {
-                            case OPEN -> PrState.OPEN;
-                            case MERGED -> PrState.MERGED;
-                            case CLOSED, UNKNOWN -> null;
-                        };
-                        if (observed != null && (observed != current.prState()
-                                || !current.prNumber().equals(Optional.of(info.number())))) {
-                            current = sessionManager.updatePrState(sessionId, observed,
-                                    Optional.of(info.number()));
-                            OpenSessionTab tab = openTabs.get(sessionId);
-                            if (tab != null) {
-                                tab.updatePrChip(current.prState(), current.prNumber());
-                            }
-                            onSessionsChanged.run();
-                        }
-                    }
-
-                    FinishWorktreePanel.Context context = new FinishWorktreePanel.Context(
-                            branch, base, worktreeRoot, current.prState(), current.prNumber(),
-                            prInfo.flatMap(GhCliService.PrInfo::url), Optional.of(summary), status.dirty());
-                    FinishWorktreePanel panel = new FinishWorktreePanel(context, new FinishWorktreePanel.Actions() {
-                        @Override
-                        public void mergeIntoBase() {
-                            handoffMerge(sessionId, worktreeRoot, branch, base);
-                        }
-
-                        @Override
-                        public void createPullRequest() {
-                            handoffCreatePr(sessionId, worktreeRoot, branch);
-                        }
-
-                        @Override
-                        public void deleteWorktree() {
-                            handoffDelete(sessionId, worktreeRoot, branch);
-                        }
-
-                        @Override
-                        public void viewPullRequest(String url) {
-                            openInBrowser(url);
-                        }
-                    }, modalLayer::close);
-                    modalLayer.show(panel);
-                }));
-    }
-
-    /** A small centered busy modal (spinner + message) for pre-panel async inspections. */
-    private static Region busyModal(String message) {
-        ProgressIndicator spinner = new ProgressIndicator();
-        spinner.setPrefSize(28, 28);
-        Label label = new Label(message);
-        label.getStyleClass().add("finish-action-caption");
-        VBox box = new VBox(10, spinner, label);
-        box.setAlignment(Pos.CENTER);
-        box.getStyleClass().add("modal");
-        box.setMaxWidth(320);
-        box.setMaxHeight(Region.USE_PREF_SIZE);
-        return box;
-    }
-
-    // ---- Hand-off: every action is executed by Claude in the terminal -------
-
-    private void handoffMerge(ManagedSessionId sessionId, Path worktreeRoot, String branch, String base) {
-        OpenSessionTab tab = openTabs.get(sessionId);
-        if (tab == null) {
-            return;
-        }
-        Repository repository = sessionById(sessionId).flatMap(this::repositoryFor).orElse(null);
-        String mainCheckout = repository == null ? "the main checkout" : repository.root().toString();
-        tab.showHandoffRunning("Claude is merging…");
-        tab.sendPrompt("Merge this worktree's branch '" + branch + "' into '" + base + "' in the main checkout at "
-                + mainCheckout + " (use git -C, merge with --no-ff, and resolve any merge conflicts yourself "
-                + "without asking me), then report the result briefly.");
-        pollHandoff(sessionId,
-                () -> gitStatusService.getChangeSummary(worktreeRoot, base)
-                        .thenApply(summary -> summary.commitsAhead() == 0),
-                () -> {
-                    tab.showHandoffDone("Merged");
-                    refreshWorktreeChipsLater(sessionId, worktreeRoot, base);
-                    restoreFinishLater(tab, sessionId);
-                });
-    }
-
-    private void handoffCreatePr(ManagedSessionId sessionId, Path worktreeRoot, String branch) {
-        OpenSessionTab tab = openTabs.get(sessionId);
-        if (tab == null) {
-            return;
-        }
-        tab.showHandoffRunning("Claude is opening a PR…");
-        tab.sendPrompt("Push this worktree's branch '" + branch + "' to origin (git push -u origin " + branch
-                + ") and open a pull request with gh pr create --fill, then report the PR number.");
-        if (!ghCliService.isAvailable()) {
-            // No gh to observe with: optimistic OPEN (chip without a number)
-            // after a grace period, per the agreed fallback.
-            PauseTransition optimistic = new PauseTransition(Duration.seconds(30));
-            optimistic.setOnFinished(e -> {
-                if (!openTabs.containsKey(sessionId)) {
-                    return;
-                }
-                applyPrState(sessionId, PrState.OPEN, Optional.empty());
-                tab.showHandoffDone("PR opened");
-                restoreFinishLater(tab, sessionId);
-            });
-            optimistic.play();
-            return;
-        }
-        pollHandoffResult(sessionId,
-                () -> ghCliService.viewPr(worktreeRoot, branch),
-                prInfo -> {
-                    PrState state = prInfo.state() == GhCliService.PrInfo.PrLifecycle.MERGED
-                            ? PrState.MERGED : PrState.OPEN;
-                    applyPrState(sessionId, state, Optional.of(prInfo.number()));
-                    tab.showHandoffDone("PR opened");
-                    restoreFinishLater(tab, sessionId);
-                });
-    }
-
-    private void handoffDelete(ManagedSessionId sessionId, Path worktreeRoot, String branch) {
-        OpenSessionTab tab = openTabs.get(sessionId);
-        if (tab == null) {
-            return;
-        }
-        Repository repository = sessionById(sessionId).flatMap(this::repositoryFor).orElse(null);
-        String mainCheckout = repository == null ? "the main checkout" : repository.root().toString();
-        tab.showHandoffRunning("Claude is cleaning up…");
-        tab.sendPrompt("Clean up this worktree: from the main checkout at " + mainCheckout
-                + " run git worktree remove " + worktreeRoot + " (add --force if it refuses) and delete the branch "
-                + "with git branch -D " + branch + ", then confirm.");
-        pollHandoff(sessionId,
-                // The existence probe is filesystem I/O; keep it off the FX
-                // thread (the poll's PauseTransition fires the probe there).
-                () -> CompletableFuture.supplyAsync(() -> !Files.exists(worktreeRoot)),
-                () -> {
-                    tab.showHandoffDone("Removed");
-                    PauseTransition removeRow = new PauseTransition(Duration.seconds(1.2));
-                    removeRow.setOnFinished(e -> sessionManager.deleteSession(sessionId)
-                            .whenComplete((v, ex) -> Platform.runLater(() -> {
-                                noteSessionDeleted(sessionId);
-                                onSessionsChanged.run();
-                            })));
-                    removeRow.play();
-                });
-    }
-
-    private void applyPrState(ManagedSessionId sessionId, PrState state, Optional<Integer> number) {
-        sessionManager.updatePrState(sessionId, state, number);
-        OpenSessionTab tab = openTabs.get(sessionId);
-        if (tab != null) {
-            tab.updatePrChip(state, number);
-        }
-        onSessionsChanged.run();
-    }
-
-    private void refreshWorktreeChipsLater(ManagedSessionId sessionId, Path worktreeRoot, String base) {
-        OpenSessionTab tab = openTabs.get(sessionId);
-        if (tab != null) {
-            refreshWorktreeChips(tab, sessionId, worktreeRoot, base);
-        }
-    }
-
-    /** Leaves the ✓ pill visible briefly, then restores the Finish ▸ button. */
-    private void restoreFinishLater(OpenSessionTab tab, ManagedSessionId sessionId) {
-        PauseTransition pause = new PauseTransition(Duration.seconds(4));
-        pause.setOnFinished(e -> {
-            if (openTabs.containsKey(sessionId)) {
-                tab.restoreFinishButton();
-            }
-        });
-        pause.play();
-    }
-
-    /** Handoff polling caps: every 4s, up to 5 minutes; on timeout the Finish button quietly returns. */
-    private static final Duration HANDOFF_POLL_INTERVAL = Duration.seconds(4);
-    private static final int HANDOFF_POLL_MAX_ATTEMPTS = 75;
-
-    private void pollHandoff(ManagedSessionId sessionId, Supplier<CompletableFuture<Boolean>> probe,
-                             Runnable onConfirmed) {
-        pollHandoffStep(sessionId, () -> probe.get().thenApply(done ->
-                Boolean.TRUE.equals(done) ? Optional.of(Boolean.TRUE) : Optional.<Boolean>empty()),
-                ignored -> onConfirmed.run(), 0);
-    }
-
-    private <T> void pollHandoffResult(ManagedSessionId sessionId,
-                                       Supplier<CompletableFuture<Optional<T>>> probe,
-                                       Consumer<T> onConfirmed) {
-        pollHandoffStep(sessionId, probe, onConfirmed, 0);
-    }
-
-    private <T> void pollHandoffStep(ManagedSessionId sessionId,
-                                     Supplier<CompletableFuture<Optional<T>>> probe,
-                                     Consumer<T> onConfirmed, int attempt) {
-        if (attempt >= HANDOFF_POLL_MAX_ATTEMPTS) {
-            OpenSessionTab tab = openTabs.get(sessionId);
-            if (tab != null) {
-                // Say WHY the pill vanished -- a silent Finish-button return
-                // reads as "it worked" when nothing was ever confirmed.
-                tab.restoreFinishButton();
-                tab.showTransientNotice("⏺ Hand-off not confirmed — check the terminal, then Finish ▸ again.");
-            }
-            return;
-        }
-        PauseTransition wait = new PauseTransition(HANDOFF_POLL_INTERVAL);
-        wait.setOnFinished(e -> probe.get().whenComplete((result, ex) -> Platform.runLater(() -> {
-            if (!openTabs.containsKey(sessionId)) {
-                return; // tab closed mid-handoff; nothing left to update
-            }
-            if (ex == null && result != null && result.isPresent()) {
-                onConfirmed.accept(result.get());
-            } else {
-                pollHandoffStep(sessionId, probe, onConfirmed, attempt + 1);
-            }
-        })));
-        wait.play();
-    }
-
-    /**
-     * macOS-native URL open (the app is macOS-only; ProcessBuilder avoids an
-     * AWT dependency). The spawn runs off-thread per AGENTS.md -- {@code
-     * open} returns instantly on success, so the browser appearing IS the
-     * progress indication; a failure surfaces as an error alert.
-     */
-    private void openInBrowser(String url) {
-        Thread.ofVirtual().start(() -> {
-            try {
-                new ProcessBuilder("open", url).start();
-            } catch (IOException e) {
-                LOG.log(Level.WARNING, "Could not open " + url, e);
-                Platform.runLater(() -> UiErrors.show("Could not open " + url, e));
-            }
-        });
+        worktreeLifecycle.setModalLayer(modalLayer);
     }
 
     /** Plan section 11.2 / 20: a real, specific dialog for a session whose working directory vanished. */
