@@ -1,3 +1,5 @@
+import java.io.ByteArrayOutputStream
+
 plugins {
     application
     id("org.openjfx.javafxplugin")
@@ -288,6 +290,150 @@ tasks.register<JavaExec>("gate0eSpike") {
 // the root build file) already does.
 val runtimeImageDir = rootProject.layout.buildDirectory.dir("image")
 
+/**
+ * Assembles one architecture's self-contained jlink runtime image at
+ * [outputDir]: jlinks the JDK + JavaFX module graph, copies the app jar +
+ * runtime classpath, copies both architectures' native libraries, bundles
+ * the dock icon, and generates the launcher script plus a thin .app
+ * wrapper. Extracted from the original single-architecture runtimeImage
+ * task body so both it and the cross-arch runtimeImageAllArches task
+ * below share one implementation (see docs/superpowers/specs/
+ * 2026-07-20-cross-arch-runtime-image-design.md).
+ *
+ * [modulePathEntries] is the full jlink --module-path. For the host's own
+ * architecture this is just the (implicitly platform-matched) JavaFX
+ * module jars -- java.* / jdk.* modules still resolve implicitly from
+ * [jlinkExe]'s own JDK, exactly as before this function existed. For a
+ * cross-linked architecture it additionally includes a downloaded
+ * jmods/ directory for that architecture (scripts/download-cross-jmods.sh)
+ * -- jlink accepts a directory of .jmod files as a --module-path entry
+ * the same way $JAVA_HOME/jmods normally works.
+ *
+ * If [expectedMachOArch] is non-null, the produced runtime/bin/java is
+ * verified with file(1) to report that architecture token, hard-failing
+ * otherwise -- mirrors buildGhosttyNative/buildNativeHost's existing
+ * file(1)-based acceptance gate. This is the only verification possible
+ * for a cross-linked, non-host architecture: actually executing it is not
+ * possible on this machine and is deferred to CI.
+ */
+fun assembleRuntimeImage(
+    outputDir: File,
+    archLabel: String,
+    jlinkExe: File,
+    modulePathEntries: List<File>,
+    appJarFile: File,
+    classpathJars: List<File>,
+    nativeBuildDir: File,
+    expectedMachOArch: String?,
+) {
+    project.delete(outputDir)
+    outputDir.mkdirs()
+
+    // 1. jlink the JDK + JavaFX module graph.
+    val modulePath = modulePathEntries.joinToString(File.pathSeparator) { it.absolutePath }
+    val runtimeOut = File(outputDir, "runtime")
+
+    @Suppress("DEPRECATION")
+    project.exec {
+        commandLine(
+            jlinkExe.absolutePath,
+            "--module-path", modulePath,
+            "--add-modules",
+            "java.base,java.desktop,java.net.http,java.xml,jdk.jfr,jdk.unsupported," +
+                "javafx.base,javafx.controls,javafx.graphics",
+            "--output", runtimeOut.absolutePath,
+            "--no-header-files",
+            "--no-man-pages",
+            "--strip-debug",
+            "--compress", "zip-6"
+        )
+    }
+
+    if (expectedMachOArch != null) {
+        val javaBin = File(runtimeOut, "bin/java")
+        val fileOutput = ByteArrayOutputStream()
+        @Suppress("DEPRECATION")
+        project.exec {
+            commandLine("file", "-b", javaBin.absolutePath)
+            standardOutput = fileOutput
+        }
+        val description = fileOutput.toString(Charsets.UTF_8.name())
+        if (!description.contains(expectedMachOArch)) {
+            throw org.gradle.api.GradleException(
+                "$javaBin is not tagged as $expectedMachOArch (file(1) reported: " +
+                    "${description.trim()}); cross-linked jlink output for $archLabel is wrong."
+            )
+        }
+    }
+
+    // 2. Copy the application jar + every runtime-classpath jar onto a
+    // plain classpath directory (app/), since the application is not yet
+    // modular.
+    val appLibDir = File(outputDir, "app")
+    appLibDir.mkdirs()
+    project.copy {
+        from(appJarFile)
+        from(classpathJars)
+        into(appLibDir)
+    }
+
+    // 3. Copy libghostty + the AppKit host shim for BOTH architectures
+    // into lib/<arch>/ -- both architectures' native libs ship in every
+    // image regardless of which JVM architecture the image itself was
+    // linked for.
+    val libDir = File(outputDir, "lib")
+    for (arch in listOf("macos-x86_64", "macos-arm64")) {
+        val src = File(nativeBuildDir, arch)
+        val dst = File(libDir, arch)
+        dst.mkdirs()
+        for (name in listOf("libghostty.dylib", "libcpmterminalhost.dylib")) {
+            val source = File(src, name)
+            if (source.isFile) {
+                source.copyTo(File(dst, name), overwrite = true)
+            } else {
+                throw org.gradle.api.GradleException(
+                    "Missing $source -- run './gradlew buildGhosttyNative buildNativeHost' first."
+                )
+            }
+        }
+    }
+
+    // 3b. Bundle the dock icon.
+    val iconSource = rootProject.file("assets/app-icon.icns")
+    if (iconSource.isFile) {
+        iconSource.copyTo(File(libDir, "app-icon.icns"), overwrite = true)
+    }
+
+    // 4. Generate the launcher.
+    val binDir = File(outputDir, "bin")
+    binDir.mkdirs()
+    val launcher = File(binDir, "claude-project-manager")
+    launcher.writeText(runtimeImageLauncherScript())
+    launcher.setExecutable(true, false)
+
+    // 5. Wrap the launcher in a minimal .app bundle.
+    val appBundle = File(outputDir, "Claude Project Manager.app")
+    val contentsDir = File(appBundle, "Contents")
+    val macosDir = File(contentsDir, "MacOS").apply { mkdirs() }
+    val resourcesDir = File(contentsDir, "Resources").apply { mkdirs() }
+    if (iconSource.isFile) {
+        iconSource.copyTo(File(resourcesDir, "app-icon.icns"), overwrite = true)
+    }
+    File(contentsDir, "Info.plist").writeText(appBundleInfoPlist())
+    val bundleLauncher = File(macosDir, "claude-project-manager")
+    bundleLauncher.writeText(
+        """
+        #!/bin/bash
+        # Thin trampoline: the bundle lives inside the runtime image, so
+        # the real launcher is three levels up. exec keeps the pid (and
+        # therefore the Dock entry) on the java process's ancestry.
+        DIR="$(dirname "${'$'}{BASH_SOURCE[0]}")"
+        exec "${'$'}DIR/../../../bin/claude-project-manager" "${'$'}@"
+        """.trimIndent() + "\n"
+    )
+    bundleLauncher.setExecutable(true, false)
+}
+
 tasks.register("runtimeImage") {
     group = "distribution"
     description = "Gate 0F: builds a self-contained jlink runtime image at build/image."
@@ -309,22 +455,6 @@ tasks.register("runtimeImage") {
     outputs.dir(runtimeImageDir)
 
     doLast {
-        val imageRoot = runtimeImageDir.get().asFile
-        project.delete(imageRoot)
-        imageRoot.mkdirs()
-
-        // 1. jlink the JDK + JavaFX module graph. jlink is invoked from the
-        // *JDK 26 toolchain's* own bin/ (not whatever JVM is running
-        // Gradle -- see the ffmSmokeTest comment above: Gradle 8.11.1 does
-        // not yet run on JDK 26 itself), so the runtime image's module set
-        // matches the JDK the application was actually compiled/run
-        // against. No --module-path entry for JDK modules is needed:
-        // jlink resolves java.*/jdk.* modules from the running JDK's own
-        // module graph (jrt:) when none is given -- verified empirically,
-        // since this Temurin 26.0.1 distribution ships no jmods/ directory
-        // at all (newer Temurin builds split jmods into a separate
-        // download). Only the JavaFX module jars need an explicit
-        // --module-path entry.
         val javaHome = javaLauncherProvider.get().metadata.installationPath.asFile
         val jlinkExe = File(javaHome, "bin/jlink")
         val fxJars = runtimeClasspathFiles.get().files.filter { it.name.startsWith("javafx-") }
@@ -332,127 +462,172 @@ tasks.register("runtimeImage") {
             "Expected exactly 3 javafx-*.jar files (base/controls/graphics) on the runtime " +
                 "classpath, found: $fxJars"
         }
-        val modulePath = fxJars.joinToString(File.pathSeparator) { it.absolutePath }
-        val runtimeOut = File(imageRoot, "runtime")
+        assembleRuntimeImage(
+            outputDir = runtimeImageDir.get().asFile,
+            archLabel = "host",
+            jlinkExe = jlinkExe,
+            modulePathEntries = fxJars,
+            appJarFile = jarTaskProvider.get().archiveFile.get().asFile,
+            classpathJars = runtimeClasspathFiles.get().files.filter { it.name.endsWith(".jar") },
+            nativeBuildDir = nativeBuildDir.get().asFile,
+            expectedMachOArch = null,
+        )
+    }
+}
 
-        // Module list is the transitive closure of what jar
-        // --describe-module reports the javafx-*.jar files require, plus
-        // what `jdeps --print-module-deps` reports app.jar itself uses
-        // directly (java.base, java.desktop, jdk.jfr) -- verified by
-        // running both against this exact JDK/JavaFX pairing rather than
-        // guessed. jdk.unsupported is added defensively even though
-        // neither tool reported it as required: several JavaFX/AWT
-        // internals reach for sun.misc.Unsafe-family APIs reflectively,
-        // which jdeps/jar --describe-module cannot see; harmless to
-        // include if unused.
-        // project.exec {} is deprecated in Gradle 8.x (in favor of an
-        // injected ExecOperations, which is awkward to wire up for an
-        // ad-hoc tasks.register {} block in a build script) but still
-        // fully functional; not worth the extra indirection for one exec
-        // call at this stage. Revisit if/when this task is promoted to a
-        // real Task subclass.
-        @Suppress("DEPRECATION")
-        project.exec {
-            commandLine(
-                jlinkExe.absolutePath,
-                "--module-path", modulePath,
-                "--add-modules",
-                // java.net.http: GitHubService's search client (Clone-from-GitHub modal).
-                "java.base,java.desktop,java.net.http,java.xml,jdk.jfr,jdk.unsupported," +
-                    "javafx.base,javafx.controls,javafx.graphics",
-                "--output", runtimeOut.absolutePath,
-                "--no-header-files",
-                "--no-man-pages",
-                "--strip-debug",
-                "--compress", "zip-6"
+// Cross-arch jlink runtime images: see docs/superpowers/specs/
+// 2026-07-20-cross-arch-runtime-image-design.md. Opt-in -- does not
+// affect runtimeImage/appImage/run in any way. Builds BOTH macOS
+// architectures in one pass regardless of which one this machine
+// actually is, downloading the non-host architecture's jmods via
+// scripts/download-cross-jmods.sh and resolving its JavaFX jars via an
+// explicit classifier (rather than the host-inferred one the javafx {}
+// block at the top of this file uses).
+val crossJdkDir = rootProject.layout.buildDirectory.dir("cross-jdk")
+
+tasks.register("runtimeImageAllArches") {
+    group = "distribution"
+    description = "Cross-links jlink runtime images for BOTH macOS architectures (x86_64 and " +
+        "arm64) in one pass at build/image-macos-x86_64 and build/image-macos-arm64. Does not " +
+        "execute the foreign-architecture binary -- only its Mach-O architecture tag is " +
+        "verified; real execution verification is CI's job."
+
+    dependsOn(rootProject.tasks.named("buildGhosttyNative"))
+    dependsOn(rootProject.tasks.named("buildNativeHost"))
+    dependsOn(tasks.named("jar"))
+
+    val toolchainService = project.extensions.getByType(JavaToolchainService::class.java)
+    val javaLauncherProvider = toolchainService.launcherFor(java.toolchain)
+    val jarTaskProvider = tasks.named<Jar>("jar")
+    val runtimeClasspathFiles = configurations.named("runtimeClasspath")
+    val nativeBuildDir = rootProject.layout.buildDirectory.dir("native")
+    val scriptsDir = rootProject.file("scripts")
+
+    inputs.file(jarTaskProvider.flatMap { it.archiveFile })
+    inputs.files(runtimeClasspathFiles)
+    inputs.dir(nativeBuildDir)
+    inputs.property("javaLauncher", javaLauncherProvider.map { it.metadata.installationPath.asFile.absolutePath })
+    outputs.dir(rootProject.layout.buildDirectory.dir("image-macos-x86_64"))
+    outputs.dir(rootProject.layout.buildDirectory.dir("image-macos-arm64"))
+
+    doLast {
+        val hostOsArch = System.getProperty("os.arch", "").lowercase()
+        val hostArchLabel = when (hostOsArch) {
+            "x86_64", "amd64" -> "macos-x86_64"
+            "aarch64", "arm64" -> "macos-arm64"
+            else -> throw org.gradle.api.GradleException(
+                "Unrecognized host os.arch '$hostOsArch' (expected x86_64/amd64 or aarch64/arm64)."
             )
         }
+        val allArches = listOf("macos-x86_64", "macos-arm64")
+        val crossArch = allArches.first { it != hostArchLabel }
 
-        // 2. Copy the application jar + every runtime-classpath jar (JavaFX
-        // plus third-party libraries such as RichTextFX and its transitive
-        // deps) onto a plain classpath directory (app/), since the
-        // application is not yet modular (see the top-of-task comment).
-        val appLibDir = File(imageRoot, "app")
-        appLibDir.mkdirs()
-        project.copy {
-            from(jarTaskProvider.get().archiveFile)
-            from(runtimeClasspathFiles.get().files.filter { it.name.endsWith(".jar") })
-            into(appLibDir)
-        }
-
-        // 3. Copy libghostty + the AppKit host shim for BOTH architectures
-        // (the approved dual-arch deviation) into lib/<arch>/, mirroring
-        // the build/native/<arch>/ layout scripts/build-ghostty.sh and
-        // scripts/build-native-host.sh already produce. This machine can
-        // only ever load and test the macos-x86_64 copy (it is an Intel
-        // Mac), but the macos-arm64 copy is bundled unconditionally so
-        // that GhosttyNativeLibrary/CpmTerminalHostLibrary's existing
-        // os.arch-based selection (the one place in the codebase allowed
-        // to branch on CPU architecture, per plan section 2.4/4.2) would
-        // pick it correctly if this exact image were copied onto Apple
-        // Silicon hardware.
+        val javaHome = javaLauncherProvider.get().metadata.installationPath.asFile
+        val jlinkExe = File(javaHome, "bin/jlink")
+        val appJarFile = jarTaskProvider.get().archiveFile.get().asFile
+        val classpathJars = runtimeClasspathFiles.get().files.filter { it.name.endsWith(".jar") }
         val nativeOut = nativeBuildDir.get().asFile
-        val libDir = File(imageRoot, "lib")
-        for (arch in listOf("macos-x86_64", "macos-arm64")) {
-            val src = File(nativeOut, arch)
-            val dst = File(libDir, arch)
-            dst.mkdirs()
-            for (name in listOf("libghostty.dylib", "libcpmterminalhost.dylib")) {
-                val source = File(src, name)
-                if (source.isFile) {
-                    source.copyTo(File(dst, name), overwrite = true)
-                } else {
-                    throw org.gradle.api.GradleException(
-                        "Missing $source -- run './gradlew buildGhosttyNative buildNativeHost' first."
-                    )
-                }
-            }
-        }
 
-        // 3b. Bundle the dock icon (assets/app-icon.icns, generated clay
-        // rounded-square + prompt glyph) so the launcher's -Xdock:icon can
-        // reference it. The real fix for dock identity is a jpackage .app
-        // bundle (future); -Xdock:* covers the bare-JVM launch until then.
-        val iconSource = rootProject.file("assets/app-icon.icns")
-        if (iconSource.isFile) {
-            iconSource.copyTo(File(libDir, "app-icon.icns"), overwrite = true)
+        // Host arch: identical inputs to the runtimeImage task above
+        // (implicit jrt: module resolution, host-classified FX jars).
+        val hostFxJars = runtimeClasspathFiles.get().files.filter { it.name.startsWith("javafx-") }
+        require(hostFxJars.size == 3) {
+            "Expected exactly 3 javafx-*.jar files (base/controls/graphics) on the runtime " +
+                "classpath, found: $hostFxJars"
         }
-
-        // 4. Generate the launcher (plan section 23.2).
-        val binDir = File(imageRoot, "bin")
-        binDir.mkdirs()
-        val launcher = File(binDir, "claude-project-manager")
-        launcher.writeText(runtimeImageLauncherScript())
-        launcher.setExecutable(true, false)
-
-        // 5. Wrap the launcher in a minimal .app bundle so macOS shows the
-        // real name + icon in the Dock/app switcher. A bare `java` process
-        // is registered with LaunchServices as "java" with the generic
-        // icon, and JavaFX never applies -Xdock:* (that path is AWT-only),
-        // so Info.plist metadata is the only public mechanism. Launch the
-        // bundle (Finder or `open`) for correct Dock identity; the plain
-        // bin/ launcher stays for the diag harness, which needs inherited
-        // environment variables that `open` would drop.
-        val appBundle = File(imageRoot, "Claude Project Manager.app")
-        val contentsDir = File(appBundle, "Contents")
-        val macosDir = File(contentsDir, "MacOS").apply { mkdirs() }
-        val resourcesDir = File(contentsDir, "Resources").apply { mkdirs() }
-        if (iconSource.isFile) {
-            iconSource.copyTo(File(resourcesDir, "app-icon.icns"), overwrite = true)
-        }
-        File(contentsDir, "Info.plist").writeText(appBundleInfoPlist())
-        val bundleLauncher = File(macosDir, "claude-project-manager")
-        bundleLauncher.writeText(
-            """
-            #!/bin/bash
-            # Thin trampoline: the bundle lives inside the runtime image, so
-            # the real launcher is three levels up. exec keeps the pid (and
-            # therefore the Dock entry) on the java process's ancestry.
-            DIR="$(dirname "${'$'}{BASH_SOURCE[0]}")"
-            exec "${'$'}DIR/../../../bin/claude-project-manager" "${'$'}@"
-            """.trimIndent() + "\n"
+        assembleRuntimeImage(
+            outputDir = rootProject.layout.buildDirectory.dir("image-$hostArchLabel").get().asFile,
+            archLabel = hostArchLabel,
+            jlinkExe = jlinkExe,
+            modulePathEntries = hostFxJars,
+            appJarFile = appJarFile,
+            classpathJars = classpathJars,
+            nativeBuildDir = nativeOut,
+            expectedMachOArch = null,
         )
-        bundleLauncher.setExecutable(true, false)
+
+        // Cross arch: explicit jmods + explicit-classifier FX jars.
+        val jmodsOutputDir = File(crossJdkDir.get().asFile, crossArch)
+        val downloadScript = File(scriptsDir, "download-cross-jmods.sh")
+        val jmodsPathOutput = ByteArrayOutputStream()
+        @Suppress("DEPRECATION")
+        project.exec {
+            commandLine(downloadScript.absolutePath, crossArch, jmodsOutputDir.absolutePath)
+            standardOutput = jmodsPathOutput
+        }
+        val jmodsDir = File(jmodsPathOutput.toString(Charsets.UTF_8.name()).trim())
+        require(jmodsDir.isDirectory) {
+            "scripts/download-cross-jmods.sh did not print a valid jmods directory path, got: '$jmodsDir'"
+        }
+
+        val fxClassifier = when (crossArch) {
+            "macos-x86_64" -> "mac"
+            "macos-arm64" -> "mac-aarch64"
+            else -> error("unreachable: crossArch was $crossArch")
+        }
+        val crossFxDeps = listOf("javafx-base", "javafx-controls", "javafx-graphics").map {
+            project.dependencies.create("org.openjfx:$it:26:$fxClassifier")
+        }
+        // org.openjfx's artifacts publish Gradle Module Metadata with
+        // per-platform variants (see the "Cannot choose between the
+        // available variants" error this produces without this block);
+        // a bare classifier in the dependency notation above is not
+        // enough to select among them -- the detached configuration also
+        // needs the same org.gradle.native.operatingSystem /
+        // org.gradle.native.architecture attributes the javafx-gradle-plugin
+        // itself requests for the host build, but pinned explicitly to the
+        // cross-linked architecture instead of the host's.
+        val crossFxConfig = project.configurations.detachedConfiguration(*crossFxDeps.toTypedArray())
+        crossFxConfig.attributes {
+            attribute(
+                org.gradle.api.attributes.Usage.USAGE_ATTRIBUTE,
+                project.objects.named(org.gradle.api.attributes.Usage::class.java, org.gradle.api.attributes.Usage.JAVA_RUNTIME)
+            )
+            attribute(
+                org.gradle.api.attributes.Category.CATEGORY_ATTRIBUTE,
+                project.objects.named(org.gradle.api.attributes.Category::class.java, org.gradle.api.attributes.Category.LIBRARY)
+            )
+            attribute(
+                org.gradle.api.attributes.LibraryElements.LIBRARY_ELEMENTS_ATTRIBUTE,
+                project.objects.named(org.gradle.api.attributes.LibraryElements::class.java, org.gradle.api.attributes.LibraryElements.JAR)
+            )
+            attribute(
+                org.gradle.nativeplatform.OperatingSystemFamily.OPERATING_SYSTEM_ATTRIBUTE,
+                project.objects.named(
+                    org.gradle.nativeplatform.OperatingSystemFamily::class.java,
+                    org.gradle.nativeplatform.OperatingSystemFamily.MACOS
+                )
+            )
+            attribute(
+                org.gradle.nativeplatform.MachineArchitecture.ARCHITECTURE_ATTRIBUTE,
+                project.objects.named(
+                    org.gradle.nativeplatform.MachineArchitecture::class.java,
+                    if (crossArch == "macos-arm64") {
+                        org.gradle.nativeplatform.MachineArchitecture.ARM64
+                    } else {
+                        org.gradle.nativeplatform.MachineArchitecture.X86_64
+                    }
+                )
+            )
+        }
+        val crossFxJars = crossFxConfig.resolve().toList()
+
+        val crossExpectedMachOArch = when (crossArch) {
+            "macos-x86_64" -> "x86_64"
+            "macos-arm64" -> "arm64"
+            else -> error("unreachable: crossArch was $crossArch")
+        }
+
+        assembleRuntimeImage(
+            outputDir = rootProject.layout.buildDirectory.dir("image-$crossArch").get().asFile,
+            archLabel = crossArch,
+            jlinkExe = jlinkExe,
+            modulePathEntries = listOf(jmodsDir) + crossFxJars,
+            appJarFile = appJarFile,
+            classpathJars = classpathJars,
+            nativeBuildDir = nativeOut,
+            expectedMachOArch = crossExpectedMachOArch,
+        )
     }
 }
 

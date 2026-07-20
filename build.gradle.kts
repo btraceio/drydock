@@ -32,6 +32,12 @@ tasks.register("runtimeImage") {
     dependsOn(":app:runtimeImage")
 }
 
+tasks.register("runtimeImageAllArches") {
+    group = "distribution"
+    description = "Alias for :app:runtimeImageAllArches (cross-links both macOS architectures in one pass)."
+    dependsOn(":app:runtimeImageAllArches")
+}
+
 // Plan section 6.3 also lists appImage / macApp / dmg as required
 // top-level command aliases. appImage/macApp are now real (Stage 3, plan
 // section 23.4): a self-contained ad-hoc-signed .app bundle assembled by
