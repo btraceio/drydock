@@ -50,6 +50,7 @@ import java.lang.System.Logger.Level;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -141,6 +142,17 @@ public final class RepositorySidebar extends VBox {
     private Runnable onCloneFromGitHub = () -> { };
     private Consumer<Repository> onNewWorktree = repository -> { };
 
+    // -- Per-row cached popups (context menus and tooltips are not part of
+    // the scene graph, so one instance can serve every cell that ever
+    // renders the row). Menu handlers resolve the LIVE session through the
+    // view model, never a captured snapshot, so a cached menu cannot act on
+    // stale data. Pruned on structural changes (see pruneRowCaches).
+    private final Map<ManagedSessionId, ContextMenu> sessionMenus = new HashMap<>();
+    private final Map<ManagedSessionId, Tooltip> sessionTooltips = new HashMap<>();
+    private final Map<RepositoryId, ContextMenu> repoMenus = new HashMap<>();
+    private final Map<RepositoryId, ContextMenu> newSessionMenus = new HashMap<>();
+    private final Map<Path, Tooltip> unopenedTooltips = new HashMap<>();
+
     /** Tree node payload: a repository row, a session row, or an unopened (discovered) worktree row. */
     sealed interface SidebarNode {
         record RepoNode(Repository repository) implements SidebarNode { }
@@ -203,6 +215,7 @@ public final class RepositorySidebar extends VBox {
             @Override
             public void structureChanged() {
                 maybeRefreshStatuses();
+                pruneRowCaches();
                 requestRebuild();
             }
 
@@ -426,6 +439,30 @@ public final class RepositorySidebar extends VBox {
             }
             return;
         }
+    }
+
+    /** Drops cached menus/tooltips whose row no longer exists (deleted sessions, removed repos/worktrees). */
+    private void pruneRowCaches() {
+        Set<ManagedSessionId> sessionIds = new HashSet<>();
+        for (ManagedClaudeSession session : viewModel.sessions()) {
+            sessionIds.add(session.id());
+        }
+        sessionMenus.keySet().retainAll(sessionIds);
+        sessionTooltips.keySet().retainAll(sessionIds);
+
+        Set<RepositoryId> repoIds = new HashSet<>();
+        Set<Path> worktreePaths = new HashSet<>();
+        for (Repository repository : repositoryManager.repositories()) {
+            repoIds.add(repository.id());
+            viewModel.worktrees(repository.id()).ifPresent(worktrees -> {
+                for (WorktreeService.Worktree worktree : worktrees) {
+                    worktreePaths.add(worktree.path());
+                }
+            });
+        }
+        repoMenus.keySet().retainAll(repoIds);
+        newSessionMenus.keySet().retainAll(repoIds);
+        unopenedTooltips.keySet().retainAll(worktreePaths);
     }
 
     /** Re-renders the one row backed by {@code worktreeRoot} (a worktree session row or an unopened row). */
@@ -864,11 +901,11 @@ public final class RepositorySidebar extends VBox {
             switch (node) {
                 case SidebarNode.RepoNode repoNode -> {
                     setGraphic(buildRepoRow(repoNode.repository()));
-                    setContextMenu(buildRepoContextMenu(repoNode.repository()));
+                    setContextMenu(repoMenu(repoNode.repository()));
                 }
                 case SidebarNode.SessionNode sessionNode -> {
                     setGraphic(buildSessionRow(sessionNode.session(), sessionNode.repository()));
-                    setContextMenu(buildSessionContextMenu(sessionNode.session()));
+                    setContextMenu(sessionMenu(sessionNode.session().id()));
                 }
                 case SidebarNode.UnopenedWorktreeNode worktreeNode -> {
                     setGraphic(buildUnopenedRow(worktreeNode.worktree(), worktreeNode.repository()));
@@ -937,7 +974,7 @@ public final class RepositorySidebar extends VBox {
             newSession.setTooltip(new Tooltip("New session or worktree…"));
             newSession.setFocusTraversable(false);
             newSession.visibleProperty().bind(hoverProperty());
-            ContextMenu newMenu = buildNewSessionMenu(repository);
+            ContextMenu newMenu = newSessionMenu(repository);
             newSession.setOnAction(e -> newMenu.show(newSession, Side.BOTTOM, 0, 4));
 
             HBox row = new HBox(7, caret, text, count, rescan, newSession);
@@ -1043,9 +1080,10 @@ public final class RepositorySidebar extends VBox {
             if (viewModel.activeSession().filter(session.id()::equals).isPresent()) {
                 row.getStyleClass().add("active");
             }
-            Tooltip.install(row, new Tooltip(
-                    "Status: " + session.status() + "\nLast opened: " + session.lastOpenedAt()
-                            + "\nWorking directory: " + session.workingDirectory()));
+            Tooltip rowTip = sessionTooltips.computeIfAbsent(session.id(), key -> new Tooltip());
+            rowTip.setText("Status: " + session.status() + "\nLast opened: " + session.lastOpenedAt()
+                    + "\nWorking directory: " + session.workingDirectory());
+            Tooltip.install(row, rowTip);
             row.setOnMouseClicked(event -> {
                 if (event.getButton() == MouseButton.PRIMARY) {
                     navigator.resumeSession(session);
@@ -1097,7 +1135,8 @@ public final class RepositorySidebar extends VBox {
             }
             row.setAlignment(Pos.CENTER_LEFT);
             row.setPadding(new Insets(5, 8, 5, 16));
-            Tooltip.install(row, new Tooltip("Discovered via git worktree list\n" + worktree.path()));
+            Tooltip.install(row, unopenedTooltips.computeIfAbsent(worktree.path(),
+                    path -> new Tooltip("Discovered via git worktree list\n" + path)));
             row.setOnMouseClicked(event -> {
                 if (event.getButton() == MouseButton.PRIMARY) {
                     navigator.showUnopenedWorktree(repository, worktree);
@@ -1119,30 +1158,44 @@ public final class RepositorySidebar extends VBox {
             return button;
         }
 
-        private ContextMenu buildSessionContextMenu(ManagedClaudeSession session) {
+    }
+
+    // ---- Cached per-row context menus ---------------------------------------
+
+    /** Applies {@code action} to the CURRENT version of the session, resolved through the model. */
+    private void withLiveSession(ManagedSessionId sessionId, Consumer<ManagedClaudeSession> action) {
+        viewModel.sessionById(sessionId).ifPresent(action);
+    }
+
+    /** One cached menu per session row; handlers re-resolve the session so the cache never acts stale. */
+    private ContextMenu sessionMenu(ManagedSessionId sessionId) {
+        return sessionMenus.computeIfAbsent(sessionId, id -> {
             MenuItem resume = new MenuItem("Resume");
-            resume.setOnAction(e -> navigator.resumeSession(session));
+            resume.setOnAction(e -> withLiveSession(id, navigator::resumeSession));
 
             MenuItem rename = new MenuItem("Rename…");
-            rename.setOnAction(e -> navigator.promptRenameSession(session));
+            rename.setOnAction(e -> withLiveSession(id, navigator::promptRenameSession));
 
             MenuItem stop = new MenuItem("Stop process");
-            stop.setOnAction(e -> navigator.closeSession(session.id()));
+            stop.setOnAction(e -> navigator.closeSession(id));
 
             MenuItem delete = new MenuItem("Delete session");
-            delete.setOnAction(e -> onDeleteSession(session));
+            delete.setOnAction(e -> withLiveSession(id, this::onDeleteSession));
 
             MenuItem reveal = new MenuItem("Reveal working directory");
-            reveal.setOnAction(e -> launchExternally("Could not reveal working directory",
-                    () -> FinderLauncher.reveal(session.workingDirectory())));
+            reveal.setOnAction(e -> withLiveSession(id, session ->
+                    launchExternally("Could not reveal working directory",
+                            () -> FinderLauncher.reveal(session.workingDirectory()))));
 
             ContextMenu menu = new ContextMenu();
             menu.getItems().addAll(resume, rename, stop, delete, new SeparatorMenuItem(), reveal);
             return menu;
-        }
+        });
+    }
 
-        /** The repo "+" menu (worktree handoff "Creating"): checkout session / new worktree / rescan. */
-        private ContextMenu buildNewSessionMenu(Repository repository) {
+    /** The repo "+" menu (worktree handoff "Creating"): checkout session / new worktree / rescan. */
+    private ContextMenu newSessionMenu(Repository repository) {
+        return newSessionMenus.computeIfAbsent(repository.id(), id -> {
             MenuItem inCheckout = new MenuItem("❯_  Session on main checkout");
             inCheckout.setOnAction(e -> navigator.openNewSession(repository));
             MenuItem newWorktree = new MenuItem("◫  New worktree…");
@@ -1150,9 +1203,11 @@ public final class RepositorySidebar extends VBox {
             MenuItem rescan = new MenuItem("⟳  Rescan worktrees");
             rescan.setOnAction(e -> refreshWorktrees(repository, true));
             return new ContextMenu(inCheckout, newWorktree, rescan);
-        }
+        });
+    }
 
-        private ContextMenu buildRepoContextMenu(Repository repository) {
+    private ContextMenu repoMenu(Repository repository) {
+        return repoMenus.computeIfAbsent(repository.id(), id -> {
             MenuItem newSession = new MenuItem("New Claude session");
             newSession.setOnAction(e -> navigator.openNewSession(repository));
             MenuItem newWorktree = new MenuItem("New worktree…");
@@ -1180,6 +1235,6 @@ public final class RepositorySidebar extends VBox {
             menu.getItems().addAll(newSession, newWorktree, rescan, new SeparatorMenuItem(), refresh, openFinder,
                     openEditor, new SeparatorMenuItem(), remove);
             return menu;
-        }
+        });
     }
 }
