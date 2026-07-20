@@ -95,9 +95,9 @@ esac
 
 existing_jmods_dir=""
 if [[ -d "$output_dir" ]]; then
-    existing_jmods_dir="$(find "$output_dir" -type d -name jmods 2>/dev/null | head -1 || true)"
+    existing_jmods_dir="$(find "$output_dir" -type f -name '*.jmod' -exec dirname {} \; 2>/dev/null | sort -u | head -1 || true)"
 fi
-if [[ -n "$existing_jmods_dir" ]] && ls "$existing_jmods_dir"/*.jmod >/dev/null 2>&1; then
+if [[ -n "$existing_jmods_dir" ]]; then
     echo "==> Already downloaded and extracted: $existing_jmods_dir" >&2
     echo "$existing_jmods_dir"
     exit 0
@@ -129,10 +129,13 @@ actual_sha256="$(shasum -a 256 "$archive_path" | awk '{print $1}')"
 echo "==> Extracting to $output_dir" >&2
 tar -xzf "$archive_path" -C "$output_dir"
 
-jmods_dirs="$(find "$output_dir" -type d -name jmods)"
+# The archive's top-level directory is named e.g. jdk-26.0.1+8-jmods/, not
+# "jmods" -- .jmod files sit directly inside it. Locate it by content
+# (a directory containing .jmod files) rather than assuming a name.
+jmods_dirs="$(find "$output_dir" -type f -name '*.jmod' -exec dirname {} \; | sort -u)"
 jmods_dir_count="$(echo "$jmods_dirs" | grep -c . || true)"
 [[ "$jmods_dir_count" -eq 1 ]] \
-    || fail "expected exactly one jmods/ directory under $output_dir after extraction, found $jmods_dir_count: $jmods_dirs"
+    || fail "expected exactly one directory of .jmod files under $output_dir after extraction, found $jmods_dir_count: $jmods_dirs"
 
 echo "$jmods_dirs"
 ```
