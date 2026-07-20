@@ -254,6 +254,9 @@ public final class RepositorySidebar extends VBox {
         });
 
         rebuildTree();
+        // The constructor sweep covers the seeded snapshot; remember it so
+        // the first model event does not immediately re-fetch everything.
+        statusRefreshedFor = viewModel.sessions();
         refreshAllStatuses();
     }
 

@@ -4,6 +4,7 @@ import app.cpm.domain.ManagedClaudeSession;
 import app.cpm.domain.ManagedSessionId;
 import app.cpm.domain.Repository;
 import app.cpm.git.WorktreeService;
+import app.cpm.ui.review.ReviewView;
 
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -11,7 +12,7 @@ import java.util.concurrent.CompletableFuture;
 /**
  * The session/worktree actions the sidebar can ask the main workspace to
  * perform, plus the one query it renders from ({@link #activeSessionId()}).
- * Modeled on {@link app.cpm.ui.review.ReviewView.ExplorerBridge}: the
+ * Modeled on {@link ReviewView.ExplorerBridge}: the
  * consumer ({@link RepositorySidebar}) depends on this narrow bridge, and
  * {@link MainWorkspace} implements it — the sidebar never sees the
  * workspace's full surface (tab bookkeeping, native terminal wiring, …).
