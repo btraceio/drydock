@@ -24,6 +24,7 @@ import app.cpm.search.SessionSearchService;
 import app.cpm.ui.explorer.DiffOverlay;
 import app.cpm.ui.explorer.SessionExplorerView;
 import app.cpm.ui.review.ReviewView;
+import app.cpm.ui.model.WorkspaceViewModel;
 import app.cpm.terminal.ghostty.GhosttyApp;
 import app.cpm.terminal.ghostty.GhosttyNativeLibrary;
 import app.cpm.terminal.host.CpmTerminalHost;
@@ -105,6 +106,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     private final DiffService diffService;
     private final ChangedLineService changedLineService;
     private final AnnotationStore annotationStore;
+    private final WorkspaceViewModel viewModel;
     private final Stage stage;
 
     /** The app shell's modal layer; wired by CpmApplication (worktree create/Finish panels show through it). */
@@ -149,8 +151,6 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     private final Timeline exitWatcher = new Timeline(
             new KeyFrame(Duration.seconds(1), e -> pollForExitedProcesses()));
 
-    private Runnable onSessionsChanged = () -> { };
-
     /** Current UI theme, for terminal config selection; wired by CpmApplication once the shell exists. */
     private Supplier<UiTheme> themeProvider = () -> UiTheme.DARK;
 
@@ -165,7 +165,8 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     public MainWorkspace(SessionManager sessionManager, RepositoryManager repositoryManager,
                           GitStatusService gitStatusService, SessionSearchService searchService,
                           GhCliService ghCliService, DiffService diffService,
-                          ChangedLineService changedLineService, AnnotationStore annotationStore, Stage stage) {
+                          ChangedLineService changedLineService, AnnotationStore annotationStore,
+                          WorkspaceViewModel viewModel, Stage stage) {
         this.sessionManager = sessionManager;
         this.repositoryManager = repositoryManager;
         this.gitStatusService = gitStatusService;
@@ -174,6 +175,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         this.diffService = diffService;
         this.changedLineService = changedLineService;
         this.annotationStore = annotationStore;
+        this.viewModel = viewModel;
         this.stage = stage;
 
         getStyleClass().add("main-pane");
@@ -208,7 +210,9 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 open.setVisible(!terminalsObscured && open.tab == newTab);
             }
             updatePickerVisibility();
-            onSessionsChanged.run();
+            // Tab selection only moves the active-row highlight; the model
+            // turns this into activeSessionChanged, never a tree rebuild.
+            viewModel.setActiveSession(activeSessionId());
         });
         tabPane.getTabs().addListener((ListChangeListener<Tab>) change -> updatePickerVisibility());
         stage.focusedProperty().addListener((obs, wasFocused, isFocused) -> {
@@ -219,8 +223,41 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
         updatePickerVisibility();
 
+        // Tab headers render from the model: a row-level change updates one
+        // header; a structural change (e.g. rename, which reorders name-
+        // sorted sidebar rows) re-reads every open tab's header.
+        viewModel.addListener(new WorkspaceViewModel.Listener() {
+            @Override
+            public void sessionRowChanged(ManagedSessionId sessionId) {
+                updateTabHeader(sessionId);
+            }
+
+            @Override
+            public void structureChanged() {
+                openTabs.keySet().forEach(MainWorkspace.this::updateTabHeader);
+            }
+        });
+
         exitWatcher.setCycleCount(Animation.INDEFINITE);
         exitWatcher.play();
+    }
+
+    /** Pushes the manager's current session snapshot into the view model (FX thread; no-op if unchanged). */
+    private void publishSessions() {
+        viewModel.setSessions(sessionManager.sessions());
+    }
+
+    /** Re-reads one open tab's header facts (name, status dot, PR chip) from the model. */
+    private void updateTabHeader(ManagedSessionId sessionId) {
+        OpenSessionTab open = openTabs.get(sessionId);
+        if (open == null) {
+            return;
+        }
+        viewModel.sessionById(sessionId).ifPresent(session -> {
+            open.setDisplayName(session.displayName());
+            open.setStatus(session.status());
+            open.updatePrChip(session.prState(), session.prNumber());
+        });
     }
 
     /** The no-session-selected placeholder (the design's resume picker is parked; see constructor). */
@@ -350,11 +387,6 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         for (OpenSessionTab open : openTabs.values()) {
             open.applyTerminalTheme(configFile);
         }
-    }
-
-    /** Invoked (on the FX Application Thread) whenever a session is opened, closed, renamed, or selected. */
-    public void setOnSessionsChanged(Runnable listener) {
-        this.onSessionsChanged = listener == null ? () -> { } : listener;
     }
 
     public boolean hasOpenSessions() {
@@ -656,7 +688,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
         Optional<ButtonType> choice = prompt.showAndWait();
         if (choice.isEmpty() || choice.get() == ButtonType.CANCEL) {
-            onSessionsChanged.run();
+            publishSessions();
             return;
         }
         if (choice.get() == delete) {
@@ -665,7 +697,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                     UiErrors.show("Could not delete session", ex);
                 }
                 noteSessionDeleted(session.id());
-                onSessionsChanged.run();
+                publishSessions();
             }));
             return;
         }
@@ -694,7 +726,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 && tabPane.getSelectionModel().getSelectedItem() == placeholderTab.tab);
         opened.session().worktreeRoot().ifPresent(root ->
                 setupWorktreeHeader(placeholderTab, opened.session().id(), root));
-        onSessionsChanged.run();
+        publishSessions();
     }
 
     // ---- Worktree lifecycle (handoff section B) -----------------------------
@@ -817,11 +849,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                                 || !current.prNumber().equals(Optional.of(info.number())))) {
                             current = sessionManager.updatePrState(sessionId, observed,
                                     Optional.of(info.number()));
-                            OpenSessionTab tab = openTabs.get(sessionId);
-                            if (tab != null) {
-                                tab.updatePrChip(current.prState(), current.prNumber());
-                            }
-                            onSessionsChanged.run();
+                            publishSessions();
                         }
                     }
 
@@ -945,7 +973,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                     removeRow.setOnFinished(e -> sessionManager.deleteSession(sessionId)
                             .whenComplete((v, ex) -> Platform.runLater(() -> {
                                 noteSessionDeleted(sessionId);
-                                onSessionsChanged.run();
+                                publishSessions();
                             })));
                     removeRow.play();
                 });
@@ -953,11 +981,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
     private void applyPrState(ManagedSessionId sessionId, PrState state, Optional<Integer> number) {
         sessionManager.updatePrState(sessionId, state, number);
-        OpenSessionTab tab = openTabs.get(sessionId);
-        if (tab != null) {
-            tab.updatePrChip(state, number);
-        }
-        onSessionsChanged.run();
+        publishSessions();
     }
 
     private void refreshWorktreeChipsLater(ManagedSessionId sessionId, Path worktreeRoot, String base) {
@@ -1049,7 +1073,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         notice.getButtonTypes().setAll(ButtonType.OK, ButtonType.CANCEL);
         Optional<ButtonType> choice = notice.showAndWait();
         if (choice.isEmpty() || choice.get() != ButtonType.OK) {
-            onSessionsChanged.run();
+            publishSessions();
             return;
         }
 
@@ -1058,12 +1082,12 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         Window owner = getScene() == null ? null : getScene().getWindow();
         File chosen = chooser.showDialog(owner);
         if (chosen == null) {
-            onSessionsChanged.run();
+            publishSessions();
             return;
         }
 
         ManagedClaudeSession updated = sessionManager.reassignWorkingDirectory(missingSession.id(), chosen.toPath());
-        onSessionsChanged.run();
+        publishSessions();
         resumeSession(updated);
     }
 
@@ -1087,7 +1111,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         open.showClosingState();
         return sessionManager.closeSession(open.sessionId()).thenRunAsync(() -> {
             removeTab(open);
-            onSessionsChanged.run();
+            publishSessions();
         }, Platform::runLater);
     }
 
@@ -1113,17 +1137,15 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         }
         if (open != null) {
             removeTab(open);
-            onSessionsChanged.run();
         }
+        // Publish even with no open tab: the deletion changed the snapshot,
+        // and the sidebar renders from the model, not from its caller.
+        publishSessions();
     }
 
     public void renameSession(ManagedSessionId sessionId, String newDisplayName) {
-        ManagedClaudeSession updated = sessionManager.renameSession(sessionId, newDisplayName);
-        OpenSessionTab open = openTabs.get(sessionId);
-        if (open != null) {
-            open.setDisplayName(updated.displayName());
-        }
-        onSessionsChanged.run();
+        sessionManager.renameSession(sessionId, newDisplayName);
+        publishSessions();
     }
 
     /** Convenience for a rename UI trigger (context menu / ⌘R): prompts for the new name in a dialog. */
@@ -1161,8 +1183,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             exitRecorded.add(sessionId);
             sessionManager.markSessionExited(sessionId).ifPresent(updated -> {
                 LOG.log(Level.INFO, "Session {0} child process exited on its own", sessionId);
-                open.setStatus(updated.status());
-                onSessionsChanged.run();
+                publishSessions();
             });
         }
     }
