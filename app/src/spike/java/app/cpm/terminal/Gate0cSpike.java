@@ -4,15 +4,19 @@ import app.cpm.terminal.ghostty.GhosttyApp;
 import app.cpm.terminal.ghostty.GhosttyNativeLibrary;
 import app.cpm.terminal.ghostty.GhosttySurface;
 import app.cpm.terminal.host.CpmTerminalHost;
+import javafx.animation.KeyFrame;
+import javafx.animation.Timeline;
 import javafx.application.Application;
 import javafx.application.Platform;
 import javafx.scene.Scene;
 import javafx.scene.layout.StackPane;
 import javafx.stage.Stage;
+import javafx.util.Duration;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Set;
 
 /**
  * Gate 0C feasibility spike (plan section 7 / 28 "Task 5"): the smallest
@@ -276,7 +280,7 @@ public final class Gate0cSpike extends Application {
     // keycode field unmodified (see onKeyEvent's Javadoc). Verified against
     // third_party/ghostty/src/input/keycodes.zig's macOS ("native", index 4)
     // column, not hand-guessed.
-    private static final java.util.Set<Integer> SPECIAL_KEYS = java.util.Set.of(
+    private static final Set<Integer> SPECIAL_KEYS = Set.of(
         36,  // Return / Enter
         51,  // Delete (Backspace)
         48,  // Tab
@@ -296,23 +300,23 @@ public final class Gate0cSpike extends Application {
      * a human who cannot watch the window live.
      */
     private void runAutomatedSequence(Stage stage) {
-        var timeline = new javafx.animation.Timeline(
-            new javafx.animation.KeyFrame(javafx.util.Duration.seconds(1), e -> {
+        var timeline = new Timeline(
+            new KeyFrame(Duration.seconds(1), e -> {
                 surface.sendText("echo gate0c\r");
                 log("automated: sent test text (direct API call, not a real keystroke)");
             }),
-            new javafx.animation.KeyFrame(javafx.util.Duration.seconds(2), e -> {
+            new KeyFrame(Duration.seconds(2), e -> {
                 stage.toFront();
                 stage.requestFocus();
                 sendRealKeystroke("q");
             }),
-            new javafx.animation.KeyFrame(javafx.util.Duration.seconds(3), e -> {
+            new KeyFrame(Duration.seconds(3), e -> {
                 stage.setWidth(1000);
                 stage.setHeight(700);
                 log("automated: resized stage");
             }),
-            new javafx.animation.KeyFrame(javafx.util.Duration.seconds(4), e -> captureScreenshot()),
-            new javafx.animation.KeyFrame(javafx.util.Duration.seconds(5), e -> {
+            new KeyFrame(Duration.seconds(4), e -> captureScreenshot()),
+            new KeyFrame(Duration.seconds(5), e -> {
                 log("automated: closing");
                 // shutdown(), not stage.close() -- see Gate0eSpike's
                 // identical fix and docs/phase0-feasibility-report.md:

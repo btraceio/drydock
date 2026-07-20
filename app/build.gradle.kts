@@ -36,7 +36,7 @@ application {
         // loads libghostty/the native host shim via FFM.
         "--enable-native-access=ALL-UNNAMED",
         // Unlike the gateNSpike tasks below (which force classpath-mode
-        // JavaFX via `classpath = sourceSets.main.get().runtimeClasspath`,
+        // JavaFX via the spike source set's runtimeClasspath,
         // avoiding JPMS enforcement entirely), the `application`/`javafx`
         // Gradle plugins configure `run` to launch JavaFX on the *module
         // path* (--module-path + --add-modules), matching the jlink runtime
@@ -57,6 +57,19 @@ application {
 
 repositories {
     mavenCentral()
+}
+
+// Phase-0 spike harnesses (Gate0cSpike & co., GhosttySmokeTest) live in a
+// dedicated source set so they stay runnable via the gateNSpike tasks below
+// but never ship in the app jar / jlink runtime image (AGENTS.md, "Code
+// placement and hygiene": spike harnesses never live in app/src/main/java).
+// The spike code sees main's classes and main's full dependency set (the
+// JavaFX jars the javafx plugin puts on main's configurations included);
+// package-private access (e.g. GhosttySmokeTest -> GhosttyBinding) still
+// works because Java access control is per-package, not per-source-set.
+val spike: SourceSet = sourceSets.create("spike") {
+    compileClasspath += sourceSets.main.get().output + sourceSets.main.get().compileClasspath
+    runtimeClasspath += output + sourceSets.main.get().runtimeClasspath
 }
 
 dependencies {
@@ -126,7 +139,7 @@ tasks.register<JavaExec>("ffmSmokeTest") {
 
     dependsOn(rootProject.tasks.named("buildGhosttyNative"))
 
-    classpath = sourceSets.main.get().runtimeClasspath
+    classpath = spike.runtimeClasspath
     mainClass.set("app.cpm.terminal.ghostty.GhosttySmokeTest")
 
     // Run with the JDK 26 toolchain (not whatever JVM launched Gradle
@@ -160,7 +173,7 @@ tasks.register<JavaExec>("gate0cSpike") {
     dependsOn(rootProject.tasks.named("buildGhosttyNative"))
     dependsOn(rootProject.tasks.named("buildNativeHost"))
 
-    classpath = sourceSets.main.get().runtimeClasspath
+    classpath = spike.runtimeClasspath
     // See Gate0cSpikeLauncher's Javadoc: launching Gate0cSpike (an
     // Application subclass) directly as the JVM's main class trips
     // JavaFX's "JavaFX runtime components are missing" module-path check,
@@ -208,7 +221,7 @@ tasks.register<JavaExec>("gate0dSpike") {
     dependsOn(rootProject.tasks.named("buildGhosttyNative"))
     dependsOn(rootProject.tasks.named("buildNativeHost"))
 
-    classpath = sourceSets.main.get().runtimeClasspath
+    classpath = spike.runtimeClasspath
     mainClass.set("app.cpm.terminal.Gate0dSpikeLauncher")
     javaLauncher.set(javaToolchains.launcherFor(java.toolchain))
 
@@ -237,7 +250,7 @@ tasks.register<JavaExec>("gate0eSpike") {
     dependsOn(rootProject.tasks.named("buildGhosttyNative"))
     dependsOn(rootProject.tasks.named("buildNativeHost"))
 
-    classpath = sourceSets.main.get().runtimeClasspath
+    classpath = spike.runtimeClasspath
     mainClass.set("app.cpm.terminal.Gate0eSpikeLauncher")
     javaLauncher.set(javaToolchains.launcherFor(java.toolchain))
 

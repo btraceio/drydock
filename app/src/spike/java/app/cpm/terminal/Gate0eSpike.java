@@ -85,7 +85,9 @@ public final class Gate0eSpike extends Application {
 
         Platform.runLater(() -> {
             try {
-                initializeTerminal(scene, CLAUDE_BIN, TEST_REPO);
+                // The surface command is a shell string (`sh -c`); quote the
+                // externally-supplied binary path (see the step-8 comment).
+                initializeTerminal(scene, shellQuote(CLAUDE_BIN), TEST_REPO);
             } catch (Throwable t) {
                 log("FAILED to initialize terminal: " + t);
                 t.printStackTrace();
@@ -272,7 +274,7 @@ public final class Gate0eSpike extends Application {
             log("[info] relaunching a fresh claude session in the same repo (new surface, same host view)");
             surface.close();
             double scale = stage.getOutputScaleX();
-            surface = GhosttySurface.create(app, host, scale, CLAUDE_BIN, TEST_REPO);
+            surface = GhosttySurface.create(app, host, scale, shellQuote(CLAUDE_BIN), TEST_REPO);
             host.setFrame(0, 0, stage.getScene().getWidth(), stage.getScene().getHeight());
             surface.setSize((int) Math.round(stage.getScene().getWidth() * scale),
                 (int) Math.round(stage.getScene().getHeight() * scale));
@@ -298,7 +300,7 @@ public final class Gate0eSpike extends Application {
             log("[info] launching `claude --resume` as a fresh surface");
             surface.close();
             double scale = stage.getOutputScaleX();
-            surface = GhosttySurface.create(app, host, scale, CLAUDE_BIN + " --resume", TEST_REPO);
+            surface = GhosttySurface.create(app, host, scale, shellQuote(CLAUDE_BIN) + " --resume", TEST_REPO);
             host.setFrame(0, 0, stage.getScene().getWidth(), stage.getScene().getHeight());
             surface.setSize((int) Math.round(stage.getScene().getWidth() * scale),
                 (int) Math.round(stage.getScene().getHeight() * scale));
@@ -332,7 +334,16 @@ public final class Gate0eSpike extends Application {
             log("[info] launching a login shell that exports CPM_GATE0E_PROBE and execs claude");
             surface.close();
             double scale = stage.getOutputScaleX();
-            String cmd = "/bin/zsh -l -c \"export CPM_GATE0E_PROBE=xyz789_gate0e; exec " + CLAUDE_BIN + "\"";
+            // libghostty's embedded `command` field is inherently a shell
+            // string (see GhosttySurface.create's Javadoc: it always runs
+            // via `sh -c`), so argv-list spawning is not expressible here;
+            // the class-Javadoc rule against splicing raw values into shell
+            // strings is honored by single-quote-wrapping every level of
+            // interpolation (same pattern as SessionManager.shellQuote) --
+            // CLAUDE_BIN comes from a system property and must never be
+            // parsed as shell syntax.
+            String cmd = "/bin/zsh -l -c "
+                + shellQuote("export CPM_GATE0E_PROBE=xyz789_gate0e; exec " + shellQuote(CLAUDE_BIN));
             surface = GhosttySurface.create(app, host, scale, cmd, TEST_REPO);
             host.setFrame(0, 0, stage.getScene().getWidth(), stage.getScene().getHeight());
             surface.setSize((int) Math.round(stage.getScene().getWidth() * scale),
@@ -470,6 +481,15 @@ public final class Gate0eSpike extends Application {
     @Override
     public void stop() {
         shutdown();
+    }
+
+    /**
+     * Wraps {@code value} as a single POSIX shell single-quoted argument,
+     * safe against embedded shell metacharacters (mirrors
+     * {@code SessionManager.shellQuote}, which is package-private there).
+     */
+    private static String shellQuote(String value) {
+        return "'" + value.replace("'", "'\\''") + "'";
     }
 
     private static void log(String message) {
