@@ -115,11 +115,12 @@ location, never the current working directory or `JAVA_HOME` — verified by
 launching from `/tmp` with `JAVA_HOME` unset and a `PATH` scrubbed down to
 just `/usr/bin:/bin`.
 
-`MAIN_CLASS` defaults to `app.cpm.terminal.Gate0cSpikeLauncher` (see "Why
-the terminal spike, not `app.cpm.Main`" below); `CPM_MAIN_CLASS`/
+`MAIN_CLASS` defaults to `app.cpm.Main` (the real application); `CPM_MAIN_CLASS`/
 `CPM_EXTRA_JVM_ARGS` environment variables are internal escape hatches used
 only by this project's own smoke testing, not part of the plan's launcher
-spec.
+spec. (See "Why the terminal spike, not `app.cpm.Main`, is the default launch target"
+below for historical context on why the spike was chosen at Milestone 0, and how
+the default changed at Milestone 5.)
 
 ### `--add-exports javafx.graphics/com.sun.glass.ui=ALL-UNNAMED`: a real, image-only defect found and fixed in Task 8
 
@@ -249,7 +250,7 @@ Gradle, no sdkman on `PATH` at all):
   `os.arch: x86_64` confirms the right architecture subdirectory was
   selected.
 - `/tmp/cpm-image-test/bin/claude-project-manager` (defaults to
-  `Gate0cSpikeLauncher`) — after the `--add-exports` fix above, runs the
+  `app.cpm.Main`, the real application) — after the `--add-exports` fix above, runs the
   full Gate 0C sequence successfully end to end: `ghostty_init`, AppKit host
   view created and attached to the JavaFX window's `NSView`,
   `ghostty_app_new`, `ghostty_surface_new` (`scale=2.0`, i.e. real

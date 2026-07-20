@@ -65,12 +65,11 @@ Steps:
      was built on (`<arch>`), and that producing an archive for the other
      architecture means re-running this script on a Mac of that
      architecture;
-   - a reminder that the image's default launch target is the Task 5
-     terminal spike (`Gate0cSpikeLauncher`), not the real application, and
-     that `CPM_MAIN_CLASS=app.cpm.Main ./image/bin/claude-project-manager`
-     launches the real app instead (this environment variable already
-     exists in the generated launcher; nothing new is added by this
-     script);
+   - a reminder that the image's default launch target is the real
+     application (`app.cpm.Main`), and that the Task 5 terminal spike can be
+     launched via `CPM_MAIN_CLASS=app.cpm.terminal.Gate0cSpikeLauncher ./image/bin/claude-project-manager`
+     if needed for testing (this environment variable already exists in the
+     generated launcher; nothing new is added by this script);
    - a one-line Gatekeeper fallback: if macOS quarantines the extracted
      binaries (typically only when transferred via a browser download or
      AirDrop, not `scp`/USB), `xattr -cr ./image` clears the quarantine
