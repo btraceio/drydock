@@ -309,6 +309,6 @@ failing native integration with mocked success").
 
 ## Files
 
-- `app/src/main/java/app/cpm/terminal/Gate0eSpike.java` — the spike itself (scripted transcript, no hard pass/fail assertions, by design — see top of this document).
-- `app/src/main/java/app/cpm/terminal/Gate0eSpikeLauncher.java` — same JavaFX-Application-from-classpath indirection as `Gate0cSpikeLauncher`/`Gate0dSpikeLauncher`.
+- `app/src/spike/java/app/cpm/terminal/Gate0eSpike.java` — the spike itself (scripted transcript, no hard pass/fail assertions, by design — see top of this document).
+- `app/src/spike/java/app/cpm/terminal/Gate0eSpikeLauncher.java` — same JavaFX-Application-from-classpath indirection as `Gate0cSpikeLauncher`/`Gate0dSpikeLauncher`.
 - `app/build.gradle.kts` — `gate0eSpike` Gradle task (`-Papp.cpm.gate0e.repo=<path>` required, `-Papp.cpm.gate0e.claude=<path>` optional override, `-Papp.cpm.gate0e.interactive` for a live human-driven window).

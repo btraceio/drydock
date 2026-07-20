@@ -30,7 +30,7 @@ public final class GhosttySmokeTest {
         System.out.println("os.arch: " + System.getProperty("os.arch"));
 
         SymbolLookup lookup = GhosttyNativeLibrary.lookup();
-        GhosttyBinding binding = new GhosttyBinding(lookup);
+        GhosttyBinding binding = GhosttyBinding.of(lookup);
 
         int initResult = binding.init();
         System.out.println("ghostty_init() -> " + initResult);

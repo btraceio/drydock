@@ -51,7 +51,7 @@ public final class GhosttyApp implements AutoCloseable {
      */
     public static void ensureProcessInitialized(SymbolLookup lookup) {
         if (PROCESS_INITIALIZED.compareAndSet(false, true)) {
-            int result = new GhosttyBinding(lookup).init();
+            int result = GhosttyBinding.of(lookup).init();
             if (result != 0) {
                 PROCESS_INITIALIZED.set(false);
                 throw new IllegalStateException("ghostty_init() returned " + result + ", expected 0");
@@ -102,8 +102,8 @@ public final class GhosttyApp implements AutoCloseable {
      */
     public static GhosttyApp create(SymbolLookup lookup, Runnable onWakeup,
                                      Optional<Path> configFile) {
-        GhosttyAppBinding binding = new GhosttyAppBinding(lookup);
-        GhosttyBinding coreBinding = new GhosttyBinding(lookup);
+        GhosttyAppBinding binding = GhosttyAppBinding.of(lookup);
+        GhosttyBinding coreBinding = GhosttyBinding.of(lookup);
         MemorySegment config = loadedConfig(coreBinding, configFile);
         Arena arena = Arena.ofShared();
 

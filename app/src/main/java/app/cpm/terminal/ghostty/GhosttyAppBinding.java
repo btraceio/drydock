@@ -10,6 +10,8 @@ import java.lang.foreign.SymbolLookup;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
 /**
  * Hand-written FFM bindings for the slice of the libghostty C API needed to
@@ -33,6 +35,20 @@ import java.nio.charset.StandardCharsets;
  * <p>Part of the narrow native boundary (plan section 2.4/4.2).</p>
  */
 final class GhosttyAppBinding {
+
+    /**
+     * Process-wide instances, one per {@link SymbolLookup} (itself a
+     * process-wide singleton -- {@code GhosttyNativeLibrary.lookup()}), so
+     * the ~20 downcall handles below are linked once per process instead
+     * of once per {@code GhosttyApp} instance; the handles are stateless
+     * and thread-safe to share.
+     */
+    private static final ConcurrentMap<SymbolLookup, GhosttyAppBinding> INSTANCES = new ConcurrentHashMap<>();
+
+    /** Returns the process-wide binding for {@code lookup}, linking it on first use. */
+    static GhosttyAppBinding of(SymbolLookup lookup) {
+        return INSTANCES.computeIfAbsent(lookup, GhosttyAppBinding::new);
+    }
 
     // ghostty_target_s { tag: i32; pad: i32; target: union { surface: *anyopaque } }
     // Verified: sizeof == 16, alignof == 8.
@@ -174,7 +190,7 @@ final class GhosttyAppBinding {
     final MethodHandle appUpdateConfig;
     final MethodHandle surfaceUpdateConfig;
 
-    GhosttyAppBinding(SymbolLookup lookup) {
+    private GhosttyAppBinding(SymbolLookup lookup) {
         // ghostty_app_t ghostty_app_new(const ghostty_runtime_config_s*, ghostty_config_t);
         this.appNew = linker.downcallHandle(
             find(lookup, "ghostty_app_new"),
