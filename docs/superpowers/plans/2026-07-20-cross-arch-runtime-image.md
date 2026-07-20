@@ -226,7 +226,9 @@ EOF
 
 - [ ] **Step 1: Extract the shared `assembleRuntimeImage` function**
 
-In `app/build.gradle.kts`, add this function immediately before the existing `runtimeImage` task registration (i.e. insert it right before line 291's `tasks.register("runtimeImage") {`):
+In `app/build.gradle.kts`, add `import java.io.ByteArrayOutputStream` as the first line of the file (before the `plugins { ... }` block) — required because plain `java` is shadowed by this file's own `java { ... }` toolchain extension, so `java.io.ByteArrayOutputStream` does not resolve without the import.
+
+Then add this function immediately before the existing `runtimeImage` task registration (i.e. insert it right before line 291's `tasks.register("runtimeImage") {`):
 
 ```kotlin
 /**
@@ -241,7 +243,7 @@ In `app/build.gradle.kts`, add this function immediately before the existing `ru
  *
  * [modulePathEntries] is the full jlink --module-path. For the host's own
  * architecture this is just the (implicitly platform-matched) JavaFX
- * module jars -- java.*/jdk.* modules still resolve implicitly from
+ * module jars -- java.* / jdk.* modules still resolve implicitly from
  * [jlinkExe]'s own JDK, exactly as before this function existed. For a
  * cross-linked architecture it additionally includes a downloaded
  * jmods/ directory for that architecture (scripts/download-cross-jmods.sh)
@@ -290,7 +292,7 @@ fun assembleRuntimeImage(
 
     if (expectedMachOArch != null) {
         val javaBin = File(runtimeOut, "bin/java")
-        val fileOutput = java.io.ByteArrayOutputStream()
+        val fileOutput = ByteArrayOutputStream()
         @Suppress("DEPRECATION")
         project.exec {
             commandLine("file", "-b", javaBin.absolutePath)
@@ -498,7 +500,7 @@ tasks.register("runtimeImageAllArches") {
         // Cross arch: explicit jmods + explicit-classifier FX jars.
         val jmodsOutputDir = File(crossJdkDir.get().asFile, crossArch)
         val downloadScript = File(scriptsDir, "download-cross-jmods.sh")
-        val jmodsPathOutput = java.io.ByteArrayOutputStream()
+        val jmodsPathOutput = ByteArrayOutputStream()
         @Suppress("DEPRECATION")
         project.exec {
             commandLine(downloadScript.absolutePath, crossArch, jmodsOutputDir.absolutePath)
@@ -517,7 +519,50 @@ tasks.register("runtimeImageAllArches") {
         val crossFxDeps = listOf("javafx-base", "javafx-controls", "javafx-graphics").map {
             project.dependencies.create("org.openjfx:$it:26:$fxClassifier")
         }
-        val crossFxJars = project.configurations.detachedConfiguration(*crossFxDeps.toTypedArray()).resolve().toList()
+        // org.openjfx's artifacts publish Gradle Module Metadata with
+        // per-platform variants (mac-aarch64Runtime, macRuntime, etc.) --
+        // a bare classifier in the dependency notation above is NOT enough
+        // to select among them on its own (resolving without the
+        // attributes below fails with "Cannot choose between the
+        // available variants"). The detached configuration needs the same
+        // org.gradle.native.operatingSystem / org.gradle.native.architecture
+        // attributes the javafx-gradle-plugin itself requests for the host
+        // build, pinned explicitly to the cross-linked architecture
+        // instead of the host's.
+        val crossFxConfig = project.configurations.detachedConfiguration(*crossFxDeps.toTypedArray())
+        crossFxConfig.attributes {
+            attribute(
+                org.gradle.api.attributes.Usage.USAGE_ATTRIBUTE,
+                project.objects.named(org.gradle.api.attributes.Usage::class.java, org.gradle.api.attributes.Usage.JAVA_RUNTIME)
+            )
+            attribute(
+                org.gradle.api.attributes.Category.CATEGORY_ATTRIBUTE,
+                project.objects.named(org.gradle.api.attributes.Category::class.java, org.gradle.api.attributes.Category.LIBRARY)
+            )
+            attribute(
+                org.gradle.api.attributes.LibraryElements.LIBRARY_ELEMENTS_ATTRIBUTE,
+                project.objects.named(org.gradle.api.attributes.LibraryElements::class.java, org.gradle.api.attributes.LibraryElements.JAR)
+            )
+            attribute(
+                org.gradle.nativeplatform.OperatingSystemFamily.OPERATING_SYSTEM_ATTRIBUTE,
+                project.objects.named(
+                    org.gradle.nativeplatform.OperatingSystemFamily::class.java,
+                    org.gradle.nativeplatform.OperatingSystemFamily.MACOS
+                )
+            )
+            attribute(
+                org.gradle.nativeplatform.MachineArchitecture.ARCHITECTURE_ATTRIBUTE,
+                project.objects.named(
+                    org.gradle.nativeplatform.MachineArchitecture::class.java,
+                    if (crossArch == "macos-arm64") {
+                        org.gradle.nativeplatform.MachineArchitecture.ARM64
+                    } else {
+                        org.gradle.nativeplatform.MachineArchitecture.X86_64
+                    }
+                )
+            )
+        }
+        val crossFxJars = crossFxConfig.resolve().toList()
 
         val crossExpectedMachOArch = when (crossArch) {
             "macos-x86_64" -> "x86_64"
@@ -817,3 +862,4 @@ EOF
 - **Spec coverage:** pinned URL/checksum table (Global Constraints + Task 1 script body), idempotent download with env override (Task 1), behavior-preserving refactor of `runtimeImage` (Task 2 Steps 1-3), new opt-in `runtimeImageAllArches` producing both `build/image-macos-x86_64`/`build/image-macos-arm64` with `file(1)` architecture verification (Task 2 Steps 4-6), root alias task (Task 2 Step 5), and `--all-arches` packaging with distinct host/cross guidance (Task 3) are all covered. No spec requirement without a task. Deliberately not covered (per spec's Non-goals): extending `appImage`/`macApp`/`dmg`, actual arm64 execution, CI wiring.
 - **Placeholder scan:** no TBD/TODO; every step has literal, complete code (both the bash script and the full Kotlin function/task bodies) and exact verification commands with expected output.
 - **Type/naming consistency:** `assembleRuntimeImage`'s parameter names and the values passed at both call sites (Task 2 Steps 2 and 4) match exactly. The `macos-x86_64`/`macos-arm64` labels and the `x86_64`/`arm64` `file(1)` tokens are used consistently across Task 1 (script arg), Task 2 (Kotlin `when` branches, `outputs.dir` paths), and Task 3 (shell `case`/variable names) — verified against `GhosttyNativeLibrary.detectArchDirectoryName()`'s existing mapping (Global Constraints) rather than invented independently.
+- **Post-implementation corrections (found while actually building Task 2, now folded into the text above):** (1) the `assembleRuntimeImage` KDoc's literal `java.*/jdk.*` substring prematurely closed the `/** ... */` block comment via `*/`, breaking compilation — reworded to `java.* / jdk.*`. (2) `java.io.ByteArrayOutputStream()` did not resolve because `java` is shadowed by this file's own `java { ... }` toolchain extension — fixed via an explicit `import java.io.ByteArrayOutputStream` and bare `ByteArrayOutputStream()` at both call sites. (3) resolving the cross-arch JavaFX dependency by bare classifier alone failed ("Cannot choose between the available variants") because org.openjfx publishes Gradle Module Metadata with per-platform variants — fixed by attaching explicit `Usage`/`Category`/`LibraryElements`/`OperatingSystemFamily`/`MachineArchitecture` attributes to the detached configuration before resolving. All three were verified by actually running `./gradlew runtimeImage` and `./gradlew runtimeImageAllArches` to completion, including a real `file(1)`-confirmed x86_64-vs-arm64 architecture difference between the two produced images.
