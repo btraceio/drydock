@@ -2,6 +2,9 @@ package app.cpm.github;
 
 import app.cpm.git.GitExecutableLocator;
 import app.cpm.git.GitExecutableNotFoundException;
+import app.cpm.process.ProcessResult;
+import app.cpm.process.ProcessRunner;
+import app.cpm.process.ProcessTimeoutException;
 import app.cpm.state.json.JsonParser;
 import app.cpm.state.json.JsonValue;
 import app.cpm.state.json.JsonValue.JsonArray;
@@ -40,6 +43,9 @@ import java.util.concurrent.Executors;
 public final class GitHubService implements AutoCloseable {
 
     private static final String SEARCH_URL = "https://api.github.com/search/repositories?per_page=10&q=";
+
+    /** A full clone legitimately takes a while; bounded so a wedged transfer cannot hang forever. */
+    private static final Duration CLONE_TIMEOUT = Duration.ofMinutes(10);
 
     private final HttpClient httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(10))
@@ -151,19 +157,20 @@ public final class GitHubService implements AutoCloseable {
         if (Files.exists(target)) {
             throw new GitHubSearchException("Target directory already exists: " + target, null);
         }
-        List<String> command = List.of(git.toString(), "clone", repo.cloneUrl(), target.toString());
+        // "--" so a pasted URL can never be parsed as a git option.
+        List<String> command = List.of(git.toString(), "clone", "--", repo.cloneUrl(), target.toString());
         try {
-            Process process = new ProcessBuilder(command)
-                    .redirectErrorStream(true)
-                    .start();
-            String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-            int exit = process.waitFor();
-            if (exit != 0) {
-                String excerpt = output.length() > 2000 ? output.substring(output.length() - 2000) : output;
-                throw new GitHubSearchException("git clone failed (exit " + exit + "):\n" + excerpt.strip(), null);
+            ProcessResult result = ProcessRunner.run(command, null, CLONE_TIMEOUT);
+            if (result.exitCode() != 0) {
+                String output = result.stderr().isBlank() ? result.stdout() : result.stderr();
+                throw new GitHubSearchException("git clone failed (exit " + result.exitCode() + "):\n"
+                        + ProcessRunner.excerpt(output), null);
             }
         } catch (IOException e) {
             throw new GitHubSearchException("Could not run git clone: " + e.getMessage(), e);
+        } catch (ProcessTimeoutException e) {
+            throw new GitHubSearchException("git clone timed out after " + CLONE_TIMEOUT.toMinutes()
+                    + " minutes and was stopped", e);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new GitHubSearchException("git clone interrupted", e);

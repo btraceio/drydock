@@ -2,6 +2,7 @@ package app.cpm.app;
 
 import app.cpm.domain.ApplicationState;
 import app.cpm.domain.Repository;
+import app.cpm.domain.RepositoryId;
 import app.cpm.git.GitStatusService;
 import app.cpm.git.NotAGitRepositoryException;
 import app.cpm.state.ApplicationStateRepository;
@@ -43,6 +44,16 @@ class RepositoryManagerTest {
         gitStatusService.close();
     }
 
+    /**
+     * State persistence is asynchronous now (see {@link
+     * ApplicationStateStore}): mutators return once the in-memory state is
+     * swapped and a background writer saves later. Tests asserting on what
+     * reached the repository must flush first.
+     */
+    private void flushState() {
+        ApplicationStateStore.forRepository(stateRepository).flush();
+    }
+
     private Path initGitRepo(String name) throws IOException, InterruptedException {
         Path dir = Files.createDirectory(tempDir.resolve(name));
         run(dir, "git", "init", "-q");
@@ -65,6 +76,7 @@ class RepositoryManagerTest {
 
         assertEquals("repo-a", added.displayName());
         assertEquals(1, manager.repositories().size());
+        flushState();
         assertEquals(1, stateRepository.savedState().repositories().size());
     }
 
@@ -98,6 +110,7 @@ class RepositoryManagerTest {
 
         assertTrue(manager.repositories().isEmpty());
         assertTrue(Files.exists(repo), "removing a repository must never delete it from disk");
+        flushState();
         assertTrue(stateRepository.savedState().repositories().isEmpty());
     }
 
@@ -105,16 +118,19 @@ class RepositoryManagerTest {
     void removeRepositoryIsANoOpForAnUnknownId() throws Exception {
         Path repo = initGitRepo("repo-d");
         manager.addRepository(repo).get();
+        flushState();
         int savesBefore = stateRepository.saveCount();
 
-        manager.removeRepository(app.cpm.domain.RepositoryId.newId());
+        manager.removeRepository(RepositoryId.newId());
 
+        flushState();
         assertEquals(1, manager.repositories().size());
         assertEquals(savesBefore, stateRepository.saveCount(), "an unknown id must not trigger a redundant save");
     }
 
     private static final class InMemoryStateRepository implements ApplicationStateRepository {
-        private ApplicationState state = ApplicationState.empty();
+        // volatile: saves arrive on the state store's background writer thread.
+        private volatile ApplicationState state = ApplicationState.empty();
         private final List<ApplicationState> saves = new ArrayList<>();
 
         @Override

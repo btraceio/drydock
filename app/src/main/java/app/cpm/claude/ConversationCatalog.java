@@ -14,11 +14,14 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Discovers resumable Claude conversations for a repository by scanning
@@ -48,7 +51,18 @@ public final class ConversationCatalog {
     public record Conversation(String sessionId, String title, int messageCount, Instant lastModified) {
     }
 
+    /** A parsed transcript, keyed on the (size, mtime) it was scanned at. */
+    private record CachedScan(long size, FileTime lastModified, Optional<Conversation> conversation) {
+    }
+
     private final Path projectsRoot;
+
+    /**
+     * Transcripts are multi-MB and {@link #listConversations} may run for
+     * every repository at once; re-scan a file only when its size or mtime
+     * changed since the last scan.
+     */
+    private final Map<Path, CachedScan> scanCache = new ConcurrentHashMap<>();
 
     public ConversationCatalog() {
         this(Path.of(System.getProperty("user.home"), ".claude", "projects"));
@@ -91,6 +105,25 @@ public final class ConversationCatalog {
     }
 
     private Optional<Conversation> readConversation(Path transcript) {
+        long size;
+        FileTime lastModified;
+        try {
+            size = Files.size(transcript);
+            lastModified = Files.getLastModifiedTime(transcript);
+        } catch (IOException e) {
+            LOG.log(Level.DEBUG, "Skipping unreadable transcript " + transcript, e);
+            return Optional.empty();
+        }
+        CachedScan cached = scanCache.get(transcript);
+        if (cached != null && cached.size() == size && cached.lastModified().equals(lastModified)) {
+            return cached.conversation();
+        }
+        Optional<Conversation> scanned = scanTranscript(transcript, lastModified.toInstant());
+        scanCache.put(transcript, new CachedScan(size, lastModified, scanned));
+        return scanned;
+    }
+
+    private Optional<Conversation> scanTranscript(Path transcript, Instant lastModified) {
         String fileName = transcript.getFileName().toString();
         String sessionId = fileName.substring(0, fileName.length() - ".jsonl".length());
 
@@ -103,10 +136,14 @@ public final class ConversationCatalog {
                 // Cheap probes first; full JSON parsing only for the lines we need.
                 boolean isUser = line.contains("\"type\":\"user\"");
                 boolean isAssistant = line.contains("\"type\":\"assistant\"");
-                if (isUser || isAssistant) {
+                boolean isSidechain = line.contains("\"isSidechain\":true");
+                // Sidechain (subagent) traffic is not part of the conversation
+                // the picker resumes; exclude it from the count like the
+                // title path already does.
+                if ((isUser || isAssistant) && !isSidechain) {
                     messageCount++;
                 }
-                if (firstUserText == null && isUser && !line.contains("\"isSidechain\":true")) {
+                if (firstUserText == null && isUser && !isSidechain) {
                     firstUserText = extractUserText(line);
                 }
                 if (line.contains("\"type\":\"summary\"")) {
@@ -128,12 +165,6 @@ public final class ConversationCatalog {
         String title = summaryTitle != null ? summaryTitle
                 : firstUserText != null ? firstUserText
                 : "Untitled conversation";
-        Instant lastModified;
-        try {
-            lastModified = Files.getLastModifiedTime(transcript).toInstant();
-        } catch (IOException e) {
-            lastModified = Instant.EPOCH;
-        }
         return Optional.of(new Conversation(sessionId, truncate(title), messageCount, lastModified));
     }
 

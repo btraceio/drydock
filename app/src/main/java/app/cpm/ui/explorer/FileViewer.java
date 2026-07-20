@@ -1,5 +1,6 @@
 package app.cpm.ui.explorer;
 
+import app.cpm.ui.UiFormats;
 import javafx.application.Platform;
 import javafx.geometry.Pos;
 import javafx.scene.control.Button;
@@ -288,17 +289,7 @@ final class FileViewer extends BorderPane {
         if (shown == null) {
             return;
         }
-        int i = 0;
-        for (Path segment : shown) {
-            if (i++ > 0) {
-                Label sep = new Label("›");
-                sep.getStyleClass().add("breadcrumb-separator");
-                breadcrumb.getChildren().add(sep);
-            }
-            Label part = new Label(segment.toString());
-            part.getStyleClass().add("breadcrumb-segment");
-            breadcrumb.getChildren().add(part);
-        }
+        breadcrumb.getChildren().addAll(UiFormats.breadcrumbSegments(shown));
         Label readOnly = new Label("read-only");
         readOnly.getStyleClass().add("read-only-chip");
         Region spacer = new Region();

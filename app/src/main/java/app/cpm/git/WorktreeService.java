@@ -1,11 +1,13 @@
 package app.cpm.git;
 
+import app.cpm.process.ProcessResult;
+import app.cpm.process.ProcessRunner;
+import app.cpm.process.ProcessTimeoutException;
+
 import java.io.IOException;
-import java.io.InputStream;
-import java.lang.System.Logger;
-import java.lang.System.Logger.Level;
-import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -31,10 +33,8 @@ import java.util.concurrent.Executors;
  */
 public final class WorktreeService implements AutoCloseable {
 
-    private static final Logger LOG = System.getLogger(WorktreeService.class.getName());
-
-    /** Excerpt length cap for stderr embedded in error messages (plan section 20). */
-    private static final int STDERR_EXCERPT_LIMIT = 2000;
+    /** List/remove are quick local operations; a hung git must not park futures forever. */
+    private static final Duration PROCESS_TIMEOUT = Duration.ofSeconds(15);
 
     private final GitExecutableLocator locator;
     private final ExecutorService executor;
@@ -97,7 +97,7 @@ public final class WorktreeService implements AutoCloseable {
             if (result.stderr().toLowerCase(Locale.ROOT).contains("not a git repository")) {
                 throw new NotAGitRepositoryException(repositoryRoot);
             }
-            throw new GitCommandFailedException(command, result.exitCode(), excerpt(result.stderr()));
+            throw new GitCommandFailedException(command, result.exitCode(), ProcessRunner.excerpt(result.stderr()));
         }
         return parse(result.stdout());
     }
@@ -142,23 +142,25 @@ public final class WorktreeService implements AutoCloseable {
                 "worktree", "remove", normalizedTarget.toString());
         ProcessResult removed = run(removeCommand);
         if (removed.exitCode() != 0) {
-            throw new GitCommandFailedException(removeCommand, removed.exitCode(), excerpt(removed.stderr()));
+            throw new GitCommandFailedException(removeCommand, removed.exitCode(), ProcessRunner.excerpt(removed.stderr()));
         }
 
         if (branch.isPresent() && !branch.get().isBlank()) {
+            // --end-of-options: a branch name that looks like an option must
+            // reach git as a branch name, never be parsed as a flag.
             List<String> branchCommand = List.of(
                     git.toString(), "-C", repositoryRoot.toString(),
-                    "branch", "-D", branch.get());
+                    "branch", "-D", "--end-of-options", branch.get());
             ProcessResult deleted = run(branchCommand);
             if (deleted.exitCode() != 0) {
-                throw new GitCommandFailedException(branchCommand, deleted.exitCode(), excerpt(deleted.stderr()));
+                throw new GitCommandFailedException(branchCommand, deleted.exitCode(), ProcessRunner.excerpt(deleted.stderr()));
             }
         }
     }
 
     private static boolean samePath(Path a, Path b) {
         try {
-            return java.nio.file.Files.isSameFile(a, b);
+            return Files.isSameFile(a, b);
         } catch (IOException e) {
             return a.toAbsolutePath().normalize().equals(b.toAbsolutePath().normalize());
         }
@@ -215,66 +217,19 @@ public final class WorktreeService implements AutoCloseable {
         return List.copyOf(worktrees);
     }
 
-    // ---- process execution (mirrors GitStatusService.run) ----
-
-    private record ProcessResult(int exitCode, String stdout, String stderr) {
-    }
+    // ---- process execution (shared ProcessRunner, git-flavored failure translation) ----
 
     private static ProcessResult run(List<String> command) {
-        Process process;
         try {
-            process = new ProcessBuilder(command).redirectErrorStream(false).start();
+            return ProcessRunner.run(command, null, PROCESS_TIMEOUT);
         } catch (IOException e) {
             throw new GitCommandFailedException(command, -1, e.getMessage() == null ? "" : e.getMessage());
-        }
-
-        // Drain stdout and stderr concurrently: reading one stream fully
-        // before the other risks a deadlock if the unread pipe's OS buffer
-        // fills first.
-        StreamReader stdoutReader = new StreamReader(process.getInputStream());
-        StreamReader stderrReader = new StreamReader(process.getErrorStream());
-        Thread stdoutThread = Thread.ofVirtual().start(stdoutReader);
-        Thread stderrThread = Thread.ofVirtual().start(stderrReader);
-
-        int exitCode;
-        try {
-            exitCode = process.waitFor();
-            stdoutThread.join();
-            stderrThread.join();
+        } catch (ProcessTimeoutException e) {
+            throw new GitCommandFailedException(command, -1,
+                    "timed out after " + PROCESS_TIMEOUT.toSeconds() + "s (killed)");
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            process.destroyForcibly();
             throw new GitCommandFailedException(command, -1, "interrupted while waiting for git");
         }
-
-        return new ProcessResult(exitCode, stdoutReader.result(), stderrReader.result());
-    }
-
-    private static final class StreamReader implements Runnable {
-        private final InputStream stream;
-        private volatile String result = "";
-
-        StreamReader(InputStream stream) {
-            this.stream = stream;
-        }
-
-        @Override
-        public void run() {
-            try {
-                result = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
-            } catch (IOException e) {
-                result = "";
-                LOG.log(Level.DEBUG, "Failed reading git process stream", e);
-            }
-        }
-
-        String result() {
-            return result;
-        }
-    }
-
-    private static String excerpt(String text) {
-        String trimmed = text.strip();
-        return trimmed.length() <= STDERR_EXCERPT_LIMIT ? trimmed : trimmed.substring(0, STDERR_EXCERPT_LIMIT) + "...";
     }
 }

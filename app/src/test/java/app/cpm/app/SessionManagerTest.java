@@ -67,6 +67,16 @@ class SessionManagerTest {
         }
     }
 
+    /**
+     * State persistence is asynchronous now (see {@link
+     * ApplicationStateStore}): mutators return once the in-memory state is
+     * swapped and a background writer saves later. Tests asserting on what
+     * reached the repository must flush first.
+     */
+    private static void flushState(InMemoryStateRepository stateRepository) {
+        ApplicationStateStore.forRepository(stateRepository).flush();
+    }
+
     private SessionManager newManager(InMemoryStateRepository stateRepository) {
         backgroundExecutor = Executors.newVirtualThreadPerTaskExecutor();
         ClaudeCapabilityService capabilityService =
@@ -201,7 +211,8 @@ class SessionManagerTest {
         assertTrue(blocked.isPresent());
         assertTrue(blocked.get() instanceof SessionOpenResult.MissingWorkingDirectory);
         assertEquals(SessionStatus.MISSING_WORKING_DIRECTORY, blocked.get().session().status());
-        // The status change must have been persisted immediately.
+        // The status change must have been persisted (asynchronously; flush first).
+        flushState(stateRepository);
         assertEquals(SessionStatus.MISSING_WORKING_DIRECTORY,
                 stateRepository.savedState().sessions().get(0).status());
     }
@@ -240,6 +251,7 @@ class SessionManagerTest {
 
         assertEquals(replacement.toAbsolutePath().normalize(), updated.workingDirectory());
         assertEquals(SessionStatus.INACTIVE, updated.status());
+        flushState(stateRepository);
         assertEquals(replacement.toAbsolutePath().normalize(),
                 stateRepository.savedState().sessions().get(0).workingDirectory());
     }
@@ -253,6 +265,7 @@ class SessionManagerTest {
         ManagedClaudeSession renamed = manager.renameSession(session.id(), "new name");
 
         assertEquals("new name", renamed.displayName());
+        flushState(stateRepository);
         assertEquals("new name", stateRepository.savedState().sessions().get(0).displayName());
     }
 
@@ -266,12 +279,14 @@ class SessionManagerTest {
 
         assertEquals(PrState.OPEN, updated.prState());
         assertEquals(129, updated.prNumber().orElseThrow());
+        flushState(stateRepository);
         assertEquals(PrState.OPEN, stateRepository.savedState().sessions().get(0).prState());
         assertEquals(129, stateRepository.savedState().sessions().get(0).prNumber().orElseThrow());
     }
 
     private static final class InMemoryStateRepository implements ApplicationStateRepository {
-        private ApplicationState state;
+        // volatile: saves arrive on the state store's background writer thread.
+        private volatile ApplicationState state;
         private final List<ApplicationState> saves = new ArrayList<>();
 
         InMemoryStateRepository(List<ManagedClaudeSession> sessions) {

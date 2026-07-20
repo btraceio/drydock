@@ -13,12 +13,9 @@
     -fx-background-color: -cpm-chrome;
     -fx-font-size: 13px;
     -fx-text-fill: -cpm-text;
-    /* System UI font; JetBrains Mono is opted into via .mono. */
+    /* System UI font; monospace areas opt in per-rule with the shared
+       "JetBrains Mono", "Menlo", monospace stack. */
     -fx-font-family: "System";
-}
-
-.mono {
-    -fx-font-family: "JetBrains Mono";
 }
 
 .label {
@@ -137,6 +134,19 @@
     -fx-effect: dropshadow(gaussian, -cpm-accent-soft, 3, 1.0, 0, 0);
 }
 
+/* Slim strip shown in the sidebar's place while it is collapsed (⌘0):
+ * an expand button plus the shortcut hint underneath it. */
+.sidebar-rail {
+    -fx-background-color: -cpm-sidebar;
+    -fx-padding: 8 3 8 3;
+    -fx-border-color: transparent -cpm-border transparent transparent;
+    -fx-border-width: 0 1 0 0;
+}
+.rail-hint {
+    -fx-font-size: 10px;
+    -fx-text-fill: -cpm-text-faint;
+}
+
 /* The repository/session tree. Custom cells draw everything; strip all
  * built-in TreeView chrome (disclosure arrows are our own carets). */
 .repo-tree {
@@ -181,13 +191,13 @@
 }
 
 .repo-branch {
-    -fx-font-family: "JetBrains Mono";
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
     -fx-font-size: 10.5px;
     -fx-text-fill: -cpm-text-dim;
 }
 
 .repo-count {
-    -fx-font-family: "JetBrains Mono";
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
     -fx-font-size: 10px;
     -fx-text-fill: -cpm-text-faint;
 }
@@ -236,7 +246,7 @@
 }
 
 .session-meta {
-    -fx-font-family: "JetBrains Mono";
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
     -fx-font-size: 10px;
     -fx-text-fill: -cpm-text-faint;
 }
@@ -318,7 +328,7 @@
 }
 
 .tab-repo-label {
-    -fx-font-family: "JetBrains Mono";
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
     -fx-font-size: 9.5px;
     -fx-text-fill: -cpm-text-faint;
 }
@@ -414,7 +424,7 @@
 }
 
 .session-meta-line {
-    -fx-font-family: "JetBrains Mono";
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
     -fx-font-size: 11px;
     -fx-text-fill: -cpm-text-dim;
 }
@@ -475,7 +485,7 @@
 }
 
 .picker-sub {
-    -fx-font-family: "JetBrains Mono";
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
     -fx-font-size: 11.5px;
     -fx-text-fill: -cpm-text-dim;
 }
@@ -528,7 +538,7 @@
     -fx-min-height: 34px; -fx-max-height: 34px;
     -fx-background-color: -cpm-hover;
     -fx-background-radius: 9px;
-    -fx-font-family: "JetBrains Mono";
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
     -fx-font-size: 13px;
     -fx-font-weight: 600;
     -fx-text-fill: -cpm-text-dim;
@@ -546,13 +556,13 @@
 }
 
 .conv-meta {
-    -fx-font-family: "JetBrains Mono";
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
     -fx-font-size: 11px;
     -fx-text-fill: -cpm-text-dim;
 }
 
 .resume-badge {
-    -fx-font-family: "JetBrains Mono";
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
     -fx-font-size: 10px;
     -fx-font-weight: 600;
     -fx-text-fill: -cpm-accent;
@@ -584,7 +594,7 @@
 }
 
 .keycap {
-    -fx-font-family: "JetBrains Mono";
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
     -fx-font-size: 10.5px;
     -fx-font-weight: 600;
     -fx-text-fill: -cpm-text-dim;
@@ -641,6 +651,13 @@
     -fx-effect: dropshadow(gaussian, -cpm-accent-soft, 3, 1.0, 0, 0);
 }
 
+/* The clone modal's result list scroll pane: fully transparent chrome. */
+.gh-results-scroll,
+.gh-results-scroll > .viewport {
+    -fx-background-color: transparent;
+    -fx-background: transparent;
+}
+
 .gh-row {
     -fx-background-radius: 11px;
     -fx-padding: 10 12 10 10;
@@ -652,7 +669,7 @@
 }
 
 .gh-name {
-    -fx-font-family: "JetBrains Mono";
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
     -fx-font-size: 13px;
     -fx-font-weight: 600;
     -fx-text-fill: -cpm-text;
@@ -664,7 +681,7 @@
 }
 
 .gh-meta {
-    -fx-font-family: "JetBrains Mono";
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
     -fx-font-size: 10.5px;
     -fx-text-fill: -cpm-text-faint;
 }

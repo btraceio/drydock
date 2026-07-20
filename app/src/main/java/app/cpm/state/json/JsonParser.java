@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Supplier;
 
 /**
  * A minimal recursive-descent JSON parser. See {@link JsonValue}'s Javadoc
@@ -15,8 +16,18 @@ import java.util.Map;
  */
 public final class JsonParser {
 
+    /**
+     * Maximum object/array nesting. This parser now also sees untrusted
+     * input (GitHub API responses, gh output, claude transcripts); without
+     * a bound, deep nesting turns the recursive descent into a
+     * {@link StackOverflowError} that escapes {@code catch
+     * (JsonParseException)} recovery paths.
+     */
+    private static final int MAX_DEPTH = 256;
+
     private final String text;
     private int pos;
+    private int depth;
 
     private JsonParser(String text) {
         this.text = text;
@@ -40,13 +51,23 @@ public final class JsonParser {
         }
         char c = text.charAt(pos);
         return switch (c) {
-            case '{' -> parseObject();
-            case '[' -> parseArray();
+            case '{' -> parseNested(this::parseObject);
+            case '[' -> parseNested(this::parseArray);
             case '"' -> new JsonValue.JsonString(parseStringLiteral());
             case 't', 'f' -> parseBoolean();
             case 'n' -> parseNull();
             default -> parseNumber();
         };
+    }
+
+    private JsonValue parseNested(Supplier<JsonValue> container) {
+        if (depth >= MAX_DEPTH) {
+            throw new JsonParseException("Nesting deeper than " + MAX_DEPTH + " levels at offset " + pos);
+        }
+        depth++;
+        JsonValue value = container.get();
+        depth--;
+        return value;
     }
 
     private JsonValue.JsonObject parseObject() {

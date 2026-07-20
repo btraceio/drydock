@@ -33,18 +33,20 @@ tasks.register("runtimeImage") {
 }
 
 // Plan section 6.3 also lists appImage / macApp / dmg as required
-// top-level command aliases. Per plan section 3 ("Initial Scope") and
-// section 28 "Task 8" ("Do not implement project management until this
-// report is complete"), packaging beyond the raw jlink image (macOS `.app`
-// wrapping, ad hoc/Developer ID signing, `.dmg` production -- plan
-// section 23.3/23.4 Stages 3-6) is out of scope for this phase. These are
-// registered now, as required, but as explicit no-ops that fail with a
-// clear message rather than being silently omitted or doing something
-// half-finished -- see docs/runtime-image.md "Packaging implications" for
-// what each one will need to do once its stage is reached.
+// top-level command aliases. appImage/macApp are now real (Stage 3, plan
+// section 23.4): a self-contained ad-hoc-signed .app bundle assembled by
+// :app:appImage at build/dist/Claude Project Manager.app. dmg (Stage 4)
+// and Developer ID signing/notarization (Stages 5-6) remain explicit
+// no-ops that fail with a clear message -- see docs/runtime-image.md
+// "Packaging implications".
+listOf("appImage", "macApp").forEach { name ->
+    tasks.register(name) {
+        group = "distribution"
+        description = "Alias for :app:appImage (Stage 3: self-contained macOS .app bundle)."
+        dependsOn(":app:appImage")
+    }
+}
 listOf(
-    "appImage" to "Stage 3 (plan section 23.4): produce an unsigned .app bundle.",
-    "macApp" to "Stage 3 (plan section 23.4): produce an unsigned .app bundle (alias).",
     "dmg" to "Stage 4 (plan section 23.4): produce a local .dmg from the .app bundle."
 ).forEach { (name, futureWork) ->
     tasks.register(name) {
@@ -92,12 +94,26 @@ tasks.register<Exec>("buildGhosttyNative") {
     description = "Builds libghostty (macOS arm64 + x86_64) via scripts/build-ghostty.sh."
 
     inputs.file("${rootDir}/scripts/build-ghostty.sh")
-    inputs.files(
-        fileTree("${rootDir}/third_party/ghostty") {
-            exclude(".zig-cache/**", "zig-out/**", "macos/GhosttyKit.xcframework/**")
-        }
-    )
-    outputs.dir(ghosttyNativeOutputDir)
+    // Fingerprint the submodule by its pinned commit hash rather than by
+    // hashing its entire working tree (tens of thousands of files, which
+    // made every up-to-date check slow). Local uncommitted edits inside
+    // third_party/ghostty therefore do NOT retrigger this task -- commit
+    // (or run with --rerun-tasks) to pick them up.
+    val ghosttyCommit = providers.exec {
+        commandLine("git", "-C", "${rootDir}/third_party/ghostty", "rev-parse", "HEAD")
+    }.standardOutput.asText.map { it.trim() }
+    inputs.property("ghosttyCommit", ghosttyCommit)
+
+    // Outputs are the specific files/dirs the script produces, NOT all of
+    // build/native: buildNativeHost writes libcpmterminalhost.dylib into
+    // the same build/native/<arch>/ directories, and claiming the whole
+    // root as this task's output made the two tasks' outputs overlap,
+    // silently disabling caching and up-to-date checks for both.
+    listOf("macos-x86_64", "macos-arm64").forEach { arch ->
+        outputs.file(ghosttyNativeOutputDir.map { it.dir(arch).file("libghostty.dylib") })
+        outputs.file(ghosttyNativeOutputDir.map { it.dir(arch).file("libghostty.a") })
+    }
+    outputs.dir(ghosttyNativeOutputDir.map { it.dir("include") })
     outputs.file(ghosttyGeneratedDir.map { it.file("ghostty-version.properties") })
 
     // System.getenv("ZIG_BIN") lets a developer pin a different Zig 0.15.x

@@ -35,6 +35,7 @@ import javafx.application.Platform;
 import javafx.collections.ListChangeListener;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
+import javafx.scene.Node;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
 import javafx.scene.control.ButtonType;
@@ -44,6 +45,7 @@ import javafx.scene.control.MenuItem;
 import javafx.scene.control.ProgressIndicator;
 import javafx.scene.control.Tab;
 import javafx.scene.control.TabPane;
+import javafx.scene.control.TextInputControl;
 import javafx.scene.control.TextInputDialog;
 import javafx.scene.control.Tooltip;
 import javafx.scene.layout.BorderPane;
@@ -74,8 +76,8 @@ import java.util.function.Supplier;
 /**
  * The main pane (design handoff section 4): a {@link TabPane} of terminal
  * session tabs (two-line headers, status dots, inline rename, a trailing
- * "+" repo-picker button) stacked with the {@link ResumePickerView}, which
- * shows whenever no tab is selected (no open sessions, or after Back).
+ * "+" repo-picker button) stacked with an empty-state pane, which shows
+ * whenever no tab is selected (no open sessions, or after Back).
  *
  * <p>Every session-opening path (new session, resume, resume-conversation)
  * and every session-closing path (tab close button, sidebar quick actions,
@@ -179,9 +181,9 @@ public final class MainWorkspace extends BorderPane {
         tabPane.getStyleClass().add("session-tabs");
         tabPane.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE); // tabs carry their own close button
 
-        // The design's resume picker (ResumePickerView) is parked for now:
-        // sessions are already persisted per repository in the sidebar, so
-        // the default no-tab state is a plain empty pane instead.
+        // The design's resume picker is parked for now: sessions are
+        // already persisted per repository in the sidebar, so the default
+        // no-tab state is a plain empty pane instead.
         emptyState = buildEmptyState();
 
         newTabButton.getStyleClass().add("new-tab-button");
@@ -359,7 +361,7 @@ public final class MainWorkspace extends BorderPane {
 
     /** The session backing the currently selected tab, if any (drives the sidebar's active row). */
     public Optional<ManagedSessionId> activeSessionId() {
-        return currentlySelected().map(open -> open.sessionId);
+        return currentlySelected().map(OpenSessionTab::sessionId);
     }
 
     /** Back / Esc from a session: deselect the tab, revealing the resume picker (handoff section 6). */
@@ -429,12 +431,16 @@ public final class MainWorkspace extends BorderPane {
 
     /** As {@link #openNewSession(Repository)}, optionally typing a task into the fresh session's terminal. */
     public void openNewSession(Repository repository, Optional<String> task) {
-        OpenSessionTab placeholderTab = createOpenSessionTab(ManagedSessionId.newId(), "Starting...",
+        // Prepared (not just a fresh id) so the placeholder is keyed under
+        // the REAL session id: the launch persists the session almost
+        // immediately, and a sidebar resume racing the launch must find
+        // this pending tab instead of starting a second surface.
+        ManagedClaudeSession prepared = sessionManager.prepareSession(repository);
+        OpenSessionTab placeholderTab = showPendingTab(prepared.id(), "Starting...",
                 Optional.of(repository), repository.root());
-        addAndSelect(placeholderTab);
 
         double scale = stage.getOutputScaleX();
-        sessionManager.createSession(repository, placeholderTab.app(), placeholderTab.host(), scale)
+        sessionManager.launchSession(prepared, placeholderTab.app(), placeholderTab.host(), scale)
                 .whenComplete((result, ex) -> Platform.runLater(() -> {
                     handleOpenResult(placeholderTab, result, ex);
                     if (ex == null && result instanceof SessionOpenResult.Opened && task.isPresent()) {
@@ -485,13 +491,14 @@ public final class MainWorkspace extends BorderPane {
      */
     public void openNewWorktreeSession(Repository repository, String branch, Path worktreeRoot,
                                        Optional<String> task) {
-        OpenSessionTab placeholderTab = createOpenSessionTab(ManagedSessionId.newId(), branch,
+        // Keyed under the real session id for the same launch-race reason
+        // as openNewSession.
+        ManagedClaudeSession prepared = sessionManager.prepareWorktreeSession(repository, branch, worktreeRoot);
+        OpenSessionTab placeholderTab = showPendingTab(prepared.id(), branch,
                 Optional.of(repository), worktreeRoot);
-        addAndSelect(placeholderTab);
 
         double scale = stage.getOutputScaleX();
-        sessionManager.createWorktreeSession(repository, branch, worktreeRoot, placeholderTab.app(),
-                        placeholderTab.host(), scale)
+        sessionManager.launchSession(prepared, placeholderTab.app(), placeholderTab.host(), scale)
                 .whenComplete((result, ex) -> Platform.runLater(() -> {
                     handleOpenResult(placeholderTab, result, ex);
                     if (ex == null && result instanceof SessionOpenResult.Opened && task.isPresent()) {
@@ -513,10 +520,8 @@ public final class MainWorkspace extends BorderPane {
             return;
         }
 
-        OpenSessionTab placeholderTab = createOpenSessionTab(session.id(), session.displayName(),
+        OpenSessionTab placeholderTab = showPendingTab(session.id(), session.displayName(),
                 repositoryFor(session), session.workingDirectory());
-        pendingTabs.put(session.id(), placeholderTab);
-        addAndSelect(placeholderTab);
 
         double scale = stage.getOutputScaleX();
         sessionManager.resumeSession(session.id(), placeholderTab.app(), placeholderTab.host(), scale)
@@ -661,17 +666,21 @@ public final class MainWorkspace extends BorderPane {
         }
 
         // Start fresh: reuse the managed session row, new claude conversation.
-        OpenSessionTab placeholderTab = createOpenSessionTab(session.id(), session.displayName(),
+        OpenSessionTab placeholderTab = showPendingTab(session.id(), session.displayName(),
                 repositoryFor(session), session.workingDirectory());
-        pendingTabs.put(session.id(), placeholderTab);
-        addAndSelect(placeholderTab);
         double scale = stage.getOutputScaleX();
         sessionManager.startFreshConversation(session.id(), placeholderTab.app(), placeholderTab.host(), scale)
                 .whenComplete((result, ex) -> Platform.runLater(() -> handleOpenResult(placeholderTab, result, ex)));
     }
 
     private void attachOpenedSession(OpenSessionTab placeholderTab, SessionOpenResult.Opened opened) {
-        pendingTabs.remove(opened.session().id(), placeholderTab);
+        // De-register under the id the placeholder was registered with,
+        // then adopt the opened session's id before keying openTabs. Since
+        // the prepare/launch split every placeholder is already keyed under
+        // the real id, so adoption is a defensive no-op -- kept so an id
+        // mismatch can never strand a tab in the maps again.
+        pendingTabs.remove(placeholderTab.sessionId(), placeholderTab);
+        placeholderTab.adoptSessionId(opened.session().id());
         placeholderTab.attachSurface(opened.surface());
         placeholderTab.setDisplayName(opened.session().displayName());
         placeholderTab.setStatus(opened.session().status());
@@ -701,34 +710,31 @@ public final class MainWorkspace extends BorderPane {
             return;
         }
         tab.updatePrChip(session.prState(), session.prNumber());
+        record Branches(String branch, String base) { }
         gitStatusService.getStatus(worktreeRoot).thenCombine(gitStatusService.getStatus(repository.root()),
-                        (worktreeStatus, baseStatus) -> new String[] {
-                                branchNameOf(worktreeStatus), branchNameOf(baseStatus)})
+                        (worktreeStatus, baseStatus) ->
+                                new Branches(branchNameOf(worktreeStatus), branchNameOf(baseStatus)))
                 .whenComplete((branches, ex) -> Platform.runLater(() -> {
                     if (ex != null || !openTabs.containsKey(sessionId)) {
                         return;
                     }
-                    String branch = branches[0];
-                    String base = branches[1];
-                    tab.configureWorktree(branch, base, worktreeRoot,
-                            () -> showFinishPanel(sessionId, worktreeRoot, branch, base));
-                    refreshWorktreeChips(tab, sessionId, worktreeRoot, base);
+                    tab.configureWorktree(branches.branch(), branches.base(), worktreeRoot,
+                            () -> showFinishPanel(sessionId, worktreeRoot, branches.branch(), branches.base()));
+                    refreshWorktreeChips(tab, sessionId, worktreeRoot, branches.base());
                 }));
     }
 
     /** Refreshes the ↑ahead + dirty/clean chips from the worktree's current git state. */
     private void refreshWorktreeChips(OpenSessionTab tab, ManagedSessionId sessionId, Path worktreeRoot,
                                       String base) {
+        record StatusAndSummary(GitStatus status, GitChangeSummary summary) { }
         gitStatusService.getStatus(worktreeRoot)
-                .thenCombine(gitStatusService.getChangeSummary(worktreeRoot, base),
-                        (status, summary) -> new Object[] {status, summary})
+                .thenCombine(gitStatusService.getChangeSummary(worktreeRoot, base), StatusAndSummary::new)
                 .whenComplete((pair, ex) -> Platform.runLater(() -> {
                     if (ex != null || !openTabs.containsKey(sessionId)) {
                         return;
                     }
-                    GitStatus status = (GitStatus) pair[0];
-                    GitChangeSummary summary = (GitChangeSummary) pair[1];
-                    tab.updateWorktreeStatus(status.dirty(), summary.commitsAhead());
+                    tab.updateWorktreeStatus(pair.status().dirty(), pair.summary().commitsAhead());
                 }));
     }
 
@@ -765,11 +771,13 @@ public final class MainWorkspace extends BorderPane {
                         ? ghCliService.viewPr(worktreeRoot, branch)
                         : CompletableFuture.completedFuture(Optional.empty());
 
+        record StatusAndSummary(GitStatus status, GitChangeSummary summary) { }
+        record Inspection(GitStatus status, GitChangeSummary summary, Optional<GhCliService.PrInfo> prInfo) { }
         gitStatusService.getStatus(worktreeRoot)
                 .thenCombine(gitStatusService.getChangeSummary(worktreeRoot, base)
                                 .exceptionally(ex -> new GitChangeSummary(0, List.of())),
-                        (status, summary) -> new Object[] {status, summary})
-                .thenCombine(prRefresh, (pair, prInfo) -> new Object[] {pair[0], pair[1], prInfo})
+                        StatusAndSummary::new)
+                .thenCombine(prRefresh, (pair, prInfo) -> new Inspection(pair.status(), pair.summary(), prInfo))
                 .whenComplete((data, ex) -> Platform.runLater(() -> {
                     if (busy.getParent() == null) {
                         return; // the user dismissed the busy modal; don't pop the panel open later
@@ -779,10 +787,9 @@ public final class MainWorkspace extends BorderPane {
                         UiErrors.show("Could not inspect the worktree", ex);
                         return;
                     }
-                    GitStatus status = (GitStatus) data[0];
-                    GitChangeSummary summary = (GitChangeSummary) data[1];
-                    @SuppressWarnings("unchecked")
-                    Optional<GhCliService.PrInfo> prInfo = (Optional<GhCliService.PrInfo>) data[2];
+                    GitStatus status = data.status();
+                    GitChangeSummary summary = data.summary();
+                    Optional<GhCliService.PrInfo> prInfo = data.prInfo();
 
                     ManagedClaudeSession current = sessionById(sessionId).orElse(null);
                     if (current == null) {
@@ -924,7 +931,9 @@ public final class MainWorkspace extends BorderPane {
                 + " run git worktree remove " + worktreeRoot + " (add --force if it refuses) and delete the branch "
                 + "with git branch -D " + branch + ", then confirm.");
         pollHandoff(sessionId,
-                () -> CompletableFuture.completedFuture(!Files.exists(worktreeRoot)),
+                // The existence probe is filesystem I/O; keep it off the FX
+                // thread (the poll's PauseTransition fires the probe there).
+                () -> CompletableFuture.supplyAsync(() -> !Files.exists(worktreeRoot)),
                 () -> {
                     tab.showHandoffDone("Removed");
                     PauseTransition removeRow = new PauseTransition(Duration.seconds(1.2));
@@ -987,7 +996,10 @@ public final class MainWorkspace extends BorderPane {
         if (attempt >= HANDOFF_POLL_MAX_ATTEMPTS) {
             OpenSessionTab tab = openTabs.get(sessionId);
             if (tab != null) {
+                // Say WHY the pill vanished -- a silent Finish-button return
+                // reads as "it worked" when nothing was ever confirmed.
                 tab.restoreFinishButton();
+                tab.showTransientNotice("⏺ Hand-off not confirmed — check the terminal, then Finish ▸ again.");
             }
             return;
         }
@@ -1005,13 +1017,21 @@ public final class MainWorkspace extends BorderPane {
         wait.play();
     }
 
-    /** macOS-native URL open (the app is macOS-only; ProcessBuilder avoids an AWT dependency). */
+    /**
+     * macOS-native URL open (the app is macOS-only; ProcessBuilder avoids an
+     * AWT dependency). The spawn runs off-thread per AGENTS.md -- {@code
+     * open} returns instantly on success, so the browser appearing IS the
+     * progress indication; a failure surfaces as an error alert.
+     */
     private void openInBrowser(String url) {
-        try {
-            new ProcessBuilder("open", url).start();
-        } catch (IOException e) {
-            LOG.log(Level.WARNING, "Could not open " + url, e);
-        }
+        Thread.ofVirtual().start(() -> {
+            try {
+                new ProcessBuilder("open", url).start();
+            } catch (IOException e) {
+                LOG.log(Level.WARNING, "Could not open " + url, e);
+                Platform.runLater(() -> UiErrors.show("Could not open " + url, e));
+            }
+        });
     }
 
     /** Plan section 11.2 / 20: a real, specific dialog for a session whose working directory vanished. */
@@ -1059,7 +1079,7 @@ public final class MainWorkspace extends BorderPane {
     /** Closes a specific tab: the session's surface first, then always the tab itself. */
     private CompletableFuture<Void> closeTab(OpenSessionTab open) {
         open.showClosingState();
-        return sessionManager.closeSession(open.sessionId).thenRunAsync(() -> {
+        return sessionManager.closeSession(open.sessionId()).thenRunAsync(() -> {
             removeTab(open);
             onSessionsChanged.run();
         }, Platform::runLater);
@@ -1141,6 +1161,22 @@ public final class MainWorkspace extends BorderPane {
 
     // ---- Helpers ------------------------------------------------------------
 
+    /**
+     * Scene focus-owner hook (wired by {@code CpmApplication}). The
+     * terminal is a native NSView whose key monitor swallows keystrokes
+     * while it is the macOS first responder -- JavaFX moving ITS focus to a
+     * text input does not move the AppKit responder, so without this every
+     * text field in the app (sidebar filter, modals, review comments) went
+     * dead while a session tab was open. Releasing on text-input focus
+     * hands the responder back to the Glass view; the terminal re-takes it
+     * when clicked (mouse-button forwarding) or when its tab reappears.
+     */
+    public void onFocusOwnerChanged(Node owner) {
+        if (owner instanceof TextInputControl) {
+            currentlySelected().ifPresent(OpenSessionTab::releaseTerminalFocus);
+        }
+    }
+
     private Optional<OpenSessionTab> currentlySelected() {
         Tab selected = tabPane.getSelectionModel().getSelectedItem();
         return openTabs.values().stream().filter(open -> open.tab == selected).findFirst();
@@ -1161,10 +1197,27 @@ public final class MainWorkspace extends BorderPane {
         // OpenSessionTab.markSurfaceClosing()'s Javadoc.
         openTab.markSurfaceClosing();
         tabPane.getTabs().remove(openTab.tab);
-        openTabs.remove(openTab.sessionId, openTab);
-        pendingTabs.remove(openTab.sessionId, openTab);
-        exitRecorded.remove(openTab.sessionId);
+        openTabs.remove(openTab.sessionId(), openTab);
+        pendingTabs.remove(openTab.sessionId(), openTab);
+        exitRecorded.remove(openTab.sessionId());
         openTab.disposeNativeResources();
+    }
+
+    /**
+     * Creates a placeholder tab for an open/resume that is still in flight,
+     * registers it in {@link #pendingTabs}, and shows it. EVERY placeholder
+     * must go through here: an unregistered placeholder is invisible to
+     * {@link #hasOpenSessions()}, {@link #closeSession} and -- critically --
+     * the shutdown path {@link #closeAllSessions()}, leaking its native
+     * {@link GhosttyApp}/{@link CpmTerminalHost} pair.
+     * {@link #attachOpenedSession}/{@link #removeTab} de-register it.
+     */
+    private OpenSessionTab showPendingTab(ManagedSessionId sessionId, String displayName,
+                                          Optional<Repository> repository, Path searchRoot) {
+        OpenSessionTab placeholderTab = createOpenSessionTab(sessionId, displayName, repository, searchRoot);
+        pendingTabs.put(sessionId, placeholderTab);
+        addAndSelect(placeholderTab);
+        return placeholderTab;
     }
 
     /**
@@ -1183,11 +1236,14 @@ public final class MainWorkspace extends BorderPane {
         GhosttyApp.ensureProcessInitialized(lookup);
 
         OpenSessionTab[] holder = new OpenSessionTab[1];
-        GhosttyApp app = GhosttyApp.create(lookup, () -> Platform.runLater(() -> {
+        // The wakeup coalescer already delivers on the FX thread with at most
+        // one pending runnable; a second Platform.runLater here would defeat
+        // that coalescing.
+        GhosttyApp app = GhosttyApp.create(lookup, () -> {
             if (holder[0] != null) {
                 holder[0].tickAndDraw();
             }
-        }), Optional.of(TerminalThemes.configFileFor(themeProvider.get())));
+        }, Optional.of(TerminalThemes.configFileFor(themeProvider.get())));
         CpmTerminalHost host;
         try {
             host = CpmTerminalHost.createForCurrentWindow();
@@ -1202,7 +1258,10 @@ public final class MainWorkspace extends BorderPane {
         // to": if bookkeeping ever disagrees (e.g. a duplicate-open bug),
         // the clicked tab must still disappear instead of surviving forever.
         openTab.setOnCloseRequested(() -> closeTab(openTab));
-        openTab.setOnRenamed(name -> renameSession(sessionId, name));
+        // Read the id through the tab, not the constructor parameter: for a
+        // brand-new session the tab adopts SessionManager's real id later
+        // (see attachOpenedSession) and the rename must target THAT id.
+        openTab.setOnRenamed(name -> renameSession(openTab.sessionId(), name));
         openTab.setOnBack(this::showPicker);
         openTab.setOnPreviousSessionTab(this::selectPreviousSessionTab);
         openTab.setOnNextSessionTab(this::selectNextSessionTab);
@@ -1212,8 +1271,11 @@ public final class MainWorkspace extends BorderPane {
         // Explorer's diff overlay and the Review tab both read it.
         DiffOverlay overlay = new DiffOverlay(changedLineService, searchRoot);
         openTab.setExplorerFactory(() -> new SessionExplorerView(searchRoot, searchService, overlay));
+        // openTab.sessionId() rather than the constructor parameter: the
+        // factory runs lazily (first Review open), by which time a created
+        // session's tab has adopted the real id -- annotations must key on it.
         repository.ifPresent(repo -> openTab.setReviewFactory(() -> new ReviewView(
-                sessionId, searchRoot, repo.root(), diffService, changedLineService, gitStatusService,
+                openTab.sessionId(), searchRoot, repo.root(), diffService, changedLineService, gitStatusService,
                 annotationStore, openTab::sendPrompt, new ReviewView.ExplorerBridge() {
                     @Override
                     public void openFileAtLine(Path relativeFile, int line) {

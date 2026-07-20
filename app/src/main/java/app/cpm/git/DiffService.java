@@ -1,11 +1,12 @@
 package app.cpm.git;
 
+import app.cpm.process.ProcessResult;
+import app.cpm.process.ProcessRunner;
+import app.cpm.process.ProcessTimeoutException;
+
 import java.io.IOException;
-import java.io.InputStream;
-import java.lang.System.Logger;
-import java.lang.System.Logger.Level;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -27,10 +28,8 @@ import java.util.concurrent.Executors;
  */
 public final class DiffService implements AutoCloseable {
 
-    private static final Logger LOG = System.getLogger(DiffService.class.getName());
-
-    /** Excerpt length cap for stderr embedded in error messages (plan section 20). */
-    private static final int STDERR_EXCERPT_LIMIT = 2000;
+    /** Every command here is a quick read-only query; a hung git must not park futures forever. */
+    private static final Duration PROCESS_TIMEOUT = Duration.ofSeconds(15);
 
     private final GitExecutableLocator locator;
     private final ExecutorService executor;
@@ -81,16 +80,18 @@ public final class DiffService implements AutoCloseable {
             case UPSTREAM -> "@{upstream}...HEAD";
             case BASE -> baseBranch + "...HEAD";
         };
+        // --end-of-options: a branch name that looks like an option must
+        // reach git as a revision, never be parsed as a flag.
         List<String> command = List.of(
                 git.toString(), "-C", checkoutRoot.toString(),
-                "diff", "--no-color", "--no-ext-diff", range);
+                "diff", "--no-color", "--no-ext-diff", "--end-of-options", range);
 
         ProcessResult result = run(command);
         if (result.exitCode() != 0) {
             if (result.stderr().toLowerCase(Locale.ROOT).contains("not a git repository")) {
                 throw new NotAGitRepositoryException(checkoutRoot);
             }
-            throw new GitCommandFailedException(command, result.exitCode(), excerpt(result.stderr()));
+            throw new GitCommandFailedException(command, result.exitCode(), ProcessRunner.excerpt(result.stderr()));
         }
 
         // Working-tree scope tags each file with whether (part of) its
@@ -103,17 +104,20 @@ public final class DiffService implements AutoCloseable {
     }
 
     private Set<String> stagedPaths(Path git, Path checkoutRoot) {
+        // -z: NUL-separated raw paths. Without it git C-quotes any
+        // non-ASCII path and the contains() check against the diff's plain
+        // path text would silently miss it.
         List<String> command = List.of(
                 git.toString(), "-C", checkoutRoot.toString(),
-                "diff", "--cached", "--name-only");
+                "diff", "--cached", "--name-only", "-z");
         ProcessResult result = run(command);
         if (result.exitCode() != 0) {
             return Set.of();
         }
         Set<String> paths = new HashSet<>();
-        for (String line : result.stdout().split("\n")) {
-            if (!line.isBlank()) {
-                paths.add(line.strip());
+        for (String entry : result.stdout().split("\\u0000")) {
+            if (!entry.isEmpty()) {
+                paths.add(entry);
             }
         }
         return paths;
@@ -248,63 +252,19 @@ public final class DiffService implements AutoCloseable {
         }
     }
 
-    // ---- process execution (mirrors GitStatusService.run) ----
-
-    private record ProcessResult(int exitCode, String stdout, String stderr) {
-    }
+    // ---- process execution (shared ProcessRunner, git-flavored failure translation) ----
 
     private static ProcessResult run(List<String> command) {
-        Process process;
         try {
-            process = new ProcessBuilder(command).redirectErrorStream(false).start();
+            return ProcessRunner.run(command, null, PROCESS_TIMEOUT);
         } catch (IOException e) {
             throw new GitCommandFailedException(command, -1, e.getMessage() == null ? "" : e.getMessage());
-        }
-
-        StreamReader stdoutReader = new StreamReader(process.getInputStream());
-        StreamReader stderrReader = new StreamReader(process.getErrorStream());
-        Thread stdoutThread = Thread.ofVirtual().start(stdoutReader);
-        Thread stderrThread = Thread.ofVirtual().start(stderrReader);
-
-        int exitCode;
-        try {
-            exitCode = process.waitFor();
-            stdoutThread.join();
-            stderrThread.join();
+        } catch (ProcessTimeoutException e) {
+            throw new GitCommandFailedException(command, -1,
+                    "timed out after " + PROCESS_TIMEOUT.toSeconds() + "s (killed)");
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            process.destroyForcibly();
             throw new GitCommandFailedException(command, -1, "interrupted while waiting for git");
         }
-
-        return new ProcessResult(exitCode, stdoutReader.result(), stderrReader.result());
-    }
-
-    private static final class StreamReader implements Runnable {
-        private final InputStream stream;
-        private volatile String result = "";
-
-        StreamReader(InputStream stream) {
-            this.stream = stream;
-        }
-
-        @Override
-        public void run() {
-            try {
-                result = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
-            } catch (IOException e) {
-                result = "";
-                LOG.log(Level.DEBUG, "Failed reading git process stream", e);
-            }
-        }
-
-        String result() {
-            return result;
-        }
-    }
-
-    private static String excerpt(String text) {
-        String trimmed = text.strip();
-        return trimmed.length() <= STDERR_EXCERPT_LIMIT ? trimmed : trimmed.substring(0, STDERR_EXCERPT_LIMIT) + "...";
     }
 }

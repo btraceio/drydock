@@ -1,5 +1,8 @@
 package app.cpm.git;
 
+import app.cpm.process.ProcessResult;
+import app.cpm.process.ProcessRunner;
+import app.cpm.process.ProcessTimeoutException;
 import app.cpm.state.json.JsonParseException;
 import app.cpm.state.json.JsonParser;
 import app.cpm.state.json.JsonValue;
@@ -9,12 +12,11 @@ import app.cpm.state.json.JsonValue.JsonString;
 
 import java.io.File;
 import java.io.IOException;
-import java.io.InputStream;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
@@ -38,6 +40,9 @@ import java.util.regex.Pattern;
 public final class GhCliService implements AutoCloseable {
 
     private static final Logger LOG = System.getLogger(GhCliService.class.getName());
+
+    /** A network query, but bounded: a hung gh must not park the PR-chip future forever. */
+    private static final Duration PROCESS_TIMEOUT = Duration.ofSeconds(15);
 
     private static final List<Path> FALLBACK_LOCATIONS = List.of(
             Path.of("/usr/local/bin/gh"),
@@ -86,9 +91,22 @@ public final class GhCliService implements AutoCloseable {
         if (gh == null) {
             return Optional.empty();
         }
+        // gh has no --end-of-options; a branch name that looks like an option
+        // must never reach its argv as one.
+        if (branch.isBlank() || branch.startsWith("-")) {
+            LOG.log(Level.DEBUG, "Refusing gh pr view for option-like branch name '" + branch + "'");
+            return Optional.empty();
+        }
         ProcessResult result = runIn(root,
                 List.of(gh.toString(), "pr", "view", branch, "--json", "number,state,url"));
-        if (result == null || result.exitCode() != 0) {
+        if (result == null) {
+            return Optional.empty();
+        }
+        if (result.exitCode() != 0) {
+            // "no PR for this branch", not authenticated, and network trouble
+            // all land here; callers treat them alike, but leave a trace.
+            LOG.log(Level.DEBUG, "gh pr view for branch '" + branch + "' exited " + result.exitCode()
+                    + (result.stderr().isBlank() ? "" : ": " + ProcessRunner.excerpt(result.stderr())));
             return Optional.empty();
         }
         try {
@@ -159,57 +177,22 @@ public final class GhCliService implements AutoCloseable {
         }
     }
 
-    // ---- process execution (same shape as GitStatusService.run; null = could not run) ----
-
-    private record ProcessResult(int exitCode, String stdout, String stderr) { }
+    // ---- process execution (shared ProcessRunner; null = could not run, callers fall back to empty) ----
 
     /** Runs {@code command} with {@code workingDirectory} as cwd ({@code gh} resolves the repo from it). */
     private static ProcessResult runIn(Path workingDirectory, List<String> command) {
-        Process process;
         try {
-            process = new ProcessBuilder(command)
-                    .directory(workingDirectory.toFile())
-                    .redirectErrorStream(false)
-                    .start();
+            return ProcessRunner.run(command, workingDirectory, PROCESS_TIMEOUT);
         } catch (IOException e) {
+            LOG.log(Level.DEBUG, "Could not launch gh: " + e.getMessage());
             return null;
-        }
-        StreamReader stdoutReader = new StreamReader(process.getInputStream());
-        StreamReader stderrReader = new StreamReader(process.getErrorStream());
-        Thread stdoutThread = Thread.ofVirtual().start(stdoutReader);
-        Thread stderrThread = Thread.ofVirtual().start(stderrReader);
-        try {
-            int exitCode = process.waitFor();
-            stdoutThread.join();
-            stderrThread.join();
-            return new ProcessResult(exitCode, stdoutReader.result(), stderrReader.result());
+        } catch (ProcessTimeoutException e) {
+            LOG.log(Level.INFO, "gh timed out after " + PROCESS_TIMEOUT.toSeconds() + "s and was killed: "
+                    + String.join(" ", command));
+            return null;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            process.destroyForcibly();
             return null;
-        }
-    }
-
-    private static final class StreamReader implements Runnable {
-        private final InputStream stream;
-        private volatile String result = "";
-
-        StreamReader(InputStream stream) {
-            this.stream = stream;
-        }
-
-        @Override
-        public void run() {
-            try {
-                result = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
-            } catch (IOException e) {
-                result = "";
-                LOG.log(Level.DEBUG, "Failed reading gh process stream", e);
-            }
-        }
-
-        String result() {
-            return result;
         }
     }
 }

@@ -1,11 +1,12 @@
 package app.cpm.claude;
 
+import app.cpm.process.ProcessResult;
+import app.cpm.process.ProcessRunner;
+import app.cpm.process.ProcessTimeoutException;
+
 import java.io.IOException;
-import java.io.InputStream;
-import java.lang.System.Logger;
-import java.lang.System.Logger.Level;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
@@ -25,10 +26,8 @@ import java.util.regex.Pattern;
  */
 public final class ClaudeCapabilityService implements AutoCloseable {
 
-    private static final Logger LOG = System.getLogger(ClaudeCapabilityService.class.getName());
-
-    /** Excerpt length cap for stderr embedded in error messages (plan section 20). */
-    private static final int STDERR_EXCERPT_LIMIT = 2000;
+    /** Generous for a --version/--help probe (node startup can be slow), but never unbounded. */
+    private static final Duration PROCESS_TIMEOUT = Duration.ofSeconds(30);
 
     // Conservative flag-presence checks against `claude --help` output.
     // Word-boundary matches so e.g. "--resume" does not also match some
@@ -101,7 +100,7 @@ public final class ClaudeCapabilityService implements AutoCloseable {
         List<String> command = List.of(claude.toString(), arg);
         ProcessResult result = run(command);
         if (result.exitCode() != 0) {
-            throw new ClaudeVersionCheckFailedException(claude, result.exitCode(), excerpt(result.stderr()));
+            throw new ClaudeVersionCheckFailedException(claude, result.exitCode(), ProcessRunner.excerpt(result.stderr()));
         }
         return result;
     }
@@ -113,70 +112,22 @@ public final class ClaudeCapabilityService implements AutoCloseable {
         }
     }
 
-    // ---- process execution ----
-
-    private record ProcessResult(int exitCode, String stdout, String stderr) {
-    }
+    // ---- process execution (shared ProcessRunner, claude-flavored failure translation) ----
 
     private static ProcessResult run(List<String> command) {
-        Process process;
+        Path executable = Path.of(command.get(0));
         try {
-            process = new ProcessBuilder(command).redirectErrorStream(false).start();
+            return ProcessRunner.run(command, null, PROCESS_TIMEOUT);
         } catch (IOException e) {
             // The executable existed at locate()-time but could not actually be
             // launched (permissions changed, removed between check and use, etc).
-            Path executable = Path.of(command.get(0));
             throw new ClaudeVersionCheckFailedException(executable, -1, e.getMessage() == null ? "" : e.getMessage());
-        }
-
-        // Drain stdout and stderr concurrently: help/version output is small
-        // in practice, but reading one stream fully before the other risks a
-        // deadlock if the unread pipe's OS buffer fills first.
-        StreamReader stdoutReader = new StreamReader(process.getInputStream());
-        StreamReader stderrReader = new StreamReader(process.getErrorStream());
-        Thread stdoutThread = Thread.ofVirtual().start(stdoutReader);
-        Thread stderrThread = Thread.ofVirtual().start(stderrReader);
-
-        int exitCode;
-        try {
-            exitCode = process.waitFor();
-            stdoutThread.join();
-            stderrThread.join();
+        } catch (ProcessTimeoutException e) {
+            throw new ClaudeVersionCheckFailedException(executable, -1,
+                    "timed out after " + PROCESS_TIMEOUT.toSeconds() + "s (killed)");
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            process.destroyForcibly();
-            Path executable = Path.of(command.get(0));
             throw new ClaudeVersionCheckFailedException(executable, -1, "interrupted while waiting for claude");
         }
-
-        return new ProcessResult(exitCode, stdoutReader.result(), stderrReader.result());
-    }
-
-    private static final class StreamReader implements Runnable {
-        private final InputStream stream;
-        private volatile String result = "";
-
-        StreamReader(InputStream stream) {
-            this.stream = stream;
-        }
-
-        @Override
-        public void run() {
-            try {
-                result = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
-            } catch (IOException e) {
-                result = "";
-                LOG.log(Level.DEBUG, "Failed reading claude process stream", e);
-            }
-        }
-
-        String result() {
-            return result;
-        }
-    }
-
-    private static String excerpt(String text) {
-        String trimmed = text.strip();
-        return trimmed.length() <= STDERR_EXCERPT_LIMIT ? trimmed : trimmed.substring(0, STDERR_EXCERPT_LIMIT) + "...";
     }
 }

@@ -1,14 +1,19 @@
 package app.cpm.search;
 
 import app.cpm.git.GitExecutableLocator;
+import app.cpm.process.ProcessResult;
+import app.cpm.process.ProcessRunner;
+import app.cpm.process.ProcessTimeoutException;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.UncheckedIOException;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -41,6 +46,9 @@ public final class SessionSearchService implements AutoCloseable {
     private static final int MAX_MATCHES = 2000;
     private static final long MAX_TEXT_FILE_BYTES = 1024 * 1024;
     private static final List<String> SKIPPED_DIRECTORIES = List.of(".git", "node_modules", "build", ".gradle", "out", "target");
+
+    /** ls-files/grep are quick local queries; a hung git must not park the rail's futures forever. */
+    private static final Duration PROCESS_TIMEOUT = Duration.ofSeconds(15);
 
     /** One file-name search hit. */
     public record FileHit(Path file, Path relativePath) { }
@@ -218,7 +226,7 @@ public final class SessionSearchService implements AutoCloseable {
                         total++;
                     }
                 }
-            } catch (IOException | java.io.UncheckedIOException e) {
+            } catch (IOException | UncheckedIOException e) {
                 // Unreadable / non-UTF-8 file: skip, keep searching.
             }
         }
@@ -267,55 +275,21 @@ public final class SessionSearchService implements AutoCloseable {
         }
     }
 
-    // ---- process execution (same concurrent-drain shape as GitStatusService.run) ----
+    // ---- process execution (shared ProcessRunner; null = could not run, caller falls back to the walk) ----
 
-    private record ProcessResult(int exitCode, String stdout, String stderr) { }
-
-    /** Returns {@code null} when the process could not run at all (caller falls back to the walk). */
     private static ProcessResult run(List<String> command) {
-        Process process;
         try {
-            process = new ProcessBuilder(command).redirectErrorStream(false).start();
+            return ProcessRunner.run(command, null, PROCESS_TIMEOUT);
         } catch (IOException e) {
+            LOG.log(Level.DEBUG, "Could not launch git for session search: " + e.getMessage());
             return null;
-        }
-        StreamReader stdoutReader = new StreamReader(process.getInputStream());
-        StreamReader stderrReader = new StreamReader(process.getErrorStream());
-        Thread stdoutThread = Thread.ofVirtual().start(stdoutReader);
-        Thread stderrThread = Thread.ofVirtual().start(stderrReader);
-        int exitCode;
-        try {
-            exitCode = process.waitFor();
-            stdoutThread.join();
-            stderrThread.join();
+        } catch (ProcessTimeoutException e) {
+            LOG.log(Level.DEBUG, "Session search git command timed out and was killed: "
+                    + String.join(" ", command));
+            return null;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            process.destroyForcibly();
             return null;
-        }
-        return new ProcessResult(exitCode, stdoutReader.result(), stderrReader.result());
-    }
-
-    private static final class StreamReader implements Runnable {
-        private final InputStream stream;
-        private volatile String result = "";
-
-        StreamReader(InputStream stream) {
-            this.stream = stream;
-        }
-
-        @Override
-        public void run() {
-            try {
-                result = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
-            } catch (IOException e) {
-                result = "";
-                LOG.log(Level.DEBUG, "Failed reading search process stream", e);
-            }
-        }
-
-        String result() {
-            return result;
         }
     }
 }

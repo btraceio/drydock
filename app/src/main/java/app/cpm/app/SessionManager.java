@@ -30,6 +30,8 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.function.UnaryOperator;
 
 /**
  * Orchestrates creating and resuming {@link ManagedClaudeSession}s (plan
@@ -75,15 +77,16 @@ public final class SessionManager implements AutoCloseable {
     private static final long DEFAULT_GRACE_PERIOD_MILLIS = 3000;
     private static final long DEFAULT_POLL_INTERVAL_MILLIS = 100;
 
-    private final ApplicationStateRepository stateRepository;
+    /** How long {@link #close} waits for queued background work (state saves) before giving up. */
+    private static final long CLOSE_AWAIT_TERMINATION_SECONDS = 2;
+
+    private final ApplicationStateStore stateStore;
     private final ClaudeCapabilityService capabilityService;
     private final ExecutorService backgroundExecutor;
     private final boolean ownsExecutor;
 
     private final ActiveSessionRegistry activeRegistry = new ActiveSessionRegistry();
     private final Map<ManagedSessionId, GhosttySurface> activeSurfaces = new ConcurrentHashMap<>();
-
-    private ApplicationState state;
 
     public SessionManager(ApplicationStateRepository stateRepository, ClaudeCapabilityService capabilityService) {
         this(stateRepository, capabilityService, Executors.newVirtualThreadPerTaskExecutor(), true);
@@ -97,11 +100,14 @@ public final class SessionManager implements AutoCloseable {
 
     private SessionManager(ApplicationStateRepository stateRepository, ClaudeCapabilityService capabilityService,
                             ExecutorService backgroundExecutor, boolean ownsExecutor) {
-        this.stateRepository = stateRepository;
+        // The store is shared with every other manager built against the
+        // same repository instance (see ApplicationStateStore.forRepository),
+        // so cross-manager read-modify-write cycles serialize on ONE lock.
+        this.stateStore = ApplicationStateStore.forRepository(stateRepository);
         this.capabilityService = capabilityService;
         this.backgroundExecutor = backgroundExecutor;
         this.ownsExecutor = ownsExecutor;
-        this.state = normalizeLoadedState(stateRepository.load());
+        stateStore.update(SessionManager::normalizeLoadedState);
     }
 
     /**
@@ -126,12 +132,12 @@ public final class SessionManager implements AutoCloseable {
     /** Read-only view into claude's transcript store, for {@code checkResumeBlocked}'s missing-conversation probe. */
     private final ConversationCatalog conversationCatalog = new ConversationCatalog();
 
-    public synchronized ApplicationState state() {
-        return state;
+    public ApplicationState state() {
+        return stateStore.state();
     }
 
-    public synchronized List<ManagedClaudeSession> sessions() {
-        return state.sessions();
+    public List<ManagedClaudeSession> sessions() {
+        return stateStore.state().sessions();
     }
 
     // ---- 11.1 Create a new session ----------------------------------------
@@ -140,6 +146,30 @@ public final class SessionManager implements AutoCloseable {
     public CompletableFuture<SessionOpenResult> createSession(Repository repository, GhosttyApp app,
                                                                CpmTerminalHost host, double scaleFactor) {
         return createSession(repository, defaultDisplayName(repository), app, host, scaleFactor);
+    }
+
+    /**
+     * Mints the metadata for a brand-new session (generated display name)
+     * WITHOUT launching anything. Callers that key UI bookkeeping by
+     * session id should prepare first and then {@link #launchSession}: the
+     * launch persists the session almost immediately (making it visible to
+     * e.g. the sidebar), and a placeholder registered under a provisional
+     * id would not be found by a concurrent open of the freshly persisted
+     * real id -- yielding a duplicate surface and a leaked native pair.
+     */
+    public ManagedClaudeSession prepareSession(Repository repository) {
+        return newSessionMetadata(repository, defaultDisplayName(repository));
+    }
+
+    /** As {@link #prepareSession}, for a session living inside an already-created worktree checkout. */
+    public ManagedClaudeSession prepareWorktreeSession(Repository repository, String displayName, Path worktreeRoot) {
+        return newSessionMetadata(repository, displayName, Optional.of(worktreeRoot));
+    }
+
+    /** Launches a session minted by {@link #prepareSession}/{@link #prepareWorktreeSession}. */
+    public CompletableFuture<SessionOpenResult> launchSession(ManagedClaudeSession prepared, GhosttyApp app,
+                                                              CpmTerminalHost host, double scaleFactor) {
+        return launchNewSession(prepared, prepared.displayName(), app, host, scaleFactor);
     }
 
     /**
@@ -207,7 +237,14 @@ public final class SessionManager implements AutoCloseable {
         if (ex != null) {
             Throwable cause = unwrap(ex);
             LOG.log(Level.WARNING, () -> "Failed to start session " + initial.id() + ": " + cause.getMessage());
-            persistUpdatedSession(initial.withStatus(SessionStatus.FAILED));
+            try {
+                persistUpdatedSession(initial.withStatus(SessionStatus.FAILED));
+            } catch (RuntimeException persistFailure) {
+                // Never mask the original launch failure with a secondary
+                // persistence failure; the FAILED status is best-effort.
+                LOG.log(Level.WARNING, () -> "Could not persist FAILED status for session " + initial.id()
+                        + ": " + persistFailure.getMessage());
+            }
             throw wrap(cause);
         }
         ManagedClaudeSession running = initial.withStatus(SessionStatus.RUNNING).withLastOpenedAt(Instant.now());
@@ -245,10 +282,8 @@ public final class SessionManager implements AutoCloseable {
                     }
                     ManagedClaudeSession session = requireSession(sessionId);
                     String command = buildResumeCommand(session);
-                    return capabilityService.detectCapabilities()
-                            .thenApplyAsync(caps -> command, backgroundExecutor)
-                            .thenCompose(cmd -> createSurfaceOnFxThread(app, host, scaleFactor, cmd,
-                                    session.workingDirectory().toString()))
+                    return createSurfaceOnFxThread(app, host, scaleFactor, command,
+                                    session.workingDirectory().toString())
                             .handleAsync((surface, ex) -> finalizeResume(session, surface, ex), backgroundExecutor);
                 });
     }
@@ -280,7 +315,12 @@ public final class SessionManager implements AutoCloseable {
      *         no Claude session id yet or that id is not already active
      *         elsewhere).
      */
-    synchronized Optional<SessionOpenResult> checkResumeBlocked(ManagedSessionId sessionId) {
+    Optional<SessionOpenResult> checkResumeBlocked(ManagedSessionId sessionId) {
+        // Deliberately holds no lock across the filesystem probes below --
+        // they can stall (network volumes, cold disk), and a monitor held
+        // here used to block FX-thread callers of this manager's other
+        // (then-synchronized) methods. State reads/writes take the store's
+        // own short-lived lock only.
         ManagedClaudeSession session = requireSession(sessionId);
 
         Optional<String> claudeSessionId = session.claudeSessionId();
@@ -296,7 +336,7 @@ public final class SessionManager implements AutoCloseable {
 
         if (Files.notExists(session.workingDirectory())) {
             ManagedClaudeSession missing = session.withStatus(SessionStatus.MISSING_WORKING_DIRECTORY);
-            persistUpdatedSessionLocked(missing);
+            persistUpdatedSession(missing);
             return Optional.of(new SessionOpenResult.MissingWorkingDirectory(missing));
         }
 
@@ -345,28 +385,20 @@ public final class SessionManager implements AutoCloseable {
     }
 
     /** Explicitly reassigns a session's working directory (plan section 11.2), e.g. after the user picks a replacement. */
-    public synchronized ManagedClaudeSession reassignWorkingDirectory(ManagedSessionId sessionId, Path newWorkingDirectory) {
-        ManagedClaudeSession session = requireSession(sessionId);
+    public ManagedClaudeSession reassignWorkingDirectory(ManagedSessionId sessionId, Path newWorkingDirectory) {
         Path normalized = newWorkingDirectory.toAbsolutePath().normalize();
-        ManagedClaudeSession updated = session.withWorkingDirectory(normalized).withStatus(SessionStatus.INACTIVE);
-        persistUpdatedSessionLocked(updated);
-        return updated;
+        return updateSession(sessionId,
+                session -> session.withWorkingDirectory(normalized).withStatus(SessionStatus.INACTIVE));
     }
 
-    public synchronized ManagedClaudeSession renameSession(ManagedSessionId sessionId, String newDisplayName) {
-        ManagedClaudeSession session = requireSession(sessionId);
-        ManagedClaudeSession updated = session.withDisplayName(newDisplayName);
-        persistUpdatedSessionLocked(updated);
-        return updated;
+    public ManagedClaudeSession renameSession(ManagedSessionId sessionId, String newDisplayName) {
+        return updateSession(sessionId, session -> session.withDisplayName(newDisplayName));
     }
 
     /** Records the observed PR lifecycle state of a worktree session's branch (Finish-panel reconciliation). */
-    public synchronized ManagedClaudeSession updatePrState(ManagedSessionId sessionId, PrState prState,
-                                                           Optional<Integer> prNumber) {
-        ManagedClaudeSession session = requireSession(sessionId);
-        ManagedClaudeSession updated = session.withPr(prState, prNumber);
-        persistUpdatedSessionLocked(updated);
-        return updated;
+    public ManagedClaudeSession updatePrState(ManagedSessionId sessionId, PrState prState,
+                                              Optional<Integer> prNumber) {
+        return updateSession(sessionId, session -> session.withPr(prState, prNumber));
     }
 
     /**
@@ -378,18 +410,25 @@ public final class SessionManager implements AutoCloseable {
      * claudeSessionId}, that session is returned unchanged instead of
      * creating a duplicate row.
      */
-    public synchronized ManagedClaudeSession adoptConversation(Repository repository, String claudeSessionId,
-                                                                String displayName) {
-        Optional<ManagedClaudeSession> existing = state.sessions().stream()
-                .filter(session -> session.claudeSessionId().map(claudeSessionId::equals).orElse(false))
-                .findFirst();
-        if (existing.isPresent()) {
-            return existing.get();
-        }
-        ManagedClaudeSession adopted = newSessionMetadata(repository, displayName)
-                .withClaudeSessionId(Optional.of(claudeSessionId));
-        persistNewSession(adopted);
-        return adopted;
+    public ManagedClaudeSession adoptConversation(Repository repository, String claudeSessionId,
+                                                  String displayName) {
+        ManagedClaudeSession[] result = new ManagedClaudeSession[1];
+        stateStore.update(state -> {
+            Optional<ManagedClaudeSession> existing = state.sessions().stream()
+                    .filter(session -> session.claudeSessionId().map(claudeSessionId::equals).orElse(false))
+                    .findFirst();
+            if (existing.isPresent()) {
+                result[0] = existing.get();
+                return state;
+            }
+            ManagedClaudeSession adopted = newSessionMetadata(repository, displayName)
+                    .withClaudeSessionId(Optional.of(claudeSessionId));
+            result[0] = adopted;
+            List<ManagedClaudeSession> updated = new ArrayList<>(state.sessions());
+            updated.add(adopted);
+            return state.withSessions(updated);
+        });
+        return result[0];
     }
 
     /**
@@ -399,18 +438,14 @@ public final class SessionManager implements AutoCloseable {
      * transcript is touched (plan section 21: never destroy user data).
      */
     public CompletableFuture<Void> deleteSession(ManagedSessionId sessionId) {
-        return closeSession(sessionId).thenRun(() -> {
-            synchronized (this) {
-                List<ManagedClaudeSession> remaining = state.sessions().stream()
+        // thenRunAsync: closeSession's future completes on the FX thread
+        // (closeGracefully's callback); the metadata removal must not run
+        // there.
+        return closeSession(sessionId).thenRunAsync(
+                () -> stateStore.update(state -> state.withSessions(state.sessions().stream()
                         .filter(session -> !session.id().equals(sessionId))
-                        .toList();
-                if (remaining.size() == state.sessions().size()) {
-                    return;
-                }
-                state = mergeSessionsOntoLatestDiskState(remaining);
-                stateRepository.save(state);
-            }
-        });
+                        .toList())),
+                backgroundExecutor);
     }
 
     // ---- Close --------------------------------------------------------------
@@ -457,29 +492,53 @@ public final class SessionManager implements AutoCloseable {
      * @return the updated session, or empty if the session no longer exists
      *         or was not RUNNING
      */
-    public synchronized Optional<ManagedClaudeSession> markSessionExited(ManagedSessionId sessionId) {
-        return findSession(sessionId)
-                .filter(session -> session.status() == SessionStatus.RUNNING)
-                .map(session -> {
-                    ManagedClaudeSession updated = session.withStatus(SessionStatus.EXITED);
-                    persistUpdatedSessionLocked(updated);
-                    return updated;
-                });
+    public Optional<ManagedClaudeSession> markSessionExited(ManagedSessionId sessionId) {
+        ManagedClaudeSession[] result = new ManagedClaudeSession[1];
+        stateStore.update(state -> {
+            Optional<ManagedClaudeSession> running = state.sessions().stream()
+                    .filter(session -> session.id().equals(sessionId))
+                    .filter(session -> session.status() == SessionStatus.RUNNING)
+                    .findFirst();
+            if (running.isEmpty()) {
+                return state;
+            }
+            ManagedClaudeSession updated = running.get().withStatus(SessionStatus.EXITED);
+            result[0] = updated;
+            return withReplacedSession(state, updated);
+        });
+        return Optional.ofNullable(result[0]);
     }
 
-    private synchronized void onSurfaceClosed(ManagedSessionId sessionId, GhosttySurface surface) {
+    private void onSurfaceClosed(ManagedSessionId sessionId, GhosttySurface surface) {
         activeSurfaces.remove(sessionId, surface);
         findSession(sessionId).ifPresent(session -> {
             session.claudeSessionId().ifPresent(activeRegistry::release);
-            persistUpdatedSessionLocked(session.withStatus(SessionStatus.EXITED));
+            persistUpdatedSession(session.withStatus(SessionStatus.EXITED));
         });
     }
 
     @Override
     public void close() {
         if (ownsExecutor) {
+            // shutdown() alone would let queued background work (including
+            // state-transform submissions) die at JVM exit; give it a
+            // bounded drain first.
             backgroundExecutor.shutdown();
+            try {
+                if (!backgroundExecutor.awaitTermination(CLOSE_AWAIT_TERMINATION_SECONDS, TimeUnit.SECONDS)) {
+                    LOG.log(Level.WARNING, "Background executor did not drain within "
+                            + CLOSE_AWAIT_TERMINATION_SECONDS + "s; forcing shutdown");
+                    backgroundExecutor.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                backgroundExecutor.shutdownNow();
+            }
         }
+        // The store's writer is asynchronous; make every queued state save
+        // durable before shutdown proceeds (AGENTS.md: services writing
+        // files from background threads must expose a flush).
+        stateStore.flush();
     }
 
     // ---- Command construction (pure; unit-testable without a window) ------
@@ -551,8 +610,8 @@ public final class SessionManager implements AutoCloseable {
         return future;
     }
 
-    private synchronized String defaultDisplayName(Repository repository) {
-        long existing = state.sessions().stream()
+    private String defaultDisplayName(Repository repository) {
+        long existing = stateStore.state().sessions().stream()
                 .filter(session -> session.repositoryId().equals(repository.id()))
                 .count();
         return "Session " + (existing + 1);
@@ -586,61 +645,57 @@ public final class SessionManager implements AutoCloseable {
                 Optional.empty());
     }
 
-    private synchronized void persistNewSession(ManagedClaudeSession session) {
-        List<ManagedClaudeSession> updated = new ArrayList<>(state.sessions());
-        updated.add(session);
-        state = mergeSessionsOntoLatestDiskState(updated);
-        stateRepository.save(state);
-    }
-
-    private void persistUpdatedSession(ManagedClaudeSession updatedSession) {
-        synchronized (this) {
-            persistUpdatedSessionLocked(updatedSession);
-        }
-    }
-
-    private void persistUpdatedSessionLocked(ManagedClaudeSession updatedSession) {
-        List<ManagedClaudeSession> updated = state.sessions().stream()
-                .map(existing -> existing.id().equals(updatedSession.id()) ? updatedSession : existing)
-                .toList();
-        state = mergeSessionsOntoLatestDiskState(updated);
-        stateRepository.save(state);
+    private void persistNewSession(ManagedClaudeSession session) {
+        stateStore.update(state -> {
+            List<ManagedClaudeSession> updated = new ArrayList<>(state.sessions());
+            updated.add(session);
+            return state.withSessions(updated);
+        });
     }
 
     /**
-     * Re-reads the freshest persisted state from disk and applies only
-     * this class's own {@code sessions} delta on top of it, rather than
-     * writing back {@link #state}'s (possibly stale) cached {@code
-     * repositories}/{@code ui} fields verbatim.
-     *
-     * <p><b>Why this exists (an integration bug found while wiring up the
-     * terminal-tabs UI, not a change to this class's public API):</b> {@link
-     * app.cpm.app.RepositoryManager} and this class each independently load
-     * and cache their own in-memory {@link ApplicationState} snapshot from
-     * the same {@link ApplicationStateRepository} file, and each mutator on
-     * either class previously wrote its entire cached snapshot back
-     * unconditionally on every save (plan section 17 -- both were already
-     * written this way before this class existed). In the terminal-tabs UI
-     * both managers now run in the same process against the same on-disk
-     * file: adding a repository via {@code RepositoryManager} after this
-     * class's own snapshot was loaded, followed by creating a session here,
-     * would otherwise silently revert that just-added repository out of the
-     * persisted file the next time this class saved (its cached {@code
-     * state.repositories()} predates the addition) -- a real, reproducible
-     * data-loss bug hit while driving exactly this milestone's "add
-     * repository, then create a session in it" acceptance flow. See
-     * docs/milestone5-report.md.</p>
+     * Replaces the persisted session with the same id as {@code
+     * updatedSession} (a no-op if it was deleted concurrently). The
+     * cross-manager lost-update protection this class used to hand-roll
+     * (re-reading the freshest disk state and re-applying only the {@code
+     * sessions} delta -- see docs/milestone5-report.md for the original
+     * data-loss bug) now lives in {@link ApplicationStateStore}: every
+     * manager's read-modify-write runs under the store's single lock, and
+     * disk writes happen on the store's background writer, never here.
      */
-    private ApplicationState mergeSessionsOntoLatestDiskState(List<ManagedClaudeSession> sessions) {
-        return stateRepository.load().withSessions(sessions);
+    private void persistUpdatedSession(ManagedClaudeSession updatedSession) {
+        stateStore.update(state -> withReplacedSession(state, updatedSession));
     }
 
-    private synchronized ManagedClaudeSession requireSession(ManagedSessionId sessionId) {
+    /** Applies the atomic find-and-change-one-session pattern shared by the metadata mutators. */
+    private ManagedClaudeSession updateSession(ManagedSessionId sessionId,
+                                               UnaryOperator<ManagedClaudeSession> change) {
+        ManagedClaudeSession[] result = new ManagedClaudeSession[1];
+        stateStore.update(state -> {
+            ManagedClaudeSession session = state.sessions().stream()
+                    .filter(existing -> existing.id().equals(sessionId))
+                    .findFirst()
+                    .orElseThrow(() -> new UnknownSessionException(sessionId));
+            result[0] = change.apply(session);
+            return withReplacedSession(state, result[0]);
+        });
+        return result[0];
+    }
+
+    private static ApplicationState withReplacedSession(ApplicationState state, ManagedClaudeSession updatedSession) {
+        return state.withSessions(state.sessions().stream()
+                .map(existing -> existing.id().equals(updatedSession.id()) ? updatedSession : existing)
+                .toList());
+    }
+
+    private ManagedClaudeSession requireSession(ManagedSessionId sessionId) {
         return findSession(sessionId).orElseThrow(() -> new UnknownSessionException(sessionId));
     }
 
-    private synchronized Optional<ManagedClaudeSession> findSession(ManagedSessionId sessionId) {
-        return state.sessions().stream().filter(session -> session.id().equals(sessionId)).findFirst();
+    private Optional<ManagedClaudeSession> findSession(ManagedSessionId sessionId) {
+        return stateStore.state().sessions().stream()
+                .filter(session -> session.id().equals(sessionId))
+                .findFirst();
     }
 
     private static Throwable unwrap(Throwable t) {

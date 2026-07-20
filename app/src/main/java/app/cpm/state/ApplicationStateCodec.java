@@ -245,12 +245,15 @@ public final class ApplicationStateCodec {
     }
 
     private static WorkspaceUiState uiFromJson(JsonObject obj) {
+        // Cosmetic UI fields decode leniently (like prState/theme above): a
+        // malformed value here must never make the whole state file look
+        // corrupt and cost the user every repository and session.
         Optional<RepositoryId> selected = Optional.empty();
         if (obj.get("selectedRepositoryId") instanceof JsonString s) {
             try {
                 selected = Optional.of(RepositoryId.of(s.value()));
             } catch (IllegalArgumentException e) {
-                throw new StateDecodeException("Malformed selectedRepositoryId: " + e.getMessage());
+                // Malformed id: fall back to "nothing selected".
             }
         }
 
@@ -266,7 +269,7 @@ public final class ApplicationStateCodec {
                     try {
                         expanded.add(RepositoryId.of(s.value()));
                     } catch (IllegalArgumentException e) {
-                        throw new StateDecodeException("Malformed expandedRepositoryIds entry: " + e.getMessage());
+                        // Malformed entry: skip it, keep the rest collapsed/expanded as stored.
                     }
                 }
             }

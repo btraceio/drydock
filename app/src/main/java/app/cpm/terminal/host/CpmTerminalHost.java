@@ -1,5 +1,7 @@
 package app.cpm.terminal.host;
 
+import javafx.application.Platform;
+
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 
@@ -30,6 +32,13 @@ public final class CpmTerminalHost implements AutoCloseable {
     private final Arena keyCallbackArena = Arena.ofShared();
     private MemorySegment handle;
     private boolean destroyed;
+    // Register-once flags, one per callback slot: each registration allocates
+    // an upcall stub from keyCallbackArena that is only reclaimed at close(),
+    // so silently replacing a listener would leak the old stub.
+    private boolean keyListenerRegistered;
+    private boolean scrollListenerRegistered;
+    private boolean mousePosListenerRegistered;
+    private boolean mouseButtonListenerRegistered;
 
     private CpmTerminalHost(CpmTerminalHostBinding binding, MemorySegment handle) {
         this.binding = binding;
@@ -43,6 +52,7 @@ public final class CpmTerminalHost implements AutoCloseable {
      * limitation.
      */
     public static CpmTerminalHost createForCurrentWindow() {
+        checkFxThread();
         CpmTerminalHostBinding binding = new CpmTerminalHostBinding(CpmTerminalHostLibrary.lookup());
         MemorySegment parentNsView = JavaFxNativeView.currentWindowNsView();
         MemorySegment handle = binding.create(parentNsView);
@@ -55,49 +65,70 @@ public final class CpmTerminalHost implements AutoCloseable {
 
     /** Sets the host view's frame, in the parent window's content-view coordinate space. */
     public void setFrame(double x, double y, double width, double height) {
+        checkFxThread();
         checkNotDestroyed();
         binding.setFrame(handle, x, y, width, height);
     }
 
     public void setVisible(boolean visible) {
+        checkFxThread();
         checkNotDestroyed();
         binding.setVisible(handle, visible);
     }
 
     public void setFocused(boolean focused) {
+        checkFxThread();
         checkNotDestroyed();
         binding.setFocused(handle, focused);
     }
 
-    /** Registers the callback invoked for every keyDown/keyUp/flagsChanged the host view receives. */
+    /**
+     * Registers the callback invoked for every keyDown/keyUp/flagsChanged
+     * the host view receives. May be called at most once per host (see the
+     * register-once flags above); a second registration throws {@link
+     * IllegalStateException}.
+     */
     public void setKeyEventListener(KeyEventListener listener) {
+        checkFxThread();
         checkNotDestroyed();
-        binding.setKeyEventCallback(
-            handle,
-            (keyCode, modifierFlags, keyDown, characters, unshiftedCharacters) ->
-                listener.onKeyEvent(keyCode, modifierFlags, keyDown, characters, unshiftedCharacters),
-            keyCallbackArena
-        );
+        if (keyListenerRegistered) {
+            throw new IllegalStateException("key event listener already registered");
+        }
+        keyListenerRegistered = true;
+        binding.setKeyEventCallback(handle, listener, keyCallbackArena);
     }
 
-    /** Registers the callback invoked for every scrollWheel event the host view receives. */
+    /** Registers the callback invoked for every scrollWheel event the host view receives (register-once). */
     public void setScrollEventListener(ScrollEventListener listener) {
+        checkFxThread();
         checkNotDestroyed();
-        binding.setScrollEventCallback(
-            handle,
-            (deltaX, deltaY, scrollMods) -> listener.onScrollEvent(deltaX, deltaY, scrollMods),
-            keyCallbackArena
-        );
+        if (scrollListenerRegistered) {
+            throw new IllegalStateException("scroll event listener already registered");
+        }
+        scrollListenerRegistered = true;
+        binding.setScrollEventCallback(handle, listener, keyCallbackArena);
     }
 
-    /** Registers the callback invoked for mouseMoved events (and immediately before each scroll). */
+    /** Registers the callback invoked for mouseMoved events (and immediately before each scroll; register-once). */
     public void setMousePosEventListener(MousePosEventListener listener) {
+        checkFxThread();
         checkNotDestroyed();
-        binding.setMousePosEventCallback(
-            handle,
-            (x, y, modifierFlags) -> listener.onMousePosEvent(x, y, modifierFlags),
-            keyCallbackArena
-        );
+        if (mousePosListenerRegistered) {
+            throw new IllegalStateException("mouse position event listener already registered");
+        }
+        mousePosListenerRegistered = true;
+        binding.setMousePosEventCallback(handle, listener, keyCallbackArena);
+    }
+
+    /** Registers the callback invoked for mouse button presses/releases (a position event precedes each; register-once). */
+    public void setMouseButtonEventListener(MouseButtonEventListener listener) {
+        checkFxThread();
+        checkNotDestroyed();
+        if (mouseButtonListenerRegistered) {
+            throw new IllegalStateException("mouse button event listener already registered");
+        }
+        mouseButtonListenerRegistered = true;
+        binding.setMouseButtonEventCallback(handle, listener, keyCallbackArena);
     }
 
     /**
@@ -106,12 +137,14 @@ public final class CpmTerminalHost implements AutoCloseable {
      * callers within the narrow native boundary packages.
      */
     public MemorySegment contentViewHandle() {
+        checkFxThread();
         checkNotDestroyed();
         return binding.contentView(handle);
     }
 
     @Override
     public void close() {
+        checkFxThread();
         if (destroyed) {
             return;
         }
@@ -124,6 +157,13 @@ public final class CpmTerminalHost implements AutoCloseable {
     private void checkNotDestroyed() {
         if (destroyed) {
             throw new IllegalStateException("CpmTerminalHost already destroyed");
+        }
+    }
+
+    /** Enforces the class-Javadoc threading contract (AppKit is not thread-safe); fail fast elsewhere. */
+    private static void checkFxThread() {
+        if (!Platform.isFxApplicationThread()) {
+            throw new IllegalStateException("Not on the JavaFX Application Thread");
         }
     }
 
@@ -165,5 +205,16 @@ public final class CpmTerminalHost implements AutoCloseable {
     @FunctionalInterface
     public interface MousePosEventListener {
         void onMousePosEvent(double x, double y, int modifierFlags);
+    }
+
+    /**
+     * Java-side shape of a mouse-button event: {@code state} and {@code
+     * button} carry ghostty's own enum values (press=1/release=0;
+     * left=1/right=2/middle=3), {@code modifierFlags} the raw NSEvent
+     * flags; see native-host/CpmTerminalHost.h.
+     */
+    @FunctionalInterface
+    public interface MouseButtonEventListener {
+        void onMouseButtonEvent(int state, int button, int modifierFlags);
     }
 }

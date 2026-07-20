@@ -11,6 +11,8 @@ import app.cpm.git.UnifiedDiff;
 import app.cpm.review.AnnotationStatus;
 import app.cpm.review.AnnotationStore;
 import app.cpm.review.ReviewAnnotation;
+import app.cpm.ui.UiErrors;
+import app.cpm.ui.UiFormats;
 import javafx.animation.PauseTransition;
 import javafx.application.Platform;
 import javafx.geometry.Point2D;
@@ -276,7 +278,7 @@ public final class ReviewView extends BorderPane {
                         renderFileList();
                         showDiffMessage(scope == DiffScope.UPSTREAM
                                 ? "No upstream is configured for this branch."
-                                : "Could not diff: " + rootMessage(failure));
+                                : "Could not diff: " + UiErrors.unwrap(failure).getMessage());
                         updateSummary();
                         return;
                     }
@@ -289,14 +291,6 @@ public final class ReviewView extends BorderPane {
                     renderSelectedFile();
                     updateSummary();
                 }));
-    }
-
-    private static String rootMessage(Throwable failure) {
-        Throwable cause = failure;
-        while (cause.getCause() != null) {
-            cause = cause.getCause();
-        }
-        return String.valueOf(cause.getMessage());
     }
 
     private void showDiffMessage(String message) {
@@ -322,11 +316,7 @@ public final class ReviewView extends BorderPane {
 
     private Region buildFileRow(UnifiedDiff.FileDiff file) {
         Label marker = new Label(file.kind());
-        marker.getStyleClass().addAll("review-file-marker", switch (file.kind()) {
-            case "A" -> "marker-added";
-            case "D" -> "marker-deleted";
-            default -> "marker-modified";
-        });
+        marker.getStyleClass().addAll("review-file-marker", UiFormats.markerStyleClass(file.kind()));
 
         Label name = new Label(Path.of(file.path()).getFileName().toString());
         name.getStyleClass().add("review-file-name");
@@ -408,17 +398,7 @@ public final class ReviewView extends BorderPane {
         HBox breadcrumb = new HBox(4);
         breadcrumb.getStyleClass().add("viewer-breadcrumb");
         breadcrumb.setAlignment(Pos.CENTER_LEFT);
-        int i = 0;
-        for (Path segment : Path.of(path)) {
-            if (i++ > 0) {
-                Label sep = new Label("›");
-                sep.getStyleClass().add("breadcrumb-separator");
-                breadcrumb.getChildren().add(sep);
-            }
-            Label part = new Label(segment.toString());
-            part.getStyleClass().add("breadcrumb-segment");
-            breadcrumb.getChildren().add(part);
-        }
+        breadcrumb.getChildren().setAll(UiFormats.breadcrumbSegments(Path.of(path)));
         return breadcrumb;
     }
 

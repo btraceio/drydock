@@ -76,7 +76,12 @@ final class OpenSessionTab {
             123, // Left arrow
             124, // Right arrow
             125, // Down arrow
-            126  // Up arrow
+            126, // Up arrow
+            115, // Home
+            119, // End
+            116, // Page Up
+            121, // Page Down
+            117  // Forward Delete (fn+Delete)
     );
 
     private static final int NS_SHIFT = 1 << 17;
@@ -92,7 +97,14 @@ final class OpenSessionTab {
     /** The three views a session tab can show in its content area (design handoff "Session Explorer" / "Diff Review"). */
     enum SubTab { TERMINAL, EXPLORER, REVIEW }
 
-    final ManagedSessionId sessionId;
+    /**
+     * The managed session this tab hosts. Not final only as a safety net:
+     * placeholders are keyed under the real session id up front (see
+     * {@code SessionManager.prepareSession}), and {@code
+     * MainWorkspace.attachOpenedSession} re-asserts it via {@link
+     * #adoptSessionId} so an id mismatch can never strand a tab.
+     */
+    private ManagedSessionId sessionId;
     final Tab tab;
     private final Stage stage;
     private final GhosttyApp app;
@@ -140,6 +152,7 @@ final class OpenSessionTab {
     private final HBox worktreeChips = new HBox(6);
     private final Button finishButton = new Button("Finish ▸");
     private final Label handoffLabel = new Label();
+    private final ProgressIndicator handoffSpinner = new ProgressIndicator();
     private final HBox handoffPill = new HBox(6);
     private final StackPane finishBox = new StackPane();
 
@@ -185,6 +198,15 @@ final class OpenSessionTab {
         });
         tabRepoLabel.setVisible(repository.isPresent());
         tabRepoLabel.setManaged(repository.isPresent());
+    }
+
+    ManagedSessionId sessionId() {
+        return sessionId;
+    }
+
+    /** See {@link #sessionId}: adopts the real session id once SessionManager has minted it. */
+    void adoptSessionId(ManagedSessionId sessionId) {
+        this.sessionId = sessionId;
     }
 
     /** Fills the header meta line once the repository's branch is known (fetched async by MainWorkspace). */
@@ -399,10 +421,9 @@ final class OpenSessionTab {
 
         finishButton.getStyleClass().add("finish-button");
         finishButton.setFocusTraversable(false);
-        ProgressIndicator spinner = new ProgressIndicator();
-        spinner.setPrefSize(12, 12);
+        handoffSpinner.setPrefSize(12, 12);
         handoffLabel.getStyleClass().add("handoff-label");
-        handoffPill.getChildren().setAll(spinner, handoffLabel);
+        handoffPill.getChildren().setAll(handoffSpinner, handoffLabel);
         handoffPill.setAlignment(Pos.CENTER);
         handoffPill.getStyleClass().add("handoff-pill");
         finishBox.getChildren().setAll(finishButton, handoffPill);
@@ -489,16 +510,16 @@ final class OpenSessionTab {
     /** Flips the pill to its done state ({@code ✓ Merged} etc.); the spinner hides, the label stays. */
     void showHandoffDone(String label) {
         handoffLabel.setText("✓ " + label);
-        handoffPill.getChildren().getFirst().setVisible(false);
-        handoffPill.getChildren().getFirst().setManaged(false);
+        handoffSpinner.setVisible(false);
+        handoffSpinner.setManaged(false);
     }
 
     /** Restores the Finish ▸ button (hand-off finished or timed out). */
     void restoreFinishButton() {
         handoffPill.setVisible(false);
         handoffPill.setManaged(false);
-        handoffPill.getChildren().getFirst().setVisible(true);
-        handoffPill.getChildren().getFirst().setManaged(true);
+        handoffSpinner.setVisible(true);
+        handoffSpinner.setManaged(true);
         finishButton.setVisible(true);
         finishButton.setManaged(true);
     }
@@ -540,7 +561,7 @@ final class OpenSessionTab {
     }
 
     /** Releases the terminal's AppKit first-responder status so JavaFX text inputs receive keys. */
-    private void releaseTerminalFocus() {
+    void releaseTerminalFocus() {
         if (disposed || surfaceClosing) {
             return;
         }
@@ -646,6 +667,7 @@ final class OpenSessionTab {
         host.setKeyEventListener(this::onKeyEvent);
         host.setScrollEventListener(this::onScrollEvent);
         host.setMousePosEventListener(this::onMousePosEvent);
+        host.setMouseButtonEventListener(this::onMouseButtonEvent);
     }
 
     /** Forwards the mouse position (view points, top-left origin) to the surface. */
@@ -655,6 +677,25 @@ final class OpenSessionTab {
         }
         try {
             surface.sendMousePos(x, y, translateModifiers(modifierFlags));
+        } catch (IllegalStateException e) {
+            // Surface closed in the teardown gap; see tickAndDraw's identical catch.
+        }
+    }
+
+    /**
+     * Forwards a mouse button press/release to the surface (text selection,
+     * click reporting). A press also refocuses the terminal -- clicking
+     * into a terminal is the universal "type here now" gesture.
+     */
+    private void onMouseButtonEvent(int state, int button, int modifierFlags) {
+        if (disposed || surfaceClosing || surface == null) {
+            return;
+        }
+        if (state == 1) {
+            focus();
+        }
+        try {
+            surface.sendMouseButton(state, button, translateModifiers(modifierFlags));
         } catch (IllegalStateException e) {
             // Surface closed in the teardown gap; see tickAndDraw's identical catch.
         }

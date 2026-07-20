@@ -64,18 +64,18 @@ public final class GitHubCloneModal extends VBox {
 
         searchField.getStyleClass().add("modal-search");
         searchField.setPromptText("Search repositories or paste a URL…");
-        searchField.textProperty().addListener((obs, oldText, newText) -> {
-            debounce.stop();
-            debounce.setOnFinished(e -> runSearch(newText));
-            debounce.playFromStart();
-        });
+        // One handler, registered once; it reads the CURRENT text when the
+        // debounce fires (re-registering per keystroke leaked a fresh
+        // handler capturing each intermediate text).
+        debounce.setOnFinished(e -> runSearch(searchField.getText()));
+        searchField.textProperty().addListener((obs, oldText, newText) -> debounce.playFromStart());
 
         statusLine.getStyleClass().add("gh-meta");
 
         ScrollPane scroll = new ScrollPane(results);
         scroll.setFitToWidth(true);
         scroll.setPrefViewportHeight(340);
-        scroll.setStyle("-fx-background-color: transparent; -fx-background: transparent;");
+        scroll.getStyleClass().add("gh-results-scroll");
         results.setFillWidth(true);
         showEmptyState("Type to search GitHub, or paste a repository URL.");
 

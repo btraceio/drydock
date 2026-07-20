@@ -17,6 +17,8 @@
 @property(nonatomic, assign) void *scrollCallbackUserdata;
 @property(nonatomic, assign) cpm_terminal_host_mouse_pos_event_cb mousePosCallback;
 @property(nonatomic, assign) void *mousePosCallbackUserdata;
+@property(nonatomic, assign) cpm_terminal_host_mouse_button_event_cb mouseButtonCallback;
+@property(nonatomic, assign) void *mouseButtonCallbackUserdata;
 @property(nonatomic, strong) NSTrackingArea *cpmTrackingArea;
 /// Local NSEvent monitor installed while this view exists (see
 /// cpm_terminal_host_create). JavaFX's Glass layer intercepts some key
@@ -122,6 +124,57 @@
     [self forwardMousePos:event];
 }
 
+// Button events (text selection, mouse-reporting TUIs). Position first so
+// the press/release lands at the right cell (same reasoning as scrolls);
+// deliberately no [super mouseDown:] etc. -- libghostty owns clicks inside
+// the terminal, nothing behind this view should also react to them.
+- (void)forwardMouseButton:(NSEvent *)event state:(int)state button:(int)button {
+    [self forwardMousePos:event];
+    if (self.mouseButtonCallback == NULL) {
+        return;
+    }
+    self.mouseButtonCallback(self.mouseButtonCallbackUserdata, state, button,
+                             (uint32_t)event.modifierFlags);
+}
+
+- (void)mouseDown:(NSEvent *)event {
+    [self forwardMouseButton:event state:1 button:1];
+}
+
+- (void)mouseUp:(NSEvent *)event {
+    [self forwardMouseButton:event state:0 button:1];
+}
+
+- (void)rightMouseDown:(NSEvent *)event {
+    [self forwardMouseButton:event state:1 button:2];
+}
+
+- (void)rightMouseUp:(NSEvent *)event {
+    [self forwardMouseButton:event state:0 button:2];
+}
+
+- (void)otherMouseDown:(NSEvent *)event {
+    [self forwardMouseButton:event state:1 button:3];
+}
+
+- (void)otherMouseUp:(NSEvent *)event {
+    [self forwardMouseButton:event state:0 button:3];
+}
+
+// Drags do not fire mouseMoved (tracking areas only cover unpressed
+// movement), so selection extension needs explicit position forwarding.
+- (void)mouseDragged:(NSEvent *)event {
+    [self forwardMousePos:event];
+}
+
+- (void)rightMouseDragged:(NSEvent *)event {
+    [self forwardMousePos:event];
+}
+
+- (void)otherMouseDragged:(NSEvent *)event {
+    [self forwardMousePos:event];
+}
+
 - (void)scrollWheel:(NSEvent *)event {
     if (getenv("CPM_DIAG_SCROLL_LOG") != NULL) {
         NSLog(@"cpm scrollWheel: dy=%f precise=%d cb=%p", event.scrollingDeltaY,
@@ -166,7 +219,14 @@
 
 @end
 
+// Enforces the header's "all functions MUST be called on the AppKit main
+// thread" contract (AppKit is not thread-safe); a debug-build violation
+// aborts loudly here instead of corrupting AppKit state silently.
+#define CPM_ASSERT_MAIN_THREAD(fn) \
+    NSCAssert([NSThread isMainThread], @fn " must be called on the AppKit main thread")
+
 cpm_terminal_host_t cpm_terminal_host_create(void *parent_nsview) {
+    CPM_ASSERT_MAIN_THREAD("cpm_terminal_host_create");
     if (parent_nsview == NULL) {
         NSLog(@"cpm_terminal_host_create: parent_nsview is NULL");
         return NULL;
@@ -217,6 +277,7 @@ void cpm_terminal_host_set_frame(cpm_terminal_host_t host,
                                   double y,
                                   double width,
                                   double height) {
+    CPM_ASSERT_MAIN_THREAD("cpm_terminal_host_set_frame");
     if (host == NULL) {
         return;
     }
@@ -233,6 +294,7 @@ void cpm_terminal_host_set_frame(cpm_terminal_host_t host,
 }
 
 void *cpm_terminal_host_content_view(cpm_terminal_host_t host) {
+    CPM_ASSERT_MAIN_THREAD("cpm_terminal_host_content_view");
     // `host` already *is* an (Objective-C retained) NSView*, so no bridging
     // is needed here. Callers must not release/free this pointer; its
     // lifetime is owned by the host and ends at cpm_terminal_host_destroy.
@@ -240,6 +302,7 @@ void *cpm_terminal_host_content_view(cpm_terminal_host_t host) {
 }
 
 void cpm_terminal_host_set_visible(cpm_terminal_host_t host, bool visible) {
+    CPM_ASSERT_MAIN_THREAD("cpm_terminal_host_set_visible");
     if (host == NULL) {
         return;
     }
@@ -259,6 +322,7 @@ void cpm_terminal_host_set_visible(cpm_terminal_host_t host, bool visible) {
 }
 
 void cpm_terminal_host_set_focused(cpm_terminal_host_t host, bool focused) {
+    CPM_ASSERT_MAIN_THREAD("cpm_terminal_host_set_focused");
     if (host == NULL) {
         return;
     }
@@ -281,6 +345,7 @@ void cpm_terminal_host_set_focused(cpm_terminal_host_t host, bool focused) {
 }
 
 void cpm_terminal_host_destroy(cpm_terminal_host_t host) {
+    CPM_ASSERT_MAIN_THREAD("cpm_terminal_host_destroy");
     if (host == NULL) {
         return;
     }
@@ -288,6 +353,23 @@ void cpm_terminal_host_destroy(cpm_terminal_host_t host) {
     if (view.keyMonitor != nil) {
         [NSEvent removeMonitor:view.keyMonitor];
         view.keyMonitor = nil;
+    }
+    // NULL every callback and drop the tracking area BEFORE detaching the
+    // view: the Java side frees the upcall stubs right after this returns,
+    // and a straggler AppKit event (queued mouseMoved, tracking-area
+    // update, ...) delivered during teardown must find NULL callbacks, not
+    // soon-to-be-freed function pointers.
+    view.keyCallback = NULL;
+    view.keyCallbackUserdata = NULL;
+    view.scrollCallback = NULL;
+    view.scrollCallbackUserdata = NULL;
+    view.mousePosCallback = NULL;
+    view.mousePosCallbackUserdata = NULL;
+    view.mouseButtonCallback = NULL;
+    view.mouseButtonCallbackUserdata = NULL;
+    if (view.cpmTrackingArea != nil) {
+        [view removeTrackingArea:view.cpmTrackingArea];
+        view.cpmTrackingArea = nil;
     }
     [view removeFromSuperview];
     // Balances the CFBridgingRetain in cpm_terminal_host_create.
@@ -297,6 +379,7 @@ void cpm_terminal_host_destroy(cpm_terminal_host_t host) {
 void cpm_terminal_host_set_key_event_callback(cpm_terminal_host_t host,
                                                cpm_terminal_host_key_event_cb callback,
                                                void *userdata) {
+    CPM_ASSERT_MAIN_THREAD("cpm_terminal_host_set_key_event_callback");
     if (host == NULL) {
         return;
     }
@@ -308,6 +391,7 @@ void cpm_terminal_host_set_key_event_callback(cpm_terminal_host_t host,
 void cpm_terminal_host_set_scroll_event_callback(cpm_terminal_host_t host,
                                                   cpm_terminal_host_scroll_event_cb callback,
                                                   void *userdata) {
+    CPM_ASSERT_MAIN_THREAD("cpm_terminal_host_set_scroll_event_callback");
     if (host == NULL) {
         return;
     }
@@ -319,10 +403,23 @@ void cpm_terminal_host_set_scroll_event_callback(cpm_terminal_host_t host,
 void cpm_terminal_host_set_mouse_pos_event_callback(cpm_terminal_host_t host,
                                                      cpm_terminal_host_mouse_pos_event_cb callback,
                                                      void *userdata) {
+    CPM_ASSERT_MAIN_THREAD("cpm_terminal_host_set_mouse_pos_event_callback");
     if (host == NULL) {
         return;
     }
     CpmTerminalHostKeyForwardingView *view = (__bridge CpmTerminalHostKeyForwardingView *)host;
     view.mousePosCallback = callback;
     view.mousePosCallbackUserdata = userdata;
+}
+
+void cpm_terminal_host_set_mouse_button_event_callback(cpm_terminal_host_t host,
+                                                        cpm_terminal_host_mouse_button_event_cb callback,
+                                                        void *userdata) {
+    CPM_ASSERT_MAIN_THREAD("cpm_terminal_host_set_mouse_button_event_callback");
+    if (host == NULL) {
+        return;
+    }
+    CpmTerminalHostKeyForwardingView *view = (__bridge CpmTerminalHostKeyForwardingView *)host;
+    view.mouseButtonCallback = callback;
+    view.mouseButtonCallbackUserdata = userdata;
 }

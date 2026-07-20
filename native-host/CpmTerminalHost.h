@@ -43,8 +43,10 @@ typedef void *cpm_terminal_host_t;
 cpm_terminal_host_t cpm_terminal_host_create(void *parent_nsview);
 
 // Updates the child view's frame, in the parent view's coordinate space
-// (top-left origin, y increasing downward -- the caller is responsible for
-// any AppKit bottom-left-origin flip; see docs/native-integration.md).
+// (top-left origin, y increasing downward, matching JavaFX). No AppKit
+// bottom-left-origin flip is needed by the caller: the host view is a
+// flipped NSView (see CpmTerminalHostKeyForwardingView's isFlipped in the
+// .m), so JavaFX-style coordinates pass through unmodified.
 void cpm_terminal_host_set_frame(cpm_terminal_host_t host,
                                   double x,
                                   double y,
@@ -61,9 +63,11 @@ void *cpm_terminal_host_content_view(cpm_terminal_host_t host);
 // Shows or hides the child view.
 void cpm_terminal_host_set_visible(cpm_terminal_host_t host, bool visible);
 
-// Makes the child view (visible == true) or its window's original first
-// responder (visible == false is not a thing here -- see .m) the first
-// responder, i.e. transfers keyboard focus to/from the terminal surface.
+// Transfers keyboard focus to/from the terminal surface: focused == true
+// makes the child view the window's first responder; focused == false
+// hands first-responder status back to the window's content view (JavaFX's
+// Glass view) so JavaFX controls receive key events again -- see the .m
+// for why not makeFirstResponder:nil.
 void cpm_terminal_host_set_focused(cpm_terminal_host_t host, bool focused);
 
 // Destroys the child view: removes it from its superview and releases the
@@ -151,6 +155,24 @@ typedef void (*cpm_terminal_host_mouse_pos_event_cb)(void *userdata,
 void cpm_terminal_host_set_mouse_pos_event_callback(cpm_terminal_host_t host,
                                                      cpm_terminal_host_mouse_pos_event_cb callback,
                                                      void *userdata);
+
+// Mouse-button forwarding (text selection, mouse-reporting TUIs). `state`
+// and `button` use ghostty's own enum values so the Java side can hand
+// them to ghostty_surface_mouse_button verbatim: state 1 = press,
+// 0 = release (ghostty_input_mouse_state_e); button 1 = left, 2 = right,
+// 3 = middle (ghostty_input_mouse_button_e). A position callback always
+// fires immediately before a button callback, so the click lands at the
+// right cell. `modifier_flags` is the raw NSEvent modifierFlags.
+typedef void (*cpm_terminal_host_mouse_button_event_cb)(void *userdata,
+                                                         int state,
+                                                         int button,
+                                                         uint32_t modifier_flags);
+
+// Registers (or clears, if callback is NULL) the mouse-button callback
+// for this host. Only one callback may be registered at a time.
+void cpm_terminal_host_set_mouse_button_event_callback(cpm_terminal_host_t host,
+                                                        cpm_terminal_host_mouse_button_event_cb callback,
+                                                        void *userdata);
 
 #ifdef __cplusplus
 }

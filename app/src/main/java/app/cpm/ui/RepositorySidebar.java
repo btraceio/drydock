@@ -5,14 +5,15 @@ import app.cpm.app.FinderLauncher;
 import app.cpm.app.RepositoryManager;
 import app.cpm.app.SessionManager;
 import app.cpm.domain.ManagedClaudeSession;
+import app.cpm.domain.ManagedSessionId;
 import app.cpm.domain.PrState;
 import app.cpm.domain.Repository;
 import app.cpm.domain.RepositoryId;
 import app.cpm.domain.SessionStatus;
-import app.cpm.git.GitBranchState;
 import app.cpm.git.GitStatus;
 import app.cpm.git.GitStatusService;
 import app.cpm.git.WorktreeService;
+import java.io.File;
 import javafx.animation.PauseTransition;
 import javafx.animation.RotateTransition;
 import javafx.application.Platform;
@@ -46,7 +47,6 @@ import java.io.IOException;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.Path;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
@@ -57,6 +57,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
 /**
@@ -84,6 +85,9 @@ public final class RepositorySidebar extends VBox {
 
     /** How long a freshly discovered worktree row keeps its highlight ring. */
     private static final Duration DISCOVERY_HIGHLIGHT = Duration.seconds(2.4);
+
+    /** Filter keystroke debounce (mirrors SearchRail's search debounce). */
+    private static final Duration FILTER_DEBOUNCE = Duration.millis(150);
 
     private final RepositoryManager repositoryManager;
     private final GitStatusService gitStatusService;
@@ -117,6 +121,19 @@ public final class RepositorySidebar extends VBox {
     /** Transient per-repo meta note ("Already up to date — no new worktrees") shown briefly after a rescan. */
     private final Map<RepositoryId, String> rescanNotes = new ConcurrentHashMap<>();
 
+    /** The session last scrolled into view, so status-refresh rebuilds don't keep yanking the scroll position. */
+    private ManagedSessionId lastRevealedSession;
+
+    /** Debounces filter keystrokes so the tree isn't rebuilt per character. */
+    private final PauseTransition filterDebounce = new PauseTransition(FILTER_DEBOUNCE);
+
+    /**
+     * Coalesces async-completion rebuilds: N git-status/worktree results
+     * landing in the same FX pulse trigger ONE {@link #rebuildTree()}
+     * instead of one full-tree rebuild each (see {@link #requestRebuild()}).
+     */
+    private final AtomicBoolean rebuildPending = new AtomicBoolean();
+
     private Runnable onCloneFromGitHub = () -> { };
     private Consumer<Repository> onNewWorktree = repository -> { };
 
@@ -149,8 +166,9 @@ public final class RepositorySidebar extends VBox {
         addButton.setMaxWidth(Double.MAX_VALUE);
 
         filterField.getStyleClass().add("filter-field");
-        filterField.setPromptText("⌕  Filter repositories…");
-        filterField.textProperty().addListener((obs, oldText, newText) -> rebuildTree());
+        filterField.setPromptText("⌕  Filter repos & worktrees…");
+        filterDebounce.setOnFinished(e -> rebuildTree());
+        filterField.textProperty().addListener((obs, oldText, newText) -> filterDebounce.playFromStart());
 
         VBox header = new VBox(addButton, filterField);
         header.getStyleClass().add("sidebar-header");
@@ -172,6 +190,14 @@ public final class RepositorySidebar extends VBox {
         // not just the ones initiated by this sidebar's own handlers. The
         // listener may fire on a background thread.
         repositoryManager.addChangeListener(() -> Platform.runLater(this::onRepositoriesChanged));
+
+        // A collapsed sidebar (⌘0) is detached from the scene; reveal the
+        // active session's row once it is re-attached.
+        sceneProperty().addListener((obs, oldScene, newScene) -> {
+            if (newScene != null) {
+                syncActiveSelection();
+            }
+        });
 
         rebuildTree();
         refreshAllStatuses();
@@ -195,8 +221,25 @@ public final class RepositorySidebar extends VBox {
 
     /** Rebuilds the tree from current manager state; called after any session change. */
     public void refreshSessions() {
-        refreshWorktreeStatuses();
+        // Re-fetch repo AND worktree statuses unconditionally: fetch-once
+        // caching left branch tags and dirty dots permanently stale. The
+        // fetches are async; each completion coalesces into one rebuild.
+        refreshAllStatuses();
         rebuildTree();
+    }
+
+    /**
+     * Schedules one {@link #rebuildTree()} on the FX thread, coalescing
+     * bursts (e.g. one git-status completion per worktree) into a single
+     * rebuild. Safe to call from any thread.
+     */
+    private void requestRebuild() {
+        if (rebuildPending.compareAndSet(false, true)) {
+            Platform.runLater(() -> {
+                rebuildPending.set(false);
+                rebuildTree();
+            });
+        }
     }
 
     // ---- Tree building ------------------------------------------------------
@@ -226,11 +269,18 @@ public final class RepositorySidebar extends VBox {
         int unopenedTotal = 0;
 
         for (Repository repository : repositories) {
-            if (!query.isEmpty() && !matchesFilter(repository, query)) {
-                continue;
+            List<SidebarNode> children = childNodesFor(repository);
+            // The filter matches the repo itself (name/branch) OR any of
+            // its worktree/session rows; a repo matched only through its
+            // children narrows to exactly the matching rows.
+            if (!query.isEmpty() && !matchesRepo(repository, query)) {
+                children = children.stream().filter(child -> matchesNode(child, query)).toList();
+                if (children.isEmpty()) {
+                    continue;
+                }
             }
             TreeItem<SidebarNode> repoItem = new TreeItem<>(new SidebarNode.RepoNode(repository));
-            for (SidebarNode child : childNodesFor(repository)) {
+            for (SidebarNode child : children) {
                 repoItem.getChildren().add(new TreeItem<>(child));
                 if (child instanceof SidebarNode.UnopenedWorktreeNode) {
                     unopenedTotal++;
@@ -271,6 +321,67 @@ public final class RepositorySidebar extends VBox {
         }
         footerLabel.setText(footerText);
         SessionStatusStyles.updateDot(footerDot, runningTotal > 0 ? SessionStatus.RUNNING : SessionStatus.INACTIVE);
+
+        syncActiveSelection();
+    }
+
+    /**
+     * Mirrors the currently selected session tab into the tree: selects the
+     * matching row and -- only while the sidebar is actually attached to
+     * the scene, so a collapsed sidebar (⌘0) is never disturbed -- expands
+     * its repository node and scrolls the row into view. The scroll fires
+     * once per active-session change, not on every status-refresh rebuild.
+     */
+    private void syncActiveSelection() {
+        ManagedSessionId active = mainWorkspace.activeSessionId().orElse(null);
+        if (active == null) {
+            lastRevealedSession = null;
+            tree.getSelectionModel().clearSelection();
+            return;
+        }
+        TreeItem<SidebarNode> match = null;
+        for (TreeItem<SidebarNode> repoItem : treeRoot.getChildren()) {
+            for (TreeItem<SidebarNode> child : repoItem.getChildren()) {
+                if (child.getValue() instanceof SidebarNode.SessionNode sessionNode
+                        && sessionNode.session().id().equals(active)) {
+                    match = child;
+                    break;
+                }
+            }
+            if (match != null) {
+                break;
+            }
+        }
+        if (match == null) {
+            tree.getSelectionModel().clearSelection();
+            return;
+        }
+        boolean sidebarShowing = getScene() != null;
+        boolean activeChanged = !active.equals(lastRevealedSession);
+        if (sidebarShowing && activeChanged) {
+            match.getParent().setExpanded(true);
+        }
+        // Select only while the row is actually visible: TreeView's
+        // selection model force-expands collapsed ancestors of a hidden
+        // selection target, which would re-open a repository the user just
+        // collapsed on every subsequent rebuild. Visibility is checked via
+        // the parent's expanded state, NOT getRow() -- getRow() reports an
+        // index for rows under a collapsed parent too (it counts as if
+        // everything were expanded), so it cannot serve as this guard.
+        if (match.getParent().isExpanded()) {
+            if (tree.getSelectionModel().getSelectedItem() != match) {
+                tree.getSelectionModel().select(match);
+            }
+        } else {
+            tree.getSelectionModel().clearSelection();
+        }
+        if (sidebarShowing && activeChanged) {
+            int row = tree.getRow(match);
+            if (row >= 0) {
+                tree.scrollTo(row);
+            }
+            lastRevealedSession = active;
+        }
     }
 
     /**
@@ -339,12 +450,35 @@ public final class RepositorySidebar extends VBox {
         return (int) worktrees.stream().filter(worktree -> !worktree.mainCheckout()).count();
     }
 
-    private boolean matchesFilter(Repository repository, String query) {
+    private boolean matchesRepo(Repository repository, String query) {
         if (repository.displayName().toLowerCase(Locale.ROOT).contains(query)) {
             return true;
         }
         GitStatus status = statuses.get(repository.id());
-        return status != null && branchText(status).toLowerCase(Locale.ROOT).contains(query);
+        return status != null && UiFormats.branchText(status).toLowerCase(Locale.ROOT).contains(query);
+    }
+
+    /** Whether one worktree/session row matches the filter: session name, branch, or worktree path. */
+    private boolean matchesNode(SidebarNode node, String query) {
+        return switch (node) {
+            case SidebarNode.RepoNode repoNode -> false;
+            case SidebarNode.SessionNode sessionNode -> {
+                StringBuilder text = new StringBuilder(sessionNode.session().displayName());
+                sessionNode.session().worktreeRoot().ifPresent(root -> {
+                    text.append(' ').append(root);
+                    GitStatus status = worktreeStatuses.get(root);
+                    if (status != null) {
+                        text.append(' ').append(UiFormats.branchText(status));
+                    }
+                });
+                yield text.toString().toLowerCase(Locale.ROOT).contains(query);
+            }
+            case SidebarNode.UnopenedWorktreeNode worktreeNode -> {
+                String text = worktreeNode.worktree().branch().orElse("")
+                        + " " + worktreeNode.worktree().path();
+                yield text.toLowerCase(Locale.ROOT).contains(query);
+            }
+        };
     }
 
     private List<ManagedClaudeSession> sessionsFor(Repository repository) {
@@ -436,14 +570,10 @@ public final class RepositorySidebar extends VBox {
         refreshWorktreeStatuses();
     }
 
-    /** Fetches per-worktree status for sessions not yet covered (branch tag + dirty dot per worktree checkout). */
+    /** Fetches per-worktree status for every worktree session (branch tag + dirty dot per worktree checkout). */
     private void refreshWorktreeStatuses() {
         for (ManagedClaudeSession session : sessionManager.sessions()) {
-            session.worktreeRoot().ifPresent(root -> {
-                if (!worktreeStatuses.containsKey(root)) {
-                    refreshWorktreeStatus(root);
-                }
-            });
+            session.worktreeRoot().ifPresent(this::refreshWorktreeStatus);
         }
     }
 
@@ -456,7 +586,7 @@ public final class RepositorySidebar extends VBox {
                     } else {
                         worktreeStatuses.put(worktreeRoot, status);
                     }
-                    rebuildTree();
+                    requestRebuild();
                 }));
     }
 
@@ -471,25 +601,14 @@ public final class RepositorySidebar extends VBox {
                         statuses.put(repository.id(), status);
                         statusFailures.remove(repository.id());
                     }
-                    rebuildTree();
+                    requestRebuild();
                 }));
-    }
-
-    private String branchText(GitStatus status) {
-        if (status.branch() instanceof GitBranchState.OnBranch onBranch) {
-            return onBranch.name();
-        }
-        if (status.branch() instanceof GitBranchState.Detached detached) {
-            String oid = detached.commitOid();
-            return "detached@" + (oid.length() > 7 ? oid.substring(0, 7) : oid);
-        }
-        return "(unknown)";
     }
 
     private String branchTextFor(Repository repository) {
         GitStatus status = statuses.get(repository.id());
         if (status != null) {
-            return branchText(status) + (status.dirty() ? " *" : "");
+            return UiFormats.branchText(status) + (status.dirty() ? " *" : "");
         }
         return statusFailures.containsKey(repository.id()) ? "(status unavailable)" : "…";
     }
@@ -500,7 +619,7 @@ public final class RepositorySidebar extends VBox {
         DirectoryChooser chooser = new DirectoryChooser();
         chooser.setTitle("Add repository");
         Window ownerWindow = getScene() == null ? null : getScene().getWindow();
-        java.io.File chosen = chooser.showDialog(ownerWindow);
+        File chosen = chooser.showDialog(ownerWindow);
         if (chosen == null) {
             return;
         }
@@ -547,37 +666,34 @@ public final class RepositorySidebar extends VBox {
     }
 
     private void onOpenInFinder(Repository repository) {
-        try {
-            FinderLauncher.reveal(repository.root());
-        } catch (IOException e) {
-            UiErrors.show("Could not open in Finder", e);
-        }
+        launchExternally("Could not open in Finder", () -> FinderLauncher.reveal(repository.root()));
     }
 
     private void onOpenInEditor(Repository repository) {
-        try {
-            editorLauncher.open(repository.root());
-        } catch (IOException e) {
-            UiErrors.show("Could not open in external editor", e);
-        }
+        launchExternally("Could not open in external editor", () -> editorLauncher.open(repository.root()));
+    }
+
+    /** A process launch that can fail with an {@link IOException} (Finder / editor / reveal). */
+    private interface ExternalLaunch {
+        void run() throws IOException;
+    }
+
+    /**
+     * Runs a Finder/editor launch off the FX thread (process spawns block,
+     * per AGENTS.md; the launched app appearing is the visible feedback)
+     * and reports a failure back on it as an error alert.
+     */
+    private void launchExternally(String failureTitle, ExternalLaunch launch) {
+        Thread.ofVirtual().start(() -> {
+            try {
+                launch.run();
+            } catch (IOException e) {
+                Platform.runLater(() -> UiErrors.show(failureTitle, e));
+            }
+        });
     }
 
     // ---- Cells --------------------------------------------------------------
-
-    /** Relative "time ago" for session meta lines (design: `branch · 2h ago`). */
-    private static String relativeTime(Instant instant) {
-        long seconds = Math.max(0, java.time.Duration.between(instant, Instant.now()).getSeconds());
-        if (seconds < 60) {
-            return "now";
-        }
-        if (seconds < 3600) {
-            return (seconds / 60) + "m ago";
-        }
-        if (seconds < 86400) {
-            return (seconds / 3600) + "h ago";
-        }
-        return (seconds / 86400) + "d ago";
-    }
 
     /** Abbreviates the user's home directory to {@code ~} for compact worktree paths. */
     private static String shortPath(Path path) {
@@ -587,6 +703,21 @@ public final class RepositorySidebar extends VBox {
     }
 
     private final class SidebarTreeCell extends TreeCell<SidebarNode> {
+
+        /**
+         * Cells report a tiny preferred width so the virtual flow sizes
+         * every cell to the viewport width: long branch/session names then
+         * ellipsize instead of widening the tree. Without this the
+         * overflowing cells grew a horizontal scrollbar that pushed the
+         * right-aligned action buttons out of view, and broke single-click
+         * repo expand/collapse: the click-triggered auto horizontal scroll
+         * shifted the row out from under the cursor between press and
+         * release, so the row's CLICKED handler never fired.
+         */
+        @Override
+        protected double computePrefWidth(double height) {
+            return 1;
+        }
 
         @Override
         protected void updateItem(SidebarNode node, boolean empty) {
@@ -654,6 +785,15 @@ public final class RepositorySidebar extends VBox {
                 spin.setByAngle(360);
                 spin.setCycleCount(RotateTransition.INDEFINITE);
                 spin.play();
+                // The spin is INDEFINITE and this row is discarded on every
+                // rebuild (including the one that ends the rescan) -- stop
+                // it once the button leaves the scene or it animates a
+                // detached node forever.
+                rescan.sceneProperty().addListener((obs, oldScene, newScene) -> {
+                    if (newScene == null) {
+                        spin.stop();
+                    }
+                });
             }
             rescan.setOnAction(e -> {
                 refreshStatus(repository);
@@ -717,7 +857,7 @@ public final class RepositorySidebar extends VBox {
             GitStatus checkoutStatus = session.worktreeRoot()
                     .map(worktreeStatuses::get)
                     .orElseGet(() -> statuses.get(repository.id()));
-            String branch = checkoutStatus != null ? branchText(checkoutStatus) : "…";
+            String branch = checkoutStatus != null ? UiFormats.branchText(checkoutStatus) : "…";
             Label branchTag = new Label((isWorktree ? "◫ " : "⎇ ") + branch);
             branchTag.getStyleClass().add(isWorktree ? "branch-tag-worktree" : "branch-tag");
 
@@ -729,7 +869,7 @@ public final class RepositorySidebar extends VBox {
                 nameRow.getChildren().add(dirtyDot);
             }
 
-            Label meta = new Label(relativeTime(session.lastOpenedAt()));
+            Label meta = new Label(UiFormats.relativeTime(session.lastOpenedAt()));
             meta.getStyleClass().add("session-meta");
 
             VBox text = new VBox(1, nameRow, meta);
@@ -861,13 +1001,8 @@ public final class RepositorySidebar extends VBox {
             delete.setOnAction(e -> onDeleteSession(session));
 
             MenuItem reveal = new MenuItem("Reveal working directory");
-            reveal.setOnAction(e -> {
-                try {
-                    FinderLauncher.reveal(session.workingDirectory());
-                } catch (IOException ex) {
-                    UiErrors.show("Could not reveal working directory", ex);
-                }
-            });
+            reveal.setOnAction(e -> launchExternally("Could not reveal working directory",
+                    () -> FinderLauncher.reveal(session.workingDirectory())));
 
             ContextMenu menu = new ContextMenu();
             menu.getItems().addAll(resume, rename, stop, delete, new SeparatorMenuItem(), reveal);

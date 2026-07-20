@@ -10,25 +10,23 @@ import javafx.scene.layout.VBox;
 
 /**
  * The keyboard-shortcuts modal (design handoff section 8): a centered
- * 440px panel listing every documented shortcut as a label &harr; keycap
- * row. Content mirrors the design prototype's {@code allShortcuts} list.
+ * 440px panel listing every shortcut as a label &harr; keycap row. Lists
+ * only shortcuts the app actually binds (see {@code
+ * CpmApplication.installGlobalShortcuts} and the terminal-side intercepts
+ * in {@code OpenSessionTab.onKeyEvent}) -- the design prototype's
+ * resume-picker shortcuts are parked with the picker itself.
  */
 final class ShortcutsOverlay {
 
     private static final String[][] SHORTCUTS = {
-            {"Show all projects", "⌘A"},
-            {"Show all branches", "⌘B"},
             {"New session", "⌘N"},
             {"Rename session", "⌘R"},
             {"Terminal view", "⌘1"},
             {"Explorer view", "⌘2"},
             {"Review view", "⌘3"},
-            {"Previous / next session tab", "⌘[ / ⌘]"},
+            {"Previous / next session tab", "⌘⇧[ / ⌘⇧]"},
             {"Toggle sidebar", "⌘0"},
             {"Filter repositories", "⌘F"},
-            {"Preview conversation", "Space"},
-            {"Navigate list", "↑ / ↓"},
-            {"Resume selected", "↵ Enter"},
             {"Toggle theme", "⌘⇧L"},
             {"Cancel / close", "Esc"},
     };

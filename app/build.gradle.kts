@@ -55,22 +55,6 @@ application {
     )
 }
 
-// Diagnostic support: forward -Papp.cpm.diag.* project properties to the
-// run task's application JVM as system properties (the Gradle client's own
-// -D flags never reach the forked app JVM; same pattern as gate0eSpike's
-// project.property forwarding below). Used by automated visual
-// verification: app.cpm.diag.stateFile isolates persisted state to a
-// throwaway file, and app.cpm.diag.autoCreateSession=true plus
-// app.cpm.diag.repo=<path> auto-registers a repository and opens a session
-// in it on startup (see CpmApplication.start).
-tasks.named<JavaExec>("run") {
-    project.properties.forEach { (key, value) ->
-        if (key.startsWith("app.cpm.diag.") && value != null) {
-            systemProperty(key, value.toString())
-        }
-    }
-}
-
 repositories {
     mavenCentral()
 }
@@ -98,6 +82,21 @@ tasks.named<JavaExec>("run") {
     dependsOn(rootProject.tasks.named("buildNativeHost"))
     javaLauncher.set(javaToolchains.launcherFor(java.toolchain))
     workingDir = rootProject.projectDir
+
+    // Diagnostic support: forward -Papp.cpm.diag.* project properties to
+    // the run task's application JVM as system properties (the Gradle
+    // client's own -D flags never reach the forked app JVM; same pattern
+    // as gate0eSpike's project.property forwarding below). Used by
+    // automated visual verification: app.cpm.diag.stateFile isolates
+    // persisted state to a throwaway file, and
+    // app.cpm.diag.autoCreateSession=true plus app.cpm.diag.repo=<path>
+    // auto-registers a repository and opens a session in it on startup
+    // (see CpmApplication.start).
+    project.properties.forEach { (key, value) ->
+        if (key.startsWith("app.cpm.diag.") && value != null) {
+            systemProperty(key, value.toString())
+        }
+    }
 
     // Allow running headless/offscreen for CI, e.g.:
     //   ./gradlew run -PheadlessTest
@@ -441,24 +440,7 @@ tasks.register("runtimeImage") {
         if (iconSource.isFile) {
             iconSource.copyTo(File(resourcesDir, "app-icon.icns"), overwrite = true)
         }
-        File(contentsDir, "Info.plist").writeText(
-            """
-            <?xml version="1.0" encoding="UTF-8"?>
-            <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-            <plist version="1.0">
-            <dict>
-                <key>CFBundleName</key><string>Claude Project Manager</string>
-                <key>CFBundleDisplayName</key><string>Claude Project Manager</string>
-                <key>CFBundleIdentifier</key><string>app.cpm.claude-project-manager</string>
-                <key>CFBundleExecutable</key><string>claude-project-manager</string>
-                <key>CFBundleIconFile</key><string>app-icon</string>
-                <key>CFBundlePackageType</key><string>APPL</string>
-                <key>CFBundleShortVersionString</key><string>0.1</string>
-                <key>NSHighResolutionCapable</key><true/>
-            </dict>
-            </plist>
-            """.trimIndent() + "\n"
-        )
+        File(contentsDir, "Info.plist").writeText(appBundleInfoPlist())
         val bundleLauncher = File(macosDir, "claude-project-manager")
         bundleLauncher.writeText(
             """
@@ -473,6 +455,91 @@ tasks.register("runtimeImage") {
         bundleLauncher.setExecutable(true, false)
     }
 }
+
+// Stage 3 (plan section 23.4): a SELF-CONTAINED .app bundle. Unlike the
+// thin bundle inside build/image (a trampoline into the image, unusable
+// once moved), this one carries the entire runtime image under Contents/,
+// so the finished bundle can be copied or symlinked to /Applications and
+// launched from Finder/Dock with the proper name and icon. The bundle is
+// ad-hoc signed as a whole so Gatekeeper (and Apple Silicon's mandatory
+// code-signing) accept the locally built binaries; Developer ID signing
+// and notarization (Stages 5-6) remain out of scope.
+val appBundleDistDir = rootProject.layout.buildDirectory.dir("dist")
+
+tasks.register("appImage") {
+    group = "distribution"
+    description = "Stage 3: self-contained macOS .app bundle at build/dist/Claude Project Manager.app."
+
+    dependsOn(tasks.named("runtimeImage"))
+    inputs.dir(runtimeImageDir)
+    outputs.dir(appBundleDistDir)
+
+    doLast {
+        val distRoot = appBundleDistDir.get().asFile
+        project.delete(distRoot)
+        val bundle = File(distRoot, "Claude Project Manager.app")
+        val contents = File(bundle, "Contents")
+        val macosDir = File(contents, "MacOS").apply { mkdirs() }
+        val resourcesDir = File(contents, "Resources").apply { mkdirs() }
+        val imageRoot = runtimeImageDir.get().asFile
+
+        // cp -R rather than Gradle's copy so executable bits and the
+        // runtime's existing code signatures survive byte-for-byte.
+        for (part in listOf("bin", "runtime", "app", "lib")) {
+            @Suppress("DEPRECATION")
+            project.exec {
+                commandLine("cp", "-R", File(imageRoot, part).absolutePath, contents.absolutePath)
+            }
+        }
+
+        val icon = File(imageRoot, "lib/app-icon.icns")
+        if (icon.isFile) {
+            icon.copyTo(File(resourcesDir, "app-icon.icns"), overwrite = true)
+        }
+
+        File(contents, "Info.plist").writeText(appBundleInfoPlist())
+
+        val bundleLauncher = File(macosDir, "claude-project-manager")
+        bundleLauncher.writeText(
+            """
+            #!/bin/bash
+            # The whole runtime image lives under Contents/ of this bundle;
+            # the real launcher resolves APP_HOME relative to itself, so a
+            # plain exec one level up is all that is needed.
+            DIR="$(cd "$(dirname "${'$'}{BASH_SOURCE[0]}")" && pwd)"
+            exec "${'$'}DIR/../bin/claude-project-manager" "${'$'}@"
+            """.trimIndent() + "\n"
+        )
+        bundleLauncher.setExecutable(true, false)
+
+        @Suppress("DEPRECATION")
+        project.exec {
+            commandLine("codesign", "--force", "--deep", "--sign", "-", bundle.absolutePath)
+        }
+    }
+}
+
+/**
+ * The Info.plist content shared by both .app bundles (the thin trampoline
+ * bundle inside build/image and the self-contained build/dist bundle) --
+ * previously duplicated verbatim in the two tasks above.
+ */
+fun appBundleInfoPlist(): String = """
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+    <plist version="1.0">
+    <dict>
+        <key>CFBundleName</key><string>Claude Project Manager</string>
+        <key>CFBundleDisplayName</key><string>Claude Project Manager</string>
+        <key>CFBundleIdentifier</key><string>app.cpm.claude-project-manager</string>
+        <key>CFBundleExecutable</key><string>claude-project-manager</string>
+        <key>CFBundleIconFile</key><string>app-icon</string>
+        <key>CFBundlePackageType</key><string>APPL</string>
+        <key>CFBundleShortVersionString</key><string>0.1</string>
+        <key>NSHighResolutionCapable</key><true/>
+    </dict>
+    </plist>
+""".trimIndent() + "\n"
 
 /**
  * The generated `build/image/bin/claude-project-manager` launcher script.

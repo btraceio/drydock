@@ -1,13 +1,19 @@
 package app.cpm.git;
 
+import app.cpm.process.ProcessResult;
+import app.cpm.process.ProcessRunner;
+import app.cpm.process.ProcessTimeoutException;
+
 import java.io.IOException;
-import java.io.InputStream;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
-import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -27,8 +33,8 @@ public final class GitStatusService implements AutoCloseable {
 
     private static final Logger LOG = System.getLogger(GitStatusService.class.getName());
 
-    /** Excerpt length cap for stderr embedded in error messages (plan section 20). */
-    private static final int STDERR_EXCERPT_LIMIT = 2000;
+    /** Every command here is a quick read-only query; a hung git must not park futures forever. */
+    private static final Duration PROCESS_TIMEOUT = Duration.ofSeconds(15);
 
     private final GitExecutableLocator locator;
     private final ExecutorService executor;
@@ -91,10 +97,10 @@ public final class GitStatusService implements AutoCloseable {
 
         ProcessResult result = run(command);
         if (result.exitCode() != 0) {
-            if (result.stderr().toLowerCase(java.util.Locale.ROOT).contains("not a git repository")) {
+            if (result.stderr().toLowerCase(Locale.ROOT).contains("not a git repository")) {
                 throw new NotAGitRepositoryException(directory);
             }
-            throw new GitCommandFailedException(command, result.exitCode(), excerpt(result.stderr()));
+            throw new GitCommandFailedException(command, result.exitCode(), ProcessRunner.excerpt(result.stderr()));
         }
         String topLevel = result.stdout().strip();
         if (topLevel.isEmpty()) {
@@ -132,7 +138,7 @@ public final class GitStatusService implements AutoCloseable {
         Path parent = normalizedDir.getParent();
         if (parent != null) {
             try {
-                java.nio.file.Files.createDirectories(parent);
+                Files.createDirectories(parent);
             } catch (IOException e) {
                 throw new GitCommandFailedException(
                         List.of("mkdir", parent.toString()), -1,
@@ -146,10 +152,10 @@ public final class GitStatusService implements AutoCloseable {
 
         ProcessResult result = run(command);
         if (result.exitCode() != 0) {
-            if (result.stderr().toLowerCase(java.util.Locale.ROOT).contains("not a git repository")) {
+            if (result.stderr().toLowerCase(Locale.ROOT).contains("not a git repository")) {
                 throw new NotAGitRepositoryException(repositoryRoot);
             }
-            throw new GitCommandFailedException(command, result.exitCode(), excerpt(result.stderr()));
+            throw new GitCommandFailedException(command, result.exitCode(), ProcessRunner.excerpt(result.stderr()));
         }
         return normalizedDir;
     }
@@ -172,28 +178,37 @@ public final class GitStatusService implements AutoCloseable {
         int commitsAhead = 0;
         List<String> countCommand = List.of(
                 git.toString(), "-C", worktreeRoot.toString(),
-                "rev-list", "--count", baseBranch + "..HEAD");
+                "rev-list", "--count", "--end-of-options", baseBranch + "..HEAD");
         ProcessResult countResult = run(countCommand);
         if (countResult.exitCode() == 0) {
             commitsAhead = parseCountOrZero(countResult.stdout().strip());
+        } else {
+            // Cosmetic count only, so keep going -- but never silently.
+            LOG.log(Level.WARNING, "git rev-list --count failed (exit " + countResult.exitCode() + ") in "
+                    + worktreeRoot + ": " + ProcessRunner.excerpt(countResult.stderr()));
         }
 
         // Two read-only diffs against the merge base: --numstat for per-file
         // +/- counts, --name-status for the M/A/D kind letter; merged by path.
         List<String> numstatCommand = List.of(
                 git.toString(), "-C", worktreeRoot.toString(),
-                "diff", "--numstat", baseBranch + "...HEAD");
+                "diff", "--numstat", "--end-of-options", baseBranch + "...HEAD");
         ProcessResult numstat = run(numstatCommand);
         if (numstat.exitCode() != 0) {
-            if (numstat.stderr().toLowerCase(java.util.Locale.ROOT).contains("not a git repository")) {
+            if (numstat.stderr().toLowerCase(Locale.ROOT).contains("not a git repository")) {
                 throw new NotAGitRepositoryException(worktreeRoot);
             }
-            throw new GitCommandFailedException(numstatCommand, numstat.exitCode(), excerpt(numstat.stderr()));
+            throw new GitCommandFailedException(numstatCommand, numstat.exitCode(), ProcessRunner.excerpt(numstat.stderr()));
         }
         List<String> nameStatusCommand = List.of(
                 git.toString(), "-C", worktreeRoot.toString(),
-                "diff", "--name-status", baseBranch + "...HEAD");
+                "diff", "--name-status", "--end-of-options", baseBranch + "...HEAD");
         ProcessResult nameStatus = run(nameStatusCommand);
+        if (nameStatus.exitCode() != 0) {
+            // The kind letter degrades to "M"; the numstat rows still render.
+            LOG.log(Level.WARNING, "git diff --name-status failed (exit " + nameStatus.exitCode() + ") in "
+                    + worktreeRoot + ": " + ProcessRunner.excerpt(nameStatus.stderr()));
+        }
 
         Map<String, String> kinds = new LinkedHashMap<>();
         if (nameStatus.exitCode() == 0) {
@@ -206,7 +221,7 @@ public final class GitStatusService implements AutoCloseable {
             }
         }
 
-        List<GitChangeSummary.ChangedFile> files = new java.util.ArrayList<>();
+        List<GitChangeSummary.ChangedFile> files = new ArrayList<>();
         for (String line : numstat.stdout().split("\n")) {
             String[] parts = line.split("\t");
             if (parts.length < 3 || parts[0].isBlank()) {
@@ -237,10 +252,10 @@ public final class GitStatusService implements AutoCloseable {
 
         ProcessResult result = run(command);
         if (result.exitCode() != 0) {
-            if (result.stderr().toLowerCase(java.util.Locale.ROOT).contains("not a git repository")) {
+            if (result.stderr().toLowerCase(Locale.ROOT).contains("not a git repository")) {
                 throw new NotAGitRepositoryException(repositoryRoot);
             }
-            throw new GitCommandFailedException(command, result.exitCode(), excerpt(result.stderr()));
+            throw new GitCommandFailedException(command, result.exitCode(), ProcessRunner.excerpt(result.stderr()));
         }
         return parse(result.stdout());
     }
@@ -252,69 +267,22 @@ public final class GitStatusService implements AutoCloseable {
         }
     }
 
-    // ---- process execution ----
-
-    private record ProcessResult(int exitCode, String stdout, String stderr) {
-    }
+    // ---- process execution (shared ProcessRunner, git-flavored failure translation) ----
 
     private static ProcessResult run(List<String> command) {
-        Process process;
         try {
-            process = new ProcessBuilder(command).redirectErrorStream(false).start();
+            return ProcessRunner.run(command, null, PROCESS_TIMEOUT);
         } catch (IOException e) {
             // The executable existed at locate()-time but could not actually be
             // launched (permissions changed, removed between check and use, etc).
             throw new GitCommandFailedException(command, -1, e.getMessage() == null ? "" : e.getMessage());
-        }
-
-        // Drain stdout and stderr concurrently: git status output is small in
-        // practice, but reading one stream fully before the other risks a
-        // deadlock if the unread pipe's OS buffer fills first.
-        StreamReader stdoutReader = new StreamReader(process.getInputStream());
-        StreamReader stderrReader = new StreamReader(process.getErrorStream());
-        Thread stdoutThread = Thread.ofVirtual().start(stdoutReader);
-        Thread stderrThread = Thread.ofVirtual().start(stderrReader);
-
-        int exitCode;
-        try {
-            exitCode = process.waitFor();
-            stdoutThread.join();
-            stderrThread.join();
+        } catch (ProcessTimeoutException e) {
+            throw new GitCommandFailedException(command, -1,
+                    "timed out after " + PROCESS_TIMEOUT.toSeconds() + "s (killed)");
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            process.destroyForcibly();
             throw new GitCommandFailedException(command, -1, "interrupted while waiting for git");
         }
-
-        return new ProcessResult(exitCode, stdoutReader.result(), stderrReader.result());
-    }
-
-    private static final class StreamReader implements Runnable {
-        private final InputStream stream;
-        private volatile String result = "";
-
-        StreamReader(InputStream stream) {
-            this.stream = stream;
-        }
-
-        @Override
-        public void run() {
-            try {
-                result = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
-            } catch (IOException e) {
-                result = "";
-                LOG.log(Level.DEBUG, "Failed reading git process stream", e);
-            }
-        }
-
-        String result() {
-            return result;
-        }
-    }
-
-    private static String excerpt(String text) {
-        String trimmed = text.strip();
-        return trimmed.length() <= STDERR_EXCERPT_LIMIT ? trimmed : trimmed.substring(0, STDERR_EXCERPT_LIMIT) + "...";
     }
 
     // ---- parsing: git status --porcelain=v2 --branch -z ----
@@ -333,7 +301,7 @@ public final class GitStatusService implements AutoCloseable {
 
         // -1 limit keeps a trailing empty token (harmless; skipped below) but
         // more importantly preserves any genuinely empty intermediate tokens.
-        for (String token : stdout.split(" ", -1)) {
+        for (String token : stdout.split("\\u0000", -1)) {
             if (token.isEmpty()) {
                 continue;
             }

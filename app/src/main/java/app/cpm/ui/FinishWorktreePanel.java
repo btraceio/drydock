@@ -126,11 +126,7 @@ final class FinishWorktreePanel extends VBox {
             List<GitChangeSummary.ChangedFile> shown = summary.files().stream().limit(6).toList();
             for (GitChangeSummary.ChangedFile file : shown) {
                 Label marker = new Label(file.kind());
-                marker.getStyleClass().addAll("finish-file-marker", switch (file.kind()) {
-                    case "A" -> "marker-added";
-                    case "D" -> "marker-deleted";
-                    default -> "marker-modified";
-                });
+                marker.getStyleClass().addAll("finish-file-marker", UiFormats.markerStyleClass(file.kind()));
                 Label path = new Label(file.path());
                 path.getStyleClass().add("finish-file-path");
                 Region spacer = new Region();

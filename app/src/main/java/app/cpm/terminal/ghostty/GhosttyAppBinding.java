@@ -165,6 +165,7 @@ final class GhosttyAppBinding {
     final MethodHandle surfaceKey;
     final MethodHandle surfaceMouseScroll;
     final MethodHandle surfaceMousePos;
+    final MethodHandle surfaceMouseButton;
     final MethodHandle surfaceProcessExited;
     final MethodHandle surfaceReadText;
     final MethodHandle surfaceFreeText;
@@ -263,6 +264,15 @@ final class GhosttyAppBinding {
             find(lookup, "ghostty_surface_mouse_pos"),
             FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.JAVA_DOUBLE,
                 ValueLayout.JAVA_DOUBLE, ValueLayout.JAVA_INT)
+        );
+        // bool ghostty_surface_mouse_button(ghostty_surface_t,
+        //                                   ghostty_input_mouse_state_e,
+        //                                   ghostty_input_mouse_button_e,
+        //                                   ghostty_input_mods_e);
+        this.surfaceMouseButton = linker.downcallHandle(
+            find(lookup, "ghostty_surface_mouse_button"),
+            FunctionDescriptor.of(ValueLayout.JAVA_BOOLEAN, ValueLayout.ADDRESS,
+                ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT)
         );
         // bool ghostty_surface_process_exited(ghostty_surface_t);
         this.surfaceProcessExited = linker.downcallHandle(

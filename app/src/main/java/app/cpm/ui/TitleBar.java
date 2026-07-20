@@ -27,6 +27,7 @@ import javafx.stage.WindowEvent;
 final class TitleBar extends StackPane {
 
     private final Button themeButton = iconButton("☾", "Toggle theme (⌘⇧L)");
+    private final Button sidebarButton = iconButton("◧", "Hide sidebar (⌘0)");
 
     private double dragOffsetX;
     private double dragOffsetY;
@@ -39,7 +40,6 @@ final class TitleBar extends StackPane {
                 stage.fireEvent(new WindowEvent(stage, WindowEvent.WINDOW_CLOSE_REQUEST)));
         Button minimize = trafficLight("minimize", () -> stage.setIconified(true));
         Button zoom = trafficLight("zoom", () -> stage.setMaximized(!stage.isMaximized()));
-        Button sidebarButton = iconButton("◧", "Toggle sidebar (⌘0)");
         sidebarButton.setOnAction(e -> onSidebarToggle.run());
         HBox lights = new HBox(8, close, minimize, zoom);
         lights.setAlignment(Pos.CENTER_LEFT);
@@ -82,6 +82,12 @@ final class TitleBar extends StackPane {
     /** Updates the theme toggle glyph: shows the theme you would switch TO. */
     void showThemeGlyphFor(UiTheme current) {
         themeButton.setText(current == UiTheme.DARK ? "☀" : "☾");
+    }
+
+    /** Reflects the sidebar collapse state in the toggle button's glyph and tooltip. */
+    void showSidebarState(boolean collapsed) {
+        sidebarButton.setText(collapsed ? "◨" : "◧");
+        sidebarButton.getTooltip().setText(collapsed ? "Show sidebar (⌘0)" : "Hide sidebar (⌘0)");
     }
 
     private static Button trafficLight(String role, Runnable action) {

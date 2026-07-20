@@ -2,6 +2,7 @@ package app.cpm.terminal.ghostty;
 
 import app.cpm.terminal.host.CpmTerminalHost;
 import javafx.animation.PauseTransition;
+import javafx.application.Platform;
 import javafx.util.Duration;
 
 import java.lang.foreign.Arena;
@@ -139,6 +140,7 @@ public final class GhosttySurface implements AutoCloseable {
     }
 
     public void setSize(int widthPx, int heightPx) {
+        checkFxThread();
         checkOpen();
         try {
             binding.surfaceSetSize.invoke(surface, widthPx, heightPx);
@@ -148,6 +150,7 @@ public final class GhosttySurface implements AutoCloseable {
     }
 
     public void setFocus(boolean focused) {
+        checkFxThread();
         checkOpen();
         try {
             binding.surfaceSetFocus.invoke(surface, focused);
@@ -157,6 +160,7 @@ public final class GhosttySurface implements AutoCloseable {
     }
 
     public void draw() {
+        checkFxThread();
         checkOpen();
         try {
             binding.surfaceDraw.invoke(surface);
@@ -173,11 +177,30 @@ public final class GhosttySurface implements AutoCloseable {
      * (same encoding as {@code sendKey}).
      */
     public void sendMousePos(double x, double y, int mods) {
+        checkFxThread();
         checkOpen();
         try {
             binding.surfaceMousePos.invoke(surface, x, y, mods);
         } catch (Throwable t) {
             throw new GhosttyBinding.GhosttyNativeCallException("ghostty_surface_mouse_pos", t);
+        }
+    }
+
+    /**
+     * Forwards a mouse button press/release at the last reported position
+     * (drives text selection and click reporting to mouse-aware TUIs).
+     * {@code state} is a {@code ghostty_input_mouse_state_e} (1 press,
+     * 0 release), {@code button} a {@code ghostty_input_mouse_button_e}
+     * (1 left, 2 right, 3 middle), {@code mods} the ghostty mods bitmask
+     * (same encoding as {@code sendKey}).
+     */
+    public void sendMouseButton(int state, int button, int mods) {
+        checkFxThread();
+        checkOpen();
+        try {
+            binding.surfaceMouseButton.invoke(surface, state, button, mods);
+        } catch (Throwable t) {
+            throw new GhosttyBinding.GhosttyNativeCallException("ghostty_surface_mouse_button", t);
         }
     }
 
@@ -188,6 +211,7 @@ public final class GhosttySurface implements AutoCloseable {
      * produced by the host shim's scrollWheel handler.
      */
     public void sendMouseScroll(double deltaX, double deltaY, int scrollMods) {
+        checkFxThread();
         checkOpen();
         try {
             binding.surfaceMouseScroll.invoke(surface, deltaX, deltaY, scrollMods);
@@ -202,6 +226,7 @@ public final class GhosttySurface implements AutoCloseable {
      * call after {@link GhosttyApp#updateConfig}).
      */
     public void applyConfig(GhosttyApp app) {
+        checkFxThread();
         checkOpen();
         try {
             binding.surfaceUpdateConfig.invoke(surface, app.configHandle());
@@ -211,6 +236,7 @@ public final class GhosttySurface implements AutoCloseable {
     }
 
     public void refresh() {
+        checkFxThread();
         checkOpen();
         try {
             binding.surfaceRefresh.invoke(surface);
@@ -221,6 +247,7 @@ public final class GhosttySurface implements AutoCloseable {
 
     /** Feeds literal text (e.g. from a keyDown's resolved {@code characters}) to the surface. */
     public void sendText(String text) {
+        checkFxThread();
         checkOpen();
         if (text.isEmpty()) {
             return;
@@ -320,6 +347,7 @@ public final class GhosttySurface implements AutoCloseable {
     }
 
     private boolean sendKey(int ghosttyKeyCode, int mods, boolean pressed, String text, int unshiftedCodepointOverride) {
+        checkFxThread();
         checkOpen();
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment keyStruct = arena.allocate(GhosttyAppBinding.INPUT_KEY_LAYOUT);
@@ -363,6 +391,7 @@ public final class GhosttySurface implements AutoCloseable {
      *         text is available (e.g. surface not yet sized/drawn).
      */
     public String readScreenText() {
+        checkFxThread();
         checkOpen();
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment selection = arena.allocate(GhosttyAppBinding.SELECTION_LAYOUT);
@@ -426,6 +455,7 @@ public final class GhosttySurface implements AutoCloseable {
     }
 
     public boolean processExited() {
+        checkFxThread();
         checkOpen();
         try {
             return (boolean) binding.surfaceProcessExited.invoke(surface);
@@ -437,6 +467,13 @@ public final class GhosttySurface implements AutoCloseable {
     private void checkOpen() {
         if (closed) {
             throw new IllegalStateException("GhosttySurface already closed");
+        }
+    }
+
+    /** Native calls are FX-Application-Thread-only (see GhosttyApp's class Javadoc); fail fast elsewhere. */
+    private static void checkFxThread() {
+        if (!Platform.isFxApplicationThread()) {
+            throw new IllegalStateException("Not on the JavaFX Application Thread");
         }
     }
 

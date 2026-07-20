@@ -14,15 +14,16 @@ import java.util.concurrent.CompletionException;
  * Turns a failure into a user-visible {@link Alert} that states what
  * failed, which executable/path was involved, the exit code, and the
  * relevant stderr excerpt where applicable (plan section 20: "never reduce
- * these to 'Something went wrong'").
+ * these to 'Something went wrong'"). Public only because the UI
+ * sub-packages ({@code app.cpm.ui.review} etc.) share it.
  */
-final class UiErrors {
+public final class UiErrors {
 
     private UiErrors() {
     }
 
     /** Unwraps a {@link CompletionException} (as produced by CompletableFuture chains) to its cause. */
-    static Throwable unwrap(Throwable failure) {
+    public static Throwable unwrap(Throwable failure) {
         return (failure instanceof CompletionException && failure.getCause() != null)
                 ? failure.getCause()
                 : failure;

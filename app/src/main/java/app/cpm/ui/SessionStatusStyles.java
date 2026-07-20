@@ -70,6 +70,19 @@ final class SessionStatusStyles {
         pulse.setCycleCount(Animation.INDEFINITE);
         dot.getProperties().put("cpm.pulse", pulse);
 
+        // The pulse is INDEFINITE, so a dot discarded while running (the
+        // sidebar rebuilds all rows on every refresh) would leave its
+        // transition animating a detached node forever -- stop it when the
+        // dot leaves the scene, and resume when it is re-attached still
+        // wanting to pulse (e.g. the collapsed sidebar returning via ⌘0).
+        dot.sceneProperty().addListener((obs, oldScene, newScene) -> {
+            if (newScene == null) {
+                pulse.stop();
+            } else if (Boolean.TRUE.equals(dot.getProperties().get("cpm.pulsing"))) {
+                pulse.play();
+            }
+        });
+
         updateDot(dot, initialStatus);
         return dot;
     }
@@ -78,8 +91,12 @@ final class SessionStatusStyles {
     static void updateDot(Region dot, SessionStatus status) {
         applyStatus(dot, status);
         if (dot.getProperties().get("cpm.pulse") instanceof ParallelTransition pulse) {
-            if (status == SessionStatus.RUNNING || status == SessionStatus.STARTING) {
-                if (pulse.getStatus() != Animation.Status.RUNNING) {
+            boolean pulsing = status == SessionStatus.RUNNING || status == SessionStatus.STARTING;
+            // Remembered separately from the transition's own state so the
+            // scene listener in createDot can resume after a detach/attach.
+            dot.getProperties().put("cpm.pulsing", pulsing);
+            if (pulsing) {
+                if (pulse.getStatus() != Animation.Status.RUNNING && dot.getScene() != null) {
                     pulse.play();
                 }
             } else {

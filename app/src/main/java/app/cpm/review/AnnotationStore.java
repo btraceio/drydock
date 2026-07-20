@@ -26,6 +26,9 @@ import java.util.Optional;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * The per-session store of Review annotations (design handoff section C):
@@ -39,10 +42,11 @@ import java.util.concurrent.Executors;
  * wholesale, so a second writer there would race it. Saves run on a
  * single background thread (writes are serialized; the newest snapshot
  * wins) with the same temp-file-and-atomic-rename pattern as the state
- * repository. Loading is lenient: a missing or malformed file yields an
- * empty store.</p>
+ * repository. Rapid mutations coalesce: only the newest snapshot is
+ * written, not one full-file rewrite per mutation. Loading is lenient: a
+ * missing or malformed file yields an empty store.</p>
  */
-public final class AnnotationStore {
+public final class AnnotationStore implements AutoCloseable {
 
     private static final Logger LOG = System.getLogger(AnnotationStore.class.getName());
 
@@ -52,6 +56,13 @@ public final class AnnotationStore {
     private final ExecutorService saveExecutor =
             Executors.newSingleThreadExecutor(runnable -> Thread.ofVirtual().unstarted(runnable));
     private final List<ReviewAnnotation> annotations = new ArrayList<>();
+
+    /**
+     * Newest-wins pending snapshot: mutations replace it, and at most one
+     * writer task is queued to consume it, so a burst of edits produces a
+     * single file write of the latest state.
+     */
+    private final AtomicReference<List<ReviewAnnotation>> pendingSnapshot = new AtomicReference<>();
 
     public AnnotationStore(Path file) {
         this.file = file.toAbsolutePath().normalize();
@@ -120,17 +131,40 @@ public final class AnnotationStore {
      */
     public void flushPendingSaves() {
         try {
-            saveExecutor.submit(() -> { }).get();
+            saveExecutor.submit(() -> { }).get(10, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         } catch (ExecutionException e) {
             // saveSnapshot never throws; it logs its own failures.
+        } catch (TimeoutException e) {
+            // A wedged disk must not hang shutdown forever; the atomic
+            // temp-file write means the worst case is a stale file, not a
+            // corrupt one.
         }
+    }
+
+    /**
+     * Flushes the newest snapshot and stops the background writer. Safe to
+     * call once at shutdown; mutations after close are not persisted.
+     */
+    @Override
+    public void close() {
+        flushPendingSaves();
+        saveExecutor.shutdown();
     }
 
     private void persistAsync() {
         List<ReviewAnnotation> snapshot = List.copyOf(annotations);
-        saveExecutor.execute(() -> saveSnapshot(snapshot));
+        // Queue a writer task only when there is no snapshot already
+        // pending; otherwise the queued task picks up this newer one.
+        if (pendingSnapshot.getAndSet(snapshot) == null) {
+            saveExecutor.execute(() -> {
+                List<ReviewAnnotation> latest = pendingSnapshot.getAndSet(null);
+                if (latest != null) {
+                    saveSnapshot(latest);
+                }
+            });
+        }
     }
 
     private void saveSnapshot(List<ReviewAnnotation> snapshot) {

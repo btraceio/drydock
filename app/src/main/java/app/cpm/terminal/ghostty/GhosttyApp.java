@@ -12,6 +12,7 @@ import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
+import java.lang.System.Logger;
 import java.nio.file.Path;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -35,6 +36,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * <p>Part of the narrow native boundary (plan section 2.4/4.2).</p>
  */
 public final class GhosttyApp implements AutoCloseable {
+
+    private static final Logger LOG = System.getLogger(GhosttyApp.class.getName());
 
     private static final AtomicBoolean PROCESS_INITIALIZED = new AtomicBoolean(false);
 
@@ -80,9 +83,11 @@ public final class GhosttyApp implements AutoCloseable {
      * this package.
      *
      * @param lookup   the libghostty symbol lookup (see {@code GhosttyNativeLibrary#lookup()})
-     * @param onWakeup invoked from an arbitrary native thread (the caller must marshal onto
-     *                 the correct thread itself, e.g. {@code () -> Platform.runLater(...)})
-     *                 whenever libghostty wants {@link #tick()} called again.
+     * @param onWakeup invoked on the JavaFX Application Thread (native wakeups
+     *                 are coalesced through a single pending {@code
+     *                 Platform.runLater} runnable -- see {@code create}'s
+     *                 wakeup coalescer) whenever libghostty wants {@link
+     *                 #tick()} called again.
      */
     public static GhosttyApp create(SymbolLookup lookup, Runnable onWakeup) {
         return create(lookup, onWakeup, Optional.empty());
@@ -102,9 +107,23 @@ public final class GhosttyApp implements AutoCloseable {
         MemorySegment config = loadedConfig(coreBinding, configFile);
         Arena arena = Arena.ofShared();
 
+        // Coalesce wakeups: libghostty fires wakeup_cb in bursts (one per pty
+        // read), and scheduling one Platform.runLater per wakeup floods the FX
+        // event queue. Keep at most one tick runnable pending; the flag is
+        // cleared at the START of the runnable (before invoking onWakeup) so
+        // a wakeup arriving while the callback runs schedules a fresh tick.
+        AtomicBoolean wakeupPending = new AtomicBoolean(false);
+        Runnable coalescedWakeup = () -> {
+            if (wakeupPending.compareAndSet(false, true)) {
+                Platform.runLater(() -> {
+                    wakeupPending.set(false);
+                    onWakeup.run();
+                });
+            }
+        };
         MemorySegment wakeupStub = boundUpcall(binding, arena,
             "handleWakeup", MethodType.methodType(void.class, Runnable.class, MemorySegment.class),
-            onWakeup, GhosttyAppBinding.WAKEUP_CB_DESCRIPTOR);
+            coalescedWakeup, GhosttyAppBinding.WAKEUP_CB_DESCRIPTOR);
         MemorySegment actionStub = plainUpcall(binding, arena,
             "handleAction", MethodType.methodType(boolean.class, MemorySegment.class, MemorySegment.class, MemorySegment.class),
             GhosttyAppBinding.ACTION_CB_DESCRIPTOR);
@@ -176,6 +195,7 @@ public final class GhosttyApp implements AutoCloseable {
      * GhosttySurface#applyConfig(GhosttyApp)} to pick the change up.
      */
     public void updateConfig(Path configFile) {
+        checkFxThread();
         checkOpen();
         MemorySegment newConfig = loadedConfig(coreBinding, Optional.of(configFile));
         try {
@@ -205,6 +225,7 @@ public final class GhosttyApp implements AutoCloseable {
 
     /** Calls {@code ghostty_app_tick}. Must be called on the same thread every time (see class Javadoc). */
     public void tick() {
+        checkFxThread();
         checkOpen();
         try {
             binding.appTick.invoke(app);
@@ -214,6 +235,7 @@ public final class GhosttyApp implements AutoCloseable {
     }
 
     public void setFocus(boolean focused) {
+        checkFxThread();
         checkOpen();
         try {
             binding.appSetFocus.invoke(app, focused);
@@ -228,8 +250,16 @@ public final class GhosttyApp implements AutoCloseable {
         }
     }
 
+    /** Native calls are FX-Application-Thread-only (see class Javadoc); fail fast elsewhere. */
+    private static void checkFxThread() {
+        if (!Platform.isFxApplicationThread()) {
+            throw new IllegalStateException("Not on the JavaFX Application Thread");
+        }
+    }
+
     @Override
     public void close() {
+        checkFxThread();
         if (closed) {
             return;
         }
@@ -247,10 +277,22 @@ public final class GhosttyApp implements AutoCloseable {
     }
 
     // --- Upcall handlers -----------------------------------------------
+    //
+    // Every handler body is wrapped in try/catch (Throwable): a Java
+    // exception escaping an FFM upcall stub into native code terminates the
+    // whole JVM, so nothing thrown here (including by user-supplied
+    // callbacks) may propagate -- log and swallow instead.
 
     @SuppressWarnings("unused")
     private static void handleWakeup(Runnable onWakeup, MemorySegment userdata) {
-        onWakeup.run();
+        // Platform.runLater (inside the coalesced onWakeup) throws
+        // IllegalStateException once Platform.exit() has run, so late native
+        // wakeups during shutdown land in this catch too.
+        try {
+            onWakeup.run();
+        } catch (Throwable t) {
+            LOG.log(Logger.Level.ERROR, "wakeup_cb handler failed", t);
+        }
     }
 
     /**
@@ -271,28 +313,27 @@ public final class GhosttyApp implements AutoCloseable {
      * clipboard's contents. {@code userdata} is the surface-config token
      * {@link GhosttySurface} planted, resolved back to the surface so the
      * request can be completed via {@code
-     * ghostty_surface_complete_clipboard_request}. Completing synchronously
-     * from inside the callback is the normal embedded-runtime pattern
-     * (Ghostty's own macOS app does the same when the pasteboard is readily
-     * readable); the JavaFX clipboard requires the FX thread, which is where
-     * every callback-triggering native call (surface_key, tick) is made.
+     * ghostty_surface_complete_clipboard_request}. Completion is deferred to
+     * {@code Platform.runLater} (same as {@link #handleConfirmReadClipboard})
+     * so the re-entrant complete call runs after the current native call
+     * unwinds; the JavaFX clipboard requires the FX thread anyway.
      */
     @SuppressWarnings("unused")
     private static boolean handleReadClipboard(MemorySegment userdata, int location, MemorySegment state) {
-        GhosttySurface surface = GhosttySurface.byClipboardToken(userdata.address());
-        if (surface == null) {
+        try {
+            GhosttySurface surface = GhosttySurface.byClipboardToken(userdata.address());
+            if (surface == null) {
+                return false;
+            }
+            Platform.runLater(() -> {
+                String text = Clipboard.getSystemClipboard().getString();
+                surface.completeClipboardRequest(text == null ? "" : text, state, false);
+            });
+            return true;
+        } catch (Throwable t) {
+            LOG.log(Logger.Level.ERROR, "read_clipboard_cb handler failed", t);
             return false;
         }
-        Runnable complete = () -> {
-            String text = Clipboard.getSystemClipboard().getString();
-            surface.completeClipboardRequest(text == null ? "" : text, state, false);
-        };
-        if (Platform.isFxApplicationThread()) {
-            complete.run();
-        } else {
-            Platform.runLater(complete);
-        }
-        return true;
     }
 
     /**
@@ -306,13 +347,17 @@ public final class GhosttyApp implements AutoCloseable {
     @SuppressWarnings("unused")
     private static void handleConfirmReadClipboard(MemorySegment userdata, MemorySegment string,
                                                     MemorySegment state, int request) {
-        GhosttySurface surface = GhosttySurface.byClipboardToken(userdata.address());
-        if (surface == null) {
-            return;
+        try {
+            GhosttySurface surface = GhosttySurface.byClipboardToken(userdata.address());
+            if (surface == null) {
+                return;
+            }
+            String text = string.equals(MemorySegment.NULL)
+                    ? "" : string.reinterpret(Long.MAX_VALUE).getString(0);
+            Platform.runLater(() -> surface.completeClipboardRequest(text, state, true));
+        } catch (Throwable t) {
+            LOG.log(Logger.Level.ERROR, "confirm_read_clipboard_cb handler failed", t);
         }
-        String text = string.equals(MemorySegment.NULL)
-                ? "" : string.reinterpret(Long.MAX_VALUE).getString(0);
-        Platform.runLater(() -> surface.completeClipboardRequest(text, state, true));
     }
 
     /**
@@ -326,40 +371,44 @@ public final class GhosttyApp implements AutoCloseable {
     @SuppressWarnings("unused")
     private static void handleWriteClipboard(MemorySegment userdata, int location,
                                               MemorySegment content, long len, boolean confirm) {
-        if (len <= 0 || content.equals(MemorySegment.NULL)) {
-            return;
-        }
-        MemorySegment entries = content.reinterpret(len * 16);
-        String text = null;
-        for (long i = 0; i < len; i++) {
-            MemorySegment mimePtr = entries.get(ValueLayout.ADDRESS, i * 16);
-            MemorySegment dataPtr = entries.get(ValueLayout.ADDRESS, i * 16 + 8);
-            if (dataPtr.equals(MemorySegment.NULL)) {
-                continue;
+        try {
+            if (len <= 0 || content.equals(MemorySegment.NULL)) {
+                return;
             }
-            String mime = mimePtr.equals(MemorySegment.NULL)
-                    ? "" : mimePtr.reinterpret(Long.MAX_VALUE).getString(0);
-            String data = dataPtr.reinterpret(Long.MAX_VALUE).getString(0);
-            if (text == null || mime.startsWith("text/plain")) {
-                text = data;
+            MemorySegment entries = content.reinterpret(len * 16);
+            String text = null;
+            for (long i = 0; i < len; i++) {
+                MemorySegment mimePtr = entries.get(ValueLayout.ADDRESS, i * 16);
+                MemorySegment dataPtr = entries.get(ValueLayout.ADDRESS, i * 16 + 8);
+                if (dataPtr.equals(MemorySegment.NULL)) {
+                    continue;
+                }
+                String mime = mimePtr.equals(MemorySegment.NULL)
+                        ? "" : mimePtr.reinterpret(Long.MAX_VALUE).getString(0);
+                String data = dataPtr.reinterpret(Long.MAX_VALUE).getString(0);
+                if (text == null || mime.startsWith("text/plain")) {
+                    text = data;
+                }
+                if (mime.startsWith("text/plain")) {
+                    break;
+                }
             }
-            if (mime.startsWith("text/plain")) {
-                break;
+            if (text == null) {
+                return;
             }
-        }
-        if (text == null) {
-            return;
-        }
-        String value = text;
-        Runnable set = () -> {
-            ClipboardContent clipboardContent = new ClipboardContent();
-            clipboardContent.putString(value);
-            Clipboard.getSystemClipboard().setContent(clipboardContent);
-        };
-        if (Platform.isFxApplicationThread()) {
-            set.run();
-        } else {
-            Platform.runLater(set);
+            String value = text;
+            Runnable set = () -> {
+                ClipboardContent clipboardContent = new ClipboardContent();
+                clipboardContent.putString(value);
+                Clipboard.getSystemClipboard().setContent(clipboardContent);
+            };
+            if (Platform.isFxApplicationThread()) {
+                set.run();
+            } else {
+                Platform.runLater(set);
+            }
+        } catch (Throwable t) {
+            LOG.log(Logger.Level.ERROR, "write_clipboard_cb handler failed", t);
         }
     }
 

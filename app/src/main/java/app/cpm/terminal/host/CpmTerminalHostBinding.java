@@ -9,6 +9,7 @@ import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
+import java.lang.System.Logger;
 import java.nio.charset.StandardCharsets;
 
 /**
@@ -22,13 +23,14 @@ import java.nio.charset.StandardCharsets;
  */
 final class CpmTerminalHostBinding {
 
-    /** Java-side shape of {@code cpm_terminal_host_key_event_cb}. */
-    @FunctionalInterface
-    interface KeyEventListener {
-        void onKeyEvent(int keyCode, int modifierFlags, boolean keyDown, String characters,
-                        String unshiftedCharacters);
-    }
+    private static final Logger LOG = System.getLogger(CpmTerminalHostBinding.class.getName());
 
+    // The listener shapes are CpmTerminalHost's own public interfaces
+    // (KeyEventListener etc.) -- the binding deliberately defines no
+    // duplicates, so CpmTerminalHost can pass caller listeners through
+    // without wrapping.
+
+    /** Native shape of {@code cpm_terminal_host_key_event_cb}. */
     private static final FunctionDescriptor KEY_EVENT_CB_DESCRIPTOR = FunctionDescriptor.ofVoid(
         ValueLayout.ADDRESS,   // void* userdata
         ValueLayout.JAVA_SHORT, // uint16_t key_code
@@ -40,12 +42,7 @@ final class CpmTerminalHostBinding {
         ValueLayout.JAVA_LONG  // size_t unshifted_characters_len
     );
 
-    /** Java-side shape of {@code cpm_terminal_host_scroll_event_cb}. */
-    @FunctionalInterface
-    interface ScrollEventListener {
-        void onScrollEvent(double deltaX, double deltaY, int scrollMods);
-    }
-
+    /** Native shape of {@code cpm_terminal_host_scroll_event_cb}. */
     private static final FunctionDescriptor SCROLL_EVENT_CB_DESCRIPTOR = FunctionDescriptor.ofVoid(
         ValueLayout.ADDRESS,     // void* userdata
         ValueLayout.JAVA_DOUBLE, // double delta_x
@@ -53,12 +50,7 @@ final class CpmTerminalHostBinding {
         ValueLayout.JAVA_BYTE    // uint8_t scroll_mods (packed ghostty ScrollMods)
     );
 
-    /** Java-side shape of {@code cpm_terminal_host_mouse_pos_event_cb}. */
-    @FunctionalInterface
-    interface MousePosEventListener {
-        void onMousePosEvent(double x, double y, int modifierFlags);
-    }
-
+    /** Native shape of {@code cpm_terminal_host_mouse_pos_event_cb}. */
     private static final FunctionDescriptor MOUSE_POS_EVENT_CB_DESCRIPTOR = FunctionDescriptor.ofVoid(
         ValueLayout.ADDRESS,     // void* userdata
         ValueLayout.JAVA_DOUBLE, // double x (view-local, top-left origin, points)
@@ -66,9 +58,18 @@ final class CpmTerminalHostBinding {
         ValueLayout.JAVA_INT     // uint32_t modifier_flags
     );
 
+    /** Native shape of {@code cpm_terminal_host_mouse_button_event_cb}. */
+    private static final FunctionDescriptor MOUSE_BUTTON_EVENT_CB_DESCRIPTOR = FunctionDescriptor.ofVoid(
+        ValueLayout.ADDRESS,  // void* userdata
+        ValueLayout.JAVA_INT, // int state (ghostty_input_mouse_state_e)
+        ValueLayout.JAVA_INT, // int button (ghostty_input_mouse_button_e)
+        ValueLayout.JAVA_INT  // uint32_t modifier_flags
+    );
+
     private static final MethodHandle KEY_EVENT_TRAMPOLINE;
     private static final MethodHandle SCROLL_EVENT_TRAMPOLINE;
     private static final MethodHandle MOUSE_POS_EVENT_TRAMPOLINE;
+    private static final MethodHandle MOUSE_BUTTON_EVENT_TRAMPOLINE;
 
     static {
         try {
@@ -77,7 +78,7 @@ final class CpmTerminalHostBinding {
                 "dispatchKeyEvent",
                 MethodType.methodType(
                     void.class,
-                    KeyEventListener.class,
+                    CpmTerminalHost.KeyEventListener.class,
                     MemorySegment.class,
                     short.class,
                     int.class,
@@ -93,7 +94,7 @@ final class CpmTerminalHostBinding {
                 "dispatchScrollEvent",
                 MethodType.methodType(
                     void.class,
-                    ScrollEventListener.class,
+                    CpmTerminalHost.ScrollEventListener.class,
                     MemorySegment.class,
                     double.class,
                     double.class,
@@ -105,10 +106,22 @@ final class CpmTerminalHostBinding {
                 "dispatchMousePosEvent",
                 MethodType.methodType(
                     void.class,
-                    MousePosEventListener.class,
+                    CpmTerminalHost.MousePosEventListener.class,
                     MemorySegment.class,
                     double.class,
                     double.class,
+                    int.class
+                )
+            );
+            MOUSE_BUTTON_EVENT_TRAMPOLINE = MethodHandles.lookup().findStatic(
+                CpmTerminalHostBinding.class,
+                "dispatchMouseButtonEvent",
+                MethodType.methodType(
+                    void.class,
+                    CpmTerminalHost.MouseButtonEventListener.class,
+                    MemorySegment.class,
+                    int.class,
+                    int.class,
                     int.class
                 )
             );
@@ -128,6 +141,7 @@ final class CpmTerminalHostBinding {
     private final MethodHandle setKeyEventCallback;
     private final MethodHandle setScrollEventCallback;
     private final MethodHandle setMousePosEventCallback;
+    private final MethodHandle setMouseButtonEventCallback;
 
     CpmTerminalHostBinding(SymbolLookup lookup) {
         // cpm_terminal_host_t cpm_terminal_host_create(void* parent_nsview);
@@ -187,6 +201,12 @@ final class CpmTerminalHostBinding {
         // void cpm_terminal_host_set_mouse_pos_event_callback(host, cb, userdata);
         this.setMousePosEventCallback = linker.downcallHandle(
             find(lookup, "cpm_terminal_host_set_mouse_pos_event_callback"),
+            FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
+        );
+
+        // void cpm_terminal_host_set_mouse_button_event_callback(host, cb, userdata);
+        this.setMouseButtonEventCallback = linker.downcallHandle(
+            find(lookup, "cpm_terminal_host_set_mouse_button_event_callback"),
             FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
         );
     }
@@ -254,7 +274,7 @@ final class CpmTerminalHostBinding {
      * host), otherwise a native call into a freed trampoline would crash
      * the process.
      */
-    void setKeyEventCallback(MemorySegment host, KeyEventListener listener, Arena arena) {
+    void setKeyEventCallback(MemorySegment host, CpmTerminalHost.KeyEventListener listener, Arena arena) {
         MethodHandle bound = MethodHandles.insertArguments(KEY_EVENT_TRAMPOLINE, 0, listener);
         MemorySegment stub = linker.upcallStub(bound, KEY_EVENT_CB_DESCRIPTOR, arena);
         try {
@@ -268,7 +288,7 @@ final class CpmTerminalHostBinding {
      * Registers {@code listener} as the host's scroll-event callback; same
      * arena-lifetime contract as {@link #setKeyEventCallback}.
      */
-    void setScrollEventCallback(MemorySegment host, ScrollEventListener listener, Arena arena) {
+    void setScrollEventCallback(MemorySegment host, CpmTerminalHost.ScrollEventListener listener, Arena arena) {
         MethodHandle bound = MethodHandles.insertArguments(SCROLL_EVENT_TRAMPOLINE, 0, listener);
         MemorySegment stub = linker.upcallStub(bound, SCROLL_EVENT_CB_DESCRIPTOR, arena);
         try {
@@ -282,7 +302,7 @@ final class CpmTerminalHostBinding {
      * Registers {@code listener} as the host's mouse-position callback; same
      * arena-lifetime contract as {@link #setKeyEventCallback}.
      */
-    void setMousePosEventCallback(MemorySegment host, MousePosEventListener listener, Arena arena) {
+    void setMousePosEventCallback(MemorySegment host, CpmTerminalHost.MousePosEventListener listener, Arena arena) {
         MethodHandle bound = MethodHandles.insertArguments(MOUSE_POS_EVENT_TRAMPOLINE, 0, listener);
         MemorySegment stub = linker.upcallStub(bound, MOUSE_POS_EVENT_CB_DESCRIPTOR, arena);
         try {
@@ -292,32 +312,74 @@ final class CpmTerminalHostBinding {
         }
     }
 
+    /**
+     * Registers {@code listener} as the host's mouse-button callback; same
+     * arena-lifetime contract as {@link #setKeyEventCallback}.
+     */
+    void setMouseButtonEventCallback(MemorySegment host, CpmTerminalHost.MouseButtonEventListener listener, Arena arena) {
+        MethodHandle bound = MethodHandles.insertArguments(MOUSE_BUTTON_EVENT_TRAMPOLINE, 0, listener);
+        MemorySegment stub = linker.upcallStub(bound, MOUSE_BUTTON_EVENT_CB_DESCRIPTOR, arena);
+        try {
+            setMouseButtonEventCallback.invoke(host, stub, MemorySegment.NULL);
+        } catch (Throwable t) {
+            throw new HostNativeCallException("cpm_terminal_host_set_mouse_button_event_callback", t);
+        }
+    }
+
+    // Every dispatch trampoline below is wrapped in try/catch (Throwable): a
+    // Java exception escaping an FFM upcall stub into native code terminates
+    // the whole JVM, so a throwing user-supplied listener must be logged and
+    // swallowed here, never propagated.
+
+    /** Upcall trampoline invoked directly by native code; see MOUSE_BUTTON_EVENT_TRAMPOLINE. */
+    @SuppressWarnings("unused")
+    private static void dispatchMouseButtonEvent(
+            CpmTerminalHost.MouseButtonEventListener listener,
+            MemorySegment userdata,
+            int state,
+            int button,
+            int modifierFlags) {
+        try {
+            listener.onMouseButtonEvent(state, button, modifierFlags);
+        } catch (Throwable t) {
+            LOG.log(Logger.Level.ERROR, "mouse-button event listener failed", t);
+        }
+    }
+
     /** Upcall trampoline invoked directly by native code; see MOUSE_POS_EVENT_TRAMPOLINE. */
     @SuppressWarnings("unused")
     private static void dispatchMousePosEvent(
-            MousePosEventListener listener,
+            CpmTerminalHost.MousePosEventListener listener,
             MemorySegment userdata,
             double x,
             double y,
             int modifierFlags) {
-        listener.onMousePosEvent(x, y, modifierFlags);
+        try {
+            listener.onMousePosEvent(x, y, modifierFlags);
+        } catch (Throwable t) {
+            LOG.log(Logger.Level.ERROR, "mouse-position event listener failed", t);
+        }
     }
 
     /** Upcall trampoline invoked directly by native code; see SCROLL_EVENT_TRAMPOLINE. */
     @SuppressWarnings("unused")
     private static void dispatchScrollEvent(
-            ScrollEventListener listener,
+            CpmTerminalHost.ScrollEventListener listener,
             MemorySegment userdata,
             double deltaX,
             double deltaY,
             byte scrollMods) {
-        listener.onScrollEvent(deltaX, deltaY, scrollMods & 0xFF);
+        try {
+            listener.onScrollEvent(deltaX, deltaY, scrollMods & 0xFF);
+        } catch (Throwable t) {
+            LOG.log(Logger.Level.ERROR, "scroll event listener failed", t);
+        }
     }
 
     /** Upcall trampoline invoked directly by native code; see KEY_EVENT_TRAMPOLINE. */
     @SuppressWarnings("unused")
     private static void dispatchKeyEvent(
-            KeyEventListener listener,
+            CpmTerminalHost.KeyEventListener listener,
             MemorySegment userdata,
             short keyCode,
             int modifierFlags,
@@ -326,9 +388,13 @@ final class CpmTerminalHostBinding {
             long charactersLen,
             MemorySegment unshiftedCharacters,
             long unshiftedCharactersLen) {
-        String text = decodeUtf8(characters, charactersLen);
-        String unshiftedText = decodeUtf8(unshiftedCharacters, unshiftedCharactersLen);
-        listener.onKeyEvent(keyCode & 0xFFFF, modifierFlags, isKeyDown != 0, text, unshiftedText);
+        try {
+            String text = decodeUtf8(characters, charactersLen);
+            String unshiftedText = decodeUtf8(unshiftedCharacters, unshiftedCharactersLen);
+            listener.onKeyEvent(keyCode & 0xFFFF, modifierFlags, isKeyDown != 0, text, unshiftedText);
+        } catch (Throwable t) {
+            LOG.log(Logger.Level.ERROR, "key event listener failed", t);
+        }
     }
 
     private static String decodeUtf8(MemorySegment segment, long len) {

@@ -1,5 +1,7 @@
 package app.cpm;
 
+import app.cpm.app.LoginShellEnvironment;
+
 /**
  * Application entry point.
  *
@@ -13,6 +15,11 @@ public final class Main {
     }
 
     public static void main(String[] args) {
+        // Must run before anything touches System.getenv()/ProcessBuilder;
+        // see LoginShellEnvironment's Javadoc (the JDK snapshots the
+        // environment on first use, and Finder launches need the repaired
+        // PATH inside that snapshot).
+        LoginShellEnvironment.mergeLoginShellPath();
         CpmApplication.main(args);
     }
 }

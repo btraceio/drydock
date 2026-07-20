@@ -1,12 +1,17 @@
 package app.cpm.ui;
 
 import app.cpm.domain.UiTheme;
+import javafx.geometry.Pos;
 import javafx.scene.Scene;
+import javafx.scene.control.Button;
+import javafx.scene.control.Label;
 import javafx.scene.control.SplitPane;
+import javafx.scene.control.Tooltip;
 import javafx.stage.StageStyle;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.Region;
 import javafx.scene.layout.StackPane;
+import javafx.scene.layout.VBox;
 import javafx.stage.Stage;
 
 import java.util.function.Consumer;
@@ -37,6 +42,10 @@ public final class AppShell {
     private boolean sidebarCollapsed;
     private double savedSidebarWidth = -1;
 
+    private final BorderPane shell = new BorderPane();
+    /** Slim strip shown in the sidebar's place while collapsed: an expand button + the ⌘0 hint. */
+    private final Region collapsedRail = buildCollapsedRail();
+
     public AppShell(Stage stage, String title, Region sidebar, Region mainPane,
                     double initialSidebarWidth, UiTheme initialTheme, Consumer<UiTheme> onThemeChanged,
                     double sceneWidth, double sceneHeight) {
@@ -52,7 +61,6 @@ public final class AppShell {
                 () -> toggleTheme(),
                 () -> toggleSidebar());
 
-        BorderPane shell = new BorderPane();
         shell.setTop(titleBar);
         shell.setCenter(splitPane);
 
@@ -100,6 +108,7 @@ public final class AppShell {
      */
     public void toggleSidebar() {
         if (sidebarCollapsed) {
+            shell.setLeft(null);
             splitPane.getItems().add(0, sidebar);
             SplitPane.setResizableWithParent(sidebar, false);
             double width = Math.clamp(savedSidebarWidth > 0 ? savedSidebarWidth : SIDEBAR_MIN,
@@ -109,8 +118,26 @@ public final class AppShell {
         } else {
             savedSidebarWidth = sidebar.getWidth();
             splitPane.getItems().remove(sidebar);
+            shell.setLeft(collapsedRail);
             sidebarCollapsed = true;
         }
+        titleBar.showSidebarState(sidebarCollapsed);
+    }
+
+    private Region buildCollapsedRail() {
+        Button expand = new Button("◧");
+        expand.getStyleClass().add("icon-button");
+        expand.setFocusTraversable(false);
+        expand.setTooltip(new Tooltip("Show sidebar (⌘0)"));
+        expand.setOnAction(e -> toggleSidebar());
+
+        Label hint = new Label("⌘0");
+        hint.getStyleClass().add("rail-hint");
+
+        VBox rail = new VBox(2, expand, hint);
+        rail.getStyleClass().add("sidebar-rail");
+        rail.setAlignment(Pos.TOP_CENTER);
+        return rail;
     }
 
     public void toggleTheme() {

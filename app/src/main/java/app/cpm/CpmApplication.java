@@ -28,10 +28,13 @@ import javafx.scene.input.KeyEvent;
 import javafx.stage.Stage;
 import javafx.stage.WindowEvent;
 
+import java.lang.System.Logger;
+import java.lang.System.Logger.Level;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.Base64;
 import java.util.Optional;
+import java.util.concurrent.TimeUnit;
 
 /**
  * The main window: a {@link SplitPane} with the repository sidebar (plan
@@ -59,8 +62,19 @@ public final class CpmApplication extends Application {
 
     static final String WINDOW_TITLE = "Claude Project Manager";
 
+    private static final Logger LOG = System.getLogger(CpmApplication.class.getName());
+
     private static final double DEFAULT_SCENE_WIDTH = 1100;
     private static final double DEFAULT_SCENE_HEIGHT = 720;
+
+    /**
+     * How long {@link #onCloseRequest} waits for the graceful
+     * close-all-sessions sweep before force-closing the window anyway:
+     * every session gets a 3s grace period (they close in parallel), plus
+     * margin for the FX-thread hops -- without a bound, one wedged surface
+     * callback would hang shutdown forever.
+     */
+    private static final long SHUTDOWN_CLOSE_TIMEOUT_SECONDS = 10;
 
     private GitStatusService gitStatusService;
     private WorktreeService worktreeService;
@@ -79,6 +93,35 @@ public final class CpmApplication extends Application {
 
     @Override
     public void start(Stage primaryStage) {
+        // Boot failures used to die with a bare stack trace on stderr --
+        // invisible to a Finder/Dock launch. Route every uncaught FX-thread
+        // exception (runLater tasks, event handlers, and, via the catch
+        // below, start() itself) through one log-and-alert handler.
+        Thread.currentThread().setUncaughtExceptionHandler(
+                (thread, error) -> reportUncaughtFxException(error));
+        try {
+            startOnFxThread(primaryStage);
+        } catch (RuntimeException | Error e) {
+            reportUncaughtFxException(e);
+            throw e;
+        }
+    }
+
+    private static void reportUncaughtFxException(Throwable error) {
+        LOG.log(Level.ERROR, "Uncaught exception on the JavaFX Application Thread", error);
+        try {
+            Alert alert = new Alert(Alert.AlertType.ERROR);
+            alert.setTitle(WINDOW_TITLE);
+            alert.setHeaderText("An unexpected error occurred");
+            alert.setContentText(String.valueOf(error));
+            alert.showAndWait();
+        } catch (RuntimeException alertFailure) {
+            // Toolkit too broken to show UI; the log line above is all we can do.
+            LOG.log(Level.WARNING, "Could not show the error alert", alertFailure);
+        }
+    }
+
+    private void startOnFxThread(Stage primaryStage) {
         // Diagnostic override (see the app.cpm.diag.* section in
         // app/build.gradle.kts): lets automated visual verification run
         // against a throwaway state file instead of the user's real
@@ -126,6 +169,11 @@ public final class CpmApplication extends Application {
         // The native ghostty view paints over in-scene modals; hide it while
         // any modal is showing (see MainWorkspace.setTerminalsObscured).
         appShell.modalLayer().setOnShowingChanged(mainWorkspace::setTerminalsObscured);
+        // Text inputs go dead while the terminal holds the macOS first
+        // responder; hand it back whenever one takes JavaFX focus (see
+        // MainWorkspace.onFocusOwnerChanged).
+        appShell.scene().focusOwnerProperty().addListener(
+                (obs, oldOwner, owner) -> mainWorkspace.onFocusOwnerChanged(owner));
 
         gitHubService = new GitHubService();
         sidebar.setOnCloneFromGitHub(() -> appShell.modalLayer().show(
@@ -447,46 +495,65 @@ public final class CpmApplication extends Application {
         }
 
         Stage stage = (Stage) event.getSource();
-        mainWorkspace.closeAllSessions().whenComplete((v, ex) -> Platform.runLater(() -> {
-            shutdownConfirmed = true;
-            stage.close(); // Stage.close() does not re-fire setOnCloseRequest -- see Gate0eSpike's shutdown().
-        }));
+        mainWorkspace.closeAllSessions()
+                .orTimeout(SHUTDOWN_CLOSE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                .whenComplete((v, ex) -> Platform.runLater(() -> {
+                    if (ex != null) {
+                        // Timeout or close failure: force the shutdown through
+                        // anyway -- stop() still runs and flushes state.
+                        LOG.log(Level.WARNING, "Graceful session close did not finish; force-closing", ex);
+                    }
+                    shutdownConfirmed = true;
+                    stage.close(); // Stage.close() does not re-fire setOnCloseRequest -- see Gate0eSpike's shutdown().
+                }));
     }
 
     @Override
     public void stop() {
+        // Every step is individually isolated: an exception from one close
+        // must never skip the later ones (before this, an early throw could
+        // silently drop annotationStore's pending review notes and
+        // sessionManager's queued state saves).
         if (appShell != null && repositoryManager != null) {
             double sidebarWidth = appShell.sidebarWidth();
             if (sidebarWidth > 0) {
-                repositoryManager.updateSidebarWidth(sidebarWidth);
+                closeQuietly("sidebar-width persistence", () -> repositoryManager.updateSidebarWidth(sidebarWidth));
             }
         }
         if (gitHubService != null) {
-            gitHubService.close();
+            closeQuietly("GitHubService", gitHubService::close);
         }
         if (annotationStore != null) {
-            annotationStore.flushPendingSaves(); // don't lose a review note queued moments before quit
+            closeQuietly("AnnotationStore", annotationStore::close);
         }
         if (sessionManager != null) {
-            sessionManager.close();
+            closeQuietly("SessionManager", sessionManager::close);
         }
         if (claudeCapabilityService != null) {
-            claudeCapabilityService.close();
+            closeQuietly("ClaudeCapabilityService", claudeCapabilityService::close);
         }
         if (gitStatusService != null) {
-            gitStatusService.close();
+            closeQuietly("GitStatusService", gitStatusService::close);
         }
         if (worktreeService != null) {
-            worktreeService.close();
+            closeQuietly("WorktreeService", worktreeService::close);
         }
         if (diffService != null) {
-            diffService.close();
+            closeQuietly("DiffService", diffService::close);
         }
         if (searchService != null) {
-            searchService.close();
+            closeQuietly("SessionSearchService", searchService::close);
         }
         if (ghCliService != null) {
-            ghCliService.close();
+            closeQuietly("GhCliService", ghCliService::close);
+        }
+    }
+
+    private static void closeQuietly(String what, Runnable close) {
+        try {
+            close.run();
+        } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, "Shutdown step failed: " + what, e);
         }
     }
 
