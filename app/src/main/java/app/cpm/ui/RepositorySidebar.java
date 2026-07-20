@@ -13,6 +13,7 @@ import app.cpm.domain.SessionStatus;
 import app.cpm.git.GitStatus;
 import app.cpm.git.GitStatusService;
 import app.cpm.git.WorktreeService;
+import app.cpm.ui.model.WorkspaceViewModel;
 import java.io.File;
 import javafx.animation.PauseTransition;
 import javafx.animation.RotateTransition;
@@ -73,11 +74,13 @@ import java.util.function.Consumer;
  * Each repo header gains a ⟳ rescan that re-runs discovery; newly-found
  * rows get a one-shot highlight.
  *
- * <p>Data still comes straight from {@link RepositoryManager} /
- * {@link SessionManager} / {@link WorktreeService} on every rebuild --
- * nothing is cached here beyond the current discovery results. {@link
- * #refreshSessions()} (called by {@link MainWorkspace} after any session
- * change) rebuilds the tree.</p>
+ * <p>All session/status data renders from the shared {@link
+ * WorkspaceViewModel}: this sidebar's async git-status/worktree fetches
+ * write their results into the model, and the model's diffed events drive
+ * the narrowest matching update -- a status change re-renders one row via
+ * {@code TreeItem.setValue}, a tab switch restyles only the previously/
+ * newly active rows, and only genuine row additions/removals trigger a
+ * (coalesced) full {@link #rebuildTree()}.</p>
  */
 public final class RepositorySidebar extends VBox {
 
@@ -94,6 +97,7 @@ public final class RepositorySidebar extends VBox {
     private final WorktreeService worktreeService;
     private final SessionManager sessionManager;
     private final WorkspaceNavigator navigator;
+    private final WorkspaceViewModel viewModel;
     private final ExternalEditorLauncher editorLauncher = new ExternalEditorLauncher();
 
     private final TextField filterField = new TextField();
@@ -105,15 +109,6 @@ public final class RepositorySidebar extends VBox {
     /** Which repository subtrees are expanded; new repositories start expanded. */
     private final Set<RepositoryId> collapsed = new HashSet<>();
 
-    /** Latest known Git status per repository, populated asynchronously; absent until the first refresh completes. */
-    private final Map<RepositoryId, GitStatus> statuses = new ConcurrentHashMap<>();
-    /** The most recent Git-status failure per repository (e.g. the directory vanished), if any. */
-    private final Map<RepositoryId, Throwable> statusFailures = new ConcurrentHashMap<>();
-    /** Latest known Git status per worktree root (worktree sessions have their own checkout + branch). */
-    private final Map<Path, GitStatus> worktreeStatuses = new ConcurrentHashMap<>();
-
-    /** Latest worktree discovery per repository ({@code git worktree list --porcelain}); absent until the first scan. */
-    private final Map<RepositoryId, List<WorktreeService.Worktree>> worktreeLists = new ConcurrentHashMap<>();
     /** Repositories with a rescan in flight (spins the ⟳ button, prevents double-scans). */
     private final Set<RepositoryId> scanning = ConcurrentHashMap.newKeySet();
     /** Worktree paths discovered by the latest rescan, highlighted one-shot until the timer clears them. */
@@ -126,6 +121,15 @@ public final class RepositorySidebar extends VBox {
 
     /** Debounces filter keystrokes so the tree isn't rebuilt per character. */
     private final PauseTransition filterDebounce = new PauseTransition(FILTER_DEBOUNCE);
+
+    /**
+     * The session snapshot whose statuses were last re-fetched, compared by
+     * identity: the model swaps the immutable snapshot instance on every
+     * session change, so an unchanged reference means a structure/row event
+     * came from worktree discovery or repo removal -- which never used to
+     * trigger a status re-fetch either.
+     */
+    private List<ManagedClaudeSession> statusRefreshedFor = List.of();
 
     /**
      * Coalesces async-completion rebuilds: N git-status/worktree results
@@ -147,12 +151,13 @@ public final class RepositorySidebar extends VBox {
 
     public RepositorySidebar(RepositoryManager repositoryManager, GitStatusService gitStatusService,
                               WorktreeService worktreeService, SessionManager sessionManager,
-                              WorkspaceNavigator navigator) {
+                              WorkspaceNavigator navigator, WorkspaceViewModel viewModel) {
         this.repositoryManager = repositoryManager;
         this.gitStatusService = gitStatusService;
         this.worktreeService = worktreeService;
         this.sessionManager = sessionManager;
         this.navigator = navigator;
+        this.viewModel = viewModel;
 
         getStyleClass().add("sidebar");
 
@@ -191,6 +196,42 @@ public final class RepositorySidebar extends VBox {
         // listener may fire on a background thread.
         repositoryManager.addChangeListener(() -> Platform.runLater(this::onRepositoriesChanged));
 
+        // Render from the model: rows update in place; only structural
+        // changes rebuild the tree (coalesced), and a tab switch touches
+        // nothing but the active rows and the selection.
+        viewModel.addListener(new WorkspaceViewModel.Listener() {
+            @Override
+            public void structureChanged() {
+                maybeRefreshStatuses();
+                requestRebuild();
+            }
+
+            @Override
+            public void sessionRowChanged(ManagedSessionId sessionId) {
+                maybeRefreshStatuses();
+                updateSessionRow(sessionId);
+            }
+
+            @Override
+            public void repoChanged(RepositoryId repositoryId) {
+                updateRepoRow(repositoryId);
+                updateFooter();
+            }
+
+            @Override
+            public void worktreeRowChanged(Path worktreeRoot) {
+                updateWorktreeRow(worktreeRoot);
+            }
+
+            @Override
+            public void activeSessionChanged(Optional<ManagedSessionId> previous,
+                                             Optional<ManagedSessionId> current) {
+                previous.ifPresent(RepositorySidebar.this::updateSessionRow);
+                current.ifPresent(RepositorySidebar.this::updateSessionRow);
+                syncActiveSelection();
+            }
+        });
+
         // A collapsed sidebar (⌘0) is detached from the scene; reveal the
         // active session's row once it is re-attached.
         sceneProperty().addListener((obs, oldScene, newScene) -> {
@@ -219,13 +260,18 @@ public final class RepositorySidebar extends VBox {
         filterField.selectAll();
     }
 
-    /** Rebuilds the tree from current manager state; called after any session change. */
-    public void refreshSessions() {
-        // Re-fetch repo AND worktree statuses unconditionally: fetch-once
-        // caching left branch tags and dirty dots permanently stale. The
-        // fetches are async; each completion coalesces into one rebuild.
-        refreshAllStatuses();
-        rebuildTree();
+    /**
+     * Re-fetches repo AND worktree statuses when the event was driven by an
+     * actual session change (fetch-once caching left branch tags and dirty
+     * dots permanently stale; see {@link #statusRefreshedFor}). The fetches
+     * are async; each completion writes into the model, which re-renders
+     * exactly the affected rows.
+     */
+    private void maybeRefreshStatuses() {
+        if (viewModel.sessions() != statusRefreshedFor) {
+            statusRefreshedFor = viewModel.sessions();
+            refreshAllStatuses();
+        }
     }
 
     /**
@@ -252,7 +298,8 @@ public final class RepositorySidebar extends VBox {
 
     private void onRepositoriesChanged() {
         for (Repository repository : repositoryManager.repositories()) {
-            if (!statuses.containsKey(repository.id()) && !statusFailures.containsKey(repository.id())) {
+            if (viewModel.repoStatus(repository.id()).isEmpty()
+                    && viewModel.repoStatusFailure(repository.id()).isEmpty()) {
                 refreshStatus(repository);
             }
         }
@@ -264,9 +311,6 @@ public final class RepositorySidebar extends VBox {
 
         List<Repository> repositories = sorted(repositoryManager.repositories());
         List<TreeItem<SidebarNode>> repoItems = new ArrayList<>();
-        int runningTotal = 0;
-        int worktreeTotal = 0;
-        int unopenedTotal = 0;
 
         for (Repository repository : repositories) {
             List<SidebarNode> children = childNodesFor(repository);
@@ -282,11 +326,7 @@ public final class RepositorySidebar extends VBox {
             TreeItem<SidebarNode> repoItem = new TreeItem<>(new SidebarNode.RepoNode(repository));
             for (SidebarNode child : children) {
                 repoItem.getChildren().add(new TreeItem<>(child));
-                if (child instanceof SidebarNode.UnopenedWorktreeNode) {
-                    unopenedTotal++;
-                }
             }
-            worktreeTotal += additionalWorktreeCount(repository);
             repoItem.setExpanded(!collapsed.contains(repository.id()));
             repoItem.expandedProperty().addListener((obs, was, is) -> {
                 if (is) {
@@ -298,19 +338,39 @@ public final class RepositorySidebar extends VBox {
             repoItems.add(repoItem);
         }
 
-        for (ManagedClaudeSession session : sessionManager.sessions()) {
+        treeRoot.getChildren().setAll(repoItems);
+
+        updateFooter();
+        syncActiveSelection();
+    }
+
+    /**
+     * Footer status line (worktree handoff): N running · M worktrees · K
+     * unopened, computed from the model across ALL repositories (the filter
+     * narrows the tree, not the totals). Until a repo's discovery has run,
+     * fall back to the session-derived worktree count so the line never
+     * reads "0".
+     */
+    private void updateFooter() {
+        int runningTotal = 0;
+        for (ManagedClaudeSession session : viewModel.sessions()) {
             if (session.status() == SessionStatus.RUNNING || session.status() == SessionStatus.STARTING) {
                 runningTotal++;
             }
         }
-
-        treeRoot.getChildren().setAll(repoItems);
-
-        // Footer status line (worktree handoff): N running · M worktrees ·
-        // K unopened. Until a repo's discovery has run, fall back to the
-        // session-derived worktree count so the line never reads "0".
-        if (worktreeLists.isEmpty()) {
-            worktreeTotal = (int) sessionManager.sessions().stream()
+        int worktreeTotal = 0;
+        int unopenedTotal = 0;
+        for (Repository repository : repositoryManager.repositories()) {
+            if (viewModel.worktrees(repository.id()).isEmpty()) {
+                continue;
+            }
+            worktreeTotal += additionalWorktreeCount(repository);
+            unopenedTotal += (int) childNodesFor(repository).stream()
+                    .filter(child -> child instanceof SidebarNode.UnopenedWorktreeNode)
+                    .count();
+        }
+        if (!viewModel.anyWorktreesDiscovered()) {
+            worktreeTotal = (int) viewModel.sessions().stream()
                     .filter(session -> session.worktreeRoot().isPresent())
                     .count();
         }
@@ -321,8 +381,79 @@ public final class RepositorySidebar extends VBox {
         }
         footerLabel.setText(footerText);
         SessionStatusStyles.updateDot(footerDot, runningTotal > 0 ? SessionStatus.RUNNING : SessionStatus.INACTIVE);
+    }
 
-        syncActiveSelection();
+    // ---- In-place row updates (model-event driven) --------------------------
+
+    /**
+     * Re-renders one session's row by swapping a fresh node record into its
+     * {@link TreeItem} -- the cell listens to the item's value property, so
+     * exactly that row rebuilds; siblings, expansion, scroll position, and
+     * the filter are untouched.
+     */
+    private void updateSessionRow(ManagedSessionId sessionId) {
+        for (TreeItem<SidebarNode> repoItem : treeRoot.getChildren()) {
+            for (TreeItem<SidebarNode> child : repoItem.getChildren()) {
+                if (child.getValue() instanceof SidebarNode.SessionNode sessionNode
+                        && sessionNode.session().id().equals(sessionId)) {
+                    viewModel.sessionById(sessionId).ifPresent(current -> child.setValue(
+                            new SidebarNode.SessionNode(current, sessionNode.repository())));
+                    return;
+                }
+            }
+        }
+    }
+
+    /**
+     * Re-renders a repository's header row plus its main-checkout session
+     * rows (their branch tag/dirty dot read the repo's status, and the
+     * header aggregates session count/running dot/meta line).
+     */
+    private void updateRepoRow(RepositoryId repositoryId) {
+        for (TreeItem<SidebarNode> repoItem : treeRoot.getChildren()) {
+            if (!(repoItem.getValue() instanceof SidebarNode.RepoNode repoNode)
+                    || !repoNode.repository().id().equals(repositoryId)) {
+                continue;
+            }
+            repoItem.setValue(new SidebarNode.RepoNode(repoNode.repository()));
+            for (TreeItem<SidebarNode> child : repoItem.getChildren()) {
+                if (child.getValue() instanceof SidebarNode.SessionNode sessionNode
+                        && sessionNode.session().worktreeRoot().isEmpty()) {
+                    child.setValue(new SidebarNode.SessionNode(
+                            viewModel.sessionById(sessionNode.session().id()).orElse(sessionNode.session()),
+                            sessionNode.repository()));
+                }
+            }
+            return;
+        }
+    }
+
+    /** Re-renders the one row backed by {@code worktreeRoot} (a worktree session row or an unopened row). */
+    private void updateWorktreeRow(Path worktreeRoot) {
+        for (TreeItem<SidebarNode> repoItem : treeRoot.getChildren()) {
+            for (TreeItem<SidebarNode> child : repoItem.getChildren()) {
+                switch (child.getValue()) {
+                    case SidebarNode.SessionNode sessionNode -> {
+                        if (sessionNode.session().worktreeRoot()
+                                .map(worktreeRoot::equals).orElse(false)) {
+                            child.setValue(new SidebarNode.SessionNode(
+                                    viewModel.sessionById(sessionNode.session().id())
+                                            .orElse(sessionNode.session()),
+                                    sessionNode.repository()));
+                            return;
+                        }
+                    }
+                    case SidebarNode.UnopenedWorktreeNode worktreeNode -> {
+                        if (worktreeNode.worktree().path().equals(worktreeRoot)) {
+                            child.setValue(new SidebarNode.UnopenedWorktreeNode(
+                                    worktreeNode.worktree(), worktreeNode.repository()));
+                            return;
+                        }
+                    }
+                    case null, default -> { }
+                }
+            }
+        }
     }
 
     /**
@@ -333,7 +464,7 @@ public final class RepositorySidebar extends VBox {
      * once per active-session change, not on every status-refresh rebuild.
      */
     private void syncActiveSelection() {
-        ManagedSessionId active = navigator.activeSessionId().orElse(null);
+        ManagedSessionId active = viewModel.activeSession().orElse(null);
         if (active == null) {
             lastRevealedSession = null;
             tree.getSelectionModel().clearSelection();
@@ -394,7 +525,7 @@ public final class RepositorySidebar extends VBox {
      */
     private List<SidebarNode> childNodesFor(Repository repository) {
         List<ManagedClaudeSession> sessions = sessionsFor(repository);
-        List<WorktreeService.Worktree> worktrees = worktreeLists.get(repository.id());
+        List<WorktreeService.Worktree> worktrees = viewModel.worktrees(repository.id()).orElse(null);
         if (worktrees == null) {
             // Discovery hasn't run yet for this repo: kick it off and show
             // the session-derived rows meanwhile.
@@ -443,7 +574,7 @@ public final class RepositorySidebar extends VBox {
 
     /** Count of additional (non-main) worktrees on disk, once discovery has run. */
     private int additionalWorktreeCount(Repository repository) {
-        List<WorktreeService.Worktree> worktrees = worktreeLists.get(repository.id());
+        List<WorktreeService.Worktree> worktrees = viewModel.worktrees(repository.id()).orElse(null);
         if (worktrees == null) {
             return 0;
         }
@@ -454,7 +585,7 @@ public final class RepositorySidebar extends VBox {
         if (repository.displayName().toLowerCase(Locale.ROOT).contains(query)) {
             return true;
         }
-        GitStatus status = statuses.get(repository.id());
+        GitStatus status = viewModel.repoStatus(repository.id()).orElse(null);
         return status != null && UiFormats.branchText(status).toLowerCase(Locale.ROOT).contains(query);
     }
 
@@ -466,7 +597,7 @@ public final class RepositorySidebar extends VBox {
                 StringBuilder text = new StringBuilder(sessionNode.session().displayName());
                 sessionNode.session().worktreeRoot().ifPresent(root -> {
                     text.append(' ').append(root);
-                    GitStatus status = worktreeStatuses.get(root);
+                    GitStatus status = viewModel.worktreeStatus(root).orElse(null);
                     if (status != null) {
                         text.append(' ').append(UiFormats.branchText(status));
                     }
@@ -482,7 +613,7 @@ public final class RepositorySidebar extends VBox {
     }
 
     private List<ManagedClaudeSession> sessionsFor(Repository repository) {
-        return sessionManager.sessions().stream()
+        return viewModel.sessions().stream()
                 .filter(session -> session.repositoryId().equals(repository.id()))
                 .sorted(Comparator.comparing(ManagedClaudeSession::displayName, String.CASE_INSENSITIVE_ORDER))
                 .toList();
@@ -500,7 +631,7 @@ public final class RepositorySidebar extends VBox {
         if (!scanning.add(repository.id())) {
             return;
         }
-        List<WorktreeService.Worktree> previous = worktreeLists.get(repository.id());
+        List<WorktreeService.Worktree> previous = viewModel.worktrees(repository.id()).orElse(null);
         worktreeService.list(repository.root())
                 .whenComplete((worktrees, failure) -> Platform.runLater(() -> {
                     scanning.remove(repository.id());
@@ -509,14 +640,13 @@ public final class RepositorySidebar extends VBox {
                         if (userInitiated) {
                             UiErrors.show("Could not rescan worktrees", failure);
                         }
+                        // The ⟳ spinner is bound to the scanning set; drop
+                        // its row back to the idle glyph.
+                        updateRepoRow(repository.id());
                         return;
                     }
-                    worktreeLists.put(repository.id(), worktrees);
-                    for (WorktreeService.Worktree worktree : worktrees) {
-                        if (!worktree.mainCheckout() && !worktreeStatuses.containsKey(worktree.path())) {
-                            refreshWorktreeStatus(worktree.path());
-                        }
-                    }
+                    // Highlights are recorded BEFORE the model write so the
+                    // structure rebuild it triggers already sees them.
                     if (userInitiated && previous != null) {
                         Set<Path> known = new HashSet<>();
                         for (WorktreeService.Worktree worktree : previous) {
@@ -531,7 +661,7 @@ public final class RepositorySidebar extends VBox {
                             PauseTransition clearNote = new PauseTransition(Duration.seconds(2.4));
                             clearNote.setOnFinished(e -> {
                                 rescanNotes.remove(repository.id());
-                                rebuildTree();
+                                updateRepoRow(repository.id());
                             });
                             clearNote.play();
                         } else {
@@ -539,12 +669,20 @@ public final class RepositorySidebar extends VBox {
                             PauseTransition clearHighlight = new PauseTransition(DISCOVERY_HIGHLIGHT);
                             clearHighlight.setOnFinished(e -> {
                                 fresh.forEach(recentlyDiscovered::remove);
-                                rebuildTree();
+                                fresh.forEach(RepositorySidebar.this::updateWorktreeRow);
                             });
                             clearHighlight.play();
                         }
                     }
-                    rebuildTree();
+                    viewModel.setWorktrees(repository.id(), worktrees);
+                    for (WorktreeService.Worktree worktree : worktrees) {
+                        if (!worktree.mainCheckout() && viewModel.worktreeStatus(worktree.path()).isEmpty()) {
+                            refreshWorktreeStatus(worktree.path());
+                        }
+                    }
+                    // An unchanged list emits no model event; the rescan
+                    // note / spinner stop still need the header re-rendered.
+                    updateRepoRow(repository.id());
                 }));
     }
 
@@ -556,7 +694,7 @@ public final class RepositorySidebar extends VBox {
                         UiErrors.show("Could not delete worktree", failure);
                         return;
                     }
-                    worktreeStatuses.remove(worktree.path());
+                    viewModel.removeWorktreeStatus(worktree.path());
                     refreshWorktrees(repository, false);
                 }));
     }
@@ -572,7 +710,7 @@ public final class RepositorySidebar extends VBox {
 
     /** Fetches per-worktree status for every worktree session (branch tag + dirty dot per worktree checkout). */
     private void refreshWorktreeStatuses() {
-        for (ManagedClaudeSession session : sessionManager.sessions()) {
+        for (ManagedClaudeSession session : viewModel.sessions()) {
             session.worktreeRoot().ifPresent(this::refreshWorktreeStatus);
         }
     }
@@ -581,12 +719,11 @@ public final class RepositorySidebar extends VBox {
         gitStatusService.getStatus(worktreeRoot)
                 .whenComplete((status, failure) -> Platform.runLater(() -> {
                     if (failure != null) {
-                        worktreeStatuses.remove(worktreeRoot);
+                        viewModel.removeWorktreeStatus(worktreeRoot);
                         LOG.log(Level.DEBUG, "Git status refresh failed for worktree " + worktreeRoot, failure);
                     } else {
-                        worktreeStatuses.put(worktreeRoot, status);
+                        viewModel.setWorktreeStatus(worktreeRoot, status);
                     }
-                    requestRebuild();
                 }));
     }
 
@@ -594,23 +731,20 @@ public final class RepositorySidebar extends VBox {
         gitStatusService.getStatus(repository.root())
                 .whenComplete((status, failure) -> Platform.runLater(() -> {
                     if (failure != null) {
-                        statusFailures.put(repository.id(), UiErrors.unwrap(failure));
-                        statuses.remove(repository.id());
+                        viewModel.setRepoStatusFailure(repository.id(), UiErrors.unwrap(failure));
                         LOG.log(Level.DEBUG, "Git status refresh failed for " + repository.root(), failure);
                     } else {
-                        statuses.put(repository.id(), status);
-                        statusFailures.remove(repository.id());
+                        viewModel.setRepoStatus(repository.id(), status);
                     }
-                    requestRebuild();
                 }));
     }
 
     private String branchTextFor(Repository repository) {
-        GitStatus status = statuses.get(repository.id());
+        GitStatus status = viewModel.repoStatus(repository.id()).orElse(null);
         if (status != null) {
             return UiFormats.branchText(status) + (status.dirty() ? " *" : "");
         }
-        return statusFailures.containsKey(repository.id()) ? "(status unavailable)" : "…";
+        return viewModel.repoStatusFailure(repository.id()).isPresent() ? "(status unavailable)" : "…";
     }
 
     // ---- Actions ------------------------------------------------------------
@@ -642,10 +776,9 @@ public final class RepositorySidebar extends VBox {
                 + "Nothing on disk at " + repository.root() + " is touched or deleted.");
         confirm.showAndWait().filter(button -> button == ButtonType.OK).ifPresent(button -> {
             repositoryManager.removeRepository(repository.id());
-            statuses.remove(repository.id());
-            statusFailures.remove(repository.id());
-            worktreeLists.remove(repository.id());
-            rebuildTree();
+            // The manager's change listener rebuilds the repo list; the
+            // model forgets the removed repo's status/discovery data.
+            viewModel.removeRepository(repository.id());
         });
     }
 
@@ -661,7 +794,6 @@ public final class RepositorySidebar extends VBox {
                         UiErrors.show("Could not delete session", ex);
                     }
                     navigator.noteSessionDeleted(session.id());
-                    rebuildTree();
                 })));
     }
 
@@ -756,7 +888,7 @@ public final class RepositorySidebar extends VBox {
 
             Label branch = new Label(repoMetaText(repository));
             branch.getStyleClass().add("repo-branch");
-            Throwable failure = statusFailures.get(repository.id());
+            Throwable failure = viewModel.repoStatusFailure(repository.id()).orElse(null);
             if (failure != null) {
                 branch.setTooltip(new Tooltip(String.valueOf(failure.getMessage())));
             }
@@ -831,7 +963,7 @@ public final class RepositorySidebar extends VBox {
                 return note;
             }
             StringBuilder meta = new StringBuilder("⎇ ").append(branchTextFor(repository));
-            List<WorktreeService.Worktree> worktrees = worktreeLists.get(repository.id());
+            List<WorktreeService.Worktree> worktrees = viewModel.worktrees(repository.id()).orElse(null);
             if (worktrees != null) {
                 int additional = additionalWorktreeCount(repository);
                 meta.append(" · ").append(additional).append(additional == 1 ? " worktree" : " worktrees");
@@ -855,8 +987,8 @@ public final class RepositorySidebar extends VBox {
             // for a worktree checkout, ⎇ dim for the current checkout.
             boolean isWorktree = session.worktreeRoot().isPresent();
             GitStatus checkoutStatus = session.worktreeRoot()
-                    .map(worktreeStatuses::get)
-                    .orElseGet(() -> statuses.get(repository.id()));
+                    .map(root -> viewModel.worktreeStatus(root).orElse(null))
+                    .orElseGet(() -> viewModel.repoStatus(repository.id()).orElse(null));
             String branch = checkoutStatus != null ? UiFormats.branchText(checkoutStatus) : "…";
             Label branchTag = new Label((isWorktree ? "◫ " : "⎇ ") + branch);
             branchTag.getStyleClass().add(isWorktree ? "branch-tag-worktree" : "branch-tag");
@@ -908,7 +1040,7 @@ public final class RepositorySidebar extends VBox {
             row.getStyleClass().add("session-row");
             row.setAlignment(Pos.CENTER_LEFT);
             row.setPadding(new Insets(5, 8, 5, 16));
-            if (navigator.activeSessionId().filter(session.id()::equals).isPresent()) {
+            if (viewModel.activeSession().filter(session.id()::equals).isPresent()) {
                 row.getStyleClass().add("active");
             }
             Tooltip.install(row, new Tooltip(

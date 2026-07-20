@@ -3,7 +3,6 @@ package app.cpm;
 import app.cpm.app.RepositoryManager;
 import app.cpm.app.SessionManager;
 import app.cpm.claude.ClaudeCapabilityService;
-import app.cpm.domain.ManagedSessionId;
 import app.cpm.domain.Repository;
 import app.cpm.git.ChangedLineService;
 import app.cpm.git.DiffService;
@@ -156,27 +155,7 @@ public final class CpmApplication extends Application {
                 ghCliService, diffService, changedLineService, annotationStore, viewModel, primaryStage);
         RepositorySidebar sidebar =
                 new RepositorySidebar(repositoryManager, gitStatusService, worktreeService, sessionManager,
-                        mainWorkspace);
-        // Transitional bridge (design step 3): until the sidebar subscribes
-        // to the model itself, replay every model event as the old coarse
-        // refresh so behavior is unchanged mid-migration.
-        viewModel.addListener(new WorkspaceViewModel.Listener() {
-            @Override
-            public void structureChanged() {
-                sidebar.refreshSessions();
-            }
-
-            @Override
-            public void sessionRowChanged(ManagedSessionId sessionId) {
-                sidebar.refreshSessions();
-            }
-
-            @Override
-            public void activeSessionChanged(Optional<ManagedSessionId> previous,
-                                             Optional<ManagedSessionId> current) {
-                sidebar.refreshSessions();
-            }
-        });
+                        mainWorkspace, viewModel);
 
         appShell = new AppShell(primaryStage, WINDOW_TITLE, sidebar, mainWorkspace,
                 repositoryManager.state().ui().sidebarWidth(),
