@@ -708,11 +708,6 @@ tasks.register("appImage") {
 }
 
 /**
- * The Info.plist content shared by both .app bundles (the thin trampoline
- * bundle inside build/image and the self-contained build/dist bundle) --
- * previously duplicated verbatim in the two tasks above.
- */
-/**
  * Reads JAVA_RUNTIME_VERSION out of a JDK installation's `release` file
  * (a standard, stable file present in every JDK distribution -- not a
  * Gradle-internal API), e.g. "26.0.1+8". Used by runtimeImageAllArches
@@ -735,6 +730,11 @@ fun readJavaRuntimeVersion(javaHome: File): String {
     return line.substringAfter("=").trim('"')
 }
 
+/**
+ * The Info.plist content shared by both .app bundles (the thin trampoline
+ * bundle inside build/image and the self-contained build/dist bundle) --
+ * previously duplicated verbatim in the two tasks above.
+ */
 fun appBundleInfoPlist(): String = """
     <?xml version="1.0" encoding="UTF-8"?>
     <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
