@@ -4,8 +4,10 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletionException;
@@ -126,6 +128,19 @@ class WorktreeServiceTest {
     }
 
     @Test
+    void removeSucceedsWhenTheWorktreeDirectoryWasDeletedFromDiskOutsideGit(
+            @TempDir Path repoDir, @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/vanished").get();
+        deleteRecursively(worktree);
+
+        service.remove(repo, worktree, Optional.of("feat/vanished")).get();
+
+        assertEquals(1, service.list(repo).get().size());
+        assertFalse(runGitCapture(repo, "branch", "--list", "feat/vanished").contains("feat/vanished"));
+    }
+
+    @Test
     void parseHandlesBranchDetachedAndBareStanzas() {
         String porcelain = """
                 worktree /repos/main
@@ -150,6 +165,18 @@ class WorktreeServiceTest {
         assertEquals(Optional.of("feat/x"), worktrees.get(1).branch());
         assertTrue(worktrees.get(2).detached());
         assertTrue(worktrees.get(2).branch().isEmpty());
+    }
+
+    private static void deleteRecursively(Path root) throws IOException {
+        try (var paths = Files.walk(root)) {
+            paths.sorted(Comparator.reverseOrder()).forEach(path -> {
+                try {
+                    Files.delete(path);
+                } catch (IOException e) {
+                    throw new UncheckedIOException(e);
+                }
+            });
+        }
     }
 
     private static Path initCommittedRepo(Path parent) throws IOException, InterruptedException {
