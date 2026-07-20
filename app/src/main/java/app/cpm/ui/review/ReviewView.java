@@ -397,8 +397,12 @@ public final class ReviewView extends BorderPane {
         diffList.scrollTo(0);
     }
 
-    /** Drops per-file row state: ordinal indexes, cached card/composer nodes. */
+    /** Drops per-file row state: selection, ordinal indexes, cached card/composer nodes. */
     private void resetRowState() {
+        // Stale ordinals must not re-highlight rows of a rebuilt model.
+        dragging = false;
+        selectionAnchor.set(-1);
+        selectionHead.set(-1);
         lineByOrdinal = List.of();
         itemIndexByOrdinal = new int[0];
         composerRow = null;
