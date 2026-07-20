@@ -6,9 +6,14 @@
 # one the build is running on (see docs/superpowers/specs/
 # 2026-07-20-cross-arch-runtime-image-design.md).
 #
-# Pinned to build 26.0.1+8, matching this project's documented JDK 26.0.1
-# toolchain (README.md prerequisites table) exactly. If that toolchain
-# version ever changes, the URLs/checksums below must be updated together.
+# Pinned to build 26.0.1+8. The project's Gradle toolchain only pins JDK
+# major version 26 (not an exact build), so this script's pinned build
+# number and the host JDK actually installed can drift apart --
+# app/build.gradle.kts's runtimeImageAllArches task checks for exactly
+# this drift before cross-linking and fails clearly if they don't match.
+# If you upgrade the project's JDK 26 toolchain to a new exact build,
+# update BOTH the URLs/checksums below AND the pinnedJmodsBuild constant
+# in app/build.gradle.kts's runtimeImageAllArches task together.
 #
 # Usage:
 #   scripts/download-cross-jmods.sh <macos-x86_64|macos-arm64> <output-dir>

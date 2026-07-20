@@ -523,6 +523,19 @@ tasks.register("runtimeImageAllArches") {
         val crossArch = allArches.first { it != hostArchLabel }
 
         val javaHome = javaLauncherProvider.get().metadata.installationPath.asFile
+
+        val pinnedJmodsBuild = "26.0.1+8"
+        val hostRuntimeVersion = readJavaRuntimeVersion(javaHome)
+        if (hostRuntimeVersion != pinnedJmodsBuild) {
+            throw org.gradle.api.GradleException(
+                "Host JDK is $hostRuntimeVersion, but scripts/download-cross-jmods.sh's pinned jmods " +
+                    "are build $pinnedJmodsBuild. Cross-linking requires the host JDK and the " +
+                    "downloaded jmods to be the exact same JDK build -- update the pinned URLs/" +
+                    "checksums in scripts/download-cross-jmods.sh (and this pinnedJmodsBuild constant) " +
+                    "together if the project's JDK 26 toolchain version has changed."
+            )
+        }
+
         val jlinkExe = File(javaHome, "bin/jlink")
         val appJarFile = jarTaskProvider.get().archiveFile.get().asFile
         val classpathJars = runtimeClasspathFiles.get().files.filter { it.name.endsWith(".jar") }
@@ -699,6 +712,29 @@ tasks.register("appImage") {
  * bundle inside build/image and the self-contained build/dist bundle) --
  * previously duplicated verbatim in the two tasks above.
  */
+/**
+ * Reads JAVA_RUNTIME_VERSION out of a JDK installation's `release` file
+ * (a standard, stable file present in every JDK distribution -- not a
+ * Gradle-internal API), e.g. "26.0.1+8". Used by runtimeImageAllArches
+ * to verify the host JDK matches the exact build that
+ * scripts/download-cross-jmods.sh's pinned jmods were built from --
+ * a mismatch here would otherwise surface as a cryptic jlink failure
+ * during the cross-link, not a clear error naming the real cause.
+ */
+fun readJavaRuntimeVersion(javaHome: File): String {
+    val releaseFile = File(javaHome, "release")
+    if (!releaseFile.isFile) {
+        throw org.gradle.api.GradleException(
+            "Expected a 'release' file at $releaseFile to read JAVA_RUNTIME_VERSION, but it does not exist."
+        )
+    }
+    val line = releaseFile.readLines().firstOrNull { it.startsWith("JAVA_RUNTIME_VERSION=") }
+        ?: throw org.gradle.api.GradleException(
+            "$releaseFile does not contain a JAVA_RUNTIME_VERSION line."
+        )
+    return line.substringAfter("=").trim('"')
+}
+
 fun appBundleInfoPlist(): String = """
     <?xml version="1.0" encoding="UTF-8"?>
     <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
