@@ -41,8 +41,8 @@ application {
         // Required now that CpmApplication (Milestone 5's terminal-tabs UI)
         // loads libghostty/the native host shim via FFM.
         "--enable-native-access=ALL-UNNAMED",
-        // Unlike the gateNSpike tasks below (which force classpath-mode
-        // JavaFX via the spike source set's runtimeClasspath,
+        // Unlike the gateNSpike tasks (cpm.spikes plugin; they force
+        // classpath-mode JavaFX via the spike source set's runtimeClasspath,
         // avoiding JPMS enforcement entirely), the `application`/`javafx`
         // Gradle plugins configure `run` to launch JavaFX on the *module
         // path* (--module-path + --add-modules), matching the jlink runtime
@@ -51,7 +51,7 @@ application {
         // an unnamed module since the app itself isn't modularized) needs
         // an explicit --add-exports to reach into javafx.graphics's
         // internal com.sun.glass.ui package -- exactly the same flag
-        // runtimeImageLauncherScript() already carries for the jlink image.
+        // app/packaging/launcher.sh already carries for the jlink image.
         // Without this, `./gradlew run` throws IllegalAccessError the first
         // time a terminal tab is opened (this was missed when Milestone 5
         // wired the terminal-tabs UI into the real app, since the `run`
@@ -83,7 +83,7 @@ tasks.test {
 tasks.named<JavaExec>("run") {
     // The real application now embeds Ghostty terminal surfaces (Milestone
     // 5's terminal-tabs UI), so `run` needs both native libraries built
-    // first, same as every gateNSpike task below.
+    // first, same as every gateNSpike task (cpm.spikes plugin).
     dependsOn(rootProject.tasks.named("buildGhosttyNative"))
     dependsOn(rootProject.tasks.named("buildNativeHost"))
     javaLauncher.set(javaToolchains.launcherFor(java.toolchain))
@@ -92,7 +92,7 @@ tasks.named<JavaExec>("run") {
     // Diagnostic support: forward -Papp.cpm.diag.* project properties to
     // the run task's application JVM as system properties (the Gradle
     // client's own -D flags never reach the forked app JVM; same pattern
-    // as gate0eSpike's project.property forwarding below). Used by
+    // as gate0eSpike's property forwarding in the cpm.spikes plugin). Used by
     // automated visual verification: app.cpm.diag.stateFile isolates
     // persisted state to a throwaway file, and
     // app.cpm.diag.autoCreateSession=true plus app.cpm.diag.repo=<path>
