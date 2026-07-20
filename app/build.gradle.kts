@@ -69,7 +69,10 @@ dependencies {
     // Read-only code viewer in the Session Explorer (syntax highlighting +
     // line-number gutter). Pulls flowless/reactfx/undofx/wellbehavedfx
     // transitively; all run from the plain classpath like the JavaFX jars.
-    implementation("org.fxmisc.richtext:richtextfx:0.11.5")
+    // 0.11.6+ is required on JavaFX 24+: TextFlow.getUnderlineShape(int, int)
+    // became final, and older TextFlowExt overrode it, so loading the class
+    // for the first rendered paragraph threw IncompatibleClassChangeError.
+    implementation("org.fxmisc.richtext:richtextfx:0.11.7")
 
     testImplementation(platform("org.junit:junit-bom:5.11.4"))
     testImplementation("org.junit.jupiter:junit-jupiter")
