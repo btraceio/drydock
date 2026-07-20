@@ -491,7 +491,7 @@ see `third_party/patches/ghostty-install-macos-shared-lib.patch` and the
   fully-linked `libghostty.dylib` per architecture — verified with `nm -g`
   (exports `ghostty_init`, `ghostty_config_new/free`, `ghostty_info`, etc.)
   and by actually calling into it from Java via FFM (see
-  `app/src/main/java/app/cpm/terminal/ghostty/GhosttySmokeTest.java`).
+  `app/src/spike/java/app/cpm/terminal/ghostty/GhosttySmokeTest.java`).
 
 ## Task 5 / Gate 0C: rendering a terminal surface
 
