@@ -194,3 +194,42 @@ model), and listeners are invoked synchronously on the mutating thread.
 - **`noteSessionDeleted` double-fire**: both the sidebar (after
   `deleteSession`) and the workspace push `setSessions`; the model's
   no-op-on-identical-content diff makes the second push silent.
+
+## Implementation plan
+
+Each step compiles and passes `./gradlew compileJava test` on its own and is
+committed separately.
+
+1. **`WorkspaceNavigator` extraction.** Add the interface in `app.cpm.ui`;
+   `MainWorkspace implements WorkspaceNavigator` (methods already exist);
+   `RepositorySidebar` swaps its `MainWorkspace` field/constructor param for
+   `WorkspaceNavigator`; `CpmApplication` unchanged except for the parameter
+   type flowing through. No behavior change.
+2. **`WorkspaceViewModel` + tests.** Add `app.cpm.ui.model.WorkspaceViewModel`
+   (data, listener interface, mutators with the diff semantics above,
+   `sessionById`, snapshot getters) and headless unit tests covering: no-op
+   sets emit nothing; field-level session change emits `sessionRowChanged` +
+   `repoChanged`; add/remove/reorder and repositoryId/worktreeRoot moves emit
+   `structureChanged`; status setters emit only on change; active-session
+   transitions; listener add/remove. Nothing uses the class yet.
+3. **Workspace writes the model.** `CpmApplication` constructs/seeds the
+   model and passes it to `MainWorkspace`; `MainWorkspace` replaces
+   `onSessionsChanged.run()` with `model.setSessions(...)` (mutations) and
+   `model.setActiveSession(...)` (tab-selection listener), registers its
+   `sessionRowChanged` listener to update open tab headers (name, status,
+   PR chip), and `setOnSessionsChanged` is deleted. `CpmApplication` keeps
+   the old sidebar wiring alive temporarily by subscribing a bridge listener
+   that calls `sidebar.refreshSessions()` on structure/session/active
+   events, so behavior is unchanged mid-migration.
+4. **Sidebar reads the model.** `RepositorySidebar` takes the model, drops
+   its four data maps (fetch completions write to the model), subscribes
+   with the event mapping above (incremental row updates via
+   `TreeItem.setValue`, `updateFooter()` extraction, `syncActiveSelection`
+   on active change only), and the temporary bridge listener in
+   `CpmApplication` is removed.
+5. **Context menu / tooltip caching.** Cache per row key, handlers resolve
+   live sessions through the model, prune on `structureChanged`.
+6. **Self-review + verify.** Diff the branch against its base, check against
+   AGENTS.md (async rules, no inline FQNs, lifecycle hygiene, doc comments
+   in `RepositorySidebar`/`MainWorkspace` that describe the old wiring), fix
+   findings, then run `./gradlew compileJava compileTestJava test`.
