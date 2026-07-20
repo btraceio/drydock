@@ -137,17 +137,27 @@ public final class SessionActivityWatcher implements AutoCloseable {
         }
     }
 
-    /** Drops any state left behind for a session that is gone for good. */
-    public void forget(String claudeSessionId) {
+    /**
+     * Drops any state left behind for a session that is gone for good.
+     *
+     * <p>The delete runs on this watcher's executor rather than the caller's
+     * thread: callers are on the JavaFX thread (session close), where AGENTS.md
+     * bars filesystem I/O. The returned future is for tests; callers that do not
+     * care may ignore it, since failure only means the file waits for the next
+     * startup purge.</p>
+     */
+    public CompletableFuture<Void> forget(String claudeSessionId) {
         if (claudeSessionId == null) {
-            return;
+            return CompletableFuture.completedFuture(null);
         }
         acknowledged.remove(claudeSessionId);
-        try {
-            Files.deleteIfExists(activityDirectory.resolve(claudeSessionId));
-        } catch (IOException | RuntimeException e) {
-            LOG.log(Level.DEBUG, "Could not clear activity state for " + claudeSessionId + ": " + e.getMessage());
-        }
+        return CompletableFuture.runAsync(() -> {
+            try {
+                Files.deleteIfExists(activityDirectory.resolve(claudeSessionId));
+            } catch (IOException | RuntimeException e) {
+                LOG.log(Level.DEBUG, "Could not clear activity state for " + claudeSessionId + ": " + e.getMessage());
+            }
+        }, executor);
     }
 
     @Override

@@ -235,6 +235,22 @@ class SessionManagerTest {
                         Optional.of(Path.of("/tmp/hooks/settings.json"))));
     }
 
+    /**
+     * Regression: resume used to be a pure function of persisted metadata and
+     * could not fail. Adding the activity --settings flag put uncached
+     * capability detection in front of it; a probe failure must degrade to
+     * "no activity reporting", never sink the resume itself. This asserts the
+     * command built from the conservative all-false fallback capabilities.
+     */
+    @Test
+    void resumeFallsBackToThePlainCommandWhenCapabilitiesAreUnknown() {
+        ManagedClaudeSession session = sessionWith(Path.of("/tmp"), Optional.of("abc-123"), Optional.empty());
+
+        assertEquals(SessionManager.ENV_CLEANUP_PREFIX + "claude --resume 'abc-123'",
+                SessionManager.buildResumeCommand(session, caps(false, false, false),
+                        Optional.of(Path.of("/tmp/hooks/settings.json"))));
+    }
+
     @Test
     void activitySettingsPathWithASpaceIsShellQuoted() {
         assertEquals(SessionManager.ENV_CLEANUP_PREFIX

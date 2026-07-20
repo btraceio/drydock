@@ -154,6 +154,38 @@ class ClaudeHookInstallerTest {
         assertEquals(SessionActivity.BUSY, observedActivity(base));
     }
 
+    /**
+     * Regression: the classifier used to glob for the bare keyword anywhere in
+     * the payload, so an unrelated notification whose human-readable text
+     * merely mentioned "permission_prompt" would badge a session that was not
+     * blocked. Only the notification_type VALUE may decide this.
+     */
+    @Test
+    void keywordInFreeTextDoesNotRaiseAttention(@TempDir Path base) throws Exception {
+        ClaudeHookInstaller installer = new ClaudeHookInstaller(base);
+        installer.install();
+
+        assertEquals(0, runHook(installer, base, "notify",
+                payload("Notification", ",\"message\":\"resolved without a permission_prompt this time\""
+                        + ",\"title\":\"idle_prompt mentioned here too\""
+                        + ",\"notification_type\":\"auth_success\"")));
+
+        assertEquals(SessionActivity.BUSY, observedActivity(base));
+    }
+
+    /** The value is what counts, wherever the field sits in the payload. */
+    @Test
+    void notificationTypeIsReadRegardlessOfFieldOrder(@TempDir Path base) throws Exception {
+        ClaudeHookInstaller installer = new ClaudeHookInstaller(base);
+        installer.install();
+
+        assertEquals(0, runHook(installer, base, "notify",
+                payload("Notification", ",\"notification_type\":\"idle_prompt\""
+                        + ",\"message\":\"Claude is waiting for your input\"")));
+
+        assertEquals(SessionActivity.NEEDS_ATTENTION, observedActivity(base));
+    }
+
     @Test
     void sessionEndRemovesTheStateFile(@TempDir Path base) throws Exception {
         ClaudeHookInstaller installer = new ClaudeHookInstaller(base);

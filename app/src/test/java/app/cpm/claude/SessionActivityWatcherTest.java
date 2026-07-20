@@ -11,6 +11,7 @@ import java.nio.file.Path;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -106,12 +107,13 @@ class SessionActivityWatcherTest {
     }
 
     @Test
-    void forgetRemovesTheSessionsStateFile(@TempDir Path dir) throws IOException {
+    void forgetRemovesTheSessionsStateFile(@TempDir Path dir) throws Exception {
         Path activity = dir.resolve("activity");
         writeState(activity, "sess", "attention");
         SessionActivityWatcher watcher = watcherOn(activity);
 
-        watcher.forget("sess");
+        // The delete is async (it must not run on the caller's FX thread).
+        watcher.forget("sess").get(10, TimeUnit.SECONDS);
 
         assertTrue(watcher.readBlocking().isEmpty());
     }

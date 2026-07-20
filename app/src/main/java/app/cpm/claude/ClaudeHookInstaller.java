@@ -43,13 +43,19 @@ public final class ClaudeHookInstaller {
 
     private static final Logger LOG = System.getLogger(ClaudeHookInstaller.class.getName());
 
-    /** Bumped whenever {@link #HOOK_SCRIPT} or {@link #settingsJson} changes, so stale installs are rewritten. */
+    /**
+     * Stamped into the generated settings file's {@code _comment} so a user who
+     * opens it can tell which build wrote it. Purely diagnostic: {@link
+     * #install()} rewrites both files unconditionally on every startup, so
+     * nothing compares this value.
+     */
     private static final String INSTALL_VERSION = "1";
 
     /**
      * POSIX sh, because it runs on every hook invocation and must add no
-     * measurable latency to a session: no jq (not guaranteed installed), no
-     * subshell beyond the one {@code sed} needed to pull the session id.
+     * measurable latency to a session. Deliberately avoids jq (not guaranteed
+     * installed); field extraction is done with {@code sed} instead, keeping
+     * the whole script to a handful of builtins and at most two short pipelines.
      *
      * <p>Every path exits 0. A nonzero exit from a hook surfaces a warning
      * into the user's session, and a status badge must never be able to
@@ -71,11 +77,14 @@ public final class ClaudeHookInstaller {
             state="$1"
             if [ "$state" = "notify" ]; then
               # notification_type distinguishes "Claude is blocked on a human"
-              # from routine chatter; anything else keeps the session "busy".
-              case "$payload" in
-                *'"notification_type"'*permission_prompt*) state=attention ;;
-                *'"notification_type"'*idle_prompt*) state=attention ;;
-                *'"notification_type"'*agent_needs_input*) state=attention ;;
+              # from routine chatter. Extract the VALUE and compare it exactly:
+              # matching the bare keyword anywhere in the payload would also fire
+              # on free text, since the same payload carries human-readable
+              # "message" and "title" fields.
+              ntype=$(printf '%s' "$payload" \\
+                      | sed -n 's/.*"notification_type"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')
+              case "$ntype" in
+                permission_prompt|idle_prompt|agent_needs_input) state=attention ;;
                 *) state=busy ;;
               esac
             fi
@@ -135,14 +144,19 @@ public final class ClaudeHookInstaller {
     /**
      * Drops activity left behind by a previous app run.
      *
-     * <p>This is the COMMON path, not a crash-only safety net. Closing a
-     * session sends Ctrl+D and force-closes the child after a 3s grace period
-     * (see {@code GhosttySurface.closeGracefully}); a claude that is blocked on
-     * a permission prompt -- precisely the NEEDS_ATTENTION state -- does not
-     * act on Ctrl+D, so it is force-killed and never runs its {@code
-     * SessionEnd} hook. Observed live: a clean app quit (exit 0) still left a
-     * session reporting NEEDS_ATTENTION with no process behind it, which would
-     * have badged on every subsequent launch.</p>
+     * <p>This is a routine path, not a crash-only safety net. Closing a session
+     * sends Ctrl+D and force-closes the child after a 3s grace period (see
+     * {@code GhosttySurface.closeGracefully}); a force-killed claude never runs
+     * its {@code SessionEnd} hook, so its state file survives. Observed live: a
+     * clean app quit (exit 0) that hit the force-close path still left a session
+     * reporting NEEDS_ATTENTION with no process behind it, which would have
+     * badged on every subsequent launch.</p>
+     *
+     * <p>Why claude did not exit on Ctrl+D in that run is NOT established here.
+     * {@code docs/claude-integration.md} attributes the general failure to a key
+     * encoding bug ({@code unshifted_codepoint=0}), fixed but recorded as not
+     * yet re-verified. Do not read this method as evidence about which sessions
+     * ignore Ctrl+D -- it only assumes that some do.</p>
      *
      * <p>No terminal process survives an app restart, so every file present at
      * startup is by definition stale. This mirrors {@code

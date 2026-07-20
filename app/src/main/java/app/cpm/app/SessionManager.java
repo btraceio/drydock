@@ -80,6 +80,16 @@ public final class SessionManager implements AutoCloseable {
     /** How long {@link #close} waits for queued background work (state saves) before giving up. */
     private static final long CLOSE_AWAIT_TERMINATION_SECONDS = 2;
 
+    /**
+     * Stand-in when capability detection fails on the resume path: every flag
+     * off, so the command falls back to the plain {@code claude --resume} form
+     * that worked before any capability was consulted. Matches
+     * {@link app.cpm.claude.ClaudeCapabilityService}'s documented "fail
+     * conservatively" default rather than guessing a flag is available.
+     */
+    private static final ClaudeCapabilities NO_CAPABILITIES =
+            new ClaudeCapabilities(false, true, false, false, false, "unknown");
+
     private final ApplicationStateStore stateStore;
     private final ClaudeCapabilityService capabilityService;
     private final ExecutorService backgroundExecutor;
@@ -299,14 +309,27 @@ public final class SessionManager implements AutoCloseable {
                         return CompletableFuture.completedFuture(blocked.get());
                     }
                     ManagedClaudeSession session = requireSession(sessionId);
-                    // Capabilities gate the activity --settings flag, exactly as
-                    // they do on the create path.
-                    return capabilityService.detectCapabilities().thenCompose(caps -> {
-                        String command = buildResumeCommand(session, caps, activitySettings);
-                        return createSurfaceOnFxThread(app, host, scaleFactor, command,
-                                        session.workingDirectory().toString())
-                                .handleAsync((surface, ex) -> finalizeResume(session, surface, ex), backgroundExecutor);
-                    });
+                    // Capabilities gate the activity --settings flag. Resume must
+                    // NOT inherit their failure mode: before this flag existed,
+                    // buildResumeCommand was a pure function of persisted metadata
+                    // and could not fail, and detectCapabilities is uncached --
+                    // every call spawns `claude --version` + `--help`. Letting it
+                    // throw here would sink a resume over a cosmetic badge, the
+                    // exact inversion activitySettingsFlag promises not to make,
+                    // so a probe failure degrades to "no activity reporting".
+                    return capabilityService.detectCapabilities()
+                            .exceptionally(ex -> {
+                                LOG.log(Level.WARNING, () -> "Claude capability detection failed while resuming "
+                                        + sessionId + "; resuming without activity reporting: " + unwrap(ex));
+                                return NO_CAPABILITIES;
+                            })
+                            .thenCompose(caps -> {
+                                String command = buildResumeCommand(session, caps, activitySettings);
+                                return createSurfaceOnFxThread(app, host, scaleFactor, command,
+                                                session.workingDirectory().toString())
+                                        .handleAsync((surface, ex) -> finalizeResume(session, surface, ex),
+                                                backgroundExecutor);
+                            });
                 });
     }
 
