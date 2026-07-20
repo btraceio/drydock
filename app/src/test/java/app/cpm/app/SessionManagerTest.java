@@ -133,64 +133,114 @@ class SessionManagerTest {
 
     // ---- 11.2 resume fallback chain (pure command construction) -----------
 
+    /** No activity-hook settings injected, so these assertions stay about the fallback chain alone. */
+    private static final Optional<Path> NO_SETTINGS = Optional.empty();
+
+    private static ClaudeCapabilities caps(boolean name, boolean sessionId, boolean settings) {
+        return new ClaudeCapabilities(name, true, false, sessionId, settings, "1.0.0");
+    }
+
     @Test
     void resumeCommandPrefersTheClaudeSessionIdWhenKnown() {
         ManagedClaudeSession session = sessionWith(Path.of("/tmp"), Optional.of("abc-123"), Optional.of("ignored-name"));
 
-        assertEquals(SessionManager.ENV_CLEANUP_PREFIX + "claude --resume 'abc-123'", SessionManager.buildResumeCommand(session));
+        assertEquals(SessionManager.ENV_CLEANUP_PREFIX + "claude --resume 'abc-123'",
+                SessionManager.buildResumeCommand(session, caps(true, true, false), NO_SETTINGS));
     }
 
     @Test
     void resumeCommandFallsBackToTheClaudeSessionNameWhenNoIdIsKnown() {
         ManagedClaudeSession session = sessionWith(Path.of("/tmp"), Optional.empty(), Optional.of("my-name"));
 
-        assertEquals(SessionManager.ENV_CLEANUP_PREFIX + "claude --resume 'my-name'", SessionManager.buildResumeCommand(session));
+        assertEquals(SessionManager.ENV_CLEANUP_PREFIX + "claude --resume 'my-name'",
+                SessionManager.buildResumeCommand(session, caps(true, true, false), NO_SETTINGS));
     }
 
     @Test
     void resumeCommandFallsBackToTheBareOfficialPickerWhenNeitherIsKnown() {
         ManagedClaudeSession session = sessionWith(Path.of("/tmp"), Optional.empty(), Optional.empty());
 
-        assertEquals(SessionManager.ENV_CLEANUP_PREFIX + "claude --resume", SessionManager.buildResumeCommand(session));
+        assertEquals(SessionManager.ENV_CLEANUP_PREFIX + "claude --resume",
+                SessionManager.buildResumeCommand(session, caps(true, true, false), NO_SETTINGS));
     }
 
     @Test
     void resumeCommandShellQuotesAnIdContainingASingleQuote() {
         ManagedClaudeSession session = sessionWith(Path.of("/tmp"), Optional.of("weird'id"), Optional.empty());
 
-        assertEquals(SessionManager.ENV_CLEANUP_PREFIX + "claude --resume 'weird'\\''id'", SessionManager.buildResumeCommand(session));
+        assertEquals(SessionManager.ENV_CLEANUP_PREFIX + "claude --resume 'weird'\\''id'",
+                SessionManager.buildResumeCommand(session, caps(true, true, false), NO_SETTINGS));
     }
 
     // ---- 11.1 create command -------------------------------------------------
 
     @Test
     void createCommandIncludesNameFlagWhenSupported() {
-        ClaudeCapabilities capabilities = new ClaudeCapabilities(true, true, false, false, "1.0.0");
-
         assertEquals(SessionManager.ENV_CLEANUP_PREFIX + "claude -n 'my session'",
-                SessionManager.buildCreateCommand(capabilities, "my session", "uuid-1"));
+                SessionManager.buildCreateCommand(caps(true, false, false), "my session", "uuid-1", NO_SETTINGS));
     }
 
     @Test
     void createCommandOmitsNameFlagWhenNotSupported() {
-        ClaudeCapabilities capabilities = new ClaudeCapabilities(false, true, false, false, "0.9.0");
-
-        assertEquals(SessionManager.ENV_CLEANUP_PREFIX + "claude", SessionManager.buildCreateCommand(capabilities, "my session", "uuid-1"));
+        assertEquals(SessionManager.ENV_CLEANUP_PREFIX + "claude",
+                SessionManager.buildCreateCommand(caps(false, false, false), "my session", "uuid-1", NO_SETTINGS));
     }
 
     @Test
     void createCommandPinsTheSessionIdWhenSupported() {
-        ClaudeCapabilities capabilities = new ClaudeCapabilities(true, true, false, true, "1.0.0");
-
         assertEquals(SessionManager.ENV_CLEANUP_PREFIX + "claude -n 'my session' --session-id 'uuid-1'",
-                SessionManager.buildCreateCommand(capabilities, "my session", "uuid-1"));
+                SessionManager.buildCreateCommand(caps(true, true, false), "my session", "uuid-1", NO_SETTINGS));
     }
 
     @Test
     void createCommandOmitsTheSessionIdWhenNotSupported() {
-        ClaudeCapabilities capabilities = new ClaudeCapabilities(false, true, false, false, "0.9.0");
+        assertEquals(SessionManager.ENV_CLEANUP_PREFIX + "claude",
+                SessionManager.buildCreateCommand(caps(false, false, false), "my session", "uuid-1", NO_SETTINGS));
+    }
 
-        assertEquals(SessionManager.ENV_CLEANUP_PREFIX + "claude", SessionManager.buildCreateCommand(capabilities, "my session", "uuid-1"));
+    // ---- activity-hook settings injection ------------------------------------
+
+    @Test
+    void createCommandInjectsTheActivitySettingsWhenSupported() {
+        assertEquals(SessionManager.ENV_CLEANUP_PREFIX
+                        + "claude -n 'my session' --session-id 'uuid-1' --settings '/tmp/hooks/settings.json'",
+                SessionManager.buildCreateCommand(caps(true, true, true), "my session", "uuid-1",
+                        Optional.of(Path.of("/tmp/hooks/settings.json"))));
+    }
+
+    @Test
+    void resumeCommandInjectsTheActivitySettingsWhenSupported() {
+        ManagedClaudeSession session = sessionWith(Path.of("/tmp"), Optional.of("abc-123"), Optional.empty());
+
+        assertEquals(SessionManager.ENV_CLEANUP_PREFIX
+                        + "claude --resume 'abc-123' --settings '/tmp/hooks/settings.json'",
+                SessionManager.buildResumeCommand(session, caps(true, true, true),
+                        Optional.of(Path.of("/tmp/hooks/settings.json"))));
+    }
+
+    /** The bare-picker fallback still reports activity: correlation comes from the hook payload, not the command line. */
+    @Test
+    void barePickerResumeStillInjectsTheActivitySettings() {
+        ManagedClaudeSession session = sessionWith(Path.of("/tmp"), Optional.empty(), Optional.empty());
+
+        assertEquals(SessionManager.ENV_CLEANUP_PREFIX + "claude --resume --settings '/tmp/hooks/settings.json'",
+                SessionManager.buildResumeCommand(session, caps(true, true, true),
+                        Optional.of(Path.of("/tmp/hooks/settings.json"))));
+    }
+
+    @Test
+    void activitySettingsAreOmittedWhenTheInstalledClaudeLacksTheFlag() {
+        assertEquals(SessionManager.ENV_CLEANUP_PREFIX + "claude -n 'my session' --session-id 'uuid-1'",
+                SessionManager.buildCreateCommand(caps(true, true, false), "my session", "uuid-1",
+                        Optional.of(Path.of("/tmp/hooks/settings.json"))));
+    }
+
+    @Test
+    void activitySettingsPathWithASpaceIsShellQuoted() {
+        assertEquals(SessionManager.ENV_CLEANUP_PREFIX
+                        + "claude --settings '/Users/x/Application Support/hooks/settings.json'",
+                SessionManager.buildCreateCommand(caps(false, false, true), "my session", "uuid-1",
+                        Optional.of(Path.of("/Users/x/Application Support/hooks/settings.json"))));
     }
 
     // ---- MISSING_WORKING_DIRECTORY detection --------------------------------

@@ -3,6 +3,7 @@ package app.cpm.ui.model;
 import app.cpm.domain.ManagedClaudeSession;
 import app.cpm.domain.ManagedSessionId;
 import app.cpm.domain.RepositoryId;
+import app.cpm.domain.SessionActivity;
 import app.cpm.git.GitStatus;
 import app.cpm.git.WorktreeService;
 
@@ -68,6 +69,7 @@ public final class WorkspaceViewModel {
     private final Map<Path, GitStatus> worktreeStatuses = new HashMap<>();
     private final Map<RepositoryId, List<WorktreeService.Worktree>> worktrees = new HashMap<>();
     private Optional<ManagedSessionId> activeSession = Optional.empty();
+    private Map<ManagedSessionId, SessionActivity> activities = Map.of();
 
     public void addListener(Listener listener) {
         listeners.add(Objects.requireNonNull(listener));
@@ -223,6 +225,41 @@ public final class WorkspaceViewModel {
         changed |= worktrees.remove(repositoryId) != null;
         if (changed) {
             notify(Listener::structureChanged);
+        }
+    }
+
+    // ---- Session activity -----------------------------------------------------
+
+    /**
+     * What the session's Claude is currently doing, or {@link
+     * SessionActivity#UNKNOWN} when nothing has reported. Distinct from the
+     * session's {@code status}, which tracks the terminal process lifecycle.
+     */
+    public SessionActivity activityOf(ManagedSessionId sessionId) {
+        return activities.getOrDefault(sessionId, SessionActivity.UNKNOWN);
+    }
+
+    /**
+     * Replaces the activity snapshot, emitting one {@link
+     * Listener#sessionRowChanged} per session whose activity actually moved.
+     * This runs on every poll tick, so an unchanged map must stay silent --
+     * otherwise the sidebar would rebuild a row every second forever.
+     */
+    public void setActivities(Map<ManagedSessionId, SessionActivity> newActivities) {
+        Map<ManagedSessionId, SessionActivity> updated = Map.copyOf(newActivities);
+        Map<ManagedSessionId, SessionActivity> previous = activities;
+        if (previous.equals(updated)) {
+            return;
+        }
+        activities = updated;
+        Set<ManagedSessionId> touched = new LinkedHashSet<>(previous.keySet());
+        touched.addAll(updated.keySet());
+        for (ManagedSessionId sessionId : touched) {
+            SessionActivity before = previous.getOrDefault(sessionId, SessionActivity.UNKNOWN);
+            SessionActivity after = updated.getOrDefault(sessionId, SessionActivity.UNKNOWN);
+            if (before != after) {
+                notify(listener -> listener.sessionRowChanged(sessionId));
+            }
         }
     }
 

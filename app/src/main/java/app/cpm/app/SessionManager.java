@@ -85,6 +85,15 @@ public final class SessionManager implements AutoCloseable {
     private final ExecutorService backgroundExecutor;
     private final boolean ownsExecutor;
 
+    /**
+     * Settings file injecting the session-activity hooks, absent until
+     * {@link #useActivitySettings} succeeds at startup. Volatile because
+     * launches run on the background executor while installation completes
+     * on another thread; a launch that races installation simply omits the
+     * flag and reports no activity, which is the intended degradation.
+     */
+    private volatile Optional<Path> activitySettings = Optional.empty();
+
     private final ActiveSessionRegistry activeRegistry = new ActiveSessionRegistry();
     private final Map<ManagedSessionId, GhosttySurface> activeSurfaces = new ConcurrentHashMap<>();
 
@@ -131,6 +140,15 @@ public final class SessionManager implements AutoCloseable {
 
     /** Read-only view into claude's transcript store, for {@code checkResumeBlocked}'s missing-conversation probe. */
     private final ConversationCatalog conversationCatalog = new ConversationCatalog();
+
+    /**
+     * Points subsequently launched sessions at {@code settingsFile} so their
+     * Claude reports activity back to this app. Passing {@code null} disables
+     * the injection (used when hook installation failed).
+     */
+    public void useActivitySettings(Path settingsFile) {
+        this.activitySettings = Optional.ofNullable(settingsFile);
+    }
 
     public ApplicationState state() {
         return stateStore.state();
@@ -215,7 +233,7 @@ public final class SessionManager implements AutoCloseable {
                 .thenCompose(ignored -> capabilityService.detectCapabilities())
                 .thenApplyAsync(caps -> {
                     String command = System.getProperty("app.cpm.diag.command",
-                            buildCreateCommand(caps, displayName, claudeSessionId));
+                            buildCreateCommand(caps, displayName, claudeSessionId, activitySettings));
                     // contains() rather than caps.supportsSessionId(): a
                     // diag command override never carries the id even when
                     // the flag is supported.
@@ -281,10 +299,14 @@ public final class SessionManager implements AutoCloseable {
                         return CompletableFuture.completedFuture(blocked.get());
                     }
                     ManagedClaudeSession session = requireSession(sessionId);
-                    String command = buildResumeCommand(session);
-                    return createSurfaceOnFxThread(app, host, scaleFactor, command,
-                                    session.workingDirectory().toString())
-                            .handleAsync((surface, ex) -> finalizeResume(session, surface, ex), backgroundExecutor);
+                    // Capabilities gate the activity --settings flag, exactly as
+                    // they do on the create path.
+                    return capabilityService.detectCapabilities().thenCompose(caps -> {
+                        String command = buildResumeCommand(session, caps, activitySettings);
+                        return createSurfaceOnFxThread(app, host, scaleFactor, command,
+                                        session.workingDirectory().toString())
+                                .handleAsync((surface, ex) -> finalizeResume(session, surface, ex), backgroundExecutor);
+                    });
                 });
     }
 
@@ -374,7 +396,8 @@ public final class SessionManager implements AutoCloseable {
                 }, backgroundExecutor)
                 .thenCompose(cleared -> capabilityService.detectCapabilities()
                         .thenApplyAsync(caps -> {
-                            String command = buildCreateCommand(caps, cleared.displayName(), claudeSessionId);
+                            String command = buildCreateCommand(caps, cleared.displayName(), claudeSessionId,
+                                    activitySettings);
                             return new CreatePlan(command, command.contains(claudeSessionId));
                         }, backgroundExecutor)
                         .thenCompose(plan -> createSurfaceOnFxThread(app, host, scaleFactor, plan.command(),
@@ -567,7 +590,8 @@ public final class SessionManager implements AutoCloseable {
      * supported, so the exact Claude conversation is known up front and a
      * later resume can target it directly (see {@link #buildResumeCommand}).
      */
-    static String buildCreateCommand(ClaudeCapabilities capabilities, String displayName, String claudeSessionId) {
+    static String buildCreateCommand(ClaudeCapabilities capabilities, String displayName, String claudeSessionId,
+                                     Optional<Path> activitySettings) {
         StringBuilder command = new StringBuilder(ENV_CLEANUP_PREFIX).append("claude");
         if (capabilities.supportsName()) {
             command.append(" -n ").append(shellQuote(displayName));
@@ -575,18 +599,39 @@ public final class SessionManager implements AutoCloseable {
         if (capabilities.supportsSessionId()) {
             command.append(" --session-id ").append(shellQuote(claudeSessionId));
         }
+        command.append(activitySettingsFlag(capabilities, activitySettings));
         return command.toString();
     }
 
     /** Plan section 11.2's exact fallback chain: id, then name, then bare {@code --resume}. */
-    static String buildResumeCommand(ManagedClaudeSession session) {
+    static String buildResumeCommand(ManagedClaudeSession session, ClaudeCapabilities capabilities,
+                                     Optional<Path> activitySettings) {
+        String suffix = activitySettingsFlag(capabilities, activitySettings);
         if (session.claudeSessionId().isPresent()) {
-            return ENV_CLEANUP_PREFIX + "claude --resume " + shellQuote(session.claudeSessionId().get());
+            return ENV_CLEANUP_PREFIX + "claude --resume " + shellQuote(session.claudeSessionId().get()) + suffix;
         }
         if (session.claudeSessionName().isPresent()) {
-            return ENV_CLEANUP_PREFIX + "claude --resume " + shellQuote(session.claudeSessionName().get());
+            return ENV_CLEANUP_PREFIX + "claude --resume " + shellQuote(session.claudeSessionName().get()) + suffix;
         }
-        return ENV_CLEANUP_PREFIX + "claude --resume";
+        return ENV_CLEANUP_PREFIX + "claude --resume" + suffix;
+    }
+
+    /**
+     * Adds {@code --settings <file>} so the session reports its activity back
+     * to this app (see {@code app.cpm.claude.ClaudeHookInstaller}). Empty
+     * whenever the installed claude lacks the flag or the hook install failed,
+     * because a session that runs without a status badge is strictly better
+     * than one that fails to launch over a cosmetic feature.
+     *
+     * <p>Hooks declared this way MERGE with the user's own hooks rather than
+     * replacing them, and are invisible to a {@code claude} started outside
+     * this app.</p>
+     */
+    private static String activitySettingsFlag(ClaudeCapabilities capabilities, Optional<Path> activitySettings) {
+        if (!capabilities.supportsSettings() || activitySettings.isEmpty()) {
+            return "";
+        }
+        return " --settings " + shellQuote(activitySettings.get().toString());
     }
 
     /** Wraps {@code value} as a single POSIX shell single-quoted argument, safe against embedded shell metacharacters. */

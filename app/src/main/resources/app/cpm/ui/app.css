@@ -1388,6 +1388,18 @@
     -fx-font-size: 10.5px;
     -fx-padding: 1 8 1 8;
 }
+/* Session whose Claude is blocked on a human. Uses the accent token rather
+   than the ghost treatment of .resume-pill: this is a call to action, not an
+   affordance hint, and must read at a glance down a long session list. Bold
+   so it outweighs the neighbouring pr-chip it shares a shape with. */
+.attention-badge {
+    -fx-background-color: -cpm-accent-soft;
+    -fx-background-radius: 100px;
+    -fx-text-fill: -cpm-accent;
+    -fx-font-size: 10.5px;
+    -fx-font-weight: bold;
+    -fx-padding: 1 8 1 8;
+}
 .worktree-delete-button:hover {
     -fx-background-color: -cpm-error-soft;
 }

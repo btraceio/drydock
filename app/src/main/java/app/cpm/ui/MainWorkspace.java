@@ -5,9 +5,11 @@ import app.cpm.app.SessionManager;
 import app.cpm.app.SessionOpenResult;
 import app.cpm.claude.ConversationCatalog;
 import app.cpm.claude.ConversationCatalog.Conversation;
+import app.cpm.claude.SessionActivityWatcher;
 import app.cpm.domain.ManagedClaudeSession;
 import app.cpm.domain.ManagedSessionId;
 import app.cpm.domain.Repository;
+import app.cpm.domain.SessionActivity;
 import app.cpm.domain.SessionStatus;
 import app.cpm.domain.UiTheme;
 import app.cpm.git.ChangedLineService;
@@ -59,6 +61,7 @@ import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.Path;
 import java.util.HashSet;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
@@ -144,7 +147,17 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * stays {@code RUNNING} in the sidebar indefinitely.
      */
     private final Timeline exitWatcher = new Timeline(
-            new KeyFrame(Duration.seconds(1), e -> pollForExitedProcesses()));
+            new KeyFrame(Duration.seconds(1), e -> {
+                pollForExitedProcesses();
+                pollSessionActivity();
+            }));
+
+    /**
+     * Reads what each session's Claude is doing; wired by {@code
+     * CpmApplication} once hook installation succeeds, and left null when it
+     * did not (no watcher simply means no activity badges).
+     */
+    private SessionActivityWatcher activityWatcher;
 
     /** Current UI theme, for terminal config selection; wired by CpmApplication once the shell exists. */
     private Supplier<UiTheme> themeProvider = () -> UiTheme.DARK;
@@ -211,6 +224,9 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             // Tab selection only moves the active-row highlight; the model
             // turns this into activeSessionChanged, never a tree rebuild.
             viewModel.setActiveSession(activeSessionId());
+            // Every selection path funnels through here, so this is the one
+            // place a "needs you" badge has to be cleared.
+            acknowledgeActivity(activeSessionId());
         });
         tabPane.getTabs().addListener((ListChangeListener<Tab>) change -> updatePickerVisibility());
         stage.focusedProperty().addListener((obs, wasFocused, isFocused) -> {
@@ -781,9 +797,27 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     private CompletableFuture<Void> closeTab(OpenSessionTab open) {
         open.showClosingState();
         return sessionManager.closeSession(open.sessionId()).thenRunAsync(() -> {
+            // The SessionEnd hook cannot be relied on to clear this: a claude
+            // sitting at a permission prompt ignores Ctrl+D and is force-killed
+            // after the grace period, so it never runs its hooks. Without this,
+            // a closed session keeps reporting NEEDS_ATTENTION.
+            forgetActivity(open.sessionId());
             removeTab(open);
             publishSessions();
         }, Platform::runLater);
+    }
+
+    /** Drops any activity state recorded for a session that is closing or gone. */
+    private void forgetActivity(ManagedSessionId sessionId) {
+        SessionActivityWatcher watcher = activityWatcher;
+        if (watcher == null) {
+            return;
+        }
+        sessionManager.sessions().stream()
+                .filter(session -> session.id().equals(sessionId))
+                .findFirst()
+                .flatMap(ManagedClaudeSession::claudeSessionId)
+                .ifPresent(watcher::forget);
     }
 
     /** Plan section 9 "Application shutdown prompts once for all active processes": closes every open tab. */
@@ -857,6 +891,50 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 publishSessions();
             });
         }
+    }
+
+    /** Wired by {@code CpmApplication} after the activity hooks are installed. */
+    public void useActivityWatcher(SessionActivityWatcher watcher) {
+        this.activityWatcher = watcher;
+    }
+
+    /**
+     * Refreshes the per-session activity badges. The watcher does its
+     * filesystem reads on its own executor (AGENTS.md), so only the
+     * translation back to managed ids and the model push happen on the FX
+     * thread. Failures are swallowed: a badge is cosmetic and must never
+     * surface an error dialog.
+     */
+    private void pollSessionActivity() {
+        SessionActivityWatcher watcher = activityWatcher;
+        if (watcher == null) {
+            return;
+        }
+        watcher.poll().thenAccept(byClaudeId -> Platform.runLater(() -> {
+            Map<ManagedSessionId, SessionActivity> byManagedId = new HashMap<>();
+            for (ManagedClaudeSession session : sessionManager.sessions()) {
+                session.claudeSessionId()
+                        .map(byClaudeId::get)
+                        .ifPresent(activity -> byManagedId.put(session.id(), activity));
+            }
+            viewModel.setActivities(byManagedId);
+        })).exceptionally(ex -> {
+            LOG.log(Level.DEBUG, "Session activity poll failed: " + ex.getMessage());
+            return null;
+        });
+    }
+
+    /** Marks the session's current activity as seen, so its badge stops showing. */
+    private void acknowledgeActivity(Optional<ManagedSessionId> sessionId) {
+        SessionActivityWatcher watcher = activityWatcher;
+        if (watcher == null || sessionId.isEmpty()) {
+            return;
+        }
+        sessionManager.sessions().stream()
+                .filter(session -> session.id().equals(sessionId.get()))
+                .findFirst()
+                .flatMap(ManagedClaudeSession::claudeSessionId)
+                .ifPresent(watcher::acknowledge);
     }
 
     // ---- Helpers ------------------------------------------------------------

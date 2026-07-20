@@ -18,6 +18,7 @@ public record ClaudeCapabilities(
         boolean supportsResume,
         boolean supportsForkSession,
         boolean supportsSessionId,
+        boolean supportsSettings,
         String version
 ) {
 
