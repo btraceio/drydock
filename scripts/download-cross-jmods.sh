@@ -15,8 +15,8 @@
 #
 # Prints the resolved jmods/ directory path to stdout on success (all
 # other output goes to stderr). Idempotent: if <output-dir> already
-# contains an extracted jmods/ directory with .jmod files in it, this is
-# a no-op that just reprints the path.
+# contains a directory with .jmod files in it (detected by content, not by
+# name), this is a no-op that just reprints the path.
 #
 # Environment overrides:
 #   CPM_CROSS_JMODS_ARCHIVE   Use this local .tar.gz path instead of
@@ -35,6 +35,8 @@ fail() {
 
 arch="$1"
 output_dir="$2"
+mkdir -p "$output_dir"
+output_dir="$(cd "$output_dir" && pwd)"
 
 case "$arch" in
     macos-arm64)
@@ -50,17 +52,18 @@ case "$arch" in
         ;;
 esac
 
-existing_jmods_dir=""
+existing_jmods_dirs=""
 if [[ -d "$output_dir" ]]; then
-    existing_jmods_dir="$(find "$output_dir" -type f -name '*.jmod' -exec dirname {} \; 2>/dev/null | sort -u | head -1 || true)"
+    existing_jmods_dirs="$(find "$output_dir" -type f -name '*.jmod' -exec dirname {} \; 2>/dev/null | sort -u)"
 fi
-if [[ -n "$existing_jmods_dir" ]]; then
-    echo "==> Already downloaded and extracted: $existing_jmods_dir" >&2
-    echo "$existing_jmods_dir"
+existing_jmods_dir_count="$(echo "$existing_jmods_dirs" | grep -c . || true)"
+if [[ "$existing_jmods_dir_count" -eq 1 ]]; then
+    echo "==> Already downloaded and extracted: $existing_jmods_dirs" >&2
+    echo "$existing_jmods_dirs"
     exit 0
+elif [[ "$existing_jmods_dir_count" -gt 1 ]]; then
+    fail "found $existing_jmods_dir_count directories with .jmod files under $output_dir (expected 0 or 1); remove $output_dir and retry: $existing_jmods_dirs"
 fi
-
-mkdir -p "$output_dir"
 
 tmp_dir=""
 cleanup() {
