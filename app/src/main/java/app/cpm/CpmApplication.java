@@ -3,6 +3,8 @@ package app.cpm;
 import app.cpm.app.RepositoryManager;
 import app.cpm.app.SessionManager;
 import app.cpm.claude.ClaudeCapabilityService;
+import app.cpm.claude.ClaudeHookInstaller;
+import app.cpm.claude.SessionActivityWatcher;
 import app.cpm.domain.Repository;
 import app.cpm.git.ChangedLineService;
 import app.cpm.git.DiffService;
@@ -32,7 +34,13 @@ import javafx.stage.WindowEvent;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.charset.StandardCharsets;
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Path;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.Base64;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
@@ -77,12 +85,17 @@ public final class CpmApplication extends Application {
      */
     private static final long SHUTDOWN_CLOSE_TIMEOUT_SECONDS = 10;
 
+    /** Short: the hook install writes two small files, and shutdown must not stall on it. */
+    private static final long HOOK_INSTALL_SHUTDOWN_WAIT_SECONDS = 2;
+
     private GitStatusService gitStatusService;
     private WorktreeService worktreeService;
     private DiffService diffService;
     private SessionSearchService searchService;
     private GhCliService ghCliService;
     private ClaudeCapabilityService claudeCapabilityService;
+    private SessionActivityWatcher activityWatcher;
+    private CompletableFuture<Void> hookInstall;
     private RepositoryManager repositoryManager;
     private SessionManager sessionManager;
     private MainWorkspace mainWorkspace;
@@ -156,6 +169,8 @@ public final class CpmApplication extends Application {
         RepositorySidebar sidebar =
                 new RepositorySidebar(repositoryManager, gitStatusService, worktreeService, sessionManager,
                         mainWorkspace, viewModel);
+
+        installSessionActivityHooks(stateRepository.stateFile().getParent());
 
         appShell = new AppShell(primaryStage, WINDOW_TITLE, sidebar, mainWorkspace,
                 repositoryManager.state().ui().sidebarWidth(),
@@ -537,6 +552,10 @@ public final class CpmApplication extends Application {
         if (claudeCapabilityService != null) {
             closeQuietly("ClaudeCapabilityService", claudeCapabilityService::close);
         }
+        closeQuietly("hook install", this::awaitHookInstall);
+        if (activityWatcher != null) {
+            closeQuietly("SessionActivityWatcher", activityWatcher::close);
+        }
         if (gitStatusService != null) {
             closeQuietly("GitStatusService", gitStatusService::close);
         }
@@ -551,6 +570,55 @@ public final class CpmApplication extends Application {
         }
         if (ghCliService != null) {
             closeQuietly("GhCliService", ghCliService::close);
+        }
+    }
+
+    /**
+     * Installs the Claude hooks that report session activity, then points the
+     * session manager and workspace at them. Runs off the FX thread (file
+     * writes), and a failure is logged and swallowed: activity badges are a
+     * convenience, and no part of launching or resuming a session depends on
+     * them.
+     */
+    private void installSessionActivityHooks(Path stateDirectory) {
+        ClaudeHookInstaller installer = new ClaudeHookInstaller(stateDirectory);
+        // A virtual thread, not the no-arg runAsync's ForkJoinPool.commonPool()
+        // (AGENTS.md: "a background executor ... or a virtual thread"). Kept in a
+        // field so stop() can await this file-writing work instead of racing it.
+        hookInstall = CompletableFuture.runAsync(() -> {
+            try {
+                installer.install();
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+        }, task -> Thread.ofVirtual().name("cpm-hook-install").start(task))
+                .thenRun(() -> Platform.runLater(() -> {
+                    sessionManager.useActivitySettings(installer.settingsFile());
+                    activityWatcher = new SessionActivityWatcher(installer.activityDirectory());
+                    mainWorkspace.useActivityWatcher(activityWatcher);
+                }))
+                .exceptionally(ex -> {
+                    LOG.log(Level.WARNING, "Session activity hooks unavailable; sessions will run without them", ex);
+                    return null;
+                });
+    }
+
+    /**
+     * Waits briefly for {@link #installSessionActivityHooks}'s file writes, so
+     * shutdown cannot race a half-written hook script (AGENTS.md: background
+     * file writers must not race teardown). Bounded -- a stuck install must
+     * never hold the app open.
+     */
+    private void awaitHookInstall() {
+        if (hookInstall == null) {
+            return;
+        }
+        try {
+            hookInstall.get(HOOK_INSTALL_SHUTDOWN_WAIT_SECONDS, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (ExecutionException | TimeoutException e) {
+            LOG.log(Level.DEBUG, "Hook install did not settle before shutdown: " + e.getMessage());
         }
     }
 

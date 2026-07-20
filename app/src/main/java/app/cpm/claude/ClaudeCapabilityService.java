@@ -37,6 +37,7 @@ public final class ClaudeCapabilityService implements AutoCloseable {
     private static final Pattern RESUME_FLAG = Pattern.compile("--resume\\b");
     private static final Pattern FORK_SESSION_FLAG = Pattern.compile("--fork-session\\b");
     private static final Pattern SESSION_ID_FLAG = Pattern.compile("--session-id\\b");
+    private static final Pattern SETTINGS_FLAG = Pattern.compile("--settings\\b");
 
     private final ClaudeExecutableLocator locator;
     private final ExecutorService executor;
@@ -92,8 +93,10 @@ public final class ClaudeCapabilityService implements AutoCloseable {
         boolean supportsResume = RESUME_FLAG.matcher(help).find();
         boolean supportsForkSession = FORK_SESSION_FLAG.matcher(help).find();
         boolean supportsSessionId = SESSION_ID_FLAG.matcher(help).find();
+        boolean supportsSettings = SETTINGS_FLAG.matcher(help).find();
 
-        return new ClaudeCapabilities(supportsName, supportsResume, supportsForkSession, supportsSessionId, version);
+        return new ClaudeCapabilities(supportsName, supportsResume, supportsForkSession, supportsSessionId,
+                supportsSettings, version);
     }
 
     private ProcessResult runAndRequireSuccess(Path claude, String arg) {

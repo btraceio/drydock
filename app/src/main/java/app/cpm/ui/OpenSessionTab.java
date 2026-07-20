@@ -94,6 +94,9 @@ final class OpenSessionTab {
 
     // -- Tab header graphic (two-line label + dot + close; handoff 4) -------
     private final Region tabDot = SessionStatusStyles.createDot(7, SessionStatus.STARTING);
+
+    /** Shown only while this session's Claude is waiting on the user; see {@link #setNeedsAttention}. */
+    private final Label tabAttentionDot = new Label("waiting");
     private final Label tabRepoLabel = new Label();
     private final Label tabTitleLabel = new Label();
     private final Button tabCloseButton = new Button("×");
@@ -336,7 +339,10 @@ final class OpenSessionTab {
         tabCloseButton.setFocusTraversable(false);
         tabCloseButton.setOnAction(e -> onCloseRequested.run());
 
-        HBox graphic = new HBox(8, tabDot, tabLabels, tabCloseButton);
+        tabAttentionDot.getStyleClass().add("attention-badge");
+        tabAttentionDot.setVisible(false);
+        tabAttentionDot.setManaged(false);
+        HBox graphic = new HBox(8, tabDot, tabLabels, tabAttentionDot, tabCloseButton);
         graphic.setAlignment(Pos.CENTER_LEFT);
 
         // Double-click the tab -> inline rename (Enter/blur commits, Esc cancels).
@@ -589,6 +595,20 @@ final class OpenSessionTab {
         SessionStatusStyles.updateDot(pillDot, status);
         SessionStatusStyles.applyStatus(statusPill, status);
         pillLabel.setText(SessionStatusStyles.designLabel(status));
+    }
+
+    /**
+     * Marks the tab when its Claude is blocked on a human (plan section 13:
+     * "tab title displays session name; dirty/running/attention state may be
+     * reflected with a small icon").
+     *
+     * <p>The sidebar badge alone is not enough: while the user is working
+     * inside another tab the sidebar may be collapsed or simply unwatched, and
+     * the tab strip is the one surface always in view.</p>
+     */
+    void setNeedsAttention(boolean needsAttention) {
+        tabAttentionDot.setVisible(needsAttention);
+        tabAttentionDot.setManaged(needsAttention);
     }
 
     /** Re-themes this tab's live terminal (app theme toggle); see {@link TerminalBridge#applyTerminalTheme}. */

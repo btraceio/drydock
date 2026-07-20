@@ -9,6 +9,7 @@ import app.cpm.domain.ManagedSessionId;
 import app.cpm.domain.PrState;
 import app.cpm.domain.Repository;
 import app.cpm.domain.RepositoryId;
+import app.cpm.domain.SessionActivity;
 import app.cpm.domain.SessionStatus;
 import app.cpm.git.GitStatus;
 import app.cpm.git.GitStatusService;
@@ -1070,6 +1071,15 @@ public final class RepositorySidebar extends VBox {
             if (prChip != null) {
                 row.getChildren().add(row.getChildren().indexOf(actions), prChip);
             }
+            // A session whose Claude is blocked on a human gets a badge: it
+            // is the one state that makes no further progress until the user
+            // comes back to it. Cleared by switching to the session.
+            SessionActivity activity = viewModel.activityOf(session.id());
+            if (activity == SessionActivity.NEEDS_ATTENTION) {
+                Label attention = new Label("waiting");
+                attention.getStyleClass().add("attention-badge");
+                row.getChildren().add(row.getChildren().indexOf(actions), attention);
+            }
             // An IDLE session advertises resumability with a ghost Resume
             // pill (worktree handoff: clicking the row resumes it).
             if (!SessionStatusStyles.isRunning(session.status())) {
@@ -1084,7 +1094,9 @@ public final class RepositorySidebar extends VBox {
                 row.getStyleClass().add("active");
             }
             Tooltip rowTip = sessionTooltips.computeIfAbsent(session.id(), key -> new Tooltip());
-            rowTip.setText("Status: " + session.status() + "\nLast opened: " + session.lastOpenedAt()
+            rowTip.setText("Status: " + session.status()
+                    + (activity == SessionActivity.UNKNOWN ? "" : "\nClaude: " + activityLabel(activity))
+                    + "\nLast opened: " + session.lastOpenedAt()
                     + "\nWorking directory: " + session.workingDirectory());
             Tooltip.install(row, rowTip);
             row.setOnMouseClicked(event -> {
@@ -1094,6 +1106,16 @@ public final class RepositorySidebar extends VBox {
                 }
             });
             return row;
+        }
+
+        /** Human-facing wording for the tooltip's activity line. */
+        private String activityLabel(SessionActivity activity) {
+            return switch (activity) {
+                case BUSY -> "working";
+                case IDLE -> "at the prompt";
+                case NEEDS_ATTENTION -> "waiting for you";
+                case UNKNOWN -> "unknown";
+            };
         }
 
         /**
