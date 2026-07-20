@@ -1,7 +1,7 @@
 #!/bin/bash
 # The `build/image/bin/claude-project-manager` launcher (plan section 23.2),
 # copied verbatim into the jlink runtime image by the `runtimeImage` task
-# (see buildSrc/src/main/kotlin/cpm/build/RuntimeImageTask.kt). No
+# (see buildSrc/src/main/kotlin/cpm/tasks/RuntimeImageTask.kt). No
 # build-time substitution happens: this file is the launcher, byte for byte.
 #
 # Deviations from the plan section 23.2 example worth noting explicitly:

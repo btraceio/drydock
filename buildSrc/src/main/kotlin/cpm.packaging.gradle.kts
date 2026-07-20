@@ -3,7 +3,7 @@
 // Applied by app/build.gradle.kts.
 //
 // The heavy lifting lives in the typed task classes
-// buildSrc/src/main/kotlin/cpm/build/{RuntimeImageTask,AppBundleTask}.kt
+// buildSrc/src/main/kotlin/cpm/tasks/{RuntimeImageTask,AppBundleTask}.kt
 // (injected ExecOperations/FileSystemOperations, precise inputs/outputs);
 // the launcher script, Info.plist, and the two .app trampolines are
 // verbatim template files under app/packaging/. Root-level alias tasks
@@ -16,8 +16,8 @@
 // (buildGhosttyNative/buildNativeHost, declared in the root build file)
 // already does.
 
-import cpm.build.AppBundleTask
-import cpm.build.RuntimeImageTask
+import cpm.tasks.AppBundleTask
+import cpm.tasks.RuntimeImageTask
 
 plugins {
     java
