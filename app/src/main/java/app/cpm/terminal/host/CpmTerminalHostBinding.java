@@ -11,6 +11,8 @@ import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.lang.System.Logger;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
 /**
  * Hand-written FFM bindings for {@code native-host/CpmTerminalHost.h} (the
@@ -130,6 +132,20 @@ final class CpmTerminalHostBinding {
         }
     }
 
+    /**
+     * Process-wide instances, one per {@link SymbolLookup} (itself a
+     * process-wide singleton -- {@code CpmTerminalHostLibrary.lookup()}),
+     * so the downcall handles are linked once per process instead of once
+     * per {@code CpmTerminalHost}; the handles are stateless and
+     * thread-safe to share.
+     */
+    private static final ConcurrentMap<SymbolLookup, CpmTerminalHostBinding> INSTANCES = new ConcurrentHashMap<>();
+
+    /** Returns the process-wide binding for {@code lookup}, linking it on first use. */
+    static CpmTerminalHostBinding of(SymbolLookup lookup) {
+        return INSTANCES.computeIfAbsent(lookup, CpmTerminalHostBinding::new);
+    }
+
     private final Linker linker = Linker.nativeLinker();
 
     private final MethodHandle create;
@@ -143,7 +159,7 @@ final class CpmTerminalHostBinding {
     private final MethodHandle setMousePosEventCallback;
     private final MethodHandle setMouseButtonEventCallback;
 
-    CpmTerminalHostBinding(SymbolLookup lookup) {
+    private CpmTerminalHostBinding(SymbolLookup lookup) {
         // cpm_terminal_host_t cpm_terminal_host_create(void* parent_nsview);
         this.create = linker.downcallHandle(
             find(lookup, "cpm_terminal_host_create"),

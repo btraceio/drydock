@@ -11,6 +11,8 @@ import java.lang.foreign.SymbolLookup;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
 /**
  * Hand-written Foreign Function &amp; Memory (FFM) bindings for the smallest
@@ -38,6 +40,20 @@ import java.nio.charset.StandardCharsets;
  * MemorySegment}, {@link MethodHandle}, or {@link Linker} for libghostty.</p>
  */
 final class GhosttyBinding {
+
+    /**
+     * Process-wide instances, one per {@link SymbolLookup}. The library's
+     * lookup is itself a process-wide singleton ({@code
+     * GhosttyNativeLibrary.lookup()}), so in practice this links the
+     * downcall handles exactly once per process instead of once per
+     * {@code GhosttyApp} (they are stateless and thread-safe to share).
+     */
+    private static final ConcurrentMap<SymbolLookup, GhosttyBinding> INSTANCES = new ConcurrentHashMap<>();
+
+    /** Returns the process-wide binding for {@code lookup}, linking it on first use. */
+    static GhosttyBinding of(SymbolLookup lookup) {
+        return INSTANCES.computeIfAbsent(lookup, GhosttyBinding::new);
+    }
 
     /**
      * Mirrors {@code ghostty_info_s} in {@code ghostty.h}:
@@ -75,7 +91,7 @@ final class GhosttyBinding {
     private final MethodHandle ghosttyConfigLoadFile;
     private final MethodHandle ghosttyConfigFinalize;
 
-    GhosttyBinding(SymbolLookup lookup) {
+    private GhosttyBinding(SymbolLookup lookup) {
         Linker linker = Linker.nativeLinker();
 
         // int ghostty_init(uintptr_t argc, char** argv);

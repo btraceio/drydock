@@ -53,7 +53,7 @@ public final class CpmTerminalHost implements AutoCloseable {
      */
     public static CpmTerminalHost createForCurrentWindow() {
         checkFxThread();
-        CpmTerminalHostBinding binding = new CpmTerminalHostBinding(CpmTerminalHostLibrary.lookup());
+        CpmTerminalHostBinding binding = CpmTerminalHostBinding.of(CpmTerminalHostLibrary.lookup());
         MemorySegment parentNsView = JavaFxNativeView.currentWindowNsView();
         MemorySegment handle = binding.create(parentNsView);
         if (handle.equals(MemorySegment.NULL)) {
