@@ -13,7 +13,6 @@ import app.cpm.review.AnnotationStore;
 import app.cpm.review.ReviewAnnotation;
 import app.cpm.ui.UiErrors;
 import app.cpm.ui.UiFormats;
-import javafx.animation.PauseTransition;
 import javafx.application.Platform;
 import javafx.geometry.Point2D;
 import javafx.geometry.Pos;
@@ -31,7 +30,6 @@ import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
 import javafx.scene.layout.VBox;
 import javafx.scene.text.Text;
-import javafx.util.Duration;
 
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
@@ -687,6 +685,7 @@ public final class ReviewView extends BorderPane {
         Label status = new Label(annotation.status().name().toLowerCase(Locale.ROOT));
         status.getStyleClass().addAll("review-status-pill", switch (annotation.status()) {
             case OPEN -> "status-open";
+            case SENT -> "status-sent";
             case RESOLVED -> "status-resolved";
             case FIXED -> "status-fixed";
         });
@@ -755,18 +754,19 @@ public final class ReviewView extends BorderPane {
     private void updateSummary() {
         List<ReviewAnnotation> annotations = annotationStore.forScope(sessionId, scope);
         long open = annotations.stream().filter(a -> a.status() == AnnotationStatus.OPEN).count();
-        long fixed = annotations.stream().filter(a -> a.status() == AnnotationStatus.FIXED).count();
+        long sent = annotations.stream().filter(a -> a.status() == AnnotationStatus.SENT).count();
         summaryLabel.setText(open + " open · " + annotations.size()
-                + (annotations.size() == 1 ? " annotation" : " annotations") + " · " + fixed + " fixed");
+                + (annotations.size() == 1 ? " annotation" : " annotations") + " · " + sent + " sent");
         sendButton.setDisable(open == 0);
     }
 
     /**
      * Posts the diff scope + every OPEN annotation into the session's live
      * Claude terminal (the same hand-off principle as the worktree Finish
-     * actions -- the app does not validate anything itself). Each open
-     * thread then gets a hand-off reply and flips to FIXED, and the banner
-     * offers a re-diff.
+     * actions -- the app does not validate anything itself). Each sent
+     * thread is marked {@link AnnotationStatus#SENT} immediately -- the app
+     * records only what it knows (the hand-off happened), never a fabricated
+     * outcome -- and the banner offers a re-diff to see the real result.
      */
     private void sendToClaude() {
         List<ReviewAnnotation> open = annotationStore.forScope(sessionId, scope).stream()
@@ -789,28 +789,19 @@ public final class ReviewView extends BorderPane {
         }
         promptSender.accept(prompt.toString().strip());
 
-        sendButton.setDisable(true);
-        sendButton.setText("Sent — Claude is validating…");
         // The app does NOT validate -- Claude does, in the live terminal.
-        // After a grace period each open thread records the hand-off and
-        // flips to FIXED; the banner's "Re-run diff" shows the real result.
-        PauseTransition settle = new PauseTransition(Duration.seconds(8));
-        settle.setOnFinished(e -> {
-            for (ReviewAnnotation annotation : open) {
-                annotationStore.update(annotation
-                        .withReply(new ReviewAnnotation.Message("Claude", Instant.now(),
-                                "Addressed in the terminal — re-run the diff to verify."))
-                        .withStatus(AnnotationStatus.FIXED));
-            }
-            sendButton.setText("Send to Claude");
-            bannerLabel.setText(open.size() + (open.size() == 1 ? " annotation" : " annotations") + " addressed");
-            banner.setVisible(true);
-            banner.setManaged(true);
-            renderFileList();
-            renderSelectedFile();
-            updateSummary();
-        });
-        settle.play();
+        // Record only the hand-off (SENT, no fabricated reply, no timer);
+        // the banner's "Re-run diff" shows the real result.
+        for (ReviewAnnotation annotation : open) {
+            annotationStore.update(annotation.withStatus(AnnotationStatus.SENT));
+        }
+        bannerLabel.setText(open.size() + (open.size() == 1 ? " annotation" : " annotations")
+                + " sent to Claude");
+        banner.setVisible(true);
+        banner.setManaged(true);
+        renderFileList();
+        renderSelectedFile();
+        updateSummary();
     }
 
     private String scopeDescription() {

@@ -92,6 +92,23 @@ class AnnotationStoreTest {
     }
 
     @Test
+    void sentStatusRoundTripsThroughJson() {
+        ReviewAnnotation sent = sample(ManagedSessionId.newId()).withStatus(AnnotationStatus.SENT);
+
+        List<ReviewAnnotation> decoded = AnnotationStore.fromJson(AnnotationStore.toJson(List.of(sent)));
+
+        assertEquals(List.of(sent), decoded);
+        assertEquals(AnnotationStatus.SENT, decoded.get(0).status());
+    }
+
+    @Test
+    void statusDecodeIsLenient() {
+        assertEquals(AnnotationStatus.SENT, AnnotationStatus.fromPersisted(" sent "));
+        assertEquals(AnnotationStatus.FIXED, AnnotationStatus.fromPersisted("FIXED"));
+        assertEquals(AnnotationStatus.OPEN, AnnotationStatus.fromPersisted("no-such-status"));
+    }
+
+    @Test
     void malformedFileYieldsEmptyStore(@TempDir Path dir) throws Exception {
         Path file = dir.resolve("annotations.json");
         Files.writeString(file, "{not json at all");

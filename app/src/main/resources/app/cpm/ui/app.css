@@ -1660,6 +1660,10 @@
     -fx-background-color: -cpm-accent-soft;
     -fx-text-fill: -cpm-accent;
 }
+.status-sent {
+    -fx-background-color: -cpm-running-soft;
+    -fx-text-fill: -cpm-running;
+}
 .status-resolved {
     -fx-background-color: -cpm-active-bg;
     -fx-text-fill: -cpm-text-dim;
