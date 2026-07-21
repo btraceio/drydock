@@ -13,12 +13,18 @@ import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
 import java.time.Duration;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Pure save-state-machine assertions against a temp dir -- no FX toolkit needed. */
@@ -47,7 +53,7 @@ class FileEditSessionTest {
     }
 
     private FileEditSession sessionFor(Path file) throws IOException {
-        return new FileEditSession(file, FileContent.load(file, MAX), executor, IDLE_DEBOUNCE);
+        return new FileEditSession(file, FileContent.load(file, MAX), executor, IDLE_DEBOUNCE, MAX);
     }
 
     /** Bumps mtime past any filesystem granularity so a same-size edit is still observed. */
@@ -98,7 +104,7 @@ class FileEditSessionTest {
         Path file = dir.resolve("a.txt");
         Files.writeString(file, "one\n");
         FileEditSession session =
-                new FileEditSession(file, FileContent.load(file, MAX), executor, SHORT_DEBOUNCE);
+                new FileEditSession(file, FileContent.load(file, MAX), executor, SHORT_DEBOUNCE, MAX);
         CountDownLatch clean = new CountDownLatch(1);
         session.setOnStateChanged(state -> {
             if (state == State.CLEAN) {
@@ -242,5 +248,191 @@ class FileEditSessionTest {
         session.flushBlocking(TIMEOUT);
 
         assertEquals("blocking\n", Files.readString(file));
+    }
+
+    /**
+     * An edit that lands while the write is in flight must not be swallowed by
+     * the CLEAN transition that follows the write. The window is widened
+     * deterministically by parking the executor inside the SAVING callback.
+     */
+    @Test
+    void editDuringAnInFlightWriteIsNotLost(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("a.txt");
+        Files.writeString(file, "one\n");
+        FileEditSession session = sessionFor(file);
+        CountDownLatch saving = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        session.setOnStateChanged(state -> {
+            if (state == State.SAVING) {
+                saving.countDown();
+                try {
+                    assertTrue(release.await(5, TimeUnit.SECONDS), "test never released the write");
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        });
+
+        session.edit("first\n");
+        var inFlight = session.flush();
+        assertTrue(saving.await(5, TimeUnit.SECONDS), "write should have reached SAVING");
+        session.edit("second\n");
+        release.countDown();
+        inFlight.get(5, TimeUnit.SECONDS);
+
+        assertEquals(State.DIRTY, session.state(), "a newer edit must not be reported as saved");
+        session.flush().get(5, TimeUnit.SECONDS);
+        assertEquals("second\n", Files.readString(file));
+        assertEquals(State.CLEAN, session.state());
+    }
+
+    @Test
+    void aTruncatedBufferCannotBeEdited(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("big.txt");
+        Files.writeString(file, "aaaaaaaaaaaaaaaaaaaaaaaa\n");
+        FileContent content = FileContent.load(file, 4);
+
+        assertThrows(IllegalArgumentException.class,
+                () -> new FileEditSession(file, content, executor, IDLE_DEBOUNCE, MAX));
+    }
+
+    @Test
+    void aBinaryBufferCannotBeEdited(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("bin.dat");
+        Files.write(file, new byte[] { 'a', 0, 'b', '\n' });
+        FileContent content = FileContent.load(file, MAX);
+
+        assertThrows(IllegalArgumentException.class,
+                () -> new FileEditSession(file, content, executor, IDLE_DEBOUNCE, MAX));
+    }
+
+    @Test
+    void aMixedTerminatorBufferCannotBeEdited(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("mixed.txt");
+        Files.write(file, "a\r\nb\n".getBytes(StandardCharsets.UTF_8));
+        FileContent content = FileContent.load(file, MAX);
+
+        assertThrows(IllegalArgumentException.class,
+                () -> new FileEditSession(file, content, executor, IDLE_DEBOUNCE, MAX));
+    }
+
+    /** ERROR is a dirty buffer whose write failed: an external change is a conflict, not a reload. */
+    @Test
+    void externalChangeWhileInErrorReportsConflict(@TempDir Path dir) throws Exception {
+        Path lockedDir = Files.createDirectory(dir.resolve("locked"));
+        Path file = lockedDir.resolve("a.txt");
+        Files.writeString(file, "one\n");
+        FileEditSession session = sessionFor(file);
+        assertTrue(file.toFile().setWritable(false), "test needs a non-writable file");
+
+        session.edit("mine\n");
+        session.flush().get(5, TimeUnit.SECONDS);
+        assertEquals(State.ERROR, session.state());
+
+        assertTrue(file.toFile().setWritable(true));
+        writeExternally(file, "claude\n");
+        var result = session.poll().get(5, TimeUnit.SECONDS);
+
+        assertEquals(PollOutcome.CONFLICT, result.outcome());
+        assertEquals(State.CONFLICT, session.state());
+    }
+
+    /** A throwable that is not an IOException must still clear SAVING. */
+    @Test
+    void aNonIoFailureOnTheWritePathDoesNotStrandSaving(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("a.txt");
+        Files.writeString(file, "one\n");
+        FileEditSession session = sessionFor(file);
+        AtomicBoolean explode = new AtomicBoolean(true);
+        session.setOnStateChanged(state -> {
+            if (state == State.SAVING && explode.compareAndSet(true, false)) {
+                throw new IllegalStateException("listener blew up");
+            }
+        });
+
+        session.edit("mine\n");
+        session.flush().get(5, TimeUnit.SECONDS);
+
+        assertNotEquals(State.SAVING, session.state(), "SAVING must never be stranded");
+        assertEquals(State.ERROR, session.state());
+        assertNotNull(session.lastError());
+        // Auto-save is still alive: the retry writes the buffer.
+        session.flush().get(5, TimeUnit.SECONDS);
+        assertEquals("mine\n", Files.readString(file));
+        assertEquals(State.CLEAN, session.state());
+    }
+
+    /** A reload adopts the fresh content, so a terminator change on disk is honoured. */
+    @Test
+    void reloadAdoptsTheDisksNewTerminator(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("w.txt");
+        Files.write(file, "a\r\nb\r\n".getBytes(StandardCharsets.UTF_8));
+        FileEditSession session = sessionFor(file);
+
+        writeExternally(file, "a\nb\n");
+        var result = session.poll().get(5, TimeUnit.SECONDS);
+        assertEquals(PollOutcome.RELOAD, result.outcome());
+
+        session.edit("a\nX\n");
+        session.flush().get(5, TimeUnit.SECONDS);
+        assertEquals("a\nX\n", Files.readString(file), "must not re-CRLF a file that is now LF");
+    }
+
+    /** A file replaced by something unwritable must not be adopted as the buffer. */
+    @Test
+    void reloadOfANonEditableFileReportsMissing(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("a.txt");
+        Files.writeString(file, "one\n");
+        FileEditSession session = sessionFor(file);
+
+        Files.write(file, new byte[] { 'a', 0, 'b', '\n' });
+        Files.setLastModifiedTime(file, FileTime.fromMillis(System.currentTimeMillis() + 2000));
+        var result = session.poll().get(5, TimeUnit.SECONDS);
+
+        assertEquals(PollOutcome.MISSING, result.outcome());
+    }
+
+    @Test
+    void takeDiskFailsExceptionallyWhenTheFileIsGone(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("a.txt");
+        Files.writeString(file, "one\n");
+        FileEditSession session = sessionFor(file);
+
+        session.edit("mine\n");
+        Files.delete(file);
+        ExecutionException failure = assertThrows(ExecutionException.class,
+                () -> session.takeDisk().get(5, TimeUnit.SECONDS));
+
+        assertInstanceOf(IOException.class, failure.getCause());
+    }
+
+    @Test
+    void flushBlockingReportsATimeout(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("a.txt");
+        Files.writeString(file, "one\n");
+        FileEditSession session = sessionFor(file);
+        CountDownLatch saving = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicReference<IOException> reported = new AtomicReference<>();
+        session.setOnSaveFailed(reported::set);
+        session.setOnStateChanged(state -> {
+            if (state == State.SAVING) {
+                saving.countDown();
+                try {
+                    assertTrue(release.await(5, TimeUnit.SECONDS), "test never released the write");
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        });
+
+        session.edit("mine\n");
+        session.flush();
+        assertTrue(saving.await(5, TimeUnit.SECONDS), "write should have reached SAVING");
+        session.flushBlocking(Duration.ofMillis(50));
+
+        assertNotNull(session.lastError(), "a timed-out shutdown flush must be recorded");
+        assertNotNull(reported.get(), "a timed-out shutdown flush must be reported");
+        release.countDown();
     }
 }
