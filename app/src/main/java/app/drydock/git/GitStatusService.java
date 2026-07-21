@@ -59,8 +59,13 @@ public final class GitStatusService implements AutoCloseable {
         this(locator, executor, false);
     }
 
-    /** Test seam: swaps the {@code ssh} executable for a fake script (mirrors {@link GitExecutableLocator}). */
-    GitStatusService(GitExecutableLocator locator, String sshExecutable) {
+    /**
+     * Test seam: swaps the {@code ssh} executable for a fake script (mirrors
+     * {@link GitExecutableLocator}). Public so callers outside this package
+     * (e.g. {@code app.drydock.app.RepositoryManagerTest}) can fake SSH
+     * remote resolution too, rather than depending on a real reachable host.
+     */
+    public GitStatusService(GitExecutableLocator locator, String sshExecutable) {
         this(locator, Executors.newVirtualThreadPerTaskExecutor(), true, sshExecutable);
     }
 
