@@ -40,6 +40,8 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.function.IntFunction;
 
 /**
@@ -75,6 +77,12 @@ final class FileViewer extends BorderPane {
     /** Latest changed-line map for the overlay's current scope (relative path → 1-based new-file lines). */
     private Map<Path, Set<Integer>> changedLines = Map.of();
 
+    // -- Conflict / error banner (spec: Error handling) ---------------------
+    private final HBox editBanner = new HBox(8);
+    private final Label editBannerLabel = new Label();
+    private final Button editBannerPrimary = new Button();
+    private final Button editBannerSecondary = new Button();
+
     /** Open files, keyed by absolute path. */
     private final Map<Path, Tab> openFiles = new LinkedHashMap<>();
     private boolean gutterVisible = true;
@@ -109,6 +117,21 @@ final class FileViewer extends BorderPane {
     private final Label statusChip = new Label("read-only");
     private PauseTransition chipReset;
 
+    /** How often open files are checked for external (Claude) edits. */
+    private static final Duration POLL_INTERVAL = Duration.ofMillis(1500);
+
+    private ScheduledFuture<?> poller;
+
+    /** Re-highlight debounce, matching SearchRail's keystroke-debounce convention. */
+    private static final Duration HIGHLIGHT_DEBOUNCE = Duration.ofMillis(150);
+
+    private PauseTransition highlightDebounce;
+
+    /** Coalescing window for the post-save diff refresh (the cache is shared with Review). */
+    private static final Duration DIFF_REFRESH_COALESCE = Duration.ofSeconds(2);
+
+    private PauseTransition diffRefreshDebounce;
+
     FileViewer() {
         getStyleClass().add("file-viewer");
 
@@ -141,6 +164,17 @@ final class FileViewer extends BorderPane {
         diffBanner.setVisible(false);
         diffBanner.setManaged(false);
 
+        editBannerLabel.getStyleClass().add("viewer-edit-banner-label");
+        editBannerPrimary.getStyleClass().add("viewer-diff-base-switch");
+        editBannerPrimary.setFocusTraversable(false);
+        editBannerSecondary.getStyleClass().add("viewer-diff-base-switch");
+        editBannerSecondary.setFocusTraversable(false);
+        editBanner.getChildren().setAll(editBannerLabel, editBannerPrimary, editBannerSecondary);
+        editBanner.setAlignment(Pos.CENTER_LEFT);
+        editBanner.getStyleClass().add("viewer-edit-banner");
+        editBanner.setVisible(false);
+        editBanner.setManaged(false);
+
         centerStack.getChildren().setAll(fileTabs, emptyState);
         setCenter(centerStack);
 
@@ -152,6 +186,20 @@ final class FileViewer extends BorderPane {
         });
         updateBreadcrumb(null);
         updateEmptyState();
+
+        // Poll only while the viewer is actually in the scene graph.
+        // OpenSessionTab.showSubTab swaps the tab's center node, so leaving
+        // the Explorer detaches this viewer and nulls its scene -- which is
+        // also the flush signal for the sub-tab-switch and tab-close cases
+        // (spec: Lifecycle).
+        sceneProperty().addListener((obs, oldScene, newScene) -> {
+            if (newScene == null) {
+                flushAllSessions();
+                stopPolling();
+            } else {
+                startPolling();
+            }
+        });
     }
 
     // ---- Diff overlay -------------------------------------------------------
@@ -205,6 +253,159 @@ final class FileViewer extends BorderPane {
         }
         diffBanner.setVisible(show);
         diffBanner.setManaged(show);
+    }
+
+    // ---- Disk polling / reload / conflict --------------------------------
+
+    private void startPolling() {
+        if (poller == null) {
+            poller = ioExecutor.scheduleWithFixedDelay(this::pollOpenFiles,
+                    POLL_INTERVAL.toMillis(), POLL_INTERVAL.toMillis(), TimeUnit.MILLISECONDS);
+        }
+    }
+
+    private void stopPolling() {
+        if (poller != null) {
+            poller.cancel(false);
+            poller = null;
+        }
+    }
+
+    private void flushAllSessions() {
+        for (FileEditSession session : sessions.values()) {
+            session.flush();
+        }
+    }
+
+    /**
+     * One round of external-change detection across every open editable tab.
+     *
+     * <p>Runs on {@link #ioExecutor} via {@code scheduleWithFixedDelay}, which
+     * silently drops all future runs if this ever throws -- there would be no
+     * signal that the user's stale-file protection just died. Every tick is
+     * therefore caught and logged rather than allowed to propagate.</p>
+     */
+    private void pollOpenFiles() {
+        try {
+            for (Tab tab : List.copyOf(fileTabs.getTabs())) {
+                if (tab.getProperties().get("drydock.session") instanceof FileEditSession session) {
+                    session.poll().thenAccept(
+                            result -> Platform.runLater(() -> applyPollResult(tab, session, result)));
+                }
+            }
+        } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, "Disk poll failed; will retry next tick", e);
+        }
+    }
+
+    /**
+     * Clean tab + changed file: silently adopt Claude's edits, so an open
+     * tab never goes stale. Dirty tab + changed file: raise the conflict
+     * banner and leave both versions intact (auto-save is already disarmed
+     * inside the session).
+     */
+    private void applyPollResult(Tab tab, FileEditSession session, FileEditSession.PollResult result) {
+        switch (result.outcome()) {
+            case UNCHANGED -> { }
+            case RELOAD -> reload(tab, result.text());
+            case CONFLICT -> showConflictBanner(tab, session);
+            case MISSING -> showMissingBanner(tab, session);
+        }
+        updateStatusChip();
+        updateDirtyDot(tab);
+    }
+
+    /**
+     * Replaces a clean tab's text with the disk content, holding the caret
+     * where it was.
+     *
+     * <p>Undo history is forgotten deliberately: {@code replaceText} pushes
+     * onto RichTextFX's UndoManager, so one Cmd+Z after a reload the user did
+     * not notice would restore their stale buffer -- which auto-save would
+     * then write over Claude's edits.</p>
+     */
+    private void reload(Tab tab, String text) {
+        if (!(tab.getContent() instanceof VirtualizedScrollPane<?> pane)
+                || !(pane.getContent() instanceof CodeArea area)) {
+            return;
+        }
+        int paragraph = area.getCurrentParagraph();
+        int column = area.getCaretColumn();
+        replaceTextQuietly(tab, area, text);
+        area.getUndoManager().forgetHistory();
+        int safeParagraph = Math.max(0, Math.min(paragraph, area.getParagraphs().size() - 1));
+        int safeColumn = Math.max(0, Math.min(column, area.getParagraphLength(safeParagraph)));
+        area.moveTo(safeParagraph, safeColumn);
+        rehighlight(tab, area, text);
+    }
+
+    private void showConflictBanner(Tab tab, FileEditSession session) {
+        String name = fileNameOf(tab);
+        editBannerLabel.setText(name + " changed on disk while you were editing it.");
+        editBannerPrimary.setText("keep mine");
+        editBannerPrimary.setOnAction(e -> {
+            hideEditBanner();
+            session.keepMine();
+        });
+        editBannerSecondary.setText("reload");
+        editBannerSecondary.setOnAction(e -> {
+            hideEditBanner();
+            session.takeDisk().whenComplete((text, failure) -> Platform.runLater(() -> {
+                if (failure != null) {
+                    showSaveErrorBanner(tab, session);
+                } else {
+                    reload(tab, text);
+                }
+            }));
+        });
+        showEditBanner();
+    }
+
+    private void showMissingBanner(Tab tab, FileEditSession session) {
+        editBannerLabel.setText(fileNameOf(tab) + " is no longer on disk.");
+        editBannerPrimary.setText("keep mine");
+        editBannerPrimary.setOnAction(e -> {
+            hideEditBanner();
+            session.keepMine();
+        });
+        editBannerSecondary.setText("close tab");
+        editBannerSecondary.setOnAction(e -> {
+            hideEditBanner();
+            fileTabs.getTabs().remove(tab);
+        });
+        showEditBanner();
+    }
+
+    /** Surfaces a failed write; the buffer is kept and the next edit or Cmd+S retries. */
+    private void showSaveErrorBanner(Tab tab, FileEditSession session) {
+        IOException error = session.lastError();
+        editBannerLabel.setText("Could not save " + fileNameOf(tab) + ": "
+                + (error == null ? "unknown error" : error.getMessage()));
+        editBannerPrimary.setText("retry");
+        editBannerPrimary.setOnAction(e -> {
+            hideEditBanner();
+            session.flush();
+        });
+        editBannerSecondary.setVisible(false);
+        editBannerSecondary.setManaged(false);
+        showEditBanner();
+    }
+
+    private void showEditBanner() {
+        editBanner.setVisible(true);
+        editBanner.setManaged(true);
+    }
+
+    private void hideEditBanner() {
+        editBanner.setVisible(false);
+        editBanner.setManaged(false);
+        editBannerSecondary.setVisible(true);
+        editBannerSecondary.setManaged(true);
+    }
+
+    private String fileNameOf(Tab tab) {
+        Path file = (Path) tab.getProperties().get("drydock.file");
+        return file == null ? "This file" : file.getFileName().toString();
     }
 
     /** Opens {@code file} in a viewer tab (or focuses the existing one), optionally jumping to a 1-based line. */
@@ -389,7 +590,10 @@ final class FileViewer extends BorderPane {
                 updateStatusChip();
             }
         }));
-        session.setOnSaveFailed(error -> Platform.runLater(this::updateStatusChip));
+        session.setOnSaveFailed(error -> Platform.runLater(() -> {
+            updateStatusChip();
+            showSaveErrorBanner(tab, session);
+        }));
 
         area.setEditable(true);
         area.textProperty().addListener((obs, oldText, newText) -> {
@@ -399,6 +603,7 @@ final class FileViewer extends BorderPane {
             session.edit(newText);
             updateDirtyDot(tab);
             updateStatusChip();
+            scheduleRehighlight(tab, area);
         });
         // Cmd+S forces an immediate flush (spec decision 1).
         area.setOnKeyPressed(event -> {
@@ -499,9 +704,59 @@ final class FileViewer extends BorderPane {
         }
     }
 
-    /** Called after each successful save; Task 5 hangs the coalesced diff refresh here. */
+    /**
+     * Schedules a diff-overlay refresh after a save. Coalesced rather than
+     * per-save: {@link DiffOverlay#invalidate()} drops a cache the Review tab
+     * shares, so each refresh costs both views a fresh {@code git diff}, and
+     * a 2s save debounce would otherwise mean a subprocess every couple of
+     * seconds while typing.
+     */
     private void onSaved() {
-        // Diff-overlay refresh is wired in the next task.
+        if (diffOverlay == null) {
+            return;
+        }
+        if (diffRefreshDebounce != null) {
+            diffRefreshDebounce.stop();
+        }
+        diffRefreshDebounce = new PauseTransition(
+                javafx.util.Duration.millis(DIFF_REFRESH_COALESCE.toMillis()));
+        diffRefreshDebounce.setOnFinished(e -> {
+            diffOverlay.invalidate();
+            refreshDiffOverlay();
+        });
+        diffRefreshDebounce.play();
+    }
+
+    /**
+     * Recomputes the lexer spans for {@code area} off the FX thread. The
+     * search-match layer is deliberately not re-derived: it is a load-time
+     * artifact of "open from search result", and recomputing it while the
+     * user types would fight the caret.
+     */
+    private void rehighlight(Tab tab, CodeArea area, String text) {
+        Path file = (Path) tab.getProperties().get("drydock.file");
+        if (file == null) {
+            return;
+        }
+        SyntaxHighlighter.Language language =
+                SyntaxHighlighter.Language.fromFileName(file.getFileName().toString());
+        Thread.ofVirtual().start(() -> {
+            var spans = SyntaxHighlighter.computeHighlighting(text, language);
+            Platform.runLater(() -> {
+                if (text.equals(area.getText()) && !text.isEmpty()) {
+                    area.setStyleSpans(0, spans);
+                }
+            });
+        });
+    }
+
+    private void scheduleRehighlight(Tab tab, CodeArea area) {
+        if (highlightDebounce != null) {
+            highlightDebounce.stop();
+        }
+        highlightDebounce = new PauseTransition(javafx.util.Duration.millis(HIGHLIGHT_DEBOUNCE.toMillis()));
+        highlightDebounce.setOnFinished(e -> rehighlight(tab, area, area.getText()));
+        highlightDebounce.play();
     }
 
     private void scrollTo(Tab tab, int oneBasedLine) {
@@ -638,7 +893,7 @@ final class FileViewer extends BorderPane {
             updateBreadcrumb(null);
             setTop(null);
         } else {
-            topBox.getChildren().setAll(breadcrumb, diffBanner);
+            topBox.getChildren().setAll(breadcrumb, diffBanner, editBanner);
             setTop(topBox);
         }
     }

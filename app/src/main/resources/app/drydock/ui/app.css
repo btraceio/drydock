@@ -1796,6 +1796,16 @@
     -fx-text-fill: -drydock-running;
     -fx-font-size: 11.5px;
 }
+.viewer-edit-banner {
+    -fx-background-color: -drydock-dirty-soft;
+    -fx-border-color: transparent transparent -drydock-border transparent;
+    -fx-border-width: 0 0 1 0;
+    -fx-padding: 4 12 4 12;
+}
+.viewer-edit-banner-label {
+    -fx-text-fill: -drydock-dirty;
+    -fx-font-size: 11.5px;
+}
 .viewer-diff-base-switch {
     -fx-background-color: transparent;
     -fx-background-radius: 6px;
