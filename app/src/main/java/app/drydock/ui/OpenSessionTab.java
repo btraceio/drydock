@@ -789,7 +789,7 @@ final class OpenSessionTab {
      * is ambiguous -- the surface exposes only whether the child process
      * exited, not its actual exit code (spec: SSH remote repositories notes
      * an ssh transport failure exits 255), so any process exit on a remote
-     * tab is rendered as a neutral "connection lost" state rather than the
+     * tab is rendered as a neutral "session ended" state rather than the
      * ordinary idle label, prompting the user to resume instead of assuming
      * Claude simply finished.
      */
@@ -798,7 +798,7 @@ final class OpenSessionTab {
         SessionStatusStyles.updateDot(pillDot, status);
         SessionStatusStyles.applyStatus(statusPill, status);
         pillLabel.setText(isRemote && status == SessionStatus.EXITED
-                ? "connection lost — resume to reconnect"
+                ? "session ended — resume to reconnect"
                 : SessionStatusStyles.designLabel(status));
     }
 
