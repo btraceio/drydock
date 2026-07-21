@@ -27,9 +27,12 @@ import java.util.function.Consumer;
  * on the single-threaded {@code executor} the viewer owns; that serialization
  * is what stops a session mistaking its own write for an external one, since
  * the stamp capture that follows a write cannot interleave with a poll.
- * {@link #edit(String)} is the one exception: it runs on the caller's thread
+ * {@link #edit(String)} is one exception: it runs on the caller's thread
  * (the FX thread) so that {@link #state()} reflects a keystroke immediately
- * for the status chip. All mutable state -- {@code state}, {@code pendingText},
+ * for the status chip. The constructor's initial stamp capture is the other:
+ * it runs on the caller's thread too, but harmlessly, since nothing else can
+ * reach the session before the constructor returns. All mutable state --
+ * {@code state}, {@code pendingText},
  * {@code stamp}, {@code content}, the armed debounce -- is therefore guarded by
  * {@link #lock}, and every decision that spans a slow I/O call re-checks that
  * state under the lock afterwards rather than trusting the pre-I/O reading.</p>
@@ -52,7 +55,13 @@ import java.util.function.Consumer;
  */
 final class FileEditSession {
 
-    /** {@link #CONFLICT} and {@link #ERROR} both disarm auto-save until the user acts. */
+    /**
+     * {@link #CONFLICT} disarms auto-save until the user resolves it. {@link
+     * #ERROR} does not: the next {@link #edit(String)} re-arms the debounce
+     * and an explicit {@link #flush()} retries too, so a transient failure
+     * (a momentarily read-only file, a full disk that frees up) clears on
+     * its own without the user having to do anything special.
+     */
     enum State { CLEAN, DIRTY, SAVING, CONFLICT, ERROR }
 
     enum PollOutcome { UNCHANGED, RELOAD, CONFLICT, MISSING }
@@ -107,8 +116,8 @@ final class FileEditSession {
         this.executor = executor;
         this.debounce = debounce;
         this.maxBytes = maxBytes;
-        this.pendingText = content.text();
         this.stamp = readStampQuietly();
+        this.pendingText = content.text();
     }
 
     /** Invoked on the executor thread, never while an internal lock is held. */
@@ -169,7 +178,12 @@ final class FileEditSession {
      * Writes immediately, cancelling any armed debounce. Completes normally
      * even when the write fails -- failure is reported through {@link
      * #setOnSaveFailed} and {@link State#ERROR}, so a forced flush on a
-     * teardown path can never propagate an exception into it.
+     * teardown path cannot have a write failure propagate an exception into
+     * it. That guarantee covers the write path only: {@link #fail} invokes
+     * {@link #setOnSaveFailed}'s handler outside every catch this class owns,
+     * so a listener that itself throws still escapes into the returned
+     * future. ({@link #flushBlocking} catches the resulting {@link
+     * ExecutionException}, so the shutdown path stays safe.)
      */
     CompletableFuture<Void> flush() {
         synchronized (lock) {
@@ -297,24 +311,32 @@ final class FileEditSession {
      * text back for reload. Completes exceptionally when the file cannot be
      * read, or when it is no longer an editable buffer -- the session's state
      * is left alone in that case, so an unresolved conflict stays unresolved
-     * rather than silently looking clean. Also completes exceptionally, with
-     * the raw {@link RejectedExecutionException}, if the executor is already
-     * shut down -- unlike {@link #flush()}, {@link #poll()} and {@link
-     * #keepMine()}, this method's contract is already "may complete
-     * exceptionally", so a shutdown is reported the same way any other
-     * failure to read the disk would be.
+     * rather than silently looking clean. Also completes exceptionally,
+     * wrapping the executor's {@link RejectedExecutionException} in an
+     * {@link IOException} so callers that cast the cause to {@link
+     * IOException} per this method's documented contract do not hit a {@link
+     * ClassCastException}, if the executor is already shut down -- unlike
+     * {@link #flush()}, {@link #poll()} and {@link #keepMine()}, this
+     * method's contract is already "may complete exceptionally", so a
+     * shutdown is reported the same way any other failure to read the disk
+     * would be.
      */
     CompletableFuture<String> takeDisk() {
         try {
             return CompletableFuture.supplyAsync(this::takeDiskNow, executor);
         } catch (RejectedExecutionException e) {
             CompletableFuture<String> failed = new CompletableFuture<>();
-            failed.completeExceptionally(e);
+            failed.completeExceptionally(
+                    new IOException("executor shut down while reading " + file, e));
             return failed;
         }
     }
 
     private String takeDiskNow() {
+        // Stamp captured before the content read, same as pollNow: an
+        // external write landing in between must not make the session adopt
+        // a stamp for content it does not actually hold.
+        DiskStamp current = readStampQuietly();
         FileContent fresh;
         try {
             fresh = FileContent.load(file, maxBytes);
@@ -322,10 +344,11 @@ final class FileEditSession {
             throw new CompletionException(e);
         }
         if (!fresh.editable()) {
+            // Not adopted below, so the premature stamp capture above is
+            // simply discarded along with everything else on this path.
             throw new CompletionException(
                     new IOException("file on disk is no longer editable: " + file));
         }
-        DiskStamp current = readStampQuietly();
         State changed;
         synchronized (lock) {
             content = fresh;
@@ -351,8 +374,8 @@ final class FileEditSession {
             armedSave = null;
             // CLEAN: nothing to write. SAVING: a write is already in flight.
             // CONFLICT: disarmed until the user resolves it. ERROR is the
-            // exception -- an explicit flush after a failed write IS the
-            // retry, so it must be allowed through.
+            // exception -- both an explicit flush and the next edit's
+            // debounce retry a failed write, so it must be allowed through.
             if (writeInFlight || (state != State.DIRTY && state != State.ERROR)) {
                 return;
             }
@@ -377,9 +400,10 @@ final class FileEditSession {
                 if (editSeq == seq) {
                     next = transition(State.CLEAN);
                 } else {
-                    // An edit landed while we were writing. Its debounce was
-                    // cancelled by nothing, but re-arm from here so the newer
-                    // text cannot be stranded behind a CLEAN state.
+                    // A newer edit arrived while this write was in flight, so
+                    // the buffer stays DIRTY for the newer text; re-arm the
+                    // debounce so that text is not stranded behind a save
+                    // that only covers what we wrote, not what is now pending.
                     next = transition(State.DIRTY);
                     cancelArmed();
                     arm();
