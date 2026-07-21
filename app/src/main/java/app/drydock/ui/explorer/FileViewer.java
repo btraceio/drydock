@@ -24,8 +24,6 @@ import org.fxmisc.richtext.model.StyleSpansBuilder;
 import java.io.IOException;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -198,7 +196,8 @@ final class FileViewer extends BorderPane {
         updateDiffBanner();
 
         Thread.ofVirtual().start(() -> {
-            String text = readFile(file);
+            FileContent content = loadFile(file);
+            String text = content.text();
             SyntaxHighlighter.Language language =
                     SyntaxHighlighter.Language.fromFileName(file.getFileName().toString());
             var spans = SyntaxHighlighter.computeHighlighting(text, language);
@@ -217,6 +216,7 @@ final class FileViewer extends BorderPane {
             }
             var styled = spans;
             Platform.runLater(() -> {
+                tab.getProperties().put("drydock.content", content);
                 area.replaceText(text);
                 if (text.length() > 0) {
                     area.setStyleSpans(0, styled);
@@ -243,19 +243,19 @@ final class FileViewer extends BorderPane {
         return builder.create();
     }
 
-    private String readFile(Path file) {
+    /**
+     * Loads {@code file} for display. Content problems (binary, bad
+     * encoding, oversized) come back as a non-{@link FileContent#editable()}
+     * buffer rather than an exception; only an unreadable file falls back to
+     * the error placeholder, which is likewise never editable.
+     */
+    private FileContent loadFile(Path file) {
         try {
-            if (Files.size(file) > MAX_FILE_BYTES) {
-                try (var in = Files.newInputStream(file)) {
-                    byte[] head = in.readNBytes((int) MAX_FILE_BYTES);
-                    return new String(head, StandardCharsets.UTF_8)
-                            + "\n\n… (truncated: file exceeds " + (MAX_FILE_BYTES / (1024 * 1024)) + " MB)\n";
-                }
-            }
-            return new String(Files.readAllBytes(file), StandardCharsets.UTF_8);
+            return FileContent.load(file, MAX_FILE_BYTES);
         } catch (IOException e) {
             LOG.log(Level.DEBUG, "Could not read " + file, e);
-            return "Could not read " + file + ": " + e.getMessage();
+            return new FileContent("Could not read " + file + ": " + e.getMessage(),
+                    false, false, FileContent.Terminator.NONE);
         }
     }
 
