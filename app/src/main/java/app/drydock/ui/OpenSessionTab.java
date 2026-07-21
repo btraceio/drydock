@@ -63,7 +63,7 @@ import java.util.function.Supplier;
 final class OpenSessionTab {
 
     /** The three views a session tab can show in its content area (design handoff "Session Explorer" / "Diff Review"). */
-    enum SubTab { TERMINAL, EXPLORER, REVIEW }
+    enum SubTab { CLAUDE, EXPLORER, REVIEW }
 
     /**
      * The managed session this tab hosts. Not final only as a safety net:
@@ -80,11 +80,11 @@ final class OpenSessionTab {
     private final BorderPane content = new BorderPane();
 
     // -- Bottom Terminal/Explorer/Review sub-tab bar (handoff "Session Explorer" / "Diff Review") --
-    private final ToggleButton terminalSubTabButton = new ToggleButton("❯_  Terminal");
+    private final ToggleButton claudeSubTabButton = new ToggleButton("✳  Claude");
     private final ToggleButton explorerSubTabButton = new ToggleButton("▤  Explorer");
     private final ToggleButton reviewSubTabButton = new ToggleButton("◨  Review");
     private final Label subTabContext = new Label();
-    private SubTab activeSubTab = SubTab.TERMINAL;
+    private SubTab activeSubTab = SubTab.CLAUDE;
     /** Built on first switch to Explorer, via {@link #setExplorerFactory}. */
     private Region explorerView;
     private Supplier<Region> explorerFactory;
@@ -200,11 +200,11 @@ final class OpenSessionTab {
     // ---- Bottom Terminal/Explorer sub-tab bar -------------------------------
 
     private Region buildSubTabBar() {
-        terminalSubTabButton.getStyleClass().add("session-subtab");
-        terminalSubTabButton.setFocusTraversable(false);
-        terminalSubTabButton.setTooltip(new Tooltip("Terminal (⌘1)"));
-        terminalSubTabButton.setSelected(true);
-        terminalSubTabButton.setOnAction(e -> showSubTab(SubTab.TERMINAL));
+        claudeSubTabButton.getStyleClass().add("session-subtab");
+        claudeSubTabButton.setFocusTraversable(false);
+        claudeSubTabButton.setTooltip(new Tooltip("Claude (⌘1)"));
+        claudeSubTabButton.setSelected(true);
+        claudeSubTabButton.setOnAction(e -> showSubTab(SubTab.CLAUDE));
 
         explorerSubTabButton.getStyleClass().add("session-subtab");
         explorerSubTabButton.setFocusTraversable(false);
@@ -221,7 +221,7 @@ final class OpenSessionTab {
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
 
-        HBox bar = new HBox(4, terminalSubTabButton, explorerSubTabButton, reviewSubTabButton, spacer, subTabContext);
+        HBox bar = new HBox(4, claudeSubTabButton, explorerSubTabButton, reviewSubTabButton, spacer, subTabContext);
         bar.setAlignment(Pos.CENTER_LEFT);
         bar.getStyleClass().add("session-subtab-bar");
         return bar;
@@ -270,7 +270,7 @@ final class OpenSessionTab {
      * tracks the placeholder's fresh bounds.
      */
     void showSubTab(SubTab subTab) {
-        terminalSubTabButton.setSelected(subTab == SubTab.TERMINAL);
+        claudeSubTabButton.setSelected(subTab == SubTab.CLAUDE);
         explorerSubTabButton.setSelected(subTab == SubTab.EXPLORER);
         reviewSubTabButton.setSelected(subTab == SubTab.REVIEW);
         if (subTab == activeSubTab) {
@@ -279,7 +279,7 @@ final class OpenSessionTab {
         if (subTab == SubTab.EXPLORER || subTab == SubTab.REVIEW) {
             Region view = subTab == SubTab.EXPLORER ? explorerViewOrBuild() : reviewViewOrBuild();
             if (view == null) {
-                terminalSubTabButton.setSelected(true);
+                claudeSubTabButton.setSelected(true);
                 explorerSubTabButton.setSelected(false);
                 reviewSubTabButton.setSelected(false);
                 return;
@@ -288,7 +288,7 @@ final class OpenSessionTab {
             content.setCenter(view);
             bridge.setTerminalSubTabActive(false);
         } else {
-            activeSubTab = SubTab.TERMINAL;
+            activeSubTab = SubTab.CLAUDE;
             content.setCenter(placeholder);
             bridge.setTerminalSubTabActive(true);
             // The center swap invalidates the placeholder's bounds only on
@@ -300,7 +300,7 @@ final class OpenSessionTab {
     /** Maps an intercepted terminal app-shortcut (see {@link TerminalBridge}) to this tab's handlers. */
     private void runShortcut(Shortcut shortcut) {
         switch (shortcut) {
-            case TERMINAL_SUB_TAB -> showSubTab(SubTab.TERMINAL);
+            case CLAUDE_SUB_TAB -> showSubTab(SubTab.CLAUDE);
             case EXPLORER_SUB_TAB -> showSubTab(SubTab.EXPLORER);
             case REVIEW_SUB_TAB -> showSubTab(SubTab.REVIEW);
             case PREVIOUS_SESSION_TAB -> onPreviousSessionTab.run();

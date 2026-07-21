@@ -437,7 +437,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
     /** ⌘1: switches the selected session tab to its Terminal sub-tab. */
     public void showTerminalSubTab() {
-        currentlySelected().ifPresent(open -> open.showSubTab(OpenSessionTab.SubTab.TERMINAL));
+        currentlySelected().ifPresent(open -> open.showSubTab(OpenSessionTab.SubTab.CLAUDE));
     }
 
     /** ⌘2: switches the selected session tab to its Explorer sub-tab. */

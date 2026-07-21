@@ -73,7 +73,7 @@ class GhosttyKeyTranslatorTest {
 
     @ParameterizedTest
     @CsvSource({
-            "1, TERMINAL_SUB_TAB",
+            "1, CLAUDE_SUB_TAB",
             "2, EXPLORER_SUB_TAB",
             "3, REVIEW_SUB_TAB",
             "[, PREVIOUS_SESSION_TAB",
@@ -93,7 +93,7 @@ class GhosttyKeyTranslatorTest {
     void shortcutKeyUpIsSwallowedWithoutRetriggering() {
         KeyAction action = GhosttyKeyTranslator.translate(18, NS_COMMAND, false, "1", "1");
         AppShortcut shortcut = assertInstanceOf(AppShortcut.class, action);
-        assertEquals(Shortcut.TERMINAL_SUB_TAB, shortcut.shortcut());
+        assertEquals(Shortcut.CLAUDE_SUB_TAB, shortcut.shortcut());
         assertEquals(false, shortcut.keyDown());
     }
 

@@ -144,7 +144,7 @@ public final class GhosttyKeyTranslator {
         if ((mods & MODS_SUPER) != 0 && !shortcutChars.isEmpty()) {
             int cp = shortcutChars.codePointAt(0);
             Shortcut shortcut = switch (cp) {
-                case '1' -> Shortcut.TERMINAL_SUB_TAB;
+                case '1' -> Shortcut.CLAUDE_SUB_TAB;
                 case '2' -> Shortcut.EXPLORER_SUB_TAB;
                 case '3' -> Shortcut.REVIEW_SUB_TAB;
                 case '[', '{' -> Shortcut.PREVIOUS_SESSION_TAB;
