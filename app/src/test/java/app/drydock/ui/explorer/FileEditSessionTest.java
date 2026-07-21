@@ -9,6 +9,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
 import java.time.Duration;
@@ -883,6 +884,195 @@ class FileEditSessionTest {
      * the caller (the FX thread, in production). This needs its own executor
      * -- the shared one is reused by every other test via {@code @AfterEach}.
      */
+    /**
+     * A file with no line terminator at all -- an empty file Claude just
+     * created, a {@code VERSION}-style single line with no trailing newline --
+     * loads as {@code Terminator.NONE}. The user types a second line and the
+     * save puts LF on disk, because {@code toDiskText(NONE)} is the identity.
+     * The comparator must ask what the DISK now holds, not the load-time write
+     * policy: otherwise every later touch of that file, while the buffer is
+     * dirty, fails the terminator arm and raises "changed on disk while you
+     * were editing it" -- with no external content change involved at all, and
+     * with a "reload" button that throws the user's typing away.
+     */
+    @Test
+    void aNoTerminatorFileThatGrewALineDoesNotConflictWithItself(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("VERSION");
+        Files.writeString(file, "1.2.3");
+        assertEquals(FileContent.Terminator.NONE, FileContent.load(file, MAX).terminator());
+        FileEditSession session = sessionFor(file);
+
+        session.edit("1.2.3\nmore\n");
+        session.flush().get(5, TimeUnit.SECONDS);
+        assertEquals("1.2.3\nmore\n", Files.readString(file));
+
+        // Dirty again, and the file is merely touched (mtime moves, bytes do not).
+        session.edit("1.2.3\nmore\nyet\n");
+        Files.setLastModifiedTime(file, FileTime.fromMillis(System.currentTimeMillis() + 2000));
+        var result = session.poll().get(5, TimeUnit.SECONDS);
+
+        assertEquals(PollOutcome.UNCHANGED, result.outcome(),
+                "the LF the save itself put there is not an external change");
+        assertEquals(State.DIRTY, session.state());
+        // ...and auto-save is still live, so the typing really does reach disk.
+        session.flush().get(5, TimeUnit.SECONDS);
+        assertEquals("1.2.3\nmore\nyet\n", Files.readString(file));
+        assertEquals(State.CLEAN, session.state());
+    }
+
+    /** The same, through the write path's own pre-write check rather than a poll. */
+    @Test
+    void aNoTerminatorFileThatGrewALineStillFlushesAfterATouch(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("VERSION");
+        Files.writeString(file, "1.2.3");
+        FileEditSession session = sessionFor(file);
+
+        session.edit("1.2.3\nmore\n");
+        session.flush().get(5, TimeUnit.SECONDS);
+
+        session.edit("1.2.3\nmore\nyet\n");
+        Files.setLastModifiedTime(file, FileTime.fromMillis(System.currentTimeMillis() + 2000));
+        session.flush().get(5, TimeUnit.SECONDS);
+
+        assertEquals(State.CLEAN, session.state(), "a touch must not block the write");
+        assertEquals("1.2.3\nmore\nyet\n", Files.readString(file));
+    }
+
+    /**
+     * The 1.5s poller's blind window: the file is deleted after this session
+     * adopted a real stamp, and a flush (debounce, blur, tab switch, shutdown)
+     * lands before the next tick can report MISSING. The write must NOT
+     * recreate the file -- no path may silently put back a file the user was
+     * never asked about -- it must surface the missing-file question instead.
+     */
+    @Test
+    void aFlushIntoThePollBlindWindowDoesNotRecreateADeletedFile(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("a.txt");
+        Files.writeString(file, "one\n");
+        FileEditSession session = sessionFor(file);
+        // Adopt a real stamp: only then does this session know the file existed.
+        assertEquals(PollOutcome.UNCHANGED, session.poll().get(5, TimeUnit.SECONDS).outcome());
+
+        session.edit("mine\n");
+        Files.delete(file);
+        session.flush().get(5, TimeUnit.SECONDS);
+
+        assertFalse(Files.exists(file), "a flush must not silently recreate a deleted file");
+        assertEquals(State.DIRTY, session.state(), "the buffer is still the user's to keep");
+        assertTrue(session.disarmed(), "the missing-file question must be raised, not skipped");
+    }
+
+    /** ...and keepMine remains the documented escape hatch out of exactly that. */
+    @Test
+    void keepMineStillRecreatesAFileDeletedInsideTheBlindWindow(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("a.txt");
+        Files.writeString(file, "one\n");
+        FileEditSession session = sessionFor(file);
+        assertEquals(PollOutcome.UNCHANGED, session.poll().get(5, TimeUnit.SECONDS).outcome());
+
+        session.edit("mine\n");
+        Files.delete(file);
+        session.flush().get(5, TimeUnit.SECONDS);
+        assertFalse(Files.exists(file));
+
+        session.keepMine().get(5, TimeUnit.SECONDS);
+
+        assertEquals("mine\n", Files.readString(file), "keepMine is how the user asks for this");
+        assertEquals(State.CLEAN, session.state());
+        assertFalse(session.disarmed());
+    }
+
+    /**
+     * Only a genuinely absent file routes into the missing-file question. Any
+     * other IOException from the pre-write stamp (here: a directory that has
+     * momentarily lost its permissions) must fall through to the write, so a
+     * transient failure is reported as the save error it is instead of raising
+     * a banner about a file that is still sitting there.
+     */
+    @Test
+    void aNonNoSuchFileStampFailureFallsThroughToTheWritesOwnError(@TempDir Path dir) throws Exception {
+        Path locked = Files.createDirectory(dir.resolve("locked"));
+        Path file = locked.resolve("a.txt");
+        Files.writeString(file, "one\n");
+        FileEditSession session = sessionFor(file);
+        assertEquals(PollOutcome.UNCHANGED, session.poll().get(5, TimeUnit.SECONDS).outcome());
+
+        session.edit("mine\n");
+        assertTrue(locked.toFile().setExecutable(false), "test needs a non-traversable directory");
+        assertTrue(locked.toFile().setReadable(false));
+        try {
+            session.flush().get(5, TimeUnit.SECONDS);
+
+            assertEquals(State.ERROR, session.state(), "a transient failure is a save error");
+            assertNotNull(session.lastError());
+            assertFalse(session.lastError() instanceof NoSuchFileException,
+                    "the file was never absent");
+            assertFalse(session.disarmed(),
+                    "a transient failure must not raise the missing-file question");
+        } finally {
+            assertTrue(locked.toFile().setReadable(true));
+            assertTrue(locked.toFile().setExecutable(true));
+        }
+        assertEquals("one\n", Files.readString(file), "nothing was written");
+    }
+
+    /**
+     * A conflict the user resolves by hand -- typing the buffer back into
+     * agreement with the disk -- must not stay on screen. The silent stamp
+     * adoption already recognised there was nothing left to reconcile; leaving
+     * CONFLICT standing would keep the banner up, auto-save disarmed and the
+     * tab close vetoed over a file with no disagreement in it.
+     */
+    @Test
+    void aConflictWhoseBufferComesToMatchTheDiskClearsOnTheNextPoll(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("a.txt");
+        Files.writeString(file, "one\n");
+        FileEditSession session = sessionFor(file);
+
+        session.edit("mine\n");
+        writeExternally(file, "claude\n");
+        assertEquals(PollOutcome.CONFLICT, session.poll().get(5, TimeUnit.SECONDS).outcome());
+        assertEquals(State.CONFLICT, session.state());
+
+        // The user gives in and types Claude's version themselves.
+        session.edit("claude\n");
+        var result = session.poll().get(5, TimeUnit.SECONDS);
+
+        assertEquals(PollOutcome.UNCHANGED, result.outcome());
+        assertEquals(State.CLEAN, session.state(), "nothing is left to reconcile");
+        // Auto-save is genuinely re-armed: an ordinary edit saves again.
+        session.edit("after\n");
+        session.flush().get(5, TimeUnit.SECONDS);
+        assertEquals("after\n", Files.readString(file));
+    }
+
+    /**
+     * A file the WRITE path discovers is no longer editable is the missing
+     * banner's question ("gone or no longer editable ... keep mine / close
+     * tab"), not the conflict banner's -- whose "reload" can only fail, since
+     * takeDisk refuses a non-editable file by contract.
+     */
+    @Test
+    void aNonEditableFileFoundByTheWritePathIsMissingNotAConflict(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("a.txt");
+        Files.writeString(file, "one\n");
+        FileEditSession session = sessionFor(file);
+
+        session.edit("mine\n");
+        byte[] binary = { 'a', 0, 'b', '\n' };
+        Files.write(file, binary);
+        Files.setLastModifiedTime(file, FileTime.fromMillis(System.currentTimeMillis() + 2000));
+        session.flush().get(5, TimeUnit.SECONDS);
+
+        assertNotEquals(State.CONFLICT, session.state(),
+                "a file this editor cannot save is not a conflict to reload");
+        assertEquals(State.DIRTY, session.state());
+        assertTrue(session.disarmed());
+        assertArrayEquals(binary, Files.readAllBytes(file), "the write must not have landed");
+        // And the poll agrees, without contradicting the write path.
+        assertEquals(PollOutcome.MISSING, session.poll().get(5, TimeUnit.SECONDS).outcome());
+    }
+
     @Test
     void flushBlockingAfterShutdownDoesNotThrow(@TempDir Path dir) throws Exception {
         Path file = dir.resolve("a.txt");

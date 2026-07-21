@@ -70,7 +70,7 @@ record FileContent(String text, boolean truncated, boolean decoded, Terminator t
         // Lenient decode for DISPLAY only; an undecodable buffer is never
         // written back, so the U+FFFD replacements cannot reach the file.
         String raw = new String(bytes, StandardCharsets.UTF_8);
-        Terminator terminator = detectTerminator(raw);
+        Terminator terminator = terminatorOf(raw);
         String text = terminator == Terminator.CRLF ? raw.replace("\r\n", "\n") : raw;
         if (truncated) {
             text = text + "\n\n… (truncated: file exceeds " + (maxBytes / (1024 * 1024)) + " MB)\n";
@@ -99,7 +99,17 @@ record FileContent(String text, boolean truncated, boolean decoded, Terminator t
         }
     }
 
-    private static Terminator detectTerminator(String raw) {
+    /**
+     * The terminator the given raw bytes-as-text carry. Package-private rather
+     * than private because {@link FileEditSession} has to answer "what
+     * terminator does the disk hold now?" for text it is about to write or has
+     * just written -- a buffer loaded as {@link Terminator#NONE} (an empty file,
+     * or a single line with no trailing newline) becomes {@link Terminator#LF}
+     * the moment the user types a second line, and a comparator that kept
+     * asking the load-time terminator would then see every later touch of the
+     * file as an external change.
+     */
+    static Terminator terminatorOf(String raw) {
         boolean crlf = false;
         boolean loneLf = false;
         for (int i = 0; i < raw.length(); i++) {

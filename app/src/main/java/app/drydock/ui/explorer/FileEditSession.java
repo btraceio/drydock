@@ -3,6 +3,7 @@ package app.drydock.ui.explorer;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
 import java.time.Duration;
@@ -115,6 +116,25 @@ final class FileEditSession {
      * typing away. Comparing against the base answers the actual question.</p>
      */
     private String baseText;
+    /**
+     * The terminator the DISK holds, as of {@link #baseText} -- deliberately
+     * distinct from {@code content.terminator()}, which is the write POLICY
+     * (the terminator {@link FileContent#toDiskText} reapplies) and must not
+     * drift just because the buffer's shape changed.
+     *
+     * <p>They diverge whenever a write changes how many line breaks the file
+     * has. {@link FileContent.Terminator#NONE} is the common case: an empty
+     * file Claude just created, or a {@code VERSION}-style single line with no
+     * trailing newline, loads as {@code NONE}; the user types a second line and
+     * the save puts LF on disk ({@code toDiskText(NONE)} is the identity), but
+     * the policy is still {@code NONE}. Comparing a freshly read {@code LF}
+     * against the policy would then report every later touch of that file as an
+     * external change -- a phantom conflict, raised with no external content
+     * change at all, whose "reload" answer discards the user's typing. The
+     * mirror case is a CRLF file edited down to a single line. So the
+     * comparators ask this field, which tracks the bytes, not the policy.</p>
+     */
+    private FileContent.Terminator baseTerminator;
     private DiskStamp stamp;
     /**
      * The identity of a file this session has already loaded and refused to
@@ -184,6 +204,7 @@ final class FileEditSession {
         this.maxBytes = maxBytes;
         this.pendingText = content.text();
         this.baseText = content.text();
+        this.baseTerminator = content.terminator();
         this.stamp = UNVERIFIED;
     }
 
@@ -296,6 +317,21 @@ final class FileEditSession {
     }
 
     /**
+     * Whether the missing-file question is currently open: the file is gone,
+     * unreadable, or no longer editable, and every write path is vetoed until
+     * the user answers. Not part of {@link State} on purpose -- the buffer's
+     * own state (DIRTY, ERROR, CONFLICT) is orthogonal and still the user's --
+     * but the viewer needs it, because the banner row is shared: a background
+     * tab whose file vanished paints nothing at the time, so re-selecting the
+     * tab has to be able to re-derive the banner it is owed.
+     */
+    boolean disarmed() {
+        synchronized (lock) {
+            return disarmed;
+        }
+    }
+
+    /**
      * Awaits {@link #flush()}, bounded. The shutdown path's entry point:
      * the viewer's executor threads are daemons, so a fire-and-forget flush
      * is killed mid-write at JVM exit (the failure {@code
@@ -398,8 +434,8 @@ final class FileEditSession {
             // tick can say so again without re-reading the whole file.
             return missing(current);
         }
-        boolean conflicted;
-        State changed;
+        boolean silentlyAdopted = false;
+        State resolved = null;
         synchronized (lock) {
             if (diskIsNotAnExternalChange(fresh)) {
                 // Nothing to reconcile: the file on disk holds either exactly
@@ -412,13 +448,38 @@ final class FileEditSession {
                 // raising a conflict against content the user is not actually
                 // in disagreement with would disarm auto-save and offer them a
                 // "reload" that discards their typing for nothing.
+                silentlyAdopted = true;
                 content = fresh;
                 stamp = current;
                 baseText = fresh.text();
+                baseTerminator = fresh.terminator();
                 rejectedStamp = null;
                 disarmed = false;
-                return new PollResult(PollOutcome.UNCHANGED, null);
+                if (state == State.CONFLICT) {
+                    // The conflict resolved itself while it was on screen: the
+                    // user typed their buffer into agreement with the disk, or
+                    // whoever wrote the file wrote (or reverted to) something
+                    // this session is no longer in disagreement with. Leaving
+                    // CONFLICT standing would keep the banner up, auto-save
+                    // disarmed and the tab close vetoed over a file with
+                    // nothing left to reconcile.
+                    resolved = transition(
+                            fresh.text().equals(pendingText) ? State.CLEAN : State.DIRTY);
+                    if (resolved == State.DIRTY) {
+                        // enterConflict cancelled the debounce; the buffer is
+                        // unsaved again, so auto-save has to actually resume.
+                        arm();
+                    }
+                }
             }
+        }
+        if (silentlyAdopted) {
+            notifyState(resolved);
+            return new PollResult(PollOutcome.UNCHANGED, null);
+        }
+        boolean conflicted;
+        State changed;
+        synchronized (lock) {
             conflicted = hasUnsavedEdits();
             changed = conflicted ? enterConflict() : null;
         }
@@ -437,6 +498,7 @@ final class FileEditSession {
                 content = fresh;
                 pendingText = fresh.text();
                 baseText = fresh.text();
+                baseTerminator = fresh.terminator();
                 stamp = current;
                 rejectedStamp = null;
                 disarmed = false;
@@ -486,11 +548,32 @@ final class FileEditSession {
      * text the user already has, so there is still nothing for them to
      * reconcile. Terminator must match in both cases -- a file rewritten
      * CRLF-to-LF has identical LF-normalised text but different bytes on disk,
-     * which is a real change this session must not paper over.</p>
+     * which is a real change this session must not paper over -- but each arm
+     * asks its OWN terminator: {@link #baseTerminator} for what the disk last
+     * held, and the terminator writing {@code pendingText} would produce for
+     * the pending arm. Asking {@code content.terminator()}, the write policy,
+     * for both is what made a {@link FileContent.Terminator#NONE} file conflict
+     * with itself forever after its first multi-line save.</p>
      */
     private boolean diskIsNotAnExternalChange(FileContent fresh) {
-        return fresh.terminator() == content.terminator()
-                && (fresh.text().equals(baseText) || fresh.text().equals(pendingText));
+        return matchesBase(fresh, baseText, baseTerminator)
+                || matchesPending(fresh, pendingText, content);
+    }
+
+    /** The disk still holds the bytes this session believes it wrote or loaded. */
+    private static boolean matchesBase(FileContent fresh, String base,
+                                       FileContent.Terminator baseTerminator) {
+        return fresh.terminator() == baseTerminator && fresh.text().equals(base);
+    }
+
+    /**
+     * The disk already holds, byte for byte, what writing the buffer would put
+     * there -- so there is nothing for the user to reconcile and nothing for a
+     * write to accomplish.
+     */
+    private static boolean matchesPending(FileContent fresh, String pending, FileContent policy) {
+        return fresh.text().equals(pending)
+                && fresh.terminator() == FileContent.terminatorOf(policy.toDiskText(pending));
     }
 
     /**
@@ -564,6 +647,7 @@ final class FileEditSession {
             content = fresh;
             pendingText = fresh.text();
             baseText = fresh.text();
+            baseTerminator = fresh.terminator();
             stamp = current;
             rejectedStamp = null;
             disarmed = false;
@@ -589,9 +673,7 @@ final class FileEditSession {
         long seq;
         FileContent snapshot;
         State changed;
-        DiskStamp adopted;
-        String base;
-        String pending;
+        WriteBasis basis;
         synchronized (lock) {
             armedSave = null;
             // CLEAN: nothing to write. SAVING: a write is already in flight.
@@ -604,10 +686,7 @@ final class FileEditSession {
             if (!writeAdmitted()) {
                 return;
             }
-            adopted = stamp;
-            base = baseText;
-            pending = pendingText;
-            snapshot = content;
+            basis = new WriteBasis(stamp, baseText, baseTerminator, pendingText, content);
         }
         // Between the keystroke that armed the debounce and this moment lies a
         // window the 1.5s poller does not cover: Claude can write the file 0.2s
@@ -616,19 +695,31 @@ final class FileEditSession {
         // session's OWN write, and nothing else; without this re-read the write
         // would clobber the external edit with no conflict raised and no trace.
         // Same thread as the write below, so nothing can slip between the two.
-        if (verifyDisk && externalChangeLandedSince(adopted, base, pending, snapshot)) {
-            State conflicted;
-            synchronized (lock) {
-                conflicted = enterConflict();
+        if (verifyDisk) {
+            WriteGate gate = gateWriteAgainstDisk(basis);
+            if (gate == WriteGate.MISSING) {
+                // gateWriteAgainstDisk has already latched the missing-file
+                // question, exactly as a MISSING poll would. Nothing is
+                // written and the state machine is left alone: the buffer is
+                // still the user's, and the banner (raised by the poller, or
+                // re-derived on tab selection from disarmed()) is how they are
+                // asked what to do with it.
+                return;
             }
-            try {
-                notifyState(conflicted);
-            } catch (RuntimeException | Error e) {
-                // The state machine already records the conflict, and nothing
-                // was written. A listener fault must not propagate out of
-                // flush(), whose contract the teardown paths rely on.
+            if (gate == WriteGate.CONFLICT) {
+                State conflicted;
+                synchronized (lock) {
+                    conflicted = enterConflict();
+                }
+                try {
+                    notifyState(conflicted);
+                } catch (RuntimeException | Error e) {
+                    // The state machine already records the conflict, and
+                    // nothing was written. A listener fault must not propagate
+                    // out of flush(), whose contract the teardown paths rely on.
+                }
+                return;
             }
-            return;
         }
         synchronized (lock) {
             // Re-checked after the I/O above: abandon(), a MISSING poll or a
@@ -648,14 +739,21 @@ final class FileEditSession {
         State next = null;
         try {
             notifyState(changed);
-            Files.write(file, snapshot.toDiskText(text).getBytes(StandardCharsets.UTF_8));
+            String diskText = snapshot.toDiskText(text);
+            Files.write(file, diskText.getBytes(StandardCharsets.UTF_8));
             // Same executor task as the write: no poll can observe the gap.
             DiskStamp written = readStamp();
             synchronized (lock) {
                 stamp = written;
                 // The disk now holds exactly what we wrote, so that is the
-                // base every later "did it change?" question is asked against.
+                // base every later "did it change?" question is asked against
+                // -- including its terminator, which the write can have changed
+                // (a NONE file that gained a line break, a CRLF one that lost
+                // its last). The write POLICY in `content` is deliberately left
+                // alone: a CRLF file edited down to one line is still a CRLF
+                // file the next time the user adds a line.
                 baseText = text;
+                baseTerminator = FileContent.terminatorOf(diskText);
                 rejectedStamp = null;
                 lastError = null;
                 if (editSeq == seq) {
@@ -700,46 +798,84 @@ final class FileEditSession {
                 && (state == State.DIRTY || state == State.ERROR);
     }
 
+    /** What {@link #gateWriteAgainstDisk} found the disk to be, just before a write. */
+    private enum WriteGate { PROCEED, CONFLICT, MISSING }
+
     /**
-     * Executor thread, immediately before a write: whether the file on disk has
-     * moved away from what this session last adopted.
-     *
-     * <p>A stamp change alone is not proof -- the same reasoning {@link
-     * #pollNow} carries -- so a differing stamp is followed by loading the file
-     * and comparing text, which also covers the {@link #UNVERIFIED} case where
-     * there is no stamp to compare at all. A file that cannot be stamped or
-     * read is NOT reported as changed: it is gone or unreadable, so there is
-     * nothing to clobber, and the write reports its own failure if it cannot
-     * recreate it. A file that is no longer editable IS reported as changed:
-     * something replaced it with content this session must not write over.</p>
-     *
-     * <p>{@code pending} is accepted alongside {@code base} so this answers the
-     * question on exactly the terms {@link #diskIsNotAnExternalChange} does:
-     * a disk holding precisely the text the user is about to write is nothing
-     * for them to reconcile either.</p>
+     * The state a write is about to be performed against, snapshotted under
+     * {@link #lock} so the slow disk check that follows runs off-lock.
      */
-    private boolean externalChangeLandedSince(DiskStamp adopted, String base, String pending,
-                                              FileContent snapshot) {
+    private record WriteBasis(DiskStamp stamp, String base,
+                              FileContent.Terminator baseTerminator,
+                              String pending, FileContent content) { }
+
+    /**
+     * Executor thread, immediately before a write: whether the file on disk is
+     * still the one this session adopted, and so whether the write may land.
+     *
+     * <p>A stamp change alone is not proof of an external edit -- the same
+     * reasoning {@link #pollNow} carries -- so a differing stamp is followed by
+     * loading the file and comparing text and terminator on exactly the terms
+     * {@link #diskIsNotAnExternalChange} does, which also covers the {@link
+     * #UNVERIFIED} case where there is no stamp to compare at all.</p>
+     *
+     * <p>A file that has been DELETED since this session adopted a real stamp
+     * yields {@link WriteGate#MISSING}, latching the missing-file question
+     * itself (the one side effect this method has) rather than letting the
+     * write recreate it. The 1.5s poller and the 2s debounce leave a window
+     * wide enough to hit every cycle -- delete at 1.6s, debounce at 2.0s, next
+     * tick at 3.0s -- and any forced flush (blur, tab switch, shutdown) reaches
+     * it too, so without this the branch's binding invariant that no path
+     * silently recreates a file the user was never asked about would hold only
+     * between poll ticks. It stays {@link WriteGate#PROCEED} when the stamp was
+     * still {@link #UNVERIFIED}: this session never confirmed the file existed,
+     * so it cannot claim anything was deleted. Any OTHER {@link IOException}
+     * also proceeds, so a transient failure (a directory briefly unreadable)
+     * falls through to the write's own error reporting instead of raising a
+     * banner about a file that is still there.</p>
+     *
+     * <p>A file that is no longer EDITABLE yields {@link WriteGate#MISSING}
+     * too, not {@link WriteGate#CONFLICT}: something replaced it with content
+     * this session must not write over, which is the missing banner's question
+     * ("gone or no longer editable ... keep mine / close tab"), not the
+     * conflict banner's -- whose "reload" would only fail, since {@link
+     * #takeDisk()} refuses a non-editable file by contract.</p>
+     */
+    private WriteGate gateWriteAgainstDisk(WriteBasis basis) {
         DiskStamp current;
         try {
             current = readStamp();
+        } catch (NoSuchFileException e) {
+            if (UNVERIFIED.equals(basis.stamp())) {
+                return WriteGate.PROCEED;
+            }
+            missing(null);
+            return WriteGate.MISSING;
         } catch (IOException e) {
-            return false;
+            return WriteGate.PROCEED;
         }
-        if (current.equals(adopted)) {
-            return false;
+        if (current.equals(basis.stamp())) {
+            return WriteGate.PROCEED;
         }
         FileContent fresh;
         try {
             fresh = FileContent.load(file, maxBytes);
+        } catch (NoSuchFileException e) {
+            // Stamped a moment ago, gone now: we know it existed.
+            missing(null);
+            return WriteGate.MISSING;
         } catch (IOException e) {
-            return false;
+            return WriteGate.PROCEED;
         }
         if (!fresh.editable()) {
-            return true;
+            // The identity IS remembered, exactly as pollNow does, so the poll
+            // tick that follows can re-report it without re-reading the file.
+            missing(current);
+            return WriteGate.MISSING;
         }
-        return !(fresh.terminator() == snapshot.terminator()
-                && (fresh.text().equals(base) || fresh.text().equals(pending)));
+        boolean unchanged = matchesBase(fresh, basis.base(), basis.baseTerminator())
+                || matchesPending(fresh, basis.pending(), basis.content());
+        return unchanged ? WriteGate.PROCEED : WriteGate.CONFLICT;
     }
 
     /** Records the failure, leaves the buffer intact and clears {@link State#SAVING}. */

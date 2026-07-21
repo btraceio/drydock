@@ -545,6 +545,18 @@ final class FileViewer extends BorderPane {
                 || !(tab.getProperties().get("drydock.session") instanceof FileEditSession session)) {
             return;
         }
+        if (session.disarmed()) {
+            // Checked before the state switch, and outside it because "the file
+            // is gone" is not a State: it is orthogonal to whatever the buffer
+            // itself is (DIRTY, ERROR, even CONFLICT), and it outranks all of
+            // them -- a conflict banner offering "reload" is meaningless for a
+            // file that is no longer there to reload. Without this a background
+            // tab whose file vanished, whose showMissingBanner call returned
+            // early because it did not own the banner row, would never tell the
+            // user anything at all: only CONFLICT and ERROR were re-derivable.
+            showMissingBanner(tab, session);
+            return;
+        }
         switch (session.state()) {
             case CONFLICT -> showConflictBanner(tab, session);
             case ERROR -> showSaveErrorBanner(tab, session);
@@ -1121,6 +1133,20 @@ final class FileViewer extends BorderPane {
                 LOG.log(Level.WARNING, "Unsaved edits to " + session.file()
                         + " were NOT written at shutdown: the file changed on disk"
                         + " and the conflict was never resolved");
+            }
+            if (session.state() == FileEditSession.State.DIRTY) {
+                // A successful flush leaves CLEAN, so DIRTY here can only mean
+                // the write was vetoed -- the file is gone or no longer
+                // editable on disk and the missing-file question was never
+                // answered (possibly never even asked, on a background tab) --
+                // or a keystroke landed after the write started. Either way
+                // these bytes are not going to disk, shutdown cannot ask
+                // anyone anything, and neither of the two gates above fires:
+                // lastError is null and the state is not CONFLICT. Without
+                // this line the loss is completely silent.
+                LOG.log(Level.WARNING, "Unsaved edits to " + session.file()
+                        + " were NOT written at shutdown: the file is gone or no longer"
+                        + " editable on disk, and the save was never re-armed");
             }
         }
     }
