@@ -1,5 +1,7 @@
 package app.drydock.terminal.host;
 
+import app.drydock.terminal.api.TerminalHostView;
+
 import java.lang.foreign.Arena;
 import java.lang.foreign.FunctionDescriptor;
 import java.lang.foreign.Linker;
@@ -80,7 +82,7 @@ final class DrydockTerminalHostBinding {
                 "dispatchKeyEvent",
                 MethodType.methodType(
                     void.class,
-                    DrydockTerminalHost.KeyEventListener.class,
+                    TerminalHostView.KeyEventListener.class,
                     MemorySegment.class,
                     short.class,
                     int.class,
@@ -96,7 +98,7 @@ final class DrydockTerminalHostBinding {
                 "dispatchScrollEvent",
                 MethodType.methodType(
                     void.class,
-                    DrydockTerminalHost.ScrollEventListener.class,
+                    TerminalHostView.ScrollEventListener.class,
                     MemorySegment.class,
                     double.class,
                     double.class,
@@ -108,7 +110,7 @@ final class DrydockTerminalHostBinding {
                 "dispatchMousePosEvent",
                 MethodType.methodType(
                     void.class,
-                    DrydockTerminalHost.MousePosEventListener.class,
+                    TerminalHostView.MousePosEventListener.class,
                     MemorySegment.class,
                     double.class,
                     double.class,
@@ -120,7 +122,7 @@ final class DrydockTerminalHostBinding {
                 "dispatchMouseButtonEvent",
                 MethodType.methodType(
                     void.class,
-                    DrydockTerminalHost.MouseButtonEventListener.class,
+                    TerminalHostView.MouseButtonEventListener.class,
                     MemorySegment.class,
                     int.class,
                     int.class,
@@ -290,7 +292,7 @@ final class DrydockTerminalHostBinding {
      * host), otherwise a native call into a freed trampoline would crash
      * the process.
      */
-    void setKeyEventCallback(MemorySegment host, DrydockTerminalHost.KeyEventListener listener, Arena arena) {
+    void setKeyEventCallback(MemorySegment host, TerminalHostView.KeyEventListener listener, Arena arena) {
         MethodHandle bound = MethodHandles.insertArguments(KEY_EVENT_TRAMPOLINE, 0, listener);
         MemorySegment stub = linker.upcallStub(bound, KEY_EVENT_CB_DESCRIPTOR, arena);
         try {
@@ -304,7 +306,7 @@ final class DrydockTerminalHostBinding {
      * Registers {@code listener} as the host's scroll-event callback; same
      * arena-lifetime contract as {@link #setKeyEventCallback}.
      */
-    void setScrollEventCallback(MemorySegment host, DrydockTerminalHost.ScrollEventListener listener, Arena arena) {
+    void setScrollEventCallback(MemorySegment host, TerminalHostView.ScrollEventListener listener, Arena arena) {
         MethodHandle bound = MethodHandles.insertArguments(SCROLL_EVENT_TRAMPOLINE, 0, listener);
         MemorySegment stub = linker.upcallStub(bound, SCROLL_EVENT_CB_DESCRIPTOR, arena);
         try {
@@ -318,7 +320,7 @@ final class DrydockTerminalHostBinding {
      * Registers {@code listener} as the host's mouse-position callback; same
      * arena-lifetime contract as {@link #setKeyEventCallback}.
      */
-    void setMousePosEventCallback(MemorySegment host, DrydockTerminalHost.MousePosEventListener listener, Arena arena) {
+    void setMousePosEventCallback(MemorySegment host, TerminalHostView.MousePosEventListener listener, Arena arena) {
         MethodHandle bound = MethodHandles.insertArguments(MOUSE_POS_EVENT_TRAMPOLINE, 0, listener);
         MemorySegment stub = linker.upcallStub(bound, MOUSE_POS_EVENT_CB_DESCRIPTOR, arena);
         try {
@@ -332,7 +334,7 @@ final class DrydockTerminalHostBinding {
      * Registers {@code listener} as the host's mouse-button callback; same
      * arena-lifetime contract as {@link #setKeyEventCallback}.
      */
-    void setMouseButtonEventCallback(MemorySegment host, DrydockTerminalHost.MouseButtonEventListener listener, Arena arena) {
+    void setMouseButtonEventCallback(MemorySegment host, TerminalHostView.MouseButtonEventListener listener, Arena arena) {
         MethodHandle bound = MethodHandles.insertArguments(MOUSE_BUTTON_EVENT_TRAMPOLINE, 0, listener);
         MemorySegment stub = linker.upcallStub(bound, MOUSE_BUTTON_EVENT_CB_DESCRIPTOR, arena);
         try {
@@ -350,7 +352,7 @@ final class DrydockTerminalHostBinding {
     /** Upcall trampoline invoked directly by native code; see MOUSE_BUTTON_EVENT_TRAMPOLINE. */
     @SuppressWarnings("unused")
     private static void dispatchMouseButtonEvent(
-            DrydockTerminalHost.MouseButtonEventListener listener,
+            TerminalHostView.MouseButtonEventListener listener,
             MemorySegment userdata,
             int state,
             int button,
@@ -365,7 +367,7 @@ final class DrydockTerminalHostBinding {
     /** Upcall trampoline invoked directly by native code; see MOUSE_POS_EVENT_TRAMPOLINE. */
     @SuppressWarnings("unused")
     private static void dispatchMousePosEvent(
-            DrydockTerminalHost.MousePosEventListener listener,
+            TerminalHostView.MousePosEventListener listener,
             MemorySegment userdata,
             double x,
             double y,
@@ -380,7 +382,7 @@ final class DrydockTerminalHostBinding {
     /** Upcall trampoline invoked directly by native code; see SCROLL_EVENT_TRAMPOLINE. */
     @SuppressWarnings("unused")
     private static void dispatchScrollEvent(
-            DrydockTerminalHost.ScrollEventListener listener,
+            TerminalHostView.ScrollEventListener listener,
             MemorySegment userdata,
             double deltaX,
             double deltaY,
@@ -395,7 +397,7 @@ final class DrydockTerminalHostBinding {
     /** Upcall trampoline invoked directly by native code; see KEY_EVENT_TRAMPOLINE. */
     @SuppressWarnings("unused")
     private static void dispatchKeyEvent(
-            DrydockTerminalHost.KeyEventListener listener,
+            TerminalHostView.KeyEventListener listener,
             MemorySegment userdata,
             short keyCode,
             int modifierFlags,

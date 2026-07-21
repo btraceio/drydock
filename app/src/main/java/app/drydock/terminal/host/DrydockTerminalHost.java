@@ -1,5 +1,6 @@
 package app.drydock.terminal.host;
 
+import app.drydock.terminal.api.TerminalHostView;
 import javafx.application.Platform;
 
 import java.lang.foreign.Arena;
@@ -26,7 +27,7 @@ import java.lang.foreign.MemorySegment;
  * programming error, not merely a performance concern -- AppKit is not
  * thread-safe.</p>
  */
-public final class DrydockTerminalHost implements AutoCloseable {
+public final class DrydockTerminalHost implements TerminalHostView, AutoCloseable {
 
     private final DrydockTerminalHostBinding binding;
     private final Arena keyCallbackArena = Arena.ofShared();
@@ -64,18 +65,21 @@ public final class DrydockTerminalHost implements AutoCloseable {
     }
 
     /** Sets the host view's frame, in the parent window's content-view coordinate space. */
+    @Override
     public void setFrame(double x, double y, double width, double height) {
         checkFxThread();
         checkNotDestroyed();
         binding.setFrame(handle, x, y, width, height);
     }
 
+    @Override
     public void setVisible(boolean visible) {
         checkFxThread();
         checkNotDestroyed();
         binding.setVisible(handle, visible);
     }
 
+    @Override
     public void setFocused(boolean focused) {
         checkFxThread();
         checkNotDestroyed();
@@ -88,7 +92,8 @@ public final class DrydockTerminalHost implements AutoCloseable {
      * register-once flags above); a second registration throws {@link
      * IllegalStateException}.
      */
-    public void setKeyEventListener(KeyEventListener listener) {
+    @Override
+    public void setKeyEventListener(TerminalHostView.KeyEventListener listener) {
         checkFxThread();
         checkNotDestroyed();
         if (keyListenerRegistered) {
@@ -99,7 +104,8 @@ public final class DrydockTerminalHost implements AutoCloseable {
     }
 
     /** Registers the callback invoked for every scrollWheel event the host view receives (register-once). */
-    public void setScrollEventListener(ScrollEventListener listener) {
+    @Override
+    public void setScrollEventListener(TerminalHostView.ScrollEventListener listener) {
         checkFxThread();
         checkNotDestroyed();
         if (scrollListenerRegistered) {
@@ -110,7 +116,8 @@ public final class DrydockTerminalHost implements AutoCloseable {
     }
 
     /** Registers the callback invoked for mouseMoved events (and immediately before each scroll; register-once). */
-    public void setMousePosEventListener(MousePosEventListener listener) {
+    @Override
+    public void setMousePosEventListener(TerminalHostView.MousePosEventListener listener) {
         checkFxThread();
         checkNotDestroyed();
         if (mousePosListenerRegistered) {
@@ -121,7 +128,8 @@ public final class DrydockTerminalHost implements AutoCloseable {
     }
 
     /** Registers the callback invoked for mouse button presses/releases (a position event precedes each; register-once). */
-    public void setMouseButtonEventListener(MouseButtonEventListener listener) {
+    @Override
+    public void setMouseButtonEventListener(TerminalHostView.MouseButtonEventListener listener) {
         checkFxThread();
         checkNotDestroyed();
         if (mouseButtonListenerRegistered) {
@@ -165,56 +173,5 @@ public final class DrydockTerminalHost implements AutoCloseable {
         if (!Platform.isFxApplicationThread()) {
             throw new IllegalStateException("Not on the JavaFX Application Thread");
         }
-    }
-
-    /**
-     * Java-side shape of a raw, uninterpreted AppKit key event; see
-     * native-host/DrydockTerminalHost.h.
-     *
-     * @param unshiftedCharacters NSEvent's {@code charactersIgnoringModifiers}
-     *                            (e.g. {@code "c"} for a Ctrl+C press whose
-     *                            {@code characters} is the ETX 0x03 control
-     *                            byte) -- required to correctly encode
-     *                            Ctrl/Cmd-modified letter keys when the
-     *                            terminal has Kitty keyboard protocol active
-     *                            (see {@code GhosttySurface.sendKey}'s
-     *                            Javadoc).
-     */
-    @FunctionalInterface
-    public interface KeyEventListener {
-        void onKeyEvent(int keyCode, int modifierFlags, boolean keyDown, String characters,
-                        String unshiftedCharacters);
-    }
-
-    /**
-     * Java-side shape of a raw scrollWheel event; {@code scrollMods} is a
-     * pre-packed {@code ghostty_input_scroll_mods_t} (see
-     * native-host/DrydockTerminalHost.h) ready to pass to
-     * {@code ghostty_surface_mouse_scroll} verbatim.
-     */
-    @FunctionalInterface
-    public interface ScrollEventListener {
-        void onScrollEvent(double deltaX, double deltaY, int scrollMods);
-    }
-
-    /**
-     * Java-side shape of a mouse-position event: view-local coordinates,
-     * top-left origin, in points (Ghostty's {@code ghostty_surface_mouse_pos}
-     * convention); {@code modifierFlags} is the raw NSEvent modifierFlags.
-     */
-    @FunctionalInterface
-    public interface MousePosEventListener {
-        void onMousePosEvent(double x, double y, int modifierFlags);
-    }
-
-    /**
-     * Java-side shape of a mouse-button event: {@code state} and {@code
-     * button} carry ghostty's own enum values (press=1/release=0;
-     * left=1/right=2/middle=3), {@code modifierFlags} the raw NSEvent
-     * flags; see native-host/DrydockTerminalHost.h.
-     */
-    @FunctionalInterface
-    public interface MouseButtonEventListener {
-        void onMouseButtonEvent(int state, int button, int modifierFlags);
     }
 }
