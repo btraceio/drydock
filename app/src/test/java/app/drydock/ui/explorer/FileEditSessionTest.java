@@ -22,6 +22,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -40,6 +41,14 @@ class FileEditSessionTest {
      */
     private static final Duration IDLE_DEBOUNCE = Duration.ofSeconds(30);
     private static final Duration SHORT_DEBOUNCE = Duration.ofMillis(40);
+    /**
+     * For the "must NOT have written" tests: long enough that the setup
+     * (an edit, then a poll or an abandon) is certain to complete before the
+     * debounce could fire, short enough that {@link #awaitPastDebounce} is
+     * quick. Those tests then wait past it deterministically instead of
+     * sleeping.
+     */
+    private static final Duration ARMED_DEBOUNCE = Duration.ofMillis(300);
     private static final Duration TIMEOUT = Duration.ofSeconds(5);
 
     private final ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -55,6 +64,20 @@ class FileEditSessionTest {
 
     private FileEditSession sessionFor(Path file) throws IOException {
         return new FileEditSession(file, FileContent.load(file, MAX), executor, IDLE_DEBOUNCE, MAX);
+    }
+
+    /**
+     * Returns once the debounce deadline has demonstrably passed, without
+     * sleeping: a marker task is scheduled on the SAME single-threaded executor
+     * the session arms its debounce on, at three times the debounce delay. If an
+     * armed {@code writeIfDirty} were still pending it would be ordered ahead of
+     * the marker and would have run by the time this returns -- so a file that
+     * is still untouched afterwards proves the debounce really was disarmed.
+     */
+    private void awaitPastDebounce(Duration debounce) throws Exception {
+        CountDownLatch marker = new CountDownLatch(1);
+        executor.schedule(marker::countDown, debounce.toMillis() * 3, TimeUnit.MILLISECONDS);
+        assertTrue(marker.await(5, TimeUnit.SECONDS), "marker task should have run");
     }
 
     /** Bumps mtime past any filesystem granularity so a same-size edit is still observed. */
@@ -216,6 +239,77 @@ class FileEditSessionTest {
         var result = session.poll().get(5, TimeUnit.SECONDS);
 
         assertEquals(PollOutcome.MISSING, result.outcome());
+    }
+
+    /**
+     * A MISSING poll must disarm auto-save. Otherwise the debounce armed by the
+     * user's last keystroke fires a second or two later and writes the buffer
+     * back -- recreating the file Claude deleted, and answering the viewer's
+     * "keep mine / close tab" banner for the user before they can read it.
+     */
+    @Test
+    void aMissingPollDisarmsTheDebounceSoADirtyBufferIsNotWrittenBack(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("a.txt");
+        Files.writeString(file, "one\n");
+        FileEditSession session =
+                new FileEditSession(file, FileContent.load(file, MAX), executor, ARMED_DEBOUNCE, MAX);
+
+        session.edit("mine\n");
+        Files.delete(file);
+        var result = session.poll().get(5, TimeUnit.SECONDS);
+        assertEquals(PollOutcome.MISSING, result.outcome());
+
+        awaitPastDebounce(ARMED_DEBOUNCE);
+
+        assertFalse(Files.exists(file), "a MISSING poll must not let the debounce recreate the file");
+        assertEquals(State.DIRTY, session.state(), "the user's buffer is still theirs to keep");
+    }
+
+    /**
+     * The viewer's "close tab" answer to the missing-file banner abandons the
+     * session. Nothing may write that buffer afterwards -- not the explicit
+     * flushes teardown fires (selection change, focus loss), nor an armed
+     * debounce.
+     */
+    @Test
+    void anAbandonedSessionWritesNeitherOnFlushNorOnTheDebounce(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("a.txt");
+        Files.writeString(file, "one\n");
+        FileEditSession session =
+                new FileEditSession(file, FileContent.load(file, MAX), executor, ARMED_DEBOUNCE, MAX);
+
+        session.edit("mine\n");
+        session.abandon();
+
+        session.flush().get(5, TimeUnit.SECONDS);
+        assertEquals("one\n", Files.readString(file), "abandon must veto an explicit flush");
+
+        awaitPastDebounce(ARMED_DEBOUNCE);
+        assertEquals("one\n", Files.readString(file), "abandon must disarm the debounce");
+
+        // And it is one-way: a late keystroke cannot re-arm it either.
+        session.edit("later\n");
+        session.flush().get(5, TimeUnit.SECONDS);
+        awaitPastDebounce(ARMED_DEBOUNCE);
+        assertEquals("one\n", Files.readString(file), "abandon must not be reversible by an edit");
+    }
+
+    /** The same veto holds when the abandoned file really is gone: it must not be recreated. */
+    @Test
+    void anAbandonedSessionDoesNotRecreateADeletedFile(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("a.txt");
+        Files.writeString(file, "one\n");
+        FileEditSession session =
+                new FileEditSession(file, FileContent.load(file, MAX), executor, ARMED_DEBOUNCE, MAX);
+
+        session.edit("mine\n");
+        Files.delete(file);
+        session.abandon();
+
+        session.flush().get(5, TimeUnit.SECONDS);
+        awaitPastDebounce(ARMED_DEBOUNCE);
+
+        assertFalse(Files.exists(file), "an abandoned buffer must not recreate its file");
     }
 
     @Test

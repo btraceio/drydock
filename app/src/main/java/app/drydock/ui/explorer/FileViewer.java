@@ -193,10 +193,10 @@ final class FileViewer extends BorderPane {
             flushSession(oldTab);
             // The edit banner is bound to one tab; showing another tab's
             // conflict/error over this file -- with buttons that act on that
-            // other file -- would be actively misleading. A still-conflicted
-            // session re-raises its banner on the next poll tick.
+            // other file -- would be actively misleading.
             if (editBannerOwner != newTab) {
                 hideEditBanner();
+                raiseBannerFor(newTab);
             }
             updateBreadcrumb(newTab);
             updateEmptyState();
@@ -217,6 +217,10 @@ final class FileViewer extends BorderPane {
                 stopTransitions();
             } else {
                 startPolling();
+                // The chip is not repainted while detached, so a save that
+                // landed (or failed) in the meantime would leave it showing
+                // whatever was true when the user left the Explorer.
+                updateStatusChip();
             }
         });
     }
@@ -382,6 +386,14 @@ final class FileViewer extends BorderPane {
      * inside the session).
      */
     private void applyPollResult(Tab tab, FileEditSession session, FileEditSession.PollResult result) {
+        if (!fileTabs.getTabs().contains(tab)) {
+            // The poll was started on the FX thread against a live tab, but the
+            // result lands one executor hop plus one runLater later -- long
+            // enough for the user to have closed the tab. Reloading its
+            // CodeArea or raising a banner wired to it would act on a file
+            // nobody has open any more.
+            return;
+        }
         switch (result.outcome()) {
             case UNCHANGED -> {
                 // Nothing changed, so nothing to repaint -- and repainting
@@ -417,6 +429,14 @@ final class FileViewer extends BorderPane {
      * seconds later with no conflict raised.</p>
      */
     private void reload(Tab tab, FileEditSession session, String text) {
+        if (session != null && session.state() == FileEditSession.State.CONFLICT) {
+            // A conflict the user has not answered yet. Adopting the disk text
+            // here would answer it for them -- in the disk's favour, discarding
+            // their buffer -- which is exactly what the banner exists to ask.
+            // (The legitimate "disk wins" path, takeDisk, leaves the session
+            // CLEAN before it calls back in here, so it is unaffected.)
+            return;
+        }
         if (!(tab.getContent() instanceof VirtualizedScrollPane<?> pane)
                 || !(pane.getContent() instanceof CodeArea area)) {
             // The session has already adopted the disk text, so silently
@@ -442,7 +462,41 @@ final class FileViewer extends BorderPane {
         rehighlight(tab, area, text);
     }
 
+    /**
+     * Re-raises the banner a newly selected tab is entitled to. The
+     * {@code show*Banner} methods only paint the selected tab's banner (the row
+     * is shared), so a background tab's conflict or save failure would
+     * otherwise be invisible for good in the save-error case -- nothing
+     * re-raises it, unlike CONFLICT and MISSING which the poller re-reports
+     * every tick. Driven off session state, so it is correct for both.
+     */
+    private void raiseBannerFor(Tab tab) {
+        if (tab == null
+                || !(tab.getProperties().get("drydock.session") instanceof FileEditSession session)) {
+            return;
+        }
+        switch (session.state()) {
+            case CONFLICT -> showConflictBanner(tab, session);
+            case ERROR -> showSaveErrorBanner(tab, session);
+            default -> { }
+        }
+    }
+
+    /**
+     * Whether {@code tab} may claim the shared banner row. The row is ONE set
+     * of controls whose text and both handlers are bound to one tab, so a
+     * background tab's conflict would render over the file the user is actually
+     * looking at, with a "reload" button that discards the OTHER file's unsaved
+     * edits.
+     */
+    private boolean ownsBannerRow(Tab tab) {
+        return fileTabs.getSelectionModel().getSelectedItem() == tab;
+    }
+
     private void showConflictBanner(Tab tab, FileEditSession session) {
+        if (!ownsBannerRow(tab)) {
+            return;
+        }
         resetEditBanner(tab);
         String name = fileNameOf(tab);
         editBannerLabel.setText(name + " changed on disk while you were editing it.");
@@ -460,8 +514,17 @@ final class FileViewer extends BorderPane {
     }
 
     private void showMissingBanner(Tab tab, FileEditSession session) {
+        if (!ownsBannerRow(tab)) {
+            return;
+        }
         resetEditBanner(tab);
-        editBannerLabel.setText(fileNameOf(tab) + " is no longer on disk.");
+        // Not only deletion: this same outcome covers a file that became
+        // unreadable, or that was replaced by content this editor must not
+        // write back (binary, oversized, mixed terminators). The wording has to
+        // cover all three, and has to say what "close tab" costs.
+        editBannerLabel.setText(fileNameOf(tab) + " is gone or no longer editable on disk"
+                + " (deleted, unreadable, or replaced by content this editor cannot save)."
+                + " Closing the tab discards your unsaved edits.");
         editBannerPrimary.setText("keep mine");
         editBannerPrimary.setOnAction(e -> {
             hideEditBanner();
@@ -470,18 +533,28 @@ final class FileViewer extends BorderPane {
         editBannerSecondary.setText("close tab");
         editBannerSecondary.setOnAction(e -> {
             hideEditBanner();
+            // Deliberately asymmetric with the user's own close gesture: NO
+            // flush. The user just chose to abandon a file that is gone from
+            // disk; writing the buffer back would recreate exactly the file
+            // they abandoned.
+            //
+            // Passing flush=false is NOT enough on its own. Removing the tab
+            // moves the selection, which synchronously runs the selection
+            // listener's flushSession(oldTab) -- and the code area losing focus
+            // runs another flush -- both before closeTab is even reached. So
+            // the veto has to live in the session itself (abandon()), and the
+            // property is detached up front so nothing can find the session
+            // through the tab either. What closeTab still needs is handed to it
+            // explicitly.
+            session.abandon();
+            tab.getProperties().remove("drydock.session");
+            fileTabs.getTabs().remove(tab);
             // Tab.CLOSED_EVENT (and therefore setOnClosed) fires only from
             // TabPaneBehavior.closeTab -- a programmatic getTabs().remove does
             // NOT run the close handler, so the cleanup has to be invoked by
             // hand or this file stays in `openFiles` (unreopenable for the rest
             // of the session) and in `sessions`.
-            //
-            // Deliberately asymmetric with the user's own close gesture: NO
-            // flush. The user just chose to abandon a file that is gone from
-            // disk; writing the buffer back would recreate exactly the file
-            // they abandoned.
-            fileTabs.getTabs().remove(tab);
-            closeTab(tab, false);
+            closeTab(tab, false, session);
         });
         showEditBanner();
     }
@@ -507,6 +580,12 @@ final class FileViewer extends BorderPane {
      * the message comes from the failure itself.
      */
     private void showReadErrorBanner(Tab tab, FileEditSession session, Throwable failure) {
+        if (!ownsBannerRow(tab)) {
+            // Same shared-row hazard as the other banners: the read is async, so
+            // the selection can move while it is in flight. The session is still
+            // in CONFLICT, so reselecting the tab re-raises the conflict banner.
+            return;
+        }
         resetEditBanner(tab);
         Throwable cause = failure instanceof CompletionException && failure.getCause() != null
                 ? failure.getCause()
@@ -528,6 +607,11 @@ final class FileViewer extends BorderPane {
 
     /** Surfaces a failed write; the buffer is kept and the next edit or Cmd+S retries. */
     private void showSaveErrorBanner(Tab tab, FileEditSession session) {
+        if (!ownsBannerRow(tab)) {
+            // Nothing re-raises a save failure later, so the selection listener
+            // re-derives it from the session's ERROR state (raiseBannerFor).
+            return;
+        }
         resetEditBanner(tab);
         IOException error = session.lastError();
         editBannerLabel.setText("Could not save " + fileNameOf(tab) + ": "
@@ -819,10 +903,20 @@ final class FileViewer extends BorderPane {
      *     file they abandoned.
      */
     private void closeTab(Tab tab, boolean flush) {
-        Path file = (Path) tab.getProperties().get("drydock.file");
         Object sessionProperty = tab.getProperties().get("drydock.session");
-        FileEditSession closingSession =
-                sessionProperty instanceof FileEditSession session ? session : null;
+        closeTab(tab, flush, sessionProperty instanceof FileEditSession session ? session : null);
+    }
+
+    /**
+     * As {@link #closeTab(Tab, boolean)}, but with the closing session handed in
+     * rather than read off the tab. The missing-file "close tab" path detaches
+     * the {@code drydock.session} property BEFORE removing the tab -- so that no
+     * listener firing during the removal can find the session and flush it -- and
+     * therefore has to supply it here, or the entry would be left in {@link
+     * #sessions} for the rest of the viewer's life.
+     */
+    private void closeTab(Tab tab, boolean flush, FileEditSession closingSession) {
+        Path file = (Path) tab.getProperties().get("drydock.file");
         CompletableFuture<Void> pending = flush ? flushSession(tab) : null;
         if (file != null) {
             openFiles.remove(file);

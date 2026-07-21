@@ -104,6 +104,14 @@ final class FileEditSession {
     private ScheduledFuture<?> armedSave;
     private long editSeq;
     private boolean writeInFlight;
+    /**
+     * Set by {@link #abandon()} and never cleared: a one-way latch that vetoes
+     * every write path this session owns. The tab is going away and the user
+     * has explicitly chosen to discard the buffer, so a listener firing during
+     * teardown (the selection listener's flush, the code area's focus-lost
+     * flush) must not be able to put those bytes back on disk.
+     */
+    private boolean abandoned;
 
     private volatile Consumer<State> onStateChanged = state -> { };
     private volatile Consumer<IOException> onSaveFailed = error -> { };
@@ -173,6 +181,9 @@ final class FileEditSession {
     void edit(String text) {
         State changed;
         synchronized (lock) {
+            if (abandoned) {
+                return;
+            }
             pendingText = text;
             editSeq++;
             cancelArmed();
@@ -204,6 +215,24 @@ final class FileEditSession {
             cancelArmed();
         }
         return runOnExecutor(this::writeIfDirty);
+    }
+
+    /**
+     * Permanently disarms this session: cancels the armed debounce and vetoes
+     * every future write, including an explicit {@link #flush()} and any later
+     * {@link #edit(String)}. There is no way back, deliberately -- the only
+     * caller is the viewer's "the file is gone from disk, close the tab"
+     * action, where the user has chosen to discard the buffer and the tab is
+     * about to be torn down. Teardown itself fires several flushes (the
+     * selection listener's, the code area's focus-lost one), so vetoing at the
+     * session is the only place that can guarantee none of them recreates the
+     * very file the user just abandoned.
+     */
+    void abandon() {
+        synchronized (lock) {
+            abandoned = true;
+            cancelArmed();
+        }
     }
 
     /**
@@ -267,7 +296,7 @@ final class FileEditSession {
         } catch (IOException e) {
             // Deleted underneath us, or unreadable: either way the viewer
             // must ask rather than silently recreate the file.
-            return new PollResult(PollOutcome.MISSING, null);
+            return missing();
         }
         synchronized (lock) {
             if (current.equals(stamp)) {
@@ -281,7 +310,7 @@ final class FileEditSession {
         try {
             fresh = FileContent.load(file, maxBytes);
         } catch (IOException e) {
-            return new PollResult(PollOutcome.MISSING, null);
+            return missing();
         }
         if (!fresh.editable()) {
             // Claude replaced the file with something we must not write
@@ -289,7 +318,7 @@ final class FileEditSession {
             // nothing -- keeping the old stamp means every later poll keeps
             // saying so -- and let the viewer decide, exactly as for a
             // deleted file.
-            return new PollResult(PollOutcome.MISSING, null);
+            return missing();
         }
         boolean conflicted;
         State changed;
@@ -331,6 +360,22 @@ final class FileEditSession {
         return conflicted
                 ? new PollResult(PollOutcome.CONFLICT, null)
                 : new PollResult(PollOutcome.RELOAD, fresh.text());
+    }
+
+    /**
+     * Reports {@link PollOutcome#MISSING} and disarms auto-save on the way out.
+     * Disarming is the point: the file the buffer belongs to is gone (deleted,
+     * unreadable, or replaced by content this session must not write back), so
+     * an armed debounce would fire a second later and recreate it -- making the
+     * banner's "keep mine / close tab" choice for the user before they can even
+     * read it. The state machine is left alone: the buffer is still the user's,
+     * and {@link #keepMine()} is exactly how they re-arm it deliberately.
+     */
+    private PollResult missing() {
+        synchronized (lock) {
+            cancelArmed();
+        }
+        return new PollResult(PollOutcome.MISSING, null);
     }
 
     /** Conflict resolution: the user's buffer wins; write it and adopt the resulting stamp. */
@@ -415,7 +460,8 @@ final class FileEditSession {
             // CONFLICT: disarmed until the user resolves it. ERROR is the
             // exception -- both an explicit flush and the next edit's
             // debounce retry a failed write, so it must be allowed through.
-            if (writeInFlight || (state != State.DIRTY && state != State.ERROR)) {
+            // ABANDONED is absolute: no path may write this buffer again.
+            if (abandoned || writeInFlight || (state != State.DIRTY && state != State.ERROR)) {
                 return;
             }
             text = pendingText;
