@@ -21,6 +21,12 @@ activity, Git status, and your changes without leaving the app.
   built around the repos you register.
 - **Persistent state** — registered repositories and window layout persist
   across restarts.
+- **Remote repositories over SSH** — register a repo on a remote host via
+  ambient SSH auth; sessions run `claude` on the host, the sidebar shows live
+  indicators. Remote sessions show a neutral 'session ended — resume to
+  reconnect' state on exit; worktrees, diffs, Explorer/Review, and activity
+  badges are unavailable. Requires `git` and `claude` on the host's
+  non-interactive PATH, a POSIX login shell, and an already-accepted host key.
 
 Drydock is macOS-only and runs natively on both **Apple Silicon (`arm64`)** and
 **Intel (`x86_64`)**.
