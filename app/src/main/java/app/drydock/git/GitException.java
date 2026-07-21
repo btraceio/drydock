@@ -12,10 +12,11 @@ package app.drydock.git;
  * @see NotAGitRepositoryException
  * @see GitCommandFailedException
  * @see WorktreeNotCleanException
+ * @see SshUnreachableException
  */
 public sealed class GitException extends RuntimeException
         permits GitExecutableNotFoundException, NotAGitRepositoryException, GitCommandFailedException,
-                WorktreeNotCleanException {
+                WorktreeNotCleanException, SshUnreachableException {
 
     GitException(String message) {
         super(message);
