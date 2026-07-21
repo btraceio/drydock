@@ -463,6 +463,11 @@ final class FileEditSession {
                     // CONFLICT standing would keep the banner up, auto-save
                     // disarmed and the tab close vetoed over a file with
                     // nothing left to reconcile.
+                    // A stale lastError from the write that failed before the
+                    // conflict would otherwise outlive it and make the
+                    // shutdown "may not have been saved" warning fire for a
+                    // file that is byte-identical to disk.
+                    lastError = null;
                     resolved = transition(
                             fresh.text().equals(pendingText) ? State.CLEAN : State.DIRTY);
                     if (resolved == State.DIRTY) {
@@ -750,8 +755,11 @@ final class FileEditSession {
                 // -- including its terminator, which the write can have changed
                 // (a NONE file that gained a line break, a CRLF one that lost
                 // its last). The write POLICY in `content` is deliberately left
-                // alone: a CRLF file edited down to one line is still a CRLF
-                // file the next time the user adds a line.
+                // alone here, so a CRLF file edited down to one line writes
+                // CRLF again the next time the user adds a line -- until the
+                // next silent adoption in pollNow replaces `content` wholesale
+                // and demotes the policy to what the disk now shows, exactly as
+                // closing and reopening the tab would.
                 baseText = text;
                 baseTerminator = FileContent.terminatorOf(diskText);
                 rejectedStamp = null;
@@ -846,9 +854,13 @@ final class FileEditSession {
         try {
             current = readStamp();
         } catch (NoSuchFileException e) {
-            if (UNVERIFIED.equals(basis.stamp())) {
-                return WriteGate.PROCEED;
-            }
+            // Unconditional, including under the seeded UNVERIFIED stamp: a
+            // session only ever exists for a FileContent the caller loaded
+            // from this very path, so the file demonstrably existed. UNVERIFIED
+            // means "the stamp may describe bytes newer than that content", not
+            // "we never saw the file" -- exempting it let a flush landing
+            // before the first poll tick silently recreate a file Claude had
+            // just deleted.
             missing(null);
             return WriteGate.MISSING;
         } catch (IOException e) {
@@ -929,6 +941,13 @@ final class FileEditSession {
     /** Must hold {@link #lock}: enter conflict and disarm auto-save. */
     private State enterConflict() {
         cancelArmed();
+        // Every caller reaches here having just loaded the file and found it
+        // editable, so the missing question is definitively answered: leaving
+        // the latch set would let raiseBannerFor paint "gone or no longer
+        // editable" -- whose "keep mine" clobbers content the user was never
+        // shown -- over a file that is present and merely conflicting. Writes
+        // stay vetoed by CONFLICT in writeAdmitted, so nothing is loosened.
+        disarmed = false;
         return transition(State.CONFLICT);
     }
 

@@ -1093,4 +1093,60 @@ class FileEditSessionTest {
             ownExecutor.shutdownNow();
         }
     }
+
+    /**
+     * The blind window before the FIRST poll tick. The session is still on its
+     * seeded UNVERIFIED stamp, so the pre-write disk check has no real stamp to
+     * compare against -- but the file demonstrably existed, because the session
+     * was constructed from a FileContent loaded from it. A flush landing here
+     * (Cmd+S, blur, tab switch, sub-tab switch, shutdown) must ask the
+     * missing-file question rather than recreate what Claude just deleted.
+     */
+    @Test
+    void aFlushBeforeTheFirstPollDoesNotRecreateADeletedFile(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("a.txt");
+        Files.writeString(file, "one\n");
+        FileEditSession session = sessionFor(file);
+
+        session.edit("mine\n");
+        Files.delete(file);
+        session.flush().get(5, TimeUnit.SECONDS);
+
+        assertFalse(Files.exists(file), "the abandoned file must not be resurrected by a flush");
+        assertTrue(session.disarmed(), "the missing-file question must be raised");
+        assertEquals(State.DIRTY, session.state(), "the buffer is kept for the banner's choice");
+
+        // The documented escape hatch still works: the user answering "keep
+        // mine" is a deliberate re-create, not a silent one.
+        session.keepMine().get(5, TimeUnit.SECONDS);
+        assertEquals("mine\n", Files.readString(file));
+        assertFalse(session.disarmed());
+    }
+
+    /**
+     * Claude deletes the file, then recreates it with DIFFERENT content. The
+     * poll that follows reports a genuine conflict about a file that is
+     * present -- so the missing latch must be gone, or the viewer re-derives a
+     * "gone or no longer editable" banner whose "keep mine" clobbers content
+     * the user was never shown.
+     */
+    @Test
+    void aConflictAfterAMissingPollClearsTheMissingLatch(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("a.txt");
+        Files.writeString(file, "one\n");
+        FileEditSession session = sessionFor(file);
+        assertEquals(PollOutcome.UNCHANGED, session.poll().get(5, TimeUnit.SECONDS).outcome());
+
+        session.edit("mine\n");
+        Files.delete(file);
+        assertEquals(PollOutcome.MISSING, session.poll().get(5, TimeUnit.SECONDS).outcome());
+        assertTrue(session.disarmed());
+
+        Files.writeString(file, "claude\n");
+        assertEquals(PollOutcome.CONFLICT, session.poll().get(5, TimeUnit.SECONDS).outcome());
+
+        assertEquals(State.CONFLICT, session.state());
+        assertFalse(session.disarmed(),
+                "the file is back and editable, so the missing question is answered");
+    }
 }

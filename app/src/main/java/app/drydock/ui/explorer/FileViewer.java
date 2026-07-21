@@ -1145,8 +1145,9 @@ final class FileViewer extends BorderPane {
                 // lastError is null and the state is not CONFLICT. Without
                 // this line the loss is completely silent.
                 LOG.log(Level.WARNING, "Unsaved edits to " + session.file()
-                        + " were NOT written at shutdown: the file is gone or no longer"
-                        + " editable on disk, and the save was never re-armed");
+                        + " were NOT written at shutdown: the save was either vetoed"
+                        + " (the file is gone or no longer editable on disk) or"
+                        + " superseded by a later edit");
             }
         }
     }
