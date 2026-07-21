@@ -24,7 +24,7 @@ import java.nio.file.Path;
  *       byte into U+FFFD, so writing the buffer back destroys a binary or
  *       non-UTF-8 file. Decoding is therefore strict, and any NUL byte
  *       marks the content binary outright.</li>
- *   <li><b>Mixed line terminators</b> -- {@link org.fxmisc.richtext.CodeArea}
+ *   <li><b>Mixed line terminators</b> -- RichTextFX's {@code CodeArea}
  *       works in LF, so a rewrite would normalise every line and turn a
  *       one-line touch-up into a whole-file diff.</li>
  * </ul>
