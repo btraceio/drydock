@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Verifies that the local machine has the prerequisites needed to build and
-# run Claude Project Manager, and prints their versions/paths.
+# run Drydock, and prints their versions/paths.
 #
 # See README.md for the full list of prerequisites and known gotchas
 # (in particular: Gradle 8.11.1 must itself run on JDK <= ~24; JDK 26 is

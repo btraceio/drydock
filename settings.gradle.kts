@@ -1,3 +1,3 @@
-rootProject.name = "claude-project-manager"
+rootProject.name = "drydock"
 
 include(":app")

@@ -12,11 +12,11 @@ loader/binding layer, (4) remove the machine-specific
 A dedicated `spike` source set in the `app` project holds every Phase-0
 harness: the six `Gate0{c,d,e}Spike`/`*Launcher` classes **and**
 `GhosttySmokeTest` (Gate 0B — equally a spike harness per AGENTS.md "Code
-placement and hygiene"; it lives in `app.cpm.terminal.ghostty` and keeps
+placement and hygiene"; it lives in `app.drydock.terminal.ghostty` and keeps
 package-private access to `GhosttyBinding` because package membership, not
 source-set membership, governs Java access).
 
-Wiring (in the `cpm.spikes` convention plugin):
+Wiring (in the `drydock.spikes` convention plugin):
 
 - `compileClasspath += main.output + main.compileClasspath`
 - `runtimeClasspath += spike.output + main.runtimeClasspath`
@@ -55,7 +55,7 @@ Fixes applied while moving (the pack owns the spikes, so this is safe):
 `buildSrc` (Kotlin DSL, `kotlin-dsl` plugin) with two precompiled script
 plugins plus two typed task classes:
 
-- **`cpm.packaging`** — registers `runtimeImage` and `appImage` in `app`,
+- **`drydock.packaging`** — registers `runtimeImage` and `appImage` in `app`,
   implemented as `RuntimeImageTask` / `AppBundleTask` (abstract
   `DefaultTask` subclasses in `buildSrc/src/main/kotlin`) with injected
   `ExecOperations` and `FileSystemOperations`. No `project.*` access at
@@ -65,7 +65,7 @@ plugins plus two typed task classes:
   `ConfigurableFileCollection`: app jar, runtime classpath, native dir,
   icon, template files, toolchain java home (as an `@Input` path string +
   `@Internal` provider, same fingerprint as today).
-- **`cpm.spikes`** — creates the `spike` source set and registers the four
+- **`drydock.spikes`** — creates the `spike` source set and registers the four
   gate tasks. Property forwarding uses `providers.gradleProperty` (CC
   input tracking) instead of `project.hasProperty` where practical.
 
@@ -90,9 +90,9 @@ already input/output-correct per AGENTS.md's Gradle rule).
 
 ## 3. Terminal loader/binding dedup
 
-- **Shared locator**: `app.cpm.terminal.NativeLibraryLocator` — one
+- **Shared locator**: `app.drydock.terminal.NativeLibraryLocator` — one
   helper holding the verbatim-duplicated logic from
-  `GhosttyNativeLibrary` / `CpmTerminalHostLibrary`
+  `GhosttyNativeLibrary` / `DrydockTerminalHostLibrary`
   (`resolveLibraryPath` / `detectArchDirectoryName` /
   `findBuildNativeDirectory`), parameterized by (system property name,
   dylib file name, "run this Gradle task first" hint). It must be
@@ -101,17 +101,17 @@ already input/output-correct per AGENTS.md's Gradle rule).
   boundary and exposes no FFM types — it only resolves `Path`s. The two
   public facades stay as thin wrappers so `MainWorkspace` (owned by
   another pack) and the packaging property contract
-  (`app.cpm.ghostty.nativeDir` / `app.cpm.terminalhost.nativeDir`) are
+  (`app.drydock.ghostty.nativeDir` / `app.drydock.terminalhost.nativeDir`) are
   untouched.
 - **Binding singletons**: `GhosttyBinding`, `GhosttyAppBinding`, and
-  `CpmTerminalHostBinding` gain a `static of(SymbolLookup)` accessor
+  `DrydockTerminalHostBinding` gain a `static of(SymbolLookup)` accessor
   backed by a `ConcurrentHashMap<SymbolLookup, Binding>`
   (`computeIfAbsent`), constructors go private. Since each library's
   `SymbolLookup` is already a process-wide singleton, each binding links
   its ~20 downcall handles once per process instead of once per
-  `GhosttyApp` / `CpmTerminalHost` instance. Call sites updated:
+  `GhosttyApp` / `DrydockTerminalHost` instance. Call sites updated:
   `GhosttyApp.ensureProcessInitialized`/`create`,
-  `CpmTerminalHost.createForCurrentWindow`, `GhosttySmokeTest`.
+  `DrydockTerminalHost.createForCurrentWindow`, `GhosttySmokeTest`.
   `GhosttySurface`, `OpenSessionTab`, `MainWorkspace` are not touched
   (another pack owns them); they only consume bindings via `GhosttyApp`,
   so they get the sharing for free.
@@ -161,25 +161,25 @@ error and machine independence.
    repoint the four gate tasks at the spike runtime classpath. Verify:
    `./gradlew compileJava compileSpikeJava test`, `jar tf` shows no
    `Gate0`/`GhosttySmokeTest` classes, gate tasks configure (`--dry-run`).
-3. **buildSrc + `cpm.spikes`.** Introduce `buildSrc` (kotlin-dsl), move
+3. **buildSrc + `drydock.spikes`.** Introduce `buildSrc` (kotlin-dsl), move
    the source-set creation and the four gate task registrations into the
-   `cpm.spikes` precompiled plugin; apply it from `app`. Verify: same as
+   `drydock.spikes` precompiled plugin; apply it from `app`. Verify: same as
    step 2.
-4. **`cpm.packaging` templates + typed tasks.** Extract `launcher.sh`,
+4. **`drydock.packaging` templates + typed tasks.** Extract `launcher.sh`,
    `Info.plist`, `bundle-trampoline.sh`, `dist-trampoline.sh` to
    `app/packaging/`; add `RuntimeImageTask`/`AppBundleTask` (injected
    `ExecOperations`/`FileSystemOperations`); register both tasks from the
-   `cpm.packaging` plugin; delete the old ad-hoc `doLast` tasks and the
+   `drydock.packaging` plugin; delete the old ad-hoc `doLast` tasks and the
    two Kotlin string builders. Verify: `compileJava test`,
    `runtimeImage`/`appImage` (executed if native libs built, else
    `--dry-run`), output layout diffed against the pre-refactor image if
    executed.
-5. **Native loader dedup.** Add `app.cpm.terminal.NativeLibraryLocator`;
-   shrink `GhosttyNativeLibrary`/`CpmTerminalHostLibrary` to facades.
+5. **Native loader dedup.** Add `app.drydock.terminal.NativeLibraryLocator`;
+   shrink `GhosttyNativeLibrary`/`DrydockTerminalHostLibrary` to facades.
    Verify: `compileJava compileSpikeJava test`.
 6. **Binding singletons.** `of(SymbolLookup)` +
    `ConcurrentHashMap` for `GhosttyBinding`/`GhosttyAppBinding`/
-   `CpmTerminalHostBinding`; private constructors; update call sites.
+   `DrydockTerminalHostBinding`; private constructors; update call sites.
    Verify: `compileJava compileSpikeJava test`.
 7. **Self-review + verify.** Branch diff read-through; `jar tf` check;
    `./gradlew --configuration-cache help` (document what remains

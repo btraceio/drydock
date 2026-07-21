@@ -2,10 +2,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key><string>Claude Project Manager</string>
-    <key>CFBundleDisplayName</key><string>Claude Project Manager</string>
-    <key>CFBundleIdentifier</key><string>app.cpm.claude-project-manager</string>
-    <key>CFBundleExecutable</key><string>claude-project-manager</string>
+    <key>CFBundleName</key><string>Drydock</string>
+    <key>CFBundleDisplayName</key><string>Drydock</string>
+    <key>CFBundleIdentifier</key><string>io.btrace.drydock</string>
+    <key>CFBundleExecutable</key><string>drydock</string>
     <key>CFBundleIconFile</key><string>app-icon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>0.1</string>

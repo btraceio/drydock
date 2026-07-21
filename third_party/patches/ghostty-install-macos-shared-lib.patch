@@ -9,7 +9,7 @@ index f9d861b19..4eab283d8 100644
 -        if (!config.target.result.os.tag.isDarwin()) {
 -            libghostty_shared.installHeader(); // Only need one header
 +        //
-+        // PATCHED (claude-project-manager, see
++        // PATCHED (drydock, see
 +        // third_party/patches/ghostty-install-macos-shared-lib.patch):
 +        // upstream's own comment above says this guard is a bug, not
 +        // intentional design ("we shouldn't have this guard"). FFM needs a
@@ -34,7 +34,7 @@ index 9276c9914..653921453 100644
              step.linkFramework("OpenGL");
          }
  
-+        // PATCHED (claude-project-manager, see
++        // PATCHED (drydock, see
 +        // third_party/patches/ghostty-install-macos-shared-lib.patch):
 +        // pkg/macos's own build.zig links CoreFoundation/CoreGraphics/
 +        // CoreText/CoreVideo/QuartzCore/IOSurface/Carbon, but nothing in

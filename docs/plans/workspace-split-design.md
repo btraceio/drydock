@@ -3,7 +3,7 @@
 Decomposes the two biggest UI classes along their natural seams, with no
 behavior change.
 
-## Seam 1: `GhosttyKeyTranslator` (new, `app.cpm.terminal.ghostty`)
+## Seam 1: `GhosttyKeyTranslator` (new, `app.drydock.terminal.ghostty`)
 
 `OpenSessionTab` currently owns the macOS-keycode/ghostty-mods vocabulary
 and the whole key-classification policy inline in `onKeyEvent`:
@@ -57,7 +57,7 @@ resources to construct.
 The `Gate0*Spike` files keep their own private copies (another pack owns
 them; not touched).
 
-## Seam 2: `TerminalBridge` (new, `app.cpm.ui`, package-private)
+## Seam 2: `TerminalBridge` (new, `app.drydock.ui`, package-private)
 
 `OpenSessionTab` mixes JavaFX chrome (tab graphic, session header,
 sub-tab bar, rename, worktree chips) with the native-terminal bridge
@@ -68,7 +68,7 @@ focus, visibility, theming, disposal). The seam is the field set
 
 **What moves** into `TerminalBridge`:
 
-- ownership of the `GhosttyApp` + `CpmTerminalHost` pair and the
+- ownership of the `GhosttyApp` + `DrydockTerminalHost` pair and the
   attached `GhosttySurface`, plus the `disposed`/`surfaceClosing` flags;
 - `attachSurface` (host listener wiring), `onKeyEvent`, `onScrollEvent`,
   `onMousePosEvent`, `onMouseButtonEvent`, `diagPressKey`, `diagScroll`;
@@ -95,11 +95,11 @@ session-id supplier for log messages, and a
 `showSubTab`/previous/next/toggle-sidebar. Key classification itself is
 delegated to `GhosttyKeyTranslator`, so the bug-prone policy is unit
 tested there; the bridge is a thin effects layer (it still requires the
-real native classes to construct — `GhosttyApp`/`CpmTerminalHost` are
+real native classes to construct — `GhosttyApp`/`DrydockTerminalHost` are
 final native wrappers — so it is exercised via the existing runtime
 paths, not new unit tests).
 
-## Seam 3: `WorktreeLifecycleController` (new, `app.cpm.ui`, package-private)
+## Seam 3: `WorktreeLifecycleController` (new, `app.drydock.ui`, package-private)
 
 `MainWorkspace` conflates tab/session orchestration with the whole
 worktree-finish lifecycle (handoff section B). The lifecycle block —
@@ -163,7 +163,7 @@ kept; `OpenSessionTab`'s package-private API is kept via delegation.
 Each step keeps the build green (`./gradlew compileJava test`) and lands
 as its own commit.
 
-1. **Extract `GhosttyKeyTranslator`** into `app.cpm.terminal.ghostty`
+1. **Extract `GhosttyKeyTranslator`** into `app.drydock.terminal.ghostty`
    with the keycode/modifier constants, special-key set, modifier
    translation, and the full `translate(...)` classification (sealed
    `KeyAction`). Rewire `OpenSessionTab.onKeyEvent`/`sendPrompt` and
@@ -171,13 +171,13 @@ as its own commit.
    private constants. Add `GhosttyKeyTranslatorTest` covering modifier
    translation, special keys, the shortcut table (shifted forms
    included), unshifted-codepoint policy, and key-up swallowing.
-2. **Extract `TerminalBridge`** into `app.cpm.ui`: move the native
+2. **Extract `TerminalBridge`** into `app.drydock.ui`: move the native
    fields, guards, listener handlers, geometry sync, visibility, focus,
    theming, prompt typing, tick/draw, and disposal out of
    `OpenSessionTab`, leaving delegating methods so `MainWorkspace`'s
    call sites are untouched. Verify listener registration order and
    teardown guards match the originals line-for-line.
-3. **Extract `WorktreeLifecycleController`** into `app.cpm.ui`: move the
+3. **Extract `WorktreeLifecycleController`** into `app.drydock.ui`: move the
    Finish-panel wiring, handoff prompts + polling, PR-state
    reconciliation, inspection records, busy modal, and browser-open out
    of `MainWorkspace`, injected with services + tab/repository lookups +

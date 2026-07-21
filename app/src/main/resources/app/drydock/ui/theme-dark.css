@@ -1,0 +1,70 @@
+/*
+ * Dark theme tokens (design handoff "Design Tokens > Dark theme", verbatim).
+ * This file defines ONLY looked-up colors; every structural rule lives in
+ * app.css and refers to these. Swapped with theme-light.css at runtime by
+ * ThemeManager -- the two files must define the identical set of names.
+ */
+.root {
+    -drydock-chrome: #191817;
+    -drydock-titlebar: #211f1e;
+    -drydock-sidebar: #1c1b1a;
+    -drydock-main: #161514;
+    -drydock-tabbar: #1c1b1a;
+    -drydock-input-bg: #141312;
+    -drydock-code-bg: #141312;
+    -drydock-keycap-bg: #23211f;
+    -drydock-terminal-bg: #0c0c0f;
+
+    -drydock-text: #ece9e5;
+    -drydock-text-dim: #a8a29b;
+    -drydock-text-faint: #6f6a63;
+
+    -drydock-border: rgba(255, 255, 255, 0.08);
+    -drydock-border-strong: rgba(255, 255, 255, 0.16);
+    -drydock-hover: rgba(255, 255, 255, 0.05);
+    -drydock-active-bg: rgba(255, 255, 255, 0.09);
+
+    -drydock-running: #6cc07a;
+    -drydock-running-soft: rgba(108, 192, 122, 0.18);
+    -drydock-error: #e06c6c;
+    -drydock-error-soft: rgba(224, 108, 108, 0.18);
+
+    -drydock-accent: #d97757;
+    -drydock-accent-soft: rgba(217, 119, 87, 0.16);
+
+    /* Non-token helper: subtle row background for unselected picker rows
+     * (prototype uses rgba(255,255,255,.02) dark / #ffffff light). */
+    -drydock-row-bg: rgba(255, 255, 255, 0.02);
+
+    /* Worktree lifecycle (design handoff "Worktrees & Session Explorer"). */
+    -drydock-dirty: #d9a03a;
+    -drydock-dirty-soft: rgba(217, 160, 58, 0.16);
+    -drydock-pr: #6c9ce0;
+    -drydock-pr-soft: rgba(108, 156, 224, 0.16);
+    -drydock-merged: #b07ad9;
+    -drydock-merged-soft: rgba(176, 122, 217, 0.16);
+    -drydock-match-bg: rgba(217, 119, 87, 0.32);
+
+    /* Diff Review (design handoff section C): add/del rows, annotation
+     * range selection, and the Explorer changed-line gutter overlay. */
+    -drydock-add-bg: rgba(108, 192, 122, 0.10);
+    -drydock-add-bar: #6cc07a;
+    -drydock-add-sign: #6cc07a;
+    -drydock-del-bg: rgba(224, 108, 108, 0.10);
+    -drydock-del-bar: #e06c6c;
+    -drydock-del-sign: #e06c6c;
+    -drydock-sel-bg: rgba(217, 119, 87, 0.14);
+    -drydock-changed-gutter: #6cc07a;
+
+    /* Read-only code viewer palette. */
+    -drydock-code-text: #c9ccd3;
+    -drydock-code-kw: #c678dd;
+    -drydock-code-str: #98c379;
+    -drydock-code-com: #6f6a63;
+    -drydock-code-num: #d19a66;
+    -drydock-code-type: #e5c07b;
+    -drydock-code-fn: #61afef;
+    -drydock-code-anno: #56b6c2;
+    -drydock-code-punct: #8f9099;
+    -drydock-code-gutter: #5c5852;
+}

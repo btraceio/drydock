@@ -24,7 +24,7 @@ Run the automated checklist with:
 Leave the window open for manual driving instead with:
 
 ```bash
-./gradlew gate0dSpike -Papp.cpm.gate0d.interactive
+./gradlew gate0dSpike -Papp.drydock.gate0d.interactive
 ```
 
 ## Results (last automated run: 2026-07-14, 12/12 checks passing)
@@ -67,7 +67,7 @@ raw **platform-native virtual keycode** (e.g. macOS keycode 36 = Return, 51
 `third_party/ghostty/src/input/keycodes.zig`'s macOS "native" column, not
 guessed).
 
-`app.cpm.terminal.Gate0cSpike` (Task 5 / Gate 0C) had this exact bug in its
+`app.drydock.terminal.Gate0cSpike` (Task 5 / Gate 0C) had this exact bug in its
 `SPECIAL_KEYS` map, translating a real AppKit keycode into a
 `GHOSTTY_KEY_*` ordinal and passing *that* as `keycode` -- e.g. it sent 53
 (`GHOSTTY_KEY_BACKSPACE`'s ordinal) for the Backspace key, and macOS
@@ -79,7 +79,7 @@ separate `ghostty_surface_text` codepath and never touches `keycode` at
 all. Both `Gate0cSpike` and `Gate0dSpike` are fixed now (native macOS
 keycodes passed straight through, see their Javadoc); see
 docs/native-integration.md, "Task 6 / Gate 0D" for the full log evidence
-(before/after) and `app.cpm.terminal.ghostty.GhosttySurface.sendCharKey`'s
+(before/after) and `app.drydock.terminal.ghostty.GhosttySurface.sendCharKey`'s
 Javadoc for a second, related finding (`ghostty_surface_text` is
 paste-only semantics, and gets wrapped in bracketed-paste markers once the
 shell enables bracketed paste -- ordinary typed characters must go through

@@ -234,7 +234,7 @@ Gradle build
 Use a Gradle multi-project build so the native boundary remains isolated.
 
 ```text
-claude-project-manager/
+drydock/
 ├── settings.gradle.kts
 ├── build.gradle.kts
 ├── gradle.properties
@@ -246,7 +246,7 @@ claude-project-manager/
 │   ├── build.gradle.kts
 │   └── src/
 │       ├── main/java/
-│       │   └── app/cpm/
+│       │   └── app/drydock/
 │       ├── main/resources/
 │       │   ├── app.css
 │       │   ├── icons/
@@ -345,7 +345,7 @@ The exact internal task names may differ, but provide these aliases.
 Launch the application with:
 
 ```text
---enable-native-access=app.cpm.terminal.ghostty
+--enable-native-access=app.drydock.terminal.ghostty
 ```
 
 Use `ALL-UNNAMED` only during the earliest non-modular spike.
@@ -369,7 +369,7 @@ The image must contain:
 The launcher must carry JVM arguments such as:
 
 ```text
---enable-native-access=app.cpm.terminal.ghostty
+--enable-native-access=app.drydock.terminal.ghostty
 -Djava.library.path=$APP_HOME/lib
 -Dfile.encoding=UTF-8
 -Djava.awt.headless=false
@@ -602,7 +602,7 @@ Acceptance criteria:
 
 ```bash
 ./gradlew runtimeImage
-build/image/bin/claude-project-manager
+build/image/bin/drydock
 ```
 
 must launch the terminal spike without:
@@ -629,36 +629,36 @@ The shim must be intentionally small.
 Suggested API:
 
 ```c
-typedef void *cpm_terminal_host_t;
+typedef void *drydock_terminal_host_t;
 
-cpm_terminal_host_t cpm_terminal_host_create(
+drydock_terminal_host_t drydock_terminal_host_create(
     void *parent_nsview
 );
 
-void cpm_terminal_host_set_frame(
-    cpm_terminal_host_t host,
+void drydock_terminal_host_set_frame(
+    drydock_terminal_host_t host,
     double x,
     double y,
     double width,
     double height
 );
 
-void *cpm_terminal_host_content_view(
-    cpm_terminal_host_t host
+void *drydock_terminal_host_content_view(
+    drydock_terminal_host_t host
 );
 
-void cpm_terminal_host_set_visible(
-    cpm_terminal_host_t host,
+void drydock_terminal_host_set_visible(
+    drydock_terminal_host_t host,
     bool visible
 );
 
-void cpm_terminal_host_set_focused(
-    cpm_terminal_host_t host,
+void drydock_terminal_host_set_focused(
+    drydock_terminal_host_t host,
     bool focused
 );
 
-void cpm_terminal_host_destroy(
-    cpm_terminal_host_t host
+void drydock_terminal_host_destroy(
+    drydock_terminal_host_t host
 );
 ```
 
@@ -1516,7 +1516,7 @@ The generated image must include:
 ```text
 ClaudeProjectManager/
 ├── bin/
-│   └── claude-project-manager
+│   └── drydock
 ├── runtime/
 │   ├── bin/
 │   ├── conf/
@@ -1527,7 +1527,7 @@ ClaudeProjectManager/
 │   └── resources
 └── lib/
     ├── libghostty.dylib
-    └── libcpm_terminal_host.dylib
+    └── libdrydock_terminal_host.dylib
 ```
 
 The exact layout may differ, but it must be deterministic and documented.
@@ -1549,7 +1549,7 @@ Required JVM options must be embedded in build configuration rather than supplie
 Example:
 
 ```text
---enable-native-access=app.cpm.terminal.ghostty
+--enable-native-access=app.drydock.terminal.ghostty
 -Dfile.encoding=UTF-8
 -Djava.library.path=<image>/lib
 ```
@@ -1561,16 +1561,16 @@ Do not add speculative JVM flags.
 After the raw executable image works, wrap it in:
 
 ```text
-Claude Project Manager.app/
+Drydock.app/
 └── Contents/
     ├── Info.plist
     ├── MacOS/
-    │   └── Claude Project Manager
+    │   └── Drydock
     ├── runtime/
     ├── app/
     ├── Frameworks/
     │   ├── libghostty.dylib
-    │   └── libcpm_terminal_host.dylib
+    │   └── libdrydock_terminal_host.dylib
     └── Resources/
 ```
 

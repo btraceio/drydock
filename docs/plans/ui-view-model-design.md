@@ -14,7 +14,7 @@ of a shared model:
   the dependency direction is circular in spirit: the workspace also calls
   back into the sidebar via the `onSessionsChanged` Runnable.
 - Every session-affecting event in `MainWorkspace` funnels into one
-  coarse-grained `onSessionsChanged.run()`, which `CpmApplication` wires to
+  coarse-grained `onSessionsChanged.run()`, which `DrydockApplication` wires to
   `RepositorySidebar.refreshSessions()` — an unconditional re-fetch of every
   repo and worktree git status plus a full `rebuildTree()`. In particular,
   merely SELECTING a tab (MainWorkspace's `selectedItemProperty` listener,
@@ -34,7 +34,7 @@ Two cooperating pieces, both in small, verifiable steps:
 
 ### 1. `WorkspaceNavigator` (the SessionActions bridge)
 
-A top-level interface in `app.cpm.ui`, modeled on the existing
+A top-level interface in `app.drydock.ui`, modeled on the existing
 `ReviewView.ExplorerBridge` pattern (consumer-shaped interface, implemented
 by the workspace, injected at construction):
 
@@ -57,7 +57,7 @@ exist with these signatures). `RepositorySidebar` takes a
 
 ### 2. `WorkspaceViewModel` (the observable session/status store)
 
-A plain-Java, listener-based store in a new `app.cpm.ui.model` package. It
+A plain-Java, listener-based store in a new `app.drydock.ui.model` package. It
 owns the data both surfaces render from:
 
 - `List<ManagedClaudeSession> sessions` (snapshot of `SessionManager.sessions()`)
@@ -106,7 +106,7 @@ model), and listeners are invoked synchronously on the mutating thread.
 
 ### Rewiring
 
-- `CpmApplication` creates the model, seeds it with
+- `DrydockApplication` creates the model, seeds it with
   `sessionManager.sessions()`, and passes it to both `MainWorkspace` and
   `RepositorySidebar`. `setOnSessionsChanged` is deleted.
 - `MainWorkspace` replaces every `onSessionsChanged.run()` after a session
@@ -200,24 +200,24 @@ model), and listeners are invoked synchronously on the mutating thread.
 Each step compiles and passes `./gradlew compileJava test` on its own and is
 committed separately.
 
-1. **`WorkspaceNavigator` extraction.** Add the interface in `app.cpm.ui`;
+1. **`WorkspaceNavigator` extraction.** Add the interface in `app.drydock.ui`;
    `MainWorkspace implements WorkspaceNavigator` (methods already exist);
    `RepositorySidebar` swaps its `MainWorkspace` field/constructor param for
-   `WorkspaceNavigator`; `CpmApplication` unchanged except for the parameter
+   `WorkspaceNavigator`; `DrydockApplication` unchanged except for the parameter
    type flowing through. No behavior change.
-2. **`WorkspaceViewModel` + tests.** Add `app.cpm.ui.model.WorkspaceViewModel`
+2. **`WorkspaceViewModel` + tests.** Add `app.drydock.ui.model.WorkspaceViewModel`
    (data, listener interface, mutators with the diff semantics above,
    `sessionById`, snapshot getters) and headless unit tests covering: no-op
    sets emit nothing; field-level session change emits `sessionRowChanged` +
    `repoChanged`; add/remove/reorder and repositoryId/worktreeRoot moves emit
    `structureChanged`; status setters emit only on change; active-session
    transitions; listener add/remove. Nothing uses the class yet.
-3. **Workspace writes the model.** `CpmApplication` constructs/seeds the
+3. **Workspace writes the model.** `DrydockApplication` constructs/seeds the
    model and passes it to `MainWorkspace`; `MainWorkspace` replaces
    `onSessionsChanged.run()` with `model.setSessions(...)` (mutations) and
    `model.setActiveSession(...)` (tab-selection listener), registers its
    `sessionRowChanged` listener to update open tab headers (name, status,
-   PR chip), and `setOnSessionsChanged` is deleted. `CpmApplication` keeps
+   PR chip), and `setOnSessionsChanged` is deleted. `DrydockApplication` keeps
    the old sidebar wiring alive temporarily by subscribing a bridge listener
    that calls `sidebar.refreshSessions()` on structure/session/active
    events, so behavior is unchanged mid-migration.
@@ -226,7 +226,7 @@ committed separately.
    with the event mapping above (incremental row updates via
    `TreeItem.setValue`, `updateFooter()` extraction, `syncActiveSelection`
    on active change only), and the temporary bridge listener in
-   `CpmApplication` is removed.
+   `DrydockApplication` is removed.
 5. **Context menu / tooltip caching.** Cache per row key, handlers resolve
    live sessions through the model, prune on `structureChanged`.
 6. **Self-review + verify.** Diff the branch against its base, check against

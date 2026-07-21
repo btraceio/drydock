@@ -14,13 +14,13 @@ milestones (Gate 0C onward) land.
   `javafx-graphics-26-mac.jar`, not assumed). A native pointer is reachable
   only through the internal, unsupported `com.sun.glass.ui` package. The
   AppKit host shim from plan section 8 was therefore implemented (not just
-  anticipated) — see `native-host/CpmTerminalHost.{h,m}` and
-  `app.cpm.terminal.host`. Full writeup, including the qualified-export
+  anticipated) — see `native-host/DrydockTerminalHost.{h,m}` and
+  `app.drydock.terminal.host`. Full writeup, including the qualified-export
   detail and why no `--add-exports` flag is currently needed (classpath-mode
   JavaFX, not module-path), in `docs/native-integration.md`, "Task 5 / Gate
   0C".
 - **Create/destroy ordering for `ghostty_app_t`/`ghostty_surface_t`**:
-  partially established — `app.cpm.terminal.ghostty.GhosttyApp`/`GhosttySurface`
+  partially established — `app.drydock.terminal.ghostty.GhosttyApp`/`GhosttySurface`
   implement and exercise surface-before-app teardown
   (`GhosttySurface#close` then `GhosttyApp#close`), verified crash-free in
   the Gate 0C spike's shutdown path. **Still open**: whether
@@ -61,7 +61,7 @@ milestones (Gate 0C onward) land.
   with "could not create image from display", confirmed via a failed
   `TCC.db` query, not just assumed). No agent/CI process can grant this
   permission itself; a human must run `./gradlew gate0cSpike
-  -Papp.cpm.gate0c.interactive` locally once, with that permission granted,
+  -Papp.drydock.gate0c.interactive` locally once, with that permission granted,
   to visually confirm actual terminal glyphs render (as opposed to just
   "no crash while calling draw").
 - **Ghostty's own libtool-merged static archive silently drops archive
@@ -85,9 +85,9 @@ milestones (Gate 0C onward) land.
 ## Narrow native boundary (plan section 2.4 / 4.2)
 
 All native (libghostty + AppKit host shim) interaction lives in two
-sibling packages under `app/src/main/java/app/cpm/terminal/`:
+sibling packages under `app/src/main/java/app/drydock/terminal/`:
 
-`app.cpm.terminal.ghostty/` (libghostty):
+`app.drydock.terminal.ghostty/` (libghostty):
 - `GhosttyNativeLibrary` -- resolves and loads the architecture-matching
   `libghostty.dylib` (this is also the one place allowed to branch on
   `os.arch`, per the approved dual-architecture deviation in `README.md`).
@@ -100,27 +100,27 @@ sibling packages under `app/src/main/java/app/cpm/terminal/`:
 - `GhosttySmokeTest` -- the Gate 0B command-line entry point
   (`./gradlew ffmSmokeTest`).
 
-`app.cpm.terminal.host/` (AppKit host shim, plan section 8):
-- `CpmTerminalHostLibrary` / `CpmTerminalHostBinding` -- loads
-  `libcpmterminalhost.dylib` and binds its 7 functions (6 from the plan's
+`app.drydock.terminal.host/` (AppKit host shim, plan section 8):
+- `DrydockTerminalHostLibrary` / `DrydockTerminalHostBinding` -- loads
+  `libdrydockterminalhost.dylib` and binds its 7 functions (6 from the plan's
   suggested API + 1 documented key-event-forwarding extension; see
   `docs/native-integration.md`).
 - `JavaFxNativeView` -- package-private; the *only* class anywhere in this
   codebase that touches the internal `com.sun.glass.ui` API, and only to
   obtain one `NSView*` pointer.
-- `CpmTerminalHost` -- public, `MemorySegment`-free (except
+- `DrydockTerminalHost` -- public, `MemorySegment`-free (except
   `contentViewHandle()`, callable only from the ghostty package) entry
   point.
 
 The corresponding native sources are `third_party/ghostty` (vendored,
-patched per `third_party/patches/`) and `native-host/CpmTerminalHost.{h,m}`
+patched per `third_party/patches/`) and `native-host/DrydockTerminalHost.{h,m}`
 (this project's own tiny AppKit shim, with zero dependency on Ghostty).
 
 No other package may reference `MemorySegment`, `MethodHandle`, `Linker`,
 generated libghostty bindings, native pointers, or AppKit handles.
-`app.cpm.terminal.Gate0cSpike` (the Gate 0C composition root) only ever
+`app.drydock.terminal.Gate0cSpike` (the Gate 0C composition root) only ever
 calls the public, pointer-free methods on `GhosttyApp`/`GhosttySurface`/
-`CpmTerminalHost`. If/when bindings are generated (e.g. via `jextract`) for
+`DrydockTerminalHost`. If/when bindings are generated (e.g. via `jextract`) for
 a larger API surface, they must live in a separate source set/package from
 the hand-written code above (plan rule 27.17).
 
@@ -191,7 +191,7 @@ Full detail in `docs/runtime-image.md`. Summary:
   application's real production module topology.
 - Dual-architecture native library bundling (`lib/macos-x86_64/`,
   `lib/macos-arm64/`) required a one-line semantic change to
-  `GhosttyNativeLibrary`/`CpmTerminalHostLibrary`'s previously-uncalled
+  `GhosttyNativeLibrary`/`DrydockTerminalHostLibrary`'s previously-uncalled
   `NATIVE_DIR_PROPERTY` override (root directory + arch subdirectory,
   instead of pointing directly at the arch-specific directory) — no new
   arch-branching code anywhere; the existing single `os.arch`-based

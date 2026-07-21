@@ -12,7 +12,7 @@ have been manually or automatically verified").
 
 ## What was built (file by file)
 
-### Domain model — `app/src/main/java/app/cpm/domain/`
+### Domain model — `app/src/main/java/app/drydock/domain/`
 - `RepositoryId.java` — UUID-wrapping identity record.
 - `Repository.java` — plan section 10.1's record shape (id, canonical root,
   display name, addedAt/lastOpenedAt, settings). Validates only pure invariants
@@ -27,7 +27,7 @@ have been manually or automatically verified").
   repository, sidebar width, expanded node ids) — no session/tab fields from
   later milestones.
 
-### Persistence — `app/src/main/java/app/cpm/state/` (+ `state/json/`)
+### Persistence — `app/src/main/java/app/drydock/state/` (+ `state/json/`)
 - `ApplicationStateRepository.java` — `load()`/`save()` interface (plan section 17).
 - `JsonApplicationStateRepository.java` — default location
   `~/Library/Application Support/ClaudeProjectManager/state.json`; atomic writes
@@ -40,7 +40,7 @@ have been manually or automatically verified").
   `JsonParser`, `JsonWriter`, `JsonParseException`), chosen over a dependency per
   plan rule 27.16 since the schema is small and fully application-controlled.
 
-### Git status detection — `app/src/main/java/app/cpm/git/`
+### Git status detection — `app/src/main/java/app/drydock/git/`
 - `GitBranchState.java` — sealed `OnBranch`/`Detached`.
 - `GitStatus.java` — `branch`, `dirty`, `Optional<UpstreamStatus>` — narrower than
   plan section 15.1's full Git-panel record (no file-change list; that's
@@ -56,7 +56,7 @@ have been manually or automatically verified").
   18). Runs `git` as a `ProcessBuilder` argument list, never a shell string (plan
   section 21); drains stdout/stderr concurrently to avoid pipe-buffer deadlock.
 
-### Application/UI wiring — `app/src/main/java/app/cpm/app/` and `.../ui/`
+### Application/UI wiring — `app/src/main/java/app/drydock/app/` and `.../ui/`
 - `RepositoryManager.java` — orchestrates add/remove: validates a candidate
   directory is a Git working tree via `GitStatusService.resolveRepositoryRoot`,
   rejects duplicates by canonical root (`RepositoryCatalog`), persists every
@@ -74,7 +74,7 @@ have been manually or automatically verified").
   manager (confirmation dialog, metadata-only). Toolbar "Add repository..." opens
   a `DirectoryChooser`, validates asynchronously, rejects duplicates/non-Git dirs
   with a real error dialog (`ui/UiErrors.java`), never a generic failure message.
-- `CpmApplication.java` — real window (`SplitPane` of sidebar + placeholder main
+- `DrydockApplication.java` — real window (`SplitPane` of sidebar + placeholder main
   area); loads persisted state and restores sidebar width on startup; persists
   sidebar width once on clean `stop()`; shuts down `GitStatusService`'s executor.
 
@@ -82,7 +82,7 @@ have been manually or automatically verified").
 50 JUnit 5 tests across `RepositoryTest`, `RepositoryCatalogTest`,
 `JsonApplicationStateRepositoryTest`, `JsonParserWriterTest`,
 `GitExecutableLocatorTest`, `GitStatusServiceTest`, `RepositoryManagerTest`,
-`ExternalEditorLauncherTest`, `CpmApplicationTest`. All exercise real
+`ExternalEditorLauncherTest`, `DrydockApplicationTest`. All exercise real
 subprocesses/temp Git repos/real files, not mocks, per plan section 22.2.
 
 ## What was verified in this final pass, and how
@@ -93,10 +93,10 @@ subprocesses/temp Git repos/real files, not mocks, per plan section 22.2.
    failures / 0 errors across all 9 test classes.
 
 2. **Live end-to-end exit-criterion exercise**, using a real temporary Git
-   repository created for this purpose (`/tmp/cpm-test-repo`, *not* this
+   repository created for this purpose (`/tmp/drydock-test-repo`, *not* this
    project's own repo), with an uncommitted change to make it dirty:
-   - Launched the real app (`./gradlew run` → `app.cpm.Main` →
-     `CpmApplication`) with a clean starting state (no pre-existing
+   - Launched the real app (`./gradlew run` → `app.drydock.Main` →
+     `DrydockApplication`) with a clean starting state (no pre-existing
      `state.json`).
    - Registered the repository through `RepositoryManager.addRepository(Path)`
      — the exact same production method the sidebar's "Add repository..."
@@ -109,7 +109,7 @@ subprocesses/temp Git repos/real files, not mocks, per plan section 22.2.
      tests and prior steps already exercise.
    - Relaunched the real app via accessibility inspection (`osascript`/System
      Events) and confirmed the sidebar table showed exactly one row:
-     `cpm-test-repo`, `master *` (dirty indicator — correct, since the repo had
+     `drydock-test-repo`, `master *` (dirty indicator — correct, since the repo had
      an uncommitted change), `0 running sessions`.
    - **Killed and restarted the app** (confirmed the process and its
      `./gradlew run` wrapper both fully exited via `pgrep` before relaunching)
@@ -128,19 +128,19 @@ subprocesses/temp Git repos/real files, not mocks, per plan section 22.2.
      unreliability as the Add flow. Fell back to calling
      `RepositoryManager.removeRepository(RepositoryId)` directly (again, the
      exact production method the menu item calls) and confirmed: (a) the
-     repository was removed from `state.json`, and (b) `/tmp/cpm-test-repo`'s
+     repository was removed from `state.json`, and (b) `/tmp/drydock-test-repo`'s
      `README.md` file was untouched on disk — same size and mtime before and
      after removal, confirming removal is metadata-only (plan section 21).
      Relaunched the app once more and confirmed the sidebar correctly showed
      the empty state with no leftover rows.
    - Cleaned up after every launch: deleted the test `state.json`/`.bak` (there
      was no real user data before this session's testing) and removed
-     `/tmp/cpm-test-repo` entirely.
+     `/tmp/drydock-test-repo` entirely.
 
 3. **Process hygiene** — every GUI launch in this step was started with its PID
    captured, explicitly killed, and confirmed gone via `pgrep`/`ps aux` before
    moving on. Final check before writing this report:
-   `ps aux | grep -E 'gradlew run|CpmApplication|app.cpm' | grep -v grep`
+   `ps aux | grep -E 'gradlew run|DrydockApplication|app.drydock' | grep -v grep`
    printed nothing.
 
 4. **Phase 0 regression check** — `./gradlew gate0dSpike` still passes **12/12**,

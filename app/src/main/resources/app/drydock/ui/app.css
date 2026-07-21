@@ -1,0 +1,1802 @@
+/*
+ * Structural stylesheet for the whole app (design handoff README is the
+ * source of truth for every measurement here). Contains NO color literals:
+ * all colors are looked-up tokens defined in theme-dark.css /
+ * theme-light.css, which ThemeManager swaps at runtime.
+ *
+ * Style classes are assigned in the app.drydock.ui view classes; pseudo-classes
+ * :running / :idle / :error are driven from SessionStatus (see
+ * SessionStatusStyles).
+ */
+
+.root {
+    -fx-background-color: -drydock-chrome;
+    -fx-font-size: 13px;
+    -fx-text-fill: -drydock-text;
+    /* System UI font; monospace areas opt in per-rule with the shared
+       "JetBrains Mono", "Menlo", monospace stack. */
+    -fx-font-family: "System";
+}
+
+.label {
+    -fx-text-fill: -drydock-text;
+}
+
+/* ---- Title bar (README section 1) ------------------------------------- */
+
+.title-bar {
+    -fx-background-color: -drydock-titlebar;
+    -fx-border-color: transparent transparent -drydock-border transparent;
+    -fx-border-width: 0 0 1 0;
+    -fx-min-height: 44px;
+    -fx-max-height: 44px;
+    -fx-padding: 0 12 0 12;
+}
+
+.title-bar-title {
+    -fx-font-size: 13px;
+    -fx-font-weight: 600;
+    -fx-text-fill: -drydock-text;
+}
+
+.traffic-light {
+    -fx-min-width: 12px;  -fx-max-width: 12px;
+    -fx-min-height: 12px; -fx-max-height: 12px;
+    -fx-background-radius: 6px;
+    -fx-background-insets: 0;
+    -fx-padding: 0;
+}
+.traffic-light.close    { -fx-background-color: #ff5f57; }
+.traffic-light.minimize { -fx-background-color: #febc2e; }
+.traffic-light.zoom     { -fx-background-color: #28c840; }
+
+.icon-button {
+    -fx-min-width: 30px;  -fx-max-width: 30px;
+    -fx-min-height: 30px; -fx-max-height: 30px;
+    -fx-background-color: transparent;
+    -fx-background-radius: 8px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 14px;
+    -fx-padding: 0;
+    -fx-cursor: hand;
+}
+.icon-button:hover {
+    -fx-background-color: -drydock-hover;
+    -fx-text-fill: -drydock-text;
+}
+
+/* ---- Split pane / divider (README section 3) --------------------------- */
+
+.split-pane {
+    -fx-background-color: -drydock-chrome;
+    -fx-background-insets: 0;
+    -fx-padding: 0;
+}
+.split-pane > .split-pane-divider {
+    -fx-background-color: transparent;
+    -fx-padding: 0 2 0 2; /* ~5px hit area */
+    -fx-cursor: h-resize;
+}
+.split-pane > .split-pane-divider:hover {
+    -fx-background-color: -drydock-accent-soft;
+}
+
+/* ---- Sidebar (README section 2) ---------------------------------------- */
+
+.sidebar {
+    -fx-background-color: -drydock-sidebar;
+    -fx-border-color: transparent -drydock-border transparent transparent;
+    -fx-border-width: 0 1 0 0;
+}
+
+.sidebar-header {
+    -fx-padding: 14 14 10 14;
+    -fx-spacing: 10;
+}
+
+.add-repo-button {
+    -fx-min-height: 34px; -fx-max-height: 34px;
+    -fx-max-width: infinity;
+    -fx-background-color: -drydock-accent;
+    -fx-background-radius: 9px;
+    -fx-text-fill: white;
+    -fx-font-size: 12.5px;
+    -fx-font-weight: 600;
+    -fx-cursor: hand;
+    -fx-effect: dropshadow(gaussian, rgba(0, 0, 0, 0.12), 2, 0, 0, 1);
+    -fx-alignment: center;
+}
+.add-repo-button:hover, .add-repo-button:showing {
+    -fx-background-color: derive(-drydock-accent, 8%);
+}
+.add-repo-button > .arrow-button > .arrow {
+    -fx-background-color: white;
+}
+.add-repo-button > .label {
+    -fx-text-fill: white;
+}
+
+.filter-field {
+    -fx-min-height: 32px; -fx-max-height: 32px;
+    -fx-background-color: -drydock-input-bg;
+    -fx-background-radius: 9px;
+    -fx-border-color: -drydock-border;
+    -fx-border-radius: 9px;
+    -fx-border-width: 1px;
+    -fx-text-fill: -drydock-text;
+    -fx-prompt-text-fill: -drydock-text-faint;
+    -fx-highlight-fill: -drydock-accent-soft;
+    -fx-font-size: 12px;
+    -fx-padding: 0 10 0 10;
+}
+.filter-field:focused {
+    -fx-border-color: -drydock-accent;
+    -fx-effect: dropshadow(gaussian, -drydock-accent-soft, 3, 1.0, 0, 0);
+}
+
+/* Slim strip shown in the sidebar's place while it is collapsed (⌘0):
+ * an expand button plus the shortcut hint underneath it. */
+.sidebar-rail {
+    -fx-background-color: -drydock-sidebar;
+    -fx-padding: 8 3 8 3;
+    -fx-border-color: transparent -drydock-border transparent transparent;
+    -fx-border-width: 0 1 0 0;
+}
+.rail-hint {
+    -fx-font-size: 10px;
+    -fx-text-fill: -drydock-text-faint;
+}
+
+/* The repository/session tree. Custom cells draw everything; strip all
+ * built-in TreeView chrome (disclosure arrows are our own carets). */
+.repo-tree {
+    -fx-background-color: -drydock-sidebar;
+    -fx-background-insets: 0;
+    -fx-padding: 0 6 0 6;
+}
+.repo-tree .tree-cell {
+    -fx-background-color: transparent;
+    -fx-padding: 0;
+    -fx-indent: 0;
+}
+.repo-tree .tree-cell > .tree-disclosure-node {
+    -fx-padding: 0;
+    -fx-min-width: 0;
+    -fx-max-width: 0;
+}
+.repo-tree .tree-cell > .tree-disclosure-node > .arrow {
+    -fx-background-color: transparent;
+    -fx-padding: 0;
+    -fx-shape: null;
+}
+
+.repo-row {
+    -fx-padding: 7 8 7 8;
+    -fx-background-radius: 8px;
+    -fx-cursor: hand;
+}
+.repo-row:hover {
+    -fx-background-color: -drydock-hover;
+}
+
+.repo-caret {
+    -fx-font-size: 9px;
+    -fx-text-fill: -drydock-text-faint;
+}
+
+.repo-name {
+    -fx-font-size: 13px;
+    -fx-font-weight: 600;
+    -fx-text-fill: -drydock-text;
+}
+
+.repo-branch {
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 10.5px;
+    -fx-text-fill: -drydock-text-dim;
+}
+
+.repo-count {
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 10px;
+    -fx-text-fill: -drydock-text-faint;
+}
+
+/* Small square hover-action buttons on repo/session rows (22px). */
+.row-action-button {
+    -fx-min-width: 22px;  -fx-max-width: 22px;
+    -fx-min-height: 22px; -fx-max-height: 22px;
+    -fx-background-color: transparent;
+    -fx-background-radius: 6px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 11px;
+    -fx-padding: 0;
+    -fx-cursor: hand;
+}
+.row-action-button:hover {
+    -fx-background-color: -drydock-active-bg;
+    -fx-text-fill: -drydock-text;
+}
+.row-action-button.destructive:hover {
+    -fx-text-fill: -drydock-error;
+}
+
+.session-row {
+    -fx-padding: 5 8 5 8;
+    -fx-background-radius: 8px;
+    -fx-cursor: hand;
+    /* 11px left rule marking the child indent. */
+    -fx-border-color: transparent transparent transparent -drydock-border;
+    -fx-border-width: 0 0 0 1;
+    -fx-border-insets: 0 0 0 0;
+}
+.session-row:hover {
+    -fx-background-color: -drydock-hover;
+}
+.session-row.active {
+    -fx-background-color: -drydock-active-bg;
+}
+
+.session-name {
+    -fx-font-size: 12.5px;
+    -fx-text-fill: -drydock-text-dim;
+}
+.session-row.active .session-name {
+    -fx-text-fill: -drydock-text;
+}
+
+.session-meta {
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 10px;
+    -fx-text-fill: -drydock-text-faint;
+}
+
+/* Status dots. Size via style class (dot-5/7/8), color via pseudo-class. */
+.status-dot {
+    -fx-background-radius: 100px;
+    -fx-background-color: -drydock-text-faint;
+}
+.status-dot.dot-8 { -fx-min-width: 8px; -fx-max-width: 8px; -fx-min-height: 8px; -fx-max-height: 8px; }
+.status-dot.dot-7 { -fx-min-width: 7px; -fx-max-width: 7px; -fx-min-height: 7px; -fx-max-height: 7px; }
+.status-dot.dot-5 { -fx-min-width: 5px; -fx-max-width: 5px; -fx-min-height: 5px; -fx-max-height: 5px; }
+.status-dot:running {
+    -fx-background-color: -drydock-running;
+    -fx-effect: dropshadow(gaussian, -drydock-running-soft, 3, 1.0, 0, 0);
+}
+.status-dot:error {
+    -fx-background-color: -drydock-error;
+    -fx-effect: dropshadow(gaussian, -drydock-error-soft, 3, 1.0, 0, 0);
+}
+
+.sidebar-footer {
+    -fx-min-height: 36px; -fx-max-height: 36px;
+    -fx-padding: 0 14 0 14;
+    -fx-spacing: 6;
+    -fx-border-color: -drydock-border transparent transparent transparent;
+    -fx-border-width: 1 0 0 0;
+    -fx-alignment: center-left;
+}
+.sidebar-footer .label {
+    -fx-font-size: 11px;
+    -fx-text-fill: -drydock-text-faint;
+}
+
+/* ---- Main pane & tab strip (README section 4) --------------------------- */
+
+.main-pane {
+    -fx-background-color: -drydock-main;
+}
+
+.session-tabs {
+    -fx-background-color: -drydock-main;
+}
+.session-tabs > .tab-header-area {
+    -fx-padding: 0;
+    -fx-background-color: -drydock-tabbar;
+}
+.session-tabs > .tab-header-area > .tab-header-background {
+    -fx-background-color: -drydock-tabbar;
+    -fx-border-color: transparent transparent -drydock-border transparent;
+    -fx-border-width: 0 0 1 0;
+}
+.session-tabs > .tab-header-area > .headers-region {
+    -fx-padding: 6 0 0 8; /* 50px strip, 44px tabs bottom-aligned */
+}
+.session-tabs > .tab-header-area > .headers-region > .tab {
+    /* 44px + real vertical padding: the two-line label needs breathing
+     * room, otherwise the title sits squeezed against the tab edges. */
+    -fx-min-height: 44px; -fx-max-height: 44px;
+    -fx-background-color: -drydock-tabbar;
+    -fx-background-radius: 8 8 0 0;
+    -fx-border-color: transparent;
+    -fx-border-width: 1 1 0 1;
+    -fx-border-radius: 8 8 0 0;
+    -fx-padding: 5 10 5 12;
+}
+.session-tabs > .tab-header-area > .headers-region > .tab:hover {
+    -fx-background-color: -drydock-hover;
+}
+.session-tabs > .tab-header-area > .headers-region > .tab:selected {
+    -fx-background-color: -drydock-main;
+    -fx-border-color: -drydock-border;
+}
+.session-tabs > .tab-header-area > .headers-region > .tab:selected .focus-indicator {
+    -fx-border-color: transparent;
+}
+.session-tabs > .tab-header-area > .control-buttons-tab {
+    -fx-padding: 0;
+}
+
+.tab-repo-label {
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 9.5px;
+    -fx-text-fill: -drydock-text-faint;
+}
+.tab-title-label {
+    -fx-font-size: 12.5px;
+    -fx-text-fill: -drydock-text-dim;
+}
+.tab:selected .tab-title-label {
+    -fx-text-fill: -drydock-text;
+}
+.tab-rename-field {
+    -fx-background-color: -drydock-input-bg;
+    -fx-background-radius: 6px;
+    -fx-border-color: -drydock-accent;
+    -fx-border-radius: 6px;
+    -fx-border-width: 1px;
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 12.5px;
+    -fx-padding: 1 6 1 6;
+}
+
+.tab-close-button {
+    -fx-min-width: 17px;  -fx-max-width: 17px;
+    -fx-min-height: 17px; -fx-max-height: 17px;
+    -fx-background-color: transparent;
+    -fx-background-radius: 5px;
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 12px;
+    -fx-padding: 0;
+    -fx-cursor: hand;
+}
+.tab-close-button:hover {
+    -fx-background-color: -drydock-active-bg;
+    -fx-text-fill: -drydock-text;
+}
+
+/* Tab-strip trailing "+" (new session) button. */
+.new-tab-button {
+    -fx-min-width: 30px;  -fx-max-width: 30px;
+    -fx-min-height: 30px; -fx-max-height: 30px;
+    -fx-background-color: transparent;
+    -fx-background-radius: 8px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 15px;
+    -fx-padding: 0;
+    -fx-cursor: hand;
+}
+.new-tab-button:hover, .new-tab-button:showing {
+    -fx-background-color: -drydock-hover;
+    -fx-text-fill: -drydock-text;
+}
+.new-tab-button > .arrow-button {
+    -fx-padding: 0;
+}
+.new-tab-button > .arrow-button > .arrow {
+    -fx-background-color: transparent;
+    -fx-padding: 0;
+}
+
+/* ---- Session view header (README section 5) ----------------------------- */
+
+.session-header {
+    -fx-padding: 15 24 15 24;
+    -fx-spacing: 12;
+    -fx-border-color: transparent transparent -drydock-border transparent;
+    -fx-border-width: 0 0 1 0;
+    -fx-background-color: -drydock-main;
+    -fx-alignment: center-left;
+}
+
+.header-icon-button {
+    -fx-min-width: 32px;  -fx-max-width: 32px;
+    -fx-min-height: 32px; -fx-max-height: 32px;
+    -fx-background-color: transparent;
+    -fx-background-radius: 9px;
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 9px;
+    -fx-border-width: 1px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 13px;
+    -fx-padding: 0;
+    -fx-cursor: hand;
+}
+.header-icon-button:hover {
+    -fx-background-color: -drydock-hover;
+    -fx-text-fill: -drydock-text;
+}
+
+.session-title {
+    -fx-font-size: 14px;
+    -fx-font-weight: 600;
+    -fx-text-fill: -drydock-text;
+}
+
+.session-meta-line {
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 11px;
+    -fx-text-fill: -drydock-text-dim;
+}
+
+.status-pill {
+    -fx-padding: 3 10 3 8;
+    -fx-background-radius: 100px;
+    -fx-background-color: -drydock-hover;
+    -fx-spacing: 6;
+    -fx-alignment: center;
+}
+.status-pill .label {
+    -fx-font-size: 11px;
+    -fx-text-fill: -drydock-text-dim;
+}
+.status-pill:running {
+    -fx-background-color: -drydock-running-soft;
+}
+.status-pill:running .label {
+    -fx-text-fill: -drydock-running;
+}
+.status-pill:error {
+    -fx-background-color: -drydock-error-soft;
+}
+.status-pill:error .label {
+    -fx-text-fill: -drydock-error;
+}
+
+/* The ghostty host region behind/around the native terminal view. Matches
+ * -drydock-main (and the background in terminal-{dark,light}.conf) so the
+ * terminal blends into the pane instead of standing out as a darker box. */
+.terminal-region {
+    -fx-background-color: -drydock-main;
+}
+
+/* ---- Resume picker (README section 6) ----------------------------------- */
+
+.resume-picker {
+    -fx-background-color: -drydock-main;
+    -fx-padding: 26 28 0 28;
+    -fx-spacing: 14;
+}
+
+.picker-icon-tile {
+    -fx-min-width: 30px;  -fx-max-width: 30px;
+    -fx-min-height: 30px; -fx-max-height: 30px;
+    -fx-background-color: -drydock-accent-soft;
+    -fx-background-radius: 8px;
+    -fx-text-fill: -drydock-accent;
+    -fx-font-size: 14px;
+    -fx-alignment: center;
+}
+
+.picker-title {
+    -fx-font-size: 15px;
+    -fx-font-weight: 600;
+    -fx-text-fill: -drydock-text;
+}
+
+.picker-sub {
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 11.5px;
+    -fx-text-fill: -drydock-text-dim;
+}
+
+.picker-search {
+    -fx-min-height: 46px; -fx-max-height: 46px;
+    -fx-background-color: -drydock-input-bg;
+    -fx-background-radius: 12px;
+    -fx-border-color: -drydock-border;
+    -fx-border-radius: 12px;
+    -fx-border-width: 1.5px;
+    -fx-text-fill: -drydock-text;
+    -fx-prompt-text-fill: -drydock-text-faint;
+    -fx-font-size: 13px;
+    -fx-padding: 0 14 0 14;
+}
+.picker-search:focused {
+    -fx-border-color: -drydock-accent;
+    -fx-effect: dropshadow(gaussian, -drydock-accent-soft, 3, 1.0, 0, 0);
+}
+
+.conversation-list {
+    -fx-background-color: transparent;
+    -fx-background-insets: 0;
+    -fx-padding: 0;
+}
+.conversation-list .list-cell {
+    -fx-background-color: transparent;
+    -fx-padding: 3 0 3 0;
+}
+
+.conversation-row {
+    -fx-background-color: -drydock-row-bg;
+    -fx-background-radius: 12px;
+    -fx-border-color: -drydock-border;
+    -fx-border-radius: 12px;
+    -fx-border-width: 1px;
+    -fx-padding: 10 14 10 12;
+    -fx-spacing: 12;
+    -fx-cursor: hand;
+    -fx-alignment: center-left;
+}
+.conversation-row.selected {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-border-color: -drydock-accent;
+}
+
+.conv-initial {
+    -fx-min-width: 34px;  -fx-max-width: 34px;
+    -fx-min-height: 34px; -fx-max-height: 34px;
+    -fx-background-color: -drydock-hover;
+    -fx-background-radius: 9px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 13px;
+    -fx-font-weight: 600;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-alignment: center;
+}
+.conversation-row.selected .conv-initial {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-text-fill: -drydock-accent;
+}
+
+.conv-title {
+    -fx-font-size: 13.5px;
+    -fx-font-weight: 600;
+    -fx-text-fill: -drydock-text;
+}
+
+.conv-meta {
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 11px;
+    -fx-text-fill: -drydock-text-dim;
+}
+
+.resume-badge {
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 10px;
+    -fx-font-weight: 600;
+    -fx-text-fill: -drydock-accent;
+    -fx-background-color: -drydock-accent-soft;
+    -fx-background-radius: 6px;
+    -fx-padding: 3 8 3 8;
+}
+
+.picker-empty-glyph {
+    -fx-font-size: 26px;
+    -fx-text-fill: -drydock-text-faint;
+}
+.picker-empty-title {
+    -fx-font-size: 13px;
+    -fx-text-fill: -drydock-text-dim;
+}
+.picker-empty-hint {
+    -fx-font-size: 12px;
+    -fx-text-fill: -drydock-text-faint;
+}
+
+.keycap-footer {
+    -fx-padding: 12 28 14 28;
+    -fx-hgap: 16;
+    -fx-vgap: 8;
+    -fx-border-color: -drydock-border transparent transparent transparent;
+    -fx-border-width: 1 0 0 0;
+    -fx-background-color: -drydock-main;
+}
+
+.keycap {
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 10.5px;
+    -fx-font-weight: 600;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-background-color: -drydock-keycap-bg;
+    -fx-background-radius: 6px;
+    -fx-border-color: -drydock-border;
+    -fx-border-radius: 6px;
+    -fx-border-width: 1px;
+    -fx-padding: 2 7 2 7;
+}
+
+.keycap-label {
+    -fx-font-size: 11px;
+    -fx-text-fill: -drydock-text-faint;
+}
+
+/* ---- Modals (README sections 7 & 8) ------------------------------------- */
+
+.modal-backdrop {
+    -fx-background-color: rgba(0, 0, 0, 0.45);
+}
+
+.modal {
+    -fx-background-color: -drydock-main;
+    -fx-background-radius: 16px;
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 16px;
+    -fx-border-width: 1px;
+    -fx-effect: dropshadow(gaussian, rgba(0, 0, 0, 0.4), 60, 0, 0, 24);
+    -fx-padding: 20 22 20 22;
+    -fx-spacing: 14;
+}
+
+.modal-title {
+    -fx-font-size: 15px;
+    -fx-font-weight: 600;
+    -fx-text-fill: -drydock-text;
+}
+
+.modal-search {
+    -fx-min-height: 42px; -fx-max-height: 42px;
+    -fx-background-color: -drydock-input-bg;
+    -fx-background-radius: 11px;
+    -fx-border-color: -drydock-border;
+    -fx-border-radius: 11px;
+    -fx-border-width: 1px;
+    -fx-text-fill: -drydock-text;
+    -fx-prompt-text-fill: -drydock-text-faint;
+    -fx-font-size: 13px;
+    -fx-padding: 0 12 0 12;
+}
+.modal-search:focused {
+    -fx-border-color: -drydock-accent;
+    -fx-effect: dropshadow(gaussian, -drydock-accent-soft, 3, 1.0, 0, 0);
+}
+
+/* The clone modal's result list scroll pane: fully transparent chrome. */
+.gh-results-scroll,
+.gh-results-scroll > .viewport {
+    -fx-background-color: transparent;
+    -fx-background: transparent;
+}
+
+.gh-row {
+    -fx-background-radius: 11px;
+    -fx-padding: 10 12 10 10;
+    -fx-spacing: 12;
+    -fx-alignment: center-left;
+}
+.gh-row:hover {
+    -fx-background-color: -drydock-hover;
+}
+
+.gh-name {
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 13px;
+    -fx-font-weight: 600;
+    -fx-text-fill: -drydock-text;
+}
+
+.gh-desc {
+    -fx-font-size: 12px;
+    -fx-text-fill: -drydock-text-dim;
+}
+
+.gh-meta {
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 10.5px;
+    -fx-text-fill: -drydock-text-faint;
+}
+
+.clone-button {
+    -fx-min-height: 32px; -fx-max-height: 32px;
+    -fx-background-color: -drydock-accent;
+    -fx-background-radius: 8px;
+    -fx-text-fill: white;
+    -fx-font-size: 12px;
+    -fx-font-weight: 600;
+    -fx-padding: 0 14 0 14;
+    -fx-cursor: hand;
+}
+.clone-button:hover {
+    -fx-background-color: derive(-drydock-accent, 8%);
+}
+
+.shortcut-row-label {
+    -fx-font-size: 12.5px;
+    -fx-text-fill: -drydock-text-dim;
+}
+
+/* ---- Menus / context menus ---------------------------------------------- */
+
+.context-menu {
+    -fx-background-color: -drydock-sidebar;
+    -fx-background-radius: 11px;
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 11px;
+    -fx-border-width: 1px;
+    -fx-effect: dropshadow(gaussian, rgba(0, 0, 0, 0.3), 30, 0, 0, 12);
+    -fx-padding: 6;
+}
+.menu-item {
+    -fx-background-radius: 7px;
+    -fx-padding: 6 12 6 10;
+}
+.menu-item .label {
+    -fx-font-size: 12.5px;
+    -fx-text-fill: -drydock-text;
+}
+.menu-item:focused, .menu-item:hover {
+    -fx-background-color: -drydock-accent-soft;
+}
+.menu-item:focused .label, .menu-item:hover .label {
+    -fx-text-fill: -drydock-text;
+}
+.separator .line {
+    -fx-border-color: -drydock-border transparent transparent transparent;
+    -fx-border-width: 1 0 0 0;
+}
+
+/* ---- Scroll bars (minimal, flat) ---------------------------------------- */
+
+.scroll-bar {
+    -fx-background-color: transparent;
+}
+.scroll-bar .track,
+.scroll-bar .track-background {
+    -fx-background-color: transparent;
+}
+.scroll-bar .thumb {
+    -fx-background-color: -drydock-active-bg;
+    -fx-background-radius: 100px;
+}
+.scroll-bar .thumb:hover {
+    -fx-background-color: -drydock-border-strong;
+}
+.scroll-bar .increment-button,
+.scroll-bar .decrement-button,
+.scroll-bar .increment-arrow,
+.scroll-bar .decrement-arrow {
+    -fx-padding: 0;
+    -fx-background-color: transparent;
+    -fx-shape: null;
+}
+.scroll-bar:vertical {
+    -fx-pref-width: 9px;
+}
+.scroll-bar:horizontal {
+    -fx-pref-height: 9px;
+}
+.corner {
+    -fx-background-color: transparent;
+}
+
+/* ---- Tooltip ------------------------------------------------------------ */
+
+.tooltip {
+    -fx-background-color: -drydock-sidebar;
+    -fx-background-radius: 8px;
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 8px;
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 11.5px;
+    -fx-padding: 6 10 6 10;
+}
+
+/* ---- Session sub-tabs (Terminal / Explorer, handoff "Session Explorer") -- */
+
+.session-subtab-bar {
+    -fx-background-color: -drydock-tabbar;
+    -fx-border-color: -drydock-border transparent transparent transparent;
+    -fx-border-width: 1 0 0 0;
+    -fx-min-height: 40px;
+    -fx-pref-height: 40px;
+    -fx-max-height: 40px;
+    -fx-padding: 0 12 0 8;
+}
+.session-subtab {
+    -fx-background-color: transparent;
+    -fx-background-radius: 6px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 12px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-padding: 5 12 5 12;
+    -fx-cursor: hand;
+}
+.session-subtab:hover {
+    -fx-background-color: -drydock-hover;
+}
+.session-subtab:selected {
+    -fx-background-color: -drydock-active-bg;
+    -fx-text-fill: -drydock-text;
+}
+.session-subtab-context {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 11.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+
+/* ---- Session Explorer: search rail -------------------------------------- */
+
+.explorer-root {
+    -fx-background-color: -drydock-main;
+}
+.search-rail {
+    -fx-background-color: -drydock-sidebar;
+    -fx-border-color: transparent -drydock-border transparent transparent;
+    -fx-border-width: 0 1 0 0;
+}
+.search-rail-content {
+    -fx-padding: 12;
+    -fx-spacing: 10;
+}
+.search-rail-collapsed {
+    -fx-padding: 10 0 10 0;
+    -fx-spacing: 14;
+}
+.search-rail-title {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 11px;
+}
+.rail-collapse-button, .rail-expand-button, .viewer-gutter-toggle {
+    -fx-background-color: transparent;
+    -fx-background-radius: 6px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 13px;
+    -fx-padding: 2 8 2 8;
+    -fx-cursor: hand;
+}
+.rail-collapse-button:hover, .rail-expand-button:hover, .viewer-gutter-toggle:hover {
+    -fx-background-color: -drydock-hover;
+    -fx-text-fill: -drydock-text;
+}
+.rail-vertical-label {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 11px;
+}
+.seg-toggle {
+    -fx-background-color: -drydock-input-bg;
+    -fx-background-radius: 7px;
+    -fx-border-color: -drydock-border;
+    -fx-border-radius: 7px;
+    -fx-padding: 2;
+}
+.seg-toggle-button {
+    -fx-background-color: transparent;
+    -fx-background-radius: 5px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 12px;
+    -fx-padding: 3 14 3 14;
+    -fx-cursor: hand;
+}
+.seg-toggle-button:selected {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-text-fill: -drydock-text;
+}
+.explorer-search-row {
+    -fx-background-color: -drydock-input-bg;
+    -fx-background-radius: 7px;
+    -fx-border-color: -drydock-border;
+    -fx-border-radius: 7px;
+    -fx-padding: 2 8 2 8;
+}
+.search-field-icon {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 13px;
+}
+.explorer-search-field {
+    -fx-background-color: transparent;
+    -fx-text-fill: -drydock-text;
+    -fx-prompt-text-fill: -drydock-text-faint;
+    -fx-font-size: 12.5px;
+    -fx-padding: 4 0 4 0;
+    -fx-background-insets: 0;
+    -fx-highlight-fill: -drydock-accent-soft;
+}
+.search-results-scroll {
+    -fx-background-color: transparent;
+}
+.search-results-scroll > .viewport {
+    -fx-background-color: transparent;
+}
+.search-results {
+    -fx-background-color: transparent;
+}
+.result-file-row {
+    -fx-background-radius: 6px;
+    -fx-padding: 3 6 3 2;
+    -fx-cursor: hand;
+}
+.result-file-row:hover {
+    -fx-background-color: -drydock-hover;
+}
+.result-check {
+    -fx-padding: 0;
+}
+.result-check .box {
+    -fx-background-color: -drydock-input-bg;
+    -fx-background-radius: 4px;
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 4px;
+    -fx-padding: 2;
+}
+.result-check:selected .box {
+    -fx-background-color: -drydock-accent;
+    -fx-border-color: -drydock-accent;
+}
+.result-check:selected .mark {
+    -fx-background-color: white;
+}
+.result-caret {
+    -fx-background-color: transparent;
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10px;
+    -fx-padding: 0 2 0 2;
+    -fx-cursor: hand;
+}
+.filetype-badge {
+    -fx-background-color: -drydock-active-bg;
+    -fx-background-radius: 4px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 9.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-padding: 1 5 1 5;
+}
+.result-file-name {
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 12.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.result-file-path {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 11px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.match-count-pill {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-background-radius: 100px;
+    -fx-text-fill: -drydock-accent;
+    -fx-font-size: 10.5px;
+    -fx-padding: 1 7 1 7;
+}
+.result-match-lines {
+    -fx-padding: 0 0 4 26;
+}
+.result-match-line {
+    -fx-background-radius: 5px;
+    -fx-padding: 2 6 2 4;
+    -fx-cursor: hand;
+}
+.result-match-line:hover {
+    -fx-background-color: -drydock-hover;
+}
+.match-line-number {
+    -fx-text-fill: -drydock-code-gutter;
+    -fx-font-size: 11px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-min-width: 26px;
+}
+.match-line-text {
+    -fx-max-height: 18px;
+}
+.match-line-plain {
+    -fx-fill: -drydock-text-dim;
+    -fx-font-size: 11.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.match-line-highlight {
+    -fx-background-color: -drydock-match-bg;
+    -fx-background-radius: 3px;
+    -fx-text-fill: -drydock-text;
+    -fx-font-weight: bold;
+    -fx-font-size: 11.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-padding: 0 1 0 1;
+}
+.open-selected-bar {
+    -fx-padding: 8 0 0 0;
+    -fx-border-color: -drydock-border transparent transparent transparent;
+    -fx-border-width: 1 0 0 0;
+}
+.open-selected-count {
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 11.5px;
+}
+.open-selected-button {
+    -fx-background-color: -drydock-accent;
+    -fx-background-radius: 7px;
+    -fx-text-fill: white;
+    -fx-font-size: 12px;
+    -fx-padding: 5 12 5 12;
+    -fx-cursor: hand;
+}
+.open-selected-button:hover {
+    -fx-opacity: 0.9;
+}
+
+/* ---- Session Explorer: viewer ------------------------------------------- */
+
+.file-viewer {
+    -fx-background-color: -drydock-code-bg;
+}
+.viewer-tabs {
+    -fx-background-color: -drydock-tabbar;
+}
+.viewer-tabs .tab-header-area .tab-header-background {
+    -fx-background-color: -drydock-tabbar;
+}
+.viewer-tabs .tab {
+    -fx-background-color: transparent;
+    -fx-background-radius: 0;
+    -fx-padding: 4 10 4 10;
+}
+.viewer-tabs .tab:selected {
+    -fx-background-color: -drydock-code-bg;
+}
+.viewer-tabs .tab .focus-indicator {
+    -fx-border-color: transparent;
+}
+.viewer-tab-label {
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 12px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.viewer-tabs .tab:selected .viewer-tab-label {
+    -fx-text-fill: -drydock-text;
+}
+.viewer-breadcrumb {
+    -fx-background-color: -drydock-code-bg;
+    -fx-border-color: transparent transparent -drydock-border transparent;
+    -fx-border-width: 0 0 1 0;
+    -fx-padding: 6 12 6 12;
+}
+.breadcrumb-segment {
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 11.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.breadcrumb-separator {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 11.5px;
+}
+.read-only-chip {
+    -fx-background-color: -drydock-active-bg;
+    -fx-background-radius: 100px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 10px;
+    -fx-padding: 1 8 1 8;
+}
+.viewer-empty {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 13px;
+}
+
+/* ---- Code area (RichTextFX, -drydock-code-* palette) ------------------------- */
+
+.code-area {
+    -fx-background-color: -drydock-code-bg;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 12px;
+}
+.code-area .text {
+    -fx-fill: -drydock-code-text;
+}
+.code-area .caret {
+    -fx-stroke: transparent;
+}
+.code-area .lineno {
+    -fx-background-color: -drydock-code-bg;
+    -fx-text-fill: -drydock-code-gutter;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 11px;
+    -fx-padding: 0 8 0 8;
+}
+.code-area .selection {
+    -fx-fill: -drydock-accent-soft;
+}
+.code-area .code-kw { -fx-fill: -drydock-code-kw; }
+.code-area .code-str { -fx-fill: -drydock-code-str; }
+.code-area .code-com { -fx-fill: -drydock-code-com; }
+.code-area .code-num { -fx-fill: -drydock-code-num; }
+.code-area .code-type { -fx-fill: -drydock-code-type; }
+.code-area .code-fn { -fx-fill: -drydock-code-fn; }
+.code-area .code-anno { -fx-fill: -drydock-code-anno; }
+.code-area .code-punct { -fx-fill: -drydock-code-punct; }
+.code-area .code-match { -rtfx-background-color: -drydock-match-bg; }
+
+/* ---- Worktree lifecycle: sidebar tags + chips ---------------------------- */
+
+.branch-tag, .branch-tag-worktree {
+    -fx-font-size: 10.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-background-radius: 4px;
+    -fx-padding: 0 5 0 5;
+}
+.branch-tag {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-background-color: -drydock-hover;
+}
+.branch-tag-worktree {
+    -fx-text-fill: -drydock-accent;
+    -fx-background-color: -drydock-accent-soft;
+}
+.dirty-dot {
+    -fx-background-color: -drydock-dirty;
+    -fx-background-radius: 100px;
+    -fx-min-width: 5px;
+    -fx-min-height: 5px;
+    -fx-max-width: 5px;
+    -fx-max-height: 5px;
+}
+.pr-chip, .pr-chip-merged {
+    -fx-font-size: 10px;
+    -fx-background-radius: 100px;
+    -fx-padding: 1 7 1 7;
+}
+.pr-chip {
+    -fx-background-color: -drydock-pr-soft;
+    -fx-text-fill: -drydock-pr;
+}
+.pr-chip-merged {
+    -fx-background-color: -drydock-merged-soft;
+    -fx-text-fill: -drydock-merged;
+}
+
+/* ---- Worktree lifecycle: create modal ------------------------------------ */
+
+.worktree-field-label {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 11px;
+}
+.worktree-field {
+    -fx-background-color: -drydock-input-bg;
+    -fx-background-radius: 7px;
+    -fx-border-color: -drydock-border;
+    -fx-border-radius: 7px;
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 12.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-padding: 7 10 7 10;
+    -fx-highlight-fill: -drydock-accent-soft;
+}
+.worktree-base-chip {
+    -fx-background-color: -drydock-active-bg;
+    -fx-background-radius: 6px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 12px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-padding: 5 10 5 10;
+}
+.worktree-task {
+    -fx-background-color: -drydock-input-bg;
+    -fx-background-radius: 7px;
+    -fx-border-color: -drydock-border;
+    -fx-border-radius: 7px;
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 12.5px;
+    -fx-highlight-fill: -drydock-accent-soft;
+}
+.worktree-task .content {
+    -fx-background-color: transparent;
+}
+.worktree-command-preview {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 11.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-background-color: -drydock-code-bg;
+    -fx-background-radius: 6px;
+    -fx-padding: 7 10 7 10;
+}
+.worktree-error {
+    -fx-text-fill: -drydock-error;
+    -fx-font-size: 11.5px;
+}
+.worktree-create-button {
+    -fx-background-color: -drydock-accent;
+    -fx-background-radius: 7px;
+    -fx-text-fill: white;
+    -fx-font-size: 12.5px;
+    -fx-padding: 6 14 6 14;
+    -fx-cursor: hand;
+}
+.worktree-create-button:hover {
+    -fx-opacity: 0.9;
+}
+.worktree-create-button:disabled {
+    -fx-opacity: 0.5;
+}
+.worktree-cancel-button {
+    -fx-background-color: transparent;
+    -fx-background-radius: 7px;
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 7px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 12.5px;
+    -fx-padding: 5 13 5 13;
+    -fx-cursor: hand;
+}
+.worktree-cancel-button:hover {
+    -fx-background-color: -drydock-hover;
+}
+
+/* ---- Worktree lifecycle: session header + Finish -------------------------- */
+
+.worktree-context-line {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 11px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.chip-ahead {
+    -fx-background-color: -drydock-active-bg;
+    -fx-background-radius: 100px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 10px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-padding: 1 7 1 7;
+}
+.chip-dirty {
+    -fx-background-color: -drydock-dirty-soft;
+    -fx-background-radius: 100px;
+    -fx-text-fill: -drydock-dirty;
+    -fx-font-size: 10px;
+    -fx-padding: 1 7 1 7;
+}
+.chip-clean {
+    -fx-background-color: -drydock-running-soft;
+    -fx-background-radius: 100px;
+    -fx-text-fill: -drydock-running;
+    -fx-font-size: 10px;
+    -fx-padding: 1 7 1 7;
+}
+.finish-button {
+    -fx-background-color: -drydock-accent;
+    -fx-background-radius: 7px;
+    -fx-text-fill: white;
+    -fx-font-size: 12px;
+    -fx-padding: 5 12 5 12;
+    -fx-cursor: hand;
+}
+.finish-button:hover {
+    -fx-opacity: 0.9;
+}
+.handoff-pill {
+    -fx-background-color: -drydock-active-bg;
+    -fx-background-radius: 100px;
+    -fx-padding: 3 10 3 10;
+}
+.handoff-pill .progress-indicator {
+    -fx-progress-color: -drydock-accent;
+}
+.handoff-label {
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 11.5px;
+}
+
+/* ---- Finish panel --------------------------------------------------------- */
+
+.finish-summary {
+    -fx-background-color: -drydock-input-bg;
+    -fx-background-radius: 8px;
+    -fx-border-color: -drydock-border;
+    -fx-border-radius: 8px;
+    -fx-padding: 10 12 10 12;
+}
+.finish-summary-headline {
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 12px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.finish-summary-row {
+    -fx-padding: 1 0 1 0;
+}
+.finish-file-marker {
+    -fx-font-size: 10.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-min-width: 14px;
+}
+.marker-added { -fx-text-fill: -drydock-running; }
+.marker-deleted { -fx-text-fill: -drydock-error; }
+.marker-modified { -fx-text-fill: -drydock-dirty; }
+.finish-file-path {
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 11.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.finish-file-stat {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 11px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.finish-action-box {
+    -fx-background-radius: 8px;
+    -fx-border-radius: 8px;
+    -fx-border-color: -drydock-border;
+    -fx-padding: 10 12 10 12;
+    -fx-cursor: hand;
+}
+.finish-action-box:hover {
+    -fx-background-color: -drydock-hover;
+}
+.finish-action-accent {
+    -fx-border-color: -drydock-accent;
+    -fx-background-color: -drydock-accent-soft;
+}
+.finish-action-destructive:hover {
+    -fx-background-color: -drydock-error-soft;
+}
+.finish-action-title {
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 13px;
+}
+.finish-action-destructive .finish-action-title {
+    -fx-text-fill: -drydock-error;
+}
+.finish-action-caption {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 11px;
+}
+.finish-waiting {
+    -fx-background-color: -drydock-pr-soft;
+    -fx-background-radius: 8px;
+    -fx-padding: 10 12 10 12;
+}
+.finish-waiting-title {
+    -fx-text-fill: -drydock-pr;
+    -fx-font-size: 13px;
+}
+
+/* ---- Worktree discovery: unopened rows, Start/Resume pills, rescan ------- */
+
+.worktree-unopened-row {
+    -fx-background-radius: 6px;
+    -fx-cursor: hand;
+}
+.worktree-unopened-row:hover {
+    -fx-background-color: -drydock-hover;
+}
+.worktree-unopened-icon {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 12px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.worktree-unopened-branch {
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 12.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.worktree-discovered {
+    -fx-border-color: -drydock-accent;
+    -fx-border-radius: 6px;
+    -fx-background-color: -drydock-accent-soft;
+}
+.start-pill {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-background-radius: 100px;
+    -fx-text-fill: -drydock-accent;
+    -fx-font-size: 11px;
+    -fx-padding: 2 9 2 9;
+    -fx-cursor: hand;
+}
+.start-pill:hover {
+    -fx-background-color: -drydock-accent;
+    -fx-text-fill: white;
+}
+.resume-pill {
+    -fx-background-color: transparent;
+    -fx-background-radius: 100px;
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 100px;
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10.5px;
+    -fx-padding: 1 8 1 8;
+}
+/* Session whose Claude is blocked on a human. Uses the accent token rather
+   than the ghost treatment of .resume-pill: this is a call to action, not an
+   affordance hint, and must read at a glance down a long session list. Bold
+   so it outweighs the neighbouring pr-chip it shares a shape with. */
+.attention-badge {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-background-radius: 100px;
+    -fx-text-fill: -drydock-accent;
+    -fx-font-size: 10.5px;
+    -fx-font-weight: bold;
+    -fx-padding: 1 8 1 8;
+}
+.worktree-delete-button:hover {
+    -fx-background-color: -drydock-error-soft;
+}
+
+/* ---- Diff Review tab (design handoff section C) -------------------------- */
+
+.review-root {
+    -fx-background-color: -drydock-main;
+}
+.review-scope-bar {
+    -fx-background-color: -drydock-tabbar;
+    -fx-border-color: transparent transparent -drydock-border transparent;
+    -fx-border-width: 0 0 1 0;
+    -fx-padding: 6 12 6 12;
+}
+.review-scope-pill {
+    -fx-background-color: transparent;
+    -fx-background-radius: 7px;
+    -fx-border-color: -drydock-border;
+    -fx-border-radius: 7px;
+    -fx-padding: 4 12 4 12;
+    -fx-cursor: hand;
+}
+.review-scope-pill:hover {
+    -fx-background-color: -drydock-hover;
+}
+.review-scope-pill:selected {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-border-color: -drydock-accent;
+}
+.review-scope-title {
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 12px;
+}
+.review-scope-sub {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-token-chip {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-background-radius: 100px;
+    -fx-padding: 2 4 2 10;
+}
+.review-token-label {
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 11px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-token-search {
+    -fx-background-color: transparent;
+    -fx-background-radius: 100px;
+    -fx-text-fill: -drydock-accent;
+    -fx-font-size: 11px;
+    -fx-padding: 1 8 1 8;
+    -fx-cursor: hand;
+}
+.review-token-search:hover {
+    -fx-background-color: -drydock-accent;
+    -fx-text-fill: white;
+}
+.review-files-scroll {
+    -fx-background-color: transparent;
+    -fx-border-color: transparent -drydock-border transparent transparent;
+    -fx-border-width: 0 1 0 0;
+}
+.review-files-scroll > .viewport {
+    -fx-background-color: transparent;
+}
+.review-files {
+    -fx-background-color: -drydock-sidebar;
+    -fx-padding: 8;
+}
+.review-files-empty {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 12px;
+    -fx-padding: 8;
+}
+.review-file-row {
+    -fx-background-radius: 6px;
+    -fx-padding: 4 8 4 8;
+    -fx-cursor: hand;
+}
+.review-file-row:hover {
+    -fx-background-color: -drydock-hover;
+}
+.review-file-row.active {
+    -fx-background-color: -drydock-active-bg;
+}
+.review-file-marker {
+    -fx-font-size: 10.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-min-width: 12px;
+}
+.review-file-name {
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 12px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-file-stats {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-staged-chip, .review-unstaged-chip {
+    -fx-background-radius: 100px;
+    -fx-font-size: 9.5px;
+    -fx-padding: 0 6 0 6;
+}
+.review-staged-chip {
+    -fx-background-color: -drydock-running-soft;
+    -fx-text-fill: -drydock-running;
+}
+.review-unstaged-chip {
+    -fx-background-color: -drydock-dirty-soft;
+    -fx-text-fill: -drydock-dirty;
+}
+.review-annotation-count {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-background-radius: 100px;
+    -fx-text-fill: -drydock-accent;
+    -fx-font-size: 10px;
+    -fx-padding: 0 6 0 6;
+}
+/* The virtualized diff pane: a ListView whose chrome is neutralized so
+   cells look exactly like the pre-virtualization VBox rows. */
+.review-diff-list {
+    -fx-background-color: -drydock-code-bg;
+    -fx-background-insets: 0;
+    -fx-padding: 0 0 20 0;
+}
+.review-diff-list .list-cell {
+    -fx-background-color: transparent;
+    -fx-padding: 0;
+}
+.review-diff-list .list-cell:filled:selected,
+.review-diff-list .list-cell:filled:selected:hover,
+.review-diff-list:focused .list-cell:filled:selected {
+    -fx-background-color: transparent;
+    -fx-background-insets: 0;
+}
+.review-diff-message {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 12px;
+    -fx-padding: 12;
+}
+.review-hunk-header {
+    -fx-background-color: -drydock-active-bg;
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 11px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-padding: 3 12 3 12;
+}
+.review-diff-row {
+    -fx-padding: 0 8 0 0;
+}
+.row-add {
+    -fx-background-color: -drydock-add-bg;
+    -fx-border-color: transparent transparent transparent -drydock-add-bar;
+    -fx-border-width: 0 0 0 2;
+}
+.row-del {
+    -fx-background-color: -drydock-del-bg;
+    -fx-border-color: transparent transparent transparent -drydock-del-bar;
+    -fx-border-width: 0 0 0 2;
+}
+.row-context {
+    -fx-border-color: transparent transparent transparent transparent;
+    -fx-border-width: 0 0 0 2;
+}
+.review-diff-row.row-selected {
+    -fx-background-color: -drydock-sel-bg;
+    -fx-border-color: transparent transparent transparent -drydock-accent;
+    -fx-border-width: 0 0 0 2;
+}
+.review-annotate-handle {
+    -fx-text-fill: transparent;
+    -fx-background-radius: 4px;
+    -fx-font-size: 11px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-min-width: 18px;
+    -fx-alignment: center;
+    -fx-cursor: hand;
+}
+.review-diff-row:hover .review-annotate-handle {
+    -fx-text-fill: -drydock-accent;
+    -fx-background-color: -drydock-accent-soft;
+}
+.review-line-number {
+    -fx-text-fill: -drydock-code-gutter;
+    -fx-font-size: 11px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-min-width: 38px;
+    -fx-alignment: center-right;
+    -fx-padding: 0 6 0 0;
+}
+.review-line-sign {
+    -fx-font-size: 12px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-min-width: 16px;
+    -fx-alignment: center;
+}
+.sign-add { -fx-text-fill: -drydock-add-sign; }
+.sign-del { -fx-text-fill: -drydock-del-sign; }
+.sign-context { -fx-text-fill: -drydock-code-gutter; }
+.review-line-text {
+    -fx-fill: -drydock-code-text;
+    -fx-font-size: 12px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-open-in-explorer {
+    -fx-background-color: transparent;
+    -fx-background-radius: 4px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 11px;
+    -fx-padding: 0 6 0 6;
+    -fx-cursor: hand;
+}
+.review-open-in-explorer:hover {
+    -fx-background-color: -drydock-hover;
+    -fx-text-fill: -drydock-text;
+}
+.review-composer {
+    -fx-background-color: -drydock-sidebar;
+    -fx-border-color: -drydock-accent;
+    -fx-border-width: 0 0 0 2;
+    -fx-padding: 10 12 10 12;
+}
+.review-composer-input {
+    -fx-background-color: -drydock-input-bg;
+    -fx-background-radius: 7px;
+    -fx-border-color: -drydock-border;
+    -fx-border-radius: 7px;
+    -fx-text-fill: -drydock-text;
+    -fx-prompt-text-fill: -drydock-text-faint;
+    -fx-font-size: 12px;
+    -fx-highlight-fill: -drydock-accent-soft;
+}
+.review-composer-input .content {
+    -fx-background-color: transparent;
+}
+.review-range-chip {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-background-radius: 100px;
+    -fx-text-fill: -drydock-accent;
+    -fx-font-size: 10.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-padding: 1 8 1 8;
+}
+.review-add-annotation {
+    -fx-background-color: -drydock-accent;
+    -fx-background-radius: 7px;
+    -fx-text-fill: white;
+    -fx-font-size: 12px;
+    -fx-padding: 4 12 4 12;
+    -fx-cursor: hand;
+}
+.review-add-annotation:hover {
+    -fx-opacity: 0.9;
+}
+.review-thread-card {
+    -fx-background-color: -drydock-sidebar;
+    -fx-background-radius: 8px;
+    -fx-border-radius: 8px;
+    -fx-border-color: -drydock-border;
+    -fx-padding: 10 12 10 12;
+}
+.review-thread-card.thread-fixed {
+    -fx-border-color: -drydock-running;
+}
+.review-status-pill {
+    -fx-background-radius: 100px;
+    -fx-font-size: 9.5px;
+    -fx-padding: 0 7 0 7;
+}
+.status-open {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-text-fill: -drydock-accent;
+}
+.status-sent {
+    -fx-background-color: -drydock-running-soft;
+    -fx-text-fill: -drydock-running;
+}
+.status-resolved {
+    -fx-background-color: -drydock-active-bg;
+    -fx-text-fill: -drydock-text-dim;
+}
+.status-fixed {
+    -fx-background-color: -drydock-running-soft;
+    -fx-text-fill: -drydock-running;
+}
+.review-thread-author {
+    -fx-font-size: 11px;
+}
+.author-you { -fx-text-fill: -drydock-text-dim; }
+.author-claude { -fx-text-fill: -drydock-accent; }
+.review-thread-text {
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 12px;
+}
+.review-thread-action {
+    -fx-background-color: transparent;
+    -fx-background-radius: 6px;
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 6px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 11px;
+    -fx-padding: 2 9 2 9;
+    -fx-cursor: hand;
+}
+.review-thread-action:hover {
+    -fx-background-color: -drydock-hover;
+    -fx-text-fill: -drydock-text;
+}
+.review-footer {
+    -fx-background-color: -drydock-tabbar;
+    -fx-border-color: -drydock-border transparent transparent transparent;
+    -fx-border-width: 1 0 0 0;
+    -fx-padding: 6 12 6 12;
+}
+.review-summary {
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 11.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-send-button {
+    -fx-background-color: -drydock-accent;
+    -fx-background-radius: 7px;
+    -fx-text-fill: white;
+    -fx-font-size: 12px;
+    -fx-padding: 5 14 5 14;
+    -fx-cursor: hand;
+}
+.review-send-button:hover {
+    -fx-opacity: 0.9;
+}
+.review-send-button:disabled {
+    -fx-opacity: 0.45;
+}
+.review-banner {
+    -fx-background-color: -drydock-running-soft;
+    -fx-background-radius: 7px;
+    -fx-padding: 3 10 3 10;
+}
+.review-banner-label {
+    -fx-text-fill: -drydock-running;
+    -fx-font-size: 11.5px;
+}
+.review-rerun-button {
+    -fx-background-color: transparent;
+    -fx-text-fill: -drydock-running;
+    -fx-font-size: 11.5px;
+    -fx-underline: true;
+    -fx-padding: 0 4 0 4;
+    -fx-cursor: hand;
+}
+
+/* ---- Explorer diff overlay (handoff section C "Explorer integration") ---- */
+
+.viewer-diff-banner {
+    -fx-background-color: -drydock-running-soft;
+    -fx-border-color: transparent transparent -drydock-border transparent;
+    -fx-border-width: 0 0 1 0;
+    -fx-padding: 4 12 4 12;
+}
+.viewer-diff-banner-label {
+    -fx-text-fill: -drydock-running;
+    -fx-font-size: 11.5px;
+}
+.viewer-diff-base-switch {
+    -fx-background-color: transparent;
+    -fx-background-radius: 6px;
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 6px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 10.5px;
+    -fx-padding: 1 8 1 8;
+    -fx-cursor: hand;
+}
+.viewer-diff-base-switch:hover {
+    -fx-background-color: -drydock-hover;
+    -fx-text-fill: -drydock-text;
+}
+.changed-line-marker {
+    -fx-min-width: 3px;
+    -fx-pref-width: 3px;
+    -fx-max-width: 3px;
+    -fx-min-height: 14px;
+    -fx-background-color: transparent;
+}
+.changed-line-marker.on {
+    -fx-background-color: -drydock-changed-gutter;
+}
+.diff-chip {
+    -fx-background-color: -drydock-running-soft;
+    -fx-background-radius: 100px;
+    -fx-text-fill: -drydock-changed-gutter;
+    -fx-font-size: 9.5px;
+    -fx-padding: 0 6 0 6;
+}

@@ -22,7 +22,7 @@ one real packaging-time-only bug was found and fixed (see below).
 source ~/.sdkman/bin/sdkman-init.sh
 export JAVA_HOME=~/.sdkman/candidates/java/23.0.1-tem   # Gradle itself; see "JDK version note" below
 ./gradlew runtimeImage
-build/image/bin/claude-project-manager
+build/image/bin/drydock
 ```
 
 `./gradlew appImage`, `./gradlew macApp`, and `./gradlew dmg` are also
@@ -46,7 +46,7 @@ Gradle/toolchain split never leaks into the produced image.
 ```text
 build/image/
 ├── bin/
-│   └── claude-project-manager        # generated launcher (bash)
+│   └── drydock        # generated launcher (bash)
 ├── runtime/                          # jlink output (JDK 26 + JavaFX 26 modules)
 │   ├── bin/
 │   │   └── java
@@ -62,18 +62,18 @@ build/image/
 └── lib/
     ├── macos-x86_64/
     │   ├── libghostty.dylib
-    │   └── libcpmterminalhost.dylib
+    │   └── libdrydockterminalhost.dylib
     └── macos-arm64/
         ├── libghostty.dylib
-        └── libcpmterminalhost.dylib
+        └── libdrydockterminalhost.dylib
 ```
 
 Deviation from the plan section 23.1 example layout: `lib/` has
 `macos-x86_64/`/`macos-arm64/` subdirectories rather than the two `.dylib`
 files directly. This is the approved dual-architecture deviation (see
 `README.md`) reaching packaging: both architectures' `libghostty.dylib`/
-`libcpmterminalhost.dylib` ship in the same image, and
-`GhosttyNativeLibrary`/`CpmTerminalHostLibrary` (the narrow native
+`libdrydockterminalhost.dylib` ship in the same image, and
+`GhosttyNativeLibrary`/`DrydockTerminalHostLibrary` (the narrow native
 boundary, plan section 2.4/4.2) pick the right subdirectory at launch via
 the same single `os.arch`-based `detectArchDirectoryName()` method already
 used for the `build/native/<arch>/` developer-build layout — no new
@@ -84,7 +84,7 @@ executed on this machine — see "What was verified vs. not" below).
 
 `build/image` (not `app/build/image`) is deliberate: the task explicitly
 targets the *root* build directory so the plan's literal acceptance
-command (`build/image/bin/claude-project-manager`, run from the repo root)
+command (`build/image/bin/drydock`, run from the repo root)
 matches exactly, the same way `build/native` (declared in the root build
 file for `buildGhosttyNative`/`buildNativeHost`) already does, even though
 the `runtimeImage` task itself is defined in `app/build.gradle.kts` for
@@ -95,7 +95,7 @@ architectures of libghostty add a few MB each).
 
 ## Exact launcher JVM arguments
 
-Generated verbatim into `build/image/bin/claude-project-manager`:
+Generated verbatim into `build/image/bin/drydock`:
 
 ```bash
 exec "$APP_HOME/runtime/bin/java" \
@@ -103,9 +103,9 @@ exec "$APP_HOME/runtime/bin/java" \
   --add-exports javafx.graphics/com.sun.glass.ui=ALL-UNNAMED \
   -Dfile.encoding=UTF-8 \
   -Djava.awt.headless=false \
-  -Dapp.cpm.ghostty.nativeDir="$APP_HOME/lib" \
-  -Dapp.cpm.terminalhost.nativeDir="$APP_HOME/lib" \
-  ${CPM_EXTRA_JVM_ARGS:-} \
+  -Dapp.drydock.ghostty.nativeDir="$APP_HOME/lib" \
+  -Dapp.drydock.terminalhost.nativeDir="$APP_HOME/lib" \
+  ${DRYDOCK_EXTRA_JVM_ARGS:-} \
   -cp "$APP_HOME/app/*" \
   "$MAIN_CLASS" "$@"
 ```
@@ -115,9 +115,9 @@ location, never the current working directory or `JAVA_HOME` — verified by
 launching from `/tmp` with `JAVA_HOME` unset and a `PATH` scrubbed down to
 just `/usr/bin:/bin`.
 
-`MAIN_CLASS` defaults to `app.cpm.terminal.Gate0cSpikeLauncher` (see "Why
-the terminal spike, not `app.cpm.Main`" below); `CPM_MAIN_CLASS`/
-`CPM_EXTRA_JVM_ARGS` environment variables are internal escape hatches used
+`MAIN_CLASS` defaults to `app.drydock.terminal.Gate0cSpikeLauncher` (see "Why
+the terminal spike, not `app.drydock.Main`" below); `DRYDOCK_MAIN_CLASS`/
+`DRYDOCK_EXTRA_JVM_ARGS` environment variables are internal escape hatches used
 only by this project's own smoke testing, not part of the plan's launcher
 spec.
 
@@ -137,12 +137,12 @@ The jlink image is a genuinely different runtime shape: `jlink` links
 `javafx.graphics` in as a real, named module (resolved via `--module-path`
 against the JavaFX module jars), while the application's own `app.jar` is
 still loaded from `-cp` (unnamed module) since it is not yet modularized.
-The first end-to-end run of `build/image/bin/claude-project-manager`
+The first end-to-end run of `build/image/bin/drydock`
 reproduced exactly this:
 
 ```
 [gate0c] FAILED to initialize terminal: java.lang.IllegalAccessError: class
-app.cpm.terminal.host.JavaFxNativeView (in unnamed module @0x...) cannot
+app.drydock.terminal.host.JavaFxNativeView (in unnamed module @0x...) cannot
 access class com.sun.glass.ui.Window (in module javafx.graphics) because
 module javafx.graphics does not export com.sun.glass.ui to unnamed module
 ```
@@ -186,7 +186,7 @@ of a developer's `build/native/<arch>/`), not any ownership/threading rule
 — see the `NATIVE_DIR_PROPERTY` Javadoc changes below.
 
 A small, backward-compatible change was needed in `GhosttyNativeLibrary`
-and `CpmTerminalHostLibrary` (the narrow native boundary, plan
+and `DrydockTerminalHostLibrary` (the narrow native boundary, plan
 section 2.4/4.2) to make this work for a dual-arch bundle: previously,
 `-D<...>.nativeDir=<dir>` (an override hook that had no caller yet) pointed
 *directly* at a directory containing the `.dylib`. It now points at a
@@ -221,34 +221,34 @@ an absolute path resolved in Java) does not depend on either of those and
 will keep working unmodified either way, since it never consults the
 dylib's own install name or `DYLD_LIBRARY_PATH`.
 
-## Why the terminal spike, not `app.cpm.Main`, is the default launch target
+## Why the terminal spike, not `app.drydock.Main`, is the default launch target
 
 At this point in the plan (Milestone 0 done; Milestones 1-2 in progress),
-`app.cpm.Main`/`CpmApplication` is still a literal empty JavaFX window (see
+`app.drydock.Main`/`DrydockApplication` is still a literal empty JavaFX window (see
 that class's own Javadoc) — launching it by default would satisfy none of
 plan section 7 "Gate 0F"'s or section 28 "Task 8"'s actual acceptance
 criteria ("must launch **the terminal spike**"). The generated launcher
-therefore defaults `MAIN_CLASS` to `app.cpm.terminal.Gate0cSpikeLauncher`
+therefore defaults `MAIN_CLASS` to `app.drydock.terminal.Gate0cSpikeLauncher`
 (Task 5's Gate 0C spike — the most advanced terminal-rendering code that
-exists), with `CPM_MAIN_CLASS` as an env-var override used to run other
+exists), with `DRYDOCK_MAIN_CLASS` as an env-var override used to run other
 spikes (`Gate0dSpikeLauncher`, `Gate0eSpikeLauncher`,
-`app.cpm.terminal.ghostty.GhosttySmokeTest`) through the same image without
-a rebuild. This default is expected to change to `app.cpm.Main` once the
+`app.drydock.terminal.ghostty.GhosttySmokeTest`) through the same image without
+a rebuild. This default is expected to change to `app.drydock.Main` once the
 real application embeds a terminal (Milestone 2 onward) — tracked here so
 it is not forgotten, not because it is meant to be permanent.
 
 ## What was verified
 
-Run from a copy at `/tmp/cpm-image-test` (outside the source/build tree),
+Run from a copy at `/tmp/drydock-image-test` (outside the source/build tree),
 with `JAVA_HOME` unset and `PATH` reduced to `/usr/bin:/bin` (no `java`, no
 Gradle, no sdkman on `PATH` at all):
 
-- `CPM_MAIN_CLASS=app.cpm.terminal.ghostty.GhosttySmokeTest
-  build/image/bin/claude-project-manager` (Gate 0B smoke test) — passes:
+- `DRYDOCK_MAIN_CLASS=app.drydock.terminal.ghostty.GhosttySmokeTest
+  build/image/bin/drydock` (Gate 0B smoke test) — passes:
   `ghostty_init`/`ghostty_info`/`ghostty_config_new`/`_free` all succeed,
   `os.arch: x86_64` confirms the right architecture subdirectory was
   selected.
-- `/tmp/cpm-image-test/bin/claude-project-manager` (defaults to
+- `/tmp/drydock-image-test/bin/drydock` (defaults to
   `Gate0cSpikeLauncher`) — after the `--add-exports` fix above, runs the
   full Gate 0C sequence successfully end to end: `ghostty_init`, AppKit host
   view created and attached to the JavaFX window's `NSView`,

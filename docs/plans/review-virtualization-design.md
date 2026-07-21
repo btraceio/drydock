@@ -2,7 +2,7 @@
 
 ## Problem
 
-`ReviewView` (app/src/main/java/app/cpm/ui/review/ReviewView.java) renders a
+`ReviewView` (app/src/main/java/app/drydock/ui/review/ReviewView.java) renders a
 unified diff as up to 3000 fully-built `HBox` rows (~8 nodes each, plus a
 hover-bound "open in Explorer" button and three mouse handlers per row) inside
 a non-virtualized `VBox` wrapped in a `ScrollPane`. Every one of these events
@@ -161,7 +161,7 @@ retroactively rewritten by a stale timer.
 ## Plan
 
 1. **Row model + builder.** Add `ReviewRow` (sealed interface + records) and
-   `ReviewRowModels.build(...)` in `app.cpm.ui.review`; pure data, no JavaFX
+   `ReviewRowModels.build(...)` in `app.drydock.ui.review`; pure data, no JavaFX
    scene-graph types beyond `UnifiedDiff`/`ReviewAnnotation` references. Unit
    tests: ordering (breadcrumb/header/lines), truncation at cap, annotation
    card placement after end-key anchor, start-key fallback, missing-anchor

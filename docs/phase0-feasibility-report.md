@@ -22,7 +22,7 @@ for those.
   `ghostty_config_new`/`_free` successfully (`./gradlew ffmSmokeTest`,
   Task 4).
 - **Full terminal embedding (Gate 0C)**: a custom AppKit host shim
-  (`native-host/CpmTerminalHost.{h,m}`) attaches a real `ghostty_surface_t`
+  (`native-host/DrydockTerminalHost.{h,m}`) attaches a real `ghostty_surface_t`
   to a JavaFX window's `NSView`; resize, focus, keyboard input (including a
   real OS-level keystroke via `osascript`/System Events) all reach the
   terminal and are confirmed via logs (Task 5, `./gradlew gate0cSpike`).
@@ -77,7 +77,7 @@ for those.
 - **Screenshot verification of actual rendered glyphs was not possible** in
   this automated environment — the process lacks macOS Screen Recording
   permission (confirmed via a denied TCC query, not assumed). A human must
-  run `./gradlew gate0cSpike -Papp.cpm.gate0c.interactive` locally, with
+  run `./gradlew gate0cSpike -Papp.drydock.gate0c.interactive` locally, with
   that permission granted once, to visually confirm glyph rendering.
 - **`.app` bundling, code signing, notarization, `.dmg` production** (plan
   section 23.4 Stages 3-6) are explicitly out of scope for this phase.
@@ -100,7 +100,7 @@ only path to a real `NSView*` is the internal, qualified-export
 visibility into via its module (classpath-mode JavaFX, not module-path, so
 `--add-exports` isn't even applicable in dev-mode task runs — it *is*
 needed for the jlink image, see below). The AppKit host shim
-(`native-host/CpmTerminalHost.{h,m}`, plan section 8's 6-function suggested
+(`native-host/DrydockTerminalHost.{h,m}`, plan section 8's 6-function suggested
 API plus one documented extension for key-event forwarding) obtains that
 handle reflectively via `JavaFxNativeView` (the one class in the codebase
 touching `com.sun.glass.ui`) and hands the real `NSView*` to
@@ -111,7 +111,7 @@ touching `com.sun.glass.ui`) and hands the real `NSView*` to
 
 - **`com.sun.glass.ui.Window` / `com.sun.glass.ui.View`** (JDK/JavaFX
   internal `com.sun.*` package), accessed reflectively by
-  `app.cpm.terminal.host.JavaFxNativeView`, the sole point of contact.
+  `app.drydock.terminal.host.JavaFxNativeView`, the sole point of contact.
   Confirmed to be a qualified export (not visible to arbitrary application
   code without an explicit carve-out). In dev-mode Gradle tasks this works
   silently because JavaFX runs from the classpath (unnamed module, no JPMS
@@ -172,15 +172,15 @@ touching `com.sun.glass.ui`) and hands the real `NSView*` to
   itself a native-ownership/lifecycle rule that still needs to be written
   and tested.
 - The narrow native boundary (plan section 2.4/4.2) is enforced by
-  packaging: only `app.cpm.terminal.ghostty` and `app.cpm.terminal.host`
-  (two sibling packages under `app/src/main/java/app/cpm/terminal/`) may
+  packaging: only `app.drydock.terminal.ghostty` and `app.drydock.terminal.host`
+  (two sibling packages under `app/src/main/java/app/drydock/terminal/`) may
   reference `MemorySegment`, `MethodHandle`, `Linker`, native pointers, or
   AppKit handles. All arch-branching logic (`os.arch` detection) lives in
   exactly one place per library:
-  `GhosttyNativeLibrary`/`CpmTerminalHostLibrary`'s
-  `detectArchDirectoryName()`. `app.cpm.terminal.Gate0cSpike` (and the later
+  `GhosttyNativeLibrary`/`DrydockTerminalHostLibrary`'s
+  `detectArchDirectoryName()`. `app.drydock.terminal.Gate0cSpike` (and the later
   spikes) only ever call public, pointer-free methods on
-  `GhosttyApp`/`GhosttySurface`/`CpmTerminalHost`.
+  `GhosttyApp`/`GhosttySurface`/`DrydockTerminalHost`.
 
 ## Packaging implications
 
@@ -217,7 +217,7 @@ touching `com.sun.glass.ui`) and hands the real `NSView*` to
   transition.
 - Dual-architecture bundling required one intentional, narrow semantic
   change: the previously-uncalled `NATIVE_DIR_PROPERTY` override in
-  `GhosttyNativeLibrary`/`CpmTerminalHostLibrary` now points at a **root**
+  `GhosttyNativeLibrary`/`DrydockTerminalHostLibrary` now points at a **root**
   directory containing `macos-x86_64`/`macos-arm64` subdirectories, instead
   of directly at an arch directory — no new arch-branching code, same
   single `detectArchDirectoryName()` decision point used everywhere else.
@@ -227,7 +227,7 @@ touching `com.sun.glass.ui`) and hands the real `NSView*` to
 ```text
 build/image/
 ├── bin/
-│   └── claude-project-manager        # generated launcher (bash)
+│   └── drydock        # generated launcher (bash)
 ├── runtime/                          # jlink output (JDK 26 + JavaFX 26 modules)
 │   ├── bin/
 │   │   └── java
@@ -243,10 +243,10 @@ build/image/
 └── lib/
     ├── macos-x86_64/
     │   ├── libghostty.dylib
-    │   └── libcpmterminalhost.dylib
+    │   └── libdrydockterminalhost.dylib
     └── macos-arm64/
         ├── libghostty.dylib
-        └── libcpmterminalhost.dylib
+        └── libdrydockterminalhost.dylib
 ```
 
 Deviation from plan section 23.1's example layout: `lib/` has
@@ -254,12 +254,12 @@ Deviation from plan section 23.1's example layout: `lib/` has
 files, to carry both architectures in one image (approved dual-arch
 deviation). `build/image` (root, not `app/build/image`) is deliberate so
 the plan's literal acceptance command
-(`build/image/bin/claude-project-manager`, run from the repo root) matches
+(`build/image/bin/drydock`, run from the repo root) matches
 exactly.
 
 ## Exact launcher JVM arguments
 
-Generated verbatim into `build/image/bin/claude-project-manager`:
+Generated verbatim into `build/image/bin/drydock`:
 
 ```bash
 exec "$APP_HOME/runtime/bin/java" \
@@ -267,9 +267,9 @@ exec "$APP_HOME/runtime/bin/java" \
   --add-exports javafx.graphics/com.sun.glass.ui=ALL-UNNAMED \
   -Dfile.encoding=UTF-8 \
   -Djava.awt.headless=false \
-  -Dapp.cpm.ghostty.nativeDir="$APP_HOME/lib" \
-  -Dapp.cpm.terminalhost.nativeDir="$APP_HOME/lib" \
-  ${CPM_EXTRA_JVM_ARGS:-} \
+  -Dapp.drydock.ghostty.nativeDir="$APP_HOME/lib" \
+  -Dapp.drydock.terminalhost.nativeDir="$APP_HOME/lib" \
+  ${DRYDOCK_EXTRA_JVM_ARGS:-} \
   -cp "$APP_HOME/app/*" \
   "$MAIN_CLASS" "$@"
 ```
@@ -277,10 +277,10 @@ exec "$APP_HOME/runtime/bin/java" \
 `$APP_HOME` resolves from the launcher script's own (symlink-resolved)
 location, never CWD or `JAVA_HOME` — verified by launching from `/tmp` with
 `JAVA_HOME` unset and `PATH` reduced to `/usr/bin:/bin`. `MAIN_CLASS`
-defaults to `app.cpm.terminal.Gate0cSpikeLauncher` (the most advanced
+defaults to `app.drydock.terminal.Gate0cSpikeLauncher` (the most advanced
 terminal-rendering code that exists at this point in the plan;
-`app.cpm.Main` is still a literal empty window); `CPM_MAIN_CLASS`/
-`CPM_EXTRA_JVM_ARGS` are internal escape hatches for this project's own
+`app.drydock.Main` is still a literal empty window); `DRYDOCK_MAIN_CLASS`/
+`DRYDOCK_EXTRA_JVM_ARGS` are internal escape hatches for this project's own
 smoke testing (e.g. running `Gate0dSpikeLauncher`, `Gate0eSpikeLauncher`, or
 `GhosttySmokeTest` through the same image without a rebuild), not part of
 the plan's launcher spec.
@@ -320,7 +320,7 @@ Per the user's approved deviation from plan section 3.2 (Apple Silicon
 only) to targeting both macOS x86_64 and macOS arm64.
 
 **Verified on x86_64** (this development machine, an Intel i7-9750H Mac):
-- `libghostty.dylib` and `libcpmterminalhost.dylib` build, link, and export
+- `libghostty.dylib` and `libdrydockterminalhost.dylib` build, link, and export
   the correct symbols (`nm -g` gate in `scripts/build-ghostty.sh`).
 - The full FFM smoke test, Gate 0C/0D/0E terminal spikes, and the jlink
   runtime image all run end to end, repeatedly, with no crashes beyond the
@@ -337,7 +337,7 @@ only) to targeting both macOS x86_64 and macOS arm64.
 **Unverified / future work on arm64** (no Apple Silicon hardware available
 in this environment):
 - `build/native/macos-arm64/libghostty.dylib` and
-  `.../libcpmterminalhost.dylib` are built by the same
+  `.../libdrydockterminalhost.dylib` are built by the same
   `scripts/build-ghostty.sh`/`buildNativeHost` pipeline and confirmed
   genuine, correctly-tagged `arm64` Mach-O binaries via `file(1)` and
   `lipo -info` — but never actually loaded, `dlopen`'d, or exercised by any
@@ -365,8 +365,8 @@ in this environment):
 1. **Dual-architecture target (macOS x86_64 + arm64) instead of Apple
    Silicon only** (plan section 3.2) — explicitly pre-approved by the user
    for the whole session. All arch-selection logic is isolated inside the
-   narrow native boundary package (`app.cpm.terminal.ghostty`/
-   `app.cpm.terminal.host`'s `detectArchDirectoryName()`), per the user's
+   narrow native boundary package (`app.drydock.terminal.ghostty`/
+   `app.drydock.terminal.host`'s `detectArchDirectoryName()`), per the user's
    explicit instruction; no arch checks exist anywhere else in the
    codebase. See "Dual-arch status" above for exactly what is verified vs.
    not.
@@ -394,7 +394,7 @@ in this environment):
    unrelated to the project's own code; documented in `README.md`, not
    worked around by downgrading the toolchain.
 5. **One extra native function beyond plan section 8's literal 6-function
-   host-shim API**: `cpm_terminal_host_set_key_event_callback`, added
+   host-shim API**: `drydock_terminal_host_set_key_event_callback`, added
    because nothing else in the suggested API can deliver AppKit's
    `keyDown`/`keyUp`/`flagsChanged` events to Java; documented at the point
    of addition (Task 5) as a justified, minimal extension rather than a

@@ -35,7 +35,7 @@ tasks.register("runtimeImage") {
 // Plan section 6.3 also lists appImage / macApp / dmg as required
 // top-level command aliases. appImage/macApp are now real (Stage 3, plan
 // section 23.4): a self-contained ad-hoc-signed .app bundle assembled by
-// :app:appImage at build/dist/Claude Project Manager.app. dmg (Stage 4)
+// :app:appImage at build/dist/Drydock.app. dmg (Stage 4)
 // and Developer ID signing/notarization (Stages 5-6) remain explicit
 // no-ops that fail with a clear message -- see docs/runtime-image.md
 // "Packaging implications".
@@ -105,7 +105,7 @@ tasks.register<Exec>("buildGhosttyNative") {
     inputs.property("ghosttyCommit", ghosttyCommit)
 
     // Outputs are the specific files/dirs the script produces, NOT all of
-    // build/native: buildNativeHost writes libcpmterminalhost.dylib into
+    // build/native: buildNativeHost writes libdrydockterminalhost.dylib into
     // the same build/native/<arch>/ directories, and claiming the whole
     // root as this task's output made the two tasks' outputs overlap,
     // silently disabling caching and up-to-date checks for both.
@@ -123,17 +123,17 @@ tasks.register<Exec>("buildGhosttyNative") {
     commandLine("bash", "${rootDir}/scripts/build-ghostty.sh")
 }
 
-// Builds the tiny AppKit host shim (native-host/CpmTerminalHost.{h,m}, plan
+// Builds the tiny AppKit host shim (native-host/DrydockTerminalHost.{h,m}, plan
 // section 8) for both supported macOS architectures. See
 // scripts/build-native-host.sh and docs/native-integration.md.
 tasks.register<Exec>("buildNativeHost") {
     group = "native"
-    description = "Builds libcpmterminalhost (macOS arm64 + x86_64) via scripts/build-native-host.sh."
+    description = "Builds libdrydockterminalhost (macOS arm64 + x86_64) via scripts/build-native-host.sh."
 
     inputs.file("${rootDir}/scripts/build-native-host.sh")
     inputs.dir("${rootDir}/native-host")
-    outputs.file(ghosttyNativeOutputDir.map { it.dir("macos-x86_64").file("libcpmterminalhost.dylib") })
-    outputs.file(ghosttyNativeOutputDir.map { it.dir("macos-arm64").file("libcpmterminalhost.dylib") })
+    outputs.file(ghosttyNativeOutputDir.map { it.dir("macos-x86_64").file("libdrydockterminalhost.dylib") })
+    outputs.file(ghosttyNativeOutputDir.map { it.dir("macos-arm64").file("libdrydockterminalhost.dylib") })
 
     commandLine("bash", "${rootDir}/scripts/build-native-host.sh")
 }

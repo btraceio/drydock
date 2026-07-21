@@ -491,7 +491,7 @@ see `third_party/patches/ghostty-install-macos-shared-lib.patch` and the
   fully-linked `libghostty.dylib` per architecture — verified with `nm -g`
   (exports `ghostty_init`, `ghostty_config_new/free`, `ghostty_info`, etc.)
   and by actually calling into it from Java via FFM (see
-  `app/src/spike/java/app/cpm/terminal/ghostty/GhosttySmokeTest.java`).
+  `app/src/spike/java/app/drydock/terminal/ghostty/GhosttySmokeTest.java`).
 
 ## Task 5 / Gate 0C: rendering a terminal surface
 
@@ -530,8 +530,8 @@ see `third_party/patches/ghostty-install-macos-shared-lib.patch` and the
 over extensive reflection into JavaFX internals"), Glass access is used for
 exactly one purpose and nowhere else: obtaining the single `NSView*`
 pointer of the current window, in
-`app.cpm.terminal.host.JavaFxNativeView` (package-private, called only
-from `CpmTerminalHost.createForCurrentWindow()`). All further native work
+`app.drydock.terminal.host.JavaFxNativeView` (package-private, called only
+from `DrydockTerminalHost.createForCurrentWindow()`). All further native work
 (child view creation, resize, focus, teardown) goes through the AppKit
 host shim below, not more Glass calls.
 
@@ -544,17 +544,17 @@ single-window spike — a real multi-window app will need a real
 
 ### The AppKit host shim (plan section 8)
 
-Implemented at `native-host/CpmTerminalHost.{h,m}`, built by
+Implemented at `native-host/DrydockTerminalHost.{h,m}`, built by
 `scripts/build-native-host.sh` into
-`build/native/{macos-x86_64,macos-arm64}/libcpmterminalhost.dylib`, loaded
-by `app.cpm.terminal.host.CpmTerminalHostLibrary`/`CpmTerminalHostBinding`
+`build/native/{macos-x86_64,macos-arm64}/libdrydockterminalhost.dylib`, loaded
+by `app.drydock.terminal.host.DrydockTerminalHostLibrary`/`DrydockTerminalHostBinding`
 (mirroring the `ghostty` package's loader), and exposed publicly as
-`app.cpm.terminal.host.CpmTerminalHost`.
+`app.drydock.terminal.host.DrydockTerminalHost`.
 
 It implements the plan's six suggested functions exactly
-(`cpm_terminal_host_create/set_frame/content_view/set_visible/set_focused/destroy`),
+(`drydock_terminal_host_create/set_frame/content_view/set_visible/set_focused/destroy`),
 plus **one deliberate, documented extension**:
-`cpm_terminal_host_set_key_event_callback`. The plan's literal API list has
+`drydock_terminal_host_set_key_event_callback`. The plan's literal API list has
 no way for the host view to report keyboard input (Java code cannot
 subclass `NSView` to override `-keyDown:`), so the shim's view overrides
 `-keyDown:`/`-keyUp:`/`-flagsChanged:` and forwards the raw AppKit event
@@ -564,7 +564,7 @@ of the event (no shortcut parsing, no ghostty-specific translation), so it
 still satisfies section 8's "must not... implement terminal rendering /
 parse keyboard shortcuts" constraints. All ghostty-specific key-code
 translation (`GHOSTTY_KEY_*` mapping, deciding text vs. special-key calls)
-happens in `app.cpm.terminal.Gate0cSpike` / will move to the Ghostty
+happens in `app.drydock.terminal.Gate0cSpike` / will move to the Ghostty
 adapter proper in a later task.
 
 **Threading contract:** every shim function, and every `ghostty_*` call in
@@ -591,7 +591,7 @@ Added `GhosttyAppBinding` (struct layouts + downcall handles for
 `ghostty_surface_config_new/new/free/set_size/set_focus/draw/refresh/text/key/process_exited`),
 `GhosttyApp` (owns the `ghostty_app_t`, its `ghostty_config_t`, and the
 `ghostty_runtime_config_s` callback table), and `GhosttySurface` (owns one
-`ghostty_surface_t`, created against a `CpmTerminalHost`'s content view).
+`ghostty_surface_t`, created against a `DrydockTerminalHost`'s content view).
 
 **Struct layout verification methodology:** rather than hand-deriving C
 struct offsets/padding by eye (error-prone, and Zig's C ABI compatibility
@@ -632,9 +632,9 @@ Gate 0C.
 
 ### What was verified, and how (since a human wasn't watching the screen)
 
-`./gradlew gate0cSpike` (`app.cpm.terminal.Gate0cSpike`, launched via
+`./gradlew gate0cSpike` (`app.drydock.terminal.Gate0cSpike`, launched via
 `Gate0cSpikeLauncher` — see below) runs an automated sequence
-(`-Dapp.cpm.gate0c.autoExit=true`, the Gradle task's default) and exits
+(`-Dapp.drydock.gate0c.autoExit=true`, the Gradle task's default) and exits
 with status 0. From one real run's log output:
 
 ```text
@@ -681,7 +681,7 @@ Mapped against the Gate 0C acceptance criteria (plan section 7):
 - **focus works** — verified indirectly but strongly: the `osascript`
   synthetic keystroke below was delivered to *this* process's key window
   and reached the host view's `-keyDown:` override, which would not happen
-  if `cpm_terminal_host_set_focused`/`makeFirstResponder:` had not
+  if `drydock_terminal_host_set_focused`/`makeFirstResponder:` had not
   actually taken effect.
 - **keyboard input reaches the terminal** — verified with a **real OS-level
   keystroke**, not just a direct API call: the spike's automated sequence
@@ -709,7 +709,7 @@ macOS 10.15+, and the process this task ran in does not have it (confirmed
 denied", i.e. the calling process is sandboxed/unprivileged with respect to
 TCC, consistent with lacking the grant). This is an environment limitation,
 not a code defect: **no screenshot was produced by this task run**; a
-human running `./gradlew gate0cSpike -Papp.cpm.gate0c.interactive` locally
+human running `./gradlew gate0cSpike -Papp.drydock.gate0c.interactive` locally
 (with Screen Recording permission granted once to their terminal app) would
 get `build/gate0c-screenshot.png` and should look at it to confirm
 recognizable terminal content (a shell prompt, ideally) is actually
@@ -720,7 +720,7 @@ close out with certainty.
 
 ```bash
 ./gradlew gate0cSpike                              # scripted, auto-exits, safe for CI/agents
-./gradlew gate0cSpike -Papp.cpm.gate0c.interactive # leaves the window open for a human
+./gradlew gate0cSpike -Papp.drydock.gate0c.interactive # leaves the window open for a human
 ```
 
 `Gate0cSpikeLauncher` exists only because launching an
@@ -890,7 +890,7 @@ a real `vim` process actually ran in the alternate screen:
 
 ```bash
 ./gradlew gate0dSpike                              # scripted, auto-exits, safe for CI/agents
-./gradlew gate0dSpike -Papp.cpm.gate0d.interactive # leaves the window (and a live shell) open for a human
+./gradlew gate0dSpike -Papp.drydock.gate0d.interactive # leaves the window (and a live shell) open for a human
 ```
 
 ### What Task 6 did not attempt

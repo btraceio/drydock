@@ -2,11 +2,11 @@ plugins {
     application
     id("org.openjfx.javafxplugin")
     // Spike source set + gateNSpike/ffmSmokeTest tasks (buildSrc convention
-    // plugin; see buildSrc/src/main/kotlin/cpm.spikes.gradle.kts).
-    id("cpm.spikes")
+    // plugin; see buildSrc/src/main/kotlin/drydock.spikes.gradle.kts).
+    id("drydock.spikes")
     // runtimeImage/appImage packaging (typed tasks + templates under
-    // app/packaging/; see buildSrc/src/main/kotlin/cpm.packaging.gradle.kts).
-    id("cpm.packaging")
+    // app/packaging/; see buildSrc/src/main/kotlin/drydock.packaging.gradle.kts).
+    id("drydock.packaging")
 }
 
 java {
@@ -29,7 +29,7 @@ javafx {
 }
 
 application {
-    mainClass.set("app.cpm.Main")
+    mainClass.set("app.drydock.Main")
 
     // Required once native (libghostty) access is introduced; harmless no-op
     // until then. Kept here now so the JVM argument list is version
@@ -38,16 +38,16 @@ application {
     applicationDefaultJvmArgs = listOf(
         "-Dfile.encoding=UTF-8",
         "-Djava.awt.headless=false",
-        // Required now that CpmApplication (Milestone 5's terminal-tabs UI)
+        // Required now that DrydockApplication (Milestone 5's terminal-tabs UI)
         // loads libghostty/the native host shim via FFM.
         "--enable-native-access=ALL-UNNAMED",
-        // Unlike the gateNSpike tasks (cpm.spikes plugin; they force
+        // Unlike the gateNSpike tasks (drydock.spikes plugin; they force
         // classpath-mode JavaFX via the spike source set's runtimeClasspath,
         // avoiding JPMS enforcement entirely), the `application`/`javafx`
         // Gradle plugins configure `run` to launch JavaFX on the *module
         // path* (--module-path + --add-modules), matching the jlink runtime
         // image's own module-path setup. That means
-        // app.cpm.terminal.host.JavaFxNativeView (in this app's classes,
+        // app.drydock.terminal.host.JavaFxNativeView (in this app's classes,
         // an unnamed module since the app itself isn't modularized) needs
         // an explicit --add-exports to reach into javafx.graphics's
         // internal com.sun.glass.ui package -- exactly the same flag
@@ -86,23 +86,23 @@ tasks.test {
 tasks.named<JavaExec>("run") {
     // The real application now embeds Ghostty terminal surfaces (Milestone
     // 5's terminal-tabs UI), so `run` needs both native libraries built
-    // first, same as every gateNSpike task (cpm.spikes plugin).
+    // first, same as every gateNSpike task (drydock.spikes plugin).
     dependsOn(rootProject.tasks.named("buildGhosttyNative"))
     dependsOn(rootProject.tasks.named("buildNativeHost"))
     javaLauncher.set(javaToolchains.launcherFor(java.toolchain))
     workingDir = rootProject.projectDir
 
-    // Diagnostic support: forward -Papp.cpm.diag.* project properties to
+    // Diagnostic support: forward -Papp.drydock.diag.* project properties to
     // the run task's application JVM as system properties (the Gradle
     // client's own -D flags never reach the forked app JVM; same pattern
-    // as gate0eSpike's property forwarding in the cpm.spikes plugin). Used by
-    // automated visual verification: app.cpm.diag.stateFile isolates
+    // as gate0eSpike's property forwarding in the drydock.spikes plugin). Used by
+    // automated visual verification: app.drydock.diag.stateFile isolates
     // persisted state to a throwaway file, and
-    // app.cpm.diag.autoCreateSession=true plus app.cpm.diag.repo=<path>
+    // app.drydock.diag.autoCreateSession=true plus app.drydock.diag.repo=<path>
     // auto-registers a repository and opens a session in it on startup
-    // (see CpmApplication.start).
+    // (see DrydockApplication.start).
     project.properties.forEach { (key, value) ->
-        if (key.startsWith("app.cpm.diag.") && value != null) {
+        if (key.startsWith("app.drydock.diag.") && value != null) {
             systemProperty(key, value.toString())
         }
     }

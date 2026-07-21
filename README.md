@@ -1,4 +1,4 @@
-# Claude Project Manager
+# Drydock
 
 A JavaFX desktop application for managing local Git repositories and the
 `claude` CLI sessions running against them, using an embedded terminal
@@ -11,9 +11,9 @@ on top of Phase 0 (feasibility gates 0A-0F, all passed) and Milestone 3
 JavaFX 26, libghostty embedded in a JavaFX window via an AppKit host
 shim, the real `claude` CLI running in that embedded terminal, a
 self-contained `jlink` runtime image
-(`./gradlew runtimeImage` -> `build/image/bin/claude-project-manager`) that
+(`./gradlew runtimeImage` -> `build/image/bin/drydock`) that
 runs without `JAVA_HOME`, without Gradle, and copied outside the source
-tree, and now the real application entry point (`app.cpm.Main`): a
+tree, and now the real application entry point (`app.drydock.Main`): a
 repository sidebar (add/remove a Git repository, branch and dirty
 indicators, open in Finder/external editor) backed by a JSON-file
 application state that persists across restarts (plan section 25). Managed
@@ -110,7 +110,7 @@ loads the architecture-matching `libghostty.dylib` via the Java Foreign
 Function & Memory API, calls `ghostty_init`, `ghostty_info` (validating the
 returned version string), and `ghostty_config_new`/`ghostty_config_free`,
 then exits cleanly. All FFM/native-pointer code for this lives in
-`app/src/main/java/app/cpm/terminal/ghostty/` — the narrow native boundary
+`app/src/main/java/app/drydock/terminal/ghostty/` — the narrow native boundary
 package mandated by the plan (section 2.4/4.2) — and is also where the
 dual-architecture `os.arch` selection logic lives
 (`GhosttyNativeLibrary.detectArchDirectoryName()`), per the deviation
@@ -120,12 +120,12 @@ below.
 
 ```bash
 ./gradlew gate0cSpike                              # scripted, auto-exits
-./gradlew gate0cSpike -Papp.cpm.gate0c.interactive # leaves the window open
+./gradlew gate0cSpike -Papp.drydock.gate0c.interactive # leaves the window open
 ```
 
 Opens the smallest possible JavaFX window that embeds one live Ghostty
 terminal surface via a small AppKit host shim
-(`native-host/CpmTerminalHost.{h,m}`, built by `./gradlew buildNativeHost`)
+(`native-host/DrydockTerminalHost.{h,m}`, built by `./gradlew buildNativeHost`)
 -- see `docs/native-integration.md` ("Task 5 / Gate 0C") for the full
 investigation, including why JavaFX has no public API for this and what
 was and wasn't possible to verify without a human watching the window.
@@ -134,7 +134,7 @@ was and wasn't possible to verify without a human watching the window.
 
 ```bash
 ./gradlew gate0dSpike                              # scripted, auto-exits, 12/12 checks pass
-./gradlew gate0dSpike -Papp.cpm.gate0d.interactive # leaves a live /bin/zsh -l session open
+./gradlew gate0dSpike -Papp.drydock.gate0d.interactive # leaves a live /bin/zsh -l session open
 ```
 
 Spawns `/bin/zsh -l` inside the Gate 0C surface and drives the plan's
@@ -148,7 +148,7 @@ vs. typed-key semantics).
 ### `claude` CLI spike (Task 7, Gate 0E)
 
 ```bash
-./gradlew gate0eSpike -Papp.cpm.gate0e.repo=<throwaway git repo, NOT this project>
+./gradlew gate0eSpike -Papp.drydock.gate0e.repo=<throwaway git repo, NOT this project>
 ```
 
 Runs the real installed `claude` CLI inside the embedded terminal, in a
@@ -165,18 +165,18 @@ JVM, which is why this task's Gradle invocation currently exits non-zero
 
 ```bash
 ./gradlew runtimeImage
-build/image/bin/claude-project-manager
+build/image/bin/drydock
 ```
 
 Builds a self-contained runtime image at `build/image/` (JDK 26 + JavaFX 26
 + this application + libghostty + the AppKit host shim for **both** macOS
 architectures) and, by default, launches the Task 5 terminal spike
 (`Gate0cSpike`) through it rather than the real application
-(`app.cpm.Main`) -- this default was set back in Milestone 3, before the
+(`app.drydock.Main`) -- this default was set back in Milestone 3, before the
 real application (Milestone 4) had a repository sidebar, and has been left
 alone since changing the runtime-image default launch target is out of
 scope for Milestone 4; see `docs/runtime-image.md` for why, and
-`CPM_MAIN_CLASS=app.cpm.Main` to launch the real application through the
+`DRYDOCK_MAIN_CLASS=app.drydock.Main` to launch the real application through the
 jlink image instead of a spike. Verified to run with `JAVA_HOME` unset, no Gradle on `PATH`, and
 copied to `/tmp` outside this repository entirely (plan section 22.5).
 `./gradlew appImage` / `macApp` / `dmg` are registered (plan section 6.3)
@@ -203,7 +203,7 @@ Version 0.1 targets **macOS only**, on **both**:
 > (`System.getProperty("os.arch")`) selecting the matching native
 > library. That detection logic must stay isolated inside the narrow
 > native boundary package the plan mandates in section 4.2/6.4
-> (`app.cpm.terminal.ghostty` once that module exists) — it must not leak
+> (`app.drydock.terminal.ghostty` once that module exists) — it must not leak
 > into UI, repository, Git, or persistence code. No other section-3.2/3.3
 > deferred item (worktrees, staging/commits, GitHub API, cloning, remote
 > SSH, Windows/Linux, universal binaries, auto-update, notarized
@@ -260,7 +260,7 @@ export PATH="$JAVA_HOME/bin:$PATH"
 ```
 
 Gradle's toolchain support then auto-detects the installed JDK 26 and uses
-it to compile and run `app.cpm.Main`. Compiled class files were confirmed
+it to compile and run `app.drydock.Main`. Compiled class files were confirmed
 to be Java 26 bytecode (`major version: 70`) even while the Gradle daemon
 itself runs on JDK 23.
 
@@ -278,7 +278,7 @@ gradle wrapper --gradle-version 8.11.1
 ```
 
 `./gradlew run` opens the real application window, titled
-"Claude Project Manager": a repository sidebar (empty, with an "Add
+"Drydock": a repository sidebar (empty, with an "Add
 repository..." button, on first run) on the left and a placeholder main
 area on the right (terminal tabs are Milestone 5+ scope, not yet
 implemented). Registered repositories, and the sidebar width, persist
@@ -303,8 +303,8 @@ window until that dependency is added.
 ├── app/                      # the (currently) single Gradle module
 │   ├── build.gradle.kts
 │   └── src/
-│       ├── main/java/app/cpm/                 # application code
-│       │   ├── Main.java / CpmApplication.java   # real application entry point (Milestone 4)
+│       ├── main/java/app/drydock/                 # application code
+│       │   ├── Main.java / DrydockApplication.java   # real application entry point (Milestone 4)
 │       │   ├── app/            # RepositoryManager, launchers (Finder/external editor)
 │       │   ├── domain/         # Repository, ApplicationState, WorkspaceUiState, ...
 │       │   ├── state/          # ApplicationStateRepository + JSON codec (plan section 17)
@@ -316,10 +316,10 @@ window until that dependency is added.
 │       │       ├── Gate0cSpike.java            # Gate 0C composition root (Task 5)
 │       │       └── Gate0cSpikeLauncher.java
 │       ├── main/resources/          # app.css, icons/, syntax/ (empty for now)
-│       └── test/java/app/cpm/       # JUnit 5 tests
+│       └── test/java/app/drydock/       # JUnit 5 tests
 ├── native-host/              # AppKit host shim C sources (plan section 8); no ghostty dependency
-│   ├── CpmTerminalHost.h
-│   └── CpmTerminalHost.m
+│   ├── DrydockTerminalHost.h
+│   └── DrydockTerminalHost.m
 ├── third_party/
 │   ├── ghostty/               # pinned submodule
 │   └── patches/                # reviewed patches applied by scripts/build-ghostty.sh
@@ -330,7 +330,7 @@ window until that dependency is added.
 ├── scripts/
 │   ├── verify-environment.sh
 │   ├── build-ghostty.sh       # builds libghostty for both macOS architectures
-│   └── build-native-host.sh   # builds libcpmterminalhost for both macOS architectures
+│   └── build-native-host.sh   # builds libdrydockterminalhost for both macOS architectures
 ├── build.gradle.kts
 ├── settings.gradle.kts
 ├── gradle.properties

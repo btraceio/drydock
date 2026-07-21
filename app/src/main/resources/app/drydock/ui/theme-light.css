@@ -1,0 +1,65 @@
+/*
+ * Light theme tokens (design handoff "Design Tokens > Light theme", verbatim).
+ * Same contract as theme-dark.css: looked-up colors only, identical names.
+ */
+.root {
+    -drydock-chrome: #eeece8;
+    -drydock-titlebar: #e6e3de;
+    -drydock-sidebar: #f4f2ee;
+    -drydock-main: #faf9f6;
+    -drydock-tabbar: #efece7;
+    -drydock-input-bg: #ffffff;
+    -drydock-code-bg: #f1eee9;
+    -drydock-keycap-bg: #ffffff;
+    -drydock-terminal-bg: #0c0c0f;
+
+    -drydock-text: #26231f;
+    -drydock-text-dim: #6b655d;
+    -drydock-text-faint: #9c958b;
+
+    -drydock-border: rgba(0, 0, 0, 0.09);
+    -drydock-border-strong: rgba(0, 0, 0, 0.17);
+    -drydock-hover: rgba(0, 0, 0, 0.04);
+    -drydock-active-bg: rgba(0, 0, 0, 0.07);
+
+    -drydock-running: #4c9d5e;
+    -drydock-running-soft: rgba(76, 157, 94, 0.16);
+    -drydock-error: #c6493f;
+    -drydock-error-soft: rgba(224, 108, 108, 0.18);
+
+    -drydock-accent: #d97757;
+    -drydock-accent-soft: rgba(217, 119, 87, 0.15);
+
+    -drydock-row-bg: #ffffff;
+
+    /* Worktree lifecycle (design handoff "Worktrees & Session Explorer"). */
+    -drydock-dirty: #b07c1e;
+    -drydock-dirty-soft: rgba(176, 124, 30, 0.14);
+    -drydock-pr: #3b6cb7;
+    -drydock-pr-soft: rgba(59, 108, 183, 0.14);
+    -drydock-merged: #8a4fb5;
+    -drydock-merged-soft: rgba(138, 79, 181, 0.14);
+    -drydock-match-bg: rgba(217, 119, 87, 0.28);
+
+    /* Diff Review (light equivalents of the dark set). */
+    -drydock-add-bg: rgba(76, 157, 94, 0.12);
+    -drydock-add-bar: #4c9d5e;
+    -drydock-add-sign: #3e8450;
+    -drydock-del-bg: rgba(198, 73, 63, 0.10);
+    -drydock-del-bar: #c6493f;
+    -drydock-del-sign: #c6493f;
+    -drydock-sel-bg: rgba(217, 119, 87, 0.16);
+    -drydock-changed-gutter: #4c9d5e;
+
+    /* Read-only code viewer palette (light equivalents of the dark set). */
+    -drydock-code-text: #3b3d44;
+    -drydock-code-kw: #a626a4;
+    -drydock-code-str: #50a14f;
+    -drydock-code-com: #9c958b;
+    -drydock-code-num: #b76b01;
+    -drydock-code-type: #c18401;
+    -drydock-code-fn: #4078f2;
+    -drydock-code-anno: #0184bc;
+    -drydock-code-punct: #6b655d;
+    -drydock-code-gutter: #a8a29b;
+}

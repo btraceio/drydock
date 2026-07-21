@@ -24,7 +24,7 @@ network calls.
 ## Child processes go through `ProcessRunner`
 
 All external process spawns (`git`, `gh`, `claude`, `open`, …) use the shared
-`app.cpm.process.ProcessRunner` — never a hand-rolled `ProcessBuilder` +
+`app.drydock.process.ProcessRunner` — never a hand-rolled `ProcessBuilder` +
 stream-drain copy in a service.
 
 - Every spawn has a timeout (short for status/query commands, long for
@@ -45,10 +45,10 @@ stream-drain copy in a service.
   JVM. This includes any user-supplied listener the trampoline invokes.
 - Every Java method that touches libghostty, AppKit, or the native host
   asserts the FX thread (`checkFxThread()`), and every exported
-  `cpm_terminal_host_*` function asserts the AppKit main thread.
+  `drydock_terminal_host_*` function asserts the AppKit main thread.
 - Callback registration is register-once per slot; re-registration throws.
   Native callback pointers are NULLed before the arena that owns their
-  stubs is closed (see `cpm_terminal_host_destroy`).
+  stubs is closed (see `drydock_terminal_host_destroy`).
 - Struct writes go through the named `StructLayout`s / derived offsets —
   never hard-coded byte offsets duplicated away from the layout definition.
 - Wakeup/redraw signals from native threads are coalesced (at most one
@@ -97,7 +97,7 @@ cycles were a documented data-loss bug).
   exception: same-name collisions from different packages).
 - Lifecycle symmetry: everything with a background executor or native
   resource implements a close/flush that shutdown actually calls; service
-  closes in `CpmApplication.stop()` are individually exception-isolated so
+  closes in `DrydockApplication.stop()` are individually exception-isolated so
   one failure cannot skip the rest.
 - Custom Gradle tasks declare precise, non-overlapping inputs/outputs
   (fingerprint the ghostty submodule by commit hash, not its file tree) so

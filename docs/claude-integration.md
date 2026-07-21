@@ -1,7 +1,7 @@
 # Gate 0E: running the real `claude` CLI in the embedded terminal
 
-Plan section 7 "Gate 0E" / section 28 "Task 7". Spike: `app.cpm.terminal.Gate0eSpike`
-(run via `./gradlew gate0eSpike -Papp.cpm.gate0e.repo=<throwaway repo>`).
+Plan section 7 "Gate 0E" / section 28 "Task 7". Spike: `app.drydock.terminal.Gate0eSpike`
+(run via `./gradlew gate0eSpike -Papp.drydock.gate0e.repo=<throwaway repo>`).
 
 ## What this spike does, and does not, prove
 
@@ -43,7 +43,7 @@ it or anywhere else.
 | quitting and relaunching | **Partially verified, with a serious incompatibility — see "Incompatibility: closing a surface with a live child process" below.** `/exit` typed as a command worked in isolation when it actually got submitted (confirmed once in run 1, where the concatenated `.../exit` message still triggered `claude`'s own "thinking" spinner on the whole blob, i.e. `/exit` alone would have been recognized had it not been glued onto prior unsent text). Relaunching a fresh `claude` surface in the same repo/host after closing the old one worked with no crash and a normal fresh banner. |
 | `claude --resume` | **Verified it runs and renders a picker; found a related data-loss incompatibility — see below.** `claude --resume` in the test repo shows a proper "Resume session" picker UI (search box, project name, "Ctrl+A to show all projects" hint) rather than silently doing nothing. In both runs it reported **"No conversations found in this project"**, despite a real multi-turn session (7+5, the multiline message, the essay) having just run in that exact repo — see the incompatibility below for why. |
 | inherited managed settings | **No managed-settings file present on this dev machine** (`/Library/Application Support/ClaudeCode` and `/etc/claude-code` both absent), so there was nothing to inherit; not exercisable here. Documented so a future run on a managed machine knows to re-check. |
-| inherited gateway environment variables | **Inconclusive in both runs** — the probe step (spawn `/bin/zsh -l -c "export CPM_GATE0E_PROBE=xyz789_gate0e; exec claude"`, then ask `claude` to `echo $CPM_GATE0E_PROBE` via its bash tool) never got a chance to answer before the script's fixed timeout elapsed, in both runs, for the same dropped-Enter reason below. What **is** independently confirmed: `GhosttySurface.create` passes no explicit environment map to `ghostty_surface_config_s` (there is no such field being set anywhere in this codebase), so the spawned command inherits the ghostty/JVM process's own environment by default (Zig's `std.process.Child` defaults to inheriting the parent's env unless overridden) — meaning a variable exported by a wrapping login shell reaches the `claude` process by ordinary Unix process-environment inheritance, independent of anything this spike or app does. The *chat-level* proof that `claude`'s own bash tool sees it was not obtained; a follow-up run with settle-detection (see below) instead of fixed delays should close this out before Task 8. |
+| inherited gateway environment variables | **Inconclusive in both runs** — the probe step (spawn `/bin/zsh -l -c "export DRYDOCK_GATE0E_PROBE=xyz789_gate0e; exec claude"`, then ask `claude` to `echo $DRYDOCK_GATE0E_PROBE` via its bash tool) never got a chance to answer before the script's fixed timeout elapsed, in both runs, for the same dropped-Enter reason below. What **is** independently confirmed: `GhosttySurface.create` passes no explicit environment map to `ghostty_surface_config_s` (there is no such field being set anywhere in this codebase), so the spawned command inherits the ghostty/JVM process's own environment by default (Zig's `std.process.Child` defaults to inheriting the parent's env unless overridden) — meaning a variable exported by a wrapping login shell reaches the `claude` process by ordinary Unix process-environment inheritance, independent of anything this spike or app does. The *chat-level* proof that `claude`'s own bash tool sees it was not obtained; a follow-up run with settle-detection (see below) instead of fixed delays should close this out before Task 8. |
 
 ## Environment-specific finding: this dev machine bypasses the trust/permission UI entirely
 
@@ -63,7 +63,7 @@ spike only reads `~/.claude/settings.json` indirectly by launching `claude`, nev
 writes to it). Its effect on this investigation: the workspace-trust dialog and
 per-tool permission prompts that a fresh/default install would show never appeared
 in either run, for a brand-new, never-before-seen throwaway repository. This is
-worth flagging explicitly for the real application, once built: **CPM cannot assume
+worth flagging explicitly for the real application, once built: **Drydock cannot assume
 a permission or trust prompt will always render** in the embedded terminal — that
 UI's presence is entirely a function of the user's own `~/.claude/settings.json`,
 which the plan already forbids this project from reading or changing. The
@@ -153,7 +153,7 @@ A plain letter like 'C' is not a predefined functional key, so it depends entire
 on `unshifted_codepoint`. This project's code (`GhosttySurface.sendKey(int, int,
 boolean)`, used for all Ctrl+-modified shortcuts) always sent `unshifted_codepoint =
 0` and no UTF-8 `text` — because the native host shim
-(`native-host/CpmTerminalHost.m`) never captured AppKit's
+(`native-host/DrydockTerminalHost.m`) never captured AppKit's
 `charactersIgnoringModifiers` (the base, unmodified character; `characters` alone
 gives the ETX 0x03 control byte, not `'c'`). With `entry_` resolving to `null` and no
 UTF-8 fallback text either, the encoder's final branch:
@@ -169,10 +169,10 @@ program has negotiated Kitty keyboard protocol (i.e. specifically `claude`, not 
 plain shell) — which is exactly the divergence observed.
 
 **Fix applied**, end-to-end:
-- `native-host/CpmTerminalHost.h`/`.m`: the key-event callback now also captures and
+- `native-host/DrydockTerminalHost.h`/`.m`: the key-event callback now also captures and
   forwards AppKit's `charactersIgnoringModifiers` as a second string
   (`unshifted_characters`).
-- `CpmTerminalHostBinding.java`/`CpmTerminalHost.java`: extended the FFM callback
+- `DrydockTerminalHostBinding.java`/`DrydockTerminalHost.java`: extended the FFM callback
   descriptor, upcall trampoline, and public `KeyEventListener` interface to carry it.
 - `GhosttySurface.java`: added `sendKey(int ghosttyKeyCode, int mods, boolean
   pressed, int unshiftedCodepoint)`, which populates the struct's
@@ -188,7 +188,7 @@ plain shell) — which is exactly the divergence observed.
   it just never manifested against a plain shell.
 
 **Verified fixed, both interactively and via the automated Gate 0E transcript:**
-- Physical Ctrl+C against `claude` in `gate0cSpike -Papp.cpm.gate0c.interactive`:
+- Physical Ctrl+C against `claude` in `gate0cSpike -Papp.drydock.gate0c.interactive`:
   confirmed working by the human tester (prior to this fix it did not cancel; this
   specific end-to-end interactive re-test after the fix is still recommended before
   fully closing this item).
@@ -224,7 +224,7 @@ checklist always drove the shell to a clean `Ctrl+D` exit *before* that direct
 differently.
 
 **Fix applied** (`GhosttySurface.closeGracefully(long, long, Runnable)`,
-`app/src/main/java/app/cpm/terminal/ghostty/GhosttySurface.java`): sends a
+`app/src/main/java/app/drydock/terminal/ghostty/GhosttySurface.java`): sends a
 graceful-exit Ctrl+D and polls `processExited()` on the JavaFX Application Thread
 (via `PauseTransition`, non-blocking) for up to a caller-supplied grace period before
 falling back to `close()` (`ghostty_surface_free`). All three spikes'
@@ -237,7 +237,7 @@ scripted "automated: closing" steps now call `shutdown()` directly instead of
 - Gate 0D (`./gradlew gate0dSpike`): 12/12 checks pass, **exits 0**, full clean
   `shutdown() -> closeGracefully (already exited) -> close() -> finishShutdown() ->
   stage.close()` sequence logged.
-- Gate 0E (`./gradlew gate0eSpike -Papp.cpm.gate0e.repo=<repo>`): the crash — an
+- Gate 0E (`./gradlew gate0eSpike -Papp.drydock.gate0e.repo=<repo>`): the crash — an
   abrupt process death with **zero** shutdown logging — is gone. The full sequence
   now runs and logs: `shutting down` -> `closeGracefully: child process still alive,
   requesting Ctrl+D...` -> (5s grace period; `claude` did not exit on Ctrl+D within
@@ -280,19 +280,19 @@ focused regression test once that lifecycle code exists, per rule 27.14.
 ```bash
 source ~/.sdkman/bin/sdkman-init.sh
 export JAVA_HOME=~/.sdkman/candidates/java/23.0.1-tem   # see README.md: Gradle 8.11.1 can't launch under JDK 26 itself
-cd /Users/jbachorik/src/olifer
+cd /Users/jbachorik/src/drydock
 
-# create a throwaway git repo OUTSIDE this project (never point this at olifer itself):
+# create a throwaway git repo OUTSIDE this project (never point this at drydock itself):
 TESTREPO=/tmp/gate0e-test-repo
 rm -rf "$TESTREPO" && mkdir -p "$TESTREPO" && cd "$TESTREPO" && git init -q \
   && git config user.email test@example.com && git config user.name "Gate0E Test" \
   && echo "# test" > README.md && git add -A && git commit -q -m init
-cd /Users/jbachorik/src/olifer
+cd /Users/jbachorik/src/drydock
 
-./gradlew gate0eSpike -Papp.cpm.gate0e.repo="$TESTREPO"
+./gradlew gate0eSpike -Papp.drydock.gate0e.repo="$TESTREPO"
 ```
 
-Pass `-Papp.cpm.gate0e.interactive` to leave the window open with a live `claude`
+Pass `-Papp.drydock.gate0e.interactive` to leave the window open with a live `claude`
 session instead of running the scripted transcript, for a human to drive the rest of
 the checklist (real trust-prompt UI on a clean account, real Cmd+C/V, physical
 Ctrl+C timing).
@@ -309,6 +309,6 @@ failing native integration with mocked success").
 
 ## Files
 
-- `app/src/spike/java/app/cpm/terminal/Gate0eSpike.java` — the spike itself (scripted transcript, no hard pass/fail assertions, by design — see top of this document).
-- `app/src/spike/java/app/cpm/terminal/Gate0eSpikeLauncher.java` — same JavaFX-Application-from-classpath indirection as `Gate0cSpikeLauncher`/`Gate0dSpikeLauncher`.
-- `app/build.gradle.kts` — `gate0eSpike` Gradle task (`-Papp.cpm.gate0e.repo=<path>` required, `-Papp.cpm.gate0e.claude=<path>` optional override, `-Papp.cpm.gate0e.interactive` for a live human-driven window).
+- `app/src/spike/java/app/drydock/terminal/Gate0eSpike.java` — the spike itself (scripted transcript, no hard pass/fail assertions, by design — see top of this document).
+- `app/src/spike/java/app/drydock/terminal/Gate0eSpikeLauncher.java` — same JavaFX-Application-from-classpath indirection as `Gate0cSpikeLauncher`/`Gate0dSpikeLauncher`.
+- `app/build.gradle.kts` — `gate0eSpike` Gradle task (`-Papp.drydock.gate0e.repo=<path>` required, `-Papp.drydock.gate0e.claude=<path>` optional override, `-Papp.drydock.gate0e.interactive` for a live human-driven window).

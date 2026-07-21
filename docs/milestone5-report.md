@@ -11,8 +11,8 @@ complete until its exit criteria have been manually or automatically verified").
 
 ## What was built (file by file)
 
-### `app/src/main/java/app/cpm/ui/OpenSessionTab.java` (new)
-One open terminal tab's native resources: its own `GhosttyApp` + `CpmTerminalHost` +
+### `app/src/main/java/app/drydock/ui/OpenSessionTab.java` (new)
+One open terminal tab's native resources: its own `GhosttyApp` + `DrydockTerminalHost` +
 (once attached) `GhosttySurface`, per Gate 0C/0D/0E's established
 one-`GhosttyApp`-per-window/view pattern (one instance per tab here, all attached to
 the same single application window — see "Design notes" below for why that's valid).
@@ -32,11 +32,11 @@ the same single application window — see "Design notes" below for why that's v
   older, since-documented-as-wrong `sendText` path for plain characters; this class
   does not copy that, using the fixed API `GhosttySurface.sendCharKey` document
   instead — see that method's Javadoc and `docs/claude-integration.md`).
-- `disposeNativeResources()` — closes only `GhosttyApp`/`CpmTerminalHost`; never calls
+- `disposeNativeResources()` — closes only `GhosttyApp`/`DrydockTerminalHost`; never calls
   `GhosttySurface.close()` itself (that already happened inside
   `SessionManager.closeSession`'s `closeGracefully` call before this runs).
 
-### `app/src/main/java/app/cpm/ui/MainWorkspace.java` (new)
+### `app/src/main/java/app/drydock/ui/MainWorkspace.java` (new)
 The main workspace (plan section 13): a `TabPane` of terminal tabs on top of a
 `Map<ManagedSessionId, OpenSessionTab>`.
 
@@ -64,7 +64,7 @@ The main workspace (plan section 13): a `TabPane` of terminal tabs on top of a
   `stage.focusedProperty()` listener refocuses the selected tab when the window
   regains focus.
 
-### `app/src/main/java/app/cpm/ui/RepositorySidebar.java` (modified)
+### `app/src/main/java/app/drydock/ui/RepositorySidebar.java` (modified)
 - Constructor now also takes `SessionManager` and `MainWorkspace`.
 - The repository context menu's "New Claude session" item is no longer a disabled
   stub — it calls `mainWorkspace.openNewSession(repository)`.
@@ -82,7 +82,7 @@ The main workspace (plan section 13): a `TabPane` of terminal tabs on top of a
 - The "0 running sessions" hardcoded placeholder is gone; it now counts real
   `RUNNING`-status sessions.
 
-### `app/src/main/java/app/cpm/CpmApplication.java` (rewritten)
+### `app/src/main/java/app/drydock/DrydockApplication.java` (rewritten)
 - Constructs `ClaudeCapabilityService` and `SessionManager` alongside the existing
   `GitStatusService`/`RepositoryManager`, sharing one `JsonApplicationStateRepository`
   instance.
@@ -96,7 +96,7 @@ The main workspace (plan section 13): a `TabPane` of terminal tabs on top of a
   this cannot infinite-loop).
 - `stop()` additionally closes `SessionManager`/`ClaudeCapabilityService`.
 
-### `app/src/main/java/app/cpm/app/SessionManager.java` and `.../app/RepositoryManager.java` (modified — see "Bug found while wiring up")
+### `app/src/main/java/app/drydock/app/SessionManager.java` and `.../app/RepositoryManager.java` (modified — see "Bug found while wiring up")
 Both gained a `mergeXOntoLatestDiskState` helper so each class's mutators re-read the
 freshest on-disk state and apply only their own owned field(s) on top of it, instead
 of writing back their entire long-lived in-memory `ApplicationState` snapshot
@@ -108,7 +108,7 @@ of writing back their entire long-lived in-memory `ApplicationState` snapshot
   `gateNSpike` task).
 - The `run` task now `dependsOn(buildGhosttyNative, buildNativeHost)` and pins the
   JDK 26 toolchain launcher + `rootProject.projectDir` as its working directory
-  (needed for `CpmTerminalHostLibrary`'s `build/native` discovery), matching every
+  (needed for `DrydockTerminalHostLibrary`'s `build/native` discovery), matching every
   other native-consuming task in this file.
 
 ## Bug found while wiring up (plan step's explicit "explain exactly why" clause)
@@ -145,17 +145,17 @@ repository and the session.
 
 ## Design notes
 
-- **Native-view overlay, not a scene-graph `Node`.** `CpmTerminalHost` attaches a
+- **Native-view overlay, not a scene-graph `Node`.** `DrydockTerminalHost` attaches a
   real AppKit `NSView` as a sibling of the current window's content view, positioned
   via pixel `setFrame` calls in that window's own coordinate space — it does not
   render through JavaFX's scene graph at all. `OpenSessionTab`'s placeholder is
   therefore an empty layout anchor only; this matches how Gate 0C/0D/0E already work,
   just adapted to move/resize/show/hide per *tab* instead of filling one whole
   spike window.
-- **One application window.** `CpmTerminalHost.createForCurrentWindow()`'s own
+- **One application window.** `DrydockTerminalHost.createForCurrentWindow()`'s own
   Javadoc documents it as "most-recently-created still-open Glass window" — a
   single-window simplification. This application still has exactly one `Stage`
-  (`CpmApplication`'s `primaryStage`), so every tab's host correctly resolves to
+  (`DrydockApplication`'s `primaryStage`), so every tab's host correctly resolves to
   that same window every time; this would need revisiting if the application ever
   grew a second top-level window.
 - **Key forwarding uses the corrected `sendCharKey` codepath**, not the older
@@ -164,7 +164,7 @@ repository and the session.
   `docs/claude-integration.md` for why `sendText` corrupts input once bracketed
   paste is enabled.
 - **`SessionOpenResult.AlreadyOpen` handling** discards the placeholder tab's
-  freshly created (but never surfaced) `GhosttyApp`/`CpmTerminalHost` rather than
+  freshly created (but never surfaced) `GhosttyApp`/`DrydockTerminalHost` rather than
   reusing them, since `SessionManager.checkResumeBlocked` short-circuits before ever
   creating a `GhosttySurface` for that attempt. Slightly wasteful (an unused
   `ghostty_app_new`/native-view-create-and-destroy pair) but simple and correct.
@@ -199,27 +199,27 @@ repository and the session.
 
 ## Verification performed
 
-All commands run from `/Users/jbachorik/src/olifer`.
+All commands run from `/Users/jbachorik/src/drydock`.
 
 1. **`./gradlew clean compileJava test`** — `BUILD SUCCESSFUL`, all existing unit
    tests (including `SessionManagerTest`, `RepositoryManagerTest`) still pass
    unmodified.
 2. **`./gradlew gate0dSpike`** — Phase 0 regression guard: still **12/12 PASS**,
-   confirming this step's `CpmApplication`/build-file changes did not regress the
+   confirming this step's `DrydockApplication`/build-file changes did not regress the
    already-verified interactive-shell terminal behavior.
 3. **Real end-to-end flow against a real `claude` CLI and a real throwaway git
-   repository** (`/tmp/cpm-milestone5-test`, created and destroyed for this run only,
+   repository** (`/tmp/drydock-milestone5-test`, created and destroyed for this run only,
    never this project's own repository), using a throwaway JavaFX driver class
    (written, run, and then deleted before this commit — not part of the delivered
    source) that constructed the exact same production objects
-   (`RepositoryManager`/`SessionManager`/`MainWorkspace`) `CpmApplication` does and
+   (`RepositoryManager`/`SessionManager`/`MainWorkspace`) `DrydockApplication` does and
    called `MainWorkspace.openNewSession`/`closeSession` — the identical methods
    `RepositorySidebar`'s "New Claude session"/"Stop process" menu items call. This
    was necessary because no GUI-automation tool for a native macOS window (as
    opposed to a browser tab) was available in this environment to literally click
    the sidebar's context menu; the driver exercises the same code path a click would,
    just invoked directly, inside a real visible JavaFX window with a real
-   `GhosttyApp`/`CpmTerminalHost`/`GhosttySurface` underneath (not mocked).
+   `GhosttyApp`/`DrydockTerminalHost`/`GhosttySurface` underneath (not mocked).
    - `openNewSession` → session metadata appeared with `status=RUNNING`; log
      confirmed `ClaudeExecutableLocator` resolved and launched the real
      `/Users/jbachorik/.local/bin/claude` binary in the repo's working directory.
@@ -231,19 +231,19 @@ All commands run from `/Users/jbachorik/src/olifer`.
      claude` immediately after confirmed the spawned `claude` process was actually
      gone (not just reported gone).
    - Simulated restart (fresh `RepositoryManager`/`SessionManager` instances
-     constructed against the same state file, exactly what `CpmApplication.start()`
+     constructed against the same state file, exactly what `DrydockApplication.start()`
      does on a real relaunch) confirmed **both** the repository and the session
      (with its final `EXITED` status) were restored, and confirmed no new `claude`
      process was spawned by doing so.
    - Directly inspected the persisted `state.json`: both the repository and session
      entries were present together — the cross-manager overwrite fix (above) is what
      makes this true; without it the repository entry would have been missing.
-4. **`./gradlew run`**, launched for real, confirmed the actual `app.cpm.Main` /
-   `CpmApplication` process starts cleanly (JavaFX window opens, no exception in
+4. **`./gradlew run`**, launched for real, confirmed the actual `app.drydock.Main` /
+   `DrydockApplication` process starts cleanly (JavaFX window opens, no exception in
    logs) with the new `MainWorkspace`/`SessionManager`/`ClaudeCapabilityService`
    wiring, then was killed.
 5. **Process cleanup**: after every step above, confirmed via
-   `ps aux | grep -E 'gradlew run|CpmApplication|app.cpm' | grep -v grep` that no
+   `ps aux | grep -E 'gradlew run|DrydockApplication|app.drydock' | grep -v grep` that no
    process remained running — this printed nothing on the final check.
 
 No milestone-completion claim beyond what the above evidence actually shows.
