@@ -3,6 +3,7 @@ package app.drydock.ui.explorer;
 import app.drydock.ui.UiFormats;
 import javafx.animation.PauseTransition;
 import javafx.application.Platform;
+import javafx.event.Event;
 import javafx.geometry.Pos;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
@@ -43,6 +44,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.IntFunction;
 
 /**
@@ -132,6 +134,13 @@ final class FileViewer extends BorderPane {
     private static final Duration POLL_INTERVAL = Duration.ofMillis(1500);
 
     private ScheduledFuture<?> poller;
+
+    /**
+     * Whether a poll round's reads are still outstanding. Written from the
+     * executor thread (the tick), the FX thread (the scan) and whichever thread
+     * completes the last read, hence atomic.
+     */
+    private final AtomicBoolean pollRoundInFlight = new AtomicBoolean();
 
     /** Re-highlight debounce, matching SearchRail's keystroke-debounce convention. */
     private static final Duration HIGHLIGHT_DEBOUNCE = Duration.ofMillis(150);
@@ -351,11 +360,23 @@ final class FileViewer extends BorderPane {
      * already-removed tab -- a conflict banner wired to a dead tab. The scan
      * therefore happens on the FX thread; the poll it starts is still
      * asynchronous, so nothing blocks there.</p>
+     *
+     * <p>{@code scheduleWithFixedDelay} only spaces the ticks that post the
+     * scan, not the reads they start, so a tick is skipped entirely while the
+     * previous round's reads are still outstanding. Without that backpressure
+     * several tabs on a slow filesystem would enqueue a fresh round every
+     * {@link #POLL_INTERVAL} on the one executor thread the SAVES also use,
+     * and the queue in front of a user's write would keep growing.</p>
      */
     private void pollOpenFiles() {
+        if (!pollRoundInFlight.compareAndSet(false, true)) {
+            LOG.log(Level.DEBUG, "Skipping disk poll: the previous round has not finished");
+            return;
+        }
         try {
             Platform.runLater(this::pollOpenFilesOnFxThread);
         } catch (RuntimeException e) {
+            pollRoundInFlight.set(false);
             LOG.log(Level.WARNING, "Could not schedule disk poll; will retry next tick", e);
         }
     }
@@ -368,13 +389,24 @@ final class FileViewer extends BorderPane {
                     targets.add(Map.entry(tab, session));
                 }
             }
-            for (Map.Entry<Tab, FileEditSession> target : targets) {
-                Tab tab = target.getKey();
-                FileEditSession session = target.getValue();
-                session.poll().thenAccept(
+            if (targets.isEmpty()) {
+                pollRoundInFlight.set(false);
+                return;
+            }
+            CompletableFuture<?>[] round = new CompletableFuture<?>[targets.size()];
+            for (int i = 0; i < targets.size(); i++) {
+                Tab tab = targets.get(i).getKey();
+                FileEditSession session = targets.get(i).getValue();
+                round[i] = session.poll().thenAccept(
                         result -> Platform.runLater(() -> applyPollResult(tab, session, result)));
             }
+            // Cleared on EVERY completion path, failures included: a round that
+            // never clears the flag would stop the stale-file protection dead
+            // for the rest of the viewer's life.
+            CompletableFuture.allOf(round)
+                    .whenComplete((ignored, failure) -> pollRoundInFlight.set(false));
         } catch (RuntimeException e) {
+            pollRoundInFlight.set(false);
             LOG.log(Level.WARNING, "Disk poll failed; will retry next tick", e);
         }
     }
@@ -459,6 +491,10 @@ final class FileViewer extends BorderPane {
         int safeParagraph = Math.max(0, Math.min(paragraph, area.getParagraphs().size() - 1));
         int safeColumn = Math.max(0, Math.min(column, area.getParagraphLength(safeParagraph)));
         area.moveTo(safeParagraph, safeColumn);
+        // The external edit shifted line numbers, so the green changed-line
+        // markers are now pointing at pre-reload lines. Nothing else repaints
+        // them until the next save-triggered overlay refresh.
+        applyGutter(area, changedLinesFor(tab));
         rehighlight(tab, area, text);
     }
 
@@ -562,6 +598,14 @@ final class FileViewer extends BorderPane {
     /** Reloads from disk, resolving a conflict in the disk's favour. */
     private void takeDisk(Tab tab, FileEditSession session) {
         session.takeDisk().whenComplete((text, failure) -> Platform.runLater(() -> {
+            if (!fileTabs.getTabs().contains(tab)) {
+                // The read is async (one executor hop plus one runLater), long
+                // enough for the user to have closed the tab meanwhile. Same
+                // guard the poll path carries: reloading an orphaned CodeArea --
+                // or re-arming its session's write through reload's session.edit
+                // -- would act on a file nobody has open any more.
+                return;
+            }
             if (failure != null) {
                 showReadErrorBanner(tab, session, failure);
             } else {
@@ -681,6 +725,7 @@ final class FileViewer extends BorderPane {
         tab.setContent(new VirtualizedScrollPane<>(area));
         tab.getProperties().put("drydock.file", file);
         tab.getProperties().put("drydock.relative", relativePath);
+        tab.setOnCloseRequest(event -> vetoCloseOfUnresolvedConflict(tab, event));
         tab.setOnClosed(e -> closeTab(tab, true));
 
         openFiles.put(file, tab);
@@ -739,6 +784,40 @@ final class FileViewer extends BorderPane {
                 jumpToLine.ifPresent(line -> scrollTo(tab, line));
             });
         });
+    }
+
+    /**
+     * Vetoes the user's ✕ on a tab whose session is in an unresolved {@link
+     * FileEditSession.State#CONFLICT}, and shows them why.
+     *
+     * <p>The ordinary close flushes ({@link #closeTab(Tab, boolean)} →
+     * {@link #flushSession}), but a conflicted session's write path returns
+     * early -- so that same gesture, which saves a plain DIRTY tab, would drop
+     * the user's buffer with no prompt, no banner and no log. A background
+     * conflict is not even on screen when it happens. Rather than pick a winner
+     * for them, keep the tab: select it and re-raise its conflict banner so the
+     * "keep mine / reload" choice is in front of them. Once they answer, the
+     * session leaves CONFLICT and the next ✕ closes normally.</p>
+     *
+     * <p>This is the ONLY route the user's gesture takes:
+     * {@code Tab.TAB_CLOSE_REQUEST_EVENT} is fired by {@code
+     * TabPaneBehavior.canCloseTab} before the tab is removed, and consuming it
+     * is how a JavaFX tab close is refused. Programmatic removals
+     * ({@code getTabs().remove}, e.g. the missing-file banner's "close tab")
+     * never fire it, so the abandon path cannot be blocked here -- and an
+     * abandoned session is excluded explicitly anyway, since the user has
+     * already made that call and nothing may hold their tab hostage over it.</p>
+     */
+    private void vetoCloseOfUnresolvedConflict(Tab tab, Event event) {
+        if (!(tab.getProperties().get("drydock.session") instanceof FileEditSession session)
+                || session.state() != FileEditSession.State.CONFLICT
+                || session.abandoned()) {
+            return;
+        }
+        event.consume();
+        LOG.log(Level.DEBUG, "Refusing to close " + fileNameOf(tab) + " with an unresolved conflict");
+        fileTabs.getSelectionModel().select(tab);
+        raiseBannerFor(tab);
     }
 
     private static StyleSpans<Collection<String>> matchSpans(String text, String query) {
@@ -969,6 +1048,16 @@ final class FileViewer extends BorderPane {
         }
         long deadlineNanos = System.nanoTime() + timeout.toNanos();
         for (FileEditSession session : snapshot) {
+            if (session.state() == FileEditSession.State.CONFLICT) {
+                // The user's close gesture is vetoed while a conflict is
+                // unresolved (vetoCloseOfUnresolvedConflict), but shutdown
+                // cannot ask anyone anything: the write path returns early for
+                // CONFLICT, so these edits are genuinely not going to disk and a
+                // log line is the only trace they will ever leave.
+                LOG.log(Level.WARNING, "Unsaved edits to " + session.file()
+                        + " were NOT written at shutdown: the file changed on disk"
+                        + " and the conflict was never resolved");
+            }
             long remainingNanos = deadlineNanos - System.nanoTime();
             if (remainingNanos <= 0) {
                 // The shared deadline is already exhausted: flushBlocking
@@ -1003,6 +1092,14 @@ final class FileViewer extends BorderPane {
      */
     private void onSaved() {
         if (diffOverlay == null) {
+            return;
+        }
+        if (getScene() == null) {
+            // Detach runs flushAllSessions() and only then stopTransitions();
+            // those flushes complete afterwards on the ioExecutor and hop back
+            // here, so arming a fresh debounce now would outlive the detach the
+            // stop was supposed to cover -- dropping the diff cache Review
+            // shares and spawning a git diff for a viewer nobody is looking at.
             return;
         }
         if (diffRefreshDebounce != null) {
@@ -1145,6 +1242,12 @@ final class FileViewer extends BorderPane {
     private void fadeChipToEditable() {
         if (chipReset != null) {
             chipReset.stop();
+        }
+        if (getScene() == null) {
+            // Same post-detach re-arming hazard as onSaved(): a flush completing
+            // after stopTransitions() must not leave a timer running on a viewer
+            // that is out of the scene graph. The chip is repainted on re-attach.
+            return;
         }
         chipReset = new PauseTransition(javafx.util.Duration.seconds(2));
         chipReset.setOnFinished(e -> {

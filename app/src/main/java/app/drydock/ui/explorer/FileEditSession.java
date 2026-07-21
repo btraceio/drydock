@@ -101,6 +101,17 @@ final class FileEditSession {
     private volatile FileContent content;
     private String pendingText;
     private DiskStamp stamp;
+    /**
+     * The identity of a file this session has already loaded and refused to
+     * adopt (binary, oversized, mixed terminators -- see {@link #missing}).
+     * {@code missing()} deliberately adopts no stamp, so without remembering
+     * the rejection every poll tick would re-read the whole file for as long as
+     * the tab stays open: a 2 MB binary Claude dropped in place would be loaded
+     * every {@code POLL_INTERVAL} forever, on the same single thread the saves
+     * use. Cleared whenever a stamp IS adopted, so a file that becomes editable
+     * again is picked up normally.
+     */
+    private DiskStamp rejectedStamp;
     private ScheduledFuture<?> armedSave;
     private long editSeq;
     private boolean writeInFlight;
@@ -236,6 +247,18 @@ final class FileEditSession {
     }
 
     /**
+     * Whether {@link #abandon()} has latched. The viewer needs this to tell an
+     * unresolved conflict (where a close gesture must be vetoed so the user
+     * answers the banner first) from a buffer the user has already deliberately
+     * discarded (where the tab must be allowed to go).
+     */
+    boolean abandoned() {
+        synchronized (lock) {
+            return abandoned;
+        }
+    }
+
+    /**
      * Awaits {@link #flush()}, bounded. The shutdown path's entry point:
      * the viewer's executor threads are daemons, so a fire-and-forget flush
      * is killed mid-write at JVM exit (the failure {@code
@@ -291,17 +314,30 @@ final class FileEditSession {
             }
         }
         DiskStamp current;
+        boolean sameAsRejected;
         try {
             current = readStamp();
         } catch (IOException e) {
             // Deleted underneath us, or unreadable: either way the viewer
-            // must ask rather than silently recreate the file.
-            return missing();
+            // must ask rather than silently recreate the file. No stamp to
+            // remember -- there is nothing here to re-read cheaply anyway.
+            return missing(null);
         }
         synchronized (lock) {
             if (current.equals(stamp)) {
+                rejectedStamp = null;
                 return new PollResult(PollOutcome.UNCHANGED, null);
             }
+            sameAsRejected = current.equals(rejectedStamp);
+        }
+        if (sameAsRejected) {
+            // Byte-for-byte the same file we already loaded and refused once.
+            // Loading it again would change nothing except the cost -- but the
+            // report (and the disarm it carries) still has to be repeated every
+            // tick, or an edit made after the rejection would re-arm the
+            // debounce and write the buffer over content this session must not
+            // touch.
+            return missing(current);
         }
         // The stamp differs, but that alone does not mean the bytes did --
         // load and compare text before deciding anything, rather than
@@ -310,15 +346,16 @@ final class FileEditSession {
         try {
             fresh = FileContent.load(file, maxBytes);
         } catch (IOException e) {
-            return missing();
+            return missing(null);
         }
         if (!fresh.editable()) {
             // Claude replaced the file with something we must not write
             // back (binary, over the size limit, mixed terminators). Adopt
             // nothing -- keeping the old stamp means every later poll keeps
             // saying so -- and let the viewer decide, exactly as for a
-            // deleted file.
-            return missing();
+            // deleted file. The rejected identity IS remembered, so the next
+            // tick can say so again without re-reading the whole file.
+            return missing(current);
         }
         boolean conflicted;
         State changed;
@@ -334,6 +371,7 @@ final class FileEditSession {
                 // wrong.
                 content = fresh;
                 stamp = current;
+                rejectedStamp = null;
                 return new PollResult(PollOutcome.UNCHANGED, null);
             }
             conflicted = hasUnsavedEdits();
@@ -354,6 +392,7 @@ final class FileEditSession {
                 content = fresh;
                 pendingText = fresh.text();
                 stamp = current;
+                rejectedStamp = null;
             }
         }
         notifyState(changed);
@@ -370,9 +409,15 @@ final class FileEditSession {
      * banner's "keep mine / close tab" choice for the user before they can even
      * read it. The state machine is left alone: the buffer is still the user's,
      * and {@link #keepMine()} is exactly how they re-arm it deliberately.
+     *
+     * @param rejected the identity of the file that was loaded and refused, so
+     *     later polls can short-circuit while it is unchanged; {@code null}
+     *     when no usable stamp was obtained (deleted / unreadable), which also
+     *     clears any previously remembered one.
      */
-    private PollResult missing() {
+    private PollResult missing(DiskStamp rejected) {
         synchronized (lock) {
+            rejectedStamp = rejected;
             cancelArmed();
         }
         return new PollResult(PollOutcome.MISSING, null);
@@ -438,6 +483,7 @@ final class FileEditSession {
             content = fresh;
             pendingText = fresh.text();
             stamp = current;
+            rejectedStamp = null;
             editSeq++;
             cancelArmed();
             lastError = null;
@@ -481,6 +527,7 @@ final class FileEditSession {
             DiskStamp written = readStamp();
             synchronized (lock) {
                 stamp = written;
+                rejectedStamp = null;
                 lastError = null;
                 if (editSeq == seq) {
                     next = transition(State.CLEAN);

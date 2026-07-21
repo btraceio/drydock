@@ -21,6 +21,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
@@ -485,6 +486,84 @@ class FileEditSessionTest {
         var result = session.poll().get(5, TimeUnit.SECONDS);
 
         assertEquals(PollOutcome.MISSING, result.outcome());
+    }
+
+    /**
+     * {@code missing()} adopts no stamp, so without remembering the identity it
+     * refused, every poll tick would re-read the whole file -- a 2 MB binary
+     * dropped in place would be loaded every 1.5s, forever, on the same thread
+     * the saves use. Observed the only way it can be from outside: the file's
+     * bytes are swapped for perfectly editable ones while its mtime and size are
+     * held identical, so a second MISSING can only mean it was never re-read.
+     */
+    @Test
+    void aRejectedNonEditableFileIsNotReReadWhileItsIdentityIsUnchanged(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("a.txt");
+        Files.writeString(file, "one\n");
+        FileEditSession session = sessionFor(file);
+
+        Files.write(file, new byte[] { 'a', 0, 'b', '\n' });
+        FileTime rejectedAt = FileTime.fromMillis(System.currentTimeMillis() + 2000);
+        Files.setLastModifiedTime(file, rejectedAt);
+        assertEquals(PollOutcome.MISSING, session.poll().get(5, TimeUnit.SECONDS).outcome());
+
+        Files.write(file, "abc\n".getBytes(StandardCharsets.UTF_8));
+        Files.setLastModifiedTime(file, rejectedAt);
+        assertEquals(PollOutcome.MISSING, session.poll().get(5, TimeUnit.SECONDS).outcome(),
+                "an unchanged rejected file must not be loaded again");
+
+        // A genuine identity change ends the short-circuit.
+        writeExternally(file, "claude\n");
+        var result = session.poll().get(5, TimeUnit.SECONDS);
+        assertEquals(PollOutcome.RELOAD, result.outcome());
+        assertEquals("claude\n", result.text());
+    }
+
+    /**
+     * The short-circuit skips the read, not the report: a keystroke made after
+     * the rejection re-arms auto-save, and every later MISSING poll must keep
+     * disarming it or the buffer would be written over content this session
+     * must not touch.
+     */
+    @Test
+    void aShortCircuitedMissingPollStillDisarmsTheDebounce(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("a.txt");
+        Files.writeString(file, "one\n");
+        FileEditSession session =
+                new FileEditSession(file, FileContent.load(file, MAX), executor, ARMED_DEBOUNCE, MAX);
+
+        byte[] binary = { 'a', 0, 'b', '\n' };
+        Files.write(file, binary);
+        Files.setLastModifiedTime(file, FileTime.fromMillis(System.currentTimeMillis() + 2000));
+        assertEquals(PollOutcome.MISSING, session.poll().get(5, TimeUnit.SECONDS).outcome());
+
+        session.edit("mine\n");
+        assertEquals(PollOutcome.MISSING, session.poll().get(5, TimeUnit.SECONDS).outcome());
+        awaitPastDebounce(ARMED_DEBOUNCE);
+
+        assertArrayEquals(binary, Files.readAllBytes(file),
+                "a repeated MISSING must keep auto-save disarmed");
+    }
+
+    /**
+     * The viewer vetoes the user's close gesture on an unresolved CONFLICT so
+     * they answer the banner first, but must never hold a tab hostage over a
+     * buffer they have already chosen to discard -- so it asks the session.
+     */
+    @Test
+    void abandonedIsAOneWayLatchTheViewerCanQuery(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("a.txt");
+        Files.writeString(file, "one\n");
+        FileEditSession session = sessionFor(file);
+
+        assertFalse(session.abandoned());
+        session.edit("mine\n");
+        assertFalse(session.abandoned());
+
+        session.abandon();
+        assertTrue(session.abandoned());
+        session.edit("later\n");
+        assertTrue(session.abandoned(), "abandon must not be reversible by an edit");
     }
 
     @Test
