@@ -658,6 +658,223 @@ class FileEditSessionTest {
     }
 
     /**
+     * The constructor seeds an UNVERIFIED stamp, so the FIRST poll always falls
+     * through to loading the file and comparing it. That comparison must be
+     * against the text the buffer is BASED on, never against the live buffer:
+     * a dirty buffer differs from the disk by construction, so comparing the
+     * two reports a conflict for a file nothing has touched. Concretely: open a
+     * file from the search rail and type before the first 1.5s tick, and the
+     * tick raises "changed on disk while you were editing it", disarms
+     * auto-save, vetoes the tab close, and offers a "reload" that throws the
+     * typing away -- with no external actor involved at all.
+     */
+    @Test
+    void typingBeforeTheFirstPollIsNotAConflictAgainstAnUntouchedFile(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("a.txt");
+        Files.writeString(file, "one\n");
+        FileEditSession session = sessionFor(file);
+
+        session.edit("mine\n");
+        var result = session.poll().get(5, TimeUnit.SECONDS);
+
+        assertEquals(PollOutcome.UNCHANGED, result.outcome(),
+                "an untouched file must not look changed just because the buffer is dirty");
+        assertEquals(State.DIRTY, session.state(), "the user's edits are still theirs, and still unsaved");
+        // Auto-save is still armed, so the edits really do reach disk.
+        session.flush().get(5, TimeUnit.SECONDS);
+        assertEquals("mine\n", Files.readString(file));
+        assertEquals(State.CLEAN, session.state());
+    }
+
+    /** The same must hold for a file whose buffer was never typed into but merely re-polled. */
+    @Test
+    void repeatedPollsOfAnUntouchedDirtyFileStayUnchanged(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("a.txt");
+        Files.writeString(file, "one\n");
+        FileEditSession session = sessionFor(file);
+
+        session.edit("mine\n");
+        assertEquals(PollOutcome.UNCHANGED, session.poll().get(5, TimeUnit.SECONDS).outcome());
+        session.edit("mine again\n");
+        assertEquals(PollOutcome.UNCHANGED, session.poll().get(5, TimeUnit.SECONDS).outcome());
+        assertEquals(State.DIRTY, session.state());
+    }
+
+    /**
+     * A MISSING poll must veto every write path, not just the debounce. The
+     * viewer forces a flush on a tab switch, on the code area losing focus, on
+     * the tab close and at shutdown -- so with only the debounce disarmed, a
+     * user who clicks anywhere at all after the missing-file banner appears
+     * silently recreates the file that is gone from disk, without ever
+     * answering the banner.
+     */
+    @Test
+    void aFlushAfterAMissingPollDoesNotRecreateTheFile(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("a.txt");
+        Files.writeString(file, "one\n");
+        FileEditSession session = sessionFor(file);
+
+        session.edit("mine\n");
+        Files.delete(file);
+        assertEquals(PollOutcome.MISSING, session.poll().get(5, TimeUnit.SECONDS).outcome());
+
+        session.flush().get(5, TimeUnit.SECONDS);
+
+        assertFalse(Files.exists(file), "a forced flush must not recreate a file a MISSING poll reported");
+        assertEquals(State.DIRTY, session.state(), "the buffer is still the user's to keep");
+    }
+
+    /**
+     * ...and the veto survives a later keystroke, since every one of those
+     * forced flushes can follow one. Only the banner's own answer re-arms it.
+     */
+    @Test
+    void anEditAfterAMissingPollStillCannotFlushTheFileBack(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("a.txt");
+        Files.writeString(file, "one\n");
+        FileEditSession session =
+                new FileEditSession(file, FileContent.load(file, MAX), executor, ARMED_DEBOUNCE, MAX);
+
+        session.edit("mine\n");
+        Files.delete(file);
+        assertEquals(PollOutcome.MISSING, session.poll().get(5, TimeUnit.SECONDS).outcome());
+
+        session.edit("later\n");
+        session.flush().get(5, TimeUnit.SECONDS);
+        awaitPastDebounce(ARMED_DEBOUNCE);
+
+        assertFalse(Files.exists(file), "only keepMine may put an abandoned-on-disk file back");
+    }
+
+    /** keepMine is the documented escape hatch: it deliberately re-creates the file. */
+    @Test
+    void keepMineDeliberatelyRecreatesAMissingFile(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("a.txt");
+        Files.writeString(file, "one\n");
+        FileEditSession session = sessionFor(file);
+
+        session.edit("mine\n");
+        Files.delete(file);
+        assertEquals(PollOutcome.MISSING, session.poll().get(5, TimeUnit.SECONDS).outcome());
+
+        session.keepMine().get(5, TimeUnit.SECONDS);
+
+        assertEquals("mine\n", Files.readString(file), "keepMine is how the user asks for exactly this");
+        assertEquals(State.CLEAN, session.state());
+        // And the latch is genuinely cleared: ordinary auto-save works again.
+        session.edit("after\n");
+        session.flush().get(5, TimeUnit.SECONDS);
+        assertEquals("after\n", Files.readString(file));
+    }
+
+    /** takeDisk is the other resolution, and must clear the latch too. */
+    @Test
+    void takeDiskAfterAMissingPollReArmsAutoSave(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("a.txt");
+        Files.writeString(file, "one\n");
+        FileEditSession session = sessionFor(file);
+
+        session.edit("mine\n");
+        Files.write(file, new byte[] { 'a', 0, 'b', '\n' });
+        Files.setLastModifiedTime(file, FileTime.fromMillis(System.currentTimeMillis() + 2000));
+        assertEquals(PollOutcome.MISSING, session.poll().get(5, TimeUnit.SECONDS).outcome());
+
+        writeExternally(file, "claude\n");
+        assertEquals("claude\n", session.takeDisk().get(5, TimeUnit.SECONDS));
+
+        session.edit("after\n");
+        session.flush().get(5, TimeUnit.SECONDS);
+        assertEquals("after\n", Files.readString(file), "takeDisk must re-arm the write path");
+    }
+
+    /** A file that comes back unchanged resolves the latch by itself: auto-save resumes. */
+    @Test
+    void aRestoredFileClearsTheMissingLatchOnTheNextPoll(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("a.txt");
+        Files.writeString(file, "one\n");
+        FileEditSession session = sessionFor(file);
+
+        // Adopt a real stamp first, so "restored identically" is observable.
+        assertEquals(PollOutcome.UNCHANGED, session.poll().get(5, TimeUnit.SECONDS).outcome());
+        FileTime stampedAt = Files.getLastModifiedTime(file);
+        session.edit("mine\n");
+        Files.delete(file);
+        assertEquals(PollOutcome.MISSING, session.poll().get(5, TimeUnit.SECONDS).outcome());
+
+        Files.writeString(file, "one\n");
+        Files.setLastModifiedTime(file, stampedAt);
+        assertEquals(PollOutcome.UNCHANGED, session.poll().get(5, TimeUnit.SECONDS).outcome());
+
+        session.flush().get(5, TimeUnit.SECONDS);
+        assertEquals("mine\n", Files.readString(file), "the file is back, so auto-save is back");
+    }
+
+    /**
+     * The 1.5s poller leaves a blind window the 2s debounce fires inside: the
+     * user types, Claude writes the file 0.2s later, and the debounce lands
+     * before any tick has looked. The write path must re-read the disk itself
+     * rather than trust the stamp it last adopted, or it clobbers the external
+     * edit with no conflict raised and no trace.
+     */
+    @Test
+    void aDebouncedWriteThatMissedThePollEntersConflictInsteadOfOverwriting(@TempDir Path dir)
+            throws Exception {
+        Path file = dir.resolve("a.txt");
+        Files.writeString(file, "one\n");
+        FileEditSession session =
+                new FileEditSession(file, FileContent.load(file, MAX), executor, ARMED_DEBOUNCE, MAX);
+        CountDownLatch conflicted = new CountDownLatch(1);
+        session.setOnStateChanged(state -> {
+            if (state == State.CONFLICT) {
+                conflicted.countDown();
+            }
+        });
+
+        session.edit("mine\n");
+        // No poll in between -- that is the whole point of the window.
+        writeExternally(file, "claude\n");
+
+        assertTrue(conflicted.await(5, TimeUnit.SECONDS), "the debounced write should have conflicted");
+        assertEquals(State.CONFLICT, session.state());
+        assertEquals("claude\n", Files.readString(file), "the external edit must survive untouched");
+    }
+
+    /** The same guard on an explicit flush -- Cmd+S, blur, tab switch, close. */
+    @Test
+    void anExplicitFlushThatMissedThePollEntersConflictInsteadOfOverwriting(@TempDir Path dir)
+            throws Exception {
+        Path file = dir.resolve("a.txt");
+        Files.writeString(file, "one\n");
+        FileEditSession session = sessionFor(file);
+
+        session.edit("mine\n");
+        writeExternally(file, "claude\n");
+        session.flush().get(5, TimeUnit.SECONDS);
+
+        assertEquals(State.CONFLICT, session.state());
+        assertEquals("claude\n", Files.readString(file), "the external edit must survive untouched");
+    }
+
+    /**
+     * ...but the guard must not fire on a file merely touched, or rewritten
+     * with the bytes already there: that would turn every {@code git checkout}
+     * of an identical file into a conflict the user has to answer.
+     */
+    @Test
+    void aTouchedButUnchangedFileDoesNotBlockTheWrite(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("a.txt");
+        Files.writeString(file, "one\n");
+        FileEditSession session = sessionFor(file);
+
+        session.edit("mine\n");
+        writeExternally(file, "one\n");
+        session.flush().get(5, TimeUnit.SECONDS);
+
+        assertEquals(State.CLEAN, session.state());
+        assertEquals("mine\n", Files.readString(file));
+    }
+
+    /**
      * {@code CompletableFuture.runAsync} calls {@code executor.execute} on the
      * calling thread and does not wrap a {@link RejectedExecutionException}
      * into the returned future, so a naive {@code flush()} would throw synchronously once the

@@ -13,7 +13,8 @@ import java.util.OptionalInt;
 
 /**
  * The Session Explorer (design handoff section A, frame 2a): a collapsible
- * session-scoped search rail beside a read-only code viewer. Shown as the
+ * session-scoped search rail beside an editable, auto-saving code viewer
+ * (files that cannot be written back safely stay read-only). Shown as the
  * session tab's center when the Explorer sub-tab is active (the native
  * terminal overlay is hidden meanwhile -- see OpenSessionTab.showSubTab).
  *
@@ -86,7 +87,17 @@ public final class SessionExplorerView extends HBox {
      * shutdown), never on a sub-tab switch -- the executor must survive that.
      */
     public void dispose() {
-        viewer.dispose();
+        dispose(true);
+    }
+
+    /**
+     * As {@link #dispose()}, with the flush optional. Pass {@code false} only
+     * when this Explorer's {@link #flushPendingEdits()} has just run: a
+     * flushing {@code dispose()} would otherwise hand it a second full flush
+     * budget, doubling the worst-case shutdown freeze on a hung disk.
+     */
+    public void dispose(boolean flush) {
+        viewer.dispose(flush);
     }
 
     /** Review-tab bridge: opens {@code relativeFile} in the viewer at a 1-based line (⤢ on a changed diff line). */

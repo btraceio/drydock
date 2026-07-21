@@ -37,7 +37,7 @@ import java.util.function.Consumer;
  * {@code content} holds. The sentinel guarantees the first {@link #poll()}
  * always verifies the file against the buffer instead of trusting a stamp
  * that might be lying. All mutable state --
- * {@code state}, {@code pendingText},
+ * {@code state}, {@code pendingText}, {@code baseText},
  * {@code stamp}, {@code content}, the armed debounce -- is therefore guarded by
  * {@link #lock}, and every decision that spans a slow I/O call re-checks that
  * state under the lock afterwards rather than trusting the pre-I/O reading.</p>
@@ -100,6 +100,21 @@ final class FileEditSession {
     /** Replaced when a reload adopts fresh disk content, so the terminator stays accurate. */
     private volatile FileContent content;
     private String pendingText;
+    /**
+     * The text this session believes is currently on disk -- the buffer's
+     * BASE, not the buffer. Seeded from the content the caller loaded, set to
+     * the written text after every successful write, and to the disk text
+     * whenever fresh content is adopted (a reload, a silent stamp adoption,
+     * {@link #takeDisk()}).
+     *
+     * <p>It exists because "did the disk change?" cannot be answered against
+     * {@link #pendingText}: a dirty buffer differs from the disk by
+     * construction, so comparing the two would report every file the user has
+     * typed into as externally changed -- a phantom conflict raised with no
+     * external actor involved at all, whose "reload" answer throws the user's
+     * typing away. Comparing against the base answers the actual question.</p>
+     */
+    private String baseText;
     private DiskStamp stamp;
     /**
      * The identity of a file this session has already loaded and refused to
@@ -123,6 +138,24 @@ final class FileEditSession {
      * flush) must not be able to put those bytes back on disk.
      */
     private boolean abandoned;
+    /**
+     * Set by {@link #missing}, cleared only by {@link #keepMine()}, {@link
+     * #takeDisk()} or a {@link #poll()} that adopts a fresh stamp. A SOFT
+     * latch, sitting beside {@link #abandoned} in the write path's veto (they
+     * are never merged: {@code abandoned} is one-way and absolute, this one is
+     * a question awaiting an answer).
+     *
+     * <p>Disarming the debounce, which is all {@code missing()} used to do, is
+     * not enough: every forced-flush path the viewer owns -- the tab ✕, a file
+     * tab switch, the code area losing focus to the terminal, leaving the
+     * Explorer sub-tab, application shutdown -- calls {@link #flush()}
+     * directly, and {@code writeIfDirty} admits {@code DIRTY}/{@code ERROR}.
+     * So a user who clicked anywhere at all after the missing-file banner
+     * appeared would silently recreate the very file that is gone from disk,
+     * without ever answering the banner. The latch makes the banner's "keep
+     * mine" the only way those bytes go back, exactly as its text promises.</p>
+     */
+    private boolean disarmed;
 
     private volatile Consumer<State> onStateChanged = state -> { };
     private volatile Consumer<IOException> onSaveFailed = error -> { };
@@ -150,6 +183,7 @@ final class FileEditSession {
         this.debounce = debounce;
         this.maxBytes = maxBytes;
         this.pendingText = content.text();
+        this.baseText = content.text();
         this.stamp = UNVERIFIED;
     }
 
@@ -211,7 +245,10 @@ final class FileEditSession {
     }
 
     /**
-     * Writes immediately, cancelling any armed debounce. Completes normally
+     * Writes immediately, cancelling any armed debounce -- unless the session
+     * is {@link #abandon()}ed or a {@link PollOutcome#MISSING} poll has
+     * disarmed it, both of which veto the write and make this a no-op that
+     * still completes normally. Completes normally
      * even when the write fails -- failure is reported through {@link
      * #setOnSaveFailed} and {@link State#ERROR}, so a forced flush on a
      * teardown path cannot have a write failure propagate an exception into
@@ -225,7 +262,7 @@ final class FileEditSession {
         synchronized (lock) {
             cancelArmed();
         }
-        return runOnExecutor(this::writeIfDirty);
+        return runOnExecutor(() -> writeIfDirty(true));
     }
 
     /**
@@ -325,7 +362,11 @@ final class FileEditSession {
         }
         synchronized (lock) {
             if (current.equals(stamp)) {
+                // The file is there and its identity is the one this session
+                // adopted, so whatever made a previous tick report MISSING is
+                // over (a delete-then-restore, a binary swapped back).
                 rejectedStamp = null;
+                disarmed = false;
                 return new PollResult(PollOutcome.UNCHANGED, null);
             }
             sameAsRejected = current.equals(rejectedStamp);
@@ -360,18 +401,22 @@ final class FileEditSession {
         boolean conflicted;
         State changed;
         synchronized (lock) {
-            if (fresh.text().equals(pendingText) && fresh.terminator() == content.terminator()) {
-                // Same bytes under a new stamp -- a rewrite that changed
-                // nothing, or a touch. (Terminator must match too: a file
-                // rewritten CRLF-to-LF has identical LF-normalised text but
-                // different bytes on disk, which is a real change.) Adopt
-                // the stamp silently, regardless of dirtiness: there is
-                // nothing here to reconcile, so raising a conflict against
-                // content identical to what the user already has would be
-                // wrong.
+            if (diskIsNotAnExternalChange(fresh)) {
+                // Nothing to reconcile: the file on disk holds either exactly
+                // what this session believes was already there (a touch, or a
+                // rewrite with identical bytes -- including the very common
+                // "the user typed before the first poll tick, and nobody has
+                // touched the file at all", where the seeded UNVERIFIED stamp
+                // forces this comparison), or exactly what the user's buffer
+                // already holds. Adopt the stamp silently, dirty or not:
+                // raising a conflict against content the user is not actually
+                // in disagreement with would disarm auto-save and offer them a
+                // "reload" that discards their typing for nothing.
                 content = fresh;
                 stamp = current;
+                baseText = fresh.text();
                 rejectedStamp = null;
+                disarmed = false;
                 return new PollResult(PollOutcome.UNCHANGED, null);
             }
             conflicted = hasUnsavedEdits();
@@ -391,8 +436,10 @@ final class FileEditSession {
             } else {
                 content = fresh;
                 pendingText = fresh.text();
+                baseText = fresh.text();
                 stamp = current;
                 rejectedStamp = null;
+                disarmed = false;
             }
         }
         notifyState(changed);
@@ -407,7 +454,10 @@ final class FileEditSession {
      * unreadable, or replaced by content this session must not write back), so
      * an armed debounce would fire a second later and recreate it -- making the
      * banner's "keep mine / close tab" choice for the user before they can even
-     * read it. The state machine is left alone: the buffer is still the user's,
+     * read it. Cancelling the debounce is not enough on its own, because every
+     * forced flush the viewer fires (tab switch, focus loss, close, shutdown)
+     * bypasses it entirely, so the {@link #disarmed} latch vetoes those too.
+     * The state machine is left alone: the buffer is still the user's,
      * and {@link #keepMine()} is exactly how they re-arm it deliberately.
      *
      * @param rejected the identity of the file that was loaded and refused, so
@@ -418,20 +468,51 @@ final class FileEditSession {
     private PollResult missing(DiskStamp rejected) {
         synchronized (lock) {
             rejectedStamp = rejected;
+            disarmed = true;
             cancelArmed();
         }
         return new PollResult(PollOutcome.MISSING, null);
     }
 
-    /** Conflict resolution: the user's buffer wins; write it and adopt the resulting stamp. */
+    /**
+     * Must hold {@link #lock}. Whether {@code fresh} -- an editable buffer just
+     * read off disk under a stamp that differs from the adopted one -- means
+     * the file did NOT actually change out from under this session.
+     *
+     * <p>Two ways it can mean that. Against {@link #baseText}: the disk still
+     * holds what this session believes it wrote (or loaded), so the stamp moved
+     * without the content moving -- a touch, or a rewrite with identical bytes.
+     * Against {@link #pendingText}: something rewrote the file with exactly the
+     * text the user already has, so there is still nothing for them to
+     * reconcile. Terminator must match in both cases -- a file rewritten
+     * CRLF-to-LF has identical LF-normalised text but different bytes on disk,
+     * which is a real change this session must not paper over.</p>
+     */
+    private boolean diskIsNotAnExternalChange(FileContent fresh) {
+        return fresh.terminator() == content.terminator()
+                && (fresh.text().equals(baseText) || fresh.text().equals(pendingText));
+    }
+
+    /**
+     * Conflict resolution: the user's buffer wins; write it and adopt the
+     * resulting stamp. The deliberate re-arm for both banners -- it is the one
+     * path that clears the {@link #disarmed} latch a MISSING poll set, and so
+     * the one way a file that is gone from disk gets recreated: because the
+     * user asked for it, in as many words.
+     */
     CompletableFuture<Void> keepMine() {
         return runOnExecutor(() -> {
             State changed;
             synchronized (lock) {
+                disarmed = false;
                 changed = transition(State.DIRTY);
             }
             notifyState(changed);
-            writeIfDirty();
+            // Unverified deliberately: the user has been shown the banner and
+            // has answered "mine wins". Re-reading the disk here would find the
+            // very change they just overruled and put them straight back into
+            // the conflict they were resolving.
+            writeIfDirty(false);
         });
     }
 
@@ -482,8 +563,10 @@ final class FileEditSession {
         synchronized (lock) {
             content = fresh;
             pendingText = fresh.text();
+            baseText = fresh.text();
             stamp = current;
             rejectedStamp = null;
+            disarmed = false;
             editSeq++;
             cancelArmed();
             lastError = null;
@@ -495,11 +578,20 @@ final class FileEditSession {
 
     // ---- Executor-thread internals -----------------------------------------
 
-    private void writeIfDirty() {
+    /**
+     * @param verifyDisk whether to re-read the file immediately before writing
+     *     and enter {@link State#CONFLICT} instead if it has changed. False
+     *     only for {@link #keepMine()}, whose whole purpose is to overwrite a
+     *     change the user has already been shown and chosen to discard.
+     */
+    private void writeIfDirty(boolean verifyDisk) {
         String text;
         long seq;
         FileContent snapshot;
         State changed;
+        DiskStamp adopted;
+        String base;
+        String pending;
         synchronized (lock) {
             armedSave = null;
             // CLEAN: nothing to write. SAVING: a write is already in flight.
@@ -507,7 +599,41 @@ final class FileEditSession {
             // exception -- both an explicit flush and the next edit's
             // debounce retry a failed write, so it must be allowed through.
             // ABANDONED is absolute: no path may write this buffer again.
-            if (abandoned || writeInFlight || (state != State.DIRTY && state != State.ERROR)) {
+            // DISARMED is the missing-file banner's open question: only the
+            // user's own "keep mine" (or the file coming back) re-arms it.
+            if (!writeAdmitted()) {
+                return;
+            }
+            adopted = stamp;
+            base = baseText;
+            pending = pendingText;
+            snapshot = content;
+        }
+        // Between the keystroke that armed the debounce and this moment lies a
+        // window the 1.5s poller does not cover: Claude can write the file 0.2s
+        // after the user types, and the 2s debounce then fires before any tick
+        // has looked. The single-threaded executor rules out racing this
+        // session's OWN write, and nothing else; without this re-read the write
+        // would clobber the external edit with no conflict raised and no trace.
+        // Same thread as the write below, so nothing can slip between the two.
+        if (verifyDisk && externalChangeLandedSince(adopted, base, pending, snapshot)) {
+            State conflicted;
+            synchronized (lock) {
+                conflicted = enterConflict();
+            }
+            try {
+                notifyState(conflicted);
+            } catch (RuntimeException | Error e) {
+                // The state machine already records the conflict, and nothing
+                // was written. A listener fault must not propagate out of
+                // flush(), whose contract the teardown paths rely on.
+            }
+            return;
+        }
+        synchronized (lock) {
+            // Re-checked after the I/O above: abandon(), a MISSING poll or a
+            // takeDisk() may have landed from another thread while it ran.
+            if (!writeAdmitted()) {
                 return;
             }
             text = pendingText;
@@ -527,6 +653,9 @@ final class FileEditSession {
             DiskStamp written = readStamp();
             synchronized (lock) {
                 stamp = written;
+                // The disk now holds exactly what we wrote, so that is the
+                // base every later "did it change?" question is asked against.
+                baseText = text;
                 rejectedStamp = null;
                 lastError = null;
                 if (editSeq == seq) {
@@ -563,6 +692,54 @@ final class FileEditSession {
         } catch (RuntimeException | Error e) {
             // Nothing to do -- the save already succeeded; see above.
         }
+    }
+
+    /** Must hold {@link #lock}: whether the write path may proceed at all. */
+    private boolean writeAdmitted() {
+        return !abandoned && !disarmed && !writeInFlight
+                && (state == State.DIRTY || state == State.ERROR);
+    }
+
+    /**
+     * Executor thread, immediately before a write: whether the file on disk has
+     * moved away from what this session last adopted.
+     *
+     * <p>A stamp change alone is not proof -- the same reasoning {@link
+     * #pollNow} carries -- so a differing stamp is followed by loading the file
+     * and comparing text, which also covers the {@link #UNVERIFIED} case where
+     * there is no stamp to compare at all. A file that cannot be stamped or
+     * read is NOT reported as changed: it is gone or unreadable, so there is
+     * nothing to clobber, and the write reports its own failure if it cannot
+     * recreate it. A file that is no longer editable IS reported as changed:
+     * something replaced it with content this session must not write over.</p>
+     *
+     * <p>{@code pending} is accepted alongside {@code base} so this answers the
+     * question on exactly the terms {@link #diskIsNotAnExternalChange} does:
+     * a disk holding precisely the text the user is about to write is nothing
+     * for them to reconcile either.</p>
+     */
+    private boolean externalChangeLandedSince(DiskStamp adopted, String base, String pending,
+                                              FileContent snapshot) {
+        DiskStamp current;
+        try {
+            current = readStamp();
+        } catch (IOException e) {
+            return false;
+        }
+        if (current.equals(adopted)) {
+            return false;
+        }
+        FileContent fresh;
+        try {
+            fresh = FileContent.load(file, maxBytes);
+        } catch (IOException e) {
+            return false;
+        }
+        if (!fresh.editable()) {
+            return true;
+        }
+        return !(fresh.terminator() == snapshot.terminator()
+                && (fresh.text().equals(base) || fresh.text().equals(pending)));
     }
 
     /** Records the failure, leaves the buffer intact and clears {@link State#SAVING}. */
@@ -630,7 +807,8 @@ final class FileEditSession {
     /** Must hold {@link #lock}. */
     private void arm() {
         try {
-            armedSave = executor.schedule(this::writeIfDirty, debounce.toMillis(), TimeUnit.MILLISECONDS);
+            armedSave = executor.schedule(
+                    () -> writeIfDirty(true), debounce.toMillis(), TimeUnit.MILLISECONDS);
         } catch (RejectedExecutionException e) {
             armedSave = null;
         }

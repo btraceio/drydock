@@ -159,6 +159,12 @@ final class FileViewer extends BorderPane {
      * Set by {@link #dispose()}. The viewer is dead afterwards: a re-attach
      * must not restart the poller, since {@link #ioExecutor} is shut down and
      * would reject the task.
+     *
+     * <p>Deliberately non-volatile: every writer and every reader is on the FX
+     * thread ({@code dispose()} is called from tab removal and the shutdown
+     * chain, {@code startPolling()} from the scene listener), so the field is
+     * thread-confined and needs no publication. Anything reading it off the FX
+     * thread would break that invariant and must make it volatile.</p>
      */
     private boolean disposed;
 
@@ -450,7 +456,14 @@ final class FileViewer extends BorderPane {
             case CONFLICT -> showConflictBanner(tab, session);
             case MISSING -> showMissingBanner(tab, session);
         }
-        updateStatusChip();
+        // Only for the tab whose chip this actually is. A background tab's
+        // reload/conflict/missing repainting the chip would cut the selected
+        // tab's deliberate 2s "saved ✓" flash short at a random point in the
+        // poll interval -- the same hazard the UNCHANGED branch above avoids,
+        // and the reason announceSaved() is gated on the selection too.
+        if (ownsBannerRow(tab)) {
+            updateStatusChip();
+        }
         updateDirtyDot(tab);
     }
 
@@ -492,6 +505,14 @@ final class FileViewer extends BorderPane {
         }
         int paragraph = area.getCurrentParagraph();
         int column = area.getCaretColumn();
+        // Known, accepted one-pulse loss: a keystroke landing between the
+        // executor's RELOAD decision and this apply is overwritten here (and
+        // then confirmed away by the session.edit below). Closing it would mean
+        // diffing/merging the buffer against the disk text on the FX thread for
+        // a window one frame wide, against a decision the session has ALREADY
+        // committed to -- disproportionate, and a merge is the one thing this
+        // feature deliberately does not do. The reload only happens for a CLEAN
+        // session, so the loss is at most the characters typed inside that pulse.
         replaceTextQuietly(tab, area, text);
         if (session != null && session.state() != FileEditSession.State.CLEAN) {
             // Cheap and idempotent: the text handed back IS the disk text the
@@ -857,7 +878,7 @@ final class FileViewer extends BorderPane {
      * the error placeholder, which is likewise never editable.
      *
      * <p>The editor works in LF line terminators: {@link FileContent} normalises
-     * CRLF-terminated files to LF for editing, and {@link FileContent#toDiskText()}
+     * CRLF-terminated files to LF for editing, and {@link FileContent#toDiskText(String)}
      * restores the file's own terminator on write. This keeps the editor's logic
      * simple and means a single-line edit does not rewrite every line of a CRLF file.
      */
@@ -1061,18 +1082,12 @@ final class FileViewer extends BorderPane {
         }
         long deadlineNanos = System.nanoTime() + timeout.toNanos();
         for (FileEditSession session : snapshot) {
-            if (session.state() == FileEditSession.State.CONFLICT) {
-                // The user's close gesture is vetoed while a conflict is
-                // unresolved (vetoCloseOfUnresolvedConflict), but shutdown
-                // cannot ask anyone anything: the write path returns early for
-                // CONFLICT, so these edits are genuinely not going to disk and a
-                // log line is the only trace they will ever leave.
-                LOG.log(Level.WARNING, "Unsaved edits to " + session.file()
-                        + " were NOT written at shutdown: the file changed on disk"
-                        + " and the conflict was never resolved");
-            }
             long remainingNanos = deadlineNanos - System.nanoTime();
-            if (remainingNanos <= 0) {
+            // Gated on there being something to lose: a CLEAN session's flush
+            // is a no-op whether or not the budget is gone, and warning about
+            // it would train readers to scroll past the line that means a real
+            // file really did not get written.
+            if (remainingNanos <= 0 && session.state() != FileEditSession.State.CLEAN) {
                 // The shared deadline is already exhausted: flushBlocking
                 // would take its Duration.ZERO/TimeoutException path
                 // immediately, which only reports through onSaveFailed --
@@ -1093,6 +1108,20 @@ final class FileViewer extends BorderPane {
                 LOG.log(Level.WARNING, "Pending edits for " + session.file()
                         + " may not have been saved at shutdown", session.lastError());
             }
+            if (session.state() == FileEditSession.State.CONFLICT) {
+                // Checked AFTER the flush, not before: as well as a conflict
+                // the user was already shown and never answered, the flush
+                // itself can raise one -- the write path re-reads the file
+                // immediately before writing, so a change that landed inside
+                // the poller's blind window surfaces right here. The user's
+                // close gesture is vetoed while a conflict is unresolved
+                // (vetoCloseOfUnresolvedConflict), but shutdown cannot ask
+                // anyone anything: these edits are genuinely not going to disk
+                // and this line is the only trace they will ever leave.
+                LOG.log(Level.WARNING, "Unsaved edits to " + session.file()
+                        + " were NOT written at shutdown: the file changed on disk"
+                        + " and the conflict was never resolved");
+            }
         }
     }
 
@@ -1109,13 +1138,32 @@ final class FileViewer extends BorderPane {
      * from the shutdown chain.</p>
      */
     void dispose() {
+        dispose(true);
+    }
+
+    /**
+     * As {@link #dispose()}, but with the flush optional.
+     *
+     * <p>{@code flush=false} exists for a caller that has ALREADY flushed this
+     * viewer -- {@code MainWorkspace.flushExplorerEdits}, which flushes every
+     * Explorer first and only then disposes them all. Since {@code dispose()}
+     * is itself a bounded flush, letting it flush again there would give each
+     * Explorer its budget twice: on a hung disk, 2 * N * {@code
+     * DISPOSE_FLUSH_TIMEOUT} of frozen FX thread instead of N.</p>
+     *
+     * @param flush whether to write pending edits out before tearing down.
+     *     Only ever false when the caller has just flushed this viewer itself.
+     */
+    void dispose(boolean flush) {
         if (disposed) {
             return;
         }
-        // Before the shutdown: flushPendingEdits' blocking waits run ON the
-        // ioExecutor, so a shutdown() first would reject them and drop the
-        // very edits this call exists to save.
-        flushPendingEdits(DISPOSE_FLUSH_TIMEOUT);
+        if (flush) {
+            // Before the shutdown: flushPendingEdits' blocking waits run ON the
+            // ioExecutor, so a shutdown() first would reject them and drop the
+            // very edits this call exists to save.
+            flushPendingEdits(DISPOSE_FLUSH_TIMEOUT);
+        }
         disposed = true;
         stopPolling();
         stopTransitions();

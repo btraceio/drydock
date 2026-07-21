@@ -887,8 +887,11 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * a fire-and-forget flush would be killed mid-write at JVM exit.
      *
      * <p>Two phases on purpose: every file is on disk before the first
-     * executor is shut down, so a slow {@code dispose()} cannot eat the
-     * budget of an Explorer still holding unwritten edits. Tabs closed
+     * executor is shut down, so an Explorer still holding unwritten edits is
+     * not queued behind another one's teardown. Phase 2 therefore disposes
+     * WITHOUT flushing -- {@code dispose()} is itself a bounded flush, so
+     * letting it flush again would give every Explorer its budget twice and
+     * double the worst-case frozen-FX-thread time on a hung disk. Tabs closed
      * earlier were already disposed by {@link #removeTab}.</p>
      */
     public void flushExplorerEdits() {
@@ -898,7 +901,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             explorer.flushPendingEdits();
         }
         for (SessionExplorerView explorer : explorers) {
-            explorer.dispose();
+            explorer.dispose(false);
         }
     }
 
