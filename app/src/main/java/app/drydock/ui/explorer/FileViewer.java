@@ -38,6 +38,7 @@ import java.util.Map;
 import java.util.OptionalInt;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -82,6 +83,16 @@ final class FileViewer extends BorderPane {
     private final Label editBannerLabel = new Label();
     private final Button editBannerPrimary = new Button();
     private final Button editBannerSecondary = new Button();
+
+    /**
+     * The tab the currently shown {@link #editBanner} belongs to, or null when
+     * it is hidden. The banner is ONE row shared by every file tab while its
+     * text and both handlers are bound to one specific tab, so without an owner
+     * the user would see another file's conflict message with buttons acting on
+     * that other file. Tracking the owner lets the banner be cleared when the
+     * selection moves away, when its session recovers, and when its tab closes.
+     */
+    private Tab editBannerOwner;
 
     /** Open files, keyed by absolute path. */
     private final Map<Path, Tab> openFiles = new LinkedHashMap<>();
@@ -180,6 +191,13 @@ final class FileViewer extends BorderPane {
 
         fileTabs.getSelectionModel().selectedItemProperty().addListener((obs, oldTab, newTab) -> {
             flushSession(oldTab);
+            // The edit banner is bound to one tab; showing another tab's
+            // conflict/error over this file -- with buttons that act on that
+            // other file -- would be actively misleading. A still-conflicted
+            // session re-raises its banner on the next poll tick.
+            if (editBannerOwner != newTab) {
+                hideEditBanner();
+            }
             updateBreadcrumb(newTab);
             updateEmptyState();
             updateDiffBanner();
@@ -196,6 +214,7 @@ final class FileViewer extends BorderPane {
             if (newScene == null) {
                 flushAllSessions();
                 stopPolling();
+                stopTransitions();
             } else {
                 startPolling();
             }
@@ -271,8 +290,44 @@ final class FileViewer extends BorderPane {
         }
     }
 
+    /**
+     * Stops every debounce/one-shot timer this viewer owns (AGENTS.md: nothing
+     * with a timer may outlive the node). A {@code diffRefreshDebounce} left
+     * armed past detach would drop the diff cache the Review tab shares and
+     * spawn a {@code git diff} for a viewer nobody is looking at.
+     */
+    private void stopTransitions() {
+        if (highlightDebounce != null) {
+            highlightDebounce.stop();
+            highlightDebounce = null;
+        }
+        if (diffRefreshDebounce != null) {
+            diffRefreshDebounce.stop();
+            diffRefreshDebounce = null;
+        }
+        if (chipReset != null) {
+            chipReset.stop();
+            chipReset = null;
+        }
+    }
+
+    /**
+     * Flushes every live session. Iterating {@link Collections#synchronizedMap}'s
+     * {@code values()} view directly would be a bug here, not a style point:
+     * {@code sessions.remove} runs from the ioExecutor thread in a tab-close
+     * completion, so a concurrent structural change would throw {@link
+     * java.util.ConcurrentModificationException} out of this FX event handler
+     * BEFORE {@code stopPolling()} -- leaving the poller running against a
+     * detached viewer with some sessions never flushed. Snapshot under the
+     * monitor and iterate the snapshot, exactly as {@link #flushPendingEdits}
+     * does.
+     */
     private void flushAllSessions() {
-        for (FileEditSession session : sessions.values()) {
+        List<FileEditSession> snapshot;
+        synchronized (sessions) {
+            snapshot = new ArrayList<>(sessions.values());
+        }
+        for (FileEditSession session : snapshot) {
             session.flush();
         }
     }
@@ -284,14 +339,36 @@ final class FileViewer extends BorderPane {
      * silently drops all future runs if this ever throws -- there would be no
      * signal that the user's stale-file protection just died. Every tick is
      * therefore caught and logged rather than allowed to propagate.</p>
+     *
+     * <p>The tick itself only schedules: the tab list and every tab's property
+     * map are JavaFX-owned structures that {@link #openFile} and tab closes
+     * mutate on the FX thread, so reading them from the executor thread could
+     * hand {@link #applyPollResult} a torn snapshot containing an
+     * already-removed tab -- a conflict banner wired to a dead tab. The scan
+     * therefore happens on the FX thread; the poll it starts is still
+     * asynchronous, so nothing blocks there.</p>
      */
     private void pollOpenFiles() {
         try {
-            for (Tab tab : List.copyOf(fileTabs.getTabs())) {
+            Platform.runLater(this::pollOpenFilesOnFxThread);
+        } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, "Could not schedule disk poll; will retry next tick", e);
+        }
+    }
+
+    private void pollOpenFilesOnFxThread() {
+        try {
+            List<Map.Entry<Tab, FileEditSession>> targets = new ArrayList<>();
+            for (Tab tab : fileTabs.getTabs()) {
                 if (tab.getProperties().get("drydock.session") instanceof FileEditSession session) {
-                    session.poll().thenAccept(
-                            result -> Platform.runLater(() -> applyPollResult(tab, session, result)));
+                    targets.add(Map.entry(tab, session));
                 }
+            }
+            for (Map.Entry<Tab, FileEditSession> target : targets) {
+                Tab tab = target.getKey();
+                FileEditSession session = target.getValue();
+                session.poll().thenAccept(
+                        result -> Platform.runLater(() -> applyPollResult(tab, session, result)));
             }
         } catch (RuntimeException e) {
             LOG.log(Level.WARNING, "Disk poll failed; will retry next tick", e);
@@ -306,8 +383,13 @@ final class FileViewer extends BorderPane {
      */
     private void applyPollResult(Tab tab, FileEditSession session, FileEditSession.PollResult result) {
         switch (result.outcome()) {
-            case UNCHANGED -> { }
-            case RELOAD -> reload(tab, result.text());
+            case UNCHANGED -> {
+                // Nothing changed, so nothing to repaint -- and repainting
+                // anyway would cut the deliberate 2s "saved" flash short at a
+                // random point in the poll interval.
+                return;
+            }
+            case RELOAD -> reload(tab, session, result.text());
             case CONFLICT -> showConflictBanner(tab, session);
             case MISSING -> showMissingBanner(tab, session);
         }
@@ -323,15 +405,36 @@ final class FileViewer extends BorderPane {
      * onto RichTextFX's UndoManager, so one Cmd+Z after a reload the user did
      * not notice would restore their stale buffer -- which auto-save would
      * then write over Claude's edits.</p>
+     *
+     * <p>{@code session} may be null (a read-only tab has none). When it is
+     * not, the buffer is re-synced from the text just applied: the session
+     * adopted the disk text on the executor thread one FX pulse ago, so a
+     * keystroke landing in that window leaves it DIRTY holding text typed on
+     * top of the PRE-reload buffer, while {@link #replaceTextQuietly}
+     * suppresses the listener that would otherwise tell it the buffer moved on.
+     * Without the re-sync the area would show Claude's text while the session
+     * held the user's stale text -- and wrote it over Claude's edits two
+     * seconds later with no conflict raised.</p>
      */
-    private void reload(Tab tab, String text) {
+    private void reload(Tab tab, FileEditSession session, String text) {
         if (!(tab.getContent() instanceof VirtualizedScrollPane<?> pane)
                 || !(pane.getContent() instanceof CodeArea area)) {
+            // The session has already adopted the disk text, so silently
+            // returning would leave buffer and session diverged with no signal.
+            LOG.log(Level.WARNING, "Cannot reload " + fileNameOf(tab)
+                    + ": tab content is not a CodeArea; its buffer is now out of sync with disk");
             return;
         }
         int paragraph = area.getCurrentParagraph();
         int column = area.getCaretColumn();
         replaceTextQuietly(tab, area, text);
+        if (session != null && session.state() != FileEditSession.State.CLEAN) {
+            // Cheap and idempotent: the text handed back IS the disk text the
+            // session already adopted, so the write this re-arms is a no-op
+            // byte-wise. Only the DIRTY-in-the-window case reaches here.
+            session.edit(text);
+            updateDirtyDot(tab);
+        }
         area.getUndoManager().forgetHistory();
         int safeParagraph = Math.max(0, Math.min(paragraph, area.getParagraphs().size() - 1));
         int safeColumn = Math.max(0, Math.min(column, area.getParagraphLength(safeParagraph)));
@@ -340,6 +443,7 @@ final class FileViewer extends BorderPane {
     }
 
     private void showConflictBanner(Tab tab, FileEditSession session) {
+        resetEditBanner(tab);
         String name = fileNameOf(tab);
         editBannerLabel.setText(name + " changed on disk while you were editing it.");
         editBannerPrimary.setText("keep mine");
@@ -350,18 +454,13 @@ final class FileViewer extends BorderPane {
         editBannerSecondary.setText("reload");
         editBannerSecondary.setOnAction(e -> {
             hideEditBanner();
-            session.takeDisk().whenComplete((text, failure) -> Platform.runLater(() -> {
-                if (failure != null) {
-                    showSaveErrorBanner(tab, session);
-                } else {
-                    reload(tab, text);
-                }
-            }));
+            takeDisk(tab, session);
         });
         showEditBanner();
     }
 
     private void showMissingBanner(Tab tab, FileEditSession session) {
+        resetEditBanner(tab);
         editBannerLabel.setText(fileNameOf(tab) + " is no longer on disk.");
         editBannerPrimary.setText("keep mine");
         editBannerPrimary.setOnAction(e -> {
@@ -371,13 +470,65 @@ final class FileViewer extends BorderPane {
         editBannerSecondary.setText("close tab");
         editBannerSecondary.setOnAction(e -> {
             hideEditBanner();
+            // Tab.CLOSED_EVENT (and therefore setOnClosed) fires only from
+            // TabPaneBehavior.closeTab -- a programmatic getTabs().remove does
+            // NOT run the close handler, so the cleanup has to be invoked by
+            // hand or this file stays in `openFiles` (unreopenable for the rest
+            // of the session) and in `sessions`.
+            //
+            // Deliberately asymmetric with the user's own close gesture: NO
+            // flush. The user just chose to abandon a file that is gone from
+            // disk; writing the buffer back would recreate exactly the file
+            // they abandoned.
             fileTabs.getTabs().remove(tab);
+            closeTab(tab, false);
+        });
+        showEditBanner();
+    }
+
+    /** Reloads from disk, resolving a conflict in the disk's favour. */
+    private void takeDisk(Tab tab, FileEditSession session) {
+        session.takeDisk().whenComplete((text, failure) -> Platform.runLater(() -> {
+            if (failure != null) {
+                showReadErrorBanner(tab, session, failure);
+            } else {
+                reload(tab, session, text);
+            }
+        }));
+    }
+
+    /**
+     * Surfaces a failed {@link FileEditSession#takeDisk()}. Distinct from
+     * {@link #showSaveErrorBanner}: a READ failed, so "could not save" is the
+     * wrong verb, {@code lastError()} was never set by this path (it would
+     * render "unknown error"), and retrying with {@code flush()} would be a
+     * guaranteed no-op -- the session is still in CONFLICT, where the write
+     * path returns early. The retry therefore re-invokes {@code takeDisk} and
+     * the message comes from the failure itself.
+     */
+    private void showReadErrorBanner(Tab tab, FileEditSession session, Throwable failure) {
+        resetEditBanner(tab);
+        Throwable cause = failure instanceof CompletionException && failure.getCause() != null
+                ? failure.getCause()
+                : failure;
+        String detail = cause.getMessage() == null ? cause.toString() : cause.getMessage();
+        editBannerLabel.setText("Could not read " + fileNameOf(tab) + " from disk: " + detail);
+        editBannerPrimary.setText("retry");
+        editBannerPrimary.setOnAction(e -> {
+            hideEditBanner();
+            takeDisk(tab, session);
+        });
+        editBannerSecondary.setText("keep mine");
+        editBannerSecondary.setOnAction(e -> {
+            hideEditBanner();
+            session.keepMine();
         });
         showEditBanner();
     }
 
     /** Surfaces a failed write; the buffer is kept and the next edit or Cmd+S retries. */
     private void showSaveErrorBanner(Tab tab, FileEditSession session) {
+        resetEditBanner(tab);
         IOException error = session.lastError();
         editBannerLabel.setText("Could not save " + fileNameOf(tab) + ": "
                 + (error == null ? "unknown error" : error.getMessage()));
@@ -391,6 +542,26 @@ final class FileViewer extends BorderPane {
         showEditBanner();
     }
 
+    /**
+     * Clears every control the previous banner may have customised and claims
+     * the row for {@code owner}. The banner is one shared row whose buttons
+     * carry per-tab handlers and whose secondary button {@link
+     * #showSaveErrorBanner} hides, so without this an error-then-conflict
+     * sequence would render the conflict banner with no "reload" button --
+     * leaving "keep mine" as the user's only option and quietly steering them
+     * into clobbering the external edits this whole mechanism exists to
+     * protect.
+     */
+    private void resetEditBanner(Tab owner) {
+        editBannerOwner = owner;
+        editBannerPrimary.setVisible(true);
+        editBannerPrimary.setManaged(true);
+        editBannerPrimary.setOnAction(null);
+        editBannerSecondary.setVisible(true);
+        editBannerSecondary.setManaged(true);
+        editBannerSecondary.setOnAction(null);
+    }
+
     private void showEditBanner() {
         editBanner.setVisible(true);
         editBanner.setManaged(true);
@@ -399,8 +570,7 @@ final class FileViewer extends BorderPane {
     private void hideEditBanner() {
         editBanner.setVisible(false);
         editBanner.setManaged(false);
-        editBannerSecondary.setVisible(true);
-        editBannerSecondary.setManaged(true);
+        resetEditBanner(null);
     }
 
     private String fileNameOf(Tab tab) {
@@ -427,39 +597,7 @@ final class FileViewer extends BorderPane {
         tab.setContent(new VirtualizedScrollPane<>(area));
         tab.getProperties().put("drydock.file", file);
         tab.getProperties().put("drydock.relative", relativePath);
-        tab.setOnClosed(e -> {
-            // The flush's write may still be in flight on the (daemon)
-            // ioExecutor thread when this handler returns; removing the
-            // session immediately would make it invisible to
-            // flushPendingEdits while that write is still pending, which is
-            // exactly the data-loss window a shutdown-time flush exists to
-            // close. Keep it reachable until the flush actually completes.
-            //
-            // Capture this tab's own session up front and remove it from
-            // `sessions` conditionally on identity (Map.remove(key, value)),
-            // not on the path alone: if the file is closed and reopened
-            // before this flush settles, a fresh FileEditSession is `put`
-            // under the same key, and an unconditional keyed removal here
-            // would evict *that* entry instead of this (closed) tab's own,
-            // however the two completions race. Removing directly in the
-            // whenComplete callback (no Platform.runLater) also matters at
-            // shutdown: runLater after the FX toolkit has exited throws into
-            // a dropped stage, and the entry would never be removed at all.
-            Object sessionProperty = tab.getProperties().get("drydock.session");
-            FileEditSession closingSession =
-                    sessionProperty instanceof FileEditSession session ? session : null;
-            CompletableFuture<Void> pending = flushSession(tab);
-            openFiles.remove(file);
-            updateEmptyState();
-            updateStatusChip();
-            if (closingSession != null) {
-                if (pending != null) {
-                    pending.whenComplete((ignored, error) -> sessions.remove(file, closingSession));
-                } else {
-                    sessions.remove(file, closingSession);
-                }
-            }
-        });
+        tab.setOnClosed(e -> closeTab(tab, true));
 
         openFiles.put(file, tab);
         fileTabs.getTabs().add(tab);
@@ -578,6 +716,12 @@ final class FileViewer extends BorderPane {
             updateDirtyDot(tab);
             boolean isSelectedTab = fileTabs.getSelectionModel().getSelectedItem() == tab;
             if (state == FileEditSession.State.CLEAN) {
+                // Recovery clears the banner: nothing else hides it, so a
+                // "Could not save X" (or an unresolved conflict) would keep
+                // sitting over a file that has since saved perfectly well.
+                if (editBannerOwner == tab) {
+                    hideEditBanner();
+                }
                 // Only flash "saved" for the tab actually being looked at --
                 // this callback fires for whichever session just saved, which
                 // may be a background tab, and must not stomp the chip
@@ -642,6 +786,58 @@ final class FileViewer extends BorderPane {
             // Restore rather than force FALSE: a nested/reload call (Task 5)
             // must not clear an outer caller's suppression.
             tab.getProperties().put("drydock.suppressDirty", previous == null ? Boolean.FALSE : previous);
+        }
+    }
+
+    /**
+     * The single cleanup path for a tab leaving the strip, shared by the user's
+     * close gesture ({@code setOnClosed}) and by the missing-file banner's
+     * "close tab" action, which removes the tab programmatically and so never
+     * fires that handler. Assumes the tab is already out of {@link #fileTabs}.
+     *
+     * <p>The flush's write may still be in flight on the (daemon) ioExecutor
+     * thread when this returns; removing the session immediately would make it
+     * invisible to {@link #flushPendingEdits} while that write is still
+     * pending, which is exactly the data-loss window a shutdown-time flush
+     * exists to close. Keep it reachable until the flush actually completes.</p>
+     *
+     * <p>This tab's own session is captured up front and removed from {@code
+     * sessions} conditionally on identity ({@code Map.remove(key, value)}), not
+     * on the path alone: if the file is closed and reopened before this flush
+     * settles, a fresh {@link FileEditSession} is {@code put} under the same
+     * key, and an unconditional keyed removal here would evict <em>that</em>
+     * entry instead of this (closed) tab's own, however the two completions
+     * race. Removing directly in the {@code whenComplete} callback (no {@link
+     * Platform#runLater}) also matters at shutdown: {@code runLater} after the
+     * FX toolkit has exited throws into a dropped stage, and the entry would
+     * never be removed at all.</p>
+     *
+     * @param flush whether to force this tab's pending edits out on the way.
+     *     True for every ordinary close. False for the missing-file banner
+     *     alone: the user has just chosen to abandon a file that is already
+     *     gone from disk, so writing its buffer back would recreate the very
+     *     file they abandoned.
+     */
+    private void closeTab(Tab tab, boolean flush) {
+        Path file = (Path) tab.getProperties().get("drydock.file");
+        Object sessionProperty = tab.getProperties().get("drydock.session");
+        FileEditSession closingSession =
+                sessionProperty instanceof FileEditSession session ? session : null;
+        CompletableFuture<Void> pending = flush ? flushSession(tab) : null;
+        if (file != null) {
+            openFiles.remove(file);
+        }
+        if (editBannerOwner == tab) {
+            hideEditBanner();
+        }
+        updateEmptyState();
+        updateStatusChip();
+        if (closingSession != null && file != null) {
+            if (pending != null) {
+                pending.whenComplete((ignored, error) -> sessions.remove(file, closingSession));
+            } else {
+                sessions.remove(file, closingSession);
+            }
         }
     }
 
@@ -876,6 +1072,14 @@ final class FileViewer extends BorderPane {
                 || session.state() == FileEditSession.State.CONFLICT
                 || session.state() == FileEditSession.State.ERROR;
         if (tab.getGraphic() instanceof HBox graphic) {
+            boolean shown = graphic.getChildren().stream()
+                    .anyMatch(node -> node.getStyleClass().contains("viewer-tab-dirty"));
+            if (shown == dirty) {
+                // Called on every poll tick (1.5s) and every keystroke:
+                // rebuilding an identical Label each time is pure garbage and
+                // can flicker the tab graphic.
+                return;
+            }
             graphic.getChildren().removeIf(node -> node.getStyleClass().contains("viewer-tab-dirty"));
             if (dirty) {
                 Label dot = new Label("•");
