@@ -31,6 +31,7 @@ import javafx.scene.layout.VBox;
 import javafx.stage.Stage;
 import javafx.util.Duration;
 
+import java.lang.System.Logger;
 import java.nio.file.Path;
 import java.util.Optional;
 import java.util.function.Consumer;
@@ -63,6 +64,12 @@ import java.util.function.Supplier;
  * resizes, the sidebar divider moves, etc.</p>
  */
 final class OpenSessionTab {
+
+    private static final Logger LOG = System.getLogger(OpenSessionTab.class.getName());
+
+    /** Graceful-close budget for the ephemeral shell (mirrors SessionManager's defaults for the Claude surface). */
+    private static final long SHELL_CLOSE_GRACE_MILLIS = 3000;
+    private static final long SHELL_CLOSE_POLL_MILLIS = 100;
 
     /** The four views a session tab can show in its content area (design handoff "Session Explorer" / "Diff Review"). */
     enum SubTab { CLAUDE, TERMINAL, EXPLORER, REVIEW }
@@ -338,8 +345,10 @@ final class OpenSessionTab {
         }
         // CLAUDE or TERMINAL: show the corresponding native surface, hide the other.
         boolean shellActive = subTab == SubTab.TERMINAL;
-        if (shellActive) {
-            ensureShellStarted();
+        if (shellActive && !ensureShellStarted()) {
+            // Shell creation unavailable/failed: undo the button selection, stay put.
+            selectSubTabButton(activeSubTab);
+            return;
         }
         activeSubTab = subTab;
         content.setCenter(shellActive ? shellPlaceholder : placeholder);
@@ -362,29 +371,42 @@ final class OpenSessionTab {
         reviewSubTabButton.setSelected(subTab == SubTab.REVIEW);
     }
 
-    /** Builds the shell sub-tab's runtime/host/surface on first use (ephemeral: never persisted or resumed). */
-    private void ensureShellStarted() {
+    /**
+     * Builds the shell sub-tab's runtime/host/surface on first use
+     * (ephemeral: never persisted or resumed). Returns whether the shell is
+     * available; a failed attempt resets {@link #shellStarted} so the next
+     * switch retries instead of wedging the sub-tab forever.
+     */
+    private boolean ensureShellStarted() {
         if (shellStarted) {
-            return;
+            return shellBridge != null;
         }
         shellStarted = true;
-        // The wakeup callback closes over shellBridge (assigned just below);
-        // a wakeup arriving before that assignment is safely dropped.
-        ShellTerminal shell = shellTerminalProvider.apply(() -> {
-            if (shellBridge != null) {
-                shellBridge.tickAndDraw();
+        try {
+            // The wakeup callback closes over shellBridge (assigned just
+            // below); a wakeup arriving before that assignment is safely
+            // dropped.
+            ShellTerminal shell = shellTerminalProvider.apply(() -> {
+                if (shellBridge != null) {
+                    shellBridge.tickAndDraw();
+                }
+            });
+            if (shell == null) {
+                shellStarted = false; // provider unavailable (e.g. headless test)
+                return false;
             }
-        });
-        if (shell == null) {
-            shellStarted = false; // provider unavailable (e.g. headless test); leave the tab empty
-            return;
+            shellBridge = new TerminalBridge(shell.runtime(), shell.host(), shellPlaceholder,
+                    stage::getOutputScaleX, this::sessionId, this::runShortcut);
+            shellSurface = shell.runtime().openSurface(shell.host(), stage.getOutputScaleX(),
+                    TerminalSpec.loginShell(shellWorkingDirectory));
+            shellBridge.adoptSurface(shellSurface);
+            shellBridge.wireInputListeners();
+            return true;
+        } catch (RuntimeException e) {
+            LOG.log(Logger.Level.WARNING, "Could not start the shell terminal for session " + sessionId, e);
+            shellStarted = false;
+            return false;
         }
-        shellBridge = new TerminalBridge(shell.runtime(), shell.host(), shellPlaceholder,
-                stage::getOutputScaleX, this::sessionId, this::runShortcut);
-        shellSurface = shell.runtime().openSurface(shell.host(), stage.getOutputScaleX(),
-                TerminalSpec.loginShell(shellWorkingDirectory));
-        shellBridge.adoptSurface(shellSurface);
-        shellBridge.wireInputListeners();
     }
 
     /** Maps an intercepted terminal app-shortcut (see {@link TerminalBridge}) to this tab's handlers. */
@@ -802,20 +824,25 @@ final class OpenSessionTab {
     void disposeNativeResources() {
         bridge.disposeNativeResources();
         if (shellBridge != null) {
-            // The ephemeral shell has no SessionManager-managed lifecycle:
-            // close its surface here (abrupt close is fine -- the login
-            // shell just gets hung up) before freeing the runtime/host, or
-            // the child shell process would be orphaned.
-            shellBridge.markSurfaceClosing();
-            if (shellSurface != null) {
-                try {
-                    shellSurface.close();
-                } catch (RuntimeException e) {
-                    // Best-effort: the runtime/host teardown below must still run.
-                }
-                shellSurface = null;
+            // The ephemeral shell has no SessionManager-managed lifecycle,
+            // so it is reaped here -- but NEVER via a direct close(): a
+            // login shell sitting at its prompt is a live child, and
+            // freeing the surface under a live child is the documented
+            // uncatchable-JVM-abort scenario (see TerminalSurface#close /
+            // SessionManager.closeSession). closeGracefully sends the exit
+            // request, polls, and only then frees; the runtime/host are
+            // freed from its onDone callback.
+            TerminalBridge closingShellBridge = shellBridge;
+            TerminalSurface closingShellSurface = shellSurface;
+            shellBridge = null;
+            shellSurface = null;
+            closingShellBridge.markSurfaceClosing();
+            if (closingShellSurface != null) {
+                closingShellSurface.closeGracefully(SHELL_CLOSE_GRACE_MILLIS, SHELL_CLOSE_POLL_MILLIS,
+                        closingShellBridge::disposeNativeResources);
+            } else {
+                closingShellBridge.disposeNativeResources();
             }
-            shellBridge.disposeNativeResources();
         }
     }
 }
