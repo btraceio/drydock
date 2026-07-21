@@ -320,7 +320,7 @@ abstract class RuntimeImageTask @Inject constructor(
         // bundle (Finder or `open`) for correct Dock identity; the plain
         // bin/ launcher stays for the diag harness, which needs inherited
         // environment variables that `open` would drop.
-        val appBundle = File(imageRoot, "Claude Project Manager.app")
+        val appBundle = File(imageRoot, "Drydock.app")
         val contentsDir = File(appBundle, "Contents")
         val macosDir = File(contentsDir, "MacOS").apply { mkdirs() }
         val resourcesDir = File(contentsDir, "Resources").apply { mkdirs() }
