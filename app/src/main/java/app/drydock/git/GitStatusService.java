@@ -131,7 +131,8 @@ public final class GitStatusService implements AutoCloseable {
         command.set(0, sshExecutable);
         ProcessResult result;
         try {
-            result = ProcessRunner.run(command, null, SshCommandBuilder.REMOTE_GIT_TIMEOUT);
+            result = ProcessRunner.run(command, Path.of(System.getProperty("user.home")),
+                    SshCommandBuilder.REMOTE_GIT_TIMEOUT);
         } catch (IOException e) {
             throw new GitCommandFailedException(command, -1, e.getMessage() == null ? "" : e.getMessage());
         } catch (ProcessTimeoutException e) {

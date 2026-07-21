@@ -10,6 +10,7 @@ import app.drydock.state.json.JsonParser;
 import app.drydock.state.json.JsonValue;
 import app.drydock.state.json.JsonValue.JsonArray;
 import app.drydock.state.json.JsonValue.JsonObject;
+import app.drydock.state.json.JsonValue.JsonString;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
@@ -122,8 +123,8 @@ class ApplicationStateCodecTest {
         JsonObject json = (JsonObject) ApplicationStateCodec.toJson(state);
         JsonObject repoObj = (JsonObject) ((JsonArray) json.get("repositories")).elements().getFirst();
         JsonObject badRemote = JsonObject.empty();
-        badRemote.put("host", new JsonValue.JsonString("-starts-with-dash"));
-        badRemote.put("path", new JsonValue.JsonString("/x"));
+        badRemote.put("host", new JsonString("-starts-with-dash"));
+        badRemote.put("path", new JsonString("/x"));
         repoObj.put("remote", badRemote);
 
         assertFalse(ApplicationStateCodec.fromJson(json).repositories().getFirst().isRemote());

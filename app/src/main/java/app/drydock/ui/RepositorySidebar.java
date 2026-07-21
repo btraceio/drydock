@@ -1196,10 +1196,13 @@ public final class RepositorySidebar extends VBox {
                 row.getStyleClass().add("active");
             }
             Tooltip rowTip = sessionTooltips.computeIfAbsent(session.id(), key -> new Tooltip());
+            String workingDirectoryText = session.worktreeRoot().isEmpty() && repository.isRemote()
+                    ? repository.remote().host() + ":" + repository.remote().remotePath()
+                    : session.workingDirectory().toString();
             rowTip.setText("Status: " + session.status()
                     + (activity == SessionActivity.UNKNOWN ? "" : "\nClaude: " + activityLabel(activity))
                     + "\nLast opened: " + session.lastOpenedAt()
-                    + "\nWorking directory: " + session.workingDirectory());
+                    + "\nWorking directory: " + workingDirectoryText);
             Tooltip.install(row, rowTip);
             row.setOnMouseClicked(event -> {
                 if (event.getButton() == MouseButton.PRIMARY) {

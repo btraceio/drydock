@@ -1612,3 +1612,4 @@ git commit -m "docs: document SSH remote repositories"
 - Spec coverage: domain/persistence (T1-2), builder+execution (T3-4), add flow (T5-7), polling/unreachable (T8), degraded sessions (T9-10), gating (T8+T10), docs/smoke (T11). "Out of scope" items have no tasks — correct.
 - Deviation from spec, deliberate: `getStatus(Path)` is kept as a delegating overload instead of replacing every call site — worktree call sites are always-local and churn there buys nothing; repo-status call sites route through `GitTarget.of` (Tasks 8, 10). Spec intent (placeholder never reaches local git) is preserved.
 - Line numbers are anchors from the current `main` (`55361f4`); every UI task includes a grep step because they drift.
+- Deviation from spec, implemented: the terminal surface exposes no exit code, so remote sessions render ANY exit as "session ended — resume to reconnect" instead of the spec's exit-255 "connection lost" mapping.

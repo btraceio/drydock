@@ -124,7 +124,7 @@ public final class RepositoryManager {
         stateStore.update(state -> {
             RepositoryCatalog.findByCanonicalRoot(state.repositories(), placeholderRoot)
                     .ifPresent(existing -> {
-                        throw new DuplicateRepositoryException(placeholderRoot, existing);
+                        throw new DuplicateRepositoryException(remote.host() + ":" + remote.remotePath(), existing);
                     });
 
             Instant now = Instant.now();
