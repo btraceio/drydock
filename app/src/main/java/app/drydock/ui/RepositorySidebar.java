@@ -13,12 +13,16 @@ import app.drydock.domain.SessionActivity;
 import app.drydock.domain.SessionStatus;
 import app.drydock.git.GitStatus;
 import app.drydock.git.GitStatusService;
+import app.drydock.git.GitTarget;
+import app.drydock.git.SshUnreachableException;
 import app.drydock.git.WorktreeNotCleanException;
 import app.drydock.git.WorktreeService;
 import app.drydock.ui.model.WorkspaceViewModel;
 import java.io.File;
+import javafx.animation.KeyFrame;
 import javafx.animation.PauseTransition;
 import javafx.animation.RotateTransition;
+import javafx.animation.Timeline;
 import javafx.application.Platform;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
@@ -277,6 +281,20 @@ public final class RepositorySidebar extends VBox {
         // the first model event does not immediately re-fetch everything.
         statusRefreshedFor = viewModel.sessions();
         refreshAllStatuses();
+
+        // Remote repos have no local file events and no user shell touching
+        // them; poll every 30s so indicators stay live and an unreachable
+        // entry recovers on its own (spec: Status polling). Local repos keep
+        // event-driven refresh only.
+        Timeline remotePoll = new Timeline(new KeyFrame(Duration.seconds(30), e -> {
+            for (Repository repository : repositoryManager.repositories()) {
+                if (repository.isRemote()) {
+                    refreshStatus(repository);
+                }
+            }
+        }));
+        remotePoll.setCycleCount(Timeline.INDEFINITE);
+        remotePoll.play();
     }
 
     /** Wired by the application shell to open the Clone-from-GitHub modal (design section 7). */
@@ -712,6 +730,9 @@ public final class RepositorySidebar extends VBox {
      * briefly notes "Already up to date" in the repo meta line.
      */
     private void refreshWorktrees(Repository repository, boolean userInitiated) {
+        if (repository.isRemote()) {
+            return;
+        }
         if (!scanning.add(repository.id())) {
             return;
         }
@@ -841,7 +862,7 @@ public final class RepositorySidebar extends VBox {
     }
 
     private void refreshStatus(Repository repository) {
-        gitStatusService.getStatus(repository.root())
+        gitStatusService.getStatus(GitTarget.of(repository))
                 .whenComplete((status, failure) -> Platform.runLater(() -> {
                     if (failure != null) {
                         viewModel.setRepoStatusFailure(repository.id(), UiErrors.unwrap(failure));
@@ -856,6 +877,9 @@ public final class RepositorySidebar extends VBox {
         GitStatus status = viewModel.repoStatus(repository.id()).orElse(null);
         if (status != null) {
             return UiFormats.branchText(status) + (status.dirty() ? " *" : "");
+        }
+        if (viewModel.repoStatusFailure(repository.id()).orElse(null) instanceof SshUnreachableException) {
+            return "(unreachable)";
         }
         return viewModel.repoStatusFailure(repository.id()).isPresent() ? "(status unavailable)" : "…";
     }
@@ -885,8 +909,11 @@ public final class RepositorySidebar extends VBox {
         Alert confirm = new Alert(AlertType.CONFIRMATION);
         confirm.setTitle("Remove repository");
         confirm.setHeaderText("Remove \"" + repository.displayName() + "\" from the manager?");
+        String location = repository.isRemote()
+                ? repository.remote().host() + ":" + repository.remote().remotePath()
+                : repository.root().toString();
         confirm.setContentText("This only removes it from Drydock's list. "
-                + "Nothing on disk at " + repository.root() + " is touched or deleted.");
+                + "Nothing at " + location + " is touched or deleted.");
         confirm.showAndWait().filter(button -> button == ButtonType.OK).ifPresent(button -> {
             repositoryManager.removeRepository(repository.id());
             // The manager's change listener rebuilds the repo list; the
@@ -1004,6 +1031,9 @@ public final class RepositorySidebar extends VBox {
             Throwable failure = viewModel.repoStatusFailure(repository.id()).orElse(null);
             if (failure != null) {
                 branch.setTooltip(new Tooltip(String.valueOf(failure.getMessage())));
+            } else if (repository.isRemote() && viewModel.repoStatus(repository.id()).isPresent()) {
+                branch.setTooltip(new Tooltip(
+                        "ahead/behind is as of the last fetch on " + repository.remote().host()));
             }
 
             List<ManagedClaudeSession> sessions = sessionsFor(repository);
@@ -1295,6 +1325,9 @@ public final class RepositorySidebar extends VBox {
         return newSessionMenus.computeIfAbsent(repository.id(), id -> {
             MenuItem inCheckout = new MenuItem("❯_  Session on main checkout");
             inCheckout.setOnAction(e -> navigator.openNewSession(repository));
+            if (repository.isRemote()) {
+                return new ContextMenu(inCheckout);
+            }
             MenuItem newWorktree = new MenuItem("◫  New worktree…");
             newWorktree.setOnAction(e -> onNewWorktree.accept(repository));
             MenuItem rescan = new MenuItem("⟳  Rescan worktrees");
@@ -1307,11 +1340,6 @@ public final class RepositorySidebar extends VBox {
         return repoMenus.computeIfAbsent(repository.id(), id -> {
             MenuItem newSession = new MenuItem("New Claude session");
             newSession.setOnAction(e -> navigator.openNewSession(repository));
-            MenuItem newWorktree = new MenuItem("New worktree…");
-            newWorktree.setOnAction(e -> onNewWorktree.accept(repository));
-
-            MenuItem rescan = new MenuItem("Rescan worktrees");
-            rescan.setOnAction(e -> refreshWorktrees(repository, true));
 
             MenuItem refresh = new MenuItem("Refresh");
             refresh.setOnAction(e -> {
@@ -1319,18 +1347,32 @@ public final class RepositorySidebar extends VBox {
                 refreshWorktrees(repository, true);
             });
 
-            MenuItem openFinder = new MenuItem("Open in Finder");
-            openFinder.setOnAction(e -> onOpenInFinder(repository));
-
-            MenuItem openEditor = new MenuItem("Open in external editor");
-            openEditor.setOnAction(e -> onOpenInEditor(repository));
-
             MenuItem remove = new MenuItem("Remove from manager");
             remove.setOnAction(e -> onRemoveRepository(repository));
 
             ContextMenu menu = new ContextMenu();
-            menu.getItems().addAll(newSession, newWorktree, rescan, new SeparatorMenuItem(), refresh, openFinder,
-                    openEditor, new SeparatorMenuItem(), remove);
+            menu.getItems().add(newSession);
+            if (!repository.isRemote()) {
+                MenuItem newWorktree = new MenuItem("New worktree…");
+                newWorktree.setOnAction(e -> onNewWorktree.accept(repository));
+
+                MenuItem rescan = new MenuItem("Rescan worktrees");
+                rescan.setOnAction(e -> refreshWorktrees(repository, true));
+
+                menu.getItems().addAll(newWorktree, rescan);
+            }
+            menu.getItems().add(new SeparatorMenuItem());
+            menu.getItems().add(refresh);
+            if (!repository.isRemote()) {
+                MenuItem openFinder = new MenuItem("Open in Finder");
+                openFinder.setOnAction(e -> onOpenInFinder(repository));
+
+                MenuItem openEditor = new MenuItem("Open in external editor");
+                openEditor.setOnAction(e -> onOpenInEditor(repository));
+
+                menu.getItems().addAll(openFinder, openEditor);
+            }
+            menu.getItems().addAll(new SeparatorMenuItem(), remove);
             return menu;
         });
     }
