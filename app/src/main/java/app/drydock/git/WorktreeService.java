@@ -118,13 +118,26 @@ public final class WorktreeService implements AutoCloseable {
      */
     public CompletableFuture<Void> remove(Path repositoryRoot, Path worktreePath, Optional<String> branch) {
         return CompletableFuture.supplyAsync(() -> {
-            removeBlocking(repositoryRoot, worktreePath, branch);
+            removeBlocking(repositoryRoot, worktreePath, branch, false);
             return null;
         }, executor);
     }
 
-    /** Synchronous form of {@link #remove}, package-private for tests. */
-    void removeBlocking(Path repositoryRoot, Path worktreePath, Optional<String> branch) {
+    /**
+     * As {@link #remove}, but removes with {@code --force} up front,
+     * discarding any uncommitted work in the worktree. Only for a
+     * user-confirmed retry after {@link #remove} failed with a
+     * {@link WorktreeNotCleanException}; still refuses the main checkout.
+     */
+    public CompletableFuture<Void> removeForced(Path repositoryRoot, Path worktreePath, Optional<String> branch) {
+        return CompletableFuture.supplyAsync(() -> {
+            removeBlocking(repositoryRoot, worktreePath, branch, true);
+            return null;
+        }, executor);
+    }
+
+    /** Synchronous form of {@link #remove}/{@link #removeForced}, package-private for tests. */
+    void removeBlocking(Path repositoryRoot, Path worktreePath, Optional<String> branch, boolean force) {
         Path git = locator.locate()
                 .orElseThrow(() -> new GitExecutableNotFoundException(locator.describeSearched()));
 
@@ -142,9 +155,9 @@ public final class WorktreeService implements AutoCloseable {
         List<String> removeCommand = List.of(
                 git.toString(), "-C", repositoryRoot.toString(),
                 "worktree", "remove", normalizedTarget.toString());
-        ProcessResult removed = run(removeCommand);
-        if (removed.exitCode() != 0) {
-            if (mayRetryWithForce(git, normalizedTarget)) {
+        ProcessResult removed = force ? null : run(removeCommand);
+        if (force || removed.exitCode() != 0) {
+            if (force || mayRetryWithForce(git, normalizedTarget)) {
                 List<String> forceRemoveCommand = List.of(
                         git.toString(), "-C", repositoryRoot.toString(),
                         "worktree", "remove", "--force", normalizedTarget.toString());
@@ -152,6 +165,10 @@ public final class WorktreeService implements AutoCloseable {
                 if (forced.exitCode() != 0) {
                     throw new GitCommandFailedException(forceRemoveCommand, forced.exitCode(), ProcessRunner.excerpt(forced.stderr()));
                 }
+            } else if (Files.exists(normalizedTarget) && !isClean(git, normalizedTarget)) {
+                // The refusal protects real uncommitted work: report it as
+                // such so the UI can offer a confirmed forced delete.
+                throw new WorktreeNotCleanException(normalizedTarget);
             } else {
                 throw new GitCommandFailedException(removeCommand, removed.exitCode(), ProcessRunner.excerpt(removed.stderr()));
             }

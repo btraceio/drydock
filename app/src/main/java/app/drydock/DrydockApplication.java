@@ -459,12 +459,15 @@ public final class DrydockApplication extends Application {
                 activeOrFirstRepository().ifPresent(mainWorkspace::openNewSession);
                 event.consume();
             } else if (cmd && event.getCode() == KeyCode.DIGIT1) {
-                mainWorkspace.showTerminalSubTab();
+                mainWorkspace.showClaudeSubTab();
                 event.consume();
             } else if (cmd && event.getCode() == KeyCode.DIGIT2) {
-                mainWorkspace.showExplorerSubTab();
+                mainWorkspace.showTerminalSubTab();
                 event.consume();
             } else if (cmd && event.getCode() == KeyCode.DIGIT3) {
+                mainWorkspace.showExplorerSubTab();
+                event.consume();
+            } else if (cmd && event.getCode() == KeyCode.DIGIT4) {
                 mainWorkspace.showReviewSubTab();
                 event.consume();
             } else if (cmd && event.getCode() == KeyCode.R) {

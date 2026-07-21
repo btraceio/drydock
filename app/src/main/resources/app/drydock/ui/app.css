@@ -159,6 +159,22 @@
     -fx-padding: 0;
     -fx-indent: 0;
 }
+/* Keyboard selection: arrow navigation moves the tree's own selection,
+ * which the custom row graphics never showed. A muted fill marks the
+ * selected row; the accent ring appears only while the tree itself holds
+ * the keyboard, and disappears the moment the terminal takes it back
+ * (TerminalBridge.focus() moves JavaFX focus onto the terminal region). */
+.repo-tree .tree-cell:selected {
+    -fx-background-color: -drydock-hover;
+    -fx-background-radius: 8px;
+}
+.repo-tree:focused .tree-cell:selected {
+    -fx-background-color: -drydock-active-bg;
+    -fx-border-color: -drydock-accent;
+    -fx-border-width: 1;
+    -fx-border-radius: 8px;
+    -fx-border-insets: 0;
+}
 .repo-tree .tree-cell > .tree-disclosure-node {
     -fx-padding: 0;
     -fx-min-width: 0;
@@ -807,6 +823,12 @@
 .session-subtab:selected {
     -fx-background-color: -drydock-active-bg;
     -fx-text-fill: -drydock-text;
+}
+/* :keys (set by OpenSessionTab): this sub-tab's native terminal currently
+ * owns the keyboard -- typing lands there, not in the sidebar/filter. */
+.session-subtab:selected:keys {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-text-fill: -drydock-accent;
 }
 .session-subtab-context {
     -fx-text-fill: -drydock-text-faint;

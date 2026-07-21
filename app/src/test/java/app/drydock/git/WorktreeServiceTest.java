@@ -123,8 +123,32 @@ class WorktreeServiceTest {
 
         CompletionException completion = assertThrows(CompletionException.class,
                 () -> service.remove(repo, worktree, Optional.of("feat/dirty")).join());
-        assertInstanceOf(GitCommandFailedException.class, completion.getCause());
+        assertInstanceOf(WorktreeNotCleanException.class, completion.getCause());
         assertTrue(Files.exists(worktree));
+    }
+
+    @Test
+    void forcedRemoveDeletesADirtyWorktreeAndItsBranch(@TempDir Path repoDir, @TempDir Path worktreeParent)
+            throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/force").get();
+        Files.writeString(worktree.resolve("uncommitted.txt"), "expendable\n");
+
+        service.removeForced(repo, worktree, Optional.of("feat/force")).get();
+
+        assertFalse(Files.exists(worktree));
+        assertEquals(1, service.list(repo).get().size());
+        assertFalse(runGitCapture(repo, "branch", "--list", "feat/force").contains("feat/force"));
+    }
+
+    @Test
+    void forcedRemoveStillRefusesTheMainCheckout(@TempDir Path repoDir) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+
+        CompletionException completion = assertThrows(CompletionException.class,
+                () -> service.removeForced(repo, repo, Optional.of("main")).join());
+        assertInstanceOf(IllegalArgumentException.class, completion.getCause());
+        assertTrue(Files.exists(repo.resolve("README.md")));
     }
 
     /**
@@ -162,7 +186,7 @@ class WorktreeServiceTest {
 
         CompletionException completion = assertThrows(CompletionException.class,
                 () -> service.remove(repo, worktree, Optional.of("feat/no-subs-dirty")).join());
-        assertInstanceOf(GitCommandFailedException.class, completion.getCause());
+        assertInstanceOf(WorktreeNotCleanException.class, completion.getCause());
         assertTrue(Files.exists(worktree.resolve("uncommitted.txt")));
     }
 
@@ -203,7 +227,7 @@ class WorktreeServiceTest {
 
         CompletionException completion = assertThrows(CompletionException.class,
                 () -> service.remove(repo, worktree, Optional.of("feat/sub-dirty")).join());
-        assertInstanceOf(GitCommandFailedException.class, completion.getCause());
+        assertInstanceOf(WorktreeNotCleanException.class, completion.getCause());
         assertTrue(Files.exists(worktree.resolve("uncommitted.txt")));
     }
 
@@ -220,7 +244,7 @@ class WorktreeServiceTest {
 
         CompletionException completion = assertThrows(CompletionException.class,
                 () -> service.remove(repo, worktree, Optional.of("feat/sub-bump")).join());
-        assertInstanceOf(GitCommandFailedException.class, completion.getCause());
+        assertInstanceOf(WorktreeNotCleanException.class, completion.getCause());
         assertTrue(Files.exists(worktree));
     }
 

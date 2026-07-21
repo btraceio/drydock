@@ -13,6 +13,7 @@ import app.drydock.domain.SessionActivity;
 import app.drydock.domain.SessionStatus;
 import app.drydock.git.GitStatus;
 import app.drydock.git.GitStatusService;
+import app.drydock.git.WorktreeNotCleanException;
 import app.drydock.git.WorktreeService;
 import app.drydock.ui.model.WorkspaceViewModel;
 import java.io.File;
@@ -36,6 +37,7 @@ import javafx.scene.control.Tooltip;
 import javafx.scene.control.TreeCell;
 import javafx.scene.control.TreeItem;
 import javafx.scene.control.TreeView;
+import javafx.scene.input.KeyCode;
 import javafx.scene.input.MouseButton;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
@@ -196,6 +198,19 @@ public final class RepositorySidebar extends VBox {
         tree.setShowRoot(false);
         tree.setCellFactory(view -> new SidebarTreeCell());
         VBox.setVgrow(tree, Priority.ALWAYS);
+        // Keyboard activation (arrows already navigate, ←/→ already
+        // collapse/expand via TreeView's built-in behavior): Enter/Space
+        // performs the row's primary click action.
+        tree.setOnKeyPressed(event -> {
+            if (event.getCode() != KeyCode.ENTER && event.getCode() != KeyCode.SPACE) {
+                return;
+            }
+            TreeItem<SidebarNode> selected = tree.getSelectionModel().getSelectedItem();
+            if (selected != null && selected.getValue() != null) {
+                activateNode(selected);
+                event.consume();
+            }
+        });
 
         // -- Footer ---------------------------------------------------------
         footerDot.getStyleClass().addAll("status-dot", "dot-5");
@@ -269,6 +284,22 @@ public final class RepositorySidebar extends VBox {
     /** Wired by the application shell to open the create-worktree modal (worktree handoff, section B). */
     public void setOnNewWorktree(Consumer<Repository> handler) {
         this.onNewWorktree = handler == null ? repository -> { } : handler;
+    }
+
+    /**
+     * The keyboard counterpart of each row's primary click (Enter/Space on
+     * the selected row): toggles a repository open/closed, resumes a
+     * session (which also hands the keyboard to its terminal), or shows an
+     * unopened worktree's start pane.
+     */
+    private void activateNode(TreeItem<SidebarNode> item) {
+        switch (item.getValue()) {
+            case SidebarNode.RepoNode repoNode -> item.setExpanded(!item.isExpanded());
+            case SidebarNode.SessionNode sessionNode ->
+                    viewModel.sessionById(sessionNode.session().id()).ifPresent(navigator::resumeSession);
+            case SidebarNode.UnopenedWorktreeNode worktreeNode ->
+                    navigator.showUnopenedWorktree(worktreeNode.repository(), worktreeNode.worktree());
+        }
     }
 
     /** Focuses the filter field (⌘F). */
@@ -351,6 +382,10 @@ public final class RepositorySidebar extends VBox {
                 } else {
                     collapsed.add(repository.id());
                 }
+                // Re-render the header so the ▶ caret tracks EVERY expansion
+                // change -- keyboard toggles (Enter, ←/→) included, not just
+                // the row's own mouse handler.
+                updateRepoRow(repository.id());
             });
             repoItems.add(repoItem);
         }
@@ -732,12 +767,41 @@ public final class RepositorySidebar extends VBox {
         worktreeService.remove(repository.root(), worktree.path(), worktree.branch())
                 .whenComplete((v, failure) -> Platform.runLater(() -> {
                     if (failure != null) {
-                        UiErrors.show("Could not delete worktree", failure);
+                        if (UiErrors.unwrap(failure) instanceof WorktreeNotCleanException) {
+                            confirmForcedWorktreeDelete(repository, worktree);
+                        } else {
+                            UiErrors.show("Could not delete worktree", failure);
+                        }
                         return;
                     }
                     viewModel.removeWorktreeStatus(worktree.path());
                     refreshWorktrees(repository, false);
                 }));
+    }
+
+    /**
+     * The plain remove was refused because the worktree holds uncommitted
+     * work (git: "contains modified or untracked files"): ask before
+     * discarding it, then retry with {@code --force}.
+     */
+    private void confirmForcedWorktreeDelete(Repository repository, WorktreeService.Worktree worktree) {
+        Alert confirm = new Alert(AlertType.CONFIRMATION);
+        confirm.setTitle("Delete worktree");
+        confirm.setHeaderText("\"" + worktree.branch().orElse(worktree.path().getFileName().toString())
+                + "\" has uncommitted changes");
+        confirm.setContentText("The worktree at " + worktree.path()
+                + " contains modified or untracked files. Deleting it will discard them permanently. "
+                + "Delete anyway?");
+        confirm.showAndWait().filter(button -> button == ButtonType.OK).ifPresent(button ->
+                worktreeService.removeForced(repository.root(), worktree.path(), worktree.branch())
+                        .whenComplete((v, failure) -> Platform.runLater(() -> {
+                            if (failure != null) {
+                                UiErrors.show("Could not delete worktree", failure);
+                                return;
+                            }
+                            viewModel.removeWorktreeStatus(worktree.path());
+                            refreshWorktrees(repository, false);
+                        })));
     }
 
     // ---- Git status ---------------------------------------------------------

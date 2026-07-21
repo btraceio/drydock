@@ -292,6 +292,12 @@ final class TerminalBridge {
             host.setFocused(true);
             app.setFocus(true);
             surface.setFocus(true);
+            // Mirror the AppKit first-responder grab into JavaFX focus on
+            // the anchor: keystrokes now go to the terminal, so no JavaFX
+            // control (e.g. the sidebar tree) may keep LOOKING focused --
+            // the anchor's :focused state is what the UI's "keys go to the
+            // terminal" indicators key off.
+            anchor.requestFocus();
         } catch (IllegalStateException e) {
             // See tickAndDraw's identical catch: surface closed out from
             // under this tab in the gap before markSurfaceClosing() runs.

@@ -12,6 +12,7 @@ import app.drydock.terminal.api.TerminalSurface;
 import app.drydock.ui.explorer.SessionExplorerView;
 import javafx.animation.PauseTransition;
 import javafx.application.Platform;
+import javafx.css.PseudoClass;
 import javafx.geometry.Pos;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
@@ -67,6 +68,14 @@ final class OpenSessionTab {
 
     private static final Logger LOG = System.getLogger(OpenSessionTab.class.getName());
 
+    /**
+     * Marks a sub-tab button whose native terminal currently owns the
+     * keyboard (the placeholder holds JavaFX focus, mirrored from the
+     * AppKit first responder by {@code TerminalBridge.focus()}), so the
+     * user can always see where their keystrokes will land.
+     */
+    private static final PseudoClass KEYS = PseudoClass.getPseudoClass("keys");
+
     /** Graceful-close budget for the ephemeral shell (mirrors SessionManager's defaults for the Claude surface). */
     private static final long SHELL_CLOSE_GRACE_MILLIS = 3000;
     private static final long SHELL_CLOSE_POLL_MILLIS = 100;
@@ -115,6 +124,14 @@ final class OpenSessionTab {
     private TerminalBridge shellBridge;   // null until first shown
     private TerminalSurface shellSurface; // null until first shown; closed by disposeNativeResources
     private boolean shellStarted;
+    /**
+     * MainWorkspace's last {@link #setVisible} verdict, kept so a shell
+     * bridge created lazily AFTER that call can be seeded with it -- the
+     * bridge's own workspace-visible flag starts false, and without the
+     * seed the freshly opened Terminal sub-tab stayed an invisible (empty)
+     * native view until the next tab switch.
+     */
+    private boolean workspaceVisible;
 
     // -- Tab header graphic (two-line label + dot + close; handoff 4) -------
     private final Region tabDot = SessionStatusStyles.createDot(7, SessionStatus.STARTING);
@@ -170,7 +187,16 @@ final class OpenSessionTab {
         placeholder.boundsInLocalProperty().addListener((obs, oldV, newV) -> bridge.updateGeometry());
         placeholder.localToSceneTransformProperty().addListener((obs, oldV, newV) -> bridge.updateGeometry());
 
+        // Keyboard-ownership indicator: the placeholder gains JavaFX focus
+        // whenever its native terminal takes the AppKit first responder
+        // (see TerminalBridge.focus()); reflect that on the matching
+        // sub-tab button so "where do my keys go" is always visible.
+        placeholder.focusedProperty().addListener((obs, was, is) ->
+                claudeSubTabButton.pseudoClassStateChanged(KEYS, is));
+
         shellPlaceholder.getStyleClass().add("terminal-region");
+        shellPlaceholder.focusedProperty().addListener((obs, was, is) ->
+                terminalSubTabButton.pseudoClassStateChanged(KEYS, is));
         shellPlaceholder.boundsInLocalProperty().addListener((obs, oldV, newV) -> {
             if (shellBridge != null) {
                 shellBridge.updateGeometry();
@@ -326,6 +352,12 @@ final class OpenSessionTab {
     void showSubTab(SubTab subTab) {
         selectSubTabButton(subTab);
         if (subTab == activeSubTab) {
+            // Already showing -- but still reclaim key routing for a native
+            // sub-tab: the user may have clicked into the sidebar (moving
+            // the AppKit first responder to the Glass view), and "switch to
+            // Claude/Terminal" must mean "let me type there again", not a
+            // silent no-op.
+            focusActiveNativeSubTab();
             return;
         }
         if (subTab == SubTab.EXPLORER || subTab == SubTab.REVIEW) {
@@ -364,6 +396,15 @@ final class OpenSessionTab {
         }
     }
 
+    /** Refocuses whichever native terminal (Claude or shell) the active sub-tab shows, if any. */
+    void focusActiveNativeSubTab() {
+        if (activeSubTab == SubTab.CLAUDE) {
+            bridge.focus();
+        } else if (activeSubTab == SubTab.TERMINAL && shellBridge != null) {
+            shellBridge.focus();
+        }
+    }
+
     private void selectSubTabButton(SubTab subTab) {
         claudeSubTabButton.setSelected(subTab == SubTab.CLAUDE);
         terminalSubTabButton.setSelected(subTab == SubTab.TERMINAL);
@@ -397,6 +438,14 @@ final class OpenSessionTab {
             }
             shellBridge = new TerminalBridge(shell.runtime(), shell.host(), shellPlaceholder,
                     stage::getOutputScaleX, this::sessionId, this::runShortcut);
+            // Deactivated until showSubTab flips it below -- pairing with
+            // the workspace-visible seed here would otherwise briefly show
+            // the shell view before its placeholder has laid out.
+            shellBridge.setTerminalSubTabActive(false);
+            // Seed MainWorkspace's verdict (see workspaceVisible): the tab
+            // is already selected by the time the shell is first shown, so
+            // without this the shell's native view never becomes visible.
+            shellBridge.setWorkspaceVisible(workspaceVisible);
             shellSurface = shell.runtime().openSurface(shell.host(), stage.getOutputScaleX(),
                     TerminalSpec.loginShell(shellWorkingDirectory));
             shellBridge.adoptSurface(shellSurface);
@@ -777,6 +826,7 @@ final class OpenSessionTab {
      * (selected tab, no modal open); see {@link TerminalBridge#setWorkspaceVisible}.
      */
     void setVisible(boolean visible) {
+        workspaceVisible = visible;
         bridge.setWorkspaceVisible(visible);
         if (shellBridge != null) {
             shellBridge.setWorkspaceVisible(visible);
@@ -794,7 +844,7 @@ final class OpenSessionTab {
     }
 
     void focus() {
-        bridge.focus();
+        focusActiveNativeSubTab();
     }
 
     /**

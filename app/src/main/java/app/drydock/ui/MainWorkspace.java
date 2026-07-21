@@ -435,17 +435,22 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         tabPane.getSelectionModel().clearSelection();
     }
 
-    /** ⌘1: switches the selected session tab to its Terminal sub-tab. */
-    public void showTerminalSubTab() {
+    /** ⌘1: switches the selected session tab to its Claude sub-tab. */
+    public void showClaudeSubTab() {
         currentlySelected().ifPresent(open -> open.showSubTab(OpenSessionTab.SubTab.CLAUDE));
     }
 
-    /** ⌘2: switches the selected session tab to its Explorer sub-tab. */
+    /** ⌘2: switches the selected session tab to its shell Terminal sub-tab. */
+    public void showTerminalSubTab() {
+        currentlySelected().ifPresent(open -> open.showSubTab(OpenSessionTab.SubTab.TERMINAL));
+    }
+
+    /** ⌘3: switches the selected session tab to its Explorer sub-tab. */
     public void showExplorerSubTab() {
         currentlySelected().ifPresent(open -> open.showSubTab(OpenSessionTab.SubTab.EXPLORER));
     }
 
-    /** ⌘3: switches the selected session tab to its Review sub-tab. */
+    /** ⌘4: switches the selected session tab to its Review sub-tab. */
     public void showReviewSubTab() {
         currentlySelected().ifPresent(open -> open.showSubTab(OpenSessionTab.SubTab.REVIEW));
     }
@@ -585,6 +590,10 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 ? openTabs.get(session.id()) : pendingTabs.get(session.id());
         if (alreadyOpen != null) {
             tabPane.getSelectionModel().select(alreadyOpen.tab);
+            // Selecting an ALREADY-selected tab fires no selection change,
+            // so nothing else restores the terminal's key routing -- and
+            // re-picking a session from the sidebar must mean "type here".
+            alreadyOpen.focus();
             return;
         }
 
