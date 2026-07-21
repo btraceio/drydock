@@ -1079,6 +1079,23 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         OpenSessionTab openTab = new OpenSessionTab(sessionId, displayName, repository, stage, app, host);
         holder[0] = openTab;
 
+        // The ephemeral shell Terminal sub-tab (created lazily on first
+        // switch): mirrors the Claude runtime/host creation, themed
+        // identically, rooted at the session's working directory.
+        openTab.setShellWorkingDirectory(searchRoot.toString());
+        openTab.setShellTerminalProvider(onWakeup -> {
+            TerminalRuntime shellRuntime = TerminalFactory.createRuntime(onWakeup,
+                    Optional.of(TerminalThemes.configFileFor(themeProvider.get())));
+            TerminalHostView shellHost;
+            try {
+                shellHost = TerminalFactory.createHostForCurrentWindow();
+            } catch (RuntimeException e) {
+                shellRuntime.close();
+                throw e;
+            }
+            return new OpenSessionTab.ShellTerminal(shellRuntime, shellHost);
+        });
+
         // Close THIS tab, not "whichever tab openTabs currently maps the id
         // to": if bookkeeping ever disagrees (e.g. a duplicate-open bug),
         // the clicked tab must still disappear instead of surviving forever.

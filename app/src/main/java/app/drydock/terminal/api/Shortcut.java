@@ -4,9 +4,11 @@ package app.drydock.terminal.api;
 public enum Shortcut {
     /** ⌘1 -- switch to the Claude sub-tab. */
     CLAUDE_SUB_TAB,
-    /** ⌘2 -- switch to the Explorer sub-tab. */
+    /** ⌘2 -- switch to the shell Terminal sub-tab. */
+    TERMINAL_SUB_TAB,
+    /** ⌘3 -- switch to the Explorer sub-tab. */
     EXPLORER_SUB_TAB,
-    /** ⌘3 -- switch to the Review sub-tab. */
+    /** ⌘4 -- switch to the Review sub-tab. */
     REVIEW_SUB_TAB,
     /** ⌘⇧[ -- select the previous session tab. */
     PREVIOUS_SESSION_TAB,

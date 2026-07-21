@@ -74,8 +74,9 @@ class GhosttyKeyTranslatorTest {
     @ParameterizedTest
     @CsvSource({
             "1, CLAUDE_SUB_TAB",
-            "2, EXPLORER_SUB_TAB",
-            "3, REVIEW_SUB_TAB",
+            "2, TERMINAL_SUB_TAB",
+            "3, EXPLORER_SUB_TAB",
+            "4, REVIEW_SUB_TAB",
             "[, PREVIOUS_SESSION_TAB",
             "{, PREVIOUS_SESSION_TAB",
             "], NEXT_SESSION_TAB",

@@ -5,6 +5,7 @@ import app.drydock.domain.PrState;
 import app.drydock.domain.Repository;
 import app.drydock.domain.SessionStatus;
 import app.drydock.terminal.api.Shortcut;
+import app.drydock.terminal.api.TerminalSpec;
 import app.drydock.terminal.api.TerminalHostView;
 import app.drydock.terminal.api.TerminalRuntime;
 import app.drydock.terminal.api.TerminalSurface;
@@ -33,6 +34,7 @@ import javafx.util.Duration;
 import java.nio.file.Path;
 import java.util.Optional;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 /**
@@ -62,8 +64,11 @@ import java.util.function.Supplier;
  */
 final class OpenSessionTab {
 
-    /** The three views a session tab can show in its content area (design handoff "Session Explorer" / "Diff Review"). */
-    enum SubTab { CLAUDE, EXPLORER, REVIEW }
+    /** The four views a session tab can show in its content area (design handoff "Session Explorer" / "Diff Review"). */
+    enum SubTab { CLAUDE, TERMINAL, EXPLORER, REVIEW }
+
+    /** One lazily-created native trio for the shell sub-tab (runtime + host, themed by MainWorkspace). */
+    record ShellTerminal(TerminalRuntime runtime, TerminalHostView host) { }
 
     /**
      * The managed session this tab hosts. Not final only as a safety net:
@@ -75,12 +80,16 @@ final class OpenSessionTab {
     private ManagedSessionId sessionId;
     final Tab tab;
     private final TerminalBridge bridge;
+    private final Stage stage;
     private final StackPane placeholder = new StackPane();
+    /** Layout anchor for the shell sub-tab's own native view (mirrors {@link #placeholder}). */
+    private final StackPane shellPlaceholder = new StackPane();
     private final Label statusLabel = new Label("Starting session...");
     private final BorderPane content = new BorderPane();
 
     // -- Bottom Terminal/Explorer/Review sub-tab bar (handoff "Session Explorer" / "Diff Review") --
     private final ToggleButton claudeSubTabButton = new ToggleButton("✳  Claude");
+    private final ToggleButton terminalSubTabButton = new ToggleButton("❯_  Terminal");
     private final ToggleButton explorerSubTabButton = new ToggleButton("▤  Explorer");
     private final ToggleButton reviewSubTabButton = new ToggleButton("◨  Review");
     private final Label subTabContext = new Label();
@@ -91,6 +100,14 @@ final class OpenSessionTab {
     /** Built on first switch to Review, via {@link #setReviewFactory}. */
     private Region reviewView;
     private Supplier<Region> reviewFactory;
+
+    // -- Ephemeral shell Terminal sub-tab (never persisted; created on first switch) --
+    /** Supplies a fresh shell runtime+host whose wakeup drives the argument (the shell bridge's tickAndDraw). */
+    private Function<Runnable, ShellTerminal> shellTerminalProvider = onWakeup -> null;
+    private String shellWorkingDirectory = System.getProperty("user.home");
+    private TerminalBridge shellBridge;   // null until first shown
+    private TerminalSurface shellSurface; // null until first shown; closed by disposeNativeResources
+    private boolean shellStarted;
 
     // -- Tab header graphic (two-line label + dot + close; handoff 4) -------
     private final Region tabDot = SessionStatusStyles.createDot(7, SessionStatus.STARTING);
@@ -136,6 +153,7 @@ final class OpenSessionTab {
                    Stage stage, TerminalRuntime app, TerminalHostView host) {
         this.sessionId = sessionId;
         this.displayName = displayName;
+        this.stage = stage;
         this.bridge = new TerminalBridge(app, host, placeholder, stage::getOutputScaleX,
                 this::sessionId, this::runShortcut);
 
@@ -144,6 +162,18 @@ final class OpenSessionTab {
         statusLabel.getStyleClass().add("session-meta");
         placeholder.boundsInLocalProperty().addListener((obs, oldV, newV) -> bridge.updateGeometry());
         placeholder.localToSceneTransformProperty().addListener((obs, oldV, newV) -> bridge.updateGeometry());
+
+        shellPlaceholder.getStyleClass().add("terminal-region");
+        shellPlaceholder.boundsInLocalProperty().addListener((obs, oldV, newV) -> {
+            if (shellBridge != null) {
+                shellBridge.updateGeometry();
+            }
+        });
+        shellPlaceholder.localToSceneTransformProperty().addListener((obs, oldV, newV) -> {
+            if (shellBridge != null) {
+                shellBridge.updateGeometry();
+            }
+        });
 
         this.tab = new Tab();
         tab.setClosable(false); // the graphic carries its own close button (17px ×, handoff 4)
@@ -206,14 +236,19 @@ final class OpenSessionTab {
         claudeSubTabButton.setSelected(true);
         claudeSubTabButton.setOnAction(e -> showSubTab(SubTab.CLAUDE));
 
+        terminalSubTabButton.getStyleClass().add("session-subtab");
+        terminalSubTabButton.setFocusTraversable(false);
+        terminalSubTabButton.setTooltip(new Tooltip("Terminal (⌘2)"));
+        terminalSubTabButton.setOnAction(e -> showSubTab(SubTab.TERMINAL));
+
         explorerSubTabButton.getStyleClass().add("session-subtab");
         explorerSubTabButton.setFocusTraversable(false);
-        explorerSubTabButton.setTooltip(new Tooltip("Explorer (⌘2)"));
+        explorerSubTabButton.setTooltip(new Tooltip("Explorer (⌘3)"));
         explorerSubTabButton.setOnAction(e -> showSubTab(SubTab.EXPLORER));
 
         reviewSubTabButton.getStyleClass().add("session-subtab");
         reviewSubTabButton.setFocusTraversable(false);
-        reviewSubTabButton.setTooltip(new Tooltip("Review (⌘3)"));
+        reviewSubTabButton.setTooltip(new Tooltip("Review (⌘4)"));
         reviewSubTabButton.setOnAction(e -> showSubTab(SubTab.REVIEW));
 
         subTabContext.getStyleClass().add("session-subtab-context");
@@ -221,7 +256,7 @@ final class OpenSessionTab {
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
 
-        HBox bar = new HBox(4, claudeSubTabButton, explorerSubTabButton, reviewSubTabButton, spacer, subTabContext);
+        HBox bar = new HBox(4, claudeSubTabButton, terminalSubTabButton, explorerSubTabButton, reviewSubTabButton, spacer, subTabContext);
         bar.setAlignment(Pos.CENTER_LEFT);
         bar.getStyleClass().add("session-subtab-bar");
         return bar;
@@ -235,6 +270,16 @@ final class OpenSessionTab {
     /** Supplies the Review view on first use (MainWorkspace wires this; it knows the session's checkout + services). */
     void setReviewFactory(Supplier<Region> factory) {
         this.reviewFactory = factory;
+    }
+
+    /** Supplies a fresh shell runtime+host on first switch to the Terminal sub-tab (MainWorkspace wires this). */
+    void setShellTerminalProvider(Function<Runnable, ShellTerminal> provider) {
+        this.shellTerminalProvider = provider;
+    }
+
+    /** The shell Terminal sub-tab's starting directory (the session's worktree root). */
+    void setShellWorkingDirectory(String dir) {
+        this.shellWorkingDirectory = dir;
     }
 
     /**
@@ -262,45 +307,91 @@ final class OpenSessionTab {
     }
 
     /**
-     * Switches between the terminal and the Explorer. The terminal is a
-     * NATIVE view overlaying the scene, so showing the Explorer must both
-     * swap the center node AND hide the native host (else it keeps painting
-     * over the Explorer); switching back restores the placeholder center
-     * first and re-runs geometry after the layout pass so the native frame
-     * tracks the placeholder's fresh bounds.
+     * Switches between the native-surface sub-tabs (Claude, Terminal) and
+     * the scene-graph ones (Explorer, Review). The native views overlay the
+     * scene, so showing Explorer/Review must both swap the center node AND
+     * hide the native hosts (else they keep painting over the view);
+     * switching to a native sub-tab restores its placeholder center first
+     * and re-runs geometry after the layout pass so the native frame tracks
+     * the placeholder's fresh bounds. Only one native view is visible at a
+     * time; the shell terminal is built lazily on first switch.
      */
     void showSubTab(SubTab subTab) {
-        claudeSubTabButton.setSelected(subTab == SubTab.CLAUDE);
-        explorerSubTabButton.setSelected(subTab == SubTab.EXPLORER);
-        reviewSubTabButton.setSelected(subTab == SubTab.REVIEW);
+        selectSubTabButton(subTab);
         if (subTab == activeSubTab) {
             return;
         }
         if (subTab == SubTab.EXPLORER || subTab == SubTab.REVIEW) {
             Region view = subTab == SubTab.EXPLORER ? explorerViewOrBuild() : reviewViewOrBuild();
             if (view == null) {
-                claudeSubTabButton.setSelected(true);
-                explorerSubTabButton.setSelected(false);
-                reviewSubTabButton.setSelected(false);
+                // Build failed: undo the button selection, stay put.
+                selectSubTabButton(activeSubTab);
                 return;
             }
             activeSubTab = subTab;
             content.setCenter(view);
             bridge.setTerminalSubTabActive(false);
-        } else {
-            activeSubTab = SubTab.CLAUDE;
-            content.setCenter(placeholder);
-            bridge.setTerminalSubTabActive(true);
-            // The center swap invalidates the placeholder's bounds only on
-            // the next layout pass; recompute the native frame after it.
-            Platform.runLater(bridge::updateGeometry);
+            if (shellBridge != null) {
+                shellBridge.setTerminalSubTabActive(false);
+            }
+            return;
         }
+        // CLAUDE or TERMINAL: show the corresponding native surface, hide the other.
+        boolean shellActive = subTab == SubTab.TERMINAL;
+        if (shellActive) {
+            ensureShellStarted();
+        }
+        activeSubTab = subTab;
+        content.setCenter(shellActive ? shellPlaceholder : placeholder);
+        bridge.setTerminalSubTabActive(!shellActive);
+        if (shellBridge != null) {
+            shellBridge.setTerminalSubTabActive(shellActive);
+        }
+        // The center swap invalidates the placeholder's bounds only on the
+        // next layout pass; recompute the active native frame after it.
+        TerminalBridge active = shellActive ? shellBridge : bridge;
+        if (active != null) {
+            Platform.runLater(active::updateGeometry);
+        }
+    }
+
+    private void selectSubTabButton(SubTab subTab) {
+        claudeSubTabButton.setSelected(subTab == SubTab.CLAUDE);
+        terminalSubTabButton.setSelected(subTab == SubTab.TERMINAL);
+        explorerSubTabButton.setSelected(subTab == SubTab.EXPLORER);
+        reviewSubTabButton.setSelected(subTab == SubTab.REVIEW);
+    }
+
+    /** Builds the shell sub-tab's runtime/host/surface on first use (ephemeral: never persisted or resumed). */
+    private void ensureShellStarted() {
+        if (shellStarted) {
+            return;
+        }
+        shellStarted = true;
+        // The wakeup callback closes over shellBridge (assigned just below);
+        // a wakeup arriving before that assignment is safely dropped.
+        ShellTerminal shell = shellTerminalProvider.apply(() -> {
+            if (shellBridge != null) {
+                shellBridge.tickAndDraw();
+            }
+        });
+        if (shell == null) {
+            shellStarted = false; // provider unavailable (e.g. headless test); leave the tab empty
+            return;
+        }
+        shellBridge = new TerminalBridge(shell.runtime(), shell.host(), shellPlaceholder,
+                stage::getOutputScaleX, this::sessionId, this::runShortcut);
+        shellSurface = shell.runtime().openSurface(shell.host(), stage.getOutputScaleX(),
+                TerminalSpec.loginShell(shellWorkingDirectory));
+        shellBridge.adoptSurface(shellSurface);
+        shellBridge.wireInputListeners();
     }
 
     /** Maps an intercepted terminal app-shortcut (see {@link TerminalBridge}) to this tab's handlers. */
     private void runShortcut(Shortcut shortcut) {
         switch (shortcut) {
             case CLAUDE_SUB_TAB -> showSubTab(SubTab.CLAUDE);
+            case TERMINAL_SUB_TAB -> showSubTab(SubTab.TERMINAL);
             case EXPLORER_SUB_TAB -> showSubTab(SubTab.EXPLORER);
             case REVIEW_SUB_TAB -> showSubTab(SubTab.REVIEW);
             case PREVIOUS_SESSION_TAB -> onPreviousSessionTab.run();
@@ -614,6 +705,9 @@ final class OpenSessionTab {
     /** Re-themes this tab's live terminal (app theme toggle); see {@link TerminalBridge#applyTerminalTheme}. */
     void applyTerminalTheme(Path configFile) {
         bridge.applyTerminalTheme(configFile);
+        if (shellBridge != null) {
+            shellBridge.applyTerminalTheme(configFile);
+        }
     }
 
     /**
@@ -662,6 +756,9 @@ final class OpenSessionTab {
      */
     void setVisible(boolean visible) {
         bridge.setWorkspaceVisible(visible);
+        if (shellBridge != null) {
+            shellBridge.setWorkspaceVisible(visible);
+        }
     }
 
     /**
@@ -704,5 +801,21 @@ final class OpenSessionTab {
      */
     void disposeNativeResources() {
         bridge.disposeNativeResources();
+        if (shellBridge != null) {
+            // The ephemeral shell has no SessionManager-managed lifecycle:
+            // close its surface here (abrupt close is fine -- the login
+            // shell just gets hung up) before freeing the runtime/host, or
+            // the child shell process would be orphaned.
+            shellBridge.markSurfaceClosing();
+            if (shellSurface != null) {
+                try {
+                    shellSurface.close();
+                } catch (RuntimeException e) {
+                    // Best-effort: the runtime/host teardown below must still run.
+                }
+                shellSurface = null;
+            }
+            shellBridge.disposeNativeResources();
+        }
     }
 }
