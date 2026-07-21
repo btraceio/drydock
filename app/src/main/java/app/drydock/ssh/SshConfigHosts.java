@@ -51,11 +51,15 @@ public final class SshConfigHosts {
                     || !keywordAndRest[0].toLowerCase(Locale.ROOT).equals("host")) {
                 continue;
             }
-            for (String pattern : keywordAndRest[1].split("[ \t]+(?=(?:[^\"]*\"[^\"]*\")*[^\"]*$)")) {
+            // Strip trailing comments (from the first unquoted #)
+            String hostLine = stripTrailingComments(keywordAndRest[1]);
+            for (String pattern : hostLine.split("[ \t]+(?=(?:[^\"]*\"[^\"]*\")*[^\"]*$)")) {
                 String alias = pattern.strip();
                 if (alias.startsWith("\"") && alias.endsWith("\"") && alias.length() >= 2) {
                     alias = alias.substring(1, alias.length() - 1);
                 }
+                // Strip any remaining quotes from unterminated quote scenarios
+                alias = alias.replaceAll("^\"|\"$", "");
                 if (alias.isEmpty() || alias.startsWith("!")
                         || alias.contains("*") || alias.contains("?")) {
                     continue;
@@ -64,5 +68,22 @@ public final class SshConfigHosts {
             }
         }
         return new ArrayList<>(hosts);
+    }
+
+    /**
+     * Strips trailing comments starting from the first unquoted # character.
+     * Respects quoted strings when determining if a # is inside or outside quotes.
+     */
+    private static String stripTrailingComments(String str) {
+        boolean inQuotes = false;
+        for (int i = 0; i < str.length(); i++) {
+            char c = str.charAt(i);
+            if (c == '"') {
+                inQuotes = !inQuotes;
+            } else if (c == '#' && !inQuotes) {
+                return str.substring(0, i).strip();
+            }
+        }
+        return str;
     }
 }

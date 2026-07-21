@@ -38,4 +38,26 @@ class SshConfigHostsTest {
     void deduplicates() {
         assertEquals(List.of("a"), SshConfigHosts.parse("Host a\nHost a\n"));
     }
+
+    @Test
+    void stripsTrailingCommentsFromHostLine() {
+        assertEquals(List.of("build"), SshConfigHosts.parse("Host build # comment here\n"));
+    }
+
+    @Test
+    void commentedOutHostsAreIgnored() {
+        assertEquals(List.of(), SshConfigHosts.parse("# Host commented-out\n"));
+    }
+
+    @Test
+    void gracefullyHandlesUnterminatedQuotes() {
+        List<String> result = SshConfigHosts.parse("Host \"unterminated alias\n");
+        for (String token : result) {
+            // No token should start or end with a double quote
+            if (!token.isEmpty()) {
+                assert !token.startsWith("\"") : "Token starts with quote: " + token;
+                assert !token.endsWith("\"") : "Token ends with quote: " + token;
+            }
+        }
+    }
 }
