@@ -1,5 +1,7 @@
 package app.drydock.terminal.ghostty;
 
+import app.drydock.terminal.api.Shortcut;
+import app.drydock.terminal.api.TerminalSurface;
 import app.drydock.terminal.host.DrydockTerminalHost;
 import javafx.animation.PauseTransition;
 import javafx.application.Platform;
@@ -11,6 +13,7 @@ import java.lang.foreign.ValueLayout;
 import java.lang.System.Logger;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -26,7 +29,7 @@ import java.util.concurrent.atomic.AtomicLong;
  *
  * <p>Part of the narrow native boundary (plan section 2.4/4.2).</p>
  */
-public final class GhosttySurface implements AutoCloseable {
+public final class GhosttySurface implements TerminalSurface, AutoCloseable {
 
     private static final Logger LOG = System.getLogger(GhosttySurface.class.getName());
 
@@ -131,6 +134,7 @@ public final class GhosttySurface implements AutoCloseable {
         }
     }
 
+    @Override
     public void setSize(int widthPx, int heightPx) {
         checkFxThread();
         checkOpen();
@@ -141,6 +145,7 @@ public final class GhosttySurface implements AutoCloseable {
         }
     }
 
+    @Override
     public void setFocus(boolean focused) {
         checkFxThread();
         checkOpen();
@@ -151,6 +156,7 @@ public final class GhosttySurface implements AutoCloseable {
         }
     }
 
+    @Override
     public void draw() {
         checkFxThread();
         checkOpen();
@@ -168,7 +174,12 @@ public final class GhosttySurface implements AutoCloseable {
      * the last reported position. {@code mods} is a ghostty mods bitmask
      * (same encoding as {@code sendKey}).
      */
-    public void sendMousePos(double x, double y, int mods) {
+    @Override
+    public void sendMousePos(double x, double y, int modifierFlags) {
+        sendMousePosGhostty(x, y, GhosttyKeyTranslator.translateModifiers(modifierFlags));
+    }
+
+    private void sendMousePosGhostty(double x, double y, int mods) {
         checkFxThread();
         checkOpen();
         try {
@@ -186,7 +197,12 @@ public final class GhosttySurface implements AutoCloseable {
      * (1 left, 2 right, 3 middle), {@code mods} the ghostty mods bitmask
      * (same encoding as {@code sendKey}).
      */
-    public void sendMouseButton(int state, int button, int mods) {
+    @Override
+    public void sendMouseButton(int state, int button, int modifierFlags) {
+        sendMouseButtonGhostty(state, button, GhosttyKeyTranslator.translateModifiers(modifierFlags));
+    }
+
+    private void sendMouseButtonGhostty(int state, int button, int mods) {
         checkFxThread();
         checkOpen();
         try {
@@ -202,6 +218,7 @@ public final class GhosttySurface implements AutoCloseable {
      * {@code scrollMods} is the packed {@code ghostty_input_scroll_mods_t}
      * produced by the host shim's scrollWheel handler.
      */
+    @Override
     public void sendMouseScroll(double deltaX, double deltaY, int scrollMods) {
         checkFxThread();
         checkOpen();
@@ -210,6 +227,39 @@ public final class GhosttySurface implements AutoCloseable {
         } catch (Throwable t) {
             throw new GhosttyBinding.GhosttyNativeCallException("ghostty_surface_mouse_scroll", t);
         }
+    }
+
+    @Override
+    public Optional<Shortcut> dispatchKeyEvent(int keyCode, int modifierFlags, boolean keyDown,
+                                               String characters, String unshiftedCharacters) {
+        // Classification policy (app-shortcut interception, special-key vs
+        // typed-character split, unshifted-codepoint rule) lives in
+        // GhosttyKeyTranslator; this method performs the effects.
+        switch (GhosttyKeyTranslator.translate(keyCode, modifierFlags, keyDown, characters, unshiftedCharacters)) {
+            case GhosttyKeyTranslator.AppShortcut(Shortcut shortcut, boolean down) -> {
+                // App shortcuts run on key-down only; both edges are swallowed by the caller.
+                return down ? Optional.of(shortcut) : Optional.empty();
+            }
+            case GhosttyKeyTranslator.ForwardKey(int code, int mods, boolean down, int unshiftedCodepoint) -> {
+                sendKey(code, mods, down, unshiftedCodepoint);
+                return Optional.empty();
+            }
+            case GhosttyKeyTranslator.TypeCharacters(String typed, int mods) -> {
+                typed.codePoints().forEach(cp -> sendCharKey(cp, mods));
+                return Optional.empty();
+            }
+            case GhosttyKeyTranslator.Ignore ignored -> {
+                return Optional.empty();
+            }
+        }
+    }
+
+    @Override
+    public void submitLine(String line) {
+        sendTypedText(line);
+        // Return keypress (raw macOS keycode; see GhosttyKeyTranslator).
+        sendKey(GhosttyKeyTranslator.KEY_RETURN, 0, true, 0);
+        sendKey(GhosttyKeyTranslator.KEY_RETURN, 0, false, 0);
     }
 
     /**
@@ -227,6 +277,7 @@ public final class GhosttySurface implements AutoCloseable {
         }
     }
 
+    @Override
     public void refresh() {
         checkFxThread();
         checkOpen();
@@ -382,6 +433,7 @@ public final class GhosttySurface implements AutoCloseable {
      * @return the viewport text, or {@code ""} if libghostty reports no
      *         text is available (e.g. surface not yet sized/drawn).
      */
+    @Override
     public String readScreenText() {
         checkFxThread();
         checkOpen();
@@ -446,6 +498,7 @@ public final class GhosttySurface implements AutoCloseable {
         }
     }
 
+    @Override
     public boolean processExited() {
         checkFxThread();
         checkOpen();
@@ -529,6 +582,7 @@ public final class GhosttySurface implements AutoCloseable {
      *               surface is closed, whether via graceful exit or timeout;
      *               may be {@code null}.
      */
+    @Override
     public void closeGracefully(long gracePeriodMillis, long pollIntervalMillis, Runnable onDone) {
         if (closed) {
             if (onDone != null) {
