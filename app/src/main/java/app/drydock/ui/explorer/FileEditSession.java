@@ -9,6 +9,7 @@ import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -115,7 +116,12 @@ final class FileEditSession {
         this.onStateChanged = handler == null ? state -> { } : handler;
     }
 
-    /** Invoked on the executor thread, never while an internal lock is held. */
+    /**
+     * Invoked on the executor thread, never while an internal lock is held --
+     * except for the shutdown path: {@link #flushBlocking} reports a timeout,
+     * an interruption, or an executor task that died without reporting itself
+     * synchronously, on whatever thread called {@link #flushBlocking}.
+     */
     void setOnSaveFailed(Consumer<IOException> handler) {
         this.onSaveFailed = handler == null ? error -> { } : handler;
     }
@@ -169,7 +175,7 @@ final class FileEditSession {
         synchronized (lock) {
             cancelArmed();
         }
-        return CompletableFuture.runAsync(this::writeIfDirty, executor);
+        return runOnExecutor(this::writeIfDirty);
     }
 
     /**
@@ -205,77 +211,85 @@ final class FileEditSession {
      * unsaved.
      */
     CompletableFuture<PollResult> poll() {
-        return CompletableFuture.supplyAsync(() -> {
-            synchronized (lock) {
-                if (state == State.SAVING) {
-                    return new PollResult(PollOutcome.UNCHANGED, null);
-                }
+        try {
+            return CompletableFuture.supplyAsync(() -> pollNow(), executor);
+        } catch (RejectedExecutionException e) {
+            // Shutting down: nothing to reload or conflict against, and the
+            // caller (a viewer timer) must not see an exception for it.
+            return CompletableFuture.completedFuture(new PollResult(PollOutcome.UNCHANGED, null));
+        }
+    }
+
+    private PollResult pollNow() {
+        synchronized (lock) {
+            if (writeInFlight || state == State.SAVING) {
+                return new PollResult(PollOutcome.UNCHANGED, null);
             }
-            DiskStamp current;
-            try {
-                current = readStamp();
-            } catch (IOException e) {
-                // Deleted underneath us, or unreadable: either way the viewer
-                // must ask rather than silently recreate the file.
-                return new PollResult(PollOutcome.MISSING, null);
+        }
+        DiskStamp current;
+        try {
+            current = readStamp();
+        } catch (IOException e) {
+            // Deleted underneath us, or unreadable: either way the viewer
+            // must ask rather than silently recreate the file.
+            return new PollResult(PollOutcome.MISSING, null);
+        }
+        boolean conflicted;
+        State changed;
+        synchronized (lock) {
+            if (current.equals(stamp)) {
+                return new PollResult(PollOutcome.UNCHANGED, null);
             }
-            boolean conflicted;
-            State changed;
-            synchronized (lock) {
-                if (current.equals(stamp)) {
-                    return new PollResult(PollOutcome.UNCHANGED, null);
-                }
-                conflicted = hasUnsavedEdits();
-                changed = conflicted ? enterConflict() : null;
-            }
-            if (conflicted) {
-                notifyState(changed);
-                return new PollResult(PollOutcome.CONFLICT, null);
-            }
-            FileContent fresh;
-            try {
-                fresh = FileContent.load(file, maxBytes);
-            } catch (IOException e) {
-                return new PollResult(PollOutcome.MISSING, null);
-            }
-            if (!fresh.editable()) {
-                // Claude replaced the file with something we must not write
-                // back (binary, over the size limit, mixed terminators). Adopt
-                // nothing -- keeping the old stamp means every later poll keeps
-                // saying so -- and let the viewer decide, exactly as for a
-                // deleted file.
-                return new PollResult(PollOutcome.MISSING, null);
-            }
-            synchronized (lock) {
-                // An edit may have landed while we were reading. Adopting the
-                // stamp now would hide Claude's version from the next write,
-                // which would then overwrite it with no conflict raised.
-                conflicted = hasUnsavedEdits();
-                if (conflicted) {
-                    changed = enterConflict();
-                } else {
-                    content = fresh;
-                    pendingText = fresh.text();
-                    stamp = current;
-                }
-            }
+            conflicted = hasUnsavedEdits();
+            changed = conflicted ? enterConflict() : null;
+        }
+        if (conflicted) {
             notifyState(changed);
-            return conflicted
-                    ? new PollResult(PollOutcome.CONFLICT, null)
-                    : new PollResult(PollOutcome.RELOAD, fresh.text());
-        }, executor);
+            return new PollResult(PollOutcome.CONFLICT, null);
+        }
+        FileContent fresh;
+        try {
+            fresh = FileContent.load(file, maxBytes);
+        } catch (IOException e) {
+            return new PollResult(PollOutcome.MISSING, null);
+        }
+        if (!fresh.editable()) {
+            // Claude replaced the file with something we must not write
+            // back (binary, over the size limit, mixed terminators). Adopt
+            // nothing -- keeping the old stamp means every later poll keeps
+            // saying so -- and let the viewer decide, exactly as for a
+            // deleted file.
+            return new PollResult(PollOutcome.MISSING, null);
+        }
+        synchronized (lock) {
+            // An edit may have landed while we were reading. Adopting the
+            // stamp now would hide Claude's version from the next write,
+            // which would then overwrite it with no conflict raised.
+            conflicted = hasUnsavedEdits();
+            if (conflicted) {
+                changed = enterConflict();
+            } else {
+                content = fresh;
+                pendingText = fresh.text();
+                stamp = current;
+            }
+        }
+        notifyState(changed);
+        return conflicted
+                ? new PollResult(PollOutcome.CONFLICT, null)
+                : new PollResult(PollOutcome.RELOAD, fresh.text());
     }
 
     /** Conflict resolution: the user's buffer wins; write it and adopt the resulting stamp. */
     CompletableFuture<Void> keepMine() {
-        return CompletableFuture.runAsync(() -> {
+        return runOnExecutor(() -> {
             State changed;
             synchronized (lock) {
                 changed = transition(State.DIRTY);
             }
             notifyState(changed);
             writeIfDirty();
-        }, executor);
+        });
     }
 
     /**
@@ -283,34 +297,47 @@ final class FileEditSession {
      * text back for reload. Completes exceptionally when the file cannot be
      * read, or when it is no longer an editable buffer -- the session's state
      * is left alone in that case, so an unresolved conflict stays unresolved
-     * rather than silently looking clean.
+     * rather than silently looking clean. Also completes exceptionally, with
+     * the raw {@link RejectedExecutionException}, if the executor is already
+     * shut down -- unlike {@link #flush()}, {@link #poll()} and {@link
+     * #keepMine()}, this method's contract is already "may complete
+     * exceptionally", so a shutdown is reported the same way any other
+     * failure to read the disk would be.
      */
     CompletableFuture<String> takeDisk() {
-        return CompletableFuture.supplyAsync(() -> {
-            FileContent fresh;
-            try {
-                fresh = FileContent.load(file, maxBytes);
-            } catch (IOException e) {
-                throw new CompletionException(e);
-            }
-            if (!fresh.editable()) {
-                throw new CompletionException(
-                        new IOException("file on disk is no longer editable: " + file));
-            }
-            DiskStamp current = readStampQuietly();
-            State changed;
-            synchronized (lock) {
-                content = fresh;
-                pendingText = fresh.text();
-                stamp = current;
-                editSeq++;
-                cancelArmed();
-                lastError = null;
-                changed = transition(State.CLEAN);
-            }
-            notifyState(changed);
-            return fresh.text();
-        }, executor);
+        try {
+            return CompletableFuture.supplyAsync(this::takeDiskNow, executor);
+        } catch (RejectedExecutionException e) {
+            CompletableFuture<String> failed = new CompletableFuture<>();
+            failed.completeExceptionally(e);
+            return failed;
+        }
+    }
+
+    private String takeDiskNow() {
+        FileContent fresh;
+        try {
+            fresh = FileContent.load(file, maxBytes);
+        } catch (IOException e) {
+            throw new CompletionException(e);
+        }
+        if (!fresh.editable()) {
+            throw new CompletionException(
+                    new IOException("file on disk is no longer editable: " + file));
+        }
+        DiskStamp current = readStampQuietly();
+        State changed;
+        synchronized (lock) {
+            content = fresh;
+            pendingText = fresh.text();
+            stamp = current;
+            editSeq++;
+            cancelArmed();
+            lastError = null;
+            changed = transition(State.CLEAN);
+        }
+        notifyState(changed);
+        return fresh.text();
     }
 
     // ---- Executor-thread internals -----------------------------------------
@@ -335,12 +362,15 @@ final class FileEditSession {
             writeInFlight = true;
             changed = transition(State.SAVING);
         }
+        // Set only by the success path below; a write/read failure (or the
+        // pre-write notifyState throwing) leaves it null so the post-write
+        // notification after the try/finally is skipped entirely.
+        State next = null;
         try {
             notifyState(changed);
             Files.write(file, snapshot.toDiskText(text).getBytes(StandardCharsets.UTF_8));
             // Same executor task as the write: no poll can observe the gap.
             DiskStamp written = readStamp();
-            State next;
             synchronized (lock) {
                 stamp = written;
                 lastError = null;
@@ -355,7 +385,6 @@ final class FileEditSession {
                     arm();
                 }
             }
-            notifyState(next);
         } catch (IOException e) {
             fail(e);
         } catch (RuntimeException | Error e) {
@@ -368,6 +397,15 @@ final class FileEditSession {
             synchronized (lock) {
                 writeInFlight = false;
             }
+        }
+        // Outside the try: the write already succeeded and the state machine
+        // already reflects it, so a listener fault here must not relabel a
+        // successful save as a failure the way the pre-write notification
+        // above still can.
+        try {
+            notifyState(next);
+        } catch (RuntimeException | Error e) {
+            // Nothing to do -- the save already succeeded; see above.
         }
     }
 
@@ -382,9 +420,20 @@ final class FileEditSession {
         onSaveFailed.accept(e);
     }
 
-    /** Records a failure nothing else will report, without touching the state machine. */
+    /**
+     * Records a failure nothing else will report, without touching the state
+     * machine. Takes {@link #lock} for the {@code lastError} write, same as
+     * the write path, even though {@code lastError} is volatile and would be
+     * visible either way -- the lock keeps this write from interleaving with
+     * one from {@link #fail} on another thread. The listener call itself is
+     * deliberately outside the lock and, per {@link #setOnSaveFailed}'s
+     * contract, runs on whatever thread called {@link #flushBlocking}, not
+     * the executor thread.
+     */
     private void report(IOException e) {
-        lastError = e;
+        synchronized (lock) {
+            lastError = e;
+        }
         onSaveFailed.accept(e);
     }
 
@@ -436,6 +485,22 @@ final class FileEditSession {
             executor.execute(task);
         } catch (RejectedExecutionException e) {
             // Shutting down; the state itself is already correct.
+        }
+    }
+
+    /**
+     * {@link CompletableFuture#runAsync(Runnable, Executor)}
+     * calls {@code executor.execute} on the calling thread and does not catch
+     * {@link RejectedExecutionException} for us, so a shut-down executor would
+     * otherwise make this throw synchronously instead of failing the future --
+     * exactly the exception {@link #flushBlocking} exists to keep off the
+     * shutdown path. Used by callers whose contract is "completes normally".
+     */
+    private CompletableFuture<Void> runOnExecutor(Runnable task) {
+        try {
+            return CompletableFuture.runAsync(task, executor);
+        } catch (RejectedExecutionException e) {
+            return CompletableFuture.completedFuture(null);
         }
     }
 

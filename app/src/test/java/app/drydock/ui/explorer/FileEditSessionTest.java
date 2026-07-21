@@ -15,6 +15,7 @@ import java.time.Duration;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -434,5 +435,35 @@ class FileEditSessionTest {
         assertNotNull(session.lastError(), "a timed-out shutdown flush must be recorded");
         assertNotNull(reported.get(), "a timed-out shutdown flush must be reported");
         release.countDown();
+    }
+
+    /**
+     * {@code CompletableFuture.runAsync} calls {@code executor.execute} on the
+     * calling thread and does not wrap a {@link RejectedExecutionException}
+     * into the returned future, so a naive {@code flush()} would throw synchronously once the
+     * executor is shut down and that exception would escape {@link
+     * FileEditSession#flushBlocking}, the shutdown entry point, straight onto
+     * the caller (the FX thread, in production). This needs its own executor
+     * -- the shared one is reused by every other test via {@code @AfterEach}.
+     */
+    @Test
+    void flushBlockingAfterShutdownDoesNotThrow(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("a.txt");
+        Files.writeString(file, "one\n");
+        ScheduledExecutorService ownExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "file-edit-shutdown-test");
+            t.setDaemon(true);
+            return t;
+        });
+        try {
+            FileEditSession session =
+                    new FileEditSession(file, FileContent.load(file, MAX), ownExecutor, IDLE_DEBOUNCE, MAX);
+            session.edit("mine\n");
+            ownExecutor.shutdownNow();
+
+            session.flushBlocking(TIMEOUT);
+        } finally {
+            ownExecutor.shutdownNow();
+        }
     }
 }
