@@ -60,6 +60,7 @@ import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Pure file-loading assertions -- no FX toolkit needed. */
@@ -162,8 +163,7 @@ class FileContentTest {
 
     @Test
     void missingFileThrows(@TempDir Path dir) {
-        org.junit.jupiter.api.Assertions.assertThrows(IOException.class,
-                () -> FileContent.load(dir.resolve("nope.txt"), MAX));
+        assertThrows(IOException.class, () -> FileContent.load(dir.resolve("nope.txt"), MAX));
     }
 }
 ```
@@ -365,6 +365,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
@@ -472,7 +473,7 @@ class FileEditSessionTest {
     @Test
     void crlfFileKeepsItsTerminatorOnSave(@TempDir Path dir) throws Exception {
         Path file = dir.resolve("w.txt");
-        Files.write(file, "a\r\nb\r\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        Files.write(file, "a\r\nb\r\n".getBytes(StandardCharsets.UTF_8));
         FileEditSession session = sessionFor(file);
 
         session.edit("a\nX\n");
