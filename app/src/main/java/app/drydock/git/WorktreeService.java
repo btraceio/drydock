@@ -24,7 +24,9 @@ import java.util.concurrent.Executors;
  * worktree on disk -- including ones created outside this application --
  * and {@link #remove(Path, Path, Optional)} performs the one-click delete
  * of an <em>unopened</em> worktree ({@code git worktree remove} +
- * {@code git branch -D}), guarded off the main checkout.
+ * {@code git branch -D}), guarded off the main checkout and falling back
+ * to {@code --force} only for refusals that cannot cost the user work
+ * (see {@link #mayRetryWithForce}).
  *
  * <p>Mirrors {@link GitStatusService}'s process/executor style: argument
  * lists (never a shell string), all work on a background virtual-thread
@@ -142,13 +144,7 @@ public final class WorktreeService implements AutoCloseable {
                 "worktree", "remove", normalizedTarget.toString());
         ProcessResult removed = run(removeCommand);
         if (removed.exitCode() != 0) {
-            // Directory already gone/corrupted on disk (e.g. rm -rf'd
-            // outside the app): git refuses the plain remove with
-            // "validation failed, cannot remove working tree: '<path>/.git'
-            // does not exist". Safe to retry with --force here since the
-            // worktree's files are already missing -- there's no working
-            // copy left to lose.
-            if (!Files.exists(normalizedTarget.resolve(".git"))) {
+            if (mayRetryWithForce(git, normalizedTarget)) {
                 List<String> forceRemoveCommand = List.of(
                         git.toString(), "-C", repositoryRoot.toString(),
                         "worktree", "remove", "--force", normalizedTarget.toString());
@@ -172,6 +168,70 @@ public final class WorktreeService implements AutoCloseable {
                 throw new GitCommandFailedException(branchCommand, deleted.exitCode(), ProcessRunner.excerpt(deleted.stderr()));
             }
         }
+    }
+
+    /**
+     * Whether a refused plain {@code git worktree remove} may be retried
+     * with {@code --force}. Only two refusals qualify, and neither can cost
+     * the user work:
+     *
+     * <ul>
+     *   <li>The worktree's files are already gone (rm -rf'd outside the
+     *       app): git refuses with "validation failed, cannot remove
+     *       working tree: '&lt;path&gt;/.git' does not exist" and there is no
+     *       working copy left to lose.</li>
+     *   <li>The worktree has submodules checked out into it. Git's
+     *       {@code validate_no_submodules} guard runs only on the non-force
+     *       path and refuses <em>unconditionally</em> -- "working trees
+     *       containing submodules cannot be moved or removed" -- however
+     *       clean the worktree is, so a repository with a vendored
+     *       submodule (Drydock's own {@code third_party/ghostty}) could
+     *       otherwise never be deleted from the sidebar. We re-run the
+     *       cleanliness check git skipped and force only when it passes.</li>
+     * </ul>
+     */
+    private static boolean mayRetryWithForce(Path git, Path worktree) {
+        if (!Files.exists(worktree.resolve(".git"))) {
+            return true;
+        }
+        return hasSubmodulesCheckedOut(git, worktree) && isClean(git, worktree);
+    }
+
+    /**
+     * Mirrors git's own condition: a submodule counts as present only once
+     * its git dir has been created under the worktree's
+     * {@code modules/} directory ({@code git submodule update --init}),
+     * which is why an uninitialized submodule does not block a plain
+     * remove. Detected from the directory rather than git's message, whose
+     * wording is localized.
+     */
+    private static boolean hasSubmodulesCheckedOut(Path git, Path worktree) {
+        List<String> command = List.of(git.toString(), "-C", worktree.toString(), "rev-parse", "--absolute-git-dir");
+        ProcessResult result = run(command);
+        if (result.exitCode() != 0) {
+            return false;
+        }
+        return Files.isDirectory(Path.of(result.stdout().strip()).resolve("modules"));
+    }
+
+    /**
+     * Whether {@code worktree} holds uncommitted work of its own.
+     *
+     * <p>{@code --ignore-submodules=dirty} draws the line exactly where it
+     * belongs: modified <em>content</em> inside a vendored submodule is
+     * ignored, because the build leaves it that way on every run (Drydock
+     * patches ghostty via {@code scripts/build-ghostty.sh}) and blocking on
+     * it would make such a worktree undeletable -- but a changed submodule
+     * <em>commit</em> is still reported, because bumping the vendored
+     * revision is real uncommitted work in this worktree's index. Plain
+     * {@code =all} would hide that bump and force it away.</p>
+     */
+    private static boolean isClean(Path git, Path worktree) {
+        List<String> command = List.of(
+                git.toString(), "-C", worktree.toString(),
+                "status", "--porcelain", "--ignore-submodules=dirty");
+        ProcessResult result = run(command);
+        return result.exitCode() == 0 && result.stdout().isBlank();
     }
 
     private static boolean samePath(Path a, Path b) {
