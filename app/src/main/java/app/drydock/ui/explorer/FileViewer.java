@@ -152,6 +152,16 @@ final class FileViewer extends BorderPane {
 
     private PauseTransition diffRefreshDebounce;
 
+    /** Flush budget for {@link #dispose()}, matching the shutdown chain's. */
+    private static final Duration DISPOSE_FLUSH_TIMEOUT = Duration.ofSeconds(2);
+
+    /**
+     * Set by {@link #dispose()}. The viewer is dead afterwards: a re-attach
+     * must not restart the poller, since {@link #ioExecutor} is shut down and
+     * would reject the task.
+     */
+    private boolean disposed;
+
     FileViewer() {
         getStyleClass().add("file-viewer");
 
@@ -290,6 +300,9 @@ final class FileViewer extends BorderPane {
     // ---- Disk polling / reload / conflict --------------------------------
 
     private void startPolling() {
+        if (disposed) {
+            return;
+        }
         if (poller == null) {
             poller = ioExecutor.scheduleWithFixedDelay(this::pollOpenFiles,
                     POLL_INTERVAL.toMillis(), POLL_INTERVAL.toMillis(), TimeUnit.MILLISECONDS);
@@ -1081,6 +1094,32 @@ final class FileViewer extends BorderPane {
                         + " may not have been saved at shutdown", session.lastError());
             }
         }
+    }
+
+    /**
+     * Flushes unsaved edits, stops every timer this viewer owns and shuts
+     * {@link #ioExecutor} down. One-way and idempotent: the viewer is dead
+     * afterwards.
+     *
+     * <p>Scene detach cannot be the trigger -- it fires on every sub-tab
+     * switch and the executor must survive the re-attach -- so nothing else
+     * ever stops that executor, and each session tab whose Explorer was
+     * opened would otherwise keep an {@code explorer-file-io} thread alive
+     * for the life of the process. Called from the owning tab's removal and
+     * from the shutdown chain.</p>
+     */
+    void dispose() {
+        if (disposed) {
+            return;
+        }
+        // Before the shutdown: flushPendingEdits' blocking waits run ON the
+        // ioExecutor, so a shutdown() first would reject them and drop the
+        // very edits this call exists to save.
+        flushPendingEdits(DISPOSE_FLUSH_TIMEOUT);
+        disposed = true;
+        stopPolling();
+        stopTransitions();
+        ioExecutor.shutdown();
     }
 
     /**

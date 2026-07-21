@@ -28,6 +28,14 @@ public final class SessionExplorerView extends HBox {
     private static final double RAIL_COLLAPSED_WIDTH = 46;
     private static final Duration COLLAPSE_ANIMATION = Duration.millis(160);
 
+    /**
+     * Bounded so a stuck filesystem cannot hang application shutdown.
+     * Fully-qualified because this class already imports {@link
+     * javafx.util.Duration} for the collapse animation -- the
+     * same-name-different-package exception AGENTS.md allows.
+     */
+    private static final java.time.Duration FLUSH_TIMEOUT = java.time.Duration.ofSeconds(2);
+
     private final Path searchRoot;
     private final FileViewer viewer;
     private final SearchRail rail;
@@ -61,6 +69,24 @@ public final class SessionExplorerView extends HBox {
 
         HBox.setHgrow(viewer, Priority.ALWAYS);
         getChildren().setAll(rail, viewer);
+    }
+
+    /**
+     * Blocks until this Explorer's unsaved file edits are on disk. Called on
+     * the shutdown path: the viewer's I/O threads are daemons, so a
+     * fire-and-forget flush is killed mid-write at JVM exit.
+     */
+    public void flushPendingEdits() {
+        viewer.flushPendingEdits(FLUSH_TIMEOUT);
+    }
+
+    /**
+     * Flushes unsaved edits and releases the viewer's I/O executor. One-way:
+     * call it when this Explorer's session tab is going away (tab removal or
+     * shutdown), never on a sub-tab switch -- the executor must survive that.
+     */
+    public void dispose() {
+        viewer.dispose();
     }
 
     /** Review-tab bridge: opens {@code relativeFile} in the viewer at a 1-based line (⤢ on a changed diff line). */

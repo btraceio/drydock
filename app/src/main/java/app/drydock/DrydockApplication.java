@@ -534,6 +534,13 @@ public final class DrydockApplication extends Application {
         // must never skip the later ones (before this, an early throw could
         // silently drop annotationStore's pending review notes and
         // sessionManager's queued state saves).
+        // FIRST: the Explorer's unsaved file edits go out while everything
+        // their write depends on is still alive. Blocking and bounded -- the
+        // viewer's I/O threads are daemons, so a fire-and-forget flush would
+        // be killed mid-write at JVM exit.
+        if (mainWorkspace != null) {
+            closeQuietly("Explorer file edits", mainWorkspace::flushExplorerEdits);
+        }
         if (appShell != null && repositoryManager != null) {
             double sidebarWidth = appShell.sidebarWidth();
             if (sidebarWidth > 0) {
