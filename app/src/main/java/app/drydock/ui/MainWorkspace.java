@@ -55,6 +55,7 @@ import javafx.stage.DirectoryChooser;
 import javafx.stage.Stage;
 import javafx.stage.Window;
 import javafx.util.Duration;
+import org.fxmisc.richtext.GenericStyledArea;
 
 import java.io.File;
 import java.lang.System.Logger;
@@ -999,7 +1000,10 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * when clicked (mouse-button forwarding) or when its tab reappears.
      */
     public void onFocusOwnerChanged(Node owner) {
-        if (owner instanceof TextInputControl) {
+        // GenericStyledArea covers RichTextFX's CodeArea (the Explorer's now
+        // editable code viewer), which is a Region rather than a
+        // TextInputControl and would otherwise never release the responder.
+        if (owner instanceof TextInputControl || owner instanceof GenericStyledArea<?, ?, ?>) {
             currentlySelected().ifPresent(OpenSessionTab::releaseTerminalFocus);
         }
     }

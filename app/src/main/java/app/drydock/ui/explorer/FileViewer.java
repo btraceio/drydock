@@ -1,6 +1,7 @@
 package app.drydock.ui.explorer;
 
 import app.drydock.ui.UiFormats;
+import javafx.animation.PauseTransition;
 import javafx.application.Platform;
 import javafx.geometry.Pos;
 import javafx.scene.control.Button;
@@ -9,6 +10,7 @@ import javafx.scene.control.Tab;
 import javafx.scene.control.TabPane;
 import javafx.scene.control.Tooltip;
 import javafx.scene.Node;
+import javafx.scene.input.KeyCode;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
@@ -25,6 +27,7 @@ import java.io.IOException;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
@@ -33,6 +36,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.OptionalInt;
 import java.util.Set;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.function.IntFunction;
 
 /**
@@ -67,6 +72,29 @@ final class FileViewer extends BorderPane {
     /** Open files, keyed by absolute path. */
     private final Map<Path, Tab> openFiles = new LinkedHashMap<>();
     private boolean gutterVisible = true;
+
+    /** Auto-save debounce (spec decision 1: long enough to be ceremony-free, short enough to be safe). */
+    private static final Duration SAVE_DEBOUNCE = Duration.ofSeconds(2);
+
+    /**
+     * ONE single-threaded executor for every open file's I/O. Single-threaded
+     * is load-bearing, not incidental: it serializes each session's write
+     * against its own stamp capture and polls (see FileEditSession's
+     * concurrency invariant). Daemon so a missed close cannot hang the JVM --
+     * the shutdown path still flushes explicitly (flushPendingEdits).
+     */
+    private final ScheduledExecutorService ioExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
+        Thread thread = new Thread(runnable, "explorer-file-io");
+        thread.setDaemon(true);
+        return thread;
+    });
+
+    /** Edit sessions of the open editable tabs, keyed by absolute path (read-only tabs have none). */
+    private final Map<Path, FileEditSession> sessions = new LinkedHashMap<>();
+
+    /** Breadcrumb status chip: read-only / editable / unsaved / saved (spec decision 4). */
+    private final Label statusChip = new Label("read-only");
+    private PauseTransition chipReset;
 
     FileViewer() {
         getStyleClass().add("file-viewer");
@@ -104,9 +132,11 @@ final class FileViewer extends BorderPane {
         setCenter(centerStack);
 
         fileTabs.getSelectionModel().selectedItemProperty().addListener((obs, oldTab, newTab) -> {
+            flushSession(oldTab);
             updateBreadcrumb(newTab);
             updateEmptyState();
             updateDiffBanner();
+            updateStatusChip();
         });
         updateBreadcrumb(null);
         updateEmptyState();
@@ -185,8 +215,11 @@ final class FileViewer extends BorderPane {
         tab.getProperties().put("drydock.file", file);
         tab.getProperties().put("drydock.relative", relativePath);
         tab.setOnClosed(e -> {
+            flushSession(tab);
+            sessions.remove(file);
             openFiles.remove(file);
             updateEmptyState();
+            updateStatusChip();
         });
 
         openFiles.put(file, tab);
@@ -216,7 +249,11 @@ final class FileViewer extends BorderPane {
             }
             var styled = spans;
             Platform.runLater(() -> {
-                area.replaceText(text);
+                if (content.editable()) {
+                    attachEditing(tab, area, file, content);
+                }
+                updateStatusChip();
+                replaceTextQuietly(tab, area, text);
                 if (text.length() > 0) {
                     area.setStyleSpans(0, styled);
                 }
@@ -263,6 +300,83 @@ final class FileViewer extends BorderPane {
         }
     }
 
+    /**
+     * Turns a loaded tab into an editable one: an auto-saving {@link
+     * FileEditSession} behind the {@link CodeArea}.
+     *
+     * <p>{@code suppressDirty} guards every PROGRAMMATIC text replacement
+     * (this initial load, and every reload). {@code textProperty} cannot
+     * tell a keystroke from a {@code replaceText}, so without the guard a
+     * freshly opened file would immediately mark itself dirty and schedule a
+     * write the user never asked for -- and a reload would re-arm a write of
+     * the content it had just superseded.</p>
+     */
+    private void attachEditing(Tab tab, CodeArea area, Path file, FileContent content) {
+        FileEditSession session =
+                new FileEditSession(file, content, ioExecutor, SAVE_DEBOUNCE, MAX_FILE_BYTES);
+        sessions.put(file, session);
+        tab.getProperties().put("drydock.session", session);
+
+        session.setOnStateChanged(state -> Platform.runLater(() -> {
+            updateStatusChip();
+            updateDirtyDot(tab);
+            if (state == FileEditSession.State.CLEAN) {
+                onSaved();
+            }
+        }));
+        session.setOnSaveFailed(error -> Platform.runLater(this::updateStatusChip));
+
+        area.setEditable(true);
+        area.textProperty().addListener((obs, oldText, newText) -> {
+            if (Boolean.TRUE.equals(tab.getProperties().get("drydock.suppressDirty"))) {
+                return;
+            }
+            session.edit(newText);
+            updateDirtyDot(tab);
+            updateStatusChip();
+        });
+        // Cmd+S forces an immediate flush (spec decision 1).
+        area.setOnKeyPressed(event -> {
+            if (event.isShortcutDown() && event.getCode() == KeyCode.S) {
+                session.flush();
+                event.consume();
+            }
+        });
+    }
+
+    /** Replaces a tab's text without marking it dirty; see {@link #attachEditing}. */
+    private void replaceTextQuietly(Tab tab, CodeArea area, String text) {
+        tab.getProperties().put("drydock.suppressDirty", Boolean.TRUE);
+        try {
+            area.replaceText(text);
+        } finally {
+            tab.getProperties().put("drydock.suppressDirty", Boolean.FALSE);
+        }
+    }
+
+    /** Forces a pending save out for {@code tab} (blur / tab switch / close). Null- and read-only-safe. */
+    private void flushSession(Tab tab) {
+        if (tab != null && tab.getProperties().get("drydock.session") instanceof FileEditSession session) {
+            session.flush();
+        }
+    }
+
+    /**
+     * Blocks until every open file's pending edits are on disk. The shutdown
+     * path's entry point -- {@link #ioExecutor}'s thread is a daemon, so a
+     * fire-and-forget flush is killed mid-write at JVM exit.
+     */
+    void flushPendingEdits(Duration timeout) {
+        for (FileEditSession session : sessions.values()) {
+            session.flushBlocking(timeout);
+        }
+    }
+
+    /** Called after each successful save; Task 5 hangs the coalesced diff refresh here. */
+    private void onSaved() {
+        // Diff-overlay refresh is wired in the next task.
+    }
+
     private void scrollTo(Tab tab, int oneBasedLine) {
         if (tab.getContent() instanceof VirtualizedScrollPane<?> pane
                 && pane.getContent() instanceof CodeArea area) {
@@ -294,11 +408,78 @@ final class FileViewer extends BorderPane {
             return;
         }
         breadcrumb.getChildren().addAll(UiFormats.breadcrumbSegments(shown));
-        Label readOnly = new Label("read-only");
-        readOnly.getStyleClass().add("read-only-chip");
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
-        breadcrumb.getChildren().addAll(spacer, readOnly, gutterToggle);
+        breadcrumb.getChildren().addAll(spacer, statusChip, gutterToggle);
+        updateStatusChip();
+    }
+
+    /** Drives the breadcrumb chip from the selected tab's session (spec decision 4). */
+    private void updateStatusChip() {
+        Tab selected = fileTabs.getSelectionModel().getSelectedItem();
+        FileEditSession session = selected == null ? null
+                : (FileEditSession) selected.getProperties().get("drydock.session");
+        statusChip.getStyleClass().removeAll("read-only-chip", "editable-chip", "unsaved-chip",
+                "saved-chip", "error-chip");
+        if (session == null) {
+            statusChip.setText("read-only");
+            statusChip.getStyleClass().add("read-only-chip");
+            return;
+        }
+        switch (session.state()) {
+            case CLEAN -> {
+                statusChip.setText("saved ✓");
+                statusChip.getStyleClass().add("saved-chip");
+                fadeChipToEditable();
+            }
+            case DIRTY, SAVING -> {
+                statusChip.setText("unsaved");
+                statusChip.getStyleClass().add("unsaved-chip");
+            }
+            case CONFLICT -> {
+                statusChip.setText("conflict");
+                statusChip.getStyleClass().add("error-chip");
+            }
+            case ERROR -> {
+                statusChip.setText("save failed");
+                statusChip.getStyleClass().add("error-chip");
+            }
+        }
+    }
+
+    /** "saved ✓" settles back to the resting "editable" state after a moment. */
+    private void fadeChipToEditable() {
+        if (chipReset != null) {
+            chipReset.stop();
+        }
+        chipReset = new PauseTransition(javafx.util.Duration.seconds(2));
+        chipReset.setOnFinished(e -> {
+            Tab selected = fileTabs.getSelectionModel().getSelectedItem();
+            if (selected != null && selected.getProperties().get("drydock.session")
+                    instanceof FileEditSession session && session.state() == FileEditSession.State.CLEAN) {
+                statusChip.setText("editable");
+                statusChip.getStyleClass().removeAll("saved-chip");
+                statusChip.getStyleClass().add("editable-chip");
+            }
+        });
+        chipReset.play();
+    }
+
+    /** A "•" on the file tab while it holds unsaved edits, so a background tab is not silently dirty. */
+    private void updateDirtyDot(Tab tab) {
+        if (!(tab.getProperties().get("drydock.session") instanceof FileEditSession session)) {
+            return;
+        }
+        boolean dirty = session.state() == FileEditSession.State.DIRTY
+                || session.state() == FileEditSession.State.CONFLICT;
+        if (tab.getGraphic() instanceof HBox graphic) {
+            graphic.getChildren().removeIf(node -> node.getStyleClass().contains("viewer-tab-dirty"));
+            if (dirty) {
+                Label dot = new Label("•");
+                dot.getStyleClass().add("viewer-tab-dirty");
+                graphic.getChildren().add(dot);
+            }
+        }
     }
 
     private void updateEmptyState() {
