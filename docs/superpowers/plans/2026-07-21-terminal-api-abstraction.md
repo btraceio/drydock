@@ -15,7 +15,7 @@
 - **Single Gradle module** — `settings.gradle.kts` stays `include(":app")`. Do NOT add subprojects or `module-info.java`.
 - **macOS only, both `arm64` and `x86_64`** — never hard-code an architecture; native-lib selection stays inside the `terminal.ghostty`/`terminal.host` packages.
 - **Claude path behavior is unchanged** — the `claude` launch command, env cleanup, activity hooks, resume fallback, persistence, and clipboard/key handling must be byte-for-byte equivalent after the refactor.
-- **Compile-green at every task boundary**: `./gradlew compileJava compileTestJava test` passes before each commit.
+- **Compile-green at every task boundary**: the verification gate is `./gradlew compileJava compileTestJava compileSpikeJava test` — it MUST pass before each commit. **`compileSpikeJava` is mandatory and easy to forget**: the `spike` source set (`app/src/spike/java`, package `app.drydock.terminal`) contains `Gate0cSpike`/`Gate0dSpike`/`Gate0eSpike`, which import the concrete terminal classes but are NOT compiled by `compileJava`, `test`, `check`, or `build`. Omitting `compileSpikeJava` lets a signature break land silently. The spikes call `GhosttyApp.create` / `GhosttySurface.create` / `DrydockTerminalHost.createForCurrentWindow` (all kept) and `host.setKeyEventListener(<5-arg lambda>)` (binds structurally to the relocated SAM), so they are expected to keep compiling unchanged — the gate is what proves it.
 - The shell **Terminal** tab is **ephemeral** (never persisted/resumed) and **lazy** (created on first switch to it).
 
 ---
@@ -121,14 +121,15 @@ public record TerminalSpec(String command, String workingDirectory) {
 
 In `app/src/main/java/app/drydock/terminal/ghostty/GhosttyKeyTranslator.java`: delete the nested `public enum Shortcut { ... }` block, and add `import app.drydock.terminal.api.Shortcut;` at the top. The `AppShortcut(Shortcut shortcut, boolean keyDown)` record and every other `Shortcut` reference now resolve to the imported api enum — no other change to that file.
 
-- [ ] **Step 5: Fix the two consumer imports**
+- [ ] **Step 5: Fix the three files importing the relocated `Shortcut`**
 
 - `OpenSessionTab.java`: change line 8 `import app.drydock.terminal.ghostty.GhosttyKeyTranslator.Shortcut;` → `import app.drydock.terminal.api.Shortcut;`.
 - `TerminalBridge.java`: change `import app.drydock.terminal.ghostty.GhosttyKeyTranslator.Shortcut;` → `import app.drydock.terminal.api.Shortcut;` (keep the other `GhosttyKeyTranslator.*` imports for now; they are removed in Task 6).
+- `app/src/test/java/app/drydock/terminal/ghostty/GhosttyKeyTranslatorTest.java`: it imports `app.drydock.terminal.ghostty.GhosttyKeyTranslator.Shortcut` (line ~7) — change it to `import app.drydock.terminal.api.Shortcut;`. (The enum-name strings in its `@CsvSource` are unchanged by this task — Task 1 only relocates, it does not rename.)
 
 - [ ] **Step 6: Run tests to verify they pass**
 
-Run: `./gradlew compileJava compileTestJava test`
+Run: `./gradlew compileJava compileTestJava compileSpikeJava test`
 Expected: PASS — `TerminalSpecTest` green; existing `GhosttyKeyTranslator` tests still green (translation logic unchanged).
 
 - [ ] **Step 7: Commit**
@@ -137,7 +138,8 @@ Expected: PASS — `TerminalSpecTest` green; existing `GhosttyKeyTranslator` tes
 git add app/src/main/java/app/drydock/terminal/api app/src/test/java/app/drydock/terminal/api \
         app/src/main/java/app/drydock/terminal/ghostty/GhosttyKeyTranslator.java \
         app/src/main/java/app/drydock/ui/OpenSessionTab.java \
-        app/src/main/java/app/drydock/ui/TerminalBridge.java
+        app/src/main/java/app/drydock/ui/TerminalBridge.java \
+        app/src/test/java/app/drydock/terminal/ghostty/GhosttyKeyTranslatorTest.java
 git commit -m "Add terminal.api TerminalSpec + relocate Shortcut out of GhosttyKeyTranslator"
 ```
 
@@ -236,13 +238,18 @@ In `DrydockTerminalHost.java`:
 - **Delete** the four nested `public interface KeyEventListener/ScrollEventListener/MousePosEventListener/MouseButtonEventListener` blocks (now in the api). Change the `set*EventListener` parameter types from `KeyEventListener` etc. to `TerminalHostView.KeyEventListener` etc. (import the api interface members; reference them as nested types on `TerminalHostView`).
 - Keep `createForCurrentWindow()` and `contentViewHandle()` exactly as-is (both stay concrete-only).
 
-- [ ] **Step 3: Retype the binding's callback setters**
+- [ ] **Step 3: Retype every `DrydockTerminalHost.<X>Listener` reference in the binding**
 
-In `DrydockTerminalHostBinding.java`, wherever a setter method takes `DrydockTerminalHost.KeyEventListener` (and the scroll/mouse-pos/mouse-button equivalents), change the parameter type to `TerminalHostView.KeyEventListener` (etc.), adding `import app.drydock.terminal.api.TerminalHostView;`. The upcall-binding bodies are unchanged (the functional-interface shape is identical).
+`DrydockTerminalHostBinding.java` references the nested listener names at **~12 sites**, not just the setters — all must change from `DrydockTerminalHost.<X>Listener` to `TerminalHostView.<X>Listener` (add `import app.drydock.terminal.api.TerminalHostView;`). The sites (line numbers approximate):
+- Setter parameters: `setKeyEventCallback` (~293), `setScrollEventCallback` (~307), `setMousePosEventCallback` (~321), `setMouseButtonEventCallback` (~335).
+- `.class` literals used for descriptor lookup: `DrydockTerminalHost.KeyEventListener.class` (~83), `ScrollEventListener.class` (~99), `MousePosEventListener.class` (~111), `MouseButtonEventListener.class` (~123).
+- Trampoline helper parameters: (~353) `MouseButtonEventListener`, (~368) `MousePosEventListener`, (~383) `ScrollEventListener`, (~398) `KeyEventListener`.
+
+Grep to confirm none remain: `grep -n "DrydockTerminalHost\.\(Key\|Scroll\|MousePos\|MouseButton\)EventListener" app/src/main/java/app/drydock/terminal/host/DrydockTerminalHostBinding.java` — expected: no output after the edit. The upcall-binding bodies are otherwise unchanged (the SAM shapes are identical), and structural lambda binding means `DrydockTerminalHost.setKeyEventListener(...)` still accepts the spike/`TerminalBridge` lambdas — `compileSpikeJava` in Step 4 proves it.
 
 - [ ] **Step 4: Compile & test**
 
-Run: `./gradlew compileJava compileTestJava test`
+Run: `./gradlew compileJava compileTestJava compileSpikeJava test`
 Expected: PASS — no behavior change; host still constructs and registers listeners.
 
 - [ ] **Step 5: Commit**
@@ -392,7 +399,7 @@ Rename the existing `public void sendMousePos(double x, double y, int mods) { ..
 
 - [ ] **Step 3: Compile & test**
 
-Run: `./gradlew compileJava compileTestJava test`
+Run: `./gradlew compileJava compileTestJava compileSpikeJava test`
 Expected: PASS — `GhosttySurface` implements the interface; `TerminalBridge` still calls the old concrete methods (its rewire is Task 6), and the renamed private mouse helpers keep the native path intact.
 
 - [ ] **Step 4: Commit**
@@ -474,7 +481,7 @@ In `GhosttySurface.java`, change `public void applyConfig(GhosttyApp app)` to `p
 
 - [ ] **Step 4: Compile & test**
 
-Run: `./gradlew compileJava compileTestJava test`
+Run: `./gradlew compileJava compileTestJava compileSpikeJava test`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -575,7 +582,7 @@ Update imports in `MainWorkspace.java`: remove `import app.drydock.terminal.ghos
 
 - [ ] **Step 3: Compile & test**
 
-Run: `./gradlew compileJava compileTestJava test`
+Run: `./gradlew compileJava compileTestJava compileSpikeJava test`
 Expected: PASS. (After this step `MainWorkspace` still passes interface-typed `app`/`host` to an `OpenSessionTab` ctor whose params are still concrete — that compiles because `GhosttyApp`/`DrydockTerminalHost` ARE the runtime/host. Task 6 flips the ctor param types.)
 
 Note: if the ctor param types (still concrete `GhosttyApp`/`DrydockTerminalHost` at this point) reject the interface-typed arguments, do Step 2 and Task 6's `OpenSessionTab` ctor retype together in one commit. They are separated for review clarity but may be merged if the compiler requires it.
@@ -607,9 +614,10 @@ Retype every field, parameter, return type, and record component in `ui`/`app` f
 
 - [ ] **Step 1: `SessionOpenResult`** — change every `GhosttySurface` to `TerminalSurface`. In `SessionOpenResult.java`: replace `import app.drydock.terminal.ghostty.GhosttySurface;` with `import app.drydock.terminal.api.TerminalSurface;`, and change `Opened(ManagedClaudeSession session, GhosttySurface surface)` and `AlreadyOpen(..., GhosttySurface activeSurface)` component types to `TerminalSurface`.
 
-- [ ] **Step 2: `SessionManager`** — retype params and surface creation:
+- [ ] **Step 2: `SessionManager`** — retype **every** `GhosttyApp`/`GhosttySurface`/`DrydockTerminalHost` occurrence (not just method params):
   - Replace imports of `GhosttyApp`, `GhosttySurface`, `DrydockTerminalHost` with `TerminalRuntime`, `TerminalSurface`, `TerminalHostView`, `TerminalSpec`.
-  - In `createSession`, `launchSession`, `resumeSession`, `startFreshConversation`, `launchNewSession`, and the private `createSurfaceOnFxThread`: change parameter/field types `GhosttyApp app` → `TerminalRuntime app`, `DrydockTerminalHost host` → `TerminalHostView host`, and `CompletableFuture<GhosttySurface>` → `CompletableFuture<TerminalSurface>`.
+  - Public method params in `createSession`, `launchSession`, `resumeSession`, `startFreshConversation`, `launchNewSession`, and the private `createSurfaceOnFxThread`: `GhosttyApp app` → `TerminalRuntime app`, `DrydockTerminalHost host` → `TerminalHostView host`, `CompletableFuture<GhosttySurface>` → `CompletableFuture<TerminalSurface>`.
+  - **Also** (found by review — do not miss these): the `activeSurfaces` field/map value type (`...put(id, launch.surface())` ~line 287), the `finalizeResume(ManagedClaudeSession session, GhosttySurface surface, ...)` parameter (~line 336), and any other local/field typed `GhosttySurface` all become `TerminalSurface`. The producer sites `new SessionOpenResult.Opened(running, launch.surface())` (~288), `new SessionOpenResult.Opened(running, surface)` (~347), and `new SessionOpenResult.AlreadyOpen(session, active.get(), activeSurface)` (~377) compile unchanged once the surfaces are `TerminalSurface`. Verify with `grep -n "GhosttySurface\|GhosttyApp\|DrydockTerminalHost" app/src/main/java/app/drydock/app/SessionManager.java` → no output.
   - Change `createSurfaceOnFxThread` to build via the runtime and a `TerminalSpec`:
 
 ```java
@@ -686,7 +694,7 @@ Expected: **no output** (nothing outside the impl packages and the factory impor
 
 - [ ] **Step 7: Compile & test**
 
-Run: `./gradlew compileJava compileTestJava test`
+Run: `./gradlew compileJava compileTestJava compileSpikeJava test`
 Expected: PASS.
 
 - [ ] **Step 8: Commit**
@@ -715,18 +723,34 @@ Low-risk relabel: the existing single terminal surface is the **Claude** tab. Re
 - Consumes: `Shortcut`.
 - Produces: `SubTab { CLAUDE, EXPLORER, REVIEW }` (TERMINAL added in Task 8); `Shortcut.CLAUDE_SUB_TAB`.
 
-- [ ] **Step 1: Find the ⌘-number → Shortcut mapping**
+- [ ] **Step 1: Locate the mapping (it is NOT keycode constants)**
 
-Run: `grep -n "TERMINAL_SUB_TAB\|EXPLORER_SUB_TAB\|REVIEW_SUB_TAB\|DIGIT1\|DIGIT2\|DIGIT3\|KEY_1\|translate" app/src/main/java/app/drydock/terminal/ghostty/GhosttyKeyTranslator.java`
-Expected: locates where ⌘1/⌘2/⌘3 map to the three `*_SUB_TAB` shortcuts (the `translate` method's app-shortcut table).
+The ⌘-number mapping lives **inside `translate(...)`** (around lines 158–171) as a `switch` on the **typed-character codepoint**, not on any `KEY_1`-style constant (the only keycode constants are `KEY_RETURN`/`KEY_D`). It looks like this today:
+
+```java
+Shortcut shortcut = switch (cp) {
+    case '1' -> Shortcut.TERMINAL_SUB_TAB;
+    case '2' -> Shortcut.EXPLORER_SUB_TAB;
+    case '3' -> Shortcut.REVIEW_SUB_TAB;
+    case '[', '{' -> Shortcut.PREVIOUS_SESSION_TAB;
+    case ']', '}' -> Shortcut.NEXT_SESSION_TAB;
+    case '0' -> Shortcut.TOGGLE_SIDEBAR;
+    default -> null;
+};
+```
+Confirm with: `grep -n "case '1'\|case '2'\|case '3'\|Shortcut\." app/src/main/java/app/drydock/terminal/ghostty/GhosttyKeyTranslator.java`.
 
 - [ ] **Step 2: Rename in `Shortcut`**
 
 In `Shortcut.java`, rename `TERMINAL_SUB_TAB` → `CLAUDE_SUB_TAB` and update its Javadoc to "⌘1 -- switch to the Claude sub-tab." (The shell's `TERMINAL_SUB_TAB` at ⌘2 is added in Task 8.)
 
-- [ ] **Step 3: Update the keycode→shortcut table**
+- [ ] **Step 3: Update the `switch` and the two failing tests**
 
-In `GhosttyKeyTranslator.java`, change the ⌘1 mapping to emit `Shortcut.CLAUDE_SUB_TAB` (⌘2→`EXPLORER_SUB_TAB`, ⌘3→`REVIEW_SUB_TAB` stay for now; they shift in Task 8). Update any unit test in `GhosttyKeyTranslatorTest` that asserts ⌘1 → `TERMINAL_SUB_TAB` to expect `CLAUDE_SUB_TAB`.
+In `GhosttyKeyTranslator.java`, change `case '1' -> Shortcut.TERMINAL_SUB_TAB;` to `case '1' -> Shortcut.CLAUDE_SUB_TAB;` (leave `'2'`/`'3'` for now; they shift in Task 8).
+
+In `app/src/test/java/app/drydock/terminal/ghostty/GhosttyKeyTranslatorTest.java` two assertions break:
+- `commandShortcutsAreIntercepted`'s `@CsvSource`: change the row `"1, TERMINAL_SUB_TAB"` → `"1, CLAUDE_SUB_TAB"`.
+- `shortcutKeyUpIsSwallowedWithoutRetriggering` (~line 96): change `assertEquals(Shortcut.TERMINAL_SUB_TAB, shortcut.shortcut());` → `assertEquals(Shortcut.CLAUDE_SUB_TAB, ...)`.
 
 - [ ] **Step 4: Update `OpenSessionTab`**
   - `enum SubTab { CLAUDE, EXPLORER, REVIEW }`; `activeSubTab = SubTab.CLAUDE`.
@@ -736,7 +760,7 @@ In `GhosttyKeyTranslator.java`, change the ⌘1 mapping to emit `Shortcut.CLAUDE
 
 - [ ] **Step 5: Compile & test**
 
-Run: `./gradlew compileJava compileTestJava test`
+Run: `./gradlew compileJava compileTestJava compileSpikeJava test`
 Expected: PASS.
 
 - [ ] **Step 6: Commit**
@@ -765,9 +789,33 @@ Add a second sub-tab **Terminal** that runs a login shell in the session's worki
 - Consumes: `TerminalFactory`, `TerminalRuntime`, `TerminalHostView`, `TerminalSurface`, `TerminalSpec`, `Shortcut`, `TerminalThemes`.
 - Produces: a working ⌘2 Terminal sub-tab.
 
-- [ ] **Step 1: Extend `Shortcut` and the accelerator table**
+- [ ] **Step 1: Extend `Shortcut`, the `switch` (add a new `'4'` case), and the test**
 
-In `Shortcut.java`, the sub-tab block becomes: `CLAUDE_SUB_TAB` (⌘1), `TERMINAL_SUB_TAB` (⌘2), `EXPLORER_SUB_TAB` (⌘3), `REVIEW_SUB_TAB` (⌘4). In `GhosttyKeyTranslator.java`, map ⌘1→CLAUDE, ⌘2→TERMINAL, ⌘3→EXPLORER, ⌘4→REVIEW. Update `GhosttyKeyTranslatorTest` accelerator assertions to match.
+In `Shortcut.java`, the sub-tab block becomes, in order: `CLAUDE_SUB_TAB` (⌘1), `TERMINAL_SUB_TAB` (⌘2), `EXPLORER_SUB_TAB` (⌘3), `REVIEW_SUB_TAB` (⌘4). (`CLAUDE_SUB_TAB` already exists from Task 7; re-add `TERMINAL_SUB_TAB` for the shell.)
+
+In `GhosttyKeyTranslator.java`, the codepoint `switch` gains a `'4'` case and shifts `'2'`/`'3'` — there is **no `'4'` case today**, so this is an addition, not just an edit:
+
+```java
+Shortcut shortcut = switch (cp) {
+    case '1' -> Shortcut.CLAUDE_SUB_TAB;
+    case '2' -> Shortcut.TERMINAL_SUB_TAB;
+    case '3' -> Shortcut.EXPLORER_SUB_TAB;
+    case '4' -> Shortcut.REVIEW_SUB_TAB;
+    case '[', '{' -> Shortcut.PREVIOUS_SESSION_TAB;
+    case ']', '}' -> Shortcut.NEXT_SESSION_TAB;
+    case '0' -> Shortcut.TOGGLE_SIDEBAR;
+    default -> null;
+};
+```
+
+In `GhosttyKeyTranslatorTest.java`, update the `commandShortcutsAreIntercepted` `@CsvSource` so its number rows read exactly:
+```
+"1, CLAUDE_SUB_TAB",
+"2, TERMINAL_SUB_TAB",
+"3, EXPLORER_SUB_TAB",
+"4, REVIEW_SUB_TAB",
+```
+(keep the `[`/`{`/`]`/`}`/`0` rows unchanged). The line-96 assertion already reads `CLAUDE_SUB_TAB` from Task 7 and stays.
 
 - [ ] **Step 2: Add a shell-terminal provider seam on `OpenSessionTab`**
 
@@ -816,7 +864,8 @@ Lazy builder:
             return;
         }
         shellStarted = true;
-        ShellTerminal[] holder = new ShellTerminal[1];
+        // The wakeup callback closes over shellBridge (assigned just below); a
+        // wakeup arriving before that assignment is safely dropped by the guard.
         ShellTerminal shell = shellTerminalProvider.apply(() -> {
             if (shellBridge != null) {
                 shellBridge.tickAndDraw();
@@ -826,7 +875,6 @@ Lazy builder:
             shellStarted = false;   // provider unavailable (e.g. headless test); leave the tab empty
             return;
         }
-        holder[0] = shell;
         shellBridge = new TerminalBridge(shell.runtime(), shell.host(), shellPlaceholder,
                 stage::getOutputScaleX, this::sessionId, this::runShortcut);
         TerminalSurface surface = shell.runtime().openSurface(shell.host(), stage.getOutputScaleX(),
@@ -840,7 +888,7 @@ Lazy builder:
 
 - [ ] **Step 4: Wire `SubTab.TERMINAL` into `showSubTab`**
 
-`enum SubTab { CLAUDE, TERMINAL, EXPLORER, REVIEW }`. In `showSubTab`, the native-surface sub-tabs are now CLAUDE and TERMINAL; Explorer/Review still replace the region. Only one native view is visible at a time — switching to TERMINAL builds it lazily and hides the Claude view:
+`enum SubTab { CLAUDE, TERMINAL, EXPLORER, REVIEW }`. In `showSubTab`, the native-surface sub-tabs are now CLAUDE and TERMINAL; Explorer/Review still replace the region. This rewrite **must preserve two behaviors the current method has** (both flagged by the plan review): (a) the `view == null` bail-out that re-selects the previous button when Explorer/Review fails to build, and (b) the `Platform.runLater(<active bridge>::updateGeometry)` after the center swap, so the newly-shown native frame re-tracks the placeholder's fresh bounds. Only one native view is visible at a time; switching to TERMINAL builds it lazily:
 
 ```java
     void showSubTab(SubTab subTab) {
@@ -851,25 +899,46 @@ Lazy builder:
         if (subTab == activeSubTab) {
             return;
         }
-        if (subTab == SubTab.TERMINAL) {
+        if (subTab == SubTab.EXPLORER || subTab == SubTab.REVIEW) {
+            Region view = subTab == SubTab.EXPLORER ? explorerViewOrBuild() : reviewViewOrBuild();
+            if (view == null) {
+                // Build failed: undo the button selection, stay put (mirrors the original guard).
+                claudeSubTabButton.setSelected(activeSubTab == SubTab.CLAUDE);
+                terminalSubTabButton.setSelected(activeSubTab == SubTab.TERMINAL);
+                explorerSubTabButton.setSelected(activeSubTab == SubTab.EXPLORER);
+                reviewSubTabButton.setSelected(activeSubTab == SubTab.REVIEW);
+                return;
+            }
+            activeSubTab = subTab;
+            content.setCenter(view);
+            bridge.setTerminalSubTabActive(false);
+            if (shellBridge != null) {
+                shellBridge.setTerminalSubTabActive(false);
+            }
+            return;
+        }
+        // CLAUDE or TERMINAL: show the corresponding native surface, hide the other.
+        boolean shellActive = subTab == SubTab.TERMINAL;
+        if (shellActive) {
             ensureShellStarted();
         }
-        boolean claudeActive = subTab == SubTab.CLAUDE;
-        boolean shellActive = subTab == SubTab.TERMINAL;
-        bridge.setTerminalSubTabActive(claudeActive);
+        activeSubTab = subTab;
+        content.setCenter(shellActive ? shellPlaceholder : placeholder);
+        bridge.setTerminalSubTabActive(!shellActive);
         if (shellBridge != null) {
             shellBridge.setTerminalSubTabActive(shellActive);
         }
-        if (subTab == SubTab.EXPLORER || subTab == SubTab.REVIEW) {
-            content.setCenter(subTab == SubTab.EXPLORER ? explorerViewOrBuild() : reviewViewOrBuild());
-        } else {
-            content.setCenter(shellActive ? shellPlaceholder : placeholder);
+        // The center swap invalidates the placeholder's bounds only on the next
+        // layout pass; recompute the active native frame after it (as the
+        // original TERMINAL branch did for the single bridge).
+        TerminalBridge active = shellActive ? shellBridge : bridge;
+        if (active != null) {
+            Platform.runLater(active::updateGeometry);
         }
-        activeSubTab = subTab;
     }
 ```
 
-(Keep the existing `bridge.applyVisibility()`/workspace-visible semantics; mirror any `setWorkspaceVisible` propagation to `shellBridge` when non-null — e.g. in the method that calls `bridge.setWorkspaceVisible(visible)`, also call `if (shellBridge != null) shellBridge.setWorkspaceVisible(visible);`.)
+Also propagate workspace visibility to the shell bridge: in `setVisible(boolean visible)` (the sole caller of `bridge.setWorkspaceVisible`), add `if (shellBridge != null) shellBridge.setWorkspaceVisible(visible);` after the existing `bridge.setWorkspaceVisible(visible);`.
 
 - [ ] **Step 5: Buttons, tooltips, `runShortcut`, dispose**
   - Add `private final ToggleButton terminalSubTabButton = new ToggleButton("❯_  Terminal");` tooltip `"Terminal (⌘2)"`; add it to the sub-tab bar `HBox` between Claude and Explorer; wire `setOnAction(e -> showSubTab(SubTab.TERMINAL))`.
@@ -899,7 +968,7 @@ In `MainWorkspace.createOpenSessionTab`, after constructing `openTab`, wire the 
 
 - [ ] **Step 7: Compile & test**
 
-Run: `./gradlew compileJava compileTestJava test`
+Run: `./gradlew compileJava compileTestJava compileSpikeJava test`
 Expected: PASS.
 
 - [ ] **Step 8: Manual verification**
