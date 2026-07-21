@@ -344,7 +344,7 @@ The whole feature's logic, FX-free and fully tested: debounced auto-save, forced
   - `enum FileEditSession.State { CLEAN, DIRTY, SAVING, CONFLICT, ERROR }`
   - `enum FileEditSession.PollOutcome { UNCHANGED, RELOAD, CONFLICT, MISSING }`
   - `record FileEditSession.PollResult(PollOutcome outcome, String text)`
-  - `FileEditSession(Path file, FileContent initial, ScheduledExecutorService executor, Duration debounce)`
+  - `FileEditSession(Path file, FileContent initial, ScheduledExecutorService executor, Duration debounce, long maxBytes)` — throws `IllegalArgumentException` for a non-`editable()` buffer, so callers must gate on `FileContent.editable()` first
   - `State state()`, `void edit(String text)`, `CompletableFuture<Void> flush()`,
     `void flushBlocking(Duration timeout)`, `CompletableFuture<PollResult> poll()`,
     `CompletableFuture<Void> keepMine()`, `CompletableFuture<String> takeDisk()`,
@@ -1097,7 +1097,8 @@ Then add the two methods:
      * the content it had just superseded.</p>
      */
     private void attachEditing(Tab tab, CodeArea area, Path file, FileContent content) {
-        FileEditSession session = new FileEditSession(file, content, ioExecutor, SAVE_DEBOUNCE);
+        FileEditSession session =
+                new FileEditSession(file, content, ioExecutor, SAVE_DEBOUNCE, MAX_FILE_BYTES);
         sessions.put(file, session);
         tab.getProperties().put("drydock.session", session);
 
