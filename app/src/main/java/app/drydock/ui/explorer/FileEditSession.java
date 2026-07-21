@@ -29,9 +29,14 @@ import java.util.function.Consumer;
  * the stamp capture that follows a write cannot interleave with a poll.
  * {@link #edit(String)} is one exception: it runs on the caller's thread
  * (the FX thread) so that {@link #state()} reflects a keystroke immediately
- * for the status chip. The constructor's initial stamp capture is the other:
- * it runs on the caller's thread too, but harmlessly, since nothing else can
- * reach the session before the constructor returns. All mutable state --
+ * for the status chip. The constructor does no I/O of its own -- it seeds an
+ * unverified sentinel stamp rather than reading the disk, because the
+ * {@code content} it is handed was already read by the caller, on a
+ * different thread, possibly one {@code Platform.runLater} hop earlier; a
+ * stamp captured fresh here could describe bytes newer than what
+ * {@code content} holds. The sentinel guarantees the first {@link #poll()}
+ * always verifies the file against the buffer instead of trusting a stamp
+ * that might be lying. All mutable state --
  * {@code state}, {@code pendingText},
  * {@code stamp}, {@code content}, the armed debounce -- is therefore guarded by
  * {@link #lock}, and every decision that spans a slow I/O call re-checks that
@@ -71,6 +76,15 @@ final class FileEditSession {
 
     /** Identity of the file as this session last saw it (spec: change detection is mtime + size). */
     private record DiskStamp(FileTime modified, long size) { }
+
+    /**
+     * Seeded by the constructor in place of a real stamp. No file on disk can
+     * report a negative size, so this can never equal a {@link #readStamp}
+     * result -- the first {@link #poll()} therefore always falls through to
+     * load and compare the file rather than trusting a stamp that might
+     * describe content this session was never handed.
+     */
+    private static final DiskStamp UNVERIFIED = new DiskStamp(FileTime.fromMillis(0), -1);
 
     private final Path file;
     private final ScheduledExecutorService executor;
@@ -116,8 +130,8 @@ final class FileEditSession {
         this.executor = executor;
         this.debounce = debounce;
         this.maxBytes = maxBytes;
-        this.stamp = readStampQuietly();
         this.pendingText = content.text();
+        this.stamp = UNVERIFIED;
     }
 
     /** Invoked on the executor thread, never while an internal lock is held. */
@@ -218,11 +232,18 @@ final class FileEditSession {
 
     /**
      * Compares the file's current identity against the stamp this session
-     * last adopted. Clean + changed means Claude edited a file we are not
-     * holding edits for, so the viewer can silently reload; dirty + changed
-     * is a genuine conflict and disarms auto-save. {@link State#ERROR} counts
-     * as dirty: it is a buffer whose write failed, and its edits are still
-     * unsaved.
+     * last adopted. A changed stamp is not by itself proof of an external
+     * edit -- something may have rewritten the file with the exact bytes the
+     * buffer already holds, or merely touched it -- so a stamp change is
+     * always followed by loading the file and comparing its text and
+     * terminator before this reports anything: an identical match adopts the
+     * new stamp and reports {@link PollOutcome#UNCHANGED}, dirty or not,
+     * since there is nothing to reconcile. Only once the file genuinely
+     * differs does dirtiness matter:
+     * clean + changed means Claude edited a file we are not holding edits
+     * for, so the viewer can silently reload; dirty + changed is a genuine
+     * conflict and disarms auto-save. {@link State#ERROR} counts as dirty: it
+     * is a buffer whose write failed, and its edits are still unsaved.
      */
     CompletableFuture<PollResult> poll() {
         try {
@@ -248,19 +269,14 @@ final class FileEditSession {
             // must ask rather than silently recreate the file.
             return new PollResult(PollOutcome.MISSING, null);
         }
-        boolean conflicted;
-        State changed;
         synchronized (lock) {
             if (current.equals(stamp)) {
                 return new PollResult(PollOutcome.UNCHANGED, null);
             }
-            conflicted = hasUnsavedEdits();
-            changed = conflicted ? enterConflict() : null;
         }
-        if (conflicted) {
-            notifyState(changed);
-            return new PollResult(PollOutcome.CONFLICT, null);
-        }
+        // The stamp differs, but that alone does not mean the bytes did --
+        // load and compare text before deciding anything, rather than
+        // declaring a conflict (or a reload) against a stamp change alone.
         FileContent fresh;
         try {
             fresh = FileContent.load(file, maxBytes);
@@ -274,6 +290,29 @@ final class FileEditSession {
             // saying so -- and let the viewer decide, exactly as for a
             // deleted file.
             return new PollResult(PollOutcome.MISSING, null);
+        }
+        boolean conflicted;
+        State changed;
+        synchronized (lock) {
+            if (fresh.text().equals(pendingText) && fresh.terminator() == content.terminator()) {
+                // Same bytes under a new stamp -- a rewrite that changed
+                // nothing, or a touch. (Terminator must match too: a file
+                // rewritten CRLF-to-LF has identical LF-normalised text but
+                // different bytes on disk, which is a real change.) Adopt
+                // the stamp silently, regardless of dirtiness: there is
+                // nothing here to reconcile, so raising a conflict against
+                // content identical to what the user already has would be
+                // wrong.
+                content = fresh;
+                stamp = current;
+                return new PollResult(PollOutcome.UNCHANGED, null);
+            }
+            conflicted = hasUnsavedEdits();
+            changed = conflicted ? enterConflict() : null;
+        }
+        if (conflicted) {
+            notifyState(changed);
+            return new PollResult(PollOutcome.CONFLICT, null);
         }
         synchronized (lock) {
             // An edit may have landed while we were reading. Adopting the

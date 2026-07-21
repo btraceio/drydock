@@ -438,6 +438,53 @@ class FileEditSessionTest {
     }
 
     /**
+     * The viewer loads a file's content on one thread and constructs the
+     * session later, inside a {@code Platform.runLater}. If the file changes
+     * in that window, the session must not trust a stamp captured after the
+     * caller's read: its first {@link FileEditSession#poll()} must still
+     * detect the file no longer matches what the buffer holds.
+     */
+    @Test
+    void fileChangedBetweenCallersLoadAndConstructionIsDetectedOnFirstPoll(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("a.txt");
+        Files.writeString(file, "one\n");
+        FileContent stale = FileContent.load(file, MAX);
+        // Simulate an external write landing after the caller's load but
+        // before the session is constructed.
+        writeExternally(file, "claude\n");
+
+        FileEditSession session = new FileEditSession(file, stale, executor, IDLE_DEBOUNCE, MAX);
+        var result = session.poll().get(5, TimeUnit.SECONDS);
+
+        assertEquals(PollOutcome.RELOAD, result.outcome());
+        assertEquals("claude\n", result.text());
+    }
+
+    /**
+     * A stamp change alone is not proof of an external edit: something may
+     * have rewritten the file with the exact bytes the buffer already holds,
+     * or merely touched it. That must not raise a conflict, even for a dirty
+     * buffer -- there is nothing to reconcile.
+     */
+    @Test
+    void stampChangeWithIdenticalBytesIsNotAConflict(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("a.txt");
+        Files.writeString(file, "one\n");
+        FileEditSession session = sessionFor(file);
+
+        session.edit("same\n");
+        writeExternally(file, "same\n");
+        var result = session.poll().get(5, TimeUnit.SECONDS);
+
+        assertEquals(PollOutcome.UNCHANGED, result.outcome());
+        assertEquals(State.DIRTY, session.state(),
+                "identical bytes must not raise a conflict for a dirty buffer");
+        // The stamp was adopted, so the file no longer looks changed either.
+        var again = session.poll().get(5, TimeUnit.SECONDS);
+        assertEquals(PollOutcome.UNCHANGED, again.outcome());
+    }
+
+    /**
      * {@code CompletableFuture.runAsync} calls {@code executor.execute} on the
      * calling thread and does not wrap a {@link RejectedExecutionException}
      * into the returned future, so a naive {@code flush()} would throw synchronously once the
