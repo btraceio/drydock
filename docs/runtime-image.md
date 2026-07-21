@@ -115,11 +115,11 @@ location, never the current working directory or `JAVA_HOME` — verified by
 launching from `/tmp` with `JAVA_HOME` unset and a `PATH` scrubbed down to
 just `/usr/bin:/bin`.
 
-`MAIN_CLASS` defaults to `app.drydock.terminal.Gate0cSpikeLauncher` (see "Why
-the terminal spike, not `app.drydock.Main`" below); `DRYDOCK_MAIN_CLASS`/
-`DRYDOCK_EXTRA_JVM_ARGS` environment variables are internal escape hatches used
-only by this project's own smoke testing, not part of the plan's launcher
-spec.
+`MAIN_CLASS` defaults to `app.drydock.Main`, the real application (see "Why
+the terminal spike, not `app.drydock.Main`" below for the historical context
+on when and why that changed); `DRYDOCK_MAIN_CLASS`/`DRYDOCK_EXTRA_JVM_ARGS`
+environment variables are internal escape hatches used only by this
+project's own smoke testing, not part of the plan's launcher spec.
 
 ### `--add-exports javafx.graphics/com.sun.glass.ui=ALL-UNNAMED`: a real, image-only defect found and fixed in Task 8
 
