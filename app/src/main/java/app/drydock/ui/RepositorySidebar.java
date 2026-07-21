@@ -143,6 +143,7 @@ public final class RepositorySidebar extends VBox {
     private final AtomicBoolean rebuildPending = new AtomicBoolean();
 
     private Runnable onCloneFromGitHub = () -> { };
+    private Runnable onAddRemote = () -> { };
     private Consumer<Repository> onNewWorktree = repository -> { };
 
     // -- Per-row cached popups (context menus and tooltips are not part of
@@ -181,7 +182,9 @@ public final class RepositorySidebar extends VBox {
         openFromDisk.setOnAction(e -> onAddRepositoryFromDisk());
         MenuItem cloneFromGitHub = new MenuItem("Clone from GitHub…");
         cloneFromGitHub.setOnAction(e -> onCloneFromGitHub.run());
-        MenuButton addButton = new MenuButton("＋  Add repository", null, openFromDisk, cloneFromGitHub);
+        MenuItem addRemote = new MenuItem("Add remote repository…");
+        addRemote.setOnAction(e -> onAddRemote.run());
+        MenuButton addButton = new MenuButton("＋  Add repository", null, openFromDisk, cloneFromGitHub, addRemote);
         addButton.getStyleClass().add("add-repo-button");
         addButton.setMaxWidth(Double.MAX_VALUE);
 
@@ -279,6 +282,11 @@ public final class RepositorySidebar extends VBox {
     /** Wired by the application shell to open the Clone-from-GitHub modal (design section 7). */
     public void setOnCloneFromGitHub(Runnable handler) {
         this.onCloneFromGitHub = handler == null ? () -> { } : handler;
+    }
+
+    /** Wired by the application shell to open the Add-remote-repository modal (spec: SSH remote repositories). */
+    public void setOnAddRemote(Runnable handler) {
+        this.onAddRemote = handler == null ? () -> { } : handler;
     }
 
     /** Wired by the application shell to open the create-worktree modal (worktree handoff, section B). */
