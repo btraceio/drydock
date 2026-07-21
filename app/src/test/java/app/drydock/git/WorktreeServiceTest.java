@@ -127,6 +127,103 @@ class WorktreeServiceTest {
         assertTrue(Files.exists(worktree));
     }
 
+    /**
+     * Pins the discriminator the force-fallback gate is built on: a
+     * submodule only blocks a plain remove once it has been checked out
+     * into the worktree, so a fresh worktree of a submodule-bearing
+     * repository still takes the ordinary path.
+     */
+    @Test
+    void removeUsesThePlainPathForAWorktreeWhoseSubmoduleIsUninitialized(
+            @TempDir Path repoDir, @TempDir Path worktreeParent) throws Exception {
+        Path repo = initRepoWithSubmodule(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/no-subs").get();
+        Path worktreeGitDir = Path.of(runGitCapture(worktree, "rev-parse", "--absolute-git-dir").strip());
+        assertFalse(Files.isDirectory(worktreeGitDir.resolve("modules")),
+                "precondition: the submodule must not be checked out into the worktree");
+
+        service.remove(repo, worktree, Optional.of("feat/no-subs")).get();
+
+        assertFalse(Files.exists(worktree));
+        assertEquals(1, service.list(repo).get().size());
+    }
+
+    /**
+     * The same worktree, left dirty: the plain path must still refuse it.
+     * Proves the uninitialized case never escalates to {@code --force},
+     * which a bare success assertion above cannot distinguish.
+     */
+    @Test
+    void removeOfADirtyUninitializedSubmoduleWorktreeStillFails(
+            @TempDir Path repoDir, @TempDir Path worktreeParent) throws Exception {
+        Path repo = initRepoWithSubmodule(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/no-subs-dirty").get();
+        Files.writeString(worktree.resolve("uncommitted.txt"), "precious\n");
+
+        CompletionException completion = assertThrows(CompletionException.class,
+                () -> service.remove(repo, worktree, Optional.of("feat/no-subs-dirty")).join());
+        assertInstanceOf(GitCommandFailedException.class, completion.getCause());
+        assertTrue(Files.exists(worktree.resolve("uncommitted.txt")));
+    }
+
+    @Test
+    void removeSucceedsForAWorktreeWithAnInitializedSubmodule(@TempDir Path repoDir, @TempDir Path worktreeParent)
+            throws Exception {
+        Path repo = initRepoWithSubmodule(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/subs").get();
+        initSubmodulesIn(worktree);
+
+        service.remove(repo, worktree, Optional.of("feat/subs")).get();
+
+        assertFalse(Files.exists(worktree));
+        assertEquals(1, service.list(repo).get().size());
+        assertFalse(runGitCapture(repo, "branch", "--list", "feat/subs").contains("feat/subs"));
+    }
+
+    @Test
+    void removeSucceedsForASubmoduleWorktreeWhoseOnlyDirtIsInsideTheSubmodule(
+            @TempDir Path repoDir, @TempDir Path worktreeParent) throws Exception {
+        Path repo = initRepoWithSubmodule(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/sub-dirt").get();
+        initSubmodulesIn(worktree);
+        Files.writeString(worktree.resolve("vendor/lib.txt"), "patched by the build\n");
+
+        service.remove(repo, worktree, Optional.of("feat/sub-dirt")).get();
+
+        assertFalse(Files.exists(worktree));
+    }
+
+    @Test
+    void removeOfADirtySubmoduleWorktreeFailsInsteadOfDiscardingChanges(
+            @TempDir Path repoDir, @TempDir Path worktreeParent) throws Exception {
+        Path repo = initRepoWithSubmodule(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/sub-dirty").get();
+        initSubmodulesIn(worktree);
+        Files.writeString(worktree.resolve("uncommitted.txt"), "precious\n");
+
+        CompletionException completion = assertThrows(CompletionException.class,
+                () -> service.remove(repo, worktree, Optional.of("feat/sub-dirty")).join());
+        assertInstanceOf(GitCommandFailedException.class, completion.getCause());
+        assertTrue(Files.exists(worktree.resolve("uncommitted.txt")));
+    }
+
+    @Test
+    void removeOfAWorktreeWithABumpedSubmodulePointerFailsInsteadOfDiscardingTheBump(
+            @TempDir Path repoDir, @TempDir Path worktreeParent) throws Exception {
+        Path repo = initRepoWithSubmodule(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/sub-bump").get();
+        initSubmodulesIn(worktree);
+        // Moving the submodule's HEAD is uncommitted work in *this*
+        // worktree's index, unlike mere dirt inside the submodule.
+        runGit(worktree.resolve("vendor"), "-c", "user.name=Test", "-c", "user.email=test@example.com",
+                "commit", "--allow-empty", "-m", "vendored bump");
+
+        CompletionException completion = assertThrows(CompletionException.class,
+                () -> service.remove(repo, worktree, Optional.of("feat/sub-bump")).join());
+        assertInstanceOf(GitCommandFailedException.class, completion.getCause());
+        assertTrue(Files.exists(worktree));
+    }
+
     @Test
     void removeSucceedsWhenTheWorktreeDirectoryWasDeletedFromDiskOutsideGit(
             @TempDir Path repoDir, @TempDir Path worktreeParent) throws Exception {
@@ -186,6 +283,33 @@ class WorktreeServiceTest {
         runGit(repo, "add", "README.md");
         runGit(repo, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "initial commit");
         return repo;
+    }
+
+    /**
+     * A repository whose {@code vendor/} is a submodule, mirroring
+     * Drydock's own vendored {@code third_party/ghostty}. {@code
+     * protocol.file.allow} has to be re-enabled explicitly: git disables
+     * {@code file://} submodule transport by default (CVE-2022-39253).
+     */
+    private static Path initRepoWithSubmodule(Path parent) throws IOException, InterruptedException {
+        Path upstream = initCommittedRepo(Files.createDirectories(parent.resolve("upstream")));
+        Files.writeString(upstream.resolve("lib.txt"), "vendored\n");
+        runGit(upstream, "add", "lib.txt");
+        runGit(upstream, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "lib");
+
+        Path repo = initCommittedRepo(parent);
+        runGit(repo, "-c", "protocol.file.allow=always",
+                "submodule", "add", "--", upstream.toString(), "vendor");
+        runGit(repo, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "add submodule");
+        return repo;
+    }
+
+    /**
+     * Checks the submodules out inside {@code worktree}, which is what
+     * makes git refuse a plain {@code worktree remove} on it.
+     */
+    private static void initSubmodulesIn(Path worktree) throws IOException, InterruptedException {
+        runGit(worktree, "-c", "protocol.file.allow=always", "submodule", "update", "--init");
     }
 
     private static void runGit(Path repo, String... args) throws IOException, InterruptedException {
