@@ -8,6 +8,7 @@ import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.RepositorySettings;
 import app.drydock.domain.SessionStatus;
+import app.drydock.domain.SshRemote;
 import app.drydock.domain.UiTheme;
 import app.drydock.domain.WorkspaceUiState;
 import app.drydock.state.json.JsonValue;
@@ -40,7 +41,8 @@ import java.util.Set;
  *       "displayName": "...",
  *       "addedAt": "<ISO-8601 instant>",
  *       "lastOpenedAt": "<ISO-8601 instant>",
- *       "settings": {}
+ *       "settings": {},
+ *       "remote": {"host": "...", "path": "..."} (optional)
  *     }
  *   ],
  *   "sessions": [
@@ -77,10 +79,13 @@ import java.util.Set;
  * further per-field migration is needed. The {@code prState}/{@code
  * prNumber} members (worktree lifecycle) were added later within version 2:
  * both decode leniently -- a document without them yields {@code NONE} /
- * empty, so no version bump was needed. {@link #toJson} always writes the
- * current version. Any {@code schemaVersion} other than 1 or 2 is treated
- * as malformed input (throws {@link StateDecodeException}), consistent
- * with how unknown versions were already rejected before this change.</p>
+ * empty, so no version bump was needed. The {@code remote} member (SSH
+ * remote repositories) was added leniently within version 2, like
+ * {@code prState}: absent or malformed decodes to null (local repo), so no
+ * version bump was needed and downgrades stay non-destructive. {@link #toJson}
+ * always writes the current version. Any {@code schemaVersion} other than 1
+ * or 2 is treated as malformed input (throws {@link StateDecodeException}),
+ * consistent with how unknown versions were already rejected before this change.</p>
  */
 public final class ApplicationStateCodec {
 
@@ -120,6 +125,12 @@ public final class ApplicationStateCodec {
         obj.put("addedAt", new JsonString(repository.addedAt().toString()));
         obj.put("lastOpenedAt", new JsonString(repository.lastOpenedAt().toString()));
         obj.put("settings", JsonObject.empty());
+        if (repository.isRemote()) {
+            JsonObject remote = JsonObject.empty();
+            remote.put("host", new JsonString(repository.remote().host()));
+            remote.put("path", new JsonString(repository.remote().remotePath()));
+            obj.put("remote", remote);
+        }
         return obj;
     }
 
@@ -204,9 +215,28 @@ public final class ApplicationStateCodec {
             String displayName = requireString(obj, "displayName");
             Instant addedAt = Instant.parse(requireString(obj, "addedAt"));
             Instant lastOpenedAt = Instant.parse(requireString(obj, "lastOpenedAt"));
-            return new Repository(id, root, displayName, addedAt, lastOpenedAt, RepositorySettings.DEFAULT);
+            return new Repository(id, root, displayName, addedAt, lastOpenedAt,
+                    RepositorySettings.DEFAULT, remoteFromJson(obj));
         } catch (IllegalArgumentException | DateTimeException e) {
             throw new StateDecodeException("Malformed repository entry: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Decodes the optional {@code "remote"} member added (leniently, within
+     * schemaVersion 2 — see class doc) for SSH remote repositories. Absent
+     * or malformed decodes to {@code null} (local repo) rather than
+     * failing: a bad value here must never make the whole state file look
+     * corrupt and cost the user every repository and session.
+     */
+    private static SshRemote remoteFromJson(JsonObject obj) {
+        if (!(obj.get("remote") instanceof JsonObject remote)) {
+            return null;
+        }
+        try {
+            return new SshRemote(requireString(remote, "host"), requireString(remote, "path"));
+        } catch (RuntimeException e) {
+            return null;
         }
     }
 
