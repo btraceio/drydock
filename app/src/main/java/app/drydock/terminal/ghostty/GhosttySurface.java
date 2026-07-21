@@ -1,6 +1,7 @@
 package app.drydock.terminal.ghostty;
 
 import app.drydock.terminal.api.Shortcut;
+import app.drydock.terminal.api.TerminalRuntime;
 import app.drydock.terminal.api.TerminalSurface;
 import app.drydock.terminal.host.DrydockTerminalHost;
 import javafx.animation.PauseTransition;
@@ -267,11 +268,12 @@ public final class GhosttySurface implements TerminalSurface, AutoCloseable {
      * {@code ghostty_surface_update_config} (used for theme switches --
      * call after {@link GhosttyApp#updateConfig}).
      */
-    public void applyConfig(GhosttyApp app) {
+    public void applyConfig(TerminalRuntime runtime) {
         checkFxThread();
         checkOpen();
+        GhosttyApp ghosttyApp = (GhosttyApp) runtime;
         try {
-            binding.surfaceUpdateConfig.invoke(surface, app.configHandle());
+            binding.surfaceUpdateConfig.invoke(surface, ghosttyApp.configHandle());
         } catch (Throwable t) {
             throw new GhosttyBinding.GhosttyNativeCallException("ghostty_surface_update_config", t);
         }

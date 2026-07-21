@@ -1,5 +1,11 @@
 package app.drydock.terminal.ghostty;
 
+import app.drydock.terminal.api.TerminalHostView;
+import app.drydock.terminal.api.TerminalRuntime;
+import app.drydock.terminal.api.TerminalSpec;
+import app.drydock.terminal.api.TerminalSurface;
+import app.drydock.terminal.host.DrydockTerminalHost;
+
 import javafx.application.Platform;
 import javafx.scene.input.Clipboard;
 import javafx.scene.input.ClipboardContent;
@@ -35,7 +41,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *
  * <p>Part of the narrow native boundary (plan section 2.4/4.2).</p>
  */
-public final class GhosttyApp implements AutoCloseable {
+public final class GhosttyApp implements TerminalRuntime, AutoCloseable {
 
     private static final Logger LOG = System.getLogger(GhosttyApp.class.getName());
 
@@ -194,6 +200,7 @@ public final class GhosttyApp implements AutoCloseable {
      * frees the replaced one). Existing surfaces still need {@link
      * GhosttySurface#applyConfig(GhosttyApp)} to pick the change up.
      */
+    @Override
     public void updateConfig(Path configFile) {
         checkFxThread();
         checkOpen();
@@ -224,6 +231,7 @@ public final class GhosttyApp implements AutoCloseable {
     }
 
     /** Calls {@code ghostty_app_tick}. Must be called on the same thread every time (see class Javadoc). */
+    @Override
     public void tick() {
         checkFxThread();
         checkOpen();
@@ -234,6 +242,7 @@ public final class GhosttyApp implements AutoCloseable {
         }
     }
 
+    @Override
     public void setFocus(boolean focused) {
         checkFxThread();
         checkOpen();
@@ -255,6 +264,14 @@ public final class GhosttyApp implements AutoCloseable {
         if (!Platform.isFxApplicationThread()) {
             throw new IllegalStateException("Not on the JavaFX Application Thread");
         }
+    }
+
+    @Override
+    public TerminalSurface openSurface(TerminalHostView host, double scaleFactor, TerminalSpec spec) {
+        // Within the native-boundary packages the host is always the AppKit
+        // DrydockTerminalHost, whose contentViewHandle() the surface needs.
+        DrydockTerminalHost ghosttyHost = (DrydockTerminalHost) host;
+        return GhosttySurface.create(this, ghosttyHost, scaleFactor, spec.command(), spec.workingDirectory());
     }
 
     @Override
