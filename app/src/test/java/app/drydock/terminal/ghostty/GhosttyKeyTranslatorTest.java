@@ -1,10 +1,10 @@
 package app.drydock.terminal.ghostty;
 
+import app.drydock.terminal.api.Shortcut;
 import app.drydock.terminal.ghostty.GhosttyKeyTranslator.AppShortcut;
 import app.drydock.terminal.ghostty.GhosttyKeyTranslator.ForwardKey;
 import app.drydock.terminal.ghostty.GhosttyKeyTranslator.Ignore;
 import app.drydock.terminal.ghostty.GhosttyKeyTranslator.KeyAction;
-import app.drydock.terminal.ghostty.GhosttyKeyTranslator.Shortcut;
 import app.drydock.terminal.ghostty.GhosttyKeyTranslator.TypeCharacters;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;

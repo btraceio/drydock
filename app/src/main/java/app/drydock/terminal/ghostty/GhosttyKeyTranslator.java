@@ -1,5 +1,7 @@
 package app.drydock.terminal.ghostty;
 
+import app.drydock.terminal.api.Shortcut;
+
 import java.util.Set;
 
 /**
@@ -63,22 +65,6 @@ public final class GhosttyKeyTranslator {
     );
 
     private GhosttyKeyTranslator() {
-    }
-
-    /** App-level shortcuts intercepted before the terminal sees the key (see {@link AppShortcut}). */
-    public enum Shortcut {
-        /** ⌘1 -- switch to the Terminal sub-tab. */
-        TERMINAL_SUB_TAB,
-        /** ⌘2 -- switch to the Explorer sub-tab. */
-        EXPLORER_SUB_TAB,
-        /** ⌘3 -- switch to the Review sub-tab. */
-        REVIEW_SUB_TAB,
-        /** ⌘⇧[ -- select the previous session tab. */
-        PREVIOUS_SESSION_TAB,
-        /** ⌘⇧] -- select the next session tab. */
-        NEXT_SESSION_TAB,
-        /** ⌘0 -- toggle the sidebar. */
-        TOGGLE_SIDEBAR
     }
 
     /** What the caller should do with one raw AppKit key event. */

@@ -1,12 +1,12 @@
 package app.drydock.ui;
 
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.terminal.api.Shortcut;
 import app.drydock.terminal.ghostty.GhosttyApp;
 import app.drydock.terminal.ghostty.GhosttyKeyTranslator;
 import app.drydock.terminal.ghostty.GhosttyKeyTranslator.AppShortcut;
 import app.drydock.terminal.ghostty.GhosttyKeyTranslator.ForwardKey;
 import app.drydock.terminal.ghostty.GhosttyKeyTranslator.Ignore;
-import app.drydock.terminal.ghostty.GhosttyKeyTranslator.Shortcut;
 import app.drydock.terminal.ghostty.GhosttyKeyTranslator.TypeCharacters;
 import app.drydock.terminal.ghostty.GhosttySurface;
 import app.drydock.terminal.host.DrydockTerminalHost;
