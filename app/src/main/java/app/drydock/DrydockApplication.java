@@ -166,7 +166,8 @@ public final class DrydockApplication extends Application {
         viewModel.setSessions(sessionManager.sessions());
 
         mainWorkspace = new MainWorkspace(sessionManager, repositoryManager, gitStatusService, searchService,
-                ghCliService, diffService, changedLineService, annotationStore, viewModel, primaryStage);
+                ghCliService, worktreeService, diffService, changedLineService, annotationStore, viewModel,
+                primaryStage);
         RepositorySidebar sidebar =
                 new RepositorySidebar(repositoryManager, gitStatusService, worktreeService, sessionManager,
                         mainWorkspace, viewModel);

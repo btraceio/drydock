@@ -26,7 +26,9 @@ import java.util.concurrent.Executors;
  * of an <em>unopened</em> worktree ({@code git worktree remove} +
  * {@code git branch -D}), guarded off the main checkout and falling back
  * to {@code --force} only for refusals that cannot cost the user work
- * (see {@link #mayRetryWithForce}).
+ * (see {@link #mayRetryWithForce}). {@link #mergeIntoBase(Path, String)}
+ * merges a worktree's branch into whatever base branch is checked out in
+ * the main checkout ({@code git merge --no-ff}).
  *
  * <p>Mirrors {@link GitStatusService}'s process/executor style: argument
  * lists (never a shell string), all work on a background virtual-thread
@@ -184,6 +186,39 @@ public final class WorktreeService implements AutoCloseable {
             if (deleted.exitCode() != 0) {
                 throw new GitCommandFailedException(branchCommand, deleted.exitCode(), ProcessRunner.excerpt(deleted.stderr()));
             }
+        }
+    }
+
+    /**
+     * Merges {@code branch} into whatever base branch is currently checked
+     * out in the main checkout at {@code mainCheckout}
+     * ({@code git merge --no-ff <branch>}), on this service's background
+     * executor. The future completes exceptionally with a
+     * {@link GitCommandFailedException} on conflict or any other failure --
+     * merge conflicts are surfaced to the user rather than resolved
+     * automatically, since there is no agent in the loop to reason about
+     * them.
+     */
+    public CompletableFuture<Void> mergeIntoBase(Path mainCheckout, String branch) {
+        return CompletableFuture.supplyAsync(() -> {
+            mergeIntoBaseBlocking(mainCheckout, branch);
+            return null;
+        }, executor);
+    }
+
+    /** Synchronous form of {@link #mergeIntoBase}, package-private for tests. */
+    void mergeIntoBaseBlocking(Path mainCheckout, String branch) {
+        Path git = locator.locate()
+                .orElseThrow(() -> new GitExecutableNotFoundException(locator.describeSearched()));
+
+        // --end-of-options: a branch name that looks like an option must
+        // reach git as a branch name, never be parsed as a flag.
+        List<String> command = List.of(
+                git.toString(), "-C", mainCheckout.toString(),
+                "merge", "--no-ff", "--end-of-options", branch);
+        ProcessResult result = run(command);
+        if (result.exitCode() != 0) {
+            throw new GitCommandFailedException(command, result.exitCode(), ProcessRunner.excerpt(result.stderr()));
         }
     }
 

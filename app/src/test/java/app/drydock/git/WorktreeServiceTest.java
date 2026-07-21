@@ -262,6 +262,39 @@ class WorktreeServiceTest {
     }
 
     @Test
+    void mergeIntoBaseMergesTheBranchIntoTheMainCheckout(@TempDir Path repoDir, @TempDir Path worktreeParent)
+            throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/mergeable").get();
+        Files.writeString(worktree.resolve("feature.txt"), "new feature\n");
+        runGit(worktree, "add", "feature.txt");
+        runGit(worktree, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "add feature");
+
+        service.mergeIntoBase(repo, "feat/mergeable").get();
+
+        assertTrue(Files.exists(repo.resolve("feature.txt")));
+        assertTrue(runGitCapture(repo, "log", "--oneline", "-1").toLowerCase(java.util.Locale.ROOT)
+                .contains("merge"));
+    }
+
+    @Test
+    void mergeIntoBaseFailsInsteadOfResolvingAConflict(@TempDir Path repoDir, @TempDir Path worktreeParent)
+            throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/conflict").get();
+        Files.writeString(worktree.resolve("README.md"), "worktree version\n");
+        runGit(worktree, "add", "README.md");
+        runGit(worktree, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "wt change");
+        Files.writeString(repo.resolve("README.md"), "main version\n");
+        runGit(repo, "add", "README.md");
+        runGit(repo, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "main change");
+
+        CompletionException completion = assertThrows(CompletionException.class,
+                () -> service.mergeIntoBase(repo, "feat/conflict").join());
+        assertInstanceOf(GitCommandFailedException.class, completion.getCause());
+    }
+
+    @Test
     void parseHandlesBranchDetachedAndBareStanzas() {
         String porcelain = """
                 worktree /repos/main

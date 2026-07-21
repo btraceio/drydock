@@ -16,9 +16,11 @@ import java.util.Optional;
 
 /**
  * The state-aware Finish panel (worktree handoff, section B): change
- * summary + actions chosen by the session's {@link PrState}. Every action
- * closes the panel and hands the real work off to Claude in the session's
- * terminal -- the app never runs git merge / gh itself:
+ * summary + actions chosen by the session's {@link PrState}. Merge and
+ * delete close the panel and run directly (plain {@code git merge} /
+ * {@code git worktree remove} + {@code git branch -D}); only "create pull
+ * request" hands off to Claude in the session's terminal, since
+ * {@code gh pr create} needs the user's own gh auth:
  *
  * <ul>
  *   <li>{@code NONE}: Merge into base · Create pull request · Delete;</li>
@@ -67,13 +69,13 @@ final class FinishWorktreePanel extends VBox {
         switch (context.prState()) {
             case NONE -> {
                 getChildren().add(action("Merge into " + context.base(),
-                        "Hand off to Claude — it merges & resolves conflicts", "finish-action-accent",
-                        () -> runAndClose(actions::mergeIntoBase, onClose)));
+                        "Runs git merge --no-ff directly — stops on conflicts for you to resolve",
+                        "finish-action-accent", () -> runAndClose(actions::mergeIntoBase, onClose)));
                 getChildren().add(action("Create pull request",
                         "Hand off to Claude — push branch & open a PR", "finish-action",
                         () -> runAndClose(actions::createPullRequest, onClose)));
                 getChildren().add(action("Delete worktree & branch",
-                        "Hand off to Claude — remove the worktree and delete " + context.branch(),
+                        "Removes the worktree and deletes " + context.branch() + " directly",
                         "finish-action-destructive", () -> runAndClose(actions::deleteWorktree, onClose)));
             }
             case OPEN -> {
@@ -89,11 +91,11 @@ final class FinishWorktreePanel extends VBox {
                         "View pull request on GitHub", url, "finish-action",
                         () -> actions.viewPullRequest(url))));
                 getChildren().add(action("Delete worktree & branch",
-                        "Hand off to Claude — remove the worktree and delete " + context.branch(),
+                        "Removes the worktree and deletes " + context.branch() + " directly",
                         "finish-action-destructive", () -> runAndClose(actions::deleteWorktree, onClose)));
             }
             case MERGED -> getChildren().add(action("Delete merged worktree & branch",
-                    "Hand off to Claude — the branch is merged; remove the worktree",
+                    "The branch is merged; removes the worktree directly",
                     "finish-action-destructive", () -> runAndClose(actions::deleteWorktree, onClose)));
         }
     }

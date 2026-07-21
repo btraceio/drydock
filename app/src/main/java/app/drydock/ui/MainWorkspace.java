@@ -204,7 +204,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
     public MainWorkspace(SessionManager sessionManager, RepositoryManager repositoryManager,
                           GitStatusService gitStatusService, SessionSearchService searchService,
-                          GhCliService ghCliService, DiffService diffService,
+                          GhCliService ghCliService, WorktreeService worktreeService, DiffService diffService,
                           ChangedLineService changedLineService, AnnotationStore annotationStore,
                           WorkspaceViewModel viewModel, Stage stage) {
         this.sessionManager = sessionManager;
@@ -218,7 +218,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         this.viewModel = viewModel;
         this.stage = stage;
         this.worktreeLifecycle = new WorktreeLifecycleController(sessionManager, gitStatusService,
-                ghCliService, openTabs::get, this::repositoryFor,
+                ghCliService, worktreeService, openTabs::get, this::repositoryFor,
                 this::publishSessions, this::noteSessionDeleted);
 
         getStyleClass().add("main-pane");

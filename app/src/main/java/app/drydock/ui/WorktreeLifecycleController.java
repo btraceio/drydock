@@ -10,6 +10,7 @@ import app.drydock.git.GitBranchState;
 import app.drydock.git.GitChangeSummary;
 import app.drydock.git.GitStatus;
 import app.drydock.git.GitStatusService;
+import app.drydock.git.WorktreeService;
 import javafx.animation.PauseTransition;
 import javafx.application.Platform;
 import javafx.geometry.Pos;
@@ -22,7 +23,6 @@ import javafx.util.Duration;
 import java.io.IOException;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
@@ -36,9 +36,12 @@ import java.util.function.Supplier;
  * from {@code MainWorkspace} (see docs/plans/workspace-split-design.md):
  * the worktree session header (context line, ↑ahead/dirty/PR chips), the
  * state-aware Finish panel with its pre-panel inspection and PR-state
- * reconciliation, and the three Claude hand-offs (merge / create PR /
- * delete worktree) with their {@code PauseTransition}-based confirmation
- * polling.
+ * reconciliation, and the three finish actions. Merge and delete run
+ * directly via {@link WorktreeService} -- trivial, deterministic git
+ * operations that don't need an agent in the loop; only "create PR" is
+ * still handed off to the Claude session in the terminal, with a
+ * {@code PauseTransition}-based confirmation poll since {@code gh pr
+ * create} needs the user's own gh auth.
  *
  * <p>Collaborators are injected: the services doing the actual git/gh
  * work, the modal layer the panels show through, and callbacks into the
@@ -58,6 +61,7 @@ final class WorktreeLifecycleController {
     private final SessionManager sessionManager;
     private final GitStatusService gitStatusService;
     private final GhCliService ghCliService;
+    private final WorktreeService worktreeService;
     /**
      * The workspace's open-tab lookup: non-null while the session's tab is
      * open, {@code null} once it closed -- the liveness guard every async
@@ -74,13 +78,14 @@ final class WorktreeLifecycleController {
     private ModalLayer modalLayer;
 
     WorktreeLifecycleController(SessionManager sessionManager, GitStatusService gitStatusService,
-                                GhCliService ghCliService,
+                                GhCliService ghCliService, WorktreeService worktreeService,
                                 Function<ManagedSessionId, OpenSessionTab> openTab,
                                 Function<ManagedClaudeSession, Optional<Repository>> repositoryFor,
                                 Runnable onSessionsChanged, Consumer<ManagedSessionId> onSessionDeleted) {
         this.sessionManager = sessionManager;
         this.gitStatusService = gitStatusService;
         this.ghCliService = ghCliService;
+        this.worktreeService = worktreeService;
         this.openTab = openTab;
         this.repositoryFor = repositoryFor;
         this.onSessionsChanged = onSessionsChanged;
@@ -255,7 +260,7 @@ final class WorktreeLifecycleController {
         return box;
     }
 
-    // ---- Hand-off: every action is executed by Claude in the terminal -------
+    // ---- Merge/delete run directly; only PR creation is a Claude hand-off ----
 
     private void handoffMerge(ManagedSessionId sessionId, Path worktreeRoot, String branch, String base) {
         OpenSessionTab tab = openTab.apply(sessionId);
@@ -263,19 +268,24 @@ final class WorktreeLifecycleController {
             return;
         }
         Repository repository = sessionById(sessionId).flatMap(repositoryFor).orElse(null);
-        String mainCheckout = repository == null ? "the main checkout" : repository.root().toString();
-        tab.showHandoffRunning("Claude is merging…");
-        tab.sendPrompt("Merge this worktree's branch '" + branch + "' into '" + base + "' in the main checkout at "
-                + mainCheckout + " (use git -C, merge with --no-ff, and resolve any merge conflicts yourself "
-                + "without asking me), then report the result briefly.");
-        pollHandoff(sessionId,
-                () -> gitStatusService.getChangeSummary(worktreeRoot, base)
-                        .thenApply(summary -> summary.commitsAhead() == 0),
-                () -> {
+        if (repository == null) {
+            return;
+        }
+        tab.showHandoffRunning("Merging…");
+        worktreeService.mergeIntoBase(repository.root(), branch)
+                .whenComplete((v, ex) -> Platform.runLater(() -> {
+                    if (openTab.apply(sessionId) == null) {
+                        return;
+                    }
+                    if (ex != null) {
+                        tab.restoreFinishButton();
+                        UiErrors.show("Could not merge '" + branch + "' into '" + base + "'", ex);
+                        return;
+                    }
                     tab.showHandoffDone("Merged");
                     refreshWorktreeChipsLater(sessionId, worktreeRoot, base);
                     restoreFinishLater(tab, sessionId);
-                });
+                }));
     }
 
     private void handoffCreatePr(ManagedSessionId sessionId, Path worktreeRoot, String branch) {
@@ -318,25 +328,29 @@ final class WorktreeLifecycleController {
             return;
         }
         Repository repository = sessionById(sessionId).flatMap(repositoryFor).orElse(null);
-        String mainCheckout = repository == null ? "the main checkout" : repository.root().toString();
-        tab.showHandoffRunning("Claude is cleaning up…");
-        tab.sendPrompt("Clean up this worktree: from the main checkout at " + mainCheckout
-                + " run git worktree remove " + worktreeRoot + " (add --force if it refuses) and delete the branch "
-                + "with git branch -D " + branch + ", then confirm.");
-        pollHandoff(sessionId,
-                // The existence probe is filesystem I/O; keep it off the FX
-                // thread (the poll's PauseTransition fires the probe there).
-                () -> CompletableFuture.supplyAsync(() -> !Files.exists(worktreeRoot)),
-                () -> {
+        if (repository == null) {
+            return;
+        }
+        tab.showHandoffRunning("Removing worktree…");
+        worktreeService.remove(repository.root(), worktreeRoot, Optional.of(branch))
+                .whenComplete((v, ex) -> Platform.runLater(() -> {
+                    if (openTab.apply(sessionId) == null) {
+                        return;
+                    }
+                    if (ex != null) {
+                        tab.restoreFinishButton();
+                        UiErrors.show("Could not remove the worktree", ex);
+                        return;
+                    }
                     tab.showHandoffDone("Removed");
                     PauseTransition removeRow = new PauseTransition(Duration.seconds(1.2));
                     removeRow.setOnFinished(e -> sessionManager.deleteSession(sessionId)
-                            .whenComplete((v, ex) -> Platform.runLater(() -> {
+                            .whenComplete((v2, ex2) -> Platform.runLater(() -> {
                                 onSessionDeleted.accept(sessionId);
                                 onSessionsChanged.run();
                             })));
                     removeRow.play();
-                });
+                }));
     }
 
     private void applyPrState(ManagedSessionId sessionId, PrState state, Optional<Integer> number) {
@@ -364,13 +378,6 @@ final class WorktreeLifecycleController {
             }
         });
         pause.play();
-    }
-
-    private void pollHandoff(ManagedSessionId sessionId, Supplier<CompletableFuture<Boolean>> probe,
-                             Runnable onConfirmed) {
-        pollHandoffStep(sessionId, () -> probe.get().thenApply(done ->
-                Boolean.TRUE.equals(done) ? Optional.of(Boolean.TRUE) : Optional.<Boolean>empty()),
-                ignored -> onConfirmed.run(), 0);
     }
 
     private <T> void pollHandoffResult(ManagedSessionId sessionId,
