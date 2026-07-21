@@ -1073,7 +1073,7 @@ Add the imports: `java.time.Duration`, `java.util.concurrent.Executors`, `java.u
 
 **Leave `area.setEditable(false);` exactly where it is** — `CodeArea` defaults to *editable*, so removing that line would make binary, oversized and mixed-terminator files typable. Eligible tabs are opted back in by `attachEditing` below.
 
-Add this in `openFile`'s `Platform.runLater` block, after `tab.getProperties().put("drydock.content", content);`:
+Add this in `openFile`'s `Platform.runLater` block, immediately before `replaceTextQuietly(tab, area, text);`:
 
 ```java
                 if (content.editable()) {
