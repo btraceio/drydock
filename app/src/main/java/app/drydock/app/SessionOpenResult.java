@@ -2,7 +2,7 @@ package app.drydock.app;
 
 import app.drydock.domain.ManagedClaudeSession;
 import app.drydock.domain.ManagedSessionId;
-import app.drydock.terminal.ghostty.GhosttySurface;
+import app.drydock.terminal.api.TerminalSurface;
 
 /**
  * Outcome of {@link SessionManager#createSession} / {@link
@@ -14,7 +14,7 @@ import app.drydock.terminal.ghostty.GhosttySurface;
  * differently to each:
  *
  * <ul>
- *   <li>{@link Opened} -- a new {@code GhosttySurface} was created and is
+ *   <li>{@link Opened} -- a new {@code TerminalSurface} was created and is
  *       running; show it in a new tab.</li>
  *   <li>{@link AlreadyOpen} -- plan section 11.3: focus {@link
  *       #activeSurface()}'s existing tab instead of opening a second one.</li>
@@ -34,11 +34,11 @@ public sealed interface SessionOpenResult {
 
     ManagedClaudeSession session();
 
-    record Opened(ManagedClaudeSession session, GhosttySurface surface) implements SessionOpenResult {
+    record Opened(ManagedClaudeSession session, TerminalSurface surface) implements SessionOpenResult {
     }
 
     record AlreadyOpen(ManagedClaudeSession session, ManagedSessionId activeSessionId,
-                        GhosttySurface activeSurface) implements SessionOpenResult {
+                        TerminalSurface activeSurface) implements SessionOpenResult {
     }
 
     record MissingWorkingDirectory(ManagedClaudeSession session) implements SessionOpenResult {

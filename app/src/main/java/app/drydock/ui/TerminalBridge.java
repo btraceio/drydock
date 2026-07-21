@@ -2,14 +2,9 @@ package app.drydock.ui;
 
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.terminal.api.Shortcut;
-import app.drydock.terminal.ghostty.GhosttyApp;
-import app.drydock.terminal.ghostty.GhosttyKeyTranslator;
-import app.drydock.terminal.ghostty.GhosttyKeyTranslator.AppShortcut;
-import app.drydock.terminal.ghostty.GhosttyKeyTranslator.ForwardKey;
-import app.drydock.terminal.ghostty.GhosttyKeyTranslator.Ignore;
-import app.drydock.terminal.ghostty.GhosttyKeyTranslator.TypeCharacters;
-import app.drydock.terminal.ghostty.GhosttySurface;
-import app.drydock.terminal.host.DrydockTerminalHost;
+import app.drydock.terminal.api.TerminalHostView;
+import app.drydock.terminal.api.TerminalRuntime;
+import app.drydock.terminal.api.TerminalSurface;
 import javafx.application.Platform;
 import javafx.geometry.Bounds;
 import javafx.scene.layout.Region;
@@ -23,27 +18,26 @@ import java.util.function.Supplier;
 /**
  * The native-terminal side of one session tab (extracted from {@code
  * OpenSessionTab} -- see docs/plans/workspace-split-design.md): owns the
- * tab's {@link GhosttyApp} + {@link DrydockTerminalHost} pair and its attached
- * {@link GhosttySurface}, and everything that talks to them -- key/mouse/
- * scroll forwarding, geometry sync, focus, visibility, theming, prompt
- * typing, tick/draw, and disposal. {@code OpenSessionTab} keeps the JavaFX
- * chrome and delegates here.
+ * tab's {@link TerminalRuntime} + {@link TerminalHostView} pair and its
+ * attached {@link TerminalSurface}, and everything that talks to them --
+ * key/mouse/scroll forwarding, geometry sync, focus, visibility, theming,
+ * prompt typing, tick/draw, and disposal. {@code OpenSessionTab} keeps the
+ * JavaFX chrome and delegates here.
  *
- * <p>Ghostty does not render into the JavaFX scene graph: {@link
- * DrydockTerminalHost} attaches a real AppKit {@code NSView} as a sibling
- * overlay on the current window's content view, positioned in that
- * window's own pixel coordinate space via {@link DrydockTerminalHost#setFrame}.
- * The {@code anchor} node is an otherwise-empty pane used purely as a
- * JavaFX layout marker: its on-screen bounds (via {@link
- * javafx.scene.Node#localToScene}) tell this class where to move the
+ * <p>The terminal does not render into the JavaFX scene graph: the host
+ * view is a real native overlay on the current window's content view,
+ * positioned in that window's own pixel coordinate space via {@link
+ * TerminalHostView#setFrame}. The {@code anchor} node is an otherwise-empty
+ * pane used purely as a JavaFX layout marker: its on-screen bounds (via
+ * {@link javafx.scene.Node#localToScene}) tell this class where to move the
  * native view so it visually tracks the tab's content area as the window
  * resizes, the sidebar divider moves, etc.</p>
  *
  * <p>Key classification (app-shortcut interception, special-key vs
- * typed-character split, unshifted-codepoint policy) is delegated to the
- * unit-tested {@link GhosttyKeyTranslator}; this class only performs the
- * effects, so it stays a thin layer over the (native-backed, and therefore
- * not unit-constructible) app/host/surface trio.</p>
+ * typed-character split, unshifted-codepoint policy) lives behind {@link
+ * TerminalSurface#dispatchKeyEvent}; this class only routes raw events, so
+ * it stays a thin layer over the (native-backed, and therefore not
+ * unit-constructible) runtime/host/surface trio.</p>
  */
 final class TerminalBridge {
 
@@ -52,8 +46,8 @@ final class TerminalBridge {
     /** Diagnostic: -Dapp.drydock.diag.logKeys=true logs every raw AppKit key event reaching this tab. */
     private static final boolean LOG_KEYS = Boolean.getBoolean("app.drydock.diag.logKeys");
 
-    private final GhosttyApp app;
-    private final DrydockTerminalHost host;
+    private final TerminalRuntime app;
+    private final TerminalHostView host;
     /** The JavaFX layout anchor whose scene bounds position the native view (owned by the tab's chrome). */
     private final Region anchor;
     /** The window's output scale ({@code Stage#getOutputScaleX}; 2.0 on Retina). */
@@ -63,7 +57,7 @@ final class TerminalBridge {
     /** Performs an intercepted app shortcut (wired to the tab's sub-tab/cycling/sidebar handlers). */
     private final Consumer<Shortcut> shortcutHandler;
 
-    private GhosttySurface surface;
+    private TerminalSurface surface;
     private boolean disposed;
     private boolean surfaceClosing;
     /** Whether MainWorkspace wants this tab's terminal shown (selected tab, no modal). */
@@ -71,7 +65,7 @@ final class TerminalBridge {
     /** Whether the tab's Terminal sub-tab is the active one (the Explorer/Review replace the terminal region). */
     private boolean terminalSubTabActive = true;
 
-    TerminalBridge(GhosttyApp app, DrydockTerminalHost host, Region anchor, DoubleSupplier outputScale,
+    TerminalBridge(TerminalRuntime app, TerminalHostView host, Region anchor, DoubleSupplier outputScale,
                    Supplier<ManagedSessionId> sessionId, Consumer<Shortcut> shortcutHandler) {
         this.app = app;
         this.host = host;
@@ -81,16 +75,16 @@ final class TerminalBridge {
         this.shortcutHandler = shortcutHandler;
     }
 
-    GhosttyApp app() {
+    TerminalRuntime app() {
         return app;
     }
 
-    DrydockTerminalHost host() {
+    TerminalHostView host() {
         return host;
     }
 
     /**
-     * Adopts the now-running {@link GhosttySurface}. Deliberately does NOT
+     * Adopts the now-running {@link TerminalSurface}. Deliberately does NOT
      * draw yet: the native host view is still hidden at this point (it only
      * becomes visible via a subsequent {@link #setWorkspaceVisible(boolean)}
      * call from {@code MainWorkspace.attachOpenedSession}), and drawing into
@@ -106,7 +100,7 @@ final class TerminalBridge {
      * label removal can fire a synchronous geometry update, which must see
      * the surface but need not see the input listeners).</p>
      */
-    void adoptSurface(GhosttySurface surface) {
+    void adoptSurface(TerminalSurface surface) {
         this.surface = surface;
     }
 
@@ -124,7 +118,7 @@ final class TerminalBridge {
             return;
         }
         try {
-            surface.sendMousePos(x, y, GhosttyKeyTranslator.translateModifiers(modifierFlags));
+            surface.sendMousePos(x, y, modifierFlags);
         } catch (IllegalStateException e) {
             // Surface closed in the teardown gap; see tickAndDraw's identical catch.
         }
@@ -143,7 +137,7 @@ final class TerminalBridge {
             focus();
         }
         try {
-            surface.sendMouseButton(state, button, GhosttyKeyTranslator.translateModifiers(modifierFlags));
+            surface.sendMouseButton(state, button, modifierFlags);
         } catch (IllegalStateException e) {
             // Surface closed in the teardown gap; see tickAndDraw's identical catch.
         }
@@ -182,13 +176,13 @@ final class TerminalBridge {
     }
 
     /**
-     * Translates a raw AppKit key event into ghostty calls, matching the
-     * corrected approach documented on {@link GhosttySurface#sendCharKey}
-     * (per-character typing goes through the real keyboard codepath, not
-     * {@link GhosttySurface#sendText}, which is paste semantics and
-     * corrupts input once a foreground program enables bracketed paste) --
-     * see that method's Javadoc and docs/claude-integration.md for the
-     * history of that finding.
+     * Routes a raw AppKit key event to the surface, which classifies and
+     * performs it ({@link TerminalSurface#dispatchKeyEvent}); an intercepted
+     * app shortcut comes back as a neutral {@link Shortcut} and runs here.
+     * App shortcuts are intercepted at this layer because while the terminal
+     * is focused its native NSEvent monitor sees every key BEFORE JavaFX's
+     * scene filter -- they must switch views instead of being typed into
+     * claude.
      */
     private void onKeyEvent(int keyCode, int modifierFlags, boolean keyDown, String characters,
                              String unshiftedCharacters) {
@@ -200,26 +194,8 @@ final class TerminalBridge {
         if (disposed || surface == null) {
             return;
         }
-        // The classification policy (app-shortcut interception, special-key
-        // vs typed-character split, unshifted-codepoint rule) lives in
-        // GhosttyKeyTranslator; this method only performs the effects.
-        switch (GhosttyKeyTranslator.translate(keyCode, modifierFlags, keyDown, characters, unshiftedCharacters)) {
-            case AppShortcut(Shortcut shortcut, boolean down) -> {
-                // App shortcuts are intercepted here because while the
-                // terminal is focused its native NSEvent monitor sees every
-                // key BEFORE JavaFX's scene filter -- they must switch views
-                // instead of being typed into claude. Both edges are
-                // swallowed; the action runs on key-down only.
-                if (down) {
-                    shortcutHandler.accept(shortcut);
-                }
-            }
-            case ForwardKey(int code, int mods, boolean down, int unshiftedCodepoint) ->
-                    surface.sendKey(code, mods, down, unshiftedCodepoint);
-            case TypeCharacters(String typed, int mods) ->
-                    typed.codePoints().forEach(cp -> surface.sendCharKey(cp, mods));
-            case Ignore ignored -> { }
-        }
+        surface.dispatchKeyEvent(keyCode, modifierFlags, keyDown, characters, unshiftedCharacters)
+               .ifPresent(shortcutHandler);
     }
 
     private static String toCodepoints(String s) {
@@ -231,7 +207,7 @@ final class TerminalBridge {
         return sb.toString().trim();
     }
 
-    /** Calls {@code ghostty_app_tick} + draw; bound to this tab's own {@code GhosttyApp}'s wakeup callback. */
+    /** Pumps the runtime and draws; bound to this tab's own runtime's wakeup callback. */
     void tickAndDraw() {
         if (disposed || surfaceClosing) {
             return;
@@ -291,22 +267,18 @@ final class TerminalBridge {
 
     /**
      * Types {@code instruction} into the live claude process as real
-     * keystrokes, then submits it with Return. Uses {@link
-     * GhosttySurface#sendTypedText} (the per-codepoint keyboard codepath),
-     * NOT {@link GhosttySurface#sendText} -- paste semantics corrupt input
-     * once claude enables bracketed paste (see onKeyEvent's Javadoc). The
-     * instruction must be a single line: an embedded newline would submit
-     * early.
+     * keystrokes, then submits it with Return ({@link
+     * TerminalSurface#submitLine} -- the per-codepoint keyboard codepath,
+     * not paste semantics, which corrupt input once claude enables
+     * bracketed paste). The instruction must be a single line: an embedded
+     * newline would submit early.
      */
     void sendPrompt(String instruction) {
         if (disposed || surfaceClosing || surface == null) {
             return;
         }
         try {
-            surface.sendTypedText(instruction);
-            // Return keypress (raw macOS keycode; see GhosttyKeyTranslator).
-            surface.sendKey(GhosttyKeyTranslator.KEY_RETURN, 0, true, 0);
-            surface.sendKey(GhosttyKeyTranslator.KEY_RETURN, 0, false, 0);
+            surface.submitLine(instruction);
         } catch (IllegalStateException e) {
             // Surface closed in the teardown gap; see tickAndDraw's identical catch.
         }
@@ -416,8 +388,8 @@ final class TerminalBridge {
      * SessionManager}'s {@code closeGracefully} has (in the closing case)
      * already closed by this point. Distinct from {@link #disposed} (which
      * {@link #disposeNativeResources()} uses for its own idempotency) so
-     * that flag isn't set before this tab's {@code GhosttyApp}/{@code
-     * DrydockTerminalHost} are actually closed.
+     * that flag isn't set before this tab's runtime/host are actually
+     * closed.
      */
     void markSurfaceClosing() {
         surfaceClosing = true;
@@ -425,9 +397,9 @@ final class TerminalBridge {
 
     /**
      * Frees this tab's native resources. Must be called only after the
-     * session's {@link GhosttySurface} is already confirmed closed (e.g.
+     * session's {@link TerminalSurface} is already confirmed closed (e.g.
      * via {@code SessionManager#closeSession}, which uses {@code
-     * GhosttySurface#closeGracefully} internally) -- never call this to
+     * TerminalSurface#closeGracefully} internally) -- never call this to
      * bypass that graceful shutdown.
      */
     void disposeNativeResources() {
@@ -439,12 +411,12 @@ final class TerminalBridge {
         try {
             host.close();
         } catch (RuntimeException e) {
-            LOG.log(Logger.Level.WARNING, "Failed to close DrydockTerminalHost for session " + sessionId.get(), e);
+            LOG.log(Logger.Level.WARNING, "Failed to close terminal host for session " + sessionId.get(), e);
         }
         try {
             app.close();
         } catch (RuntimeException e) {
-            LOG.log(Logger.Level.WARNING, "Failed to close GhosttyApp for session " + sessionId.get(), e);
+            LOG.log(Logger.Level.WARNING, "Failed to close terminal runtime for session " + sessionId.get(), e);
         }
     }
 }

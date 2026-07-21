@@ -5,10 +5,10 @@ import app.drydock.domain.PrState;
 import app.drydock.domain.Repository;
 import app.drydock.domain.SessionStatus;
 import app.drydock.terminal.api.Shortcut;
-import app.drydock.terminal.ghostty.GhosttyApp;
-import app.drydock.terminal.ghostty.GhosttySurface;
+import app.drydock.terminal.api.TerminalHostView;
+import app.drydock.terminal.api.TerminalRuntime;
+import app.drydock.terminal.api.TerminalSurface;
 import app.drydock.ui.explorer.SessionExplorerView;
-import app.drydock.terminal.host.DrydockTerminalHost;
 import javafx.animation.PauseTransition;
 import javafx.application.Platform;
 import javafx.geometry.Pos;
@@ -38,7 +38,7 @@ import java.util.function.Supplier;
 /**
  * One open terminal tab (plan section 13): the tab's JavaFX chrome and
  * sub-tab hosting. The native-terminal side -- the tab's own {@link
- * GhosttyApp} + {@link DrydockTerminalHost} + {@link GhosttySurface} trio and
+ * TerminalRuntime} + {@link TerminalHostView} + {@link TerminalSurface} trio and
  * everything that talks to it (input forwarding, geometry sync, focus,
  * visibility, disposal) -- lives in this tab's {@link TerminalBridge},
  * to which the methods below delegate (per Gate 0C/0D/0E's established
@@ -133,7 +133,7 @@ final class OpenSessionTab {
     private String displayName;
 
     OpenSessionTab(ManagedSessionId sessionId, String displayName, Optional<Repository> repository,
-                   Stage stage, GhosttyApp app, DrydockTerminalHost host) {
+                   Stage stage, TerminalRuntime app, TerminalHostView host) {
         this.sessionId = sessionId;
         this.displayName = displayName;
         this.bridge = new TerminalBridge(app, host, placeholder, stage::getOutputScaleX,
@@ -617,13 +617,13 @@ final class OpenSessionTab {
     }
 
     /**
-     * Attaches the now-running {@link GhosttySurface} and starts forwarding
+     * Attaches the now-running {@link TerminalSurface} and starts forwarding
      * keyboard input to it (see {@link TerminalBridge#adoptSurface}'s
      * Javadoc for why nothing is drawn yet). The "Starting session..."
      * label is removed between surface adoption and input wiring,
      * preserving the original statement order.
      */
-    void attachSurface(GhosttySurface surface) {
+    void attachSurface(TerminalSurface surface) {
         bridge.adoptSurface(surface);
         placeholder.getChildren().remove(statusLabel);
         bridge.wireInputListeners();
@@ -634,11 +634,11 @@ final class OpenSessionTab {
         bridge.diagScroll(deltaY);
     }
 
-    GhosttyApp app() {
+    TerminalRuntime app() {
         return bridge.app();
     }
 
-    DrydockTerminalHost host() {
+    TerminalHostView host() {
         return bridge.host();
     }
 
@@ -651,7 +651,7 @@ final class OpenSessionTab {
         bridge.markSurfaceClosing();
     }
 
-    /** Calls {@code ghostty_app_tick} + draw; bound to this tab's own {@code GhosttyApp}'s wakeup callback. */
+    /** Pumps the runtime and draws; bound to this tab's own runtime's wakeup callback. */
     void tickAndDraw() {
         bridge.tickAndDraw();
     }
@@ -699,7 +699,7 @@ final class OpenSessionTab {
 
     /**
      * Frees this tab's native resources. Must be called only after the
-     * session's {@link GhosttySurface} is already confirmed closed; see
+     * session's {@link TerminalSurface} is already confirmed closed; see
      * {@link TerminalBridge#disposeNativeResources}.
      */
     void disposeNativeResources() {

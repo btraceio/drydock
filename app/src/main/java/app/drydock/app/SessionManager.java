@@ -10,9 +10,10 @@ import app.drydock.domain.PrState;
 import app.drydock.domain.Repository;
 import app.drydock.domain.SessionStatus;
 import app.drydock.state.ApplicationStateRepository;
-import app.drydock.terminal.ghostty.GhosttyApp;
-import app.drydock.terminal.ghostty.GhosttySurface;
-import app.drydock.terminal.host.DrydockTerminalHost;
+import app.drydock.terminal.api.TerminalHostView;
+import app.drydock.terminal.api.TerminalRuntime;
+import app.drydock.terminal.api.TerminalSpec;
+import app.drydock.terminal.api.TerminalSurface;
 import javafx.application.Platform;
 
 import java.lang.System.Logger;
@@ -37,23 +38,23 @@ import java.util.function.UnaryOperator;
  * Orchestrates creating and resuming {@link ManagedClaudeSession}s (plan
  * section 11): generates/persists session metadata via {@link
  * ApplicationStateRepository}, launches the real {@code claude} CLI inside a
- * {@link GhosttySurface}, enforces duplicate-open protection (plan section
+ * {@link TerminalSurface}, enforces duplicate-open protection (plan section
  * 11.3), and closes sessions using {@link
- * GhosttySurface#closeGracefully(long, long, Runnable)}.
+ * TerminalSurface#closeGracefully(long, long, Runnable)}.
  *
  * <p><b>Threading (plan section 18):</b> {@link #createSession} and {@link
  * #resumeSession} do their slow work -- {@link ClaudeCapabilityService}
  * detection and persistence I/O -- on a background executor, and only touch
- * {@link GhosttySurface}/{@link GhosttyApp}/{@link DrydockTerminalHost} via
- * {@link Platform#runLater}, per {@link DrydockTerminalHost}'s own documented
+ * {@link TerminalSurface}/{@link TerminalRuntime}/{@link TerminalHostView} via
+ * {@link Platform#runLater}, per {@link TerminalHostView}'s own documented
  * "JavaFX Application Thread only" constraint. Callers get back a {@link
  * CompletableFuture}; if the caller needs to touch UI with the result, it is
  * the caller's responsibility to hop back onto the FX thread (this class
  * does not assume the completion thread is the FX thread for anything
- * except the {@link GhosttySurface} calls it makes itself).</p>
+ * except the {@link TerminalSurface} calls it makes itself).</p>
  *
  * <p><b>Deviation from a literal reading of plan section 21</b> ("argument
- * list, never a shell string"): {@link GhosttySurface#create} (Phase 0's
+ * list, never a shell string"): {@code TerminalRuntime#openSurface} (Phase 0's
  * already-fixed, narrow terminal API -- not modified here) only accepts a
  * single shell command string, which libghostty always runs via {@code
  * /bin/sh -c "<command>"}. There is no argument-list overload to call
@@ -63,7 +64,7 @@ import java.util.function.UnaryOperator;
  * placed into it (display name, Claude session id/name) is quoted so it
  * cannot be interpreted as additional shell syntax. Likewise, plan section
  * 11.1's "add only application-specific environment variables that are
- * strictly necessary" is not implemented: {@code GhosttySurface.create} has
+ * strictly necessary" is not implemented: {@code TerminalRuntime.openSurface} has
  * no environment-map parameter at all, so the spawned {@code claude}
  * process's environment is simply whatever the embedded shell inherits from
  * this application's own process (which does satisfy "inherit the
@@ -105,7 +106,7 @@ public final class SessionManager implements AutoCloseable {
     private volatile Optional<Path> activitySettings = Optional.empty();
 
     private final ActiveSessionRegistry activeRegistry = new ActiveSessionRegistry();
-    private final Map<ManagedSessionId, GhosttySurface> activeSurfaces = new ConcurrentHashMap<>();
+    private final Map<ManagedSessionId, TerminalSurface> activeSurfaces = new ConcurrentHashMap<>();
 
     public SessionManager(ApplicationStateRepository stateRepository, ClaudeCapabilityService capabilityService) {
         this(stateRepository, capabilityService, Executors.newVirtualThreadPerTaskExecutor(), true);
@@ -171,8 +172,8 @@ public final class SessionManager implements AutoCloseable {
     // ---- 11.1 Create a new session ----------------------------------------
 
     /** Creates a new session with a generated default display name (plan section 11.1). */
-    public CompletableFuture<SessionOpenResult> createSession(Repository repository, GhosttyApp app,
-                                                               DrydockTerminalHost host, double scaleFactor) {
+    public CompletableFuture<SessionOpenResult> createSession(Repository repository, TerminalRuntime app,
+                                                               TerminalHostView host, double scaleFactor) {
         return createSession(repository, defaultDisplayName(repository), app, host, scaleFactor);
     }
 
@@ -195,8 +196,8 @@ public final class SessionManager implements AutoCloseable {
     }
 
     /** Launches a session minted by {@link #prepareSession}/{@link #prepareWorktreeSession}. */
-    public CompletableFuture<SessionOpenResult> launchSession(ManagedClaudeSession prepared, GhosttyApp app,
-                                                              DrydockTerminalHost host, double scaleFactor) {
+    public CompletableFuture<SessionOpenResult> launchSession(ManagedClaudeSession prepared, TerminalRuntime app,
+                                                              TerminalHostView host, double scaleFactor) {
         return launchNewSession(prepared, prepared.displayName(), app, host, scaleFactor);
     }
 
@@ -207,7 +208,7 @@ public final class SessionManager implements AutoCloseable {
      * step does not itself provide UI for).
      */
     public CompletableFuture<SessionOpenResult> createSession(Repository repository, String displayName,
-                                                               GhosttyApp app, DrydockTerminalHost host,
+                                                               TerminalRuntime app, TerminalHostView host,
                                                                double scaleFactor) {
         return launchNewSession(newSessionMetadata(repository, displayName), displayName, app, host, scaleFactor);
     }
@@ -220,14 +221,14 @@ public final class SessionManager implements AutoCloseable {
      * caller's job, via {@link app.drydock.git.GitStatusService#createWorktree}.
      */
     public CompletableFuture<SessionOpenResult> createWorktreeSession(Repository repository, String displayName,
-                                                                       Path worktreeRoot, GhosttyApp app,
-                                                                       DrydockTerminalHost host, double scaleFactor) {
+                                                                       Path worktreeRoot, TerminalRuntime app,
+                                                                       TerminalHostView host, double scaleFactor) {
         ManagedClaudeSession initial = newSessionMetadata(repository, displayName, Optional.of(worktreeRoot));
         return launchNewSession(initial, displayName, app, host, scaleFactor);
     }
 
     private CompletableFuture<SessionOpenResult> launchNewSession(ManagedClaudeSession initial, String displayName,
-                                                                  GhosttyApp app, DrydockTerminalHost host,
+                                                                  TerminalRuntime app, TerminalHostView host,
                                                                   double scaleFactor) {
         // Generated up front so this app -- not claude -- decides the Claude
         // session id: launching with `claude --session-id '<uuid>'` (when the
@@ -258,7 +259,7 @@ public final class SessionManager implements AutoCloseable {
     /** The launch command plus whether it actually carries the pre-generated {@code --session-id}. */
     private record CreatePlan(String command, boolean sessionIdUsed) { }
 
-    private record CreateLaunch(CreatePlan plan, GhosttySurface surface) { }
+    private record CreateLaunch(CreatePlan plan, TerminalSurface surface) { }
 
     private SessionOpenResult finalizeCreate(ManagedClaudeSession initial, String claudeSessionId,
                                               CreateLaunch launch, Throwable ex) {
@@ -298,8 +299,8 @@ public final class SessionManager implements AutoCloseable {
      * the session's stored working directory; never silently substitutes a
      * different one (see {@link #reassignWorkingDirectory}).
      */
-    public CompletableFuture<SessionOpenResult> resumeSession(ManagedSessionId sessionId, GhosttyApp app,
-                                                               DrydockTerminalHost host, double scaleFactor) {
+    public CompletableFuture<SessionOpenResult> resumeSession(ManagedSessionId sessionId, TerminalRuntime app,
+                                                               TerminalHostView host, double scaleFactor) {
         // checkResumeBlocked touches the filesystem (working-directory and
         // transcript existence probes, potentially persistence) -- run it on
         // the background executor, never the calling (FX) thread.
@@ -333,7 +334,7 @@ public final class SessionManager implements AutoCloseable {
                 });
     }
 
-    private SessionOpenResult finalizeResume(ManagedClaudeSession session, GhosttySurface surface, Throwable ex) {
+    private SessionOpenResult finalizeResume(ManagedClaudeSession session, TerminalSurface surface, Throwable ex) {
         if (ex != null) {
             Throwable cause = unwrap(ex);
             LOG.log(Level.WARNING, () -> "Failed to resume session " + session.id() + ": " + cause.getMessage());
@@ -372,7 +373,7 @@ public final class SessionManager implements AutoCloseable {
         if (claudeSessionId.isPresent()) {
             Optional<ManagedSessionId> active = activeRegistry.activeSessionId(claudeSessionId.get());
             if (active.isPresent() && !active.get().equals(sessionId)) {
-                GhosttySurface activeSurface = activeSurfaces.get(active.get());
+                TerminalSurface activeSurface = activeSurfaces.get(active.get());
                 if (activeSurface != null) {
                     return Optional.of(new SessionOpenResult.AlreadyOpen(session, active.get(), activeSurface));
                 }
@@ -408,8 +409,8 @@ public final class SessionManager implements AutoCloseable {
      * managed session row is kept, its stale Claude session id replaced by
      * a freshly pinned one.
      */
-    public CompletableFuture<SessionOpenResult> startFreshConversation(ManagedSessionId sessionId, GhosttyApp app,
-                                                                        DrydockTerminalHost host, double scaleFactor) {
+    public CompletableFuture<SessionOpenResult> startFreshConversation(ManagedSessionId sessionId, TerminalRuntime app,
+                                                                        TerminalHostView host, double scaleFactor) {
         String claudeSessionId = UUID.randomUUID().toString();
         // The stale-id clear persists to disk; keep it off the (FX) caller thread.
         return CompletableFuture.supplyAsync(() -> {
@@ -503,19 +504,19 @@ public final class SessionManager implements AutoCloseable {
 
     /**
      * Closes a session's active surface via {@link
-     * GhosttySurface#closeGracefully(long, long, Runnable)} -- never {@link
-     * GhosttySurface#close()} directly, per the documented live-child-process
+     * TerminalSurface#closeGracefully(long, long, Runnable)} -- never {@link
+     * TerminalSurface#close()} directly, per the documented live-child-process
      * crash risk -- and updates the persisted session's status/lastOpenedAt
      * afterward. A no-op (completes immediately) if the session has no
      * active surface.
      *
      * <p>{@code lastExitCode} is deliberately left unchanged: {@link
-     * GhosttySurface} exposes only {@link GhosttySurface#processExited()}
+     * TerminalSurface} exposes only {@link TerminalSurface#processExited()}
      * (a boolean), not an actual exit code, so there is nothing more precise
      * to persist here.</p>
      */
     public CompletableFuture<Void> closeSession(ManagedSessionId sessionId, long gracePeriodMillis, long pollIntervalMillis) {
-        GhosttySurface surface = activeSurfaces.get(sessionId);
+        TerminalSurface surface = activeSurfaces.get(sessionId);
         if (surface == null) {
             return CompletableFuture.completedFuture(null);
         }
@@ -529,7 +530,7 @@ public final class SessionManager implements AutoCloseable {
 
     /**
      * Records that a session's child process exited on its own (detected by
-     * the UI polling {@link GhosttySurface#processExited()}), without
+     * the UI polling {@link TerminalSurface#processExited()}), without
      * closing the surface -- the terminal stays open so the user can read
      * the final output. Only a {@link SessionStatus#RUNNING} session is
      * updated (idempotent; racing with {@link #closeSession}'s own EXITED
@@ -555,7 +556,7 @@ public final class SessionManager implements AutoCloseable {
         return Optional.ofNullable(result[0]);
     }
 
-    private void onSurfaceClosed(ManagedSessionId sessionId, GhosttySurface surface) {
+    private void onSurfaceClosed(ManagedSessionId sessionId, TerminalSurface surface) {
         activeSurfaces.remove(sessionId, surface);
         findSession(sessionId).ifPresent(session -> {
             session.claudeSessionId().ifPresent(activeRegistry::release);
@@ -664,13 +665,13 @@ public final class SessionManager implements AutoCloseable {
 
     // ---- Helpers ------------------------------------------------------------
 
-    private CompletableFuture<GhosttySurface> createSurfaceOnFxThread(GhosttyApp app, DrydockTerminalHost host,
+    private CompletableFuture<TerminalSurface> createSurfaceOnFxThread(TerminalRuntime app, TerminalHostView host,
                                                                        double scaleFactor, String command,
                                                                        String workingDirectory) {
-        CompletableFuture<GhosttySurface> future = new CompletableFuture<>();
+        CompletableFuture<TerminalSurface> future = new CompletableFuture<>();
         Platform.runLater(() -> {
             try {
-                future.complete(GhosttySurface.create(app, host, scaleFactor, command, workingDirectory));
+                future.complete(app.openSurface(host, scaleFactor, new TerminalSpec(command, workingDirectory)));
             } catch (Throwable t) {
                 future.completeExceptionally(t);
             }

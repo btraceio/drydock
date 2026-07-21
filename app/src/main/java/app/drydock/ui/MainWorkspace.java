@@ -24,9 +24,9 @@ import app.drydock.ui.explorer.DiffOverlay;
 import app.drydock.ui.explorer.SessionExplorerView;
 import app.drydock.ui.review.ReviewView;
 import app.drydock.ui.model.WorkspaceViewModel;
-import app.drydock.terminal.ghostty.GhosttyApp;
-import app.drydock.terminal.ghostty.GhosttyNativeLibrary;
-import app.drydock.terminal.host.DrydockTerminalHost;
+import app.drydock.terminal.TerminalFactory;
+import app.drydock.terminal.api.TerminalHostView;
+import app.drydock.terminal.api.TerminalRuntime;
 import javafx.animation.Animation;
 import javafx.animation.KeyFrame;
 import javafx.animation.PauseTransition;
@@ -82,7 +82,7 @@ import java.util.function.Supplier;
  * SessionManager#resumeSession}, {@link SessionManager#closeSession} --
  * which is what actually launches/kills the {@code claude} process and
  * persists session metadata. This class never calls {@code
- * GhosttySurface#close()} directly and never bypasses {@code
+ * TerminalSurface#close()} directly and never bypasses {@code
  * closeGracefully} (plan section 9's documented live-child-process crash
  * risk).</p>
  */
@@ -797,7 +797,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
     // ---- Closing --------------------------------------------------------------
 
-    /** Closes one session's tab via {@link SessionManager#closeSession} (never {@code GhosttySurface#close()} directly). */
+    /** Closes one session's tab via {@link SessionManager#closeSession} (never {@code TerminalSurface#close()} directly). */
     @Override
     public CompletableFuture<Void> closeSession(ManagedSessionId sessionId) {
         OpenSessionTab open = openTabs.get(sessionId);
@@ -1036,7 +1036,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * must go through here: an unregistered placeholder is invisible to
      * {@link #hasOpenSessions()}, {@link #closeSession} and -- critically --
      * the shutdown path {@link #closeAllSessions()}, leaking its native
-     * {@link GhosttyApp}/{@link DrydockTerminalHost} pair.
+     * runtime/host pair.
      * {@link #attachOpenedSession}/{@link #removeTab} de-register it.
      */
     private OpenSessionTab showPendingTab(ManagedSessionId sessionId, String displayName,
@@ -1048,32 +1048,30 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     }
 
     /**
-     * Creates one tab's {@link GhosttyApp} + {@link DrydockTerminalHost} pair
-     * (still without a surface -- {@link SessionManager} attaches that) and
-     * wraps them in a fresh {@link OpenSessionTab}, per Gate 0C/0D/0E's
-     * one-{@code GhosttyApp}-per-window/view pattern, one instance per tab
-     * here. The wakeup callback is bound to the {@link OpenSessionTab}
-     * itself via a one-element holder, since {@code ghostty_app_new}
-     * requires the callback up front, before the {@link OpenSessionTab} it
-     * needs to call back into can exist.
+     * Creates one tab's {@link TerminalRuntime} + {@link TerminalHostView}
+     * pair (still without a surface -- {@link SessionManager} attaches that)
+     * and wraps them in a fresh {@link OpenSessionTab}, per Gate 0C/0D/0E's
+     * one-runtime-per-window/view pattern, one instance per tab here. The
+     * wakeup callback is bound to the {@link OpenSessionTab} itself via a
+     * one-element holder, since the runtime requires the callback up front,
+     * before the {@link OpenSessionTab} it needs to call back into can exist.
      */
     private OpenSessionTab createOpenSessionTab(ManagedSessionId sessionId, String displayName,
                                                  Optional<Repository> repository, Path searchRoot) {
-        var lookup = GhosttyNativeLibrary.lookup();
-        GhosttyApp.ensureProcessInitialized(lookup);
+        TerminalFactory.ensureProcessInitialized();
 
         OpenSessionTab[] holder = new OpenSessionTab[1];
         // The wakeup coalescer already delivers on the FX thread with at most
         // one pending runnable; a second Platform.runLater here would defeat
         // that coalescing.
-        GhosttyApp app = GhosttyApp.create(lookup, () -> {
+        TerminalRuntime app = TerminalFactory.createRuntime(() -> {
             if (holder[0] != null) {
                 holder[0].tickAndDraw();
             }
         }, Optional.of(TerminalThemes.configFileFor(themeProvider.get())));
-        DrydockTerminalHost host;
+        TerminalHostView host;
         try {
-            host = DrydockTerminalHost.createForCurrentWindow();
+            host = TerminalFactory.createHostForCurrentWindow();
         } catch (RuntimeException e) {
             app.close();
             throw e;

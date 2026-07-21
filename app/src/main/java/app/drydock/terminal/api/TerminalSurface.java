@@ -40,6 +40,9 @@ public interface TerminalSurface extends AutoCloseable {
     /** Forwards a scroll event; {@code scrollMods} is the pre-packed value from the host. */
     void sendMouseScroll(double deltaX, double deltaY, int scrollMods);
 
+    /** Applies {@code runtime}'s current config to this live surface (call after {@link TerminalRuntime#updateConfig}). */
+    void applyConfig(TerminalRuntime runtime);
+
     String readScreenText();
 
     boolean processExited();

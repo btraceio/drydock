@@ -268,6 +268,7 @@ public final class GhosttySurface implements TerminalSurface, AutoCloseable {
      * {@code ghostty_surface_update_config} (used for theme switches --
      * call after {@link GhosttyApp#updateConfig}).
      */
+    @Override
     public void applyConfig(TerminalRuntime runtime) {
         checkFxThread();
         checkOpen();
