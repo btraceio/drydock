@@ -233,14 +233,30 @@ final class FileViewer extends BorderPane {
             // flushPendingEdits while that write is still pending, which is
             // exactly the data-loss window a shutdown-time flush exists to
             // close. Keep it reachable until the flush actually completes.
+            //
+            // Capture this tab's own session up front and remove it from
+            // `sessions` conditionally on identity (Map.remove(key, value)),
+            // not on the path alone: if the file is closed and reopened
+            // before this flush settles, a fresh FileEditSession is `put`
+            // under the same key, and an unconditional keyed removal here
+            // would evict *that* entry instead of this (closed) tab's own,
+            // however the two completions race. Removing directly in the
+            // whenComplete callback (no Platform.runLater) also matters at
+            // shutdown: runLater after the FX toolkit has exited throws into
+            // a dropped stage, and the entry would never be removed at all.
+            Object sessionProperty = tab.getProperties().get("drydock.session");
+            FileEditSession closingSession =
+                    sessionProperty instanceof FileEditSession session ? session : null;
             CompletableFuture<Void> pending = flushSession(tab);
             openFiles.remove(file);
             updateEmptyState();
             updateStatusChip();
-            if (pending != null) {
-                pending.whenComplete((ignored, error) -> Platform.runLater(() -> sessions.remove(file)));
-            } else {
-                sessions.remove(file);
+            if (closingSession != null) {
+                if (pending != null) {
+                    pending.whenComplete((ignored, error) -> sessions.remove(file, closingSession));
+                } else {
+                    sessions.remove(file, closingSession);
+                }
             }
         });
 
@@ -279,8 +295,22 @@ final class FileViewer extends BorderPane {
                 if (text.length() > 0) {
                     area.setStyleSpans(0, styled);
                 }
-                if (content.editable()) {
-                    attachEditing(tab, area, file, content);
+                // The tab may have been closed while this load was off the
+                // FX thread; setOnClosed only cleans up a session that
+                // exists at close time, so attaching one here for a tab that
+                // is no longer the open one for `file` would create an entry
+                // nothing ever removes. Only attach if this tab is still it.
+                if (content.editable() && openFiles.get(file) == tab) {
+                    try {
+                        attachEditing(tab, area, file, content);
+                    } catch (RuntimeException ex) {
+                        // A throw here (e.g. the session constructor's
+                        // IllegalArgumentException) must not skip the chip
+                        // update and jump-to-line below -- the tab still
+                        // degrades to a working read-only tab at the right
+                        // line rather than silently dropping both.
+                        LOG.log(Level.WARNING, "Failed to attach editing for " + file, ex);
+                    }
                 }
                 updateStatusChip();
                 jumpToLine.ifPresent(line -> scrollTo(tab, line));
@@ -444,11 +474,27 @@ final class FileViewer extends BorderPane {
         }
         long deadlineNanos = System.nanoTime() + timeout.toNanos();
         for (FileEditSession session : snapshot) {
-            Duration remaining = Duration.ofNanos(Math.max(0, deadlineNanos - System.nanoTime()));
+            long remainingNanos = deadlineNanos - System.nanoTime();
+            if (remainingNanos <= 0) {
+                // The shared deadline is already exhausted: flushBlocking
+                // would take its Duration.ZERO/TimeoutException path
+                // immediately, which only reports through onSaveFailed --
+                // in this class just a chip repaint, and at shutdown the
+                // chip is long gone. Without this log a genuinely unflushed
+                // file leaves no trace anywhere.
+                LOG.log(Level.WARNING,
+                        "Shutdown flush deadline exhausted before flushing " + session.file()
+                                + "; its pending edits may be lost");
+            }
+            Duration remaining = Duration.ofNanos(Math.max(0, remainingNanos));
             try {
                 session.flushBlocking(remaining);
             } catch (RuntimeException e) {
                 LOG.log(Level.WARNING, "Failed to flush pending edits for " + session.file(), e);
+            }
+            if (session.lastError() != null) {
+                LOG.log(Level.WARNING, "Pending edits for " + session.file()
+                        + " may not have been saved at shutdown", session.lastError());
             }
         }
     }
@@ -572,7 +618,8 @@ final class FileViewer extends BorderPane {
             return;
         }
         boolean dirty = session.state() == FileEditSession.State.DIRTY
-                || session.state() == FileEditSession.State.CONFLICT;
+                || session.state() == FileEditSession.State.CONFLICT
+                || session.state() == FileEditSession.State.ERROR;
         if (tab.getGraphic() instanceof HBox graphic) {
             graphic.getChildren().removeIf(node -> node.getStyleClass().contains("viewer-tab-dirty"));
             if (dirty) {
