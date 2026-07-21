@@ -9,6 +9,7 @@ import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.PrState;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionStatus;
+import app.drydock.domain.SshRemote;
 import app.drydock.state.ApplicationStateRepository;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -257,6 +258,36 @@ class SessionManagerTest {
                         + "claude --settings '/Users/x/Application Support/hooks/settings.json'",
                 SessionManager.buildCreateCommand(caps(false, false, true), "my session", "uuid-1",
                         Optional.of(Path.of("/Users/x/Application Support/hooks/settings.json"))));
+    }
+
+    // ---- degraded remote session contract (command construction) -----------
+
+    @Test
+    void remoteCreateCommandIsSshWrappedPlainClaude() {
+        SshRemote remote = new SshRemote("user@h", "/srv/app");
+        String command = SessionManager.buildRemoteCreateCommand(remote);
+        // Pessimistic flag set: no -n, no --session-id, no --settings — the
+        // remote claude's capabilities are unknown and the activity-hook
+        // settings file is a LOCAL path (spec: degraded remote contract).
+        assertEquals("exec ssh -t -- 'user@h' "
+                + "'export TERM=xterm-256color; cd '\\''/srv/app'\\'' && exec claude'", command);
+    }
+
+    @Test
+    void remoteResumeCommandTrustsStoredId() {
+        SshRemote remote = new SshRemote("user@h", "/srv/app");
+        ManagedClaudeSession session = sessionWith(Path.of("/tmp"), Optional.of("abc-123"), Optional.empty());
+        String command = SessionManager.buildRemoteResumeCommand(remote, session);
+        assertTrue(command.contains("--resume"));
+        assertTrue(command.contains("abc-123"));
+        assertTrue(command.startsWith("exec ssh -t -- 'user@h' '"));
+    }
+
+    @Test
+    void remoteResumeCommandFallsBackToBareResume() {
+        SshRemote remote = new SshRemote("user@h", "/srv/app");
+        ManagedClaudeSession session = sessionWith(Path.of("/tmp"), Optional.empty(), Optional.empty());
+        assertTrue(SessionManager.buildRemoteResumeCommand(remote, session).endsWith("exec claude --resume'"));
     }
 
     // ---- MISSING_WORKING_DIRECTORY detection --------------------------------

@@ -9,6 +9,8 @@ import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.PrState;
 import app.drydock.domain.Repository;
 import app.drydock.domain.SessionStatus;
+import app.drydock.domain.SshRemote;
+import app.drydock.process.SshCommandBuilder;
 import app.drydock.state.ApplicationStateRepository;
 import app.drydock.terminal.api.TerminalHostView;
 import app.drydock.terminal.api.TerminalRuntime;
@@ -239,6 +241,21 @@ public final class SessionManager implements AutoCloseable {
         // chain) instead of dropping the user into the interactive picker.
         String claudeSessionId = UUID.randomUUID().toString();
 
+        // Remote repositories get the degraded remote contract (spec):
+        // plain ssh-wrapped claude, no local capability probe (the REMOTE
+        // claude's capabilities are unknown), and never a pre-generated
+        // session id -- the remote claude was never told about it.
+        Optional<SshRemote> remote = remoteFor(repositoryFor(initial));
+        if (remote.isPresent()) {
+            String command = buildRemoteCreateCommand(remote.get());
+            return CompletableFuture.runAsync(() -> persistNewSession(initial), backgroundExecutor)
+                    .thenCompose(ignored -> createSurfaceOnFxThread(app, host, scaleFactor, command,
+                            System.getProperty("user.home"))
+                            .thenApply(surface -> new CreateLaunch(new CreatePlan(command, false), surface)))
+                    .handleAsync((launch, ex) -> finalizeCreate(initial, claudeSessionId, launch, ex),
+                            backgroundExecutor);
+        }
+
         // Metadata persistence is disk I/O; keep it off the (FX) caller thread.
         return CompletableFuture.runAsync(() -> persistNewSession(initial), backgroundExecutor)
                 .thenCompose(ignored -> capabilityService.detectCapabilities())
@@ -310,6 +327,14 @@ public final class SessionManager implements AutoCloseable {
                         return CompletableFuture.completedFuture(blocked.get());
                     }
                     ManagedClaudeSession session = requireSession(sessionId);
+                    Optional<SshRemote> remote = remoteFor(repositoryFor(session));
+                    if (remote.isPresent()) {
+                        String command = buildRemoteResumeCommand(remote.get(), session);
+                        return createSurfaceOnFxThread(app, host, scaleFactor, command,
+                                        System.getProperty("user.home"))
+                                .handleAsync((surface, ex) -> finalizeResume(session, surface, ex),
+                                        backgroundExecutor);
+                    }
                     // Capabilities gate the activity --settings flag. Resume must
                     // NOT inherit their failure mode: before this flag existed,
                     // buildResumeCommand was a pure function of persisted metadata
@@ -360,6 +385,11 @@ public final class SessionManager implements AutoCloseable {
      *         clear to launch (working directory exists, and either it has
      *         no Claude session id yet or that id is not already active
      *         elsewhere).
+     *
+     * <p>Remote sessions skip both probes -- the working directory is a
+     * virtual placeholder and the transcript lives on the remote host; a
+     * vanished remote conversation surfaces as claude's own "No conversation
+     * found" inside the terminal (spec: degraded remote contract).</p>
      */
     Optional<SessionOpenResult> checkResumeBlocked(ManagedSessionId sessionId) {
         // Deliberately holds no lock across the filesystem probes below --
@@ -380,7 +410,9 @@ public final class SessionManager implements AutoCloseable {
             }
         }
 
-        if (Files.notExists(session.workingDirectory())) {
+        boolean remoteSession = repositoryFor(session).map(Repository::isRemote).orElse(false);
+
+        if (!remoteSession && Files.notExists(session.workingDirectory())) {
             ManagedClaudeSession missing = session.withStatus(SessionStatus.MISSING_WORKING_DIRECTORY);
             persistUpdatedSession(missing);
             return Optional.of(new SessionOpenResult.MissingWorkingDirectory(missing));
@@ -391,7 +423,7 @@ public final class SessionManager implements AutoCloseable {
         // conversation found" -- detect it up front (same transcript layout
         // ConversationCatalog reads) so the UI can offer a fresh start or
         // deletion instead of presenting a dead terminal.
-        if (claudeSessionId.isPresent()) {
+        if (!remoteSession && claudeSessionId.isPresent()) {
             Path transcript = conversationCatalog.projectDirFor(session.workingDirectory())
                     .resolve(claudeSessionId.get() + ".jsonl");
             if (Files.notExists(transcript)) {
@@ -418,7 +450,17 @@ public final class SessionManager implements AutoCloseable {
                     persistUpdatedSession(cleared);
                     return cleared;
                 }, backgroundExecutor)
-                .thenCompose(cleared -> capabilityService.detectCapabilities()
+                .thenCompose(cleared -> {
+                    Optional<SshRemote> remote = remoteFor(repositoryFor(cleared));
+                    if (remote.isPresent()) {
+                        String command = buildRemoteCreateCommand(remote.get());
+                        return createSurfaceOnFxThread(app, host, scaleFactor, command,
+                                        System.getProperty("user.home"))
+                                .thenApply(surface -> new CreateLaunch(new CreatePlan(command, false), surface))
+                                .handleAsync((launch, ex) -> finalizeCreate(cleared, claudeSessionId, launch, ex),
+                                        backgroundExecutor);
+                    }
+                    return capabilityService.detectCapabilities()
                         .thenApplyAsync(caps -> {
                             String command = buildCreateCommand(caps, cleared.displayName(), claudeSessionId,
                                     activitySettings);
@@ -428,7 +470,8 @@ public final class SessionManager implements AutoCloseable {
                                 cleared.workingDirectory().toString())
                                 .thenApply(surface -> new CreateLaunch(plan, surface)))
                         .handleAsync((launch, ex) -> finalizeCreate(cleared, claudeSessionId, launch, ex),
-                                backgroundExecutor));
+                                backgroundExecutor);
+                });
     }
 
     /** Explicitly reassigns a session's working directory (plan section 11.2), e.g. after the user picks a replacement. */
@@ -641,6 +684,30 @@ public final class SessionManager implements AutoCloseable {
     }
 
     /**
+     * Remote sessions (spec: degraded remote contract) launch plain
+     * {@code claude} over {@code ssh -t}: no {@code -n}/{@code --session-id}
+     * (the REMOTE claude's capabilities are unknown and unprobed), no
+     * {@code --settings} (the activity-hook settings file is a local path
+     * the remote host cannot see), no {@link #ENV_CLEANUP_PREFIX} (those
+     * variables live in THIS process's environment, which ssh does not
+     * forward). TERM handling and quoting live in {@link SshCommandBuilder}.
+     */
+    static String buildRemoteCreateCommand(SshRemote remote) {
+        return SshCommandBuilder.interactiveSessionCommand(remote, "exec claude");
+    }
+
+    /** Remote resume: trust the stored id/name — the transcript lives on the remote host and is not checked locally. */
+    static String buildRemoteResumeCommand(SshRemote remote, ManagedClaudeSession session) {
+        String exec = "exec claude --resume";
+        if (session.claudeSessionId().isPresent()) {
+            exec += " " + SshCommandBuilder.posixQuote(session.claudeSessionId().get());
+        } else if (session.claudeSessionName().isPresent()) {
+            exec += " " + SshCommandBuilder.posixQuote(session.claudeSessionName().get());
+        }
+        return SshCommandBuilder.interactiveSessionCommand(remote, exec);
+    }
+
+    /**
      * Adds {@code --settings <file>} so the session reports its activity back
      * to this app (see {@code app.drydock.claude.ClaudeHookInstaller}). Empty
      * whenever the installed claude lacks the flag or the hook install failed,
@@ -765,6 +832,16 @@ public final class SessionManager implements AutoCloseable {
         return stateStore.state().sessions().stream()
                 .filter(session -> session.id().equals(sessionId))
                 .findFirst();
+    }
+
+    private Optional<Repository> repositoryFor(ManagedClaudeSession session) {
+        return stateStore.state().repositories().stream()
+                .filter(repository -> repository.id().equals(session.repositoryId()))
+                .findFirst();
+    }
+
+    private static Optional<SshRemote> remoteFor(Optional<Repository> repository) {
+        return repository.filter(Repository::isRemote).map(Repository::remote);
     }
 
     private static Throwable unwrap(Throwable t) {
