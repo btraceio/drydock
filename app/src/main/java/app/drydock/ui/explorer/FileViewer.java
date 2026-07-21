@@ -216,7 +216,6 @@ final class FileViewer extends BorderPane {
             }
             var styled = spans;
             Platform.runLater(() -> {
-                tab.getProperties().put("drydock.content", content);
                 area.replaceText(text);
                 if (text.length() > 0) {
                     area.setStyleSpans(0, styled);
@@ -248,6 +247,11 @@ final class FileViewer extends BorderPane {
      * encoding, oversized) come back as a non-{@link FileContent#editable()}
      * buffer rather than an exception; only an unreadable file falls back to
      * the error placeholder, which is likewise never editable.
+     *
+     * <p>The editor works in LF line terminators: {@link FileContent} normalises
+     * CRLF-terminated files to LF for editing, and {@link FileContent#toDiskText()}
+     * restores the file's own terminator on write. This keeps the editor's logic
+     * simple and means a single-line edit does not rewrite every line of a CRLF file.
      */
     private FileContent loadFile(Path file) {
         try {
