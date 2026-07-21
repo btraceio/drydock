@@ -1761,7 +1761,11 @@ Scene detach covers sub-tab switches and tab closes, but application shutdown ha
 
 **Interfaces:**
 - Consumes: `FileViewer.flushPendingEdits(Duration)` (Task 4).
-- Produces: `void SessionExplorerView.flushPendingEdits()`, `void MainWorkspace.flushExplorerEdits()`.
+- Produces: `void FileViewer.dispose()`, `void SessionExplorerView.flushPendingEdits()`, `void SessionExplorerView.dispose()`, `void MainWorkspace.flushExplorerEdits()`.
+
+**Also in this task — executor disposal.** Task 4's review found that `FileViewer` creates a single-threaded daemon `ScheduledExecutorService` per session tab and nothing ever shuts it down, so every session tab whose Explorer was opened leaks a live `explorer-file-io` thread for the life of the process. Scene detach cannot be the trigger — it fires on every sub-tab switch, and the executor must survive re-attach.
+
+Add `FileViewer.dispose()`: flush pending edits, stop the `chipReset` and any other running `PauseTransition`, then `ioExecutor.shutdown()`. Expose it through `SessionExplorerView.dispose()`. `MainWorkspace` already registers each Explorer it builds; key that registration by the owning tab so `removeTab` can dispose the right one, and have `flushExplorerEdits()` dispose the rest at shutdown.
 
 - [ ] **Step 1: Expose the flush on `SessionExplorerView`**
 
