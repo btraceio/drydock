@@ -17,7 +17,9 @@ import app.drydock.git.DiffService;
 import app.drydock.git.GhCliService;
 import app.drydock.git.GitBranchState;
 import app.drydock.git.GitStatusService;
+import app.drydock.git.GitTarget;
 import app.drydock.git.WorktreeService;
+import app.drydock.process.SshCommandBuilder;
 import app.drydock.review.AnnotationStore;
 import app.drydock.search.SessionSearchService;
 import app.drydock.ui.explorer.DiffOverlay;
@@ -623,19 +625,29 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * pty carries only the child process's own output, so the notice shows
      * transiently in the session header instead of being faked into the
      * terminal stream; N comes from claude's on-disk transcript.
+     *
+     * <p>For a remote repository {@code session.workingDirectory()} is the
+     * SSH remote's local placeholder root, not a real transcript directory
+     * (spec: SSH remote repositories) -- scanning it would either find
+     * nothing or, worse, some unrelated local conversation, so the catalog
+     * scan is skipped entirely and the notice falls back to its
+     * unqualified "Resumed session." form.</p>
      */
     private void showResumeNotice(OpenSessionTab tab, ManagedClaudeSession session) {
+        boolean remote = repositoryFor(session).map(Repository::isRemote).orElse(false);
         Thread.ofVirtual().start(() -> {
             int messageCount = 0;
-            try {
-                messageCount = conversationCatalog.listConversations(session.workingDirectory()).stream()
-                        .filter(conversation -> session.claudeSessionId()
-                                .map(conversation.sessionId()::equals).orElse(false))
-                        .mapToInt(Conversation::messageCount)
-                        .findFirst()
-                        .orElse(0);
-            } catch (RuntimeException e) {
-                LOG.log(Level.DEBUG, "Could not count restored messages for " + session.id(), e);
+            if (!remote) {
+                try {
+                    messageCount = conversationCatalog.listConversations(session.workingDirectory()).stream()
+                            .filter(conversation -> session.claudeSessionId()
+                                    .map(conversation.sessionId()::equals).orElse(false))
+                            .mapToInt(Conversation::messageCount)
+                            .findFirst()
+                            .orElse(0);
+                } catch (RuntimeException e) {
+                    LOG.log(Level.DEBUG, "Could not count restored messages for " + session.id(), e);
+                }
             }
             int restored = messageCount;
             Platform.runLater(() -> {
@@ -1090,8 +1102,16 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
         // The ephemeral shell Terminal sub-tab (created lazily on first
         // switch): mirrors the Claude runtime/host creation, themed
-        // identically, rooted at the session's working directory.
+        // identically, rooted at the session's working directory -- unless
+        // the repository is remote, in which case it ssh's into the host
+        // instead (spec: SSH remote repositories; there is no local
+        // checkout to root a local shell in).
         openTab.setShellWorkingDirectory(searchRoot.toString());
+        repository.filter(Repository::isRemote).ifPresent(repo -> {
+            openTab.setShellCommand(SshCommandBuilder.interactiveSessionCommand(repo.remote(),
+                    "exec \"${SHELL:-sh}\" -l"));
+            openTab.setShellWorkingDirectory(System.getProperty("user.home"));
+        });
         openTab.setShellTerminalProvider(onWakeup -> {
             TerminalRuntime shellRuntime = TerminalFactory.createRuntime(onWakeup,
                     Optional.of(TerminalThemes.configFileFor(themeProvider.get())));
@@ -1118,45 +1138,59 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         openTab.setOnNextSessionTab(this::selectNextSessionTab);
         openTab.setOnToggleSidebar(() -> onToggleSidebar.run());
 
-        // ONE shared changed-line source (design handoff section C): the
-        // Explorer's diff overlay and the Review tab both read it.
-        DiffOverlay overlay = new DiffOverlay(changedLineService, searchRoot);
-        openTab.setExplorerFactory(() -> new SessionExplorerView(searchRoot, searchService, overlay));
-        // openTab.sessionId() rather than the constructor parameter: the
-        // factory runs lazily (first Review open), by which time a created
-        // session's tab has adopted the real id -- annotations must key on it.
-        repository.ifPresent(repo -> openTab.setReviewFactory(() -> new ReviewView(
-                openTab.sessionId(), searchRoot, repo.root(), diffService, changedLineService, gitStatusService,
-                annotationStore, openTab::sendPrompt, new ReviewView.ExplorerBridge() {
-                    @Override
-                    public void openFileAtLine(Path relativeFile, int line) {
-                        openTab.openExplorerAt(relativeFile, line);
-                    }
-
-                    @Override
-                    public void searchText(String token) {
-                        openTab.searchInExplorer(token);
-                    }
-                })));
-
-        // Branch of the session's own checkout: for a worktree session the
-        // search root IS the worktree, so its branch (not the main
-        // checkout's) fills the header/sub-tab context lines. The main
-        // checkout's branch is the diff overlay's base.
-        repository.ifPresent(repo -> {
-            gitStatusService.getStatus(searchRoot)
+        if (repository.map(Repository::isRemote).orElse(false)) {
+            // Explorer (local file search) and Review (local diffs) have no
+            // local checkout to operate on -- spec: Feature gating. Leaving
+            // both factories unset (OpenSessionTab disables their toggle
+            // buttons for a remote tab; see its constructor) instead of
+            // wiring anything against the remote's placeholder root.
+            repository.ifPresent(repo -> gitStatusService.getStatus(GitTarget.of(repo))
                     .whenComplete((status, failure) -> Platform.runLater(() -> {
                         if (failure == null && status.branch() instanceof GitBranchState.OnBranch onBranch) {
                             openTab.setHeaderBranch(onBranch.name(), repo.displayName());
                         }
-                    }));
-            gitStatusService.getStatus(repo.root())
-                    .whenComplete((status, failure) -> Platform.runLater(() -> {
-                        if (failure == null && status.branch() instanceof GitBranchState.OnBranch onBranch) {
-                            overlay.setBaseBranch(onBranch.name());
+                    })));
+        } else {
+            // ONE shared changed-line source (design handoff section C): the
+            // Explorer's diff overlay and the Review tab both read it.
+            DiffOverlay overlay = new DiffOverlay(changedLineService, searchRoot);
+            openTab.setExplorerFactory(() -> new SessionExplorerView(searchRoot, searchService, overlay));
+            // openTab.sessionId() rather than the constructor parameter: the
+            // factory runs lazily (first Review open), by which time a created
+            // session's tab has adopted the real id -- annotations must key on it.
+            repository.ifPresent(repo -> openTab.setReviewFactory(() -> new ReviewView(
+                    openTab.sessionId(), searchRoot, repo.root(), diffService, changedLineService, gitStatusService,
+                    annotationStore, openTab::sendPrompt, new ReviewView.ExplorerBridge() {
+                        @Override
+                        public void openFileAtLine(Path relativeFile, int line) {
+                            openTab.openExplorerAt(relativeFile, line);
                         }
-                    }));
-        });
+
+                        @Override
+                        public void searchText(String token) {
+                            openTab.searchInExplorer(token);
+                        }
+                    })));
+
+            // Branch of the session's own checkout: for a worktree session the
+            // search root IS the worktree, so its branch (not the main
+            // checkout's) fills the header/sub-tab context lines. The main
+            // checkout's branch is the diff overlay's base.
+            repository.ifPresent(repo -> {
+                gitStatusService.getStatus(searchRoot)
+                        .whenComplete((status, failure) -> Platform.runLater(() -> {
+                            if (failure == null && status.branch() instanceof GitBranchState.OnBranch onBranch) {
+                                openTab.setHeaderBranch(onBranch.name(), repo.displayName());
+                            }
+                        }));
+                gitStatusService.getStatus(repo.root())
+                        .whenComplete((status, failure) -> Platform.runLater(() -> {
+                            if (failure == null && status.branch() instanceof GitBranchState.OnBranch onBranch) {
+                                overlay.setBaseBranch(onBranch.name());
+                            }
+                        }));
+            });
+        }
         return openTab;
     }
 }
