@@ -196,16 +196,28 @@ public final class GitStatusService implements AutoCloseable {
 
     /**
      * Creates a new git worktree at {@code worktreeDirectory} with a new
-     * branch {@code branch} ({@code git worktree add <dir> -b <branch>}),
-     * on this service's background executor. Merge and delete
+     * branch {@code branch}, forked from the repository's current HEAD
+     * ({@code git worktree add <dir> -b <branch>}), on this service's
+     * background executor. Merge and delete
      * ({@link WorktreeService#mergeIntoBase}, {@link WorktreeService#remove})
      * also run directly; only PR creation is handed off to the Claude
      * session in the terminal, since {@code gh pr create} needs the user's
      * own gh auth.
      */
     public CompletableFuture<Path> createWorktree(Path repositoryRoot, Path worktreeDirectory, String branch) {
-        return CompletableFuture.supplyAsync(() -> createWorktreeBlocking(repositoryRoot, worktreeDirectory, branch),
-                executor);
+        return createWorktree(repositoryRoot, worktreeDirectory, branch, Optional.empty());
+    }
+
+    /**
+     * As {@link #createWorktree(Path, Path, String)}, but forks the new
+     * branch from {@code startPoint} (any committish -- branch, tag, SHA)
+     * instead of HEAD when present ({@code git worktree add <dir> -b
+     * <branch> <startPoint>}).
+     */
+    public CompletableFuture<Path> createWorktree(Path repositoryRoot, Path worktreeDirectory, String branch,
+                                                   Optional<String> startPoint) {
+        return CompletableFuture.supplyAsync(
+                () -> createWorktreeBlocking(repositoryRoot, worktreeDirectory, branch, startPoint), executor);
     }
 
     /**
@@ -215,6 +227,12 @@ public final class GitStatusService implements AutoCloseable {
      * application thread.
      */
     Path createWorktreeBlocking(Path repositoryRoot, Path worktreeDirectory, String branch) {
+        return createWorktreeBlocking(repositoryRoot, worktreeDirectory, branch, Optional.empty());
+    }
+
+    /** As {@link #createWorktreeBlocking(Path, Path, String)}, with an explicit fork-point. */
+    Path createWorktreeBlocking(Path repositoryRoot, Path worktreeDirectory, String branch,
+                                Optional<String> startPoint) {
         Path git = locator.locate()
                 .orElseThrow(() -> new GitExecutableNotFoundException(locator.describeSearched()));
 
@@ -230,9 +248,12 @@ public final class GitStatusService implements AutoCloseable {
             }
         }
 
-        List<String> command = List.of(
+        List<String> command = new ArrayList<>(List.of(
                 git.toString(), "-C", repositoryRoot.toString(),
-                "worktree", "add", normalizedDir.toString(), "-b", branch);
+                "worktree", "add", normalizedDir.toString(), "-b", branch));
+        // --end-of-options: a start-point that looks like an option must
+        // reach git as a committish, never be parsed as a flag.
+        startPoint.filter(s -> !s.isBlank()).ifPresent(s -> command.addAll(List.of("--end-of-options", s)));
 
         ProcessResult result = run(command);
         if (result.exitCode() != 0) {
@@ -242,6 +263,34 @@ public final class GitStatusService implements AutoCloseable {
             throw new GitCommandFailedException(command, result.exitCode(), ProcessRunner.excerpt(result.stderr()));
         }
         return normalizedDir;
+    }
+
+    /**
+     * Lists local branch names ({@code git for-each-ref refs/heads}) for
+     * the base-branch picker in the create-worktree modal, on this
+     * service's background executor.
+     */
+    public CompletableFuture<List<String>> listLocalBranches(Path repositoryRoot) {
+        return CompletableFuture.supplyAsync(() -> listLocalBranchesBlocking(repositoryRoot), executor);
+    }
+
+    /** Synchronous form of {@link #listLocalBranches}, package-private for tests. */
+    List<String> listLocalBranchesBlocking(Path repositoryRoot) {
+        Path git = locator.locate()
+                .orElseThrow(() -> new GitExecutableNotFoundException(locator.describeSearched()));
+
+        List<String> command = List.of(
+                git.toString(), "-C", repositoryRoot.toString(),
+                "for-each-ref", "--format=%(refname:short)", "refs/heads/");
+
+        ProcessResult result = run(command);
+        if (result.exitCode() != 0) {
+            if (result.stderr().toLowerCase(Locale.ROOT).contains("not a git repository")) {
+                throw new NotAGitRepositoryException(repositoryRoot);
+            }
+            throw new GitCommandFailedException(command, result.exitCode(), ProcessRunner.excerpt(result.stderr()));
+        }
+        return result.stdout().lines().map(String::strip).filter(s -> !s.isEmpty()).toList();
     }
 
     /**

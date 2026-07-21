@@ -6,6 +6,8 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
@@ -214,6 +216,42 @@ class GitStatusServiceTest {
         CompletionException completion = assertThrows(CompletionException.class,
                 () -> service.createWorktree(notARepo, worktreeParent.resolve("wt"), "feat/x").join());
         assertInstanceOf(NotAGitRepositoryException.class, completion.getCause());
+    }
+
+    @Test
+    void createWorktreeForksFromAnExplicitStartPoint(@TempDir Path repoDir, @TempDir Path worktreeParent)
+            throws Exception {
+        Path repo = repoDir.resolve("repo");
+        Files.createDirectory(repo);
+        initRepo(repo, "main");
+        writeFile(repo, "README.md", "hello\n");
+        runGit(repo, "add", "README.md");
+        commit(repo, "initial commit");
+        runGit(repo, "checkout", "-b", "develop");
+        writeFile(repo, "develop-only.txt", "develop\n");
+        runGit(repo, "add", "develop-only.txt");
+        commit(repo, "develop-only commit");
+        runGit(repo, "checkout", "main");
+
+        Path worktreeDir = worktreeParent.resolve("wt-from-develop");
+        Path created = service.createWorktree(repo, worktreeDir, "feat/from-develop", Optional.of("develop")).get();
+
+        assertTrue(Files.exists(created.resolve("develop-only.txt")));
+    }
+
+    @Test
+    void listLocalBranchesReportsEveryLocalBranch(@TempDir Path repo) throws Exception {
+        initRepo(repo, "main");
+        writeFile(repo, "README.md", "hello\n");
+        runGit(repo, "add", "README.md");
+        commit(repo, "initial commit");
+        runGit(repo, "branch", "develop");
+        runGit(repo, "branch", "feat/x");
+
+        List<String> branches = service.listLocalBranches(repo).get();
+
+        assertTrue(branches.containsAll(List.of("main", "develop", "feat/x")));
+        assertEquals(3, branches.size());
     }
 
     @Test

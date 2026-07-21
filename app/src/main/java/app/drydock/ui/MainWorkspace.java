@@ -555,9 +555,9 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     public void promptNewWorktree(Repository repository, ModalLayer modalLayer) {
         NewWorktreeModal[] holder = new NewWorktreeModal[1];
         holder[0] = new NewWorktreeModal(repository, gitStatusService, modalLayer::close,
-                (branch, directory, task) -> {
+                (branch, base, directory, task) -> {
                     holder[0].showCreating();
-                    gitStatusService.createWorktree(repository.root(), directory, branch)
+                    gitStatusService.createWorktree(repository.root(), directory, branch, Optional.of(base))
                             .whenComplete((created, ex) -> Platform.runLater(() -> {
                                 if (ex != null) {
                                     holder[0].showError(String.valueOf(UiErrors.unwrap(ex).getMessage()));

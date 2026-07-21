@@ -6,6 +6,7 @@ import app.drydock.git.GitStatusService;
 import javafx.application.Platform;
 import javafx.geometry.Pos;
 import javafx.scene.control.Button;
+import javafx.scene.control.ComboBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.TextArea;
 import javafx.scene.control.TextField;
@@ -19,21 +20,24 @@ import java.util.Optional;
 
 /**
  * The create-worktree modal (design handoff section B, "Creating"): a new
- * branch (defaults {@code feat/}), the fork-from base (the repo's current
- * branch, read-only), a worktree directory auto-derived from the branch
- * slug (editable; auto-derivation stops after a manual edit), and an
- * optional "Start Claude with a task" text. The footer previews the
- * literal {@code git worktree add} command -- the ONLY git mutation the
- * app itself runs.
+ * branch (defaults {@code feat/}), the fork-from base (an editable combo
+ * box defaulting to the repo's current branch, populated with local
+ * branches), a worktree directory auto-derived from the branch slug
+ * (editable; auto-derivation stops after a manual edit), and an optional
+ * "Start Claude with a task" text. The footer previews the literal
+ * {@code git worktree add} command this modal runs -- merge and delete
+ * (see {@code WorktreeLifecycleController}) run their own git mutations
+ * directly too.
  */
 final class NewWorktreeModal extends VBox {
 
-    /** branch, directory, optional task -- invoked on Create. */
+    /** branch, base, directory, optional task -- invoked on Create. */
     interface CreateHandler {
-        void create(String branch, Path directory, Optional<String> task);
+        void create(String branch, String base, Path directory, Optional<String> task);
     }
 
     private final TextField branchField = new TextField("feat/");
+    private final ComboBox<String> baseField = new ComboBox<>();
     private final TextField directoryField = new TextField();
     private final TextArea taskField = new TextArea();
     private final Label commandPreview = new Label();
@@ -64,14 +68,20 @@ final class NewWorktreeModal extends VBox {
         branchField.getStyleClass().add("worktree-field");
         directoryField.getStyleClass().add("worktree-field");
 
-        Label baseChip = new Label("⎇ …");
-        baseChip.getStyleClass().add("worktree-base-chip");
+        baseField.getStyleClass().add("worktree-base-combo");
+        baseField.setEditable(true);
+        baseField.setMaxWidth(Double.MAX_VALUE);
+        baseField.getEditor().textProperty().addListener((obs, oldText, newText) -> updateFooter());
         gitStatusService.getStatus(repository.root()).whenComplete((status, failure) ->
                 Platform.runLater(() -> {
                     if (failure == null && status.branch() instanceof GitBranchState.OnBranch onBranch) {
-                        baseChip.setText("⎇ " + onBranch.name());
-                    } else {
-                        baseChip.setText("⎇ (unknown)");
+                        baseField.setValue(onBranch.name());
+                    }
+                }));
+        gitStatusService.listLocalBranches(repository.root()).whenComplete((branches, failure) ->
+                Platform.runLater(() -> {
+                    if (failure == null) {
+                        baseField.getItems().setAll(branches);
                     }
                 }));
 
@@ -114,7 +124,7 @@ final class NewWorktreeModal extends VBox {
         createButton.getStyleClass().add("worktree-create-button");
         createButton.setOnAction(e -> {
             String task = taskField.getText() == null ? "" : taskField.getText().strip();
-            onCreate.create(branchField.getText().strip(),
+            onCreate.create(branchField.getText().strip(), baseText(),
                     Path.of(directoryField.getText().strip()).toAbsolutePath().normalize(),
                     task.isEmpty() ? Optional.empty() : Optional.of(task));
         });
@@ -125,7 +135,7 @@ final class NewWorktreeModal extends VBox {
 
         getChildren().addAll(header,
                 fieldGroup("New branch", branchField),
-                fieldGroup("Fork from", baseChip),
+                fieldGroup("Fork from", baseField),
                 fieldGroup("Worktree directory", directoryField),
                 fieldGroup("Start Claude with a task", taskField),
                 commandPreview, errorLine, buttons);
@@ -143,12 +153,20 @@ final class NewWorktreeModal extends VBox {
         return new VBox(4, label, field);
     }
 
+    /** The base field's current text, whether typed or picked from the dropdown. */
+    private String baseText() {
+        String editorText = baseField.getEditor().getText();
+        return (editorText == null ? "" : editorText).strip();
+    }
+
     private void updateFooter() {
         String branch = branchField.getText() == null ? "" : branchField.getText().strip();
+        String base = baseText();
         String directory = directoryField.getText() == null ? "" : directoryField.getText().strip();
-        commandPreview.setText("$ git worktree add " + directory + " -b " + branch);
+        commandPreview.setText("$ git worktree add " + directory + " -b " + branch
+                + (base.isEmpty() ? "" : " " + base));
         boolean branchValid = !branch.isEmpty() && !branch.endsWith("/") && !branch.contains(" ");
-        createButton.setDisable(!branchValid || directory.isEmpty());
+        createButton.setDisable(!branchValid || base.isEmpty() || directory.isEmpty());
     }
 
     /** Shows a creation failure inline; the modal stays open so the input can be corrected. */
