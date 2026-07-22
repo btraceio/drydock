@@ -48,9 +48,13 @@ public final class WorktreeService implements AutoCloseable {
      * One worktree of a repository as reported by
      * {@code git worktree list --porcelain}. The first entry git prints is
      * always the main checkout ({@link #mainCheckout()}); a detached or
-     * bare entry has no {@link #branch()}.
+     * bare entry has no {@link #branch()}. A {@link #prunable()} entry's
+     * directory is gone from disk but still owns its branch, and a
+     * {@link #locked()} one refuses removal -- both still block
+     * {@code git worktree add} on that branch.
      */
-    public record Worktree(Path path, Optional<String> branch, boolean mainCheckout, boolean detached) {
+    public record Worktree(Path path, Optional<String> branch, boolean mainCheckout, boolean detached,
+                           boolean prunable, boolean locked) {
     }
 
     public WorktreeService() {
@@ -316,17 +320,21 @@ public final class WorktreeService implements AutoCloseable {
         Optional<String> branch = Optional.empty();
         boolean detached = false;
         boolean bare = false;
+        boolean prunable = false;
+        boolean locked = false;
 
         for (String rawLine : stdout.split("\n", -1)) {
             String line = rawLine.strip();
             if (line.isEmpty()) {
                 if (path != null && !bare) {
-                    worktrees.add(new Worktree(path, branch, worktrees.isEmpty(), detached));
+                    worktrees.add(new Worktree(path, branch, worktrees.isEmpty(), detached, prunable, locked));
                 }
                 path = null;
                 branch = Optional.empty();
                 detached = false;
                 bare = false;
+                prunable = false;
+                locked = false;
             } else if (line.startsWith("worktree ")) {
                 path = Path.of(line.substring("worktree ".length())).normalize();
             } else if (line.startsWith("branch ")) {
@@ -337,10 +345,14 @@ public final class WorktreeService implements AutoCloseable {
                 detached = true;
             } else if (line.equals("bare")) {
                 bare = true;
+            } else if (line.equals("prunable") || line.startsWith("prunable ")) {
+                prunable = true;
+            } else if (line.equals("locked") || line.startsWith("locked ")) {
+                locked = true;
             }
         }
         if (path != null && !bare) {
-            worktrees.add(new Worktree(path, branch, worktrees.isEmpty(), detached));
+            worktrees.add(new Worktree(path, branch, worktrees.isEmpty(), detached, prunable, locked));
         }
         return List.copyOf(worktrees);
     }

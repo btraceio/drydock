@@ -321,6 +321,36 @@ class WorktreeServiceTest {
         assertTrue(worktrees.get(2).branch().isEmpty());
     }
 
+    @Test
+    void parseReadsPrunableAndLockedAttributes() {
+        String porcelain = """
+                worktree /repo
+                HEAD 1111111111111111111111111111111111111111
+                branch refs/heads/main
+
+                worktree /gone
+                HEAD 2222222222222222222222222222222222222222
+                branch refs/heads/ghost
+                prunable gitdir file points to non-existent location
+
+                worktree /held
+                HEAD 3333333333333333333333333333333333333333
+                branch refs/heads/held-branch
+                locked
+
+                """;
+
+        List<WorktreeService.Worktree> worktrees = WorktreeService.parse(porcelain);
+
+        assertEquals(3, worktrees.size());
+        assertFalse(worktrees.get(0).prunable());
+        assertFalse(worktrees.get(0).locked());
+        assertTrue(worktrees.get(1).prunable());
+        assertEquals(Optional.of("ghost"), worktrees.get(1).branch());
+        assertTrue(worktrees.get(2).locked());
+        assertFalse(worktrees.get(2).prunable());
+    }
+
     private static void deleteRecursively(Path root) throws IOException {
         try (var paths = Files.walk(root)) {
             paths.sorted(Comparator.reverseOrder()).forEach(path -> {

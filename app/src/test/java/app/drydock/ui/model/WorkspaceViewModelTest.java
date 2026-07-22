@@ -218,7 +218,7 @@ class WorkspaceViewModelTest {
     void worktreeDiscoveryIsStructuralOnlyWhenTheListChanges() {
         List<WorktreeService.Worktree> discovered = List.of(
                 new WorktreeService.Worktree(Path.of("/tmp/repo").toAbsolutePath(),
-                        Optional.of("main"), true, false));
+                        Optional.of("main"), true, false, false, false));
         assertTrue(!model.anyWorktreesDiscovered());
         model.setWorktrees(repoA, discovered);
         model.setWorktrees(repoA, discovered);
