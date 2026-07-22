@@ -1,9 +1,13 @@
 package app.drydock.state;
 
 import app.drydock.domain.ApplicationState;
+import app.drydock.domain.ManagedClaudeSession;
+import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.PrState;
 import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.RepositorySettings;
+import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SshRemote;
 import app.drydock.domain.WorkspaceUiState;
 import app.drydock.state.json.JsonParser;
@@ -16,6 +20,7 @@ import org.junit.jupiter.api.Test;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -166,5 +171,34 @@ class ApplicationStateCodecTest {
         repoObj.put("remote", badRemote);
 
         assertFalse(ApplicationStateCodec.fromJson(json).repositories().getFirst().isRemote());
+    }
+
+    @Test
+    void sessionWithBranchCreatedHereFalseRoundTrips() {
+        // Regression guard: if encode/decode flips or drops an explicit
+        // false on branchCreatedHere, the whole suite must break.
+        // A false value protects a pre-existing branch from deletion.
+        Repository repo = new Repository(RepositoryId.newId(), Path.of("/tmp/repo"), "repo",
+                Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT);
+        ManagedClaudeSession session = new ManagedClaudeSession(
+                ManagedSessionId.newId(),
+                repo.id(),
+                "test session",
+                Optional.empty(),
+                Optional.empty(),
+                Path.of("/tmp/repo/wd"),
+                Optional.empty(),
+                SessionStatus.INACTIVE,
+                Instant.EPOCH,
+                Instant.EPOCH,
+                Optional.empty(),
+                PrState.NONE,
+                Optional.empty(),
+                false);
+        ApplicationState state = new ApplicationState(List.of(repo), List.of(session), WorkspaceUiState.empty());
+
+        ApplicationState decoded = ApplicationStateCodec.fromJson(ApplicationStateCodec.toJson(state));
+
+        assertFalse(decoded.sessions().getFirst().branchCreatedHere());
     }
 }
