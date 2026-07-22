@@ -76,7 +76,7 @@ class NewWorktreeStateTest {
 
     @Test
     void anOccupiedBranchHintsWhereItIsCheckedOutAndBlocksCreate() {
-        BranchRef occupied = new BranchRef("main", false, Optional.of(Path.of("/src/olifer")), false);
+        BranchRef occupied = new BranchRef("main", false, Optional.of(Path.of("/src/olifer")), false, false);
 
         NewWorktreeState state = derive(catalog(occupied), "main");
 
@@ -85,13 +85,36 @@ class NewWorktreeStateTest {
     }
 
     @Test
-    void aStaleWorktreeHintsAtPruneInsteadAndBlocksCreate() {
-        BranchRef stale = new BranchRef("ghost", false, Optional.of(Path.of("/gone")), true);
+    void aPrunableWorktreeHintsAtPruneAndBlocksCreate() {
+        BranchRef stale = new BranchRef("ghost", false, Optional.of(Path.of("/gone")), true, false);
 
         NewWorktreeState state = derive(catalog(stale), "ghost");
 
         assertEquals("Blocked by a stale worktree at /gone — run `git worktree prune` to release it.",
                 state.hint());
+        assertTrue(state.createDisabled());
+    }
+
+    @Test
+    void aLockedWorktreeHintsAtUnlockNotPruneAndBlocksCreate() {
+        // `git worktree prune` silently skips a locked worktree, so advising
+        // it here would be advice that provably cannot unblock the branch.
+        BranchRef locked = new BranchRef("held", false, Optional.of(Path.of("/held")), false, true);
+
+        NewWorktreeState state = derive(catalog(locked), "held");
+
+        assertEquals("Blocked by a locked worktree at /held — run `git worktree unlock` to release it.",
+                state.hint());
+        assertTrue(state.createDisabled());
+    }
+
+    @Test
+    void aLockedAndPrunableWorktreeStillPointsAtUnlockFirst() {
+        BranchRef both = new BranchRef("held", false, Optional.of(Path.of("/held")), true, true);
+
+        NewWorktreeState state = derive(catalog(both), "held");
+
+        assertTrue(state.hint().contains("git worktree unlock"));
         assertTrue(state.createDisabled());
     }
 
@@ -102,11 +125,14 @@ class NewWorktreeStateTest {
     }
 
     @Test
-    void createIsDisabledUntilTheCatalogLoads() {
+    void createIsDisabledUntilTheCatalogLoadsAndTheHintSaysSo() {
         NewWorktreeState state = NewWorktreeState.derive(null, false, "feat/new", "main", "/wt/x", false);
 
         // With no catalog, nothing is known to exist -- so it reads as create mode.
         assertEquals("New branch", state.branchLabel());
+        // The branch editor is pre-filled, so a TextField prompt would never
+        // be painted; the loading state has to ride on the hint line.
+        assertEquals("Loading branches…", state.hint());
         assertTrue(state.createDisabled());
     }
 
@@ -114,6 +140,11 @@ class NewWorktreeStateTest {
     void createIsDisabledWhenTheCatalogFailedToLoad() {
         assertTrue(NewWorktreeState.derive(catalog(MAIN), true, "feat/new", "main", "/wt/x", false)
                 .createDisabled());
+    }
+
+    @Test
+    void aFailedCatalogLoadShowsNoLoadingHintTheErrorLineSpeaksInstead() {
+        assertEquals("", NewWorktreeState.derive(null, true, "feat/new", "main", "/wt/x", false).hint());
     }
 
     @Test

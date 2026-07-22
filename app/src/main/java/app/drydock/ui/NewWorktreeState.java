@@ -17,12 +17,17 @@ import java.util.Optional;
  * <p>{@link #preview} must stay in lockstep with what actually runs --
  * {@code GitStatusService.addWorktreeForBranchBlocking} for an existing branch
  * and {@code GitStatusService.createWorktreeBlocking} for a new one -- down to
- * the {@code -b <localName> --track <remoteRef>} argument order.</p>
+ * the {@code -b <localName> --track <remoteRef>} argument order. The one
+ * deliberate omission is {@code --end-of-options}: git forbids refs whose
+ * name starts with {@code -}, so the separator can never change the meaning
+ * of anything the user can type here, and previewing it would only add noise
+ * to the command a reader is meant to recognise. Do not "correct" it in.</p>
  *
  * @param branchLabel    the label above the branch picker: create or check out
  * @param baseVisible    whether the "Fork from" row applies (create mode only)
  * @param preview        the literal git command the Create button would run
- * @param hint           why the selection is blocked, or empty when it is not
+ * @param hint           why Create is unavailable (blocking occupancy, or the
+ *                       catalog still loading), or empty when it is available
  * @param createDisabled whether Create must be disabled
  */
 record NewWorktreeState(String branchLabel, boolean baseVisible, String preview, String hint,
@@ -52,12 +57,15 @@ record NewWorktreeState(String branchLabel, boolean baseVisible, String preview,
                     + (base.isEmpty() ? "" : " " + base);
         }
 
-        String hint = existing.filter(branch -> !branch.available())
-                .map(branch -> branch.stale()
-                        ? "Blocked by a stale worktree at " + branch.checkedOutAt().orElseThrow()
-                                + " — run `git worktree prune` to release it."
-                        : "Already checked out in " + branch.checkedOutAt().orElseThrow())
-                .orElse("");
+        // The prompt text this used to live in is invisible whenever the
+        // branch editor is non-empty (and it is pre-filled with "feat/"),
+        // so the loading state is announced here instead. A failed load
+        // speaks for itself through the error line.
+        String hint = catalog == null && !catalogFailed
+                ? "Loading branches…"
+                : existing.filter(branch -> !branch.available())
+                        .map(NewWorktreeState::blockedHint)
+                        .orElse("");
 
         boolean blocked = catalog == null || catalogFailed || !hint.isEmpty() || dir.isEmpty();
         boolean branchValid = existing.isPresent()
@@ -65,5 +73,24 @@ record NewWorktreeState(String branchLabel, boolean baseVisible, String preview,
 
         return new NewWorktreeState(existing.isPresent() ? "Existing branch" : "New branch",
                 existing.isEmpty(), preview, hint, blocked || !branchValid || creatingInFlight);
+    }
+
+    /**
+     * Why an occupied branch cannot be checked out, and how to release it.
+     * Locked is tested first and named separately from prunable because
+     * {@code git worktree prune} silently skips a locked worktree -- telling
+     * the user to run it would be advice that provably does nothing.
+     */
+    private static String blockedHint(BranchRef branch) {
+        String where = branch.checkedOutAt().orElseThrow().toString();
+        if (branch.locked()) {
+            return "Blocked by a locked worktree at " + where
+                    + " — run `git worktree unlock` to release it.";
+        }
+        if (branch.prunable()) {
+            return "Blocked by a stale worktree at " + where
+                    + " — run `git worktree prune` to release it.";
+        }
+        return "Already checked out in " + where;
     }
 }

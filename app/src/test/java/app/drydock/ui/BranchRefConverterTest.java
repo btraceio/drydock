@@ -21,7 +21,7 @@ class BranchRefConverterTest {
 
     @Test
     void toStringIsTheBareBranchNameEvenWhenTheBranchIsOccupied() {
-        BranchRef occupied = new BranchRef("main", false, Optional.of(Path.of("/src/olifer")), false);
+        BranchRef occupied = new BranchRef("main", false, Optional.of(Path.of("/src/olifer")), false, false);
 
         assertEquals("main", converter.toString(occupied));
         assertEquals("origin/feature/x", converter.toString(BranchRef.remote("origin/feature/x")));
@@ -37,13 +37,18 @@ class BranchRefConverterTest {
     }
 
     @Test
-    void describeAnnotatesOccupiedAndStaleBranchesForTheDropdownOnly() {
-        BranchRef occupied = new BranchRef("main", false, Optional.of(Path.of("/src/olifer")), false);
-        BranchRef stale = new BranchRef("ghost", false, Optional.of(Path.of("/gone")), true);
+    void describeAnnotatesOccupiedStaleAndLockedBranchesForTheDropdownOnly() {
+        BranchRef occupied = new BranchRef("main", false, Optional.of(Path.of("/src/olifer")), false, false);
+        BranchRef stale = new BranchRef("ghost", false, Optional.of(Path.of("/gone")), true, false);
+        BranchRef locked = new BranchRef("held", false, Optional.of(Path.of("/held")), false, true);
 
         assertTrue(BranchRefConverter.describe(occupied).contains("in use"));
         assertTrue(BranchRefConverter.describe(occupied).contains("/src/olifer"));
-        assertTrue(BranchRefConverter.describe(stale).contains("stale"));
+        assertTrue(BranchRefConverter.describe(stale).contains("stale worktree"));
+        // Locked reads apart from stale: it needs `git worktree unlock`, and
+        // `git worktree prune` would silently skip it.
+        assertTrue(BranchRefConverter.describe(locked).contains("locked worktree"));
+        assertTrue(BranchRefConverter.describe(locked).contains("/held"));
         assertEquals("idle", BranchRefConverter.describe(BranchRef.local("idle")));
     }
 }

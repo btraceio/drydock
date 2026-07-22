@@ -46,6 +46,9 @@ public record BranchCatalog(List<BranchRef> branches, List<String> remotes) {
     public static BranchCatalog merge(BranchListing listing, List<Worktree> worktrees) {
         Map<String, Worktree> byBranch = new HashMap<>();
         for (Worktree worktree : worktrees) {
+            // Two worktrees cannot legally claim one branch; if git ever reports
+            // it, the first wins -- in practice the main checkout, which
+            // WorktreeService.parse emits first.
             worktree.branch().ifPresent(branch -> byBranch.putIfAbsent(branch, worktree));
         }
 
@@ -57,9 +60,12 @@ public record BranchCatalog(List<BranchRef> branches, List<String> remotes) {
             }
             localNames.add(ref.name());
             Worktree holder = byBranch.get(ref.name());
+            // prunable and locked are carried separately: `git worktree prune`
+            // releases the first and silently skips the second.
             locals.add(new BranchRef(ref.name(), false,
                     holder == null ? Optional.empty() : Optional.of(holder.path()),
-                    holder != null && (holder.prunable() || holder.locked())));
+                    holder != null && holder.prunable(),
+                    holder != null && holder.locked()));
         }
         locals.sort(Comparator.comparing(BranchRef::name));
 
@@ -106,7 +112,11 @@ public record BranchCatalog(List<BranchRef> branches, List<String> remotes) {
     /**
      * Resolves picker text to a branch: an exact local match first (a local
      * branch may literally be named {@code origin/foo}), then an exact
-     * remote-tracking match, then the bare name qualified by each remote.
+     * remote-tracking match, then the typed text with a remote prefix
+     * stripped (a shadowed remote ref is dropped from {@link #branches()},
+     * so pasting its full {@code origin/feature/x} spelling must still find
+     * local {@code feature/x} rather than propose creating a branch called
+     * "origin/feature/x"), then the bare name qualified by each remote.
      * Empty means "no such branch" -- i.e. create mode.
      */
     public Optional<BranchRef> lookup(String text) {
@@ -127,6 +137,20 @@ public record BranchCatalog(List<BranchRef> branches, List<String> remotes) {
                 return Optional.of(ref);
             }
         }
+        for (String remote : remotes) {
+            String prefix = remote + "/";
+            if (!needle.startsWith(prefix)) {
+                continue;
+            }
+            String stripped = needle.substring(prefix.length());
+            for (BranchRef ref : branches) {
+                if (!ref.remote() && ref.name().equals(stripped)) {
+                    return Optional.of(ref);
+                }
+            }
+        }
+        // An ambiguous bare name (present on several remotes) resolves
+        // against the first remote in listing order.
         for (String remote : remotes) {
             String qualified = remote + "/" + needle;
             for (BranchRef ref : branches) {

@@ -38,8 +38,16 @@ final class BranchRefConverter extends StringConverter<BranchRef> {
             return branch.name();
         }
         Path holder = branch.checkedOutAt().orElseThrow();
-        return branch.name() + (branch.stale()
-                ? "  —  stale worktree (" + holder + ")"
-                : "  —  in use (" + holder + ")");
+        // Locked and stale read differently because they are escaped
+        // differently: `git worktree unlock` vs. `git worktree prune`.
+        String why;
+        if (branch.locked()) {
+            why = "locked worktree";
+        } else if (branch.prunable()) {
+            why = "stale worktree";
+        } else {
+            why = "in use";
+        }
+        return branch.name() + "  —  " + why + " (" + holder + ")";
     }
 }

@@ -146,6 +146,10 @@ final class NewWorktreeModal extends VBox {
             }
         });
         branchField.getEditor().setText("feat/");
+        // A TextField shows its prompt only while empty, and this one starts
+        // pre-filled -- so the loading state is really carried by the hint
+        // line (see NewWorktreeState.derive). The prompt is the fallback for
+        // the case where the user clears the field mid-load.
         branchField.getEditor().setPromptText("Loading branches…");
         branchField.getEditor().textProperty().addListener((obs, oldText, newText) -> {
             if (!directoryManuallyEdited) {
@@ -234,7 +238,7 @@ final class NewWorktreeModal extends VBox {
 
     /**
      * Loads the branch catalog. Until it arrives, Create stays disabled and
-     * the field prompts "Loading branches…": the catalog decides create vs.
+     * the hint line reads "Loading branches…": the catalog decides create vs.
      * checkout, so acting on a half-known list would run {@code -b} against
      * a branch that already exists. A failure is surfaced, never silently
      * degraded to an empty list -- that would make every branch read as new.
@@ -260,6 +264,12 @@ final class NewWorktreeModal extends VBox {
     /**
      * Fetches every remote, then reloads the catalog. Every completion path
      * -- success, fetch failure, load failure -- restores the button.
+     *
+     * <p>A failed fetch does NOT abort the reload: listing branches is purely
+     * local, so an offline user whose first load failed would otherwise be
+     * stuck with {@code catalogFailed} forever -- it is only ever cleared by
+     * a successful {@code applyCatalog}. The fetch error is reported and the
+     * (still useful) local reload runs anyway.</p>
      */
     private void onRefresh(Repository repository, GitStatusService gitStatusService,
                            WorktreeService worktreeService) {
@@ -271,9 +281,7 @@ final class NewWorktreeModal extends VBox {
         gitStatusService.fetchAll(repository.root()).whenComplete((v, fetchFailure) ->
                 Platform.runLater(() -> {
                     if (fetchFailure != null) {
-                        restoreRefreshButton();
                         showMessage("Fetch failed: " + UiErrors.unwrap(fetchFailure).getMessage());
-                        return;
                     }
                     BranchCatalog.load(gitStatusService, worktreeService, repository.root())
                             .whenComplete((loaded, loadFailure) -> Platform.runLater(() -> {
@@ -285,8 +293,11 @@ final class NewWorktreeModal extends VBox {
                                 applyCatalog(loaded);
                                 // --prune can delete the very remote-tracking
                                 // ref that was selected; say so rather than
-                                // silently flipping to "New branch".
-                                if (matchedBefore && catalog.lookup(branchText()).isEmpty()) {
+                                // silently flipping to "New branch". Skipped
+                                // when the fetch failed: nothing was pruned,
+                                // and it would bury the fetch error.
+                                if (fetchFailure == null && matchedBefore
+                                        && catalog.lookup(branchText()).isEmpty()) {
                                     showMessage("That branch no longer exists on the remote — "
                                             + "Create would now make a new one.");
                                 }

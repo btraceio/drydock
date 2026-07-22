@@ -13,6 +13,7 @@ import app.drydock.domain.UiTheme;
 import app.drydock.domain.WorkspaceUiState;
 import app.drydock.state.json.JsonValue;
 import app.drydock.state.json.JsonValue.JsonArray;
+import app.drydock.state.json.JsonValue.JsonBoolean;
 import app.drydock.state.json.JsonValue.JsonNumber;
 import app.drydock.state.json.JsonValue.JsonObject;
 import app.drydock.state.json.JsonValue.JsonString;
@@ -161,7 +162,7 @@ public final class ApplicationStateCodec {
         obj.put("prNumber", session.prNumber()
                 .<JsonValue>map(number -> JsonNumber.of((long) number))
                 .orElse(JsonValue.JsonNull.INSTANCE));
-        obj.put("branchCreatedHere", new JsonValue.JsonBoolean(session.branchCreatedHere()));
+        obj.put("branchCreatedHere", new JsonBoolean(session.branchCreatedHere()));
         return obj;
     }
 
@@ -273,7 +274,7 @@ public final class ApplicationStateCodec {
             // Lenient, like prState/remote: every session persisted before
             // this member existed did create its own branch, so an absent or
             // malformed value decodes to true. No schema bump.
-            boolean branchCreatedHere = !(obj.get("branchCreatedHere") instanceof JsonValue.JsonBoolean b)
+            boolean branchCreatedHere = !(obj.get("branchCreatedHere") instanceof JsonBoolean b)
                     || b.value();
             return new ManagedClaudeSession(id, repositoryId, displayName, claudeSessionId, claudeSessionName,
                     workingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, lastExitCode, prState, prNumber,

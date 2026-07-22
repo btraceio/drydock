@@ -791,7 +791,11 @@ public final class RepositorySidebar extends VBox {
                 }));
     }
 
-    /** One-click 🗑 of an unopened worktree: {@code git worktree remove} + {@code git branch -D}. */
+    /**
+     * One-click 🗑 of an unopened worktree: {@code git worktree remove} only.
+     * The branch is kept -- see {@link #deletableBranchOf}, which is always
+     * empty for a row reachable from here.
+     */
     private void onDeleteUnopenedWorktree(Repository repository, WorktreeService.Worktree worktree) {
         worktreeService.remove(repository.root(), worktree.path(), deletableBranchOf(worktree))
                 .whenComplete((v, failure) -> Platform.runLater(() -> {
@@ -838,6 +842,14 @@ public final class RepositorySidebar extends VBox {
      * discovered on disk, or one opened on a branch that already existed,
      * keeps its branch: {@code git branch -D} is unrecoverable for unpushed
      * commits, and drydock only destroys what it created.
+     *
+     * <p>At both sidebar call sites this is in fact <em>always</em> empty:
+     * {@code childNodesFor} only mints an {@code UnopenedWorktreeNode} when
+     * no session's {@code worktreeRoot} matches the path, while
+     * {@code mayDeleteBranchOf} requires exactly such a session. The guard is
+     * kept deliberately rather than inlined to {@code Optional.empty()}: it
+     * is the ownership rule itself, and it must keep holding if a future row
+     * source ever routes a session-backed worktree through here.</p>
      */
     private Optional<String> deletableBranchOf(WorktreeService.Worktree worktree) {
         return sessionManager.mayDeleteBranchOf(worktree.path()) ? worktree.branch() : Optional.empty();

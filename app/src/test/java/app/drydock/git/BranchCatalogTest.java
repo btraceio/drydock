@@ -35,14 +35,25 @@ class BranchCatalogTest {
     }
 
     @Test
-    void aPrunableOrLockedWorktreeMarksItsBranchStale() {
+    void prunableAndLockedWorktreesStayApartBecauseTheEscapeDiffers() {
+        // `git worktree prune` releases a prunable worktree but SILENTLY
+        // SKIPS a locked one, so the two must not collapse into one flag.
         BranchCatalog catalog = BranchCatalog.merge(
                 new BranchListing(List.of(BranchRef.local("ghost"), BranchRef.local("held")), List.of()),
                 List.of(new Worktree(Path.of("/gone"), Optional.of("ghost"), false, false, true, false),
                         new Worktree(Path.of("/held"), Optional.of("held"), false, false, false, true)));
 
-        assertTrue(catalog.lookup("ghost").orElseThrow().stale());
-        assertTrue(catalog.lookup("held").orElseThrow().stale());
+        BranchRef ghost = catalog.lookup("ghost").orElseThrow();
+        assertTrue(ghost.prunable());
+        assertFalse(ghost.locked());
+
+        BranchRef held = catalog.lookup("held").orElseThrow();
+        assertTrue(held.locked());
+        assertFalse(held.prunable());
+
+        // Both are blocked either way.
+        assertFalse(ghost.available());
+        assertFalse(held.available());
     }
 
     @Test
@@ -82,6 +93,25 @@ class BranchCatalogTest {
                 List.of());
 
         assertFalse(catalog.lookup("origin/foo").orElseThrow().remote());
+    }
+
+    @Test
+    void lookupStripsARemotePrefixToFindTheLocalBranchThatShadowedIt() {
+        // merge() drops origin/feature/x once local feature/x exists, so the
+        // full remote spelling (as pasted from `git branch -r`) has nothing
+        // to match exactly -- it must still resolve, not fall into create
+        // mode and propose a local branch literally named "origin/feature/x".
+        BranchCatalog catalog = BranchCatalog.merge(
+                new BranchListing(List.of(
+                        BranchRef.local("feature/x"),
+                        BranchRef.remote("origin/feature/x")), List.of("origin")),
+                List.of());
+
+        BranchRef found = catalog.lookup("origin/feature/x").orElseThrow();
+        assertEquals("feature/x", found.name());
+        assertFalse(found.remote());
+        // A remote prefix over a name that exists nowhere is still create mode.
+        assertTrue(catalog.lookup("origin/brand-new").isEmpty());
     }
 
     @Test

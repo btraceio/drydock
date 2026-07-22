@@ -354,8 +354,9 @@ public final class GitStatusService implements AutoCloseable {
      * Lists every branch -- local and remote-tracking -- plus the
      * repository's remote names, for the create-worktree modal's branch
      * picker, on this service's background executor. Occupancy
-     * ({@link BranchRef#checkedOutAt()}) is filled in separately by a
-     * later task, which composes this with {@link WorktreeService#list}.
+     * ({@link BranchRef#checkedOutAt()}) is filled in separately by
+     * {@link BranchCatalog#merge}, which composes this with
+     * {@link WorktreeService#list}.
      */
     public CompletableFuture<BranchListing> listBranches(Path repositoryRoot) {
         return CompletableFuture.supplyAsync(() -> listBranchesBlocking(repositoryRoot), executor);

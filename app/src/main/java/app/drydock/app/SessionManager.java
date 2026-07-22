@@ -217,20 +217,6 @@ public final class SessionManager implements AutoCloseable {
         return launchNewSession(newSessionMetadata(repository, displayName), displayName, app, host, scaleFactor);
     }
 
-    /**
-     * Creates a session living inside an (already-created) git worktree
-     * checkout: claude launches from {@code worktreeRoot}, and the session
-     * is tagged with it so the UI can render branch/dirty/PR metadata.
-     * Creating the worktree itself ({@code git worktree add}) is the
-     * caller's job, via {@link app.drydock.git.GitStatusService#createWorktree}.
-     */
-    public CompletableFuture<SessionOpenResult> createWorktreeSession(Repository repository, String displayName,
-                                                                       Path worktreeRoot, TerminalRuntime app,
-                                                                       TerminalHostView host, double scaleFactor) {
-        ManagedClaudeSession initial = newSessionMetadata(repository, displayName, Optional.of(worktreeRoot));
-        return launchNewSession(initial, displayName, app, host, scaleFactor);
-    }
-
     private CompletableFuture<SessionOpenResult> launchNewSession(ManagedClaudeSession initial, String displayName,
                                                                   TerminalRuntime app, TerminalHostView host,
                                                                   double scaleFactor) {
@@ -763,12 +749,10 @@ public final class SessionManager implements AutoCloseable {
      * When {@code worktreeRoot} is present the session lives (and launches
      * claude) inside that worktree checkout rather than the repository's
      * main checkout -- {@code workingDirectory} IS the worktree directory.
+     * {@code branchCreatedHere} records whether drydock minted the branch,
+     * and so whether it may later delete it; it has no safe default, which
+     * is why every worktree caller must state it.
      */
-    private ManagedClaudeSession newSessionMetadata(Repository repository, String displayName,
-                                                    Optional<Path> worktreeRoot) {
-        return newSessionMetadata(repository, displayName, worktreeRoot, true);
-    }
-
     private ManagedClaudeSession newSessionMetadata(Repository repository, String displayName,
                                                     Optional<Path> worktreeRoot, boolean branchCreatedHere) {
         Instant now = Instant.now();

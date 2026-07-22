@@ -8,8 +8,8 @@ import java.util.Objects;
  * plus the repository's remote names. The remote names are not decoration --
  * a remote may itself contain a slash ({@code git remote add team/fork}), so
  * they are the only way to split {@code team/fork/feature/x} into its remote
- * and its local name. A later task consumes this to correctly split such
- * names.
+ * and its local name. {@link BranchCatalog#localName(BranchRef)} consumes
+ * them to split such names correctly.
  */
 public record BranchListing(List<BranchRef> branches, List<String> remotes) {
 
