@@ -52,7 +52,7 @@ Copied from `AGENTS.md`; every task's requirements implicitly include these.
 `git fetch` against an HTTPS remote needing credentials blocks on a terminal prompt, because `ProcessRunner` leaves stdin an open pipe nobody closes. The user would watch a spinner for the full timeout and get a bare "timed out".
 
 **Files:**
-- Modify: `app/src/main/java/app/drydock/process/ProcessRunner.java:48-56`
+- Modify: `app/src/main/java/app/drydock/process/ProcessRunner.java:49-82` (the `run` method)
 - Test: `app/src/test/java/app/drydock/process/ProcessRunnerTest.java`
 
 **Interfaces:**
@@ -155,7 +155,7 @@ Add `import java.util.Objects;` if absent. Rename the **existing** method body: 
             throws IOException, InterruptedException {
 ```
 
-with its first three lines (the `ProcessBuilder` construction and `workingDirectory` block) deleted, since the callers now build it. Everything from `Process process = builder.start();` onward is unchanged — including the concurrent drain and the `destroyForcibly()` timeout path.
+with its first **four** lines deleted — the `ProcessBuilder builder = …` line plus the whole three-line `if (workingDirectory != null) { … }` block (`ProcessRunner.java:51-54`) — since the callers now build it. Deleting three would leave a stray `}`. Everything from `Process process = builder.start();` onward is unchanged — including the concurrent drain and the `destroyForcibly()` timeout path.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -280,7 +280,7 @@ Both construction sites become:
 
 - [ ] **Step 4: Fix the other construction sites, then run tests**
 
-Compile will point at every remaining `new Worktree(` — pass `false, false` for the two new components. Search first: `grep -rn "new Worktree(\|new WorktreeService.Worktree(" app/src`.
+Compile will point at every remaining `new Worktree(` — pass `false, false` for the two new components. Search first: `grep -rn "new Worktree(\|new WorktreeService.Worktree(" app/src`. Besides `WorktreeService` itself and `WorktreeServiceTest`, this hits **`app/src/test/java/app/drydock/ui/model/WorkspaceViewModelTest.java:220`**.
 
 Run: `./gradlew :app:test`
 Expected: PASS.
@@ -288,7 +288,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add app/src/main/java/app/drydock/git/WorktreeService.java app/src/test/java/app/drydock/git/WorktreeServiceTest.java
+git add app/src/main/java/app/drydock/git/WorktreeService.java app/src/test/java/app/drydock/git/WorktreeServiceTest.java app/src/test/java/app/drydock/ui/model/WorkspaceViewModelTest.java
 git commit -m "Parse prunable and locked worktree attributes"
 ```
 
@@ -357,13 +357,13 @@ Replace `listLocalBranchesReportsEveryLocalBranch` in `GitStatusServiceTest` wit
     }
 ```
 
-Add a helper beside the existing ones (the existing `runGit` always passes `-C <repo>`, which cannot host a `clone` that creates its target):
+Add a helper beside the existing ones (the existing `runGit` always passes `-C <repo>`, which cannot host a `clone` that creates its target). The file already imports `java.util.List`; add `java.util.ArrayList` and `java.util.Arrays` rather than inlining fully-qualified names as the neighbouring `runGitCapture` does:
 
 ```java
     private static void runGitIn(Path cwd, String... args) throws IOException, InterruptedException {
-        java.util.List<String> command = new java.util.ArrayList<>();
+        List<String> command = new ArrayList<>();
         command.add("git");
-        command.addAll(java.util.Arrays.asList(args));
+        command.addAll(Arrays.asList(args));
         Process process = new ProcessBuilder(command).directory(cwd.toFile()).redirectErrorStream(true).start();
         String output = new String(process.getInputStream().readAllBytes());
         if (process.waitFor() != 0) {
@@ -508,10 +508,9 @@ In `GitStatusService`, replace `listLocalBranches`/`listLocalBranchesBlocking` w
 
 `for-each-ref` sorts by refname by default, so `refs/heads/*` precedes `refs/remotes/*` and each group is alphabetical — which is the order the first test asserts.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [ ] **Step 4: Apply the shim, then run the tests**
 
-Run: `./gradlew :app:test --tests "app.drydock.git.GitStatusServiceTest"`
-Expected: PASS. `NewWorktreeModal.java:83` still calls the deleted `listLocalBranches`, so compilation of the main source set fails — apply the temporary shim below, since Task 9 rewrites that call properly.
+Do the shim **first**: `NewWorktreeModal.java:83` still calls the now-deleted `listLocalBranches`, so the main source set does not compile and the test task cannot run at all until it is fixed. Task 9 rewrites this call properly; this only keeps the build green in between.
 
 In `NewWorktreeModal`, change the `listLocalBranches` block to:
 
@@ -528,6 +527,9 @@ In `NewWorktreeModal`, change the `listLocalBranches` block to:
 ```
 
 with `import app.drydock.git.BranchRef;`. This keeps the fork-from picker behaving exactly as before (local branches only).
+
+Run: `./gradlew :app:test --tests "app.drydock.git.GitStatusServiceTest"`
+Expected: PASS.
 
 Run: `./gradlew :app:test`
 Expected: PASS.
@@ -1277,7 +1279,7 @@ class BranchOwnershipTest {
 }
 ```
 
-If `RepositoryId.newId()` does not exist, use `RepositoryId.of(java.util.UUID.randomUUID().toString())` — check the type first.
+`RepositoryId.newId()` exists (`RepositoryId.java:19`). This test lives in `app.drydock.domain`, so `ManagedClaudeSession`, `PrState`, `SessionStatus`, `ManagedSessionId`, and `RepositoryId` all need no import.
 
 Add to `ApplicationStateCodecTest`:
 
@@ -1378,6 +1380,8 @@ Expose the predicate over the live session list:
     }
 ```
 
+`SessionManager` is in `app.drydock.app`, so add `import app.drydock.domain.BranchOwnership;`.
+
 **3c.** Create `BranchOwnership.java`:
 
 ```java
@@ -1414,10 +1418,10 @@ public final class BranchOwnership {
 **3d.** In `ApplicationStateCodec`, encode in `sessionToJson`:
 
 ```java
-        obj.put("branchCreatedHere", JsonValue.JsonBoolean.of(session.branchCreatedHere()));
+        obj.put("branchCreatedHere", new JsonValue.JsonBoolean(session.branchCreatedHere()));
 ```
 
-Use whatever boolean `JsonValue` variant this codebase's hand-rolled JSON provides — check `app/src/main/java/app/drydock/state/json/JsonValue.java` and follow the existing style exactly (it may be `new JsonBoolean(true)` or a shared constant).
+`JsonBoolean` is `record JsonBoolean(boolean value) implements JsonValue` (`app/src/main/java/app/drydock/state/json/JsonValue.java:87`) with **no** static factory — unlike `JsonNumber.of` / `JsonNull.INSTANCE`, so it must be constructed directly. `ApplicationStateCodec` imports `JsonObject`/`JsonString`/`JsonNumber`/`JsonArray` individually but not `JsonBoolean`; either add that import or keep the `JsonValue.` qualifier in both the encode and decode snippets.
 
 Decode in `sessionFromJson`, beside the other lenient fields:
 
@@ -1441,7 +1445,16 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add app/src/main/java/app/drydock/domain/ app/src/main/java/app/drydock/state/ApplicationStateCodec.java app/src/main/java/app/drydock/app/SessionManager.java app/src/test/java/app/drydock/
+git add app/src/main/java/app/drydock/domain/ManagedClaudeSession.java \
+        app/src/main/java/app/drydock/domain/BranchOwnership.java \
+        app/src/main/java/app/drydock/state/ApplicationStateCodec.java \
+        app/src/main/java/app/drydock/app/SessionManager.java \
+        app/src/test/java/app/drydock/domain/BranchOwnershipTest.java \
+        app/src/test/java/app/drydock/domain/ManagedClaudeSessionTest.java \
+        app/src/test/java/app/drydock/state/ApplicationStateCodecTest.java \
+        app/src/test/java/app/drydock/state/JsonApplicationStateRepositoryTest.java \
+        app/src/test/java/app/drydock/app/SessionManagerTest.java \
+        app/src/test/java/app/drydock/ui/model/WorkspaceViewModelTest.java
 git commit -m "Record whether drydock created a session's branch"
 ```
 
@@ -1582,7 +1595,11 @@ In the constructor, build the field:
         HBox.setHgrow(branchField, Priority.ALWAYS);
 ```
 
-`deriveDirectory` must be declared before this listener; keep it as the existing `Runnable` local but move its declaration above. It now derives from the **local** name, so the directory is identical whether the user picked the local or the remote spelling:
+`deriveDirectory` must be declared before this listener — and it captures two other locals, so **all three move together as one block** above the combo setup: `Path home` and `AtomicReference<Optional<Path>> worktreesDirectory` (`NewWorktreeModal.java:95-96`) followed by the `deriveDirectory` runnable (`:97-103`). Moving `deriveDirectory` alone leaves `home` and `worktreesDirectory` forward-referenced and the file will not compile.
+
+Move only the *declarations*. The invocation `deriveDirectory.run()` (currently `:104`) stays **after** `branchField.getEditor().setText("feat/")`: run it before the seed text is set and the first derivation sees an empty branch name, with no listener yet registered to correct it, so the modal opens showing a directory with no branch slug.
+
+It now derives from the **local** name, so the directory is identical whether the user picked the local or the remote spelling:
 
 ```java
         Runnable deriveDirectory = () -> {
@@ -1650,11 +1667,20 @@ Replace the two `getStatus`/`listLocalBranches` blocks. The status call still se
                     catalog = loaded;
                     catalogFailed = false;
                     branchField.getItems().setAll(loaded.branches());
+                    // The "Fork from" picker keeps offering local branches
+                    // only: today NewWorktreeModal:83-88 is its sole item
+                    // source, and this replaces that call.
+                    baseField.getItems().setAll(loaded.branches().stream()
+                            .filter(branch -> !branch.remote())
+                            .map(BranchRef::name)
+                            .toList());
                     branchField.getEditor().setPromptText("");
                     refreshState();
                 }));
     }
 ```
+
+`baseField.setValue(...)` in the `getStatus` callback only sets the editor text — without the `setAll` above, the fork-from dropdown would silently come up empty.
 
 Add `import app.drydock.domain.Repository;` if not present, and `UiErrors` is already used by `MainWorkspace` — import `app.drydock.ui.UiErrors` only if `NewWorktreeModal` is in another package (it is not; no import needed).
 
@@ -1707,7 +1733,7 @@ Every path re-enables the button and restores its label — success, fetch failu
 
 - [ ] **Step 5: Make `refreshState` the only writer of the disabled state**
 
-Delete `updateFooter()` and replace with:
+Delete `updateFooter()` and replace with the method below. It has **four** existing call sites, all of which become `refreshState()`: `NewWorktreeModal.java:76` (the `baseField` editor listener), `:117` (inside the branch listener, which Step 2 already rewrote), `:123` (the `directoryField` listener), and `:155` (the constructor's final call, which Step 6 rewrites). The compiler catches these, but Task 9's only *expected* red is `MainWorkspace:557`.
 
 ```java
     /**
@@ -1846,7 +1872,13 @@ Expected: FAILS at `MainWorkspace.java:557` — the `CreateHandler` lambda now t
 
 - [ ] **Step 1: Rewrite `promptNewWorktree`**
 
-`MainWorkspace` must have a `WorktreeService` to pass down; it already holds one (it constructs `RepositorySidebar` with one) — use that field.
+`MainWorkspace` receives a `WorktreeService` as a **constructor parameter** (`:207`) and passes it straight into `new WorktreeLifecycleController(...)` (`:221`) — it never stores it. Add the field, since `promptNewWorktree` now needs it:
+
+```java
+    private final WorktreeService worktreeService;
+```
+
+and assign it in the constructor alongside the other field assignments (`:212-219`). The `WorktreeService` import is already present (`:21`).
 
 ```java
     /**
@@ -1892,7 +1924,13 @@ Expected: FAILS at `MainWorkspace.java:557` — the `CreateHandler` lambda now t
                 sessionManager.prepareWorktreeSession(repository, branch, worktreeRoot, branchCreatedHere);
 ```
 
-The rest of the method is unchanged. Fix any other caller the compiler flags — `grep -rn "openNewWorktreeSession(" app/src` — passing `true` where the branch was freshly created.
+The rest of the method is unchanged. There is exactly one other caller, and it must pass **`false`**:
+
+`MainWorkspace.java:420`, inside `promptStartWorktreeSession` — the Start-session modal for an **existing** worktree, documented at `:403-408` as running "no `git worktree add` anywhere". Its worktree was discovered on disk, so drydock did not create that branch. Passing `true` there would re-arm the exact `git branch -D` hazard Tasks 7 and 8 exist to close: removing such a worktree would force-delete a branch the user created elsewhere.
+
+```java
+                openNewWorktreeSession(repository, branch, worktree.path(), task, false);
+```
 
 - [ ] **Step 3: Compile and run the full suite**
 
@@ -1992,5 +2030,7 @@ Commit anything the visual pass turned up; if it turned up nothing, there is not
 **Spec coverage:** listing/symref → Task 3; occupancy + prunable/locked → Tasks 2, 4; local-name/longest-remote-prefix → Task 4; shadowing → Task 4; `(name, remote)` collision → Task 4; `addWorktreeForBranch` → Task 5; fetch timeout + prompt guard → Tasks 1, 5; converter identity → Task 6; derived mode + `refreshState` sole writer + two message slots + load gate + refresh reporting → Task 9; directory derivation from local name → Task 9; provenance model + lenient codec → Task 7; both delete sites → Task 8 (the sidebar site was **not** in the spec; added per the decision to use one predicate across both); wiring → Task 10.
 
 **Type consistency:** `BranchRef` is `(name, remote, checkedOutAt, stale)` throughout; `BranchCatalog.localName(BranchRef)` is the single name-splitting entry point used by Tasks 5, 9, 10; `mayDeleteBranchOf` has the same name on `BranchOwnership` (static, list-taking) and `SessionManager` (instance, live sessions). `Worktree` gains exactly `prunable, locked` in that order, appended last, matching every construction site in Tasks 2 and 4.
+
+**Provenance call-site audit** (every place that decides `branchCreatedHere`): `MainWorkspace:567` create mode → `true`; `MainWorkspace:567` checkout mode → `false`; `MainWorkspace:420` (`promptStartWorktreeSession`, existing worktree) → `false`; `SessionManager`'s non-worktree overloads → `true` (a plain session has no worktree branch to protect); sessions persisted before the field existed → `true` via the lenient decode.
 
 **Known deviation from the spec:** the spec proposed a `NewWorktreeModalTest` that selects a dropdown row. There is no TestFX and no toolkit in unit tests, so that test cannot exist. The coverage moved to `BranchRefConverterTest` (Task 6, catches the exact regression) plus the on-screen check in Task 11 step 3.3.
