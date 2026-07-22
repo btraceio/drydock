@@ -1233,6 +1233,39 @@
     -fx-highlight-fill: -drydock-accent-soft;
     -fx-padding: 7 0 7 10;
 }
+/* The popup is a separate scene graph, so the rules above never reach it --
+   without these it renders in the default light Modena palette against the
+   dark UI. Disabled rows are the branches already checked out elsewhere. */
+.worktree-base-combo .combo-box-popup .list-view,
+.worktree-branch-combo .combo-box-popup .list-view {
+    -fx-background-color: -drydock-titlebar;
+    -fx-background-radius: 7px;
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 7px;
+    -fx-padding: 4px;
+}
+.worktree-base-combo .combo-box-popup .list-cell,
+.worktree-branch-combo .combo-box-popup .list-cell {
+    -fx-background-color: transparent;
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 12.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-padding: 6 10 6 10;
+    -fx-background-radius: 5px;
+}
+.worktree-base-combo .combo-box-popup .list-cell:filled:hover,
+.worktree-branch-combo .combo-box-popup .list-cell:filled:hover {
+    -fx-background-color: -drydock-hover;
+}
+.worktree-base-combo .combo-box-popup .list-cell:filled:selected,
+.worktree-branch-combo .combo-box-popup .list-cell:filled:selected {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-text-fill: -drydock-text;
+}
+.worktree-branch-combo .combo-box-popup .list-cell:disabled {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-opacity: 1;
+}
 .worktree-refresh-button {
     -fx-min-width: 30px;  -fx-max-width: 30px;
     -fx-min-height: 30px; -fx-max-height: 30px;
