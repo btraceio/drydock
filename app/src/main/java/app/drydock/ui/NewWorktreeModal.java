@@ -1,5 +1,6 @@
 package app.drydock.ui;
 
+import app.drydock.config.UserConfig;
 import app.drydock.domain.Repository;
 import app.drydock.git.GitBranchState;
 import app.drydock.git.GitStatusService;
@@ -17,6 +18,7 @@ import javafx.scene.layout.VBox;
 
 import java.nio.file.Path;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * The create-worktree modal (design handoff section B, "Creating"): a new
@@ -91,13 +93,23 @@ final class NewWorktreeModal extends VBox {
         taskField.setWrapText(true);
 
         Path home = Path.of(System.getProperty("user.home"));
+        AtomicReference<Optional<Path>> worktreesDirectory = new AtomicReference<>(Optional.empty());
         Runnable deriveDirectory = () -> {
             derivingDirectory = true;
             directoryField.setText(
-                    WorktreeNaming.defaultDirectory(home, repository.displayName(), branchField.getText()).toString());
+                    WorktreeNaming.defaultDirectory(home, worktreesDirectory.get(), repository.displayName(),
+                            branchField.getText()).toString());
             derivingDirectory = false;
         };
         deriveDirectory.run();
+        UserConfig.loadAsync().whenComplete((config, failure) -> Platform.runLater(() -> {
+            if (failure == null) {
+                worktreesDirectory.set(config.worktreesDirectory());
+                if (!directoryManuallyEdited) {
+                    deriveDirectory.run();
+                }
+            }
+        }));
         branchField.textProperty().addListener((obs, oldText, newText) -> {
             if (!directoryManuallyEdited) {
                 deriveDirectory.run();

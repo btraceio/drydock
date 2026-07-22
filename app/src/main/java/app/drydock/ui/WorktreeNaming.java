@@ -2,6 +2,7 @@ package app.drydock.ui;
 
 import java.nio.file.Path;
 import java.util.Locale;
+import java.util.Optional;
 
 /**
  * Pure branch-name → worktree-directory derivation for the create-worktree
@@ -34,12 +35,24 @@ final class WorktreeNaming {
 
     /** The default worktree directory: {@code <home>/dev/wt/<repo>-<slug>}. */
     static Path defaultDirectory(Path home, String repositoryName, String branch) {
+        return defaultDirectory(home, Optional.empty(), repositoryName, branch);
+    }
+
+    /**
+     * As {@link #defaultDirectory(Path, String, String)}, but forms the
+     * directory under {@code worktreesDirectory} (the user's configured
+     * base, see {@code UserConfig}) instead of {@code <home>/dev/wt} when
+     * present: {@code <worktreesDirectory>/<repo>-<slug>}.
+     */
+    static Path defaultDirectory(Path home, Optional<Path> worktreesDirectory, String repositoryName,
+                                 String branch) {
         String repoSlug = repositoryName == null ? "" : repositoryName.strip().toLowerCase(Locale.ROOT)
                 .replaceAll("[^a-z0-9]+", "-")
                 .replaceAll("^-+|-+$", "");
         if (repoSlug.isEmpty()) {
             repoSlug = "repo";
         }
-        return home.resolve("dev").resolve("wt").resolve(repoSlug + "-" + slug(branch));
+        Path base = worktreesDirectory.orElseGet(() -> home.resolve("dev").resolve("wt"));
+        return base.resolve(repoSlug + "-" + slug(branch));
     }
 }
