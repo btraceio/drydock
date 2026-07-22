@@ -194,10 +194,23 @@ create is force-deleted.
 `ManagedClaudeSession` gains `boolean branchCreatedHere`.
 `SessionManager.prepareWorktreeSession` takes it as a parameter; the
 create-mode path passes `true`, the checkout path `false`.
-`WorktreeLifecycleController.handoffDelete` passes
-`Optional.of(branch)` only when `branchCreatedHere`, and
-`Optional.empty()` otherwise — the worktree is removed, the branch
-survives.
+
+**Two call sites run `git branch -D`, not one.** Besides
+`WorktreeLifecycleController.handoffDelete` (`:335`), the sidebar's 🗑 on an
+*unopened* worktree row (`RepositorySidebar.java:796`, and its forced retry
+at `:825`) deletes the branch of any worktree — including ones merely
+discovered on disk that drydock never created. One predicate covers both:
+
+```java
+BranchOwnership.mayDeleteBranchOf(List<ManagedClaudeSession>, Path worktreeRoot)
+```
+
+— true only when a session for that worktree records `branchCreatedHere`.
+Both sites pass `Optional.of(branch)` when it holds and `Optional.empty()`
+otherwise: the worktree is removed, the branch survives. This also closes
+the pre-existing hazard for discovered worktrees, which is a deliberate
+behaviour change — the sidebar stops force-deleting branches of
+externally-created worktrees.
 
 Persistence follows the codec's established lenient pattern (as `prState`
 and `remote` did): the field is added within schema version 2, and an
@@ -229,13 +242,19 @@ pass vacuously):
 
 `WorktreeServiceTest` gains `prunable`/`locked` parsing cases.
 
-Modal tests (`NewWorktreeModalTest`, following the existing
-`RemoteRepositoryModalTest`): selecting a *decorated* row from the dropdown
-resolves to checkout mode and a clean branch name — the converter
-round-trip is the single most likely thing to ship broken, and no
-service-level test can catch it. Plus: typing before the catalog loads
-leaves Create disabled; a catalog load failure shows an error rather than
-an empty list.
+**There is no TestFX and no FX toolkit in unit tests** —
+`RemoteRepositoryModalTest` only exercises a pure static helper. So the
+modal's logic has to live in toolkit-free units to be testable at all:
+`BranchCatalog.lookup` (the mode oracle) and `BranchRefConverter`
+(`javafx.util.StringConverter` instantiates fine without the toolkit). The
+converter's identity-on-name property is the single most likely thing to
+ship broken and gets its own test; the `ComboBox` is a thin delegate over
+both.
+
+What no unit test can reach — the mode flip on screen, the hidden "Fork
+from" row, the refresh button's in-flight state — is verified by launching
+the app against a scratch repository and validating a *series* of
+screenshots across each interaction.
 
 Codec test: a persisted session without `branchCreatedHere` decodes to
 `true`.
