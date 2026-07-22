@@ -68,6 +68,17 @@ final class NewWorktreeModal extends VBox {
     private BranchCatalog catalog;
     private boolean catalogFailed;
     private boolean creatingInFlight;
+    /** True while either the initial load or a user refresh is running. */
+    private boolean refreshInFlight;
+
+    /**
+     * Re-derives the worktree directory from the branch text. Held as a field
+     * so the catalog-applied path can re-run it: while the catalog is null,
+     * {@code localBranchName()} falls back to the raw text, so a directory
+     * derived from {@code origin/foo} must be redone as {@code foo} once the
+     * catalog can strip the remote.
+     */
+    private Runnable deriveDirectory = () -> { };
 
     /** Once the user hand-edits the directory, the branch listener stops overwriting it. */
     private boolean directoryManuallyEdited;
@@ -114,7 +125,7 @@ final class NewWorktreeModal extends VBox {
         AtomicReference<Optional<Path>> worktreesDirectory = new AtomicReference<>(Optional.empty());
         // Derives from the LOCAL name, so the directory is identical whether
         // the user picked the local or the remote spelling of a branch.
-        Runnable deriveDirectory = () -> {
+        deriveDirectory = () -> {
             derivingDirectory = true;
             directoryField.setText(
                     WorktreeNaming.defaultDirectory(home, worktreesDirectory.get(), repository.displayName(),
@@ -230,8 +241,14 @@ final class NewWorktreeModal extends VBox {
      */
     private void loadCatalog(Repository repository, GitStatusService gitStatusService,
                              WorktreeService worktreeService) {
+        // Serialised against a user refresh: otherwise a refresh could land
+        // first and a late initial FAILURE would then poison a newer, valid
+        // catalog by setting catalogFailed on top of it.
+        refreshInFlight = true;
+        refreshState();
         BranchCatalog.load(gitStatusService, worktreeService, repository.root())
                 .whenComplete((loaded, failure) -> Platform.runLater(() -> {
+                    refreshInFlight = false;
                     if (failure != null) {
                         applyCatalogFailure(failure);
                         return;
@@ -247,14 +264,15 @@ final class NewWorktreeModal extends VBox {
     private void onRefresh(Repository repository, GitStatusService gitStatusService,
                            WorktreeService worktreeService) {
         boolean matchedBefore = catalog != null && catalog.lookup(branchText()).isPresent();
-        refreshButton.setDisable(true);
+        refreshInFlight = true;
         refreshButton.setText("…");
         hideError();
+        refreshState();
         gitStatusService.fetchAll(repository.root()).whenComplete((v, fetchFailure) ->
                 Platform.runLater(() -> {
                     if (fetchFailure != null) {
                         restoreRefreshButton();
-                        showError("Fetch failed: " + UiErrors.unwrap(fetchFailure).getMessage());
+                        showMessage("Fetch failed: " + UiErrors.unwrap(fetchFailure).getMessage());
                         return;
                     }
                     BranchCatalog.load(gitStatusService, worktreeService, repository.root())
@@ -269,15 +287,20 @@ final class NewWorktreeModal extends VBox {
                                 // ref that was selected; say so rather than
                                 // silently flipping to "New branch".
                                 if (matchedBefore && catalog.lookup(branchText()).isEmpty()) {
-                                    showError("That branch no longer exists on the remote — "
+                                    showMessage("That branch no longer exists on the remote — "
                                             + "Create would now make a new one.");
                                 }
                             }));
                 }));
     }
 
+    /**
+     * Ends the in-flight refresh and restores the glyph. The button's disabled
+     * state has exactly one writer -- {@link #refreshState()} -- reached here
+     * through whichever of {@code applyCatalog}/{@code showMessage} follows.
+     */
     private void restoreRefreshButton() {
-        refreshButton.setDisable(false);
+        refreshInFlight = false;
         refreshButton.setText("⟳");
     }
 
@@ -297,13 +320,25 @@ final class NewWorktreeModal extends VBox {
                 .map(BranchRef::name)
                 .toList());
         branchField.getEditor().setPromptText("");
+        // Until now localBranchName() fell back to the raw text, so "origin/foo"
+        // slugged a directory the catalog can now strip to "foo".
+        if (!directoryManuallyEdited) {
+            deriveDirectory.run();
+        }
         refreshState();
     }
 
-    /** Surfaces a catalog load failure; {@link #showError} re-derives the state. */
+    /**
+     * Surfaces a catalog load failure. It must NOT go through
+     * {@link #showError}: that sink ends an in-flight creation, and a failed
+     * refresh during a creation would hand back a second Create click.
+     */
     private void applyCatalogFailure(Throwable failure) {
         catalogFailed = true;
-        showError("Could not list branches: " + UiErrors.unwrap(failure).getMessage());
+        // The prompt is only ever cleared on the success path otherwise, so a
+        // failed first load would keep claiming the branches are still loading.
+        branchField.getEditor().setPromptText("");
+        showMessage("Could not list branches: " + UiErrors.unwrap(failure).getMessage());
     }
 
     /** The local branch name the current text would check out as. */
@@ -335,50 +370,40 @@ final class NewWorktreeModal extends VBox {
      * state has just declared impossible.
      */
     private void refreshState() {
-        String text = branchText();
-        String directory = directoryField.getText() == null ? "" : directoryField.getText().strip();
-        Optional<BranchRef> existing = catalog == null ? Optional.empty() : catalog.lookup(text);
+        NewWorktreeState state = NewWorktreeState.derive(catalog, catalogFailed, branchText(), baseText(),
+                directoryField.getText(), creatingInFlight);
 
-        branchLabel.setText(existing.isPresent() ? "Existing branch" : "New branch");
-        boolean creating = existing.isEmpty();
-        baseGroup.setVisible(creating);
-        baseGroup.setManaged(creating);
-
-        String base = baseText();
-        if (existing.isPresent()) {
-            BranchRef branch = existing.get();
-            commandPreview.setText(branch.remote()
-                    ? "$ git worktree add " + directory + " -b " + catalog.localName(branch)
-                            + " --track " + branch.name()
-                    : "$ git worktree add " + directory + " " + branch.name());
-        } else {
-            commandPreview.setText("$ git worktree add " + directory + " -b " + text
-                    + (base.isEmpty() ? "" : " " + base));
-        }
-
-        String hint = existing.filter(branch -> !branch.available())
-                .map(branch -> branch.stale()
-                        ? "Blocked by a stale worktree at " + branch.checkedOutAt().orElseThrow()
-                                + " — run `git worktree prune` to release it."
-                        : "Already checked out in " + branch.checkedOutAt().orElseThrow())
-                .orElse("");
-        hintLine.setText(hint);
-        hintLine.setVisible(!hint.isEmpty());
-        hintLine.setManaged(!hint.isEmpty());
-
-        boolean blocked = catalog == null || catalogFailed || !hint.isEmpty() || directory.isEmpty();
-        boolean branchValid = existing.isPresent()
-                || (!text.isEmpty() && !text.endsWith("/") && !text.contains(" ") && !base.isEmpty());
-        createButton.setDisable(blocked || !branchValid || creatingInFlight);
+        branchLabel.setText(state.branchLabel());
+        baseGroup.setVisible(state.baseVisible());
+        baseGroup.setManaged(state.baseVisible());
+        commandPreview.setText(state.preview());
+        hintLine.setText(state.hint());
+        hintLine.setVisible(!state.hint().isEmpty());
+        hintLine.setManaged(!state.hint().isEmpty());
+        createButton.setDisable(state.createDisabled());
+        // Refreshing mid-creation would clear the in-flight flag through the
+        // error sink and hand back a second Create click for the same
+        // directory, so the refresh button follows the same derived state.
+        refreshButton.setDisable(refreshInFlight || creatingInFlight);
     }
 
-    /** Shows a creation failure inline; the modal stays open so the input can be corrected. */
+    /**
+     * Shows a creation failure inline and ends the in-flight creation; the
+     * modal stays open so the input can be corrected. Only {@code MainWorkspace}'s
+     * create-failure path may call this -- any other error must use
+     * {@link #showMessage}, which leaves {@code creatingInFlight} alone.
+     */
     void showError(String message) {
+        creatingInFlight = false;
+        createButton.setText("Create worktree");
+        showMessage(message);
+    }
+
+    /** Paints an error that has nothing to do with an in-flight creation. */
+    private void showMessage(String message) {
         errorLine.setText(message);
         errorLine.setVisible(true);
         errorLine.setManaged(true);
-        creatingInFlight = false;
-        createButton.setText("Create worktree");
         refreshState();
     }
 
