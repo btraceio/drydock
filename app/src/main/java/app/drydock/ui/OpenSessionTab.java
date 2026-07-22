@@ -327,6 +327,13 @@ final class OpenSessionTab {
         }
     }
 
+    /** Diagnostic-only (see MainWorkspace.diagTypeInExplorer): types into the Explorer's code area. */
+    void diagTypeInExplorer(String text) {
+        if (explorerView instanceof SessionExplorerView explorer) {
+            explorer.diagType(text);
+        }
+    }
+
     /** Explorer bridge for the Review tab: switches to the Explorer and runs a text search for {@code token}. */
     void searchInExplorer(String token) {
         showSubTab(SubTab.EXPLORER);

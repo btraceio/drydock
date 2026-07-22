@@ -1079,12 +1079,39 @@
     -fx-text-fill: -drydock-text-faint;
     -fx-font-size: 11.5px;
 }
-.read-only-chip {
+.read-only-chip,
+.editable-chip {
     -fx-background-color: -drydock-active-bg;
     -fx-background-radius: 100px;
     -fx-text-fill: -drydock-text-dim;
     -fx-font-size: 10px;
     -fx-padding: 1 8 1 8;
+}
+.unsaved-chip {
+    -fx-background-color: -drydock-dirty-soft;
+    -fx-background-radius: 100px;
+    -fx-text-fill: -drydock-dirty;
+    -fx-font-size: 10px;
+    -fx-padding: 1 8 1 8;
+}
+.saved-chip {
+    -fx-background-color: -drydock-running-soft;
+    -fx-background-radius: 100px;
+    -fx-text-fill: -drydock-running;
+    -fx-font-size: 10px;
+    -fx-padding: 1 8 1 8;
+}
+.error-chip {
+    -fx-background-color: -drydock-error-soft;
+    -fx-background-radius: 100px;
+    -fx-text-fill: -drydock-error;
+    -fx-font-size: 10px;
+    -fx-padding: 1 8 1 8;
+}
+.viewer-tab-dirty {
+    -fx-text-fill: -drydock-dirty;
+    -fx-font-size: 14px;
+    -fx-padding: 0 0 0 4;
 }
 .viewer-empty {
     -fx-text-fill: -drydock-text-faint;
@@ -1789,6 +1816,16 @@
 }
 .viewer-diff-banner-label {
     -fx-text-fill: -drydock-running;
+    -fx-font-size: 11.5px;
+}
+.viewer-edit-banner {
+    -fx-background-color: -drydock-dirty-soft;
+    -fx-border-color: transparent transparent -drydock-border transparent;
+    -fx-border-width: 0 0 1 0;
+    -fx-padding: 4 12 4 12;
+}
+.viewer-edit-banner-label {
+    -fx-text-fill: -drydock-dirty;
     -fx-font-size: 11.5px;
 }
 .viewer-diff-base-switch {

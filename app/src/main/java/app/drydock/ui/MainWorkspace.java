@@ -55,13 +55,16 @@ import javafx.stage.DirectoryChooser;
 import javafx.stage.Stage;
 import javafx.stage.Window;
 import javafx.util.Duration;
+import org.fxmisc.richtext.GenericStyledArea;
 
 import java.io.File;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.HashMap;
+import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
@@ -136,6 +139,17 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * first tab's entry, orphaning a tab that could then never be closed.
      */
     private final Map<ManagedSessionId, OpenSessionTab> pendingTabs = new LinkedHashMap<>();
+
+    /**
+     * Every Explorer built by {@link #createOpenSessionTab}'s factory, keyed
+     * by the tab that owns it, so {@link #flushExplorerEdits()} can reach
+     * their unsaved file edits at shutdown and {@link #removeTab} can dispose
+     * the right one. Explorers are created lazily inside the factory closure
+     * and are otherwise unreachable from here. Keyed by the tab rather than
+     * its session id because a brand-new tab adopts SessionManager's real id
+     * later (see {@code attachOpenedSession}).
+     */
+    private final Map<OpenSessionTab, SessionExplorerView> openExplorers = new LinkedHashMap<>();
 
     /** Sessions whose self-exit has already been recorded, so the watcher fires once per exit. */
     private final Set<ManagedSessionId> exitRecorded = new HashSet<>();
@@ -875,6 +889,31 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         return CompletableFuture.allOf(futures);
     }
 
+    /**
+     * Flushes every open Explorer's unsaved file edits and then releases its
+     * I/O executor. Invoked from {@code DrydockApplication.stop()}; blocking
+     * and bounded per Explorer, because the executor threads are daemons and
+     * a fire-and-forget flush would be killed mid-write at JVM exit.
+     *
+     * <p>Two phases on purpose: every file is on disk before the first
+     * executor is shut down, so an Explorer still holding unwritten edits is
+     * not queued behind another one's teardown. Phase 2 therefore disposes
+     * WITHOUT flushing -- {@code dispose()} is itself a bounded flush, so
+     * letting it flush again would give every Explorer its budget twice and
+     * double the worst-case frozen-FX-thread time on a hung disk. Tabs closed
+     * earlier were already disposed by {@link #removeTab}.</p>
+     */
+    public void flushExplorerEdits() {
+        List<SessionExplorerView> explorers = new ArrayList<>(openExplorers.values());
+        openExplorers.clear();
+        for (SessionExplorerView explorer : explorers) {
+            explorer.flushPendingEdits();
+        }
+        for (SessionExplorerView explorer : explorers) {
+            explorer.dispose(false);
+        }
+    }
+
     /** Called by the sidebar after {@link SessionManager#deleteSession} so any open tab disappears too. */
     @Override
     public void noteSessionDeleted(ManagedSessionId sessionId) {
@@ -920,6 +959,24 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     /** Diagnostic-only: sends a scroll through the selected tab's scroll path. */
     public void diagScroll(double deltaY) {
         currentlySelected().ifPresent(open -> open.diagScroll(deltaY));
+    }
+
+    /**
+     * Diagnostic-only: switches the selected tab to the Explorer and opens
+     * {@code relativeFile} in the code viewer, the same bridge the Review
+     * tab's ⤢ uses. Exists so the automated visual pass can reach the
+     * editable viewer without synthesising rail clicks; the FX layer of the
+     * editor has no headless test harness, so screenshots of a real window
+     * are the only machine-checkable evidence for the chip, the dirty dot
+     * and the conflict/missing banners.
+     */
+    public void diagOpenExplorerFile(Path relativeFile) {
+        currentlySelected().ifPresent(open -> open.openExplorerAt(relativeFile, 1));
+    }
+
+    /** Diagnostic-only: focuses the Explorer's code area and types {@code text} into it as real edits. */
+    public void diagTypeInExplorer(String text) {
+        currentlySelected().ifPresent(open -> open.diagTypeInExplorer(text));
     }
 
     // ---- Exit watcher --------------------------------------------------------
@@ -1008,7 +1065,10 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * when clicked (mouse-button forwarding) or when its tab reappears.
      */
     public void onFocusOwnerChanged(Node owner) {
-        if (owner instanceof TextInputControl) {
+        // GenericStyledArea covers RichTextFX's CodeArea (the Explorer's now
+        // editable code viewer), which is a Region rather than a
+        // TextInputControl and would otherwise never release the responder.
+        if (owner instanceof TextInputControl || owner instanceof GenericStyledArea<?, ?, ?>) {
             currentlySelected().ifPresent(OpenSessionTab::releaseTerminalFocus);
         }
     }
@@ -1024,6 +1084,13 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     }
 
     private void removeTab(OpenSessionTab openTab) {
+        // First: the Explorer's unsaved edits go to disk while the tab is
+        // still whole, and its I/O executor thread is released here rather
+        // than leaking for the life of the process.
+        SessionExplorerView explorer = openExplorers.remove(openTab);
+        if (explorer != null) {
+            explorer.dispose();
+        }
         // Must run before removing the tab's node from the TabPane below:
         // that removal synchronously fires JavaFX property-invalidation
         // listeners (e.g. the placeholder's localToSceneTransformProperty)
@@ -1121,7 +1188,11 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         // ONE shared changed-line source (design handoff section C): the
         // Explorer's diff overlay and the Review tab both read it.
         DiffOverlay overlay = new DiffOverlay(changedLineService, searchRoot);
-        openTab.setExplorerFactory(() -> new SessionExplorerView(searchRoot, searchService, overlay));
+        openTab.setExplorerFactory(() -> {
+            SessionExplorerView explorer = new SessionExplorerView(searchRoot, searchService, overlay);
+            openExplorers.put(openTab, explorer);
+            return explorer;
+        });
         // openTab.sessionId() rather than the constructor parameter: the
         // factory runs lazily (first Review open), by which time a created
         // session's tab has adopted the real id -- annotations must key on it.

@@ -59,4 +59,18 @@ public final class DiffOverlay {
     public CompletableFuture<Map<Path, Set<Integer>>> changedSet() {
         return changedLineService.changedSet(checkoutRoot, scope, baseBranch);
     }
+
+    /**
+     * Drops this checkout's cached changed-line maps so the next {@link
+     * #changedSet()} re-runs git. Needed after the Explorer writes a file:
+     * {@link ChangedLineService} memoizes per (root, scope, base) and would
+     * otherwise keep handing back the pre-save map, leaving the green
+     * markers frozen.
+     *
+     * <p>The cache is shared with the Review tab, so each invalidation
+     * costs both views a fresh diff -- callers coalesce.</p>
+     */
+    public void invalidate() {
+        changedLineService.invalidate(checkoutRoot);
+    }
 }

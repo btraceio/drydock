@@ -56,14 +56,31 @@ milestones (Gate 0C onward) land.
   Gate 0D's much larger checklist (modifiers, Ctrl+C/D, Option combos,
   copy/paste, IME, function keys, etc.), which is explicitly out of scope
   until Task 6.
-- **The Gate 0C automated run could not capture/verify a screenshot**: the
-  process lacks macOS Screen Recording permission (`screencapture` failed
-  with "could not create image from display", confirmed via a failed
-  `TCC.db` query, not just assumed). No agent/CI process can grant this
-  permission itself; a human must run `./gradlew gate0cSpike
-  -Papp.drydock.gate0c.interactive` locally once, with that permission granted,
-  to visually confirm actual terminal glyphs render (as opposed to just
-  "no crash while calling draw").
+- **Screenshot capture was unavailable when Gate 0C was written, and is not
+  any more.** At the time the process lacked macOS Screen Recording
+  permission (`screencapture` failed with "could not create image from
+  display", confirmed via a failed `TCC.db` query, not just assumed), so
+  Gate 0C's glyph rendering had to be confirmed by a human running
+  `./gradlew gate0cSpike -Papp.drydock.gate0c.interactive` locally.
+
+  That permission has since been granted on the development machine, and
+  `screencapture` works. Automated visual verification of the JavaFX layer
+  is therefore possible and is the intended way to check UI that no test
+  harness covers — there is no headless-FX harness in `app/src/test`, so
+  screenshots of a real window are the only machine-checkable evidence for
+  chips, banners and other purely visual state. The
+  `app.drydock.diag.explorerScript` hook (see `DrydockApplication`) drives
+  the editable Explorer for exactly this purpose; the editor's
+  conflict-banner button truncation was found this way and could not have
+  been found any other way.
+
+  Two constraints still apply. `screencapture -R <rect>` grabs a *screen
+  region*, so the target window must be frontmost or an overlapping window
+  is captured instead; raise it first, and scope the rect to the app's own
+  window rather than grabbing the full screen, which would capture whatever
+  else the developer has open. Gate 0C's terminal-glyph check remains a
+  human task for the separate reason in the bullet above (it asserts on
+  native Ghostty rendering, not on the JavaFX scene graph).
 - **Ghostty's own libtool-merged static archive silently drops archive
   members** (see `docs/native-integration.md`, "Task 4 update" section, and
   `third_party/patches/ghostty-install-macos-shared-lib.patch`). Worked
