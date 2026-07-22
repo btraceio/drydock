@@ -18,6 +18,7 @@ import app.drydock.state.JsonApplicationStateRepository;
 import app.drydock.ui.AppShell;
 import app.drydock.ui.GitHubCloneModal;
 import app.drydock.ui.MainWorkspace;
+import app.drydock.ui.RemoteRepositoryModal;
 import app.drydock.ui.RepositorySidebar;
 import app.drydock.ui.model.WorkspaceViewModel;
 import javafx.application.Application;
@@ -198,6 +199,8 @@ public final class DrydockApplication extends Application {
         gitHubService = new GitHubService();
         sidebar.setOnCloneFromGitHub(() -> appShell.modalLayer().show(
                 new GitHubCloneModal(gitHubService, repositoryManager, appShell.modalLayer()::close)));
+        sidebar.setOnAddRemote(() -> appShell.modalLayer().show(
+                new RemoteRepositoryModal(repositoryManager, appShell.modalLayer()::close)));
         sidebar.setOnNewWorktree(repository ->
                 mainWorkspace.promptNewWorktree(repository, appShell.modalLayer()));
 

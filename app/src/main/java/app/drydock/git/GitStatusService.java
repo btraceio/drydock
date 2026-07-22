@@ -1,8 +1,10 @@
 package app.drydock.git;
 
+import app.drydock.domain.SshRemote;
 import app.drydock.process.ProcessResult;
 import app.drydock.process.ProcessRunner;
 import app.drydock.process.ProcessTimeoutException;
+import app.drydock.process.SshCommandBuilder;
 
 import java.io.IOException;
 import java.lang.System.Logger;
@@ -36,9 +38,13 @@ public final class GitStatusService implements AutoCloseable {
     /** Every command here is a quick read-only query; a hung git must not park futures forever. */
     private static final Duration PROCESS_TIMEOUT = Duration.ofSeconds(15);
 
+    /** ssh exit code reserved for transport failure (everything git returns is < 255). */
+    private static final int SSH_TRANSPORT_FAILURE = 255;
+
     private final GitExecutableLocator locator;
     private final ExecutorService executor;
     private final boolean ownsExecutor;
+    private final String sshExecutable;
 
     public GitStatusService() {
         this(new GitExecutableLocator());
@@ -53,10 +59,26 @@ public final class GitStatusService implements AutoCloseable {
         this(locator, executor, false);
     }
 
+    /**
+     * Test seam: swaps the {@code ssh} executable for a fake script (mirrors
+     * {@link GitExecutableLocator}). Public so callers outside this package
+     * (e.g. {@code app.drydock.app.RepositoryManagerTest}) can fake SSH
+     * remote resolution too, rather than depending on a real reachable host.
+     */
+    public GitStatusService(GitExecutableLocator locator, String sshExecutable) {
+        this(locator, Executors.newVirtualThreadPerTaskExecutor(), true, sshExecutable);
+    }
+
     private GitStatusService(GitExecutableLocator locator, ExecutorService executor, boolean ownsExecutor) {
+        this(locator, executor, ownsExecutor, "ssh");
+    }
+
+    private GitStatusService(GitExecutableLocator locator, ExecutorService executor, boolean ownsExecutor,
+                              String sshExecutable) {
         this.locator = locator;
         this.executor = executor;
         this.ownsExecutor = ownsExecutor;
+        this.sshExecutable = sshExecutable;
     }
 
     /**
@@ -68,6 +90,68 @@ public final class GitStatusService implements AutoCloseable {
      */
     public CompletableFuture<GitStatus> getStatus(Path repositoryRoot) {
         return CompletableFuture.supplyAsync(() -> getStatusBlocking(repositoryRoot), executor);
+    }
+
+    /** As {@link #getStatus(Path)}, but dispatching on where the repository actually lives. */
+    public CompletableFuture<GitStatus> getStatus(GitTarget target) {
+        return switch (target) {
+            case GitTarget.Local local -> getStatus(local.root());
+            case GitTarget.Remote remote ->
+                    CompletableFuture.supplyAsync(() -> getRemoteStatusBlocking(remote.remote()), executor);
+        };
+    }
+
+    GitStatus getRemoteStatusBlocking(SshRemote remote) {
+        ProcessResult result = runSsh(SshCommandBuilder.remoteGitCommand(remote,
+                List.of("status", "--porcelain=v2", "--branch", "-z")), remote);
+        return parse(result.stdout());
+    }
+
+    /**
+     * Resolves the toplevel of a candidate remote repo path via
+     * {@code git rev-parse --show-toplevel} over ssh — the add flow's
+     * validation, mirroring {@link #resolveRepositoryRoot(Path)}.
+     */
+    public CompletableFuture<String> resolveRemoteRepositoryRoot(SshRemote candidate) {
+        return CompletableFuture.supplyAsync(() -> {
+            ProcessResult result = runSsh(SshCommandBuilder.remoteGitCommand(candidate,
+                    List.of("rev-parse", "--show-toplevel")), candidate);
+            String topLevel = result.stdout().strip();
+            if (topLevel.isEmpty()) {
+                throw new GitCommandFailedException(List.of("ssh", candidate.host(), "git rev-parse"), 0,
+                        "git rev-parse --show-toplevel produced no output");
+            }
+            return topLevel;
+        }, executor);
+    }
+
+    /** Runs an ssh-wrapped git command, translating exit 255 into {@link SshUnreachableException}. */
+    private ProcessResult runSsh(List<String> builtCommand, SshRemote remote) {
+        List<String> command = new ArrayList<>(builtCommand);
+        command.set(0, sshExecutable);
+        ProcessResult result;
+        try {
+            result = ProcessRunner.run(command, Path.of(System.getProperty("user.home")),
+                    SshCommandBuilder.REMOTE_GIT_TIMEOUT);
+        } catch (IOException e) {
+            throw new GitCommandFailedException(command, -1, e.getMessage() == null ? "" : e.getMessage());
+        } catch (ProcessTimeoutException e) {
+            throw new SshUnreachableException(remote.host(),
+                    "timed out after " + SshCommandBuilder.REMOTE_GIT_TIMEOUT.toSeconds() + "s (killed)");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new GitCommandFailedException(command, -1, "interrupted while waiting for ssh");
+        }
+        if (result.exitCode() == SSH_TRANSPORT_FAILURE) {
+            throw new SshUnreachableException(remote.host(), ProcessRunner.excerpt(result.stderr()));
+        }
+        if (result.exitCode() != 0) {
+            if (result.stderr().toLowerCase(Locale.ROOT).contains("not a git repository")) {
+                throw new NotAGitRepositoryException(Path.of(remote.remotePath()));
+            }
+            throw new GitCommandFailedException(command, result.exitCode(), ProcessRunner.excerpt(result.stderr()));
+        }
+        return result;
     }
 
     /**

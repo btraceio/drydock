@@ -650,6 +650,11 @@
     -fx-text-fill: -drydock-text;
 }
 
+.modal-hint {
+    -fx-font-size: 11px;
+    -fx-text-fill: -drydock-text-faint;
+}
+
 .modal-search {
     -fx-min-height: 42px; -fx-max-height: 42px;
     -fx-background-color: -drydock-input-bg;

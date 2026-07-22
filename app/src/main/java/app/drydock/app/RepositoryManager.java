@@ -6,6 +6,7 @@ import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryCatalog;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.RepositorySettings;
+import app.drydock.domain.SshRemote;
 import app.drydock.git.GitStatusService;
 import app.drydock.state.ApplicationStateRepository;
 
@@ -93,6 +94,43 @@ public final class RepositoryManager {
             String displayName = defaultDisplayName(canonicalRoot);
             added[0] = new Repository(
                     RepositoryId.newId(), canonicalRoot, displayName, now, now, RepositorySettings.DEFAULT);
+
+            List<Repository> updated = new ArrayList<>(state.repositories());
+            updated.add(added[0]);
+            return state.withRepositories(updated);
+        });
+        notifyChanged();
+        return added[0];
+    }
+
+    /**
+     * Registers a repository living on a remote host (spec: SSH remote
+     * repositories): validates {@code candidate.remotePath()} is (inside) a
+     * git working tree on the host, resolves it to its toplevel, and
+     * registers under the deterministic placeholder root — which makes the
+     * existing canonical-root duplicate detection work unchanged. The same
+     * physical repo reachable via two different host aliases registers
+     * twice; accepted (canonicalizing aliases would mean resolving SSH
+     * config).
+     */
+    public CompletableFuture<Repository> addRemoteRepository(SshRemote candidate) {
+        return gitStatusService.resolveRemoteRepositoryRoot(candidate)
+                .thenApply(resolvedPath -> registerValidatedRemote(new SshRemote(candidate.host(), resolvedPath)));
+    }
+
+    private Repository registerValidatedRemote(SshRemote remote) {
+        Path placeholderRoot = remote.placeholderRoot();
+        Repository[] added = new Repository[1];
+        stateStore.update(state -> {
+            RepositoryCatalog.findByCanonicalRoot(state.repositories(), placeholderRoot)
+                    .ifPresent(existing -> {
+                        throw new DuplicateRepositoryException(remote.host() + ":" + remote.remotePath(), existing);
+                    });
+
+            Instant now = Instant.now();
+            String displayName = defaultDisplayName(Path.of(remote.remotePath()));
+            added[0] = new Repository(RepositoryId.newId(), placeholderRoot, displayName, now, now,
+                    RepositorySettings.DEFAULT, remote);
 
             List<Repository> updated = new ArrayList<>(state.repositories());
             updated.add(added[0]);

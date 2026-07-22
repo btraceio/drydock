@@ -21,6 +21,24 @@ public final class DuplicateRepositoryException extends RuntimeException {
         this.existing = existing;
     }
 
+    /**
+     * As the {@link Path}-based constructor, but for a remote repository:
+     * {@code attemptedDisplay} and the existing repository's location are
+     * rendered as {@code host:remotePath} rather than leaking the internal
+     * placeholder root path into the message.
+     */
+    public DuplicateRepositoryException(String attemptedDisplay, Repository existing) {
+        super("\"" + attemptedDisplay + "\" is already registered as \"" + existing.displayName()
+                + "\" (" + existingLocationDisplay(existing) + ")");
+        this.existing = existing;
+    }
+
+    private static String existingLocationDisplay(Repository existing) {
+        return existing.isRemote()
+                ? existing.remote().host() + ":" + existing.remote().remotePath()
+                : existing.root().toString();
+    }
+
     public Repository existing() {
         return existing;
     }

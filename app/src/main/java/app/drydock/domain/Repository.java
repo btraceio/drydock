@@ -19,6 +19,10 @@ import java.util.Objects;
  * state for a repository that has since been deleted or renamed). Those
  * checks belong at the point of adding a repository, or when a repository
  * is opened.</p>
+ *
+ * <p>For a remote repository ({@code remote != null}) {@code root} is a
+ * deterministic virtual placeholder (see {@link SshRemote#placeholderRoot})
+ * and must never be resolved against the local filesystem.</p>
  */
 public record Repository(
         RepositoryId id,
@@ -26,7 +30,8 @@ public record Repository(
         String displayName,
         Instant addedAt,
         Instant lastOpenedAt,
-        RepositorySettings settings
+        RepositorySettings settings,
+        SshRemote remote
 ) {
 
     public Repository {
@@ -51,11 +56,22 @@ public record Repository(
         }
     }
 
+    /** Local-repository constructor (the overwhelmingly common case): no SSH remote. */
+    public Repository(RepositoryId id, Path root, String displayName, Instant addedAt,
+                      Instant lastOpenedAt, RepositorySettings settings) {
+        this(id, root, displayName, addedAt, lastOpenedAt, settings, null);
+    }
+
+    /** True when this repository lives on a remote host; {@link #root} is then a virtual placeholder. */
+    public boolean isRemote() {
+        return remote != null;
+    }
+
     public Repository withLastOpenedAt(Instant newLastOpenedAt) {
-        return new Repository(id, root, displayName, addedAt, newLastOpenedAt, settings);
+        return new Repository(id, root, displayName, addedAt, newLastOpenedAt, settings, remote);
     }
 
     public Repository withDisplayName(String newDisplayName) {
-        return new Repository(id, root, newDisplayName, addedAt, lastOpenedAt, settings);
+        return new Repository(id, root, newDisplayName, addedAt, lastOpenedAt, settings, remote);
     }
 }

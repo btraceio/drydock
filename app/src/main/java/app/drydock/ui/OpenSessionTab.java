@@ -121,6 +121,8 @@ final class OpenSessionTab {
     /** Supplies a fresh shell runtime+host whose wakeup drives the argument (the shell bridge's tickAndDraw). */
     private Function<Runnable, ShellTerminal> shellTerminalProvider = onWakeup -> null;
     private String shellWorkingDirectory = System.getProperty("user.home");
+    /** Full /bin/sh -c command for the shell sub-tab; empty = default local login shell in {@link #shellWorkingDirectory}. */
+    private Optional<String> shellCommand = Optional.empty();
     private TerminalBridge shellBridge;   // null until first shown
     private TerminalSurface shellSurface; // null until first shown; closed by disposeNativeResources
     private boolean shellStarted;
@@ -173,11 +175,21 @@ final class OpenSessionTab {
 
     private String displayName;
 
+    /**
+     * Whether this tab's repository lives on a remote host (spec: SSH remote
+     * repositories) -- derived once from the constructor's {@code
+     * repository}, since a tab's repository never changes after creation.
+     * Drives the shell sub-tab command, Explorer/Review gating, the
+     * connection-lost status mapping, and activity-badge suppression.
+     */
+    private final boolean isRemote;
+
     OpenSessionTab(ManagedSessionId sessionId, String displayName, Optional<Repository> repository,
                    Stage stage, TerminalRuntime app, TerminalHostView host) {
         this.sessionId = sessionId;
         this.displayName = displayName;
         this.stage = stage;
+        this.isRemote = repository.map(Repository::isRemote).orElse(false);
         this.bridge = new TerminalBridge(app, host, placeholder, stage::getOutputScaleX,
                 this::sessionId, this::runShortcut);
 
@@ -276,13 +288,26 @@ final class OpenSessionTab {
 
         explorerSubTabButton.getStyleClass().add("session-subtab");
         explorerSubTabButton.setFocusTraversable(false);
-        explorerSubTabButton.setTooltip(new Tooltip("Explorer (⌘3)"));
         explorerSubTabButton.setOnAction(e -> showSubTab(SubTab.EXPLORER));
 
         reviewSubTabButton.getStyleClass().add("session-subtab");
         reviewSubTabButton.setFocusTraversable(false);
-        reviewSubTabButton.setTooltip(new Tooltip("Review (⌘4)"));
         reviewSubTabButton.setOnAction(e -> showSubTab(SubTab.REVIEW));
+
+        // Remote repositories have no local checkout for Explorer (local file
+        // search) or Review (local diffs) to operate on -- spec: Feature
+        // gating. MainWorkspace never wires their factories for a remote
+        // tab, so disable the toggles up front instead of letting a click
+        // silently no-op in showSubTab.
+        if (isRemote) {
+            explorerSubTabButton.setDisable(true);
+            reviewSubTabButton.setDisable(true);
+            explorerSubTabButton.setTooltip(new Tooltip("Not available for remote repositories"));
+            reviewSubTabButton.setTooltip(new Tooltip("Not available for remote repositories"));
+        } else {
+            explorerSubTabButton.setTooltip(new Tooltip("Explorer (⌘3)"));
+            reviewSubTabButton.setTooltip(new Tooltip("Review (⌘4)"));
+        }
 
         subTabContext.getStyleClass().add("session-subtab-context");
 
@@ -313,6 +338,11 @@ final class OpenSessionTab {
     /** The shell Terminal sub-tab's starting directory (the session's worktree root). */
     void setShellWorkingDirectory(String dir) {
         this.shellWorkingDirectory = dir;
+    }
+
+    /** Overrides the shell sub-tab's command (remote repos: ssh into the host instead of a local shell). */
+    void setShellCommand(String command) {
+        this.shellCommand = Optional.of(command);
     }
 
     /**
@@ -453,8 +483,10 @@ final class OpenSessionTab {
             // is already selected by the time the shell is first shown, so
             // without this the shell's native view never becomes visible.
             shellBridge.setWorkspaceVisible(workspaceVisible);
-            shellSurface = shell.runtime().openSurface(shell.host(), stage.getOutputScaleX(),
-                    TerminalSpec.loginShell(shellWorkingDirectory));
+            TerminalSpec spec = shellCommand
+                    .map(command -> new TerminalSpec(command, System.getProperty("user.home")))
+                    .orElseGet(() -> TerminalSpec.loginShell(shellWorkingDirectory));
+            shellSurface = shell.runtime().openSurface(shell.host(), stage.getOutputScaleX(), spec);
             shellBridge.adoptSurface(shellSurface);
             shellBridge.wireInputListeners();
             return true;
@@ -758,12 +790,23 @@ final class OpenSessionTab {
         return displayName;
     }
 
-    /** Drives the tab dot + header pill from the session's real status (handoff "Critical behaviors"). */
+    /**
+     * Drives the tab dot + header pill from the session's real status
+     * (handoff "Critical behaviors"). For a remote session an EXITED status
+     * is ambiguous -- the surface exposes only whether the child process
+     * exited, not its actual exit code (spec: SSH remote repositories notes
+     * an ssh transport failure exits 255), so any process exit on a remote
+     * tab is rendered as a neutral "session ended" state rather than the
+     * ordinary idle label, prompting the user to resume instead of assuming
+     * Claude simply finished.
+     */
     void setStatus(SessionStatus status) {
         SessionStatusStyles.updateDot(tabDot, status);
         SessionStatusStyles.updateDot(pillDot, status);
         SessionStatusStyles.applyStatus(statusPill, status);
-        pillLabel.setText(SessionStatusStyles.designLabel(status));
+        pillLabel.setText(isRemote && status == SessionStatus.EXITED
+                ? "session ended — resume to reconnect"
+                : SessionStatusStyles.designLabel(status));
     }
 
     /**
@@ -774,10 +817,17 @@ final class OpenSessionTab {
      * <p>The sidebar badge alone is not enough: while the user is working
      * inside another tab the sidebar may be collapsed or simply unwatched, and
      * the tab strip is the one surface always in view.</p>
+     *
+     * <p>Remote sessions never receive hook events (there is no local
+     * activity watcher for a host that isn't this machine), so a remote tab
+     * is forced to the plain status dot regardless of what the caller
+     * passes -- never a stale spinner/badge left over from a poll that
+     * cannot actually observe this session.</p>
      */
     void setNeedsAttention(boolean needsAttention) {
-        tabAttentionDot.setVisible(needsAttention);
-        tabAttentionDot.setManaged(needsAttention);
+        boolean effective = needsAttention && !isRemote;
+        tabAttentionDot.setVisible(effective);
+        tabAttentionDot.setManaged(effective);
     }
 
     /** Re-themes this tab's live terminal (app theme toggle); see {@link TerminalBridge#applyTerminalTheme}. */

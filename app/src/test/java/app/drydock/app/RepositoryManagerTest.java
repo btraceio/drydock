@@ -3,6 +3,8 @@ package app.drydock.app;
 import app.drydock.domain.ApplicationState;
 import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryId;
+import app.drydock.domain.SshRemote;
+import app.drydock.git.GitExecutableLocator;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.NotAGitRepositoryException;
 import app.drydock.state.ApplicationStateRepository;
@@ -14,12 +16,14 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -68,6 +72,18 @@ class RepositoryManagerTest {
         }
     }
 
+    /**
+     * Fakes the {@code ssh} executable (mirrors {@code
+     * GitStatusServiceRemoteTest}), so remote resolution never depends on an
+     * actually-reachable host.
+     */
+    private Path fakeSsh(String script) throws IOException {
+        Path fake = tempDir.resolve("fake-ssh-" + System.nanoTime());
+        Files.writeString(fake, "#!/bin/sh\n" + script);
+        Files.setPosixFilePermissions(fake, PosixFilePermissions.fromString("rwxr-xr-x"));
+        return fake;
+    }
+
     @Test
     void addRepositoryRegistersAndPersistsAValidGitRepository() throws Exception {
         Path repo = initGitRepo("repo-a");
@@ -99,6 +115,26 @@ class RepositoryManagerTest {
 
         assertTrue(thrown.getCause() instanceof DuplicateRepositoryException);
         assertEquals(1, manager.repositories().size());
+    }
+
+    @Test
+    void addRemoteRepositoryRegistersWithResolvedRootAndRejectsDuplicates() throws Exception {
+        Path fake = fakeSsh("printf '/srv/app\\n'");
+        try (GitStatusService remoteGitStatusService = new GitStatusService(new GitExecutableLocator(), fake.toString())) {
+            RepositoryManager remoteManager = new RepositoryManager(stateRepository, remoteGitStatusService);
+            SshRemote candidate = new SshRemote("user@h", "/srv/app/subdir");
+
+            Repository added = remoteManager.addRemoteRepository(candidate).join();
+
+            assertTrue(added.isRemote());
+            assertEquals(new SshRemote("user@h", "/srv/app"), added.remote());
+            assertEquals(added.remote().placeholderRoot(), added.root());
+            assertEquals("app", added.displayName());
+
+            CompletionException thrown = assertThrows(CompletionException.class,
+                    () -> remoteManager.addRemoteRepository(new SshRemote("user@h", "/srv/app")).join());
+            assertInstanceOf(DuplicateRepositoryException.class, thrown.getCause());
+        }
     }
 
     @Test
