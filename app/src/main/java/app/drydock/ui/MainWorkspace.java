@@ -991,6 +991,15 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         currentlySelected().ifPresent(open -> open.diagTypeInExplorer(text));
     }
 
+    /**
+     * Diagnostic-only: switches the selected tab to the Review sub-tab and
+     * returns its view, so the automated visual pass can screenshot a
+     * populated Review pane -- the FX layer has no headless harness.
+     */
+    public ReviewView diagShowReview() {
+        return currentlySelected().map(OpenSessionTab::diagShowReview).orElse(null);
+    }
+
     // ---- Exit watcher --------------------------------------------------------
 
     private void pollForExitedProcesses() {

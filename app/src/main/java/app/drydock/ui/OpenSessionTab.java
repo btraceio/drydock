@@ -10,6 +10,7 @@ import app.drydock.terminal.api.TerminalHostView;
 import app.drydock.terminal.api.TerminalRuntime;
 import app.drydock.terminal.api.TerminalSurface;
 import app.drydock.ui.explorer.SessionExplorerView;
+import app.drydock.ui.review.ReviewView;
 import javafx.animation.PauseTransition;
 import javafx.application.Platform;
 import javafx.css.PseudoClass;
@@ -362,6 +363,12 @@ final class OpenSessionTab {
         if (explorerView instanceof SessionExplorerView explorer) {
             explorer.diagType(text);
         }
+    }
+
+    /** Diagnostic-only (see MainWorkspace.diagShowReview): switches to the Review sub-tab and returns its view. */
+    ReviewView diagShowReview() {
+        showSubTab(SubTab.REVIEW);
+        return reviewView instanceof ReviewView review ? review : null;
     }
 
     /** Explorer bridge for the Review tab: switches to the Explorer and runs a text search for {@code token}. */

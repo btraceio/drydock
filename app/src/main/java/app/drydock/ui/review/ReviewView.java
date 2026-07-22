@@ -15,6 +15,7 @@ import app.drydock.ui.UiErrors;
 import app.drydock.ui.UiFormats;
 import javafx.application.Platform;
 import javafx.beans.InvalidationListener;
+import javafx.beans.binding.DoubleBinding;
 import javafx.beans.property.BooleanProperty;
 import javafx.beans.property.IntegerProperty;
 import javafx.beans.property.SimpleBooleanProperty;
@@ -32,6 +33,8 @@ import javafx.scene.control.ScrollPane;
 import javafx.scene.control.TextArea;
 import javafx.scene.control.ToggleButton;
 import javafx.scene.control.Tooltip;
+import javafx.scene.input.KeyCode;
+import javafx.scene.input.KeyEvent;
 import javafx.scene.input.MouseButton;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
@@ -79,6 +82,9 @@ public final class ReviewView extends BorderPane {
     /** Longest identifier the select-to-search chip accepts (design: ≤64 chars, no whitespace). */
     private static final int MAX_TOKEN_LENGTH = 64;
 
+    /** Width the diff list reserves for its vertical scrollbar (see {@link #viewportWidth}). */
+    private static final double VERTICAL_SCROLLBAR_ALLOWANCE = 16;
+
     /** Jump-outs into the Session Explorer (OpenSessionTab implements both). */
     public interface ExplorerBridge {
         /** Opens {@code relativeFile} in the Explorer viewer at a 1-based line. */
@@ -107,6 +113,15 @@ public final class ReviewView extends BorderPane {
     private final VBox filesBox = new VBox(2);
     private final ObservableList<ReviewRow> diffRows = FXCollections.observableArrayList();
     private final ListView<ReviewRow> diffList = new ListView<>(diffRows);
+
+    /**
+     * Visible width of the diff pane: the list's own width less its vertical
+     * scrollbar. Rows that must stay on screen whatever the widest diff line
+     * is -- the composer and annotation cards -- size to this rather than to
+     * the (potentially much wider) cell.
+     */
+    private final DoubleBinding viewportWidth =
+            diffList.widthProperty().subtract(VERTICAL_SCROLLBAR_ALLOWANCE);
 
     private final Label summaryLabel = new Label();
     private final Button sendButton = new Button("Send to Claude");
@@ -491,7 +506,16 @@ public final class ReviewView extends BorderPane {
             if (node instanceof Region region) {
                 // Cells do not stretch their graphic; full-width row
                 // backgrounds (row-add/del, hunk headers) need the bind.
-                region.prefWidthProperty().bind(widthProperty());
+                // Cards and the composer are the exception: a cell is as wide
+                // as the widest diff line (that width is what the horizontal
+                // scrollbar scrolls), so binding them to it pushes their
+                // right-aligned buttons off the visible pane.
+                if (row instanceof ReviewRow.Composer || row instanceof ReviewRow.AnnotationCard) {
+                    region.prefWidthProperty().bind(viewportWidth);
+                    region.maxWidthProperty().bind(viewportWidth);
+                } else {
+                    region.prefWidthProperty().bind(widthProperty());
+                }
             }
             setGraphic(node);
         }
@@ -762,6 +786,16 @@ public final class ReviewView extends BorderPane {
 
         VBox box = new VBox(8, buttons, input);
         box.getStyleClass().add("review-composer");
+        // Esc cancels the composer, so the whole annotate flow is reachable
+        // without the mouse (ShortcutsOverlay already advertises "Cancel /
+        // close — Esc"). The global Esc filter deliberately skips text inputs,
+        // which is exactly where focus sits while the composer is open.
+        box.addEventHandler(KeyEvent.KEY_PRESSED, e -> {
+            if (e.getCode() == KeyCode.ESCAPE) {
+                clearSelection();
+                e.consume();
+            }
+        });
         composerNode = box;
         composerRow = new ReviewRow.Composer(startOrdinal, endOrdinal);
         int insertAt = itemIndexByOrdinal[endOrdinal] + 1;
@@ -954,5 +988,20 @@ public final class ReviewView extends BorderPane {
     private void hideBanner() {
         banner.setVisible(false);
         banner.setManaged(false);
+    }
+
+    // ---- Diagnostics ---------------------------------------------------------
+
+    /**
+     * Diagnostic-only: switches to the working-tree scope, the only one that
+     * is non-empty for a session opened directly in a repository root (BASE
+     * diffs the checkout against its own branch there). Exists so the
+     * automated visual pass can reach a populated Review pane -- there is no
+     * headless-FX harness, so screenshots of a real window are the only
+     * machine-checkable evidence for this view (see docs/architecture.md).
+     */
+    public void diagSelectWorkingTree() {
+        workingScope.setSelected(true);
+        selectScope(DiffScope.WORKING_TREE);
     }
 }

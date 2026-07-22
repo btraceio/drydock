@@ -21,6 +21,7 @@ import app.drydock.ui.MainWorkspace;
 import app.drydock.ui.RemoteRepositoryModal;
 import app.drydock.ui.RepositorySidebar;
 import app.drydock.ui.model.WorkspaceViewModel;
+import app.drydock.ui.review.ReviewView;
 import javafx.application.Application;
 import javafx.application.Platform;
 import javafx.scene.control.Alert;
@@ -44,6 +45,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.Base64;
 import java.util.Optional;
+import java.util.function.Supplier;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -388,6 +390,38 @@ public final class DrydockApplication extends Application {
             driver.start();
         }
 
+        // Diagnostic hook for the Review tab's visual pass: switches the
+        // selected tab to Review and shows the working-tree diff (the only
+        // non-empty scope for a session opened in a repository root) after
+        // <delaySeconds>. Inert unless -Dapp.drydock.diag.openReview is set.
+        String openReview = System.getProperty("app.drydock.diag.openReview");
+        if (openReview != null) {
+            long reviewDelayMillis = (long) (Double.parseDouble(openReview.strip()) * 1000);
+            Thread reviewOpener = new Thread(() -> {
+                try {
+                    Thread.sleep(reviewDelayMillis);
+                    ReviewView review = onFx(mainWorkspace::diagShowReview);
+                    if (review == null) {
+                        System.out.println("[diag] openReview: no Review view on the selected tab");
+                        return;
+                    }
+                    // The sub-tab switch and first diff render need a few pulses.
+                    Thread.sleep(2_000);
+                    onFx(() -> {
+                        review.diagSelectWorkingTree();
+                        return null;
+                    });
+                    System.out.println("[diag] review opened on the working-tree scope");
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                } catch (RuntimeException e) {
+                    System.out.println("[diag] openReview failed: " + e);
+                }
+            });
+            reviewOpener.setDaemon(true);
+            reviewOpener.start();
+        }
+
         // Diagnostic hook: sends 10 synthetic scroll-up events through the
         // selected tab's scroll path (verifies the Java ->
         // ghostty_surface_mouse_scroll pipeline without real NSEvents).
@@ -685,6 +719,23 @@ public final class DrydockApplication extends Application {
             close.run();
         } catch (RuntimeException e) {
             LOG.log(Level.WARNING, "Shutdown step failed: " + what, e);
+        }
+    }
+
+    /** Diagnostic-only: runs {@code work} on the FX thread and waits for its result. */
+    private static <T> T onFx(Supplier<T> work) throws InterruptedException {
+        CompletableFuture<T> result = new CompletableFuture<>();
+        Platform.runLater(() -> {
+            try {
+                result.complete(work.get());
+            } catch (RuntimeException e) {
+                result.completeExceptionally(e);
+            }
+        });
+        try {
+            return result.get(10, TimeUnit.SECONDS);
+        } catch (ExecutionException | TimeoutException e) {
+            throw new IllegalStateException("diag FX step failed", e);
         }
     }
 
