@@ -33,7 +33,25 @@ final class FinishWorktreePanel extends VBox {
     /** What the panel needs to know; assembled by MainWorkspace before showing. */
     record Context(String branch, String base, Path worktreeRoot, PrState prState,
                    Optional<Integer> prNumber, Optional<String> prUrl,
-                   Optional<GitChangeSummary> changeSummary, boolean dirty) { }
+                   Optional<GitChangeSummary> changeSummary, boolean dirty,
+                   boolean branchWillBeDeleted) {
+
+        /**
+         * The destructive action's label and caption. A branch drydock did not
+         * create outlives its worktree (see {@code BranchOwnership}), so the
+         * copy must not promise a {@code git branch -D} that will not run --
+         * this is the one place the user is told what is about to be destroyed.
+         */
+        String deleteTitle() {
+            return branchWillBeDeleted ? "Delete worktree & branch" : "Delete worktree";
+        }
+
+        String deleteCaption() {
+            return branchWillBeDeleted
+                    ? "Removes the worktree and deletes " + branch + " directly"
+                    : "Removes the worktree — " + branch + " already existed, so it is kept";
+        }
+    }
 
     interface Actions {
         void mergeIntoBase();
@@ -74,8 +92,7 @@ final class FinishWorktreePanel extends VBox {
                 getChildren().add(action("Create pull request",
                         "Hand off to Claude — push branch & open a PR", "finish-action",
                         () -> runAndClose(actions::createPullRequest, onClose)));
-                getChildren().add(action("Delete worktree & branch",
-                        "Removes the worktree and deletes " + context.branch() + " directly",
+                getChildren().add(action(context.deleteTitle(), context.deleteCaption(),
                         "finish-action-destructive", () -> runAndClose(actions::deleteWorktree, onClose)));
             }
             case OPEN -> {
@@ -90,11 +107,11 @@ final class FinishWorktreePanel extends VBox {
                 context.prUrl().ifPresent(url -> getChildren().add(action(
                         "View pull request on GitHub", url, "finish-action",
                         () -> actions.viewPullRequest(url))));
-                getChildren().add(action("Delete worktree & branch",
-                        "Removes the worktree and deletes " + context.branch() + " directly",
+                getChildren().add(action(context.deleteTitle(), context.deleteCaption(),
                         "finish-action-destructive", () -> runAndClose(actions::deleteWorktree, onClose)));
             }
-            case MERGED -> getChildren().add(action("Delete merged worktree & branch",
+            case MERGED -> getChildren().add(action(context.branchWillBeDeleted()
+                            ? "Delete merged worktree & branch" : "Delete merged worktree",
                     "The branch is merged; removes the worktree directly",
                     "finish-action-destructive", () -> runAndClose(actions::deleteWorktree, onClose)));
         }

@@ -150,7 +150,11 @@ final class NewWorktreeModal extends VBox {
         // pre-filled -- so the loading state is really carried by the hint
         // line (see NewWorktreeState.derive). The prompt is the fallback for
         // the case where the user clears the field mid-load.
-        branchField.getEditor().setPromptText("Loading branches…");
+        //
+        // Set on the ComboBox, never on its editor: the skin binds the
+        // editor's promptText to the ComboBox's, and setting a bound value
+        // throws ("FakeFocusTextField.promptText : A bound value cannot be set").
+        branchField.setPromptText("Loading branches…");
         branchField.getEditor().textProperty().addListener((obs, oldText, newText) -> {
             if (!directoryManuallyEdited) {
                 deriveDirectory.run();
@@ -322,7 +326,20 @@ final class NewWorktreeModal extends VBox {
     private void applyCatalog(BranchCatalog loaded) {
         catalog = loaded;
         catalogFailed = false;
+        // Replacing the items of an editable ComboBox clears its value when the
+        // old value is not among the new items -- which is exactly the "feat/"
+        // seed, and anything half-typed while the catalog was loading. The skin
+        // then re-syncs the editor from that null value on a LATER pulse, so
+        // restoring inline here would compare against text that has not been
+        // wiped yet; the restore has to run after that sync.
+        String typed = branchField.getEditor().getText();
         branchField.getItems().setAll(loaded.branches());
+        Platform.runLater(() -> {
+            if (!typed.equals(branchField.getEditor().getText())) {
+                branchField.getEditor().setText(typed);
+                branchField.getEditor().positionCaret(typed.length());
+            }
+        });
         // The "Fork from" picker keeps offering local branches only, and this
         // is its sole item source: baseField.setValue() from the status call
         // only sets the editor text.
@@ -330,7 +347,7 @@ final class NewWorktreeModal extends VBox {
                 .filter(branch -> !branch.remote())
                 .map(BranchRef::name)
                 .toList());
-        branchField.getEditor().setPromptText("");
+        branchField.setPromptText("");
         // Until now localBranchName() fell back to the raw text, so "origin/foo"
         // slugged a directory the catalog can now strip to "foo".
         if (!directoryManuallyEdited) {
@@ -348,7 +365,7 @@ final class NewWorktreeModal extends VBox {
         catalogFailed = true;
         // The prompt is only ever cleared on the success path otherwise, so a
         // failed first load would keep claiming the branches are still loading.
-        branchField.getEditor().setPromptText("");
+        branchField.setPromptText("");
         showMessage("Could not list branches: " + UiErrors.unwrap(failure).getMessage());
     }
 

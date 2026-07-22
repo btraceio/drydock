@@ -220,7 +220,8 @@ final class WorktreeLifecycleController {
 
                     FinishWorktreePanel.Context context = new FinishWorktreePanel.Context(
                             branch, base, worktreeRoot, current.prState(), current.prNumber(),
-                            prInfo.flatMap(GhCliService.PrInfo::url), Optional.of(summary), status.dirty());
+                            prInfo.flatMap(GhCliService.PrInfo::url), Optional.of(summary), status.dirty(),
+                            sessionManager.mayDeleteBranchOf(worktreeRoot));
                     FinishWorktreePanel panel = new FinishWorktreePanel(context, new FinishWorktreePanel.Actions() {
                         @Override
                         public void mergeIntoBase() {
