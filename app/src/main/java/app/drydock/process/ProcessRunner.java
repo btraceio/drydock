@@ -1,5 +1,6 @@
 package app.drydock.process;
 
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.lang.System.Logger;
@@ -8,6 +9,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -48,10 +51,40 @@ public final class ProcessRunner {
      */
     public static ProcessResult run(List<String> command, Path workingDirectory, Duration timeout)
             throws IOException, InterruptedException {
-        ProcessBuilder builder = new ProcessBuilder(command).redirectErrorStream(false);
-        if (workingDirectory != null) {
-            builder.directory(workingDirectory.toFile());
+        return run(command, new Options(workingDirectory, timeout, false, Map.of()));
+    }
+
+    /**
+     * How to spawn a child: {@code workingDirectory} may be {@code null} to
+     * inherit this process's cwd; {@code discardInput} redirects stdin from
+     * {@code /dev/null} so a child that would prompt (e.g. {@code git fetch}
+     * asking for credentials) sees EOF instead of hanging until
+     * {@code timeout}; {@code environment} entries are added to the child's
+     * inherited environment.
+     */
+    public record Options(Path workingDirectory, Duration timeout, boolean discardInput,
+                          Map<String, String> environment) {
+        public Options {
+            Objects.requireNonNull(timeout, "timeout");
+            environment = Map.copyOf(Objects.requireNonNull(environment, "environment"));
         }
+    }
+
+    public static ProcessResult run(List<String> command, Options options)
+            throws IOException, InterruptedException {
+        ProcessBuilder builder = new ProcessBuilder(command).redirectErrorStream(false);
+        if (options.workingDirectory() != null) {
+            builder.directory(options.workingDirectory().toFile());
+        }
+        if (options.discardInput()) {
+            builder.redirectInput(ProcessBuilder.Redirect.from(new File("/dev/null")));
+        }
+        builder.environment().putAll(options.environment());
+        return runBuilder(builder, command, options.timeout());
+    }
+
+    private static ProcessResult runBuilder(ProcessBuilder builder, List<String> command, Duration timeout)
+            throws IOException, InterruptedException {
         Process process = builder.start();
 
         // Drain stdout and stderr concurrently: reading one stream fully

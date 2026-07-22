@@ -6,6 +6,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -54,5 +55,28 @@ class ProcessRunnerTest {
         assertTrue(excerpt.length() < longText.length());
         assertTrue(excerpt.endsWith("..."));
         assertEquals("short", ProcessRunner.excerpt("  short  "));
+    }
+
+    @Test
+    void discardInputClosesStdinSoAReaderExitsImmediately() throws Exception {
+        // Without discardInput, `cat` blocks on the inherited pipe until the
+        // timeout kills it. With it, cat sees EOF at once and exits 0.
+        ProcessResult result = ProcessRunner.run(
+                List.of("/bin/cat"),
+                new ProcessRunner.Options(null, Duration.ofSeconds(5), true, Map.of()));
+
+        assertEquals(0, result.exitCode());
+        assertEquals("", result.stdout());
+    }
+
+    @Test
+    void environmentEntriesReachTheChild() throws Exception {
+        ProcessResult result = ProcessRunner.run(
+                List.of("/bin/sh", "-c", "printf %s \"$DRYDOCK_TEST_VAR\""),
+                new ProcessRunner.Options(null, Duration.ofSeconds(5), true,
+                        Map.of("DRYDOCK_TEST_VAR", "set-by-test")));
+
+        assertEquals(0, result.exitCode());
+        assertTrue(result.stdout().contains("set-by-test"), result.stdout());
     }
 }
