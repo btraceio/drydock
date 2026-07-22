@@ -6,6 +6,8 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -240,7 +242,7 @@ class GitStatusServiceTest {
     }
 
     @Test
-    void listLocalBranchesReportsEveryLocalBranch(@TempDir Path repo) throws Exception {
+    void listBranchesReportsEveryLocalBranch(@TempDir Path repo) throws Exception {
         initRepo(repo, "main");
         writeFile(repo, "README.md", "hello\n");
         runGit(repo, "add", "README.md");
@@ -248,10 +250,36 @@ class GitStatusServiceTest {
         runGit(repo, "branch", "develop");
         runGit(repo, "branch", "feat/x");
 
-        List<String> branches = service.listLocalBranches(repo).get();
+        BranchListing listing = service.listBranches(repo).get();
 
-        assertTrue(branches.containsAll(List.of("main", "develop", "feat/x")));
-        assertEquals(3, branches.size());
+        List<String> names = listing.branches().stream().map(BranchRef::name).toList();
+        assertEquals(List.of("develop", "feat/x", "main"), names);
+        assertTrue(listing.branches().stream().noneMatch(BranchRef::remote));
+        assertTrue(listing.remotes().isEmpty());
+    }
+
+    @Test
+    void listBranchesIncludesRemotesAndSkipsTheOriginHeadSymref(@TempDir Path tmp) throws Exception {
+        Path upstream = tmp.resolve("upstream");
+        Files.createDirectory(upstream);
+        initRepo(upstream, "main");
+        writeFile(upstream, "README.md", "hello\n");
+        runGit(upstream, "add", "README.md");
+        commit(upstream, "initial commit");
+        runGit(upstream, "branch", "feature/x");
+
+        Path clone = tmp.resolve("clone");
+        runGitIn(tmp, "clone", upstream.toString(), clone.toString());
+
+        BranchListing listing = service.listBranches(clone).get();
+
+        List<String> names = listing.branches().stream().map(BranchRef::name).toList();
+        assertTrue(names.contains("origin/feature/x"), names.toString());
+        assertTrue(names.contains("origin/main"), names.toString());
+        // refs/remotes/origin/HEAD short-names to "origin" -- it must be
+        // dropped as a symref, not survive as a phantom branch.
+        assertFalse(names.contains("origin"), names.toString());
+        assertEquals(List.of("origin"), listing.remotes());
     }
 
     @Test
@@ -303,6 +331,17 @@ class GitStatusServiceTest {
 
     private static void runGit(Path repo, String... args) throws IOException, InterruptedException {
         runGitCapture(repo, args);
+    }
+
+    private static void runGitIn(Path cwd, String... args) throws IOException, InterruptedException {
+        List<String> command = new ArrayList<>();
+        command.add("git");
+        command.addAll(Arrays.asList(args));
+        Process process = new ProcessBuilder(command).directory(cwd.toFile()).redirectErrorStream(true).start();
+        String output = new String(process.getInputStream().readAllBytes());
+        if (process.waitFor() != 0) {
+            throw new IOException("git " + String.join(" ", args) + " failed: " + output);
+        }
     }
 
     private static String runGitCapture(Path repo, String... args) throws IOException, InterruptedException {

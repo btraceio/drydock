@@ -2,6 +2,7 @@ package app.drydock.ui;
 
 import app.drydock.config.UserConfig;
 import app.drydock.domain.Repository;
+import app.drydock.git.BranchRef;
 import app.drydock.git.GitBranchState;
 import app.drydock.git.GitStatusService;
 import javafx.application.Platform;
@@ -80,10 +81,13 @@ final class NewWorktreeModal extends VBox {
                         baseField.setValue(onBranch.name());
                     }
                 }));
-        gitStatusService.listLocalBranches(repository.root()).whenComplete((branches, failure) ->
+        gitStatusService.listBranches(repository.root()).whenComplete((listing, failure) ->
                 Platform.runLater(() -> {
                     if (failure == null) {
-                        baseField.getItems().setAll(branches);
+                        baseField.getItems().setAll(listing.branches().stream()
+                                .filter(branch -> !branch.remote())
+                                .map(BranchRef::name)
+                                .toList());
                     }
                 }));
 

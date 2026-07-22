@@ -266,22 +266,49 @@ public final class GitStatusService implements AutoCloseable {
     }
 
     /**
-     * Lists local branch names ({@code git for-each-ref refs/heads}) for
-     * the base-branch picker in the create-worktree modal, on this
-     * service's background executor.
+     * Lists every branch -- local and remote-tracking -- plus the
+     * repository's remote names, for the create-worktree modal's branch
+     * picker, on this service's background executor. Occupancy
+     * ({@link BranchRef#checkedOutAt()}) is filled in separately by a
+     * later task, which composes this with {@link WorktreeService#list}.
      */
-    public CompletableFuture<List<String>> listLocalBranches(Path repositoryRoot) {
-        return CompletableFuture.supplyAsync(() -> listLocalBranchesBlocking(repositoryRoot), executor);
+    public CompletableFuture<BranchListing> listBranches(Path repositoryRoot) {
+        return CompletableFuture.supplyAsync(() -> listBranchesBlocking(repositoryRoot), executor);
     }
 
-    /** Synchronous form of {@link #listLocalBranches}, package-private for tests. */
-    List<String> listLocalBranchesBlocking(Path repositoryRoot) {
+    /** Synchronous form of {@link #listBranches}, package-private for tests. */
+    BranchListing listBranchesBlocking(Path repositoryRoot) {
         Path git = locator.locate()
                 .orElseThrow(() -> new GitExecutableNotFoundException(locator.describeSearched()));
 
-        List<String> command = List.of(
-                git.toString(), "-C", repositoryRoot.toString(),
-                "for-each-ref", "--format=%(refname:short)", "refs/heads/");
+        List<String> remotes = runLines(git, repositoryRoot, List.of("remote"));
+
+        // %(symref) is the only reliable way to spot refs/remotes/origin/HEAD:
+        // %(refname:short) renders it as "origin", so a name-shaped filter
+        // would miss it and leave a phantom branch named after the remote.
+        List<String> refLines = runLines(git, repositoryRoot, List.of(
+                "for-each-ref", "--format=%(refname)%09%(symref)", "refs/heads/", "refs/remotes/"));
+
+        List<BranchRef> branches = new ArrayList<>();
+        for (String line : refLines) {
+            String[] parts = line.split("\t", -1);
+            if (parts.length > 1 && !parts[1].isBlank()) {
+                continue; // symbolic ref (origin/HEAD), not a branch
+            }
+            String refName = parts[0];
+            if (refName.startsWith("refs/heads/")) {
+                branches.add(BranchRef.local(refName.substring("refs/heads/".length())));
+            } else if (refName.startsWith("refs/remotes/")) {
+                branches.add(BranchRef.remote(refName.substring("refs/remotes/".length())));
+            }
+        }
+        return new BranchListing(List.copyOf(branches), remotes);
+    }
+
+    /** Runs a read-only git subcommand in {@code repositoryRoot}, returning its non-blank stdout lines. */
+    private List<String> runLines(Path git, Path repositoryRoot, List<String> arguments) {
+        List<String> command = new ArrayList<>(List.of(git.toString(), "-C", repositoryRoot.toString()));
+        command.addAll(arguments);
 
         ProcessResult result = run(command);
         if (result.exitCode() != 0) {
