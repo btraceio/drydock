@@ -793,7 +793,7 @@ public final class RepositorySidebar extends VBox {
 
     /** One-click 🗑 of an unopened worktree: {@code git worktree remove} + {@code git branch -D}. */
     private void onDeleteUnopenedWorktree(Repository repository, WorktreeService.Worktree worktree) {
-        worktreeService.remove(repository.root(), worktree.path(), worktree.branch())
+        worktreeService.remove(repository.root(), worktree.path(), deletableBranchOf(worktree))
                 .whenComplete((v, failure) -> Platform.runLater(() -> {
                     if (failure != null) {
                         if (UiErrors.unwrap(failure) instanceof WorktreeNotCleanException) {
@@ -822,7 +822,7 @@ public final class RepositorySidebar extends VBox {
                 + " contains modified or untracked files. Deleting it will discard them permanently. "
                 + "Delete anyway?");
         confirm.showAndWait().filter(button -> button == ButtonType.OK).ifPresent(button ->
-                worktreeService.removeForced(repository.root(), worktree.path(), worktree.branch())
+                worktreeService.removeForced(repository.root(), worktree.path(), deletableBranchOf(worktree))
                         .whenComplete((v, failure) -> Platform.runLater(() -> {
                             if (failure != null) {
                                 UiErrors.show("Could not delete worktree", failure);
@@ -831,6 +831,16 @@ public final class RepositorySidebar extends VBox {
                             viewModel.removeWorktreeStatus(worktree.path());
                             refreshWorktrees(repository, false);
                         })));
+    }
+
+    /**
+     * The branch to delete along with {@code worktree}, if any. A worktree
+     * discovered on disk, or one opened on a branch that already existed,
+     * keeps its branch: {@code git branch -D} is unrecoverable for unpushed
+     * commits, and drydock only destroys what it created.
+     */
+    private Optional<String> deletableBranchOf(WorktreeService.Worktree worktree) {
+        return sessionManager.mayDeleteBranchOf(worktree.path()) ? worktree.branch() : Optional.empty();
     }
 
     // ---- Git status ---------------------------------------------------------

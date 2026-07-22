@@ -332,7 +332,12 @@ final class WorktreeLifecycleController {
             return;
         }
         tab.showHandoffRunning("Removing worktree…");
-        worktreeService.remove(repository.root(), worktreeRoot, Optional.of(branch))
+        // A branch drydock did not create (an existing branch checked out
+        // into this worktree) outlives the worktree: only the worktree goes.
+        Optional<String> branchToDelete = sessionManager.mayDeleteBranchOf(worktreeRoot)
+                ? Optional.of(branch)
+                : Optional.empty();
+        worktreeService.remove(repository.root(), worktreeRoot, branchToDelete)
                 .whenComplete((v, ex) -> Platform.runLater(() -> {
                     if (openTab.apply(sessionId) == null) {
                         return;
