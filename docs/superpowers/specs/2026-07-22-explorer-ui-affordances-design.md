@@ -4,80 +4,184 @@ Date: 2026-07-22
 
 Three independent defects in the session Explorer, all in the "the affordance
 exists but is invisible" family. Each is fixed in isolation; none share code.
+One of them (§3) also unmasks a pre-existing silent failure, fixed here
+because the fix is what makes it reachable.
 
 ## 1. The editor has no visible caret
 
-**Cause.** `app.css:1136` hides it unconditionally:
+**Cause.** `app.css:1136-1138` hides it unconditionally:
 
 ```css
 .code-area .caret { -fx-stroke: transparent; }
 ```
 
-RichTextFX's `CodeArea` already maintains a blinking caret with `AUTO`
-visibility (painted only while the area has focus). Nothing else is missing.
+RichTextFX's caret node is a `javafx.scene.shape.Path` carrying the style
+class `caret`, so `-fx-stroke` is the property that paints it — the rule is
+the whole cause. The library's `CaretNode` binds its visibility to
+`focused AND editable AND !disabled` (`GenericStyledArea`'s
+`autoCaretBlinksSteam`, with the default `CaretVisibility.AUTO` that this app
+never overrides), and it drives its own blink.
 
-**Fix.** Keep the transparent default — read-only viewers must stay
-caret-free, so the editor does not invite typing where typing is refused —
-and paint the caret only for editable files:
+**Fix.** One line, no Java change:
 
 ```css
-.code-area.editable-code .caret { -fx-stroke: -drydock-code-text; }
+.code-area .caret { -fx-stroke: -drydock-code-text; }
 ```
 
-`FileViewer.attachEditing` (`FileViewer.java:933`) is the single place a tab's
-area flips to editable, so it adds the `editable-code` style class alongside
-`area.setEditable(true)`. Areas that never reach `attachEditing` keep the
-default and stay caret-free.
+A read-only viewer stays caret-free by construction, because
+`FileViewer.java:781` leaves the area non-editable until
+`attachEditing` (`FileViewer.java:966`) flips it — the library, not CSS, is
+what suppresses the caret there. An earlier draft of this spec added an
+`editable-code` style class to gate the rule; that gate is redundant and is
+not implemented.
 
-Blinking is the library's own, driven by focus; no `Animation.INDEFINITE` is
-introduced, so `stopTransitions()` needs no new entry.
+Two consequences to record rather than fix:
+
+- A `disarmed` or `CONFLICT` session keeps `setEditable(true)`
+  (`FileEditSession.java:538,805`), so the caret blinks in a buffer whose
+  writes are refused. That is correct — the text really is editable, only the
+  save is blocked, and the edit banner already says so.
+- `reload` restores the caret by clamped paragraph/column
+  (`FileViewer.java:515,534-536`). An external edit that shortens the file
+  will now visibly jump the caret. Acceptable, but it becomes observable for
+  the first time, so it is on the verification list.
+
+`FileViewer.java:779` is the only `new CodeArea` in the app (`DiffOverlay` is
+a state holder with no node), so this rule has exactly one consumer today.
+`FileViewer.java:780` re-adds the `code-area` class that `CodeArea`'s own
+constructor already adds; the duplicate is harmless and is left alone.
+
+No new `Animation.INDEFINITE` is introduced — the blink already runs — so
+`stopTransitions()` (`FileViewer.java:340`) needs no new entry.
 
 ## 2. Search results show no full path
 
-**Cause.** Result rows show a filetype badge and the bare file name; in Files
-mode a relative path label is appended, in Text mode it is not. A row for
-`FileViewer.java` is therefore ambiguous when several modules define the same
-name.
+**Cause.** Result rows show a filetype badge and the bare file name. Files
+mode appends a relative-path label (`SearchRail.java:336-338`); Text mode
+shows a match-count pill instead and no path at all. A row for
+`FileViewer.java` is therefore ambiguous whenever several modules define the
+same name — always in Text mode, and in Files mode whenever the label
+ellipsizes, which the 324px fixed rail (`SessionExplorerView.java:28`,
+`fitToWidth` with `hbarPolicy NEVER` at `SearchRail.java:194-195`) makes
+common.
 
-**Fix.** Install a JavaFX `Tooltip` carrying the session-relative path on both
-row kinds — `SearchRail.buildFileRow` (`SearchRail.java:292`) and
-`SearchRail.buildMatchLine` (`SearchRail.java:372`). Match rows already render
-their line number, so the tooltip is the path alone.
+**Fix.** `Tooltip.install(row, tip)` — the rows are `HBox`es, not `Control`s,
+so `setTooltip` is unavailable — carrying the session-relative path, with the
+show delay shortened from JavaFX's 1000ms default to 400ms.
 
-Rows are rebuilt on every keystroke, so tooltips are cached by relative path
-in a `Map<Path, Tooltip>` field and reused across rebuilds — the pattern
-`RepositorySidebar.java:1220-1228` already uses for its rebuilt session rows.
-The cache is cleared wherever the rail drops its result state.
+Scope and lifecycle:
+
+- File rows only. The tooltip goes on the `HBox row` built at
+  `SearchRail.java:322`, **not** the enclosing `VBox group` that
+  `buildFileRow` returns (`SearchRail.java:342,369`) — installing on the group
+  would cover the nested match lines too.
+- Match lines get no tooltip. They sit directly under their file row, which
+  already answers "which file", and a text query yields one row per match —
+  hundreds of popup registrations for a path shown two pixels above.
+- No tooltip cache. Rows are rebuilt per render, but `Tooltip.install` stores
+  the tooltip in the *node's* property map with no back-reference, so a
+  discarded row takes its tooltip with it. Caching (as `RepositorySidebar`
+  does at `:1220-1228`, with `retainAll` pruning at `:516`) would buy one
+  object allocation per row against a full node-tree rebuild, in a path
+  already debounced 150ms (`SearchRail.java:58`) — and it would add a
+  pruning-lifecycle bug surface for nothing.
+- No new CSS: `.tooltip` is already themed at `app.css:795-803`.
+
+Out of scope: result rows are mouse-only today — every control in them is
+`setFocusTraversable(false)` (`SearchRail.java:295,308`) — so the tooltip is
+mouse-only too. Making the rail keyboard-navigable is a separate change.
 
 ## 3. Explorer file tabs cannot be closed
 
 **Cause.** They already are closable: `FileViewer.java:175` sets
 `TabClosingPolicy.ALL_TABS`, and the close path is complete (conflict veto at
 `FileViewer.java:872`, flush and deregistration in `closeTab`). The close
-button is merely invisible, through a style-class collision:
+button is all but invisible, through a style-class collision.
 `OpenSessionTab.java:546` gives its custom close `Button` the style class
-`tab-close-button`, which is also the built-in class JavaFX puts on the close
-`StackPane` inside every `Tab`. For that StackPane the cross glyph *is* its
-`-fx-background-color`, and `app.css:369` sets it to `transparent`.
+`tab-close-button` — also the class JavaFX's `TabPaneSkin` puts (via
+`setAll`) on the close `StackPane` inside every `Tab`. For that StackPane the
+cross glyph *is* its `-fx-background-color` over a `-fx-shape`
+(modena.css:1696-1704), and `app.css:369` sets it to `transparent`. Author
+stylesheets beat the user-agent sheet regardless of modena's higher
+specificity, so the glyph disappears. Modena's white dropshadow survives, so
+what is actually on screen is a faint ghost on hover — not literally nothing.
 
-**Fix.** Two parts:
+**Fix.**
 
 - Rename the custom button's class to `session-tab-close`
-  (`OpenSessionTab.java:546` and the two rules at `app.css:369-382`), so the
-  app's own styling no longer reaches into any `TabPane`'s internals. This
-  also protects every future `TabPane`.
-- Style the built-in button explicitly for the Explorer strip:
-  `.viewer-tabs .tab-close-button` draws the cross in `-drydock-text-faint`,
-  brightening to `-drydock-text` on hover, so it matches the theme rather than
-  inheriting Modena's default mark colour.
+  (`OpenSessionTab.java:546` plus the two rules at `app.css:369-382`), so app
+  styling no longer reaches into any `TabPane`'s internals. Safe because
+  those three sites are the only users of the name, and because
+  `MainWorkspace.java:229` sets the session strip to
+  `TabClosingPolicy.UNAVAILABLE` — its skin never creates a close button, so
+  the rename cannot make a second ✕ appear there.
+- Add `.viewer-tabs .tab-close-button`, restoring what the renamed rule used
+  to supply (17px box, zero padding, background radius, hand cursor) and
+  painting the glyph `-drydock-text-faint`, `-drydock-text` on hover with
+  `-drydock-active-bg` behind it. Set `-fx-effect: null` to drop modena's
+  white dropshadow, which reads as muddy against the light theme.
+- Cap `.viewer-tab-label` at 160px (`app.css:1064`), matching the session tab
+  labels (`OpenSessionTab.java:1220-1223`). The graphic is badge + name +
+  dirty dot and the ✕ now sits beside it; without a cap a long filename
+  crowds the strip.
+- Style `.viewer-tabs > .tab-header-area > .control-buttons-tab`, which
+  `app.css:342` currently provides only for `.session-tabs`. Wider tabs reach
+  JavaFX's overflow menu sooner, and its default chrome is modena blue-grey
+  inside a `-drydock-tabbar` strip.
 
-No Java behaviour changes; the existing close, veto and flush paths are what
-the newly visible button triggers.
+**Unmasked defect: a save that fails during close is swallowed.** `closeTab`
+flushes asynchronously (`FileViewer.java:1060`). If that write fails,
+`onSaveFailed` calls `showSaveErrorBanner`, which returns immediately because
+`ownsBannerRow(tab)` is false once the tab has left the pane
+(`FileViewer.java:714-719`). Its comment says the selection listener
+re-derives the error from the session's `ERROR` state — but the tab is gone
+and `sessions.remove` has dropped the session, so nothing ever does. The user
+loses the edit with no indication. Today this needs the programmatic close
+path to hit it; after this change it is one click on a dirty tab.
+
+Fix: in `closeTab`'s `pending.whenComplete` (`FileViewer.java:1069`), if the
+session ended in `State.ERROR`, log at WARNING with the path and
+`session.lastError()` before dropping it. A background write that fails must
+not be indistinguishable from one that succeeded. Surfacing it in the UI
+(re-raising a banner on whatever tab remains) is deliberately not done here —
+there is no owning tab to attach it to, and inventing a viewer-level
+notification is a larger change than this fix warrants.
+
+Also unstated but true: nothing persists open Explorer tabs — no `explorer`
+key exists under `app/src/main/java/app/drydock/state`. Closing is
+irreversible across restarts.
+
+⌘W is out of scope. `DrydockApplication.java:216` routes it to window close,
+`FileViewer.java:977-982` intercepts only ⌘S, and JavaFX `TabPane` has no
+middle-click close. Adding a tab-close binding would also require a
+`ShortcutsOverlay` row for advertised↔bound parity (AGENTS.md:86-88). File
+tabs stay mouse-closable, deliberately.
 
 ## Verification
 
-Unit tests cover none of this (it is rendering). Verification is by launching
-the app and confirming on screen: a blinking caret in an editable file and
-none in a read-only one, a path tooltip on hover over a search result in both
-Files and Text mode, and a visible, working close button on Explorer file tabs
-including the unsaved-conflict veto still firing.
+There is no TestFX dependency (`app/build.gradle.kts:77-78` lists JUnit only)
+and the Explorer's tests are pure logic (`FileContentTest`,
+`FileEditSessionTest`, `SyntaxHighlighterTest`). Adding a UI test harness is
+out of scope; this is verified by running the app.
+
+The repo's diagnostic driver is the vehicle for the caret:
+`app/build.gradle.kts:104-110` forwards `-Papp.drydock.diag.*`, and
+`DrydockApplication.java:348-390` implements `explorerScript` with
+`open`/`type`/`mark`, reaching `FileViewer.diagType`
+(`FileViewer.java:1330`) which already calls `requestFocus()`. Because the
+caret blinks, confirm it across several frames rather than one screenshot.
+
+Checklist:
+
+1. Caret blinks in an editable file with the editor focused; a read-only file
+   (binary/oversized) shows none.
+2. Caret survives `reload` with an external edit that shortens the file.
+3. Hovering a search result in Text mode shows the session-relative path;
+   Files mode shows it too, untruncated, where the inline label ellipsizes.
+4. Explorer file tabs show a themed ✕ in both light and dark themes; clicking
+   it closes the tab and flushes.
+5. The unsaved-conflict veto still refuses the close and re-raises its banner.
+6. Session tabs (top strip) are visually unchanged after the class rename.
+
+Items 3 and 4 have no diag verb (no hover, no tab-close, no second-file open)
+and are hand-verified.
