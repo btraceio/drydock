@@ -137,7 +137,8 @@ class JsonApplicationStateRepositoryTest {
                 Instant.parse("2026-01-04T00:00:00Z"),
                 Optional.of(1),
                 PrState.OPEN,
-                Optional.of(128));
+                Optional.of(128),
+                true);
         ApplicationState state = new ApplicationState(List.of(repo), List.of(session), WorkspaceUiState.empty());
 
         JsonApplicationStateRepository repository = new JsonApplicationStateRepository(stateFile());
@@ -166,7 +167,8 @@ class JsonApplicationStateRepositoryTest {
                 Instant.parse("2026-01-04T00:00:00Z"),
                 Optional.empty(),
                 PrState.NONE,
-                Optional.empty());
+                Optional.empty(),
+                true);
         ApplicationState state = new ApplicationState(List.of(repo), List.of(session), WorkspaceUiState.empty());
 
         JsonApplicationStateRepository repository = new JsonApplicationStateRepository(stateFile());

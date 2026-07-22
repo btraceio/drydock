@@ -101,7 +101,8 @@ class SessionManagerTest {
                 now,
                 Optional.empty(),
                 PrState.NONE,
-                Optional.empty());
+                Optional.empty(),
+                true);
     }
 
     // ---- startup normalization of stale statuses ---------------------------

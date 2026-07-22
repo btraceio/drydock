@@ -32,6 +32,34 @@ class ApplicationStateCodecTest {
     private static final String REPO_ID = "11111111-2222-3333-4444-555555555555";
     private static final String OTHER_ID = "99999999-8888-7777-6666-555555555555";
 
+    private static final String SESSION_WITHOUT_PROVENANCE = """
+            {
+              "schemaVersion": 2,
+              "repositories": [
+                {
+                  "id": "%s",
+                  "root": "/tmp/repo",
+                  "displayName": "repo",
+                  "addedAt": "2026-01-01T00:00:00Z",
+                  "lastOpenedAt": "2026-01-02T00:00:00Z",
+                  "settings": {}
+                }
+              ],
+              "sessions": [
+                {
+                  "id": "22222222-3333-4444-5555-666666666666",
+                  "repositoryId": "%s",
+                  "displayName": "s",
+                  "workingDirectory": "/tmp/repo",
+                  "status": "INACTIVE",
+                  "createdAt": "2026-01-01T00:00:00Z",
+                  "lastOpenedAt": "2026-01-02T00:00:00Z"
+                }
+              ],
+              "ui": {"selectedRepositoryId": null, "sidebarWidth": 260.0, "expandedRepositoryIds": []}
+            }
+            """.formatted(REPO_ID, REPO_ID);
+
     private static String document(String uiJson) {
         return """
                 {
@@ -50,6 +78,16 @@ class ApplicationStateCodecTest {
                   "ui": %s
                 }
                 """.formatted(REPO_ID, uiJson);
+    }
+
+    @Test
+    void sessionWithoutBranchCreatedHereDecodesToTrue() {
+        // Every session persisted before this field existed did create its
+        // own branch; defaulting to false would silently stop deleting
+        // branches the app is responsible for.
+        ApplicationState state = ApplicationStateCodec.fromJson(JsonParser.parse(SESSION_WITHOUT_PROVENANCE));
+
+        assertTrue(state.sessions().get(0).branchCreatedHere());
     }
 
     @Test

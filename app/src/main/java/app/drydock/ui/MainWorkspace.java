@@ -581,7 +581,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                                        Optional<String> task) {
         // Keyed under the real session id for the same launch-race reason
         // as openNewSession.
-        ManagedClaudeSession prepared = sessionManager.prepareWorktreeSession(repository, branch, worktreeRoot);
+        ManagedClaudeSession prepared = sessionManager.prepareWorktreeSession(repository, branch, worktreeRoot, true);
         OpenSessionTab placeholderTab = showPendingTab(prepared.id(), branch,
                 Optional.of(repository), worktreeRoot);
 

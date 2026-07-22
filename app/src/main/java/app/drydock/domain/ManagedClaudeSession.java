@@ -32,6 +32,11 @@ import java.util.Optional;
  * still exists on disk happens when a session is opened/resumed (plan
  * section 11.2), not here, so restoring persisted state for a session whose
  * directory has since disappeared never throws.</p>
+ *
+ * <p>{@link #branchCreatedHere()} records whether this application created
+ * the session's branch (as opposed to checking out a branch that already
+ * existed). The delete paths consult it before {@code git branch -D}: a
+ * branch drydock did not create is never force-deleted.</p>
  */
 public record ManagedClaudeSession(
         ManagedSessionId id,
@@ -46,7 +51,8 @@ public record ManagedClaudeSession(
         Instant lastOpenedAt,
         Optional<Integer> lastExitCode,
         PrState prState,
-        Optional<Integer> prNumber
+        Optional<Integer> prNumber,
+        boolean branchCreatedHere
 ) {
 
     public ManagedClaudeSession {
@@ -87,47 +93,56 @@ public record ManagedClaudeSession(
 
     public ManagedClaudeSession withDisplayName(String newDisplayName) {
         return new ManagedClaudeSession(id, repositoryId, newDisplayName, claudeSessionId, claudeSessionName,
-                workingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, lastExitCode, prState, prNumber);
+                workingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, lastExitCode, prState, prNumber,
+                branchCreatedHere);
     }
 
     public ManagedClaudeSession withClaudeSessionId(Optional<String> newClaudeSessionId) {
         return new ManagedClaudeSession(id, repositoryId, displayName, newClaudeSessionId, claudeSessionName,
-                workingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, lastExitCode, prState, prNumber);
+                workingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, lastExitCode, prState, prNumber,
+                branchCreatedHere);
     }
 
     public ManagedClaudeSession withClaudeSessionName(Optional<String> newClaudeSessionName) {
         return new ManagedClaudeSession(id, repositoryId, displayName, claudeSessionId, newClaudeSessionName,
-                workingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, lastExitCode, prState, prNumber);
+                workingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, lastExitCode, prState, prNumber,
+                branchCreatedHere);
     }
 
     public ManagedClaudeSession withWorkingDirectory(Path newWorkingDirectory) {
         return new ManagedClaudeSession(id, repositoryId, displayName, claudeSessionId, claudeSessionName,
-                newWorkingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, lastExitCode, prState, prNumber);
+                newWorkingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, lastExitCode, prState, prNumber,
+                branchCreatedHere);
     }
 
     public ManagedClaudeSession withStatus(SessionStatus newStatus) {
         return new ManagedClaudeSession(id, repositoryId, displayName, claudeSessionId, claudeSessionName,
-                workingDirectory, worktreeRoot, newStatus, createdAt, lastOpenedAt, lastExitCode, prState, prNumber);
+                workingDirectory, worktreeRoot, newStatus, createdAt, lastOpenedAt, lastExitCode, prState, prNumber,
+                branchCreatedHere);
     }
 
     public ManagedClaudeSession withLastOpenedAt(Instant newLastOpenedAt) {
         return new ManagedClaudeSession(id, repositoryId, displayName, claudeSessionId, claudeSessionName,
-                workingDirectory, worktreeRoot, status, createdAt, newLastOpenedAt, lastExitCode, prState, prNumber);
+                workingDirectory, worktreeRoot, status, createdAt, newLastOpenedAt, lastExitCode, prState, prNumber,
+                branchCreatedHere);
     }
 
     public ManagedClaudeSession withLastExitCode(Optional<Integer> newLastExitCode) {
         return new ManagedClaudeSession(id, repositoryId, displayName, claudeSessionId, claudeSessionName,
-                workingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, newLastExitCode, prState, prNumber);
+                workingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, newLastExitCode, prState, prNumber,
+                branchCreatedHere);
     }
 
     public ManagedClaudeSession withWorktreeRoot(Optional<Path> newWorktreeRoot) {
         return new ManagedClaudeSession(id, repositoryId, displayName, claudeSessionId, claudeSessionName,
-                workingDirectory, newWorktreeRoot, status, createdAt, lastOpenedAt, lastExitCode, prState, prNumber);
+                workingDirectory, newWorktreeRoot, status, createdAt, lastOpenedAt, lastExitCode, prState, prNumber,
+                branchCreatedHere);
     }
 
     /** PR state and number always change together (a number is meaningless without OPEN/MERGED). */
     public ManagedClaudeSession withPr(PrState newPrState, Optional<Integer> newPrNumber) {
         return new ManagedClaudeSession(id, repositoryId, displayName, claudeSessionId, claudeSessionName,
-                workingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, lastExitCode, newPrState, newPrNumber);
+                workingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, lastExitCode, newPrState, newPrNumber,
+                branchCreatedHere);
     }
 }

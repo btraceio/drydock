@@ -59,7 +59,8 @@ import java.util.Set;
  *       "lastOpenedAt": "<ISO-8601 instant>",
  *       "lastExitCode": <int> | null,
  *       "prState": "NONE" | "OPEN" | "MERGED",
- *       "prNumber": <int> | null
+ *       "prNumber": <int> | null,
+ *       "branchCreatedHere": <boolean>
  *     }
  *   ],
  *   "ui": {
@@ -82,7 +83,12 @@ import java.util.Set;
  * empty, so no version bump was needed. The {@code remote} member (SSH
  * remote repositories) was added leniently within version 2, like
  * {@code prState}: absent or malformed decodes to null (local repo), so no
- * version bump was needed and downgrades stay non-destructive. {@link #toJson}
+ * version bump was needed and downgrades stay non-destructive. The
+ * {@code branchCreatedHere} member was likewise added leniently within
+ * version 2: every session persisted before it existed did create its own
+ * branch, so an absent or malformed value decodes to {@code true}, not
+ * {@code false} -- the opposite default would silently stop drydock from
+ * deleting branches it is responsible for. {@link #toJson}
  * always writes the current version. Any {@code schemaVersion} other than 1
  * or 2 is treated as malformed input (throws {@link StateDecodeException}),
  * consistent with how unknown versions were already rejected before this change.</p>
@@ -155,6 +161,7 @@ public final class ApplicationStateCodec {
         obj.put("prNumber", session.prNumber()
                 .<JsonValue>map(number -> JsonNumber.of((long) number))
                 .orElse(JsonValue.JsonNull.INSTANCE));
+        obj.put("branchCreatedHere", new JsonValue.JsonBoolean(session.branchCreatedHere()));
         return obj;
     }
 
@@ -263,8 +270,14 @@ public final class ApplicationStateCodec {
             Optional<Integer> prNumber = obj.get("prNumber") instanceof JsonNumber pn
                     ? Optional.of(pn.asInt())
                     : Optional.empty();
+            // Lenient, like prState/remote: every session persisted before
+            // this member existed did create its own branch, so an absent or
+            // malformed value decodes to true. No schema bump.
+            boolean branchCreatedHere = !(obj.get("branchCreatedHere") instanceof JsonValue.JsonBoolean b)
+                    || b.value();
             return new ManagedClaudeSession(id, repositoryId, displayName, claudeSessionId, claudeSessionName,
-                    workingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, lastExitCode, prState, prNumber);
+                    workingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, lastExitCode, prState, prNumber,
+                    branchCreatedHere);
         } catch (IllegalArgumentException | DateTimeException e) {
             throw new StateDecodeException("Malformed session entry: " + e.getMessage());
         }

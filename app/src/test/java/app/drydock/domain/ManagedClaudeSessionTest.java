@@ -30,7 +30,8 @@ class ManagedClaudeSessionTest {
                 Instant.now(),
                 Optional.empty(),
                 PrState.NONE,
-                Optional.empty());
+                Optional.empty(),
+                true);
     }
 
     @Test
@@ -58,7 +59,7 @@ class ManagedClaudeSessionTest {
         assertThrows(IllegalArgumentException.class, () -> new ManagedClaudeSession(
                 ManagedSessionId.newId(), RepositoryId.newId(), "example", Optional.empty(), Optional.empty(),
                 dir, Optional.of(notNormalized), SessionStatus.INACTIVE, Instant.now(), Instant.now(), Optional.empty(),
-                PrState.NONE, Optional.empty()));
+                PrState.NONE, Optional.empty(), true));
     }
 
     @Test
@@ -67,7 +68,7 @@ class ManagedClaudeSessionTest {
         assertThrows(IllegalArgumentException.class, () -> new ManagedClaudeSession(
                 ManagedSessionId.newId(), RepositoryId.newId(), "   ", Optional.empty(), Optional.empty(),
                 dir, Optional.empty(), SessionStatus.INACTIVE, Instant.now(), Instant.now(), Optional.empty(),
-                PrState.NONE, Optional.empty()));
+                PrState.NONE, Optional.empty(), true));
     }
 
     @Test

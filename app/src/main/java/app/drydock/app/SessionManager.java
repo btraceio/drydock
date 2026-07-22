@@ -4,6 +4,7 @@ import app.drydock.claude.ClaudeCapabilities;
 import app.drydock.claude.ClaudeCapabilityService;
 import app.drydock.claude.ConversationCatalog;
 import app.drydock.domain.ApplicationState;
+import app.drydock.domain.BranchOwnership;
 import app.drydock.domain.ManagedClaudeSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.PrState;
@@ -193,8 +194,9 @@ public final class SessionManager implements AutoCloseable {
     }
 
     /** As {@link #prepareSession}, for a session living inside an already-created worktree checkout. */
-    public ManagedClaudeSession prepareWorktreeSession(Repository repository, String displayName, Path worktreeRoot) {
-        return newSessionMetadata(repository, displayName, Optional.of(worktreeRoot));
+    public ManagedClaudeSession prepareWorktreeSession(Repository repository, String displayName, Path worktreeRoot,
+                                                        boolean branchCreatedHere) {
+        return newSessionMetadata(repository, displayName, Optional.of(worktreeRoot), branchCreatedHere);
     }
 
     /** Launches a session minted by {@link #prepareSession}/{@link #prepareWorktreeSession}. */
@@ -754,7 +756,7 @@ public final class SessionManager implements AutoCloseable {
     }
 
     private ManagedClaudeSession newSessionMetadata(Repository repository, String displayName) {
-        return newSessionMetadata(repository, displayName, Optional.empty());
+        return newSessionMetadata(repository, displayName, Optional.empty(), true);
     }
 
     /**
@@ -764,6 +766,11 @@ public final class SessionManager implements AutoCloseable {
      */
     private ManagedClaudeSession newSessionMetadata(Repository repository, String displayName,
                                                     Optional<Path> worktreeRoot) {
+        return newSessionMetadata(repository, displayName, worktreeRoot, true);
+    }
+
+    private ManagedClaudeSession newSessionMetadata(Repository repository, String displayName,
+                                                    Optional<Path> worktreeRoot, boolean branchCreatedHere) {
         Instant now = Instant.now();
         return new ManagedClaudeSession(
                 ManagedSessionId.newId(),
@@ -778,7 +785,17 @@ public final class SessionManager implements AutoCloseable {
                 now,
                 Optional.empty(),
                 PrState.NONE,
-                Optional.empty());
+                Optional.empty(),
+                branchCreatedHere);
+    }
+
+    /**
+     * Whether the branch of the worktree at {@code worktreeRoot} may be
+     * force-deleted along with it -- true only when a session records that
+     * this application created that branch. See {@link BranchOwnership}.
+     */
+    public boolean mayDeleteBranchOf(Path worktreeRoot) {
+        return BranchOwnership.mayDeleteBranchOf(sessions(), worktreeRoot);
     }
 
     private void persistNewSession(ManagedClaudeSession session) {

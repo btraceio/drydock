@@ -75,7 +75,7 @@ class WorkspaceViewModelTest {
         Instant t = Instant.parse("2026-01-01T00:00:00Z");
         return new ManagedClaudeSession(id, repositoryId, name, Optional.empty(), Optional.empty(),
                 Path.of("/tmp/repo").toAbsolutePath(), Optional.empty(), SessionStatus.INACTIVE,
-                t, t, Optional.empty(), PrState.NONE, Optional.empty());
+                t, t, Optional.empty(), PrState.NONE, Optional.empty(), true);
     }
 
     private static GitStatus status(String branch, boolean dirty) {
