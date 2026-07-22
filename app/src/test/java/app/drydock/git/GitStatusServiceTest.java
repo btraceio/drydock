@@ -312,6 +312,78 @@ class GitStatusServiceTest {
         assertEquals(1, modified.deletions());
     }
 
+    @Test
+    void addWorktreeForLocalBranchChecksItOutWithoutCreatingARef(@TempDir Path tmp) throws Exception {
+        Path repo = tmp.resolve("repo");
+        Files.createDirectory(repo);
+        initRepo(repo, "main");
+        writeFile(repo, "README.md", "hello\n");
+        runGit(repo, "add", "README.md");
+        commit(repo, "initial commit");
+        runGit(repo, "branch", "existing");
+        String before = runGitCapture(repo, "rev-parse", "existing").strip();
+
+        Path created = service.addWorktreeForBranch(
+                repo, tmp.resolve("wt"), BranchRef.local("existing"), "existing").get();
+
+        assertTrue(Files.exists(created.resolve("README.md")));
+        assertEquals("existing", runGitCapture(created, "rev-parse", "--abbrev-ref", "HEAD").strip());
+        assertEquals(before, runGitCapture(repo, "rev-parse", "existing").strip());
+    }
+
+    @Test
+    void addWorktreeForRemoteBranchCreatesATrackingLocalBranch(@TempDir Path tmp) throws Exception {
+        Path upstream = tmp.resolve("upstream");
+        Files.createDirectory(upstream);
+        initRepo(upstream, "main");
+        writeFile(upstream, "README.md", "hello\n");
+        runGit(upstream, "add", "README.md");
+        commit(upstream, "initial commit");
+        runGit(upstream, "branch", "feature/x");
+
+        Path clone = tmp.resolve("clone");
+        runGitIn(tmp, "clone", upstream.toString(), clone.toString());
+
+        Path created = service.addWorktreeForBranch(
+                clone, tmp.resolve("wt"), BranchRef.remote("origin/feature/x"), "feature/x").get();
+
+        assertEquals("feature/x", runGitCapture(created, "rev-parse", "--abbrev-ref", "HEAD").strip());
+        assertEquals("origin", runGitCapture(clone, "config", "branch.feature/x.remote").strip());
+    }
+
+    @Test
+    void addWorktreeForABranchAlreadyCheckedOutFails(@TempDir Path tmp) throws Exception {
+        Path repo = tmp.resolve("repo");
+        Files.createDirectory(repo);
+        initRepo(repo, "main");
+        writeFile(repo, "README.md", "hello\n");
+        runGit(repo, "add", "README.md");
+        commit(repo, "initial commit");
+
+        // "main" is checked out in the main checkout itself.
+        assertThrows(GitCommandFailedException.class, () ->
+                service.addWorktreeForBranchBlocking(repo, tmp.resolve("wt"), BranchRef.local("main"), "main"));
+    }
+
+    @Test
+    void fetchAllSucceedsAgainstALocalRemote(@TempDir Path tmp) throws Exception {
+        Path upstream = tmp.resolve("upstream");
+        Files.createDirectory(upstream);
+        initRepo(upstream, "main");
+        writeFile(upstream, "README.md", "hello\n");
+        runGit(upstream, "add", "README.md");
+        commit(upstream, "initial commit");
+
+        Path clone = tmp.resolve("clone");
+        runGitIn(tmp, "clone", upstream.toString(), clone.toString());
+        runGit(upstream, "branch", "added-later");
+
+        service.fetchAll(clone).get();
+
+        assertTrue(service.listBranches(clone).get().branches().stream()
+                .anyMatch(branch -> branch.name().equals("origin/added-later")));
+    }
+
     private GitStatus getStatus(Path repo) throws ExecutionException, InterruptedException {
         CompletableFuture<GitStatus> future = service.getStatus(repo);
         return future.get();

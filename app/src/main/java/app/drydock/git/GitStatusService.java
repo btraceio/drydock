@@ -38,6 +38,9 @@ public final class GitStatusService implements AutoCloseable {
     /** Every command here is a quick read-only query; a hung git must not park futures forever. */
     private static final Duration PROCESS_TIMEOUT = Duration.ofSeconds(15);
 
+    /** git fetch reaches the network; it needs far longer than a local status query. */
+    private static final Duration FETCH_TIMEOUT = Duration.ofMinutes(2);
+
     /** ssh exit code reserved for transport failure (everything git returns is < 255). */
     private static final int SSH_TRANSPORT_FAILURE = 255;
 
@@ -236,17 +239,7 @@ public final class GitStatusService implements AutoCloseable {
         Path git = locator.locate()
                 .orElseThrow(() -> new GitExecutableNotFoundException(locator.describeSearched()));
 
-        Path normalizedDir = worktreeDirectory.toAbsolutePath().normalize();
-        Path parent = normalizedDir.getParent();
-        if (parent != null) {
-            try {
-                Files.createDirectories(parent);
-            } catch (IOException e) {
-                throw new GitCommandFailedException(
-                        List.of("mkdir", parent.toString()), -1,
-                        e.getMessage() == null ? "could not create parent directory" : e.getMessage());
-            }
-        }
+        Path normalizedDir = prepareWorktreeParent(worktreeDirectory);
 
         List<String> command = new ArrayList<>(List.of(
                 git.toString(), "-C", repositoryRoot.toString(),
@@ -263,6 +256,98 @@ public final class GitStatusService implements AutoCloseable {
             throw new GitCommandFailedException(command, result.exitCode(), ProcessRunner.excerpt(result.stderr()));
         }
         return normalizedDir;
+    }
+
+    /** Normalizes the target and creates its parent, as {@code git worktree add} will not. */
+    private static Path prepareWorktreeParent(Path worktreeDirectory) {
+        Path normalizedDir = worktreeDirectory.toAbsolutePath().normalize();
+        Path parent = normalizedDir.getParent();
+        if (parent != null) {
+            try {
+                Files.createDirectories(parent);
+            } catch (IOException e) {
+                throw new GitCommandFailedException(
+                        List.of("mkdir", parent.toString()), -1,
+                        e.getMessage() == null ? "could not create parent directory" : e.getMessage());
+            }
+        }
+        return normalizedDir;
+    }
+
+    /**
+     * Creates a worktree at {@code worktreeDirectory} on an <em>existing</em>
+     * branch, on this service's background executor. A local branch is
+     * checked out as-is; a remote-tracking one gets a local branch named
+     * {@code localName} that tracks it ({@code -b <localName> --track}) --
+     * never a detached checkout. {@code localName} comes from
+     * {@link BranchCatalog#localName}, so remote-name splitting stays in one
+     * place.
+     */
+    public CompletableFuture<Path> addWorktreeForBranch(Path repositoryRoot, Path worktreeDirectory,
+                                                        BranchRef branch, String localName) {
+        return CompletableFuture.supplyAsync(
+                () -> addWorktreeForBranchBlocking(repositoryRoot, worktreeDirectory, branch, localName), executor);
+    }
+
+    /** Synchronous form of {@link #addWorktreeForBranch}, package-private for tests. */
+    Path addWorktreeForBranchBlocking(Path repositoryRoot, Path worktreeDirectory, BranchRef branch,
+                                      String localName) {
+        Path git = locator.locate()
+                .orElseThrow(() -> new GitExecutableNotFoundException(locator.describeSearched()));
+
+        Path normalizedDir = prepareWorktreeParent(worktreeDirectory);
+
+        List<String> command = new ArrayList<>(List.of(
+                git.toString(), "-C", repositoryRoot.toString(),
+                "worktree", "add", normalizedDir.toString()));
+        if (branch.remote()) {
+            command.addAll(List.of("-b", localName, "--track"));
+        }
+        // --end-of-options: a ref that looks like an option must reach git as
+        // a ref, never be parsed as a flag.
+        command.addAll(List.of("--end-of-options", branch.name()));
+
+        ProcessResult result = run(command);
+        if (result.exitCode() != 0) {
+            if (result.stderr().toLowerCase(Locale.ROOT).contains("not a git repository")) {
+                throw new NotAGitRepositoryException(repositoryRoot);
+            }
+            throw new GitCommandFailedException(command, result.exitCode(), ProcessRunner.excerpt(result.stderr()));
+        }
+        return normalizedDir;
+    }
+
+    /**
+     * Updates every remote and drops stale remote-tracking refs
+     * ({@code git fetch --all --prune}) so the branch picker can show
+     * newly pushed branches, on this service's background executor.
+     */
+    public CompletableFuture<Void> fetchAll(Path repositoryRoot) {
+        return CompletableFuture.supplyAsync(() -> {
+            fetchAllBlocking(repositoryRoot);
+            return null;
+        }, executor);
+    }
+
+    /** Synchronous form of {@link #fetchAll}, package-private for tests. */
+    void fetchAllBlocking(Path repositoryRoot) {
+        Path git = locator.locate()
+                .orElseThrow(() -> new GitExecutableNotFoundException(locator.describeSearched()));
+
+        List<String> command = List.of(
+                git.toString(), "-C", repositoryRoot.toString(), "fetch", "--all", "--prune");
+
+        // Credentials must never be prompted for: stdin is discarded and
+        // GIT_TERMINAL_PROMPT=0 makes an auth-needing remote fail fast with a
+        // real message instead of parking on a prompt until FETCH_TIMEOUT.
+        ProcessResult result = run(command, new ProcessRunner.Options(
+                null, FETCH_TIMEOUT, true, Map.of("GIT_TERMINAL_PROMPT", "0")));
+        if (result.exitCode() != 0) {
+            if (result.stderr().toLowerCase(Locale.ROOT).contains("not a git repository")) {
+                throw new NotAGitRepositoryException(repositoryRoot);
+            }
+            throw new GitCommandFailedException(command, result.exitCode(), ProcessRunner.excerpt(result.stderr()));
+        }
     }
 
     /**
@@ -430,15 +515,19 @@ public final class GitStatusService implements AutoCloseable {
     // ---- process execution (shared ProcessRunner, git-flavored failure translation) ----
 
     private static ProcessResult run(List<String> command) {
+        return run(command, new ProcessRunner.Options(null, PROCESS_TIMEOUT, false, Map.of()));
+    }
+
+    private static ProcessResult run(List<String> command, ProcessRunner.Options options) {
         try {
-            return ProcessRunner.run(command, null, PROCESS_TIMEOUT);
+            return ProcessRunner.run(command, options);
         } catch (IOException e) {
             // The executable existed at locate()-time but could not actually be
             // launched (permissions changed, removed between check and use, etc).
             throw new GitCommandFailedException(command, -1, e.getMessage() == null ? "" : e.getMessage());
         } catch (ProcessTimeoutException e) {
             throw new GitCommandFailedException(command, -1,
-                    "timed out after " + PROCESS_TIMEOUT.toSeconds() + "s (killed)");
+                    "timed out after " + options.timeout().toSeconds() + "s (killed)");
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new GitCommandFailedException(command, -1, "interrupted while waiting for git");
