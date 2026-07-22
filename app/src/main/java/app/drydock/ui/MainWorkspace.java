@@ -952,6 +952,24 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         currentlySelected().ifPresent(open -> open.diagScroll(deltaY));
     }
 
+    /**
+     * Diagnostic-only: switches the selected tab to the Explorer and opens
+     * {@code relativeFile} in the code viewer, the same bridge the Review
+     * tab's ⤢ uses. Exists so the automated visual pass can reach the
+     * editable viewer without synthesising rail clicks; the FX layer of the
+     * editor has no headless test harness, so screenshots of a real window
+     * are the only machine-checkable evidence for the chip, the dirty dot
+     * and the conflict/missing banners.
+     */
+    public void diagOpenExplorerFile(Path relativeFile) {
+        currentlySelected().ifPresent(open -> open.openExplorerAt(relativeFile, 1));
+    }
+
+    /** Diagnostic-only: focuses the Explorer's code area and types {@code text} into it as real edits. */
+    public void diagTypeInExplorer(String text) {
+        currentlySelected().ifPresent(open -> open.diagTypeInExplorer(text));
+    }
+
     // ---- Exit watcher --------------------------------------------------------
 
     private void pollForExitedProcesses() {

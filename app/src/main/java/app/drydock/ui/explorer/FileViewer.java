@@ -205,6 +205,15 @@ final class FileViewer extends BorderPane {
         editBannerPrimary.setFocusTraversable(false);
         editBannerSecondary.getStyleClass().add("viewer-diff-base-switch");
         editBannerSecondary.setFocusTraversable(false);
+        // The label must be the only thing that gives way when the row is
+        // narrow. Without this the HBox shrinks the BUTTONS first and both
+        // collapse to "..." -- two identical unreadable controls, one of which
+        // discards the user's unsaved edits. Caught by the visual pass; the
+        // long missing-file wording made it reproduce at ordinary widths.
+        editBannerPrimary.setMinWidth(Region.USE_PREF_SIZE);
+        editBannerSecondary.setMinWidth(Region.USE_PREF_SIZE);
+        editBannerLabel.setMinWidth(0);
+        HBox.setHgrow(editBannerLabel, Priority.ALWAYS);
         editBanner.getChildren().setAll(editBannerLabel, editBannerPrimary, editBannerSecondary);
         editBanner.setAlignment(Pos.CENTER_LEFT);
         editBanner.getStyleClass().add("viewer-edit-banner");
@@ -604,9 +613,15 @@ final class FileViewer extends BorderPane {
         // unreadable, or that was replaced by content this editor must not
         // write back (binary, oversized, mixed terminators). The wording has to
         // cover all three, and has to say what "close tab" costs.
-        editBannerLabel.setText(fileNameOf(tab) + " is gone or no longer editable on disk"
-                + " (deleted, unreadable, or replaced by content this editor cannot save)."
-                + " Closing the tab discards your unsaved edits.");
+        // Kept short enough to survive a narrow viewer: the visual pass showed
+        // the previous three-clause wording pushing the row past its width. The
+        // full explanation lives in the tooltip, the cost of "close tab" stays
+        // in the visible text.
+        editBannerLabel.setText(fileNameOf(tab)
+                + " is gone or unwritable on disk. Closing the tab discards your edits.");
+        editBannerLabel.setTooltip(new Tooltip(fileNameOf(tab)
+                + " was deleted, became unreadable, or was replaced by content this"
+                + " editor cannot save (binary, oversized, or mixed line endings)."));
         editBannerPrimary.setText("keep mine");
         editBannerPrimary.setOnAction(e -> {
             hideEditBanner();
@@ -1306,6 +1321,22 @@ final class FileViewer extends BorderPane {
      * {@link #announceSaved}) fired only on an actual DIRTY/SAVING -> CLEAN
      * transition.
      */
+    /**
+     * Diagnostic-only (see MainWorkspace.diagTypeInExplorer): appends {@code
+     * text} to the selected tab's code area, driving the real
+     * {@code textProperty} listener -- so this dirties the session, arms the
+     * debounce and moves the chip exactly as typing does.
+     */
+    public void diagType(String text) {
+        Tab selected = fileTabs.getSelectionModel().getSelectedItem();
+        if (selected != null
+                && selected.getContent() instanceof VirtualizedScrollPane<?> pane
+                && pane.getContent() instanceof CodeArea area) {
+            area.requestFocus();
+            area.insertText(0, text);
+        }
+    }
+
     private void updateStatusChip() {
         Tab selected = fileTabs.getSelectionModel().getSelectedItem();
         FileEditSession session = selected == null ? null

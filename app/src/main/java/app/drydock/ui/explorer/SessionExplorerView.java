@@ -105,6 +105,11 @@ public final class SessionExplorerView extends HBox {
         viewer.openFile(searchRoot.resolve(relativeFile).normalize(), relativeFile, OptionalInt.of(line), null);
     }
 
+    /** Diagnostic-only (see MainWorkspace.diagTypeInExplorer): types into the open file's code area. */
+    public void diagType(String text) {
+        viewer.diagType(text);
+    }
+
     /** Review-tab bridge: runs a Text-mode search for {@code token} (the "Search in Explorer" chip). */
     public void searchText(String token) {
         setRailCollapsed(false);

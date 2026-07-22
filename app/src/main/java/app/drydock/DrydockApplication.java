@@ -340,6 +340,50 @@ public final class DrydockApplication extends Application {
             typer.start();
         }
 
+        // Diagnostic hook for the editable-Explorer visual pass. Value is a
+        // comma-separated script of "<delaySeconds>:<verb>[:<arg>]" steps,
+        // e.g. "14:open:src/notes.txt,17:type:XX,21:mark:saved". Verbs:
+        // open (switch to the Explorer and open a repo-relative file), type
+        // (insert text through the real textProperty listener), mark (just
+        // print a marker so the screenshotting harness can synchronise).
+        // Each step's delay is measured from startup. Inert unless
+        // -Dapp.drydock.diag.explorerScript is set.
+        String explorerScript = System.getProperty("app.drydock.diag.explorerScript");
+        if (explorerScript != null) {
+            Thread driver = new Thread(() -> {
+                long start = System.nanoTime();
+                for (String step : explorerScript.split(",")) {
+                    String[] parts = step.split(":", 3);
+                    long atMillis = (long) (Double.parseDouble(parts[0].strip()) * 1000);
+                    long elapsed = (System.nanoTime() - start) / 1_000_000;
+                    if (elapsed < atMillis) {
+                        try {
+                            Thread.sleep(atMillis - elapsed);
+                        } catch (InterruptedException e) {
+                            return;
+                        }
+                    }
+                    String verb = parts[1].strip();
+                    String arg = parts.length > 2 ? parts[2] : "";
+                    Platform.runLater(() -> {
+                        switch (verb) {
+                            case "open" -> {
+                                mainWorkspace.diagOpenExplorerFile(Path.of(arg));
+                                System.out.println("[diag] explorer opened " + arg);
+                            }
+                            case "type" -> {
+                                mainWorkspace.diagTypeInExplorer(arg);
+                                System.out.println("[diag] explorer typed " + arg.length() + " chars");
+                            }
+                            default -> System.out.println("[diag] mark " + arg);
+                        }
+                    });
+                }
+            });
+            driver.setDaemon(true);
+            driver.start();
+        }
+
         // Diagnostic hook: sends 10 synthetic scroll-up events through the
         // selected tab's scroll path (verifies the Java ->
         // ghostty_surface_mouse_scroll pipeline without real NSEvents).
