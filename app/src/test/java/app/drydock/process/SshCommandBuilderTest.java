@@ -50,7 +50,7 @@ class SshCommandBuilderTest {
     @Test
     void interactiveSessionCommandShape() {
         String command = SshCommandBuilder.interactiveSessionCommand(remote, "exec claude");
-        assertEquals("exec ssh -t -- 'user@h' "
+        assertEquals("ssh -t -- 'user@h' "
                 + "'export TERM=xterm-256color; cd '\\''/srv/my repo'\\'' && exec claude'",
                 command);
     }
@@ -61,7 +61,7 @@ class SshCommandBuilderTest {
         // builder then local-quotes the whole remote command once more.
         String resume = "exec claude --resume " + SshCommandBuilder.posixQuote("abc-123");
         String command = SshCommandBuilder.interactiveSessionCommand(remote, resume);
-        assertTrue(command.startsWith("exec ssh -t -- 'user@h' '"));
+        assertTrue(command.startsWith("ssh -t -- 'user@h' '"));
         assertTrue(command.contains("--resume"));
         assertTrue(command.endsWith("'"));
     }

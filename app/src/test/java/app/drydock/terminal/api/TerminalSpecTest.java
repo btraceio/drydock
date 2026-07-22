@@ -9,9 +9,10 @@ class TerminalSpecTest {
     @Test
     void loginShellRunsTheDefaultShellInteractivelyInTheGivenDirectory() {
         TerminalSpec spec = TerminalSpec.loginShell("/work/repo");
-        // exec replaces /bin/sh (libghostty runs the command via `/bin/sh -c`)
-        // with the user's $SHELL as a login shell, falling back to zsh.
-        assertEquals("exec ${SHELL:-/bin/zsh} -l", spec.command());
+        // Bare $SHELL (falling back to zsh): libghostty supplies the
+        // `exec -l` wrapper that makes it a login shell, so adding our own
+        // would exec a program literally named "exec".
+        assertEquals("${SHELL:-/bin/zsh}", spec.command());
         assertEquals("/work/repo", spec.workingDirectory());
     }
 

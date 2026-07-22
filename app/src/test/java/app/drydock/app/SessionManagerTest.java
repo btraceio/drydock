@@ -270,7 +270,7 @@ class SessionManagerTest {
         // Pessimistic flag set: no -n, no --session-id, no --settings — the
         // remote claude's capabilities are unknown and the activity-hook
         // settings file is a LOCAL path (spec: degraded remote contract).
-        assertEquals("exec ssh -t -- 'user@h' "
+        assertEquals("ssh -t -- 'user@h' "
                 + "'export TERM=xterm-256color; cd '\\''/srv/app'\\'' && exec claude'", command);
     }
 
@@ -281,7 +281,7 @@ class SessionManagerTest {
         String command = SessionManager.buildRemoteResumeCommand(remote, session);
         assertTrue(command.contains("--resume"));
         assertTrue(command.contains("abc-123"));
-        assertTrue(command.startsWith("exec ssh -t -- 'user@h' '"));
+        assertTrue(command.startsWith("ssh -t -- 'user@h' '"));
     }
 
     @Test

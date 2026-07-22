@@ -122,7 +122,7 @@ final class OpenSessionTab {
     /** Supplies a fresh shell runtime+host whose wakeup drives the argument (the shell bridge's tickAndDraw). */
     private Function<Runnable, ShellTerminal> shellTerminalProvider = onWakeup -> null;
     private String shellWorkingDirectory = System.getProperty("user.home");
-    /** Full /bin/sh -c command for the shell sub-tab; empty = default local login shell in {@link #shellWorkingDirectory}. */
+    /** Full shell command for the shell sub-tab; empty = default local login shell in {@link #shellWorkingDirectory}. */
     private Optional<String> shellCommand = Optional.empty();
     private TerminalBridge shellBridge;   // null until first shown
     private TerminalSurface shellSurface; // null until first shown; closed by disposeNativeResources

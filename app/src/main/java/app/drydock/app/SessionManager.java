@@ -59,8 +59,10 @@ import java.util.function.UnaryOperator;
  * <p><b>Deviation from a literal reading of plan section 21</b> ("argument
  * list, never a shell string"): {@code TerminalRuntime#openSurface} (Phase 0's
  * already-fixed, narrow terminal API -- not modified here) only accepts a
- * single shell command string, which libghostty always runs via {@code
- * /bin/sh -c "<command>"}. There is no argument-list overload to call
+ * single shell command string, which libghostty always runs through a shell
+ * (see {@link app.drydock.terminal.api.TerminalSpec} for the exact macOS
+ * {@code login}/{@code bash -c "exec -l ..."} wrapping). There is no
+ * argument-list overload to call
  * instead. This class therefore builds the command as a single
  * single-quoted-argument string ({@link #shellQuote}) rather than an actual
  * {@code String[]}/{@code List<String>} argument vector; every dynamic value

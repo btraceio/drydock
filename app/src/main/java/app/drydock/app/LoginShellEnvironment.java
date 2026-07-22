@@ -21,7 +21,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * Finder/the Dock. launchd starts apps with the bare system PATH
  * ({@code /usr/bin:/bin:/usr/sbin:/sbin}), so every child this process
  * spawns -- {@code claude} inside the embedded terminal (libghostty runs
- * the session command via {@code /bin/sh -c}, inheriting this process's
+ * the session command through a shell, inheriting this process's
  * environment), {@code gh}, anything a claude session itself runs -- would
  * miss user-installed tools. This asks the user's login shell for its PATH
  * and merges it into the real process environment with {@code setenv(3)}.

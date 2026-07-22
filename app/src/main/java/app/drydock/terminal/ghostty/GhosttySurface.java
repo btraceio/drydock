@@ -91,11 +91,15 @@ public final class GhosttySurface implements TerminalSurface, AutoCloseable {
      * Same as {@link #create(GhosttyApp, DrydockTerminalHost, double)}, but lets
      * the caller override the spawned command and working directory (Task 6
      * / Gate 0D: "spawn {@code /bin/zsh -l} inside the embedded terminal").
-     * Per {@code src/apprt/embedded.zig}'s {@code command} field doc
-     * comment, {@code command} always runs via a shell (e.g.
-     * {@code /bin/sh -c "<command>"}), so a full command line with
-     * arguments (e.g. {@code "/bin/zsh -l"}) is valid here. A {@code null}
-     * command falls back to libghostty's own default-shell resolution.
+     * Per {@code src/apprt/embedded.zig}'s {@code command} field doc comment,
+     * {@code command} always runs via a shell, so a full command line with
+     * arguments (e.g. {@code "/bin/zsh -f"}) is valid here. On macOS that
+     * shell is not a bare {@code /bin/sh -c}: libghostty substitutes the
+     * command into {@code /usr/bin/login -flp <user> /bin/bash --noprofile
+     * --norc -c "exec -l <command>"}, which is why callers must not supply
+     * their own {@code exec} prefix -- see {@link
+     * app.drydock.terminal.api.TerminalSpec}. A {@code null} command falls
+     * back to libghostty's own default-shell resolution.
      */
     public static GhosttySurface create(GhosttyApp app, DrydockTerminalHost host, double scaleFactor,
                                          String command, String workingDirectory) {

@@ -11,7 +11,7 @@ import java.util.StringJoiner;
  * The single place ssh command lines are constructed (spec: SSH remote
  * repositories). Two forms: an argv list for {@link ProcessRunner}
  * (non-interactive git commands, BatchMode so background work can never
- * hang on a prompt), and a {@code /bin/sh -c} string for interactive
+ * hang on a prompt), and a single shell command string for interactive
  * terminal sessions (libghostty takes a shell string; prompts must render).
  *
  * <p>Invariants, both forms: {@code --} is placed immediately <em>before</em>
@@ -58,8 +58,12 @@ public final class SshCommandBuilder {
     }
 
     /**
-     * A {@code /bin/sh -c} string launching an interactive remote command
-     * in the embedded terminal: {@code exec ssh -t -- <host> '<remote>'}.
+     * A shell command string launching an interactive remote command in the
+     * embedded terminal: {@code ssh -t -- <host> '<remote>'}. No local
+     * {@code exec} prefix -- on macOS (the only platform this app ships)
+     * libghostty already wraps the command it is given in one, see {@link
+     * app.drydock.terminal.api.TerminalSpec}; a second one would try to run a
+     * program literally named {@code exec}.
      * No BatchMode — passphrase/password prompts belong in the terminal.
      * {@code TERM} is forced to {@code xterm-256color} because Ghostty's
      * own {@code xterm-ghostty} terminfo won't exist on remote hosts and
@@ -71,7 +75,7 @@ public final class SshCommandBuilder {
     public static String interactiveSessionCommand(SshRemote remote, String remoteExec) {
         String remoteCommand = "export TERM=xterm-256color; cd " + posixQuote(remote.remotePath())
                 + " && " + remoteExec;
-        return "exec ssh -t -- " + posixQuote(remote.host()) + " " + posixQuote(remoteCommand);
+        return "ssh -t -- " + posixQuote(remote.host()) + " " + posixQuote(remoteCommand);
     }
 
     /** Wraps {@code value} as one POSIX single-quoted word, safe against embedded metacharacters. */
