@@ -101,6 +101,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     private final SessionManager sessionManager;
     private final RepositoryManager repositoryManager;
     private final GitStatusService gitStatusService;
+    private final WorktreeService worktreeService;
     private final SessionSearchService searchService;
     private final GhCliService ghCliService;
     private final DiffService diffService;
@@ -210,6 +211,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         this.sessionManager = sessionManager;
         this.repositoryManager = repositoryManager;
         this.gitStatusService = gitStatusService;
+        this.worktreeService = worktreeService;
         this.searchService = searchService;
         this.ghCliService = ghCliService;
         this.diffService = diffService;
@@ -417,7 +419,9 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             if (worktree.mainCheckout()) {
                 openNewSession(repository, task);
             } else {
-                openNewWorktreeSession(repository, branch, worktree.path(), task);
+                // Discovered on disk: drydock did not create this branch, so
+                // removing the worktree must never force-delete it.
+                openNewWorktreeSession(repository, branch, worktree.path(), task, false);
             }
         });
         modalLayer.show(modal);
@@ -548,24 +552,29 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
     /**
      * Shows the create-worktree modal for {@code repository} (worktree
-     * handoff "Creating"): on Create, runs {@code git worktree add} (the
-     * app's one direct git mutation) and opens a session in the fresh
-     * worktree; failures show inline and keep the modal open.
+     * handoff "Creating"): on Create, either creates a new branch or checks
+     * out an existing one (local, or remote as a new tracking branch), then
+     * opens a session in the fresh worktree; failures show inline and keep
+     * the modal open.
      */
     public void promptNewWorktree(Repository repository, ModalLayer modalLayer) {
         NewWorktreeModal[] holder = new NewWorktreeModal[1];
-        holder[0] = new NewWorktreeModal(repository, gitStatusService, modalLayer::close,
-                (branch, base, directory, task) -> {
+        holder[0] = new NewWorktreeModal(repository, gitStatusService, worktreeService, modalLayer::close,
+                (existing, branch, base, directory, task) -> {
                     holder[0].showCreating();
-                    gitStatusService.createWorktree(repository.root(), directory, branch, Optional.of(base))
-                            .whenComplete((created, ex) -> Platform.runLater(() -> {
-                                if (ex != null) {
-                                    holder[0].showError(String.valueOf(UiErrors.unwrap(ex).getMessage()));
-                                    return;
-                                }
-                                modalLayer.close();
-                                openNewWorktreeSession(repository, branch, created, task);
-                            }));
+                    CompletableFuture<Path> creation = existing
+                            .map(ref -> gitStatusService.addWorktreeForBranch(
+                                    repository.root(), directory, ref, branch))
+                            .orElseGet(() -> gitStatusService.createWorktree(
+                                    repository.root(), directory, branch, Optional.of(base)));
+                    creation.whenComplete((created, ex) -> Platform.runLater(() -> {
+                        if (ex != null) {
+                            holder[0].showError(String.valueOf(UiErrors.unwrap(ex).getMessage()));
+                            return;
+                        }
+                        modalLayer.close();
+                        openNewWorktreeSession(repository, branch, created, task, existing.isEmpty());
+                    }));
                 });
         modalLayer.show(holder[0]);
     }
@@ -576,12 +585,16 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * from the worktree directory, is tagged with it, and -- when a task
      * was given -- gets the task typed into its terminal once the surface
      * is up.
+     *
+     * <p>{@code branchCreatedHere} records whether drydock created that
+     * branch: only then may removing the worktree also delete it.</p>
      */
     public void openNewWorktreeSession(Repository repository, String branch, Path worktreeRoot,
-                                       Optional<String> task) {
+                                       Optional<String> task, boolean branchCreatedHere) {
         // Keyed under the real session id for the same launch-race reason
         // as openNewSession.
-        ManagedClaudeSession prepared = sessionManager.prepareWorktreeSession(repository, branch, worktreeRoot, true);
+        ManagedClaudeSession prepared =
+                sessionManager.prepareWorktreeSession(repository, branch, worktreeRoot, branchCreatedHere);
         OpenSessionTab placeholderTab = showPendingTab(prepared.id(), branch,
                 Optional.of(repository), worktreeRoot);
 
