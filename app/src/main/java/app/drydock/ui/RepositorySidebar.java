@@ -35,6 +35,7 @@ import javafx.scene.control.ContextMenu;
 import javafx.scene.control.Label;
 import javafx.scene.control.MenuButton;
 import javafx.scene.control.MenuItem;
+import javafx.scene.control.OverrunStyle;
 import javafx.scene.control.SeparatorMenuItem;
 import javafx.scene.control.TextField;
 import javafx.scene.control.Tooltip;
@@ -46,6 +47,7 @@ import javafx.scene.input.MouseButton;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
+import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
 import javafx.stage.DirectoryChooser;
 import javafx.stage.Window;
@@ -56,15 +58,16 @@ import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
@@ -117,6 +120,9 @@ public final class RepositorySidebar extends VBox {
     /** Which repository subtrees are expanded; new repositories start expanded. */
     private final Set<RepositoryId> collapsed = new HashSet<>();
 
+    /** Repos whose stale bucket is expanded. Distinct from {@code collapsed} (repo-level). */
+    private final Set<RepositoryId> staleBucketExpanded = new HashSet<>();
+
     /** Repositories with a rescan in flight (spins the ⟳ button, prevents double-scans). */
     private final Set<RepositoryId> scanning = ConcurrentHashMap.newKeySet();
     /** Worktree paths discovered by the latest rescan, highlighted one-shot until the timer clears them. */
@@ -166,6 +172,8 @@ public final class RepositorySidebar extends VBox {
         record RepoNode(Repository repository) implements SidebarNode { }
         record SessionNode(ManagedClaudeSession session, Repository repository) implements SidebarNode { }
         record UnopenedWorktreeNode(WorktreeService.Worktree worktree, Repository repository)
+                implements SidebarNode { }
+        record StaleWorktreesNode(List<WorktreeService.Worktree> worktrees, Repository repository)
                 implements SidebarNode { }
     }
 
@@ -325,6 +333,13 @@ public final class RepositorySidebar extends VBox {
                     viewModel.sessionById(sessionNode.session().id()).ifPresent(navigator::resumeSession);
             case SidebarNode.UnopenedWorktreeNode worktreeNode ->
                     navigator.showUnopenedWorktree(worktreeNode.repository(), worktreeNode.worktree());
+            case SidebarNode.StaleWorktreesNode staleNode -> {
+                RepositoryId repoId = staleNode.repository().id();
+                if (!staleBucketExpanded.add(repoId)) {
+                    staleBucketExpanded.remove(repoId);
+                }
+                requestRebuild();
+            }
         }
     }
 
@@ -368,6 +383,55 @@ public final class RepositorySidebar extends VBox {
         return source.stream()
                 .sorted(Comparator.comparing(Repository::displayName, String.CASE_INSENSITIVE_ORDER))
                 .toList();
+    }
+
+    /** Wrapping index of the next live session; {@code -1} when there are none. */
+    static int nextLiveIndex(int count, int current, int direction) {
+        if (count == 0) {
+            return -1;
+        }
+        if (current < 0) {
+            return direction > 0 ? 0 : count - 1;
+        }
+        return ((current + direction) % count + count) % count;
+    }
+
+    /**
+     * Moves selection to the next/previous running session (top-to-bottom across
+     * repos, wrapping) and opens it. Skips idle sessions, worktrees, and buckets.
+     */
+    public void focusAdjacentLiveSession(int direction) {
+        List<ManagedClaudeSession> live = new ArrayList<>();
+        for (Repository repository : sorted(repositoryManager.repositories())) {
+            SidebarChildren classified = childrenOf(repository);
+            if (classified != null) {
+                live.addAll(classified.liveSessions());
+            }
+        }
+        if (live.isEmpty()) {
+            return;
+        }
+        ManagedSessionId selectedId = selectedSessionId();
+        int current = -1;
+        for (int i = 0; i < live.size(); i++) {
+            if (live.get(i).id().equals(selectedId)) {
+                current = i;
+                break;
+            }
+        }
+        ManagedClaudeSession target = live.get(nextLiveIndex(live.size(), current, direction));
+        // Same entry point as a row click; opening the session drives selection,
+        // and syncActiveSelection() then expands the owning repo and scrolls the
+        // row into view.
+        navigator.resumeSession(target);
+    }
+
+    private ManagedSessionId selectedSessionId() {
+        TreeItem<SidebarNode> selected = tree.getSelectionModel().getSelectedItem();
+        if (selected != null && selected.getValue() instanceof SidebarNode.SessionNode sessionNode) {
+            return sessionNode.session().id();
+        }
+        return null;
     }
 
     private void onRepositoriesChanged() {
@@ -439,13 +503,13 @@ public final class RepositorySidebar extends VBox {
         int worktreeTotal = 0;
         int unopenedTotal = 0;
         for (Repository repository : repositoryManager.repositories()) {
-            if (viewModel.worktrees(repository.id()).isEmpty()) {
+            SidebarChildren classified = childrenOf(repository);
+            if (classified == null) {
                 continue;
             }
-            worktreeTotal += additionalWorktreeCount(repository);
-            unopenedTotal += (int) childNodesFor(repository).stream()
-                    .filter(child -> child instanceof SidebarNode.UnopenedWorktreeNode)
-                    .count();
+            worktreeTotal += classified.worktreeCount() + classified.staleCount();
+            unopenedTotal += (int) classified.openWorktrees().stream().filter(w -> !w.mainCheckout()).count()
+                    + classified.staleCount();
         }
         if (!viewModel.anyWorktreesDiscovered()) {
             worktreeTotal = (int) viewModel.sessions().stream()
@@ -528,6 +592,8 @@ public final class RepositorySidebar extends VBox {
         repoMenus.keySet().retainAll(repoIds);
         newSessionMenus.keySet().retainAll(repoIds);
         unopenedTooltips.keySet().retainAll(worktreePaths);
+        collapsed.retainAll(repoIds);
+        staleBucketExpanded.retainAll(repoIds);
     }
 
     /** Re-renders the one row backed by {@code worktreeRoot} (a worktree session row or an unopened row). */
@@ -618,69 +684,40 @@ public final class RepositorySidebar extends VBox {
     }
 
     /**
-     * The worktree-first children of one repository row: the main checkout's
-     * sessions (or the main checkout itself, unopened), then every
-     * additional worktree on disk -- as a session row when a managed
-     * session lives in it, else as an unopened row -- then any worktree
-     * session whose directory discovery no longer reports (e.g. removed
-     * outside the app; kept visible so it can still be cleaned up).
+     * The banded children of one repository row: live sessions, then idle
+     * sessions, then open (non-stale) worktrees, then a single collapsed
+     * stale-worktrees bucket (if any) -- ordering and classification
+     * delegated to {@link SidebarChildren}.
      */
     private List<SidebarNode> childNodesFor(Repository repository) {
-        List<ManagedClaudeSession> sessions = sessionsFor(repository);
-        List<WorktreeService.Worktree> worktrees = viewModel.worktrees(repository.id()).orElse(null);
-        if (worktrees == null) {
-            // Discovery hasn't run yet for this repo: kick it off and show
-            // the session-derived rows meanwhile.
+        SidebarChildren classified = childrenOf(repository);
+        if (classified == null) {
+            // Discovery hasn't run yet: kick it off and show session-derived rows meanwhile.
             refreshWorktrees(repository, false);
-            return new ArrayList<>(sessions.stream()
+            return new ArrayList<>(sessionsFor(repository).stream()
                     .map(session -> (SidebarNode) new SidebarNode.SessionNode(session, repository))
                     .toList());
         }
-
         List<SidebarNode> children = new ArrayList<>();
-        Set<ManagedClaudeSession> placed = new LinkedHashSet<>();
-        for (WorktreeService.Worktree worktree : worktrees) {
-            if (worktree.mainCheckout()) {
-                List<ManagedClaudeSession> mainSessions = sessions.stream()
-                        .filter(session -> session.worktreeRoot().isEmpty())
-                        .toList();
-                if (mainSessions.isEmpty()) {
-                    children.add(new SidebarNode.UnopenedWorktreeNode(worktree, repository));
-                } else {
-                    for (ManagedClaudeSession session : mainSessions) {
-                        children.add(new SidebarNode.SessionNode(session, repository));
-                        placed.add(session);
-                    }
-                }
-            } else {
-                Optional<ManagedClaudeSession> match = sessions.stream()
-                        .filter(session -> session.worktreeRoot()
-                                .map(root -> root.equals(worktree.path()))
-                                .orElse(false))
-                        .findFirst();
-                if (match.isPresent()) {
-                    children.add(new SidebarNode.SessionNode(match.get(), repository));
-                    placed.add(match.get());
-                } else {
-                    children.add(new SidebarNode.UnopenedWorktreeNode(worktree, repository));
-                }
-            }
+        for (ManagedClaudeSession session : classified.orderedSessions()) {
+            children.add(new SidebarNode.SessionNode(session, repository));
         }
-        for (ManagedClaudeSession session : sessions) {
-            if (!placed.contains(session) && session.worktreeRoot().isPresent()) {
-                children.add(new SidebarNode.SessionNode(session, repository));
-            }
+        for (WorktreeService.Worktree worktree : classified.openWorktrees()) {
+            children.add(new SidebarNode.UnopenedWorktreeNode(worktree, repository));
+        }
+        if (!classified.staleWorktrees().isEmpty()) {
+            children.add(new SidebarNode.StaleWorktreesNode(classified.staleWorktrees(), repository));
         }
         return children;
     }
 
-    /** Count of additional (non-main) worktrees on disk, once discovery has run. */
-    private int additionalWorktreeCount(Repository repository) {
+    /** Classifies a repo's worktrees + sessions, or {@code null} if discovery hasn't run yet. */
+    private SidebarChildren childrenOf(Repository repository) {
         List<WorktreeService.Worktree> worktrees = viewModel.worktrees(repository.id()).orElse(null);
         if (worktrees == null) {
-            return 0;
+            return null;
         }
-        return (int) worktrees.stream().filter(worktree -> !worktree.mainCheckout()).count();
+        return SidebarChildren.classify(worktrees, sessionsFor(repository), viewModel::activityOf);
     }
 
     private boolean matchesRepo(Repository repository, String query) {
@@ -711,6 +748,10 @@ public final class RepositorySidebar extends VBox {
                         + " " + worktreeNode.worktree().path();
                 yield text.toLowerCase(Locale.ROOT).contains(query);
             }
+            case SidebarNode.StaleWorktreesNode staleNode -> staleNode.worktrees().stream().anyMatch(worktree -> {
+                String text = worktree.branch().orElse("") + " " + worktree.path();
+                return text.toLowerCase(Locale.ROOT).contains(query);
+            });
         };
     }
 
@@ -853,6 +894,58 @@ public final class RepositorySidebar extends VBox {
      */
     private Optional<String> deletableBranchOf(WorktreeService.Worktree worktree) {
         return sessionManager.mayDeleteBranchOf(worktree.path()) ? worktree.branch() : Optional.empty();
+    }
+
+    /**
+     * Batch-remove the bucket: one confirm, remove the cleanly-removable ones,
+     * and report (never silently force) any that hold uncommitted work.
+     */
+    private void cleanStaleWorktrees(Repository repository, List<WorktreeService.Worktree> worktrees) {
+        Alert confirm = new Alert(AlertType.CONFIRMATION);
+        confirm.setTitle("Clean stale worktrees");
+        confirm.setHeaderText("Remove " + worktrees.size() + " stale worktree"
+                + (worktrees.size() == 1 ? "" : "s") + "?");
+        confirm.setContentText("Worktrees with uncommitted changes are skipped and left in place.");
+        if (confirm.showAndWait().filter(button -> button == ButtonType.OK).isEmpty()) {
+            return;
+        }
+        List<CompletableFuture<Void>> removals = new ArrayList<>();
+        List<Path> skippedPaths = Collections.synchronizedList(new ArrayList<>());
+        for (WorktreeService.Worktree worktree : worktrees) {
+            removals.add(worktreeService.remove(repository.root(), worktree.path(), deletableBranchOf(worktree))
+                    .handle((v, failure) -> {
+                        Platform.runLater(() -> {
+                            if (failure != null) {
+                                if (UiErrors.unwrap(failure) instanceof WorktreeNotCleanException) {
+                                    skippedPaths.add(worktree.path()); // dirty: report, do not force
+                                } else {
+                                    UiErrors.show("Could not remove worktree", failure);
+                                }
+                            } else {
+                                viewModel.removeWorktreeStatus(worktree.path());
+                            }
+                        });
+                        return null;
+                    }));
+        }
+        CompletableFuture
+                .allOf(removals.toArray(CompletableFuture[]::new))
+                .whenComplete((v, ignored) -> Platform.runLater(() -> {
+                    refreshWorktrees(repository, false);
+                    if (!skippedPaths.isEmpty()) {
+                        // Transient status note, cleared after 2.4s -- mirrors the
+                        // "Already up to date" rescan note.
+                        rescanNotes.put(repository.id(), "kept " + skippedPaths.size()
+                                + " with uncommitted changes");
+                        updateRepoRow(repository.id());
+                        PauseTransition clearNote = new PauseTransition(Duration.seconds(2.4));
+                        clearNote.setOnFinished(e -> {
+                            rescanNotes.remove(repository.id());
+                            updateRepoRow(repository.id());
+                        });
+                        clearNote.play();
+                    }
+                }));
     }
 
     // ---- Git status ---------------------------------------------------------
@@ -1036,6 +1129,10 @@ public final class RepositorySidebar extends VBox {
                     setGraphic(buildUnopenedRow(worktreeNode.worktree(), worktreeNode.repository()));
                     setContextMenu(null);
                 }
+                case SidebarNode.StaleWorktreesNode staleNode -> {
+                    setGraphic(buildStaleRow(staleNode.worktrees(), staleNode.repository()));
+                    setContextMenu(null);
+                }
             }
         }
 
@@ -1048,8 +1145,14 @@ public final class RepositorySidebar extends VBox {
             Label name = new Label(repository.displayName());
             name.getStyleClass().add("repo-name");
 
-            Label branch = new Label(repoMetaText(repository));
+            // When a transient rescan note is present it owns the whole line
+            // (branch text = note, no counts).
+            String note = rescanNotes.get(repository.id());
+            Label branch = new Label(note != null ? note : "⎇ " + branchTextFor(repository));
             branch.getStyleClass().add("repo-branch");
+            branch.setTextOverrun(OverrunStyle.LEADING_ELLIPSIS);
+            HBox.setHgrow(branch, Priority.ALWAYS);
+            branch.setMaxWidth(Double.MAX_VALUE);
             Throwable failure = viewModel.repoStatusFailure(repository.id()).orElse(null);
             if (failure != null) {
                 branch.setTooltip(new Tooltip(String.valueOf(failure.getMessage())));
@@ -1058,9 +1161,13 @@ public final class RepositorySidebar extends VBox {
                         "ahead/behind is as of the last fetch on " + repository.remote().host()));
             }
 
+            Label counts = new Label(repoCountsText(repository));
+            counts.getStyleClass().add("repo-count-meta");
+            counts.setMinWidth(Region.USE_PREF_SIZE);
+
             List<ManagedClaudeSession> sessions = sessionsFor(repository);
             boolean anyRunning = sessions.stream().anyMatch(s -> SessionStatusStyles.isRunning(s.status()));
-            HBox branchRow = new HBox(6, branch);
+            HBox branchRow = new HBox(6, branch, counts);
             branchRow.setAlignment(Pos.CENTER_LEFT);
             if (anyRunning) {
                 branchRow.getChildren().add(SessionStatusStyles.createDot(5, SessionStatus.RUNNING));
@@ -1121,29 +1228,27 @@ public final class RepositorySidebar extends VBox {
             return row;
         }
 
-        /** Repo meta line: {@code ⎇ <base> · <n> worktrees · <m> unopened} once discovery has run. */
-        private String repoMetaText(Repository repository) {
-            String note = rescanNotes.get(repository.id());
-            if (note != null) {
-                return note;
+        /** Just the counts fragment: {@code · 3 wt · 1 stale}, or "" before discovery / when a note is showing. */
+        private String repoCountsText(Repository repository) {
+            if (rescanNotes.get(repository.id()) != null) {
+                return "";
             }
-            StringBuilder meta = new StringBuilder("⎇ ").append(branchTextFor(repository));
-            List<WorktreeService.Worktree> worktrees = viewModel.worktrees(repository.id()).orElse(null);
-            if (worktrees != null) {
-                int additional = additionalWorktreeCount(repository);
-                meta.append(" · ").append(additional).append(additional == 1 ? " worktree" : " worktrees");
-                long unopened = childNodesFor(repository).stream()
-                        .filter(child -> child instanceof SidebarNode.UnopenedWorktreeNode)
-                        .count();
-                if (unopened > 0) {
-                    meta.append(" · ").append(unopened).append(" unopened");
-                }
+            SidebarChildren classified = childrenOf(repository);
+            if (classified == null) {
+                return "";
             }
-            return meta.toString();
+            StringBuilder counts = new StringBuilder(" · ").append(classified.worktreeCount()).append(" wt");
+            if (classified.staleCount() > 0) {
+                counts.append(" · ").append(classified.staleCount()).append(" stale");
+            }
+            return counts.toString();
         }
 
         private HBox buildSessionRow(ManagedClaudeSession session, Repository repository) {
-            Region dot = SessionStatusStyles.createDot(8, session.status());
+            boolean live = SessionStatusStyles.isRunning(session.status());
+            Region dot = SessionStatusStyles.createDot(8, session.status(), live);
+            StackPane statusCol = new StackPane(dot);
+            statusCol.getStyleClass().add("child-row-status");
 
             Label name = new Label(session.displayName());
             name.getStyleClass().add("session-name");
@@ -1191,7 +1296,7 @@ public final class RepositorySidebar extends VBox {
             actions.setAlignment(Pos.CENTER_RIGHT);
             actions.visibleProperty().bind(hoverProperty());
 
-            HBox row = new HBox(8, dot, text, actions);
+            HBox row = new HBox(8, statusCol, text, actions);
             if (prChip != null) {
                 row.getChildren().add(row.getChildren().indexOf(actions), prChip);
             }
@@ -1211,9 +1316,8 @@ public final class RepositorySidebar extends VBox {
                 resumePill.getStyleClass().add("resume-pill");
                 row.getChildren().add(row.getChildren().indexOf(actions), resumePill);
             }
-            row.getStyleClass().add("session-row");
+            row.getStyleClass().addAll("session-row", "child-row");
             row.setAlignment(Pos.CENTER_LEFT);
-            row.setPadding(new Insets(5, 8, 5, 16));
             if (viewModel.activeSession().filter(session.id()::equals).isPresent()) {
                 row.getStyleClass().add("active");
             }
@@ -1254,6 +1358,8 @@ public final class RepositorySidebar extends VBox {
         private HBox buildUnopenedRow(WorktreeService.Worktree worktree, Repository repository) {
             Label icon = new Label(worktree.mainCheckout() ? "⎇" : "◫");
             icon.getStyleClass().add("worktree-unopened-icon");
+            StackPane statusCol = new StackPane(icon);
+            statusCol.getStyleClass().add("child-row-status");
 
             String branch = worktree.branch().orElse(worktree.detached() ? "(detached)" : "(no branch)");
             Label name = new Label(branch);
@@ -1274,19 +1380,18 @@ public final class RepositorySidebar extends VBox {
                 }
             });
 
-            HBox row = new HBox(8, icon, text, startPill);
+            HBox row = new HBox(8, statusCol, text, startPill);
             if (!worktree.mainCheckout()) {
                 Button delete = quickAction("🗑", "Delete worktree & branch", true,
                         () -> onDeleteUnopenedWorktree(repository, worktree));
                 delete.getStyleClass().add("worktree-delete-button");
                 row.getChildren().add(delete);
             }
-            row.getStyleClass().add("worktree-unopened-row");
+            row.getStyleClass().addAll("worktree-unopened-row", "child-row");
             if (recentlyDiscovered.contains(worktree.path())) {
                 row.getStyleClass().add("worktree-discovered");
             }
             row.setAlignment(Pos.CENTER_LEFT);
-            row.setPadding(new Insets(5, 8, 5, 16));
             Tooltip.install(row, unopenedTooltips.computeIfAbsent(worktree.path(),
                     path -> new Tooltip("Discovered via git worktree list\n" + path)));
             row.setOnMouseClicked(event -> {
@@ -1296,6 +1401,56 @@ public final class RepositorySidebar extends VBox {
                 }
             });
             return row;
+        }
+
+        /**
+         * The collapsed stale bucket: {@code ▸ N stale worktrees} + a Clean action.
+         * Expands in place (its own {@code staleBucketExpanded} state) to plain dim
+         * path rows. Clean removes the cleanly-removable worktrees in one confirm and
+         * reports (never force-deletes) those with uncommitted work.
+         */
+        private VBox buildStaleRow(List<WorktreeService.Worktree> worktrees, Repository repository) {
+            boolean expanded = staleBucketExpanded.contains(repository.id());
+
+            Label caret = new Label(expanded ? "▾" : "▸");
+            caret.getStyleClass().add("repo-caret");
+            StackPane statusCol = new StackPane(caret);
+            statusCol.getStyleClass().add("child-row-status");
+            Label label = new Label(worktrees.size() + (worktrees.size() == 1
+                    ? " stale worktree" : " stale worktrees"));
+            label.getStyleClass().add("stale-summary");
+            HBox.setHgrow(label, Priority.ALWAYS);
+
+            Button clean = new Button("Clean ↺");
+            clean.getStyleClass().add("stale-clean-button");
+            clean.setFocusTraversable(false);
+            clean.setOnAction(e -> cleanStaleWorktrees(repository, worktrees));
+
+            HBox summary = new HBox(7, statusCol, label, clean);
+            summary.getStyleClass().addAll("stale-summary-row", "child-row");
+            summary.setAlignment(Pos.CENTER_LEFT);
+            summary.setOnMouseClicked(event -> {
+                if (event.getButton() == MouseButton.PRIMARY) {
+                    if (expanded) {
+                        staleBucketExpanded.remove(repository.id());
+                    } else {
+                        staleBucketExpanded.add(repository.id());
+                    }
+                    requestRebuild();
+                    event.consume();
+                }
+            });
+
+            VBox box = new VBox(summary);
+            if (expanded) {
+                for (WorktreeService.Worktree worktree : worktrees) {
+                    Label path = new Label(shortPath(worktree.path()));
+                    path.getStyleClass().add("stale-path");
+                    path.setPadding(new Insets(2, 8, 2, 34));
+                    box.getChildren().add(path);
+                }
+            }
+            return box;
         }
 
         private Button quickAction(String glyph, String tooltip, boolean destructive, Runnable action) {
