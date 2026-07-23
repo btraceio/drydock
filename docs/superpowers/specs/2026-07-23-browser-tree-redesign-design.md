@@ -80,19 +80,35 @@ Sort keys:
 - Bands 1–2: `lastOpenedAt` descending (most recent first); `NEEDS_ATTENTION`
   overrides to the front of band 1.
 - Band 3: branch name, case-insensitive; the main checkout's own unopened row
-  (when it has no session) sorts first.
+  (when it has no session) sorts first. A branch-less worktree
+  (`branch().isEmpty()` — e.g. a locked detached checkout) sorts after the
+  named ones, by path.
 
 ### 2. Stale rule
 
-A worktree is **stale** when:
+The rule is **exemptions first, then the staleness test** — the exemptions win,
+so a worktree that carries a session (running or idle) can **never** be folded
+into the hidden bucket. Evaluated in order:
+
+1. **Never stale** if `worktree.locked()`, `worktree.mainCheckout()`, **or a
+   session is checked out on it** (matched the same way `childNodesFor` matches
+   today). This clause takes precedence over everything below — a `prunable`
+   directory under a live session stays a visible session row.
+2. Otherwise **stale** if `worktree.prunable() || worktree.detached()`.
+3. Otherwise not stale (a normal open-worktree row).
+
+Written as one guarded expression:
 
 ```
-worktree.prunable() || (worktree.detached() && no matching session)
+!locked && !mainCheckout && !hasSession && (prunable || detached)
 ```
 
-and is **never** stale when `worktree.locked()` or `worktree.mainCheckout()`,
-or when a session is checked out on it. This is the rule that folds the many
-`(detached)` rows into one `▸ N stale worktrees` line.
+This is the rule that folds the many `(detached)` rows into one
+`▸ N stale worktrees` line. Note the earlier boolean draft
+(`prunable || (detached && no session)`) was ambiguous: it left the `prunable`
+clause ungated on session presence and could be read to hide a live session's
+worktree. The exemption-first ordering above resolves that — session presence
+is checked before, and overrides, the staleness test.
 
 ### 3. Row anatomy
 
@@ -111,9 +127,16 @@ Three distinct shapes:
 - Line 2: relative time; PR chip / `waiting` badge / `Resume` pill
   right-aligned (unchanged semantics).
 - **Filled dot = live, hollow dot = idle**, so band membership stays legible
-  mid-scroll. (Running/error coloring and the pulse from
-  `SessionStatusStyles.createDot` are retained; "filled vs hollow" is the new
-  idle distinction.)
+  mid-scroll. This is **new rendering**, not just a pseudo-class:
+  `SessionStatusStyles.createDot` today always draws a solid
+  `-fx-background-color` fill, so an idle variant needs a border-only shape
+  (transparent fill + colored 1–1.5px ring). Give `createDot` an explicit
+  `filled` parameter (or a sibling `createIdleDot`) rather than overloading a
+  CSS pseudo-class. **Error color overrides hollow:** a `FAILED` /
+  `MISSING_WORKING_DIRECTORY` session that is not running (idle band, `:error`)
+  renders as a *filled* error-colored dot, not a hollow one — the failure
+  signal must not be weakened by the idle treatment. Running color and the
+  pulse from `createDot` are otherwise retained.
 - Active-session highlight (`.active` background) unchanged.
 
 **Open-worktree row** — 1 line, **no status dot**. The status column holds a
@@ -123,11 +146,24 @@ worktree, not a session.
   except on the main checkout.
 
 **Stale bucket row** — 1 line, collapsible, collapsed by default.
-- `▸ N stale worktrees` with a `Clean ↺` action that prunes them (wired to the
-  existing worktree-removal path; a single confirm covers the batch).
+- `▸ N stale worktrees` with a `Clean ↺` action that removes them.
+- **Batch semantics** (the existing per-worktree path,
+  `onDeleteUnopenedWorktree` → `confirmForcedWorktreeDelete`, is
+  *per-item* — prunable ones auto-force silently, but a dirty
+  detached-and-unmatched worktree throws `WorktreeNotCleanException` and today
+  pops one `Alert` each). `Clean ↺` must not inherit that: it shows **one
+  confirm** naming the count, removes the cleanly-removable worktrees, and any
+  that would need a forced/dirty removal are **reported and skipped, never
+  silently force-deleted** (no unattended data loss). A follow-up line/toast
+  states "removed X, skipped Y (uncommitted changes)"; skipped worktrees remain
+  in the bucket for individual handling.
 - Expands **in place** to plain dim `path` rows (no pills, no per-row actions).
-- Expansion follows the existing hand-rolled caret + `collapsed` set pattern;
-  it does not use a nested `TreeItem` level.
+- Expansion uses the hand-rolled caret pattern but needs its **own expansion
+  state, not the repo-level `collapsed` set** (`Set<RepositoryId>`, keyed by
+  repo and meaning "repo collapsed"). A repo must be expandable while its stale
+  bucket stays collapsed, so the bucket gets a separate
+  `staleBucketExpanded` set keyed by `RepositoryId` (a repo has at most one
+  bucket). It does not use a nested `TreeItem` level.
 
 The glyph budget per row drops: the **dot** carries live/idle, the
 **`◫`/`⎇`** carries worktree-vs-checkout, and caret/pills stay. No single row
@@ -135,23 +171,35 @@ renders all of `⎇ ◫ ▶ ■ × 🗑` simultaneously.
 
 ### 4. Repo header & count agreement
 
-`repoMetaText(Repository)` is rederived from the **same classified child list**
-produced in §1, so header numbers and visible rows cannot disagree (this closes
-the `olifer` `0 worktrees` bug). The meta line reads:
+The header counts are rederived from the **same classified child list**
+produced in §1 (not from the separate `additionalWorktreeCount` /
+`viewModel.worktrees()` read that `repoMetaText` uses today), so header numbers
+and visible rows are computed from one source. The meta line reads:
 
 ```
 ⎇ main *  ·  3 wt · 1 stale
 ```
 
 - base branch + dirty `*` marker (existing `branchTextFor`);
-- worktree count (open worktrees + worktree-backed sessions, i.e. non-main
-  checkouts);
-- ` · N stale` **only when N > 0**.
+- **`N wt`** = non-main checkouts = open-worktree rows (band 3) +
+  worktree-backed session rows (bands 1–2 with `worktreeRoot().isPresent()`).
+  This explicitly **includes** worktrees that carry a session, so the count
+  does not drop when a worktree row is replaced by its session row — that
+  substitution is exactly what produced the `olifer` `0 worktrees` symptom.
+- **`N stale`** = size of the stale bucket, shown **only when N > 0**. Stale
+  worktrees are counted here and **not** in `N wt`, so `wt + stale` never
+  double-counts and the collapsed bucket hiding rows does not make `N wt`
+  lie about what is visible when expanded.
 
-**Width priority:** the counts are what a collapsed repo needs to advertise, so
-when the line cannot fit, the **branch label ellipsizes first and the counts
-never do**. (Today the branch eats the counts — see `btrace`'s
-`⎇ agent/issue-881-release-gates * · 14...`.)
+**Header is split into separate `Label` nodes, not one string.** Today
+`repoMetaText` returns a single combined `String` rendered by one `Label`
+(`RepositorySidebar.java:1051`), which ellipsizes uniformly — "branch shrinks,
+counts don't" is impossible in that layout. `buildRepoRow` is therefore
+restructured: the meta line becomes an `HBox` of a **branch `Label`**
+(`HBox.setHgrow(..., ALWAYS)`, `textOverrun = ELLIPSIS`, allowed to shrink) and
+a **counts `Label`** (fixed, `minWidth = USE_PREF_SIZE`, never shrinks). The
+branch ellipsizes first; the counts always survive. (This adds `buildRepoRow`
+to the touched surface — see Files touched.)
 
 The right-edge numeric badge stays as the repo's total session count and is
 kept out of the ellipsize path.
@@ -164,8 +212,17 @@ expands its repo, scrolls it into view, and opens it (identical to clicking the
 row). Idle sessions, worktrees, and stale buckets are skipped.
 
 Registered in `ShortcutsOverlay` as `Next / previous live session — ⌘↑ / ⌘↓`
-and actually bound (AGENTS.md: advertised ⟺ bound). No collision: view
-switching uses `⌘1–4`, tab cycling uses `⌘⇧[ / ⌘⇧]`, `⌘↑/⌘↓` are free.
+and actually bound (AGENTS.md: advertised ⟺ bound). Binding site: the global
+`cmd`-key filter in `DrydockApplication` (~line 528), where the existing
+bracket handlers live. No collision — verified against actual bindings, not the
+overlay text: view switching is `⌘1–4`; tab cycling is plain **`⌘[` / `⌘]`**
+(`DrydockApplication.java:528` `cmd && OPEN_BRACKET` / `CLOSE_BRACKET`), not the
+`⌘⇧[ / ⌘⇧]` the overlay currently *advertises*; `⌘↑`/`⌘↓` are unbound.
+
+**In-scope cleanup:** that overlay entry (`ShortcutsOverlay.java:28`,
+`"⌘⇧[ / ⌘⇧]"`) is a pre-existing advertised≠bound violation of the same
+AGENTS.md rule this change relies on. Correct it to `⌘[ / ⌘]` while editing the
+overlay, so the new shortcut is not landing next to a stale advertisement.
 
 ## Testing
 
@@ -173,16 +230,33 @@ The sidebar has no unit tests and its FX cells are awkward to test. Extract the
 two **pure** pieces into static, toolkit-free helpers and cover them with plain
 JUnit:
 
-- `classifyChildren(worktrees, sessions, activity)` → the four ordered bands +
-  stale bucket. Tests:
+- `classifyChildren(worktrees, sessions, activity)` → a value object holding the
+  four ordered bands, the stale bucket, and the derived counts (`wt`, `stale`,
+  sessions). It takes **already-resolved** inputs — the worktree list, the
+  sessions, and an `activity` lookup passed in (a `Map` or
+  `Function<SessionId, SessionActivity>`), so no `viewModel`/FX dependency
+  leaks in and the helper stays toolkit-free. Tests:
   - band order (live → idle → open worktree → stale);
-  - `lastOpenedAt` descending within a band;
+  - `lastOpenedAt` descending within a band; branch-less worktrees sort last by
+    path in band 3;
   - `NEEDS_ATTENTION` pinned to the front of band 1;
-  - stale rule: prunable → stale; detached-and-no-session → stale;
-    locked → never; main checkout → never; session present → never;
-  - header/row count agreement derived from one classification.
-- `repoMetaText(...)` computed from that same classification — a regression
-  test that the `olifer` 0-vs-1 mismatch cannot recur.
+  - stale rule (exemption-first, §2): prunable-no-session → stale;
+    detached-no-session → stale; **prunable *with* a session → never stale, row
+    stays a session**; locked → never; main checkout → never;
+  - the counts on the returned object: `wt` includes worktree-backed sessions,
+    `stale` is disjoint from `wt`, and both match the emitted rows.
+- **Count agreement is a property of the returned object, not of two functions
+  agreeing.** The header reads `result.wt()` / `result.stale()` and the rows are
+  `result` 's bands — same object, so they cannot diverge by construction. The
+  `olifer` symptom came from a *second, independent* count path
+  (`additionalWorktreeCount` vs. `childNodesFor`, with the `worktrees == null`
+  pending-discovery short-circuit in between). That second path is **deleted**,
+  not merely tested around — the regression guarantee is structural. The
+  pending-discovery state (worktrees not yet loaded) is out of scope for
+  `classifyChildren` (which requires a resolved list); the spec's claim is
+  narrowed to: *once discovery has run, header and rows agree because they are
+  the same object.* While discovery is pending the header shows no worktree
+  counts at all (as today), never a wrong one.
 
 Row construction stays visual and is **verified by running the app and
 inspecting the sidebar on screen** (per standing preference — launch it,
@@ -193,14 +267,25 @@ before-screenshot.
 ## Files touched
 
 - `app/src/main/java/app/drydock/ui/RepositorySidebar.java` — new
-  `StaleWorktreesNode`, rewritten `childNodesFor`, extracted `classifyChildren`,
-  three row builders reworked onto the grid, `repoMetaText` rederivation, caret
-  handling for the stale bucket, `⌘↑/⌘↓` binding.
+  `StaleWorktreesNode`; rewritten `childNodesFor` delegating to the extracted
+  `classifyChildren` (banding + stale bucket + counts); the three child row
+  builders reworked onto the fixed grid; `buildRepoRow` restructured so the
+  meta line is a branch `Label` + a non-shrinking counts `Label` fed from
+  `classifyChildren`; **deletion of the separate `additionalWorktreeCount` /
+  `repoMetaText`-string count path** that caused the mismatch; a
+  `staleBucketExpanded` `Set<RepositoryId>` distinct from the repo `collapsed`
+  set, with caret handling for the bucket; `Clean ↺` batch handler (one confirm,
+  skip-dirty); `⌘↑/⌘↓` handling.
+- `app/src/main/java/app/drydock/ui/SessionStatusStyles.java` — `createDot`
+  gains a `filled` variant (hollow/ring for idle; error color stays filled).
+- `app/src/main/java/app/drydock/DrydockApplication.java` — the `⌘↑/⌘↓` bindings
+  in the existing `cmd`-key filter (next to the bracket handlers).
 - `app/src/main/java/app/drydock/ui/model/WorkspaceViewModel.java` — only if the
   classification needs a new accessor; no state-model change expected.
-- `app/src/main/java/app/drydock/ui/ShortcutsOverlay.java` — the new shortcut row.
+- `app/src/main/java/app/drydock/ui/ShortcutsOverlay.java` — the new shortcut
+  row, plus the `⌘⇧[ / ⌘⇧]` → `⌘[ / ⌘]` advertised≠bound correction.
 - `app/src/main/resources/app/drydock/ui/app.css` (+ theme files) — the fixed
-  gutter/grid, filled-vs-hollow dot, stale-bucket and open-worktree row styles;
+  gutter/grid, hollow-vs-filled dot, stale-bucket and open-worktree row styles;
   removal of the inline-padding-driven indent.
-- New test class under `app/src/test/java/...` for `classifyChildren` /
-  `repoMetaText`.
+- New test class under `app/src/test/java/...` for `classifyChildren` (bands,
+  stale rule, sort keys, and the derived counts).
