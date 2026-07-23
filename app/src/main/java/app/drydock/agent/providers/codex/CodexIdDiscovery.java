@@ -50,17 +50,10 @@ public final class CodexIdDiscovery implements SessionIdDiscovery {
                     .toList();
             if (fresh.size() == 1) {
                 String id = fresh.get(0);
-                // Atomic claim: newKeySet().add() returns false if another concurrent
-                // discovery just took this id — then we lost the race and re-poll. An
-                // immutable claimedIds (e.g. Set.of() in single-discovery tests) cannot
-                // participate in a race at all, so treat its add() rejection as a claim.
-                boolean claimed;
-                try {
-                    claimed = claimedIds.add(id);
-                } catch (UnsupportedOperationException e) {
-                    claimed = true;
-                }
-                if (claimed) {
+                // Atomic claim: add() returns true if we won the race, false if another
+                // concurrent discovery took this id (we re-poll). UnsupportedOperationException
+                // propagates: immutable sets are contract violations, not graceful fallbacks.
+                if (claimedIds.add(id)) {
                     return Optional.of(id);
                 }
             } else if (fresh.size() >= 2) {

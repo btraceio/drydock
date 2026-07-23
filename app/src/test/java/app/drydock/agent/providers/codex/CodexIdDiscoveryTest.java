@@ -32,7 +32,7 @@ class CodexIdDiscoveryTest {
         rollout(root, "new11111-0000-0000-0000-000000000000", "/repo/a", "2026-07-23T11:00:00Z");
         CodexIdDiscovery discovery = new CodexIdDiscovery(new CodexRolloutStore(root), 1, 0);
         Optional<String> id = discovery.discover(Path.of("/repo/a"),
-                Instant.parse("2026-07-23T10:00:00Z"), snap, Set.of());
+                Instant.parse("2026-07-23T10:00:00Z"), snap, java.util.concurrent.ConcurrentHashMap.newKeySet());
         assertTrue(id.isPresent());
         assertEquals("new11111-0000-0000-0000-000000000000", id.get());
     }
@@ -43,7 +43,7 @@ class CodexIdDiscoveryTest {
         CodexRolloutStore store = new CodexRolloutStore(root);
         CodexIdDiscovery discovery = new CodexIdDiscovery(store, 1, 0);
         assertTrue(discovery.discover(Path.of("/repo/a"), Instant.parse("2026-07-23T10:00:00Z"),
-                store.idsFor(Path.of("/repo/a")), Set.of()).isEmpty());
+                store.idsFor(Path.of("/repo/a")), java.util.concurrent.ConcurrentHashMap.newKeySet()).isEmpty());
     }
 
     @Test
