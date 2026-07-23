@@ -861,15 +861,17 @@ public final class RepositorySidebar extends VBox {
         for (WorktreeService.Worktree worktree : worktrees) {
             removals.add(worktreeService.remove(repository.root(), worktree.path(), deletableBranchOf(worktree))
                     .handle((v, failure) -> {
-                        if (failure != null) {
-                            if (UiErrors.unwrap(failure) instanceof WorktreeNotCleanException) {
-                                skippedPaths.add(worktree.path()); // dirty: report, do not force
+                        Platform.runLater(() -> {
+                            if (failure != null) {
+                                if (UiErrors.unwrap(failure) instanceof WorktreeNotCleanException) {
+                                    skippedPaths.add(worktree.path()); // dirty: report, do not force
+                                } else {
+                                    UiErrors.show("Could not remove worktree", failure);
+                                }
                             } else {
-                                Platform.runLater(() -> UiErrors.show("Could not remove worktree", failure));
+                                viewModel.removeWorktreeStatus(worktree.path());
                             }
-                        } else {
-                            viewModel.removeWorktreeStatus(worktree.path());
-                        }
+                        });
                         return null;
                     }));
         }
