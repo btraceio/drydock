@@ -1,5 +1,6 @@
 package app.drydock.ui;
 
+import app.drydock.agent.api.Agent;
 import app.drydock.agent.api.AgentKind;
 import app.drydock.agent.api.AgentRegistry;
 import app.drydock.agent.api.CreateContext;
@@ -17,15 +18,17 @@ import javafx.scene.layout.VBox;
 import java.nio.file.Path;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.Consumer;
 
 /**
  * The Start-session modal for an EXISTING worktree (worktree handoff,
  * section B "Discovering worktrees, starting &amp; resuming"): shows the
  * target {@code ◫ <branch> · <path>} read-only, an {@link AgentSelector},
- * an optional "Task for Claude" textarea, and a footer previewing the
- * chosen agent's actual launch command. Starting registers a running
- * session ON the existing checkout -- there is no {@code git worktree add}
- * anywhere in this flow.
+ * an optional task textarea, and a footer previewing the chosen agent's
+ * actual launch command. The title, task label, and task prompt all track
+ * the selected agent (never hard-coded to one agent). Starting registers a
+ * running session ON the existing checkout -- there is no {@code git
+ * worktree add} anywhere in this flow.
  */
 final class StartSessionModal extends VBox {
 
@@ -79,7 +82,7 @@ final class StartSessionModal extends VBox {
         setMaxHeight(Region.USE_PREF_SIZE);
         setSpacing(12);
 
-        Label title = new Label("Start a Claude session");
+        Label title = new Label();
         title.getStyleClass().add("modal-title");
         Button close = new Button("×");
         close.getStyleClass().add("icon-button");
@@ -93,18 +96,30 @@ final class StartSessionModal extends VBox {
         target.getStyleClass().add("worktree-base-chip");
         target.setWrapText(true);
 
-        AgentSelector selector = new AgentSelector(registry, preselected, requireRemoteCapability,
-                kind -> refreshPreview(kind));
-
         TextArea taskField = new TextArea();
         taskField.getStyleClass().add("worktree-task");
-        taskField.setPromptText("Optional: a task for Claude; it is typed into the new session");
         taskField.setPrefRowCount(3);
         taskField.setWrapText(true);
 
+        Label taskLabel = new Label();
+        taskLabel.getStyleClass().add("worktree-field-label");
+
         commandPreview.getStyleClass().add("worktree-command-preview");
         commandPreview.setWrapText(true);
-        refreshPreview(preselected);
+
+        // Title, task label, and prompt all track the selected agent, so the
+        // modal never advertises one agent while the picker has another
+        // selected. Runs on selection change and once for the initial choice.
+        Consumer<AgentKind> applyAgent = kind -> {
+            String name = agentDisplayName(kind);
+            title.setText("Start a " + name + " session");
+            taskLabel.setText("Task for " + name);
+            taskField.setPromptText("Optional: a task for " + name + "; it is typed into the new session");
+            refreshPreview(kind);
+        };
+
+        AgentSelector selector = new AgentSelector(registry, preselected, requireRemoteCapability, applyAgent);
+        applyAgent.accept(preselected);
 
         Button cancel = new Button("Cancel");
         cancel.getStyleClass().add("worktree-cancel-button");
@@ -123,8 +138,6 @@ final class StartSessionModal extends VBox {
 
         Label targetLabel = new Label("Worktree");
         targetLabel.getStyleClass().add("worktree-field-label");
-        Label taskLabel = new Label("Task for Claude");
-        taskLabel.getStyleClass().add("worktree-field-label");
 
         getChildren().addAll(header, selector, new VBox(4, targetLabel, target), new VBox(4, taskLabel, taskField),
                 commandPreview, buttons);
@@ -155,5 +168,14 @@ final class StartSessionModal extends VBox {
         } catch (RuntimeException e) {
             return "(preview unavailable)";
         }
+    }
+
+    /** The display name the registry advertises for {@code kind}, falling back to its persisted key. */
+    private String agentDisplayName(AgentKind kind) {
+        return registry.agents().stream()
+                .filter(a -> a.kind() == kind)
+                .map(Agent::displayName)
+                .findFirst()
+                .orElse(kind.persistedName());
     }
 }
