@@ -25,10 +25,15 @@ jobs:
     outputs:
       version: ${{ steps.resolve.outputs.version }}
       ref: ${{ steps.resolve.outputs.ref }}
+      dry_run: ${{ steps.resolve.outputs.dry_run }}
     steps:
       - id: resolve
         env:
           INPUT_VERSION: ${{ github.event.inputs.version }}
+          # Empty on push events; "true"/"false" on workflow_dispatch. Normalized
+          # to a concrete string output below so downstream jobs never evaluate
+          # github.event.inputs on a push (where the inputs context is absent).
+          INPUT_DRY_RUN: ${{ github.event.inputs.dry_run }}
         run: |
           if [ "${{ github.event_name }}" = "push" ]; then
             V="${GITHUB_REF_NAME#v}"; REF="${GITHUB_REF_NAME}"
@@ -38,13 +43,17 @@ jobs:
           if ! echo "$V" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
             echo "::error::Invalid version '$V' (expected X.Y.Z)"; exit 1
           fi
-          echo "version=$V" >> "$GITHUB_OUTPUT"
-          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          if [ "$INPUT_DRY_RUN" = "true" ]; then DRY=true; else DRY=false; fi
+          {
+            echo "version=$V"
+            echo "ref=$REF"
+            echo "dry_run=$DRY"
+          } >> "$GITHUB_OUTPUT"
 
   prepare:
     name: Bump version and tag
     needs: setup
-    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run != 'true' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && needs.setup.outputs.dry_run != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -92,7 +101,7 @@ jobs:
         with:
           # In a dry run the tag does not exist yet (prepare is skipped), so
           # build from the triggering ref instead of needs.setup.outputs.ref.
-          ref: ${{ github.event.inputs.dry_run == 'true' && github.ref || needs.setup.outputs.ref }}
+          ref: ${{ needs.setup.outputs.dry_run == 'true' && github.ref || needs.setup.outputs.ref }}
           submodules: recursive
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
@@ -124,7 +133,7 @@ jobs:
         with:
           # In a dry run the tag does not exist yet (prepare is skipped), so
           # build from the triggering ref instead of needs.setup.outputs.ref.
-          ref: ${{ github.event.inputs.dry_run == 'true' && github.ref || needs.setup.outputs.ref }}
+          ref: ${{ needs.setup.outputs.dry_run == 'true' && github.ref || needs.setup.outputs.ref }}
           submodules: recursive
       - name: Download arm64 native libraries
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -143,7 +152,7 @@ jobs:
             26
             17
       - name: Stage to Central Portal
-        if: ${{ github.event.inputs.dry_run != 'true' }}
+        if: ${{ needs.setup.outputs.dry_run != 'true' }}
         env:
           # Reuse the existing org secrets; vanniktech reads them via these
           # ORG_GRADLE_PROJECT_* Gradle-property env vars. SONATYPE_* must be a
@@ -159,7 +168,7 @@ jobs:
             -Pnatives.prebuilt=true \
             -Dorg.gradle.java.installations.fromEnv=JAVA_HOME_17_ARM64,JAVA_HOME_26_ARM64
       - name: Dry run - build to mavenLocal
-        if: ${{ github.event.inputs.dry_run == 'true' }}
+        if: ${{ needs.setup.outputs.dry_run == 'true' }}
         run: |
           ./gradlew :app:publishToMavenLocal \
             --no-daemon --stacktrace \
@@ -172,12 +181,12 @@ jobs:
           path: app/build/libs/drydock-${{ needs.setup.outputs.version }}.jar
           if-no-files-found: error
       - name: Staging complete
-        if: ${{ github.event.inputs.dry_run != 'true' }}
+        if: ${{ needs.setup.outputs.dry_run != 'true' }}
         run: |
           echo "Artifacts STAGED. Review and click Publish at:"
           echo "  https://central.sonatype.com/publishing/deployments"
       - name: Dry run complete
-        if: ${{ github.event.inputs.dry_run == 'true' }}
+        if: ${{ needs.setup.outputs.dry_run == 'true' }}
         run: |
           echo "DRY RUN complete. Built and signed to ~/.m2/repository."
           echo "No tag pushed, nothing staged to Central, no GitHub release created."
@@ -185,7 +194,7 @@ jobs:
   wait-for-maven:
     name: Wait for Maven Central
     needs: [setup, stage-maven]
-    if: ${{ github.event.inputs.dry_run != 'true' }}
+    if: ${{ needs.setup.outputs.dry_run != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
@@ -207,7 +216,7 @@ jobs:
   create-github-release:
     name: Create GitHub Release
     needs: [setup, wait-for-maven]
-    if: ${{ github.event.inputs.dry_run != 'true' }}
+    if: ${{ needs.setup.outputs.dry_run != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
