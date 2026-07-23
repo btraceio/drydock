@@ -24,7 +24,8 @@
   - **Activity is trust-gated with no `notify`** → `activity()` returns `Optional.empty()`.
   - `supportsRemote()` = **false**.
   - Codex reads cwd from the launching terminal (Drydock launches the terminal in the worktree), so **no `-C` flag needed**; `codex` needs a git repo, and Drydock sessions always run in one, so no `--skip-git-repo-check`.
-- **`CODEX_HOME` must be preserved** in the env scrub (the child needs it to find its config/sessions).
+- **Env scrub (determined, not deferred):** strip Codex's nested-sandbox markers so a Codex launched from inside another sandboxed agent doesn't inherit a stale "I'm already sandboxed" flag — `env -u CODEX_SANDBOX -u CODEX_SANDBOX_NETWORK_DISABLED codex …`. Both are real markers verified in the `codex` binary (`strings /usr/local/bin/codex | grep CODEX_SANDBOX`), analogous to Claude's `CLAUDECODE`. **`CODEX_HOME` must be PRESERVED** (the child needs it to find its config/sessions) — never scrub it.
+- **Real version:** `AgentCapabilities.version` must carry the probed CLI version (`codex --version` → `codex-cli 0.144.5`), not a literal tag — same contract Claude honors. Probe it (blocking, off the FX thread) in `probeCapabilities()`.
 - **Scope:** Codex only. Pi is a later plan. Plan A (the seam) is complete and merged.
 
 ---
@@ -35,7 +36,8 @@
 - `app/src/main/java/app/drydock/agent/api/SessionIdDiscovery.java` — capability: snapshot-before-launch + discover-after (api).
 - `app/src/main/java/app/drydock/agent/providers/codex/CodexAgentProvider.java` — the SPI impl.
 - `app/src/main/java/app/drydock/agent/providers/codex/internal/CodexExecutableLocator.java` — locate `codex` + fallbacks.
-- `app/src/main/java/app/drydock/agent/providers/codex/internal/CodexRolloutStore.java` — read/scan `~/.codex/sessions/**` (session_meta parsing, snapshot, find-new, exists-by-id, list).
+- `app/src/main/java/app/drydock/agent/providers/codex/internal/CodexRolloutStore.java` — read/scan `~/.codex/sessions/**` (session_meta parsing, snapshot, new-candidates, exists-by-id, list).
+- `app/src/main/java/app/drydock/agent/providers/codex/internal/CodexVersionProbe.java` — `codex --version` probe + pure `parseVersion(String)`.
 - `app/src/main/java/app/drydock/agent/providers/codex/CodexConversationSource.java` — `ConversationSource` over the store.
 - `app/src/main/java/app/drydock/agent/providers/codex/CodexIdDiscovery.java` — `SessionIdDiscovery` over the store.
 - Append to `app/src/main/resources/META-INF/services/app.drydock.agent.spi.AgentProvider`.
@@ -316,7 +318,7 @@ git commit -m "feat(codex): add CodexExecutableLocator"
   - `record RolloutMeta(String id, Path cwd, Instant timestamp, String source, Path file)`.
   - `List<RolloutMeta> forWorkingDirectory(Path cwd)` — every rollout whose `session_meta.payload.cwd` equals `cwd`, newest first, `source=="cli"` only.
   - `Set<String> idsFor(Path cwd)` — the ids from `forWorkingDirectory` (the snapshot set).
-  - `Optional<RolloutMeta> firstNew(Path cwd, Instant launchedAt, Set<String> snapshotIds, Set<String> claimedIds)` — newest rollout for `cwd` with `timestamp >= launchedAt`, id not in `snapshotIds` and not in `claimedIds`.
+  - `List<RolloutMeta> newCandidates(Path cwd, Instant launchedAt, Set<String> snapshotIds)` — every rollout for `cwd` with `timestamp >= launchedAt` whose id is **not** in `snapshotIds`, sorted **earliest-first** (FIFO). The store does NOT know about claimed ids or ambiguity — that is `CodexIdDiscovery`'s concern (Task 4). Earliest-first (not newest-first) so that, under concurrent same-cwd launches, each launch's discovery tends to claim the rollout closest to its own `launchedAt` rather than a later launch's fresher one.
   - `boolean existsForId(String id)` — a rollout file whose name contains `<id>` exists.
 
 This reads the **first line** of each rollout (`session_meta`) only — never the whole file. Scanning is bounded to the most recent day-buckets first for efficiency (walk `YYYY/MM/DD` newest-first, stop early where possible).
@@ -365,18 +367,18 @@ class CodexRolloutStoreTest {
     }
 
     @Test
-    void firstNewSkipsSnapshotAndClaimedAndOld(@TempDir Path root) throws IOException {
+    void newCandidatesSkipsSnapshotAndOldAndSortsEarliestFirst(@TempDir Path root) throws IOException {
         String preexisting = "dddd4444-0000-0000-0000-000000000004";
         writeRollout(root, "2026-07-23", preexisting, "/repo/a", "2026-07-23T09:00:00Z", "cli");
         Set<String> snapshot = new CodexRolloutStore(root).idsFor(Path.of("/repo/a"));
-        String fresh = "eeee5555-0000-0000-0000-000000000005";
-        writeRollout(root, "2026-07-23", fresh, "/repo/a", "2026-07-23T11:00:00Z", "cli");
-        CodexRolloutStore store = new CodexRolloutStore(root);
-        var found = store.firstNew(Path.of("/repo/a"), Instant.parse("2026-07-23T10:30:00Z"), snapshot, Set.of());
-        assertTrue(found.isPresent());
-        assertEquals(fresh, found.get().id());
-        // if the fresh id is already claimed, nothing new is found
-        assertTrue(store.firstNew(Path.of("/repo/a"), Instant.parse("2026-07-23T10:30:00Z"), snapshot, Set.of(fresh)).isEmpty());
+        String earlier = "eeee5555-0000-0000-0000-000000000005";
+        String later = "ffff6666-0000-0000-0000-000000000007";
+        writeRollout(root, "2026-07-23", later, "/repo/a", "2026-07-23T11:05:00Z", "cli");
+        writeRollout(root, "2026-07-23", earlier, "/repo/a", "2026-07-23T11:00:00Z", "cli");
+        var found = new CodexRolloutStore(root)
+                .newCandidates(Path.of("/repo/a"), Instant.parse("2026-07-23T10:30:00Z"), snapshot);
+        // preexisting excluded (in snapshot); earliest-first ordering
+        assertEquals(List.of(earlier, later), found.stream().map(CodexRolloutStore.RolloutMeta::id).toList());
     }
 
     @Test
@@ -401,7 +403,7 @@ Implement `CodexRolloutStore` reading each rollout's first line and parsing it v
 - a private `readMeta(Path file) -> Optional<RolloutMeta>`: read the first line (`Files.lines` limited to 1, or a `BufferedReader.readLine`), parse, extract `payload.{id,cwd,timestamp,source}`; return empty on any malformed line (never throw — a stray file must not break scanning; log at FINE).
 - `forWorkingDirectory(cwd)`: walk `sessionsRoot` for `rollout-*.jsonl` files (guard: `sessionsRoot` may not exist → empty list), map through `readMeta`, filter `source.equals("cli")` and `cwd` match (compare `toAbsolutePath().normalize()`), sort by `timestamp` desc.
 - `idsFor(cwd)`: `forWorkingDirectory(cwd)` → set of ids.
-- `firstNew(...)`: `forWorkingDirectory(cwd)` (already newest-first), first whose `timestamp >= launchedAt` && `!snapshotIds.contains(id)` && `!claimedIds.contains(id)`.
+- `newCandidates(cwd, launchedAt, snapshotIds)`: from `forWorkingDirectory(cwd)`, keep those with `timestamp >= launchedAt` && `!snapshotIds.contains(id)`, sorted **earliest-first** (ascending timestamp). No claimed-id logic here.
 - `existsForId(id)`: walk for any file whose filename contains `id` (bounded: filename check only, no parse).
 
 - [ ] **Step 4: Run to verify it passes**
@@ -481,6 +483,34 @@ class CodexIdDiscoveryTest {
         assertTrue(discovery.discover(Path.of("/repo/a"), Instant.parse("2026-07-23T10:00:00Z"),
                 store.idsFor(Path.of("/repo/a")), Set.of()).isEmpty());
     }
+
+    @Test
+    void ambiguousTwoNewRolloutsBailToPickerWithoutBinding(@TempDir Path root) throws IOException {
+        // Two same-cwd launches: snapshot is empty, then TWO new unclaimed rollouts appear.
+        java.util.Set<String> claimed = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        CodexRolloutStore store = new CodexRolloutStore(root);
+        java.util.Set<String> snap = store.idsFor(Path.of("/repo/a"));   // empty
+        rollout(root, "aaa00000-0000-0000-0000-000000000000", "/repo/a", "2026-07-23T11:00:00Z");
+        rollout(root, "bbb00000-0000-0000-0000-000000000000", "/repo/a", "2026-07-23T11:01:00Z");
+        CodexIdDiscovery discovery = new CodexIdDiscovery(new CodexRolloutStore(root), 1, 0);
+        // Ambiguous -> empty, and NOTHING claimed (no wrong bind).
+        assertTrue(discovery.discover(Path.of("/repo/a"), Instant.parse("2026-07-23T10:00:00Z"), snap, claimed).isEmpty());
+        assertTrue(claimed.isEmpty());
+    }
+
+    @Test
+    void concurrentSingleCandidateClaimsAreDistinct(@TempDir Path root) throws IOException {
+        // One new rollout, two discoveries racing the SAME claimed set: exactly one binds it.
+        java.util.Set<String> claimed = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        CodexRolloutStore store = new CodexRolloutStore(root);
+        java.util.Set<String> snap = store.idsFor(Path.of("/repo/a"));
+        rollout(root, "ccc00000-0000-0000-0000-000000000000", "/repo/a", "2026-07-23T11:00:00Z");
+        CodexIdDiscovery d = new CodexIdDiscovery(new CodexRolloutStore(root), 1, 0);
+        Optional<String> first = d.discover(Path.of("/repo/a"), Instant.parse("2026-07-23T10:00:00Z"), snap, claimed);
+        Optional<String> second = d.discover(Path.of("/repo/a"), Instant.parse("2026-07-23T10:00:00Z"), snap, claimed);
+        assertTrue(first.isPresent());
+        assertTrue(second.isEmpty());   // already claimed -> second finds no unclaimed candidate
+    }
 }
 ```
 
@@ -537,10 +567,26 @@ public final class CodexIdDiscovery implements SessionIdDiscovery {
                                      Set<String> claimedIds) {
         Set<String> snapshotIds = (Set<String>) snapshot;
         for (int i = 0; i < attempts; i++) {
-            Optional<CodexRolloutStore.RolloutMeta> found =
-                    store.firstNew(workingDirectory, launchedAt, snapshotIds, claimedIds);
-            if (found.isPresent()) {
-                return Optional.of(found.get().id());
+            List<String> fresh = store.newCandidates(workingDirectory, launchedAt, snapshotIds).stream()
+                    .map(CodexRolloutStore.RolloutMeta::id)
+                    .filter(id -> !claimedIds.contains(id))
+                    .toList();
+            if (fresh.size() == 1) {
+                String id = fresh.get(0);
+                // Atomic claim: newKeySet().add() returns false if another concurrent
+                // discovery just took this id — then we lost the race and re-poll.
+                if (claimedIds.add(id)) {
+                    return Optional.of(id);
+                }
+            } else if (fresh.size() >= 2) {
+                // Ambiguous: concurrent same-cwd launches (or an external codex in this
+                // cwd) produced multiple unclaimed rollouts. Binding any one risks the
+                // WRONG session id — which looks successful, worse than degrading. Bail
+                // -> the session keeps an empty id and resume falls back to the picker.
+                LOG.log(System.Logger.Level.INFO,
+                        "Codex id ambiguous for {0} ({1} candidates); resume will use the picker",
+                        workingDirectory, fresh.size());
+                return Optional.empty();
             }
             if (sleepMillis > 0 && i < attempts - 1) {
                 try {
@@ -615,7 +661,22 @@ git commit -m "feat(codex): add CodexConversationSource and CodexIdDiscovery"
 - Consumes: SPI/api, `CodexExecutableLocator`, `CodexRolloutStore`, `CodexConversationSource`, `CodexIdDiscovery`.
 - Produces: a registered `AgentProvider` for `AgentKind.CODEX`.
 
-**Env-scrub determination (do this first, empirically):** run `codex` (or check `codex` docs) to find which `CODEX_*` env vars it sets inside a session to mark an active session (analogous to Claude's `CLAUDECODE`). A quick check: launch a codex session and inspect its child-process env, or grep the codex docs/config. **Preserve `CODEX_HOME`.** If none is found, `envScrubList()` may be empty (and the create command carries no `env -u` prefix) — document what you determined in the report. Do not guess a var that isn't real.
+**Env-scrub (determined — do NOT re-defer):** the nested-sandbox markers are
+`CODEX_SANDBOX` and `CODEX_SANDBOX_NETWORK_DISABLED` (verified in the binary:
+`strings /usr/local/bin/codex | grep CODEX_SANDBOX`), analogous to Claude's
+`CLAUDECODE`. `ENV_SCRUB = List.of("CODEX_SANDBOX", "CODEX_SANDBOX_NETWORK_DISABLED")`.
+**Never scrub `CODEX_HOME`** (the child needs it). If a future codex adds another
+"inside codex" marker, add it here — but this list is the correct starting point,
+not a placeholder.
+
+**Version probe:** `probeCapabilities()` runs `codex --version` (via `ProcessRunner`,
+per AGENTS.md — never a raw `ProcessBuilder`; short timeout) and puts the parsed
+version string (`codex-cli 0.144.5` → `"0.144.5"`, or the raw line if parsing is
+unclear) into `AgentCapabilities.version`. On failure/timeout, `"unknown"`. This
+runs on the caller's (background) thread — `probeCapabilities` is allowed to block
+per the SPI contract. Confirm `ProcessRunner`'s real API by reading
+`app/src/main/java/app/drydock/process/ProcessRunner.java` (mirror how
+`ClaudeCapabilityService` invokes `claude --version`).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -733,8 +794,8 @@ import java.util.Optional;
  */
 public final class CodexAgentProvider implements AgentProvider {
 
-    // Determined empirically (Task 5 step 0). Preserve CODEX_HOME. May be empty.
-    private static final List<String> ENV_SCRUB = List.of(/* e.g. "CODEX_SANDBOX", ... — fill from empirical check */);
+    // Codex nested-sandbox markers (verified in the binary). Preserve CODEX_HOME.
+    private static final List<String> ENV_SCRUB = List.of("CODEX_SANDBOX", "CODEX_SANDBOX_NETWORK_DISABLED");
 
     private final CodexExecutableLocator locator;
     private CodexConversationSource conversationSource;
@@ -760,7 +821,20 @@ public final class CodexAgentProvider implements AgentProvider {
 
     @Override public Optional<Path> locateExecutable() { return locator.locate(); }
     @Override public String describeSearched() { return locator.describeSearched(); }
-    @Override public AgentCapabilities probeCapabilities() { return new AgentCapabilities(false, true, "codex"); }
+
+    /** Probes {@code codex --version} (blocking; off the FX thread per the SPI contract). */
+    @Override
+    public AgentCapabilities probeCapabilities() {
+        return new AgentCapabilities(false, true, probeVersion());
+    }
+
+    private String probeVersion() {
+        // Run `codex --version` via ProcessRunner (AGENTS.md: never a raw ProcessBuilder),
+        // parse "codex-cli 0.144.5" -> "0.144.5"; on any failure/timeout return "unknown".
+        // Mirror ClaudeCapabilityService's version probe; requires locator.locate() present.
+        return CodexVersionProbe.probe(locator.locate().orElse(null));  // small internal helper (Task 5 impl)
+    }
+
     @Override public boolean supportsRemote() { return false; }
     @Override public List<String> envScrubList() { return ENV_SCRUB; }
 
@@ -807,6 +881,8 @@ public final class CodexAgentProvider implements AgentProvider {
 ```
 > **Note:** `supportsRemote()` is a method on the SPI (added in Plan A's Task-12 fix). Confirm its exact name in `AgentProvider.java` and match it. `AgentCapabilities`'s second field is `supportsResume` — Codex supports resume, so `true`.
 
+Also create `app/src/main/java/app/drydock/agent/providers/codex/internal/CodexVersionProbe.java` — a tiny helper: `static String probe(Path codexExecutable)` that returns `"unknown"` when the path is null, else runs `<codex> --version` via `ProcessRunner` (short timeout, args as a list), takes the first stdout line, and returns the token after `codex-cli ` (or the whole trimmed line if that prefix is absent). Any exception/timeout → `"unknown"`. Add a unit test `CodexVersionProbeTest` that asserts the parse (`"codex-cli 0.144.5"` → `"0.144.5"`, `""`/malformed → sensible fallback) by factoring the pure parse into a `static String parseVersion(String line)` and testing that directly (the process spawn itself is not unit-tested).
+
 Append to `META-INF/services/app.drydock.agent.spi.AgentProvider`:
 ```
 app.drydock.agent.providers.codex.CodexAgentProvider
@@ -836,19 +912,42 @@ git commit -m "feat(codex): add CodexAgentProvider (DISCOVERED, no remote/activi
 - Consumes: `AgentRegistry.idDiscovery(kind)`, `SessionIdDiscovery`.
 - Produces: for a `DISCOVERED` provider, the launch snapshots the id store **before** spawning, and after a successful create runs discovery on the background executor, patching the session's `agentSessionId` and adding it to a shared claimed-id set. A pure helper `SessionManager.seedClaimedIds(ApplicationState)` collects already-assigned `agentSessionId`s so restarts don't re-bind them.
 
-This is the one flow change. Current `launchNewSession` generates the id up front only for PRESET; DISCOVERED launches with an empty id and never captures it. Add:
+This is the one flow change. Current `launchNewSession` generates the id up front only for PRESET; DISCOVERED launches with an empty id and never captures it.
+
+**Placement decision (do NOT put discovery inside `finalizeCreate`).** `finalizeCreate(ManagedAgentSession initial, String agentSessionId, CreateLaunch launch, Throwable ex)` is shared with the PRESET/`startFreshConversation` path and does not carry `snapshot`/`launchedAt`/`cwd`/`discovery`. Threading those into it would widen a shared signature and touch both call sites. Instead, keep the discovery kick-off in **`launchNewSession`'s own chain**, where a closure already holds `provider`, `cwd`, `snapshot`, and `launchedAt`. `finalizeCreate` stays PRESET/DISCOVERED-agnostic and unchanged.
+
+Add:
 
 1. A field `private final Set<String> claimedAgentSessionIds = ConcurrentHashMap.newKeySet();`, seeded in the constructor from persisted sessions via `seedClaimedIds(...)`.
-2. In the create flow, when `provider.idStrategy() == DISCOVERED` and `registry.idDiscovery(kind)` is present: capture `Object snapshot = discovery.snapshot(cwd)` and `Instant launchedAt = Instant.now()` **before** `createSurfaceOnFxThread` (i.e. before the process can write a rollout).
-3. In `finalizeCreate`'s success path, for DISCOVERED: after persisting the RUNNING session, submit an async task on `backgroundExecutor`:
+2. In `launchNewSession`, for a DISCOVERED provider with `registry.idDiscovery(kind)` present, capture, as locals in the method (so they're in the lambda closure), **before** `createSurfaceOnFxThread` (before the process can write a rollout):
 ```java
-discovery.discover(cwd, launchedAt, snapshot, claimedAgentSessionIds).ifPresent(id -> {
-    claimedAgentSessionIds.add(id);
-    persistUpdatedSession(requireSession(running.id()).withAgentSessionId(Optional.of(id)));
-    activeRegistry.tryMarkActive(id, running.id());   // mirror the PRESET path's registration
-});
+Optional<SessionIdDiscovery> discovery = provider.idStrategy() == SessionIdStrategy.DISCOVERED
+        ? registry.idDiscovery(provider.kind())
+        : Optional.empty();
+Path discoverCwd = initial.workingDirectory();
+Object idSnapshot = discovery.map(d -> d.snapshot(discoverCwd)).orElse(null);
+Instant launchedAt = Instant.now();
 ```
-   Failure to discover leaves the id empty (resume will use the picker) — never a launch failure.
+3. Append a discovery stage to the create future chain **after** `finalizeCreate`, in `launchNewSession` (not inside `finalizeCreate`). The existing tail is
+   `.handleAsync((launch, ex) -> finalizeCreate(initial, sessionId, launch, ex), backgroundExecutor)` —
+   extend it:
+```java
+    .handleAsync((launch, ex) -> finalizeCreate(initial, sessionId, launch, ex), backgroundExecutor)
+    .thenApplyAsync(result -> {
+        // Best-effort DISCOVERED id capture; only when the create actually opened.
+        if (discovery.isPresent() && result instanceof SessionOpenResult.Opened opened) {
+            discovery.get().discover(discoverCwd, launchedAt, idSnapshot, claimedAgentSessionIds)
+                    .ifPresent(id -> {
+                        // discover() already atomically claimed `id` in claimedAgentSessionIds.
+                        persistUpdatedSession(requireSession(opened.session().id())
+                                .withAgentSessionId(Optional.of(id)));
+                        activeRegistry.tryMarkActive(id, opened.session().id());
+                    });
+        }
+        return result;
+    }, backgroundExecutor);
+```
+   Discovery failure/ambiguity leaves the id empty (resume uses the picker) — never a launch failure. Confirm the exact `SessionOpenResult.Opened` accessor for the session (`.session()`); adapt if it differs. Note: `discover()` performs the atomic claim internally (Task 4), so do **not** also `.add(id)` here.
 
 - [ ] **Step 1: Write the failing tests** (headless-safe: the pure seed helper + a discovery-integration test using a fake DISCOVERED provider + fixture rollout store)
 
@@ -932,8 +1031,25 @@ git commit -m "docs(codex): record end-to-end validation results"
 - Registration + preference order (CODEX already in `preferenceOrder`) → Task 5. ✓
 - On-screen validation → Task 7. ✓
 
-**Placeholder scan:** the only deferred item is the exact `ENV_SCRUB` list, which Task 5 step 0 determines **empirically before writing the class** (a concrete instruction with a fallback of "empty if none real"), not a hand-wave. `CodexRolloutStore` step-3 body is described precisely (first-line-only parse via `JsonParser`, filters, sort) rather than reproduced line-by-line because it depends on `JsonParser`'s real API, which the implementer must read — flagged explicitly.
+**Placeholder scan:** no deferred/empirical placeholders remain. `ENV_SCRUB` is a
+concrete verified list (`CODEX_SANDBOX`, `CODEX_SANDBOX_NETWORK_DISABLED`); the
+version is probed via `CodexVersionProbe`. `CodexRolloutStore`'s step-3 body is
+described precisely (first-line-only parse via `JsonParser`, filters, earliest-first
+sort) rather than reproduced line-by-line because it depends on `JsonParser`'s real
+API, which the implementer must read — flagged explicitly.
 
-**Type consistency:** `SessionIdDiscovery.snapshot`/`discover` signatures consistent across Tasks 1, 4, 6. `CodexRolloutStore.{forWorkingDirectory,idsFor,firstNew,existsForId,RolloutMeta}` consistent across Tasks 3, 4. `AgentProvider.idDiscovery()` / `supportsRemote()` consistent across Tasks 1, 5. `LaunchPlan.of/unsupported` matches Plan A. `AgentKind.CODEX` / `SessionIdStrategy.DISCOVERED` from Plan A.
+**Type consistency:** `SessionIdDiscovery.snapshot`/`discover` signatures consistent across Tasks 1, 4, 6. `CodexRolloutStore.{forWorkingDirectory,idsFor,newCandidates,existsForId,RolloutMeta}` consistent across Tasks 3, 4. `AgentProvider.idDiscovery()` / `supportsRemote()` consistent across Tasks 1, 5. `LaunchPlan.of/unsupported` matches Plan A. `AgentKind.CODEX` / `SessionIdStrategy.DISCOVERED` from Plan A.
 
-**Known follow-ups (not gaps):** Codex activity remains deferred (revisit if a non-invasive notify appears); conversation `title`/`messageCount` are minimal (id + 0) since the rollout's first line doesn't carry a title — enrich later if the catalog UI needs it; the SPI test doubles (`FakeProvider`, `StubProvider`) gain `idDiscovery()` in Task 1.
+**Adversarial-review fixes folded in (2026-07-23):**
+- `probeCapabilities().version` now probes `codex --version` (was hardcoded `"codex"`).
+- Env-scrub determined, not deferred: `CODEX_SANDBOX`/`CODEX_SANDBOX_NETWORK_DISABLED`.
+- DISCOVERED discovery kick-off lives in `launchNewSession`'s chain (closure holds
+  `snapshot`/`launchedAt`/`cwd`/`discovery`), NOT in the shared `finalizeCreate`
+  (which lacks them) — the plan now specifies the exact future-chain placement.
+- Discovery is race-safe: earliest-first (FIFO) candidates, **atomic claim** inside
+  `discover()` (`claimedIds.add` — like `ActiveSessionRegistry.putIfAbsent`), and
+  **bail-on-ambiguity** (2+ unclaimed candidates → empty → picker, never a wrong
+  bind). Covered by new tests (`ambiguousTwoNewRolloutsBailToPickerWithoutBinding`,
+  `concurrentSingleCandidateClaimsAreDistinct`).
+
+**Known follow-ups (not gaps):** Codex activity remains deferred (revisit if a non-invasive notify appears); conversation `title`/`messageCount` are minimal (id + 0) since the rollout's first line doesn't carry a title — enrich later if the catalog UI needs it; under genuinely concurrent same-cwd launches auto-discovery deliberately bails to the picker (safe, not a wrong bind); the SPI test doubles (`FakeProvider`, `StubProvider`) gain `idDiscovery()` in Task 1.
