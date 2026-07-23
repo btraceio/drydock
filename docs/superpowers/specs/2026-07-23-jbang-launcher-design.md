@@ -55,6 +55,7 @@ existing btraceio Sonatype domain:
     - `native/macos-arm64/libdrydockterminalhost.dylib`
     - `native/macos-x86_64/libghostty.dylib`
     - `native/macos-x86_64/libdrydockterminalhost.dylib`
+  - the dock icon PNG resource (e.g. `icon/drydock.png`, 1024×1024) — see §6.
 - **Not bundled:** JavaFX and richtextfx. They stay Maven dependencies so jbang
   fetches/caches them and applies its JavaFX module-path handling. The natives
   ride *inside* the jar precisely because they are the one thing not otherwise
@@ -116,6 +117,8 @@ A `jbang-catalog.json` committed at the repo root defines an alias `drydock`:
   - `--add-exports=javafx.graphics/com.sun.glass.ui=ALL-UNNAMED`
   - `-Dfile.encoding=UTF-8`
   - `-Djava.awt.headless=false`
+  - `-Xdock:name=Drydock` (dock/menu-bar label; a launch-time JVM arg, so the
+    alias is the right place for it — see §6).
 - **ref (artifact):** `io.btraceio:drydock:0.1.0` (the Central GAV).
 
 **Why JavaFX lives in the alias `deps`, not the published POM:** jbang's JavaFX
@@ -124,6 +127,17 @@ module path — keys off `org.openjfx` deps it sees *directly*. Declaring them a
 alias deps guarantees that handling. Relying on transitive resolution from a
 static POM risks a host-wrong classifier being baked in. So the app POM omits
 them and the alias supplies them.
+
+**Empirically confirmed (jbang 0.101.0):** deps supplied via `--deps` (exactly
+how an alias `deps:` expands at run time) receive the full JavaFX treatment —
+jbang resolved the platform classifier jars and launched with
+`java --module-path <the openjfx jars> …`. On an x86_64 host it correctly picked
+the `-mac` (x86_64) classifier. So the pure-alias approach works; **no
+`.java`-with-`//DEPS` launcher script is required.** The one item left to verify
+at plan time is that jbang also picks `mac-aarch64` on an Apple Silicon host
+(couldn't be tested on the x86_64 dev machine); if it ever mis-picks, the
+fallback is a per-arch classifier pin, but jbang's resolution proved arch-aware
+here.
 
 **End-user commands:**
 
@@ -146,18 +160,43 @@ run` already set, and are required for the same reasons:
 - `-Dfile.encoding=UTF-8`, `-Djava.awt.headless=false` — same as the other
   launchers.
 
-`-Xdock:name` / `-Xdock:icon` from `launcher.sh` are **optional** here (see §7);
-they can be added to `runtime-options` for a nicer dock label but require the icon
-to be reachable, which a Central jar resource is not by absolute path. Left out
-of v1.
+### Dock name and icon (required — the app must not look unbranded in the dock)
+
+A jbang launch is not a `.app` bundle, so the dock label/icon must be supplied
+explicitly. They split by *when* they can be set:
+
+- **Dock name** — `-Xdock:name=Drydock` is a JVM **launch** arg. jbang applies
+  `runtime-options` at launch, so this goes straight in the alias (§5). No file
+  needed.
+- **Dock icon** — `-Xdock:icon=<path>` needs an absolute file path at launch,
+  which a Central jar resource cannot provide. Instead set it **at run time**
+  via `java.awt.Taskbar.getTaskbar().setIconImage(image)`: the bootstrap loads
+  the icon PNG from its own classpath resources and sets it before delegating to
+  `Main`. AWT/`Taskbar` is available because `-Djava.awt.headless=false` is
+  already set. This is the standard approach for non-bundled JavaFX apps on
+  macOS and avoids the path-at-launch problem entirely.
+
+The icon PNG is therefore bundled as a jar resource (e.g. a 1024×1024
+`icon/drydock.png`) alongside the dylibs (§3). `Taskbar.setIconImage` is a no-op
+or throws `UnsupportedOperationException` on platforms without the feature —
+guard it so a non-macOS run (which is already unsupported) degrades cleanly.
+
+**New artwork.** The current `assets/app-icon.icns` is Claude-branded (terracotta
+fill + white CLI-prompt chevron). It is being **replaced** with a drydock-themed
+mark on a non-terracotta palette. The new source art regenerates *both*
+`assets/app-icon.icns` (used by `appImage`/`launcher.sh`) and the bundled
+`icon/drydock.png` (used by the jbang path), so the two launchers stay visually
+identical. The artwork direction is decided separately; the mechanism above is
+agnostic to which mark wins.
 
 ## 7. Known limitations (explicit, by design)
 
 - **Not a signed/notarized `.app` bundle.** A jbang launch is a plain JVM
-  process: it shows in the dock as a Java process, has no Finder double-click, no
-  bundle identity, no notarization. jbang is the *curl-able* path; the existing
-  `appImage`/`dmg` pipeline remains the polished, double-clickable path. These
-  are complementary, not competing.
+  process: no Finder double-click, no bundle identity, no notarization. jbang is
+  the *curl-able* path; the existing `appImage`/`dmg` pipeline remains the
+  polished, double-clickable path. These are complementary, not competing. (The
+  dock *name* and *icon* are handled — see §6 — so it does not look unbranded;
+  what's missing is bundle-level identity/notarization, not cosmetics.)
 - **Arch-fat jar.** The published jar carries both arch slices of both dylibs
   (tens of MB). The JVM and JavaFX are still arch-correct (jbang provisions the
   right JDK; JavaFX classifier is host-picked); only the bundled natives are fat.
@@ -187,9 +226,12 @@ of v1.
 2. Central publishing wiring reusing the btrace GPG/Sonatype config: main jar +
    signed `-sources`, `-javadoc`, POM.
 3. `app.drydock.launcher.JBangBootstrap` (arch detect, safe extraction, property
-   set, delegate to `Main`).
-4. `jbang-catalog.json` alias `drydock` (java-version, deps, runtime-options,
+   set, dock-icon via `Taskbar.setIconImage`, delegate to `Main`).
+4. New drydock-themed app artwork → regenerate `assets/app-icon.icns` **and** the
+   bundled `icon/drydock.png`; add `-Xdock:name=Drydock` to the alias.
+5. `jbang-catalog.json` alias `drydock` (java-version, deps, runtime-options,
    main, GAV ref).
-5. Docs: a README/run section for the `jbang drydock@…` path and its limitations.
-6. Verification: on a clean machine (or a JDK-less shell), `jbang drydock@…`
-   launches a working Drydock with a live terminal tab, on both arm64 and x86_64.
+6. Docs: a README/run section for the `jbang drydock@…` path and its limitations.
+7. Verification: on a clean machine (or a JDK-less shell), `jbang drydock@…`
+   launches a working Drydock with a live terminal tab, correct dock name/icon,
+   and correct JavaFX classifier on **both** arm64 and x86_64.
