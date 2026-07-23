@@ -1,0 +1,146 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. 0.1.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  setup:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      ref: ${{ steps.resolve.outputs.ref }}
+    steps:
+      - id: resolve
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            V="${GITHUB_REF_NAME#v}"; REF="${GITHUB_REF_NAME}"
+          else
+            V="${{ github.event.inputs.version }}"; REF="v${V}"
+          fi
+          if ! echo "$V" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Invalid version '$V' (expected X.Y.Z)"; exit 1
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+
+  prepare:
+    name: Bump version and tag
+    needs: setup
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Bump, commit, tag, push
+        env:
+          V: ${{ needs.setup.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          sed -i -E "s/^version = \".*\"/version = \"${V}\"/" app/build.gradle.kts
+          sed -i -E "s|(\"script-ref\": \"io\.btraceio:drydock:)[^\"]*(\")|\1${V}\2|" jbang-catalog.json
+          grep -q "version = \"${V}\"" app/build.gradle.kts || { echo "::error::version bump failed"; exit 1; }
+          grep -q "io.btraceio:drydock:${V}" jbang-catalog.json || { echo "::error::catalog bump failed"; exit 1; }
+          git add app/build.gradle.kts jbang-catalog.json
+          git commit -m "Release v${V}"
+          git tag -a "v${V}" -m "Release v${V}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+          git push origin "v${V}"
+
+  stage-maven:
+    name: Stage to Maven Central
+    needs: [setup, prepare]
+    if: ${{ always() && needs.setup.result == 'success' && (needs.prepare.result == 'success' || needs.prepare.result == 'skipped') }}
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.setup.outputs.ref }}
+          submodules: recursive
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: 0.15.2
+      - name: Ensure Metal Toolchain
+        run: xcodebuild -downloadComponent MetalToolchain || echo "Metal Toolchain already present or bundled"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: |
+            17
+            26
+      - name: Stage to Central Portal
+        env:
+          GPG_SIGNING_KEY: ${{ secrets.GPG_SIGNING_KEY }}
+          GPG_SIGNING_PWD: ${{ secrets.GPG_SIGNING_PWD }}
+          SONATYPE_USERNAME: ${{ secrets.SONATYPE_USERNAME }}
+          SONATYPE_PASSWORD: ${{ secrets.SONATYPE_PASSWORD }}
+        run: |
+          ./gradlew :app:publishAllPublicationsToSonatypeRepository \
+            --no-daemon --stacktrace \
+            -Dorg.gradle.java.installations.fromEnv=JAVA_HOME_17_ARM64,JAVA_HOME_26_ARM64
+      - name: Upload jbangJar for the release job
+        uses: actions/upload-artifact@v4
+        with:
+          name: drydock-jbang-jar
+          path: app/build/libs/drydock-${{ needs.setup.outputs.version }}.jar
+          if-no-files-found: error
+      - name: Staging complete
+        run: |
+          echo "Artifacts STAGED. Review and click Publish at:"
+          echo "  https://central.sonatype.com/publishing/deployments"
+
+  wait-for-maven:
+    name: Wait for Maven Central
+    needs: [setup, stage-maven]
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Poll repo1 for the released POM
+        run: |
+          V="${{ needs.setup.outputs.version }}"
+          URL="https://repo1.maven.org/maven2/io/btraceio/drydock/${V}/drydock-${V}.pom"
+          echo "Waiting for ${URL}"
+          echo "Click Publish at https://central.sonatype.com/publishing/deployments"
+          for i in $(seq 1 60); do
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' "$URL")
+            if [ "$CODE" = "200" ]; then echo "Available on Maven Central."; exit 0; fi
+            echo "Attempt ${i}/60: HTTP ${CODE} - waiting 30s..."
+            sleep 30
+          done
+          echo "::error::Timed out after 30 min. Release not finalized on Central."
+          exit 1
+
+  create-github-release:
+    name: Create GitHub Release
+    needs: [setup, wait-for-maven]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.setup.outputs.ref }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: drydock-jbang-jar
+          path: dist
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          V="${{ needs.setup.outputs.version }}"
+          gh release create "v${V}" \
+            --title "Drydock v${V}" \
+            --generate-notes \
+            "dist/drydock-${V}.jar"
