@@ -5,14 +5,15 @@ import app.drydock.agent.api.AgentRegistry;
 import app.drydock.app.RepositoryManager;
 import app.drydock.app.SessionManager;
 import app.drydock.app.SessionOpenResult;
-import app.drydock.agent.providers.claude.internal.ConversationCatalog;
-import app.drydock.agent.providers.claude.internal.ConversationCatalog.Conversation;
+import app.drydock.agent.api.ConversationSource;
+import app.drydock.agent.api.ConversationSource.Conversation;
 import app.drydock.activity.SessionActivityWatcher;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.Repository;
 import app.drydock.domain.SessionActivity;
 import app.drydock.domain.SessionStatus;
+import app.drydock.domain.SshRemote;
 import app.drydock.domain.UiTheme;
 import app.drydock.git.ChangedLineService;
 import app.drydock.git.DiffService;
@@ -86,7 +87,7 @@ import java.util.stream.Collectors;
  * <p>Every session-opening path (new session, resume, resume-conversation)
  * and every session-closing path (tab close button, sidebar quick actions,
  * application shutdown) funnels through {@link SessionManager}'s public
- * API -- {@link SessionManager#createSession}, {@link
+ * API -- {@link SessionManager#launchSession}, {@link
  * SessionManager#resumeSession}, {@link SessionManager#closeSession} --
  * which is what actually launches/kills the {@code claude} process and
  * persists session metadata. This class never calls {@code
@@ -123,9 +124,6 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     private final Region emptyState;
     private final StackPane centerStack;
     private final MenuButton newTabButton = new MenuButton("＋");
-
-    /** Read-only view into claude's transcript store (resume notice message counts). */
-    private final ConversationCatalog conversationCatalog = new ConversationCatalog();
 
     /**
      * The per-worktree empty pane (worktree handoff: "No session in this
@@ -427,7 +425,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         }
         String branch = worktree.branch().orElse(worktree.detached() ? "(detached)" : repository.displayName());
         StartSessionModal modal = new StartSessionModal(branch, worktree.path(), agentRegistry, defaultKind.get(),
-                requireRemote, modalLayer::close, (task, agent) -> {
+                requireRemote, remoteOf(repository), modalLayer::close, (task, agent) -> {
             clearUnopenedWorktreeState();
             if (worktree.mainCheckout()) {
                 openNewSession(repository, task, agent);
@@ -554,7 +552,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             return;
         }
         StartSessionModal modal = new StartSessionModal(repository.displayName(), repository.root(), agentRegistry,
-                defaultKind.get(), requireRemote, modalLayer::close,
+                defaultKind.get(), requireRemote, remoteOf(repository), modalLayer::close,
                 (task, agent) -> openNewSession(repository, task, agent));
         modalLayer.show(modal);
     }
@@ -642,10 +640,14 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                             return;
                         }
                         modalLayer.close();
-                        AgentKind defaultKind = agentRegistry
-                                .resolveDefault(repository.settings().lastUsedAgent(), repository.isRemote())
-                                .orElse(AgentKind.CLAUDE);
-                        openNewWorktreeSession(repository, branch, created, task, existing.isEmpty(), defaultKind);
+                        Optional<AgentKind> defaultKind = agentRegistry
+                                .resolveDefault(repository.settings().lastUsedAgent(), repository.isRemote());
+                        if (defaultKind.isEmpty()) {
+                            showNoAgentAvailable();
+                            return;
+                        }
+                        openNewWorktreeSession(repository, branch, created, task, existing.isEmpty(),
+                                defaultKind.get());
                     }));
                 });
         modalLayer.show(holder[0]);
@@ -734,11 +736,12 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      */
     private void showResumeNotice(OpenSessionTab tab, ManagedAgentSession session) {
         boolean remote = repositoryFor(session).map(Repository::isRemote).orElse(false);
+        Optional<ConversationSource> conversations = agentRegistry.conversations(session.agentKind());
         Thread.ofVirtual().start(() -> {
             int messageCount = 0;
-            if (!remote) {
+            if (!remote && conversations.isPresent()) {
                 try {
-                    messageCount = conversationCatalog.listConversations(session.workingDirectory()).stream()
+                    messageCount = conversations.get().listConversations(session.workingDirectory()).stream()
                             .filter(conversation -> session.agentSessionId()
                                     .map(conversation.sessionId()::equals).orElse(false))
                             .mapToInt(Conversation::messageCount)
@@ -763,6 +766,11 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         });
     }
 
+    /** The repository's SSH remote, if it is a remote repository -- see {@link Repository#isRemote()}. */
+    private static Optional<SshRemote> remoteOf(Repository repository) {
+        return repository.isRemote() ? Optional.of(repository.remote()) : Optional.empty();
+    }
+
     private Optional<Repository> repositoryFor(ManagedAgentSession session) {
         return repositoryManager.repositories().stream()
                 .filter(repository -> repository.id().equals(session.repositoryId()))
@@ -775,11 +783,11 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             UiErrors.show("Could not start Claude session", ex);
             return;
         }
-        // createSession only ever produces Opened -- see SessionManager.finalizeCreate.
+        // launchSession only ever produces Opened -- see SessionManager.finalizeCreate.
         if (result instanceof SessionOpenResult.Opened opened) {
             attachOpenedSession(placeholderTab, opened);
         } else {
-            LOG.log(Level.WARNING, "Unexpected SessionOpenResult from createSession: " + result);
+            LOG.log(Level.WARNING, "Unexpected SessionOpenResult from launchSession: " + result);
             removeTab(placeholderTab);
         }
     }
@@ -816,7 +824,25 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 removeTab(placeholderTab);
                 promptForMissingConversation(missing.session());
             }
+            case SessionOpenResult.UnsupportedAgent unsupported -> {
+                removeTab(placeholderTab);
+                showUnsupportedAgent(unsupported.session());
+            }
         }
+    }
+
+    /**
+     * The session's persisted {@code agentKind} raw name is not one this
+     * build recognizes (see {@link SessionStatus#UNSUPPORTED_AGENT}); its
+     * {@code agentKind()} is only a placeholder, so resuming it would
+     * silently launch the wrong agent. No surface is created.
+     */
+    private void showUnsupportedAgent(ManagedAgentSession session) {
+        Alert alert = new Alert(Alert.AlertType.WARNING);
+        alert.setTitle("Unsupported agent");
+        alert.setHeaderText("Can't resume \"" + session.displayName() + "\"");
+        alert.setContentText("This session was created by an agent this build doesn't support.");
+        alert.showAndWait();
     }
 
     /**

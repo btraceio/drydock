@@ -3,8 +3,7 @@ package app.drydock.ui;
 import app.drydock.agent.api.AgentKind;
 import app.drydock.agent.api.AgentRegistry;
 import app.drydock.agent.api.CreateContext;
-import app.drydock.agent.api.LaunchPlan;
-import app.drydock.agent.spi.AgentProvider;
+import app.drydock.domain.SshRemote;
 import javafx.application.Platform;
 import javafx.geometry.Pos;
 import javafx.scene.control.Button;
@@ -37,11 +36,12 @@ final class StartSessionModal extends VBox {
     private final AgentRegistry registry;
     private final String branch;
     private final Path worktreePath;
+    private final Optional<SshRemote> remote;
     private final Label commandPreview = new Label("Preparing…");
 
     StartSessionModal(String branch, Path worktreePath, AgentRegistry registry, AgentKind preselected,
                        Runnable onClose, StartHandler onStart) {
-        this(branch, worktreePath, registry, preselected, false, onClose, onStart);
+        this(branch, worktreePath, registry, preselected, false, Optional.empty(), onClose, onStart);
     }
 
     /**
@@ -55,9 +55,24 @@ final class StartSessionModal extends VBox {
      */
     StartSessionModal(String branch, Path worktreePath, AgentRegistry registry, AgentKind preselected,
                        boolean requireRemoteCapability, Runnable onClose, StartHandler onStart) {
+        this(branch, worktreePath, registry, preselected, requireRemoteCapability, Optional.empty(), onClose,
+                onStart);
+    }
+
+    /**
+     * @param remote the target repository's SSH remote, when it is remote --
+     *               threaded into the command-preview {@link CreateContext}
+     *               so the preview shown here matches what will actually
+     *               launch (a remote repo previews the remote command, not
+     *               the local one).
+     */
+    StartSessionModal(String branch, Path worktreePath, AgentRegistry registry, AgentKind preselected,
+                       boolean requireRemoteCapability, Optional<SshRemote> remote, Runnable onClose,
+                       StartHandler onStart) {
         this.registry = registry;
         this.branch = branch;
         this.worktreePath = worktreePath;
+        this.remote = remote;
 
         getStyleClass().add("modal");
         setMaxWidth(508);
@@ -134,14 +149,9 @@ final class StartSessionModal extends VBox {
 
     private String buildPreviewText(AgentKind kind) {
         try {
-            Optional<AgentProvider> provider = registry.provider(kind);
-            if (provider.isEmpty()) {
-                return "(no provider for " + kind.persistedName() + ")";
-            }
-            CreateContext ctx = new CreateContext(branch, UUID.randomUUID().toString(), worktreePath,
-                    Optional.empty());
-            LaunchPlan plan = provider.get().buildCreateCommand(ctx);
-            return plan.supported() ? "$ " + plan.command() : "(unsupported for this context)";
+            CreateContext ctx = new CreateContext(branch, UUID.randomUUID().toString(), worktreePath, remote);
+            String command = registry.previewCreateCommand(kind, ctx);
+            return command.startsWith("(") ? command : "$ " + command;
         } catch (RuntimeException e) {
             return "(preview unavailable)";
         }

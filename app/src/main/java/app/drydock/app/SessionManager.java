@@ -49,7 +49,7 @@ import java.util.function.UnaryOperator;
  * 11.3), and closes sessions using {@link
  * TerminalSurface#closeGracefully(long, long, Runnable)}.
  *
- * <p><b>Threading (plan section 18):</b> {@link #createSession} and {@link
+ * <p><b>Threading (plan section 18):</b> {@link #launchSession} and {@link
  * #resumeSession} do their slow work -- {@link AgentProvider} capability
  * probing and persistence I/O -- on a background executor, and only touch
  * {@link TerminalSurface}/{@link TerminalRuntime}/{@link TerminalHostView} via
@@ -161,12 +161,6 @@ public final class SessionManager implements AutoCloseable {
 
     // ---- 11.1 Create a new session ----------------------------------------
 
-    /** Creates a new session with a generated default display name (plan section 11.1). */
-    public CompletableFuture<SessionOpenResult> createSession(Repository repository, TerminalRuntime app,
-                                                               TerminalHostView host, double scaleFactor) {
-        return createSession(repository, defaultDisplayName(repository), app, host, scaleFactor);
-    }
-
     /**
      * Mints the metadata for a brand-new session (generated display name)
      * WITHOUT launching anything. Callers that key UI bookkeeping by
@@ -190,18 +184,6 @@ public final class SessionManager implements AutoCloseable {
     public CompletableFuture<SessionOpenResult> launchSession(ManagedAgentSession prepared, TerminalRuntime app,
                                                               TerminalHostView host, double scaleFactor) {
         return launchNewSession(prepared, prepared.displayName(), app, host, scaleFactor);
-    }
-
-    /**
-     * Creates a new session with an explicit display name (plan section
-     * 11.1's "allow immediate renaming" -- a caller can generate its own
-     * name, or rename after the fact via {@link #renameSession}, which this
-     * step does not itself provide UI for).
-     */
-    public CompletableFuture<SessionOpenResult> createSession(Repository repository, String displayName,
-                                                               TerminalRuntime app, TerminalHostView host,
-                                                               double scaleFactor) {
-        return launchNewSession(newSessionMetadata(repository, displayName), displayName, app, host, scaleFactor);
     }
 
     private CompletableFuture<SessionOpenResult> launchNewSession(ManagedAgentSession initial, String displayName,
@@ -393,6 +375,14 @@ public final class SessionManager implements AutoCloseable {
         // (then-synchronized) methods. State reads/writes take the store's
         // own short-lived lock only.
         ManagedAgentSession session = requireSession(sessionId);
+
+        // An unrecognized persisted agentKind raw-name decodes to this
+        // status with a placeholder agentKind() == CLAUDE (see the
+        // ManagedAgentSession decoder); launching it would silently run the
+        // wrong agent in that worktree, so it must never reach a launch.
+        if (session.status() == SessionStatus.UNSUPPORTED_AGENT) {
+            return Optional.of(new SessionOpenResult.UnsupportedAgent(session));
+        }
 
         Optional<String> agentSessionId = session.agentSessionId();
         if (agentSessionId.isPresent()) {

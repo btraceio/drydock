@@ -203,6 +203,19 @@ class SessionManagerTest {
     }
 
     @Test
+    void checkResumeBlockedBlocksAnUnsupportedAgentSession(@TempDir Path tempDir) {
+        ManagedAgentSession session = sessionWith(tempDir, Optional.empty(), Optional.empty())
+                .withStatus(SessionStatus.UNSUPPORTED_AGENT);
+        SessionManager manager = newManager(new InMemoryStateRepository(List.of(session)));
+
+        Optional<SessionOpenResult> blocked = manager.checkResumeBlocked(session.id());
+
+        assertTrue(blocked.isPresent(), "an UNSUPPORTED_AGENT session must never resume/launch");
+        assertTrue(blocked.get() instanceof SessionOpenResult.UnsupportedAgent);
+        assertEquals(session.id(), blocked.get().session().id());
+    }
+
+    @Test
     void checkResumeBlockedThrowsForAnUnknownSessionId() {
         SessionManager manager = newManager(new InMemoryStateRepository(List.of()));
 

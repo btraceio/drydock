@@ -120,4 +120,19 @@ class AgentRegistryTest {
                 List.of(new StubProvider(AgentKind.CLAUDE, true, false)), ctx());
         assertTrue(registry.resolveDefault(Optional.empty(), true).isEmpty());
     }
+
+    @Test
+    void previewCreateCommandReturnsTheProvidersBuiltCommand() {
+        AgentRegistry registry = new AgentRegistry(List.of(new StubProvider(AgentKind.CLAUDE, true)), ctx());
+        CreateContext createContext = new CreateContext("name", "id", Path.of("/tmp"), Optional.empty());
+        assertEquals("x", registry.previewCreateCommand(AgentKind.CLAUDE, createContext));
+    }
+
+    @Test
+    void previewCreateCommandReportsNoProviderForAnUnregisteredKind() {
+        AgentRegistry registry = new AgentRegistry(List.of(new StubProvider(AgentKind.CLAUDE, true)), ctx());
+        CreateContext createContext = new CreateContext("name", "id", Path.of("/tmp"), Optional.empty());
+        assertEquals("(no provider for " + AgentKind.CODEX.persistedName() + ")",
+                registry.previewCreateCommand(AgentKind.CODEX, createContext));
+    }
 }

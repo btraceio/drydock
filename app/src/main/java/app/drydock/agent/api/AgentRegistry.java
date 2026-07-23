@@ -83,6 +83,27 @@ public final class AgentRegistry {
         return Optional.ofNullable(providers.get(kind));
     }
 
+    /**
+     * Resolves {@code kind}'s provider and returns the launch command its
+     * {@link AgentProvider#buildCreateCommand} would produce for {@code ctx}
+     * -- used by the UI to preview the actual command without importing the
+     * {@code spi} layer itself. May block on capability probing, same as
+     * {@link AgentProvider#buildCreateCommand}; callers should run this off
+     * the FX thread.
+     *
+     * @return the built command, or a bracketed placeholder describing why
+     *         none is available (no provider for {@code kind}, or the plan
+     *         is unsupported for this context, e.g. remote unsupported)
+     */
+    public String previewCreateCommand(AgentKind kind, CreateContext ctx) {
+        Optional<AgentProvider> provider = provider(kind);
+        if (provider.isEmpty()) {
+            return "(no provider for " + kind.persistedName() + ")";
+        }
+        LaunchPlan plan = provider.get().buildCreateCommand(ctx);
+        return plan.supported() ? plan.command() : "(unsupported for this context)";
+    }
+
     public Optional<ConversationSource> conversations(AgentKind kind) {
         return provider(kind).flatMap(AgentProvider::conversations);
     }

@@ -28,6 +28,11 @@ import app.drydock.terminal.api.TerminalSurface;
  *       was created. Offer to start a fresh conversation under the same
  *       name ({@link SessionManager#startFreshConversation}) or delete the
  *       session.</li>
+ *   <li>{@link UnsupportedAgent} -- the session was persisted with {@link
+ *       app.drydock.domain.SessionStatus#UNSUPPORTED_AGENT} (its {@code
+ *       agentKind} decoded from an unrecognized raw name and is only a
+ *       placeholder); no surface was created, since launching it would
+ *       silently run the wrong agent.</li>
  * </ul>
  */
 public sealed interface SessionOpenResult {
@@ -45,5 +50,8 @@ public sealed interface SessionOpenResult {
     }
 
     record MissingConversation(ManagedAgentSession session) implements SessionOpenResult {
+    }
+
+    record UnsupportedAgent(ManagedAgentSession session) implements SessionOpenResult {
     }
 }
