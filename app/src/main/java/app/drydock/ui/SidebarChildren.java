@@ -52,7 +52,7 @@ record SidebarChildren(
         for (Worktree worktree : worktrees) {
             if (worktree.mainCheckout()) {
                 if (mainSessions.isEmpty()) {
-                    bucket(worktree, false, openWorktrees, staleWorktrees);
+                    bucket(worktree, openWorktrees, staleWorktrees);
                 } else {
                     sessionRows.addAll(mainSessions);
                     placed.addAll(mainSessions);
@@ -66,7 +66,7 @@ record SidebarChildren(
                     sessionRows.add(match.get());
                     placed.add(match.get());
                 } else {
-                    bucket(worktree, false, openWorktrees, staleWorktrees);
+                    bucket(worktree, openWorktrees, staleWorktrees);
                 }
             }
         }
@@ -108,9 +108,9 @@ record SidebarChildren(
                 worktreeCount, staleWorktrees.size());
     }
 
-    private static void bucket(Worktree worktree, boolean hasSession,
+    private static void bucket(Worktree worktree,
             List<Worktree> open, List<Worktree> stale) {
-        boolean isStale = !worktree.locked() && !worktree.mainCheckout() && !hasSession
+        boolean isStale = !worktree.locked() && !worktree.mainCheckout()
                 && (worktree.prunable() || worktree.detached());
         (isStale ? stale : open).add(worktree);
     }

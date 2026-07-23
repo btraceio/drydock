@@ -507,7 +507,7 @@ public final class RepositorySidebar extends VBox {
             if (classified == null) {
                 continue;
             }
-            worktreeTotal += classified.worktreeCount();
+            worktreeTotal += classified.worktreeCount() + classified.staleCount();
             unopenedTotal += (int) classified.openWorktrees().stream().filter(w -> !w.mainCheckout()).count()
                     + classified.staleCount();
         }
@@ -592,6 +592,8 @@ public final class RepositorySidebar extends VBox {
         repoMenus.keySet().retainAll(repoIds);
         newSessionMenus.keySet().retainAll(repoIds);
         unopenedTooltips.keySet().retainAll(worktreePaths);
+        collapsed.retainAll(repoIds);
+        staleBucketExpanded.retainAll(repoIds);
     }
 
     /** Re-renders the one row backed by {@code worktreeRoot} (a worktree session row or an unopened row). */
