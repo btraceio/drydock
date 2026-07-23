@@ -275,8 +275,8 @@ public final class SessionManager implements AutoCloseable {
                                 .ifPresent(id -> {
                                     // discover() already atomically claimed
                                     // `id` in claimedAgentSessionIds.
-                                    persistUpdatedSession(requireSession(opened.session().id())
-                                            .withAgentSessionId(Optional.of(id)));
+                                    updateSession(opened.session().id(),
+                                            s -> s.withAgentSessionId(Optional.of(id)));
                                     activeRegistry.tryMarkActive(id, opened.session().id());
                                 });
                     } catch (RuntimeException e) {

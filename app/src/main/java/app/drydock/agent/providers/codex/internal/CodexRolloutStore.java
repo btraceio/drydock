@@ -86,6 +86,12 @@ public final class CodexRolloutStore {
      * launches, each launch's discovery tends to claim the rollout closest
      * to its own {@code launchedAt} rather than a later launch's fresher
      * one.</p>
+     *
+     * <p>Codex records {@code session_meta.payload.timestamp} at
+     * sub-second (millisecond) precision (verified from real rollouts,
+     * e.g. {@code 2026-07-23T19:27:59.508Z}), so the {@code timestamp >=
+     * launchedAt} boundary does not exclude a session launched just before
+     * its rollout file is stamped.</p>
      */
     public List<RolloutMeta> newCandidates(Path cwd, Instant launchedAt, Set<String> snapshotIds) {
         List<RolloutMeta> candidates = new ArrayList<>();
