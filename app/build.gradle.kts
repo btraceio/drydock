@@ -234,5 +234,14 @@ tasks.named<Javadoc>("javadoc") {
 signing {
     // Sign only for a real publish, never for publishToMavenLocal.
     setRequired({ gradle.taskGraph.allTasks.any { it.name.startsWith("publish") && it.name.contains("Repository") && !it.name.contains("MavenLocal") } })
+
+    // In-memory PGP key for CI (mirrors btrace's btrace-dist). Falls back to
+    // the default gpg-agent/keyring when the env/props are absent (local dev).
+    val signingKey = (findProperty("gpg.signing.key") as String?) ?: System.getenv("GPG_SIGNING_KEY")
+    val signingPwd = (findProperty("gpg.signing.pwd") as String?) ?: System.getenv("GPG_SIGNING_PWD")
+    if (signingKey != null && signingPwd != null) {
+        useInMemoryPgpKeys(signingKey, signingPwd)
+    }
+
     sign(publishing.publications["drydock"])
 }
