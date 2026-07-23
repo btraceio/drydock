@@ -22,11 +22,13 @@ jobs:
       ref: ${{ steps.resolve.outputs.ref }}
     steps:
       - id: resolve
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
         run: |
           if [ "${{ github.event_name }}" = "push" ]; then
             V="${GITHUB_REF_NAME#v}"; REF="${GITHUB_REF_NAME}"
           else
-            V="${{ github.event.inputs.version }}"; REF="v${V}"
+            V="$INPUT_VERSION"; REF="v${V}"
           fi
           if ! echo "$V" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
             echo "::error::Invalid version '$V' (expected X.Y.Z)"; exit 1
@@ -51,10 +53,12 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           sed -i -E "s/^version = \".*\"/version = \"${V}\"/" app/build.gradle.kts
+          sed -i -E "s/^version = \".*\"/version = \"${V}\"/" build.gradle.kts
           sed -i -E "s|(\"script-ref\": \"io\.btraceio:drydock:)[^\"]*(\")|\1${V}\2|" jbang-catalog.json
           grep -q "version = \"${V}\"" app/build.gradle.kts || { echo "::error::version bump failed"; exit 1; }
+          grep -q "version = \"${V}\"" build.gradle.kts || { echo "::error::root version bump failed"; exit 1; }
           grep -q "io.btraceio:drydock:${V}" jbang-catalog.json || { echo "::error::catalog bump failed"; exit 1; }
-          git add app/build.gradle.kts jbang-catalog.json
+          git add app/build.gradle.kts build.gradle.kts jbang-catalog.json
           git commit -m "Release v${V}"
           git tag -a "v${V}" -m "Release v${V}"
           git push origin "HEAD:${GITHUB_REF_NAME}"

@@ -15,6 +15,15 @@ plugins {
     id("io.github.gradle-nexus.publish-plugin") version "2.0.0"
 }
 
+// The nexus-publish plugin resolves its Central Portal staging profile
+// (packageGroup) from rootProject.group and selects the release vs snapshot
+// endpoint from whether rootProject.version ends in "-SNAPSHOT". The :app
+// publication carries its own group/version for the artifact coordinates;
+// these root values exist solely for the plugin, and the release workflow's
+// prepare job keeps them in sync with app/build.gradle.kts.
+group = "io.btraceio"
+version = "0.1.0"
+
 // Alias for the plan's literal Gate 0B task name
 // (":terminal-ghostty:ffmSmokeTest") -- the project is still a single
 // module ("app") during the Phase 0 feasibility spike (see section 5), so
