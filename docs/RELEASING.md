@@ -43,9 +43,9 @@ Two ways to trigger `.github/workflows/release.yml`:
 ## What CI does, and your one manual step
 
 1. Two `native` jobs build the macOS libraries **natively, one arch per runner**
-   — `arm64` on `macos-14`, `x86_64` on `macos-15-intel` — and upload each
-   slice's dylibs as an artifact. (Native builds avoid the cross-compile
-   failures hit when building the x86_64 slice on an Apple Silicon runner.)
+   — `arm64` on `macos-15`, `x86_64` on `macos-15-intel` — and upload each
+   slice's dylibs as an artifact. (Both use the macOS 15 SDK, which ghostty
+   requires; the older `macos-14` 14.5 SDK lacks `kCVPixelFormatType_30RGB_r210`.)
 2. `stage-maven` (macOS) downloads both native artifacts, packages the
    `jbangJar` with `-Pnatives.prebuilt=true`, and uploads a **staged**
    deployment to the Central Portal. It does **not** auto-release.

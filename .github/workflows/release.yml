@@ -69,10 +69,11 @@ jobs:
           git push origin "HEAD:${GITHUB_REF_NAME}"
           git push origin "v${V}"
 
-  # Build each macOS arch slice natively on its own runner (arm64 on macos-14,
-  # x86_64 on the Intel macos-13). Native compilation avoids the cross-compile
-  # translate-c failures (e.g. missing kCVPixelFormatType_30RGB_r210) hit when
-  # cross-building the x86_64 slice on an Apple Silicon runner.
+  # Build each macOS arch slice natively on its own runner, both on the macOS 15
+  # image generation. ghostty's pkg/macos references kCVPixelFormatType_30RGB_r210,
+  # a CoreVideo constant added in the macOS 15 SDK; the older macos-14 image
+  # (14.5 SDK) lacks it and the ghostty build fails regardless of native vs
+  # cross-compile. arm64 -> macos-15, x86_64 -> macos-15-intel.
   native:
     name: Build native (${{ matrix.arch }})
     needs: [setup, prepare]
@@ -82,7 +83,7 @@ jobs:
       matrix:
         include:
           - arch: arm64
-            runner: macos-14
+            runner: macos-15
           - arch: x86_64
             runner: macos-15-intel
     runs-on: ${{ matrix.runner }}

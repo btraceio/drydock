@@ -3,18 +3,29 @@
 ## Problem
 
 The release workflow's `stage-maven` job builds both macOS native slices
-(`libghostty`, `libdrydockterminalhost`) on a single Apple Silicon runner by
-**cross-compiling** the `x86_64` slice. That cross-compile fails:
+(`libghostty`, `libdrydockterminalhost`) on a single `macos-14` runner. The
+ghostty build fails:
 
 ```
 pkg/macos/video/pixel_format.zig:55:22: error: root source file struct 'cimport'
   has no member named 'kCVPixelFormatType_30RGB_r210'
 ```
 
-This is a `zig translate-c` artifact of importing CoreVideo headers for a
-non-host target. It never surfaced before because every prior CI run died
-earlier (the `setup-zig@v1` tarball-naming 404), so `buildGhosttyNative` had
-never actually executed in CI.
+**Root cause:** `kCVPixelFormatType_30RGB_r210` is a CoreVideo constant added in
+the **macOS 15 SDK**. The `macos-14` runner ships the 14.5 SDK, which lacks it,
+so the ghostty build fails — confirmed to reproduce on both `aarch64` (native)
+and `x86_64` targets on `macos-14`, and to succeed on the macOS 15 image. It is
+an SDK-version problem, not a cross-compile artifact. It never surfaced before
+because every prior CI run died earlier (the `setup-zig@v1` tarball-naming 404),
+so `buildGhosttyNative` had never actually executed in CI.
+
+## Two coupled changes
+
+1. **Build on the macOS 15 image** (`macos-15` / `macos-15-intel`) so the SDK
+   has the constant. This alone fixes the compile error.
+2. **Split the build per-arch onto native runners** (below). Independently
+   motivated: parallelism, native builds instead of cross-compiling, and it is
+   what the maintainer requested. Both slices land on the macOS 15 generation.
 
 ## Goal
 
@@ -68,7 +79,8 @@ Each job:
 5. Upload `build/native/macos-<arch>/{libghostty.dylib,libdrydockterminalhost.dylib}`
    as artifact `natives-macos-<arch>` (`if-no-files-found: error`).
 
-`native-arm64` runs on `macos-14`; `native-x86_64` on `macos-15-intel`.
+`native-arm64` runs on `macos-15`; `native-x86_64` on `macos-15-intel` (both the
+macOS 15 SDK generation).
 
 ### stage-maven job
 
@@ -111,9 +123,9 @@ deployment, no GitHub release.
 
 ## Risks
 
-- **Does native compilation actually fix `kCVPixelFormatType_30RGB_r210`?**
-  High likelihood (native builds are the standard cure for translate-c
-  cross-target gaps), but only confirmable when it runs.
+- **`kCVPixelFormatType_30RGB_r210`** is fixed by building on the macOS 15 image
+  (verified: `x86_64` on `macos-15-intel` succeeds; `macos-14` fails on both
+  arches). The per-arch split is orthogonal to this fix.
 - **Intel runners are on borrowed time.** `macos-15-intel` is the current Intel
   label (the classic `macos-13` was retired). GitHub will eventually sunset
   Intel macOS runners entirely; when that happens, `x86_64` would need
