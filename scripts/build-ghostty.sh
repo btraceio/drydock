@@ -262,10 +262,27 @@ the build has changed. Inspect with: nm -g '$dylib' | grep ghostty_"
     rm -rf "$prefix"
 }
 
-build_one_arch "x86_64-macos"  "macos-x86_64"
-build_one_arch "aarch64-macos" "macos-arm64"
+# Which architecture slice(s) to build. Default builds both (unchanged local
+# `./gradlew` behavior); CI's per-arch native jobs set NATIVE_ARCHES to build a
+# single slice natively on the matching runner instead of cross-compiling.
+#   NATIVE_ARCHES=arm64   -> aarch64-macos only
+#   NATIVE_ARCHES=x86_64  -> x86_64-macos only
+#   NATIVE_ARCHES=both    -> both (default)
+NATIVE_ARCHES="${NATIVE_ARCHES:-both}"
 
-for arch_dir in macos-x86_64 macos-arm64; do
+built_dirs=()
+case "$NATIVE_ARCHES" in
+    arm64)  build_one_arch "aarch64-macos" "macos-arm64";  built_dirs=(macos-arm64) ;;
+    x86_64) build_one_arch "x86_64-macos"  "macos-x86_64"; built_dirs=(macos-x86_64) ;;
+    both)
+        build_one_arch "x86_64-macos"  "macos-x86_64"
+        build_one_arch "aarch64-macos" "macos-arm64"
+        built_dirs=(macos-x86_64 macos-arm64)
+        ;;
+    *) fail "Invalid NATIVE_ARCHES='$NATIVE_ARCHES' (expected: arm64, x86_64, or both)." ;;
+esac
+
+for arch_dir in "${built_dirs[@]}"; do
     arch_name="${arch_dir#macos-}"
     [[ "$arch_name" == "x86_64" ]] && expect="x86_64" || expect="arm64"
     actual_arch="$(file -b "$OUT_DIR/$arch_dir/libghostty.dylib" | grep -oE 'x86_64|arm64')"

@@ -48,18 +48,29 @@ build_arch() {
         "$src_dir/DrydockTerminalHost.m"
 }
 
-build_arch "x86_64-apple-macos12" macos-x86_64
-build_arch "arm64-apple-macos12" macos-arm64
+# Which architecture slice(s) to build. Default builds both (unchanged local
+# `./gradlew` behavior); CI's per-arch native jobs set NATIVE_ARCHES to build a
+# single slice on the matching runner. Values: arm64, x86_64, both (default).
+NATIVE_ARCHES="${NATIVE_ARCHES:-both}"
 
-for arch_dir_expect in "macos-x86_64:x86_64" "macos-arm64:arm64"; do
-    arch_dir="${arch_dir_expect%%:*}"
-    expect="${arch_dir_expect##*:}"
+built_dirs=()
+case "$NATIVE_ARCHES" in
+    arm64)  build_arch "arm64-apple-macos12"  macos-arm64;  built_dirs=(macos-arm64) ;;
+    x86_64) build_arch "x86_64-apple-macos12" macos-x86_64; built_dirs=(macos-x86_64) ;;
+    both)
+        build_arch "x86_64-apple-macos12" macos-x86_64
+        build_arch "arm64-apple-macos12"  macos-arm64
+        built_dirs=(macos-x86_64 macos-arm64)
+        ;;
+    *) fail "Invalid NATIVE_ARCHES='$NATIVE_ARCHES' (expected: arm64, x86_64, or both)." ;;
+esac
+
+for arch_dir in "${built_dirs[@]}"; do
+    arch_name="${arch_dir#macos-}"
+    [[ "$arch_name" == "x86_64" ]] && expect="x86_64" || expect="arm64"
     actual="$(file -b "$OUT_DIR/$arch_dir/libdrydockterminalhost.dylib" | grep -oE 'x86_64|arm64')"
     [[ "$actual" == "$expect" ]] || fail "'$OUT_DIR/$arch_dir/libdrydockterminalhost.dylib' is architecture '$actual', expected '$expect'."
     nm -g "$OUT_DIR/$arch_dir/libdrydockterminalhost.dylib" | grep -q "_drydock_terminal_host_create" \
         || fail "'$OUT_DIR/$arch_dir/libdrydockterminalhost.dylib' does not export drydock_terminal_host_create."
+    echo "==> built $OUT_DIR/$arch_dir/libdrydockterminalhost.dylib"
 done
-
-echo "==> libdrydockterminalhost.dylib built for both architectures:"
-echo "  $OUT_DIR/macos-x86_64/libdrydockterminalhost.dylib"
-echo "  $OUT_DIR/macos-arm64/libdrydockterminalhost.dylib"

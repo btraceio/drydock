@@ -102,7 +102,44 @@ tasks.register<Exec>("verifyEnvironment") {
 val ghosttyNativeOutputDir = layout.buildDirectory.dir("native")
 val ghosttyGeneratedDir = layout.buildDirectory.dir("generated")
 
+// CI builds each macOS arch slice natively on its own runner (arm64 on
+// macos-14, x86_64 on the Intel macos-13) and the fan-in stage job downloads
+// both into build/native/. With -Pnatives.prebuilt=true the two native build
+// tasks are skipped and checkPrebuiltNatives verifies the downloaded dylibs are
+// present, so jbangJar consumes them without re-running the (cross-compiling)
+// native build. Unset -> unchanged local behavior (both slices built on host).
+val nativesPrebuilt = providers.gradleProperty("natives.prebuilt")
+    .map { it.toBoolean() }.orElse(false)
+
+// The dylibs jbangJar actually bundles (per arch). checkPrebuiltNatives asserts
+// these exist when natives are supplied pre-built by upstream CI jobs.
+val prebuiltNativeDylibs = listOf("macos-arm64", "macos-x86_64").flatMap { arch ->
+    listOf("libghostty.dylib", "libdrydockterminalhost.dylib").map { lib ->
+        ghosttyNativeOutputDir.map { it.dir(arch).file(lib) }
+    }
+}
+
+tasks.register("checkPrebuiltNatives") {
+    group = "native"
+    description = "Verifies pre-built native dylibs are present (for -Pnatives.prebuilt=true)."
+    onlyIf { nativesPrebuilt.get() }
+    doLast {
+        val missing = prebuiltNativeDylibs.map { it.get().asFile }.filterNot { it.isFile }
+        if (missing.isNotEmpty()) {
+            throw GradleException(
+                "natives.prebuilt=true but expected native libraries are missing:\n" +
+                    missing.joinToString("\n") { "  - $it" } +
+                    "\nEach must be downloaded from the per-arch native build job into build/native/<arch>/."
+            )
+        }
+    }
+}
+
 tasks.register<Exec>("buildGhosttyNative") {
+    // Skipped when the natives are supplied pre-built (CI fan-in); the
+    // checkPrebuiltNatives task verifies their presence instead.
+    onlyIf { !nativesPrebuilt.get() }
+
     group = "native"
     description = "Builds libghostty (macOS arm64 + x86_64) via scripts/build-ghostty.sh."
 
@@ -142,6 +179,8 @@ tasks.register<Exec>("buildGhosttyNative") {
 tasks.register<Exec>("buildNativeHost") {
     group = "native"
     description = "Builds libdrydockterminalhost (macOS arm64 + x86_64) via scripts/build-native-host.sh."
+    // Skipped when the natives are supplied pre-built (CI fan-in).
+    onlyIf { !nativesPrebuilt.get() }
 
     inputs.file("${rootDir}/scripts/build-native-host.sh")
     inputs.dir("${rootDir}/native-host")

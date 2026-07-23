@@ -42,12 +42,17 @@ Two ways to trigger `.github/workflows/release.yml`:
 
 ## What CI does, and your one manual step
 
-1. `stage-maven` (macOS) builds the natives and uploads a **staged** deployment
-   to the Central Portal. It does **not** auto-release.
-2. `wait-for-maven` polls `repo1.maven.org` for up to 30 minutes.
-3. **You** go to https://central.sonatype.com/publishing/deployments, review the
+1. Two `native` jobs build the macOS libraries **natively, one arch per runner**
+   — `arm64` on `macos-14`, `x86_64` on `macos-15-intel` — and upload each
+   slice's dylibs as an artifact. (Native builds avoid the cross-compile
+   failures hit when building the x86_64 slice on an Apple Silicon runner.)
+2. `stage-maven` (macOS) downloads both native artifacts, packages the
+   `jbangJar` with `-Pnatives.prebuilt=true`, and uploads a **staged**
+   deployment to the Central Portal. It does **not** auto-release.
+3. `wait-for-maven` polls `repo1.maven.org` for up to 30 minutes.
+4. **You** go to https://central.sonatype.com/publishing/deployments, review the
    staged deployment, and click **Publish**.
-4. Once the artifact appears on Maven Central, `create-github-release` publishes
+5. Once the artifact appears on Maven Central, `create-github-release` publishes
    the GitHub Release with the `jbangJar` attached.
 
 If you don't click Publish within 30 minutes, `wait-for-maven` times out and the

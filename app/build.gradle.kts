@@ -108,6 +108,10 @@ tasks.register<Jar>("jbangJar") {
 
     dependsOn(rootProject.tasks.named("buildGhosttyNative"))
     dependsOn(rootProject.tasks.named("buildNativeHost"))
+    // With -Pnatives.prebuilt=true the two build tasks above are skipped; this
+    // verifies the downloaded dylibs are present so the jar is never packaged
+    // with missing natives.
+    dependsOn(rootProject.tasks.named("checkPrebuiltNatives"))
 
     from(sourceSets.main.get().output)
 
