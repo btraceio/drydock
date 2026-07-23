@@ -1,6 +1,6 @@
 package app.drydock.app;
 
-import app.drydock.domain.ManagedClaudeSession;
+import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.terminal.api.TerminalSurface;
 
@@ -32,18 +32,18 @@ import app.drydock.terminal.api.TerminalSurface;
  */
 public sealed interface SessionOpenResult {
 
-    ManagedClaudeSession session();
+    ManagedAgentSession session();
 
-    record Opened(ManagedClaudeSession session, TerminalSurface surface) implements SessionOpenResult {
+    record Opened(ManagedAgentSession session, TerminalSurface surface) implements SessionOpenResult {
     }
 
-    record AlreadyOpen(ManagedClaudeSession session, ManagedSessionId activeSessionId,
+    record AlreadyOpen(ManagedAgentSession session, ManagedSessionId activeSessionId,
                         TerminalSurface activeSurface) implements SessionOpenResult {
     }
 
-    record MissingWorkingDirectory(ManagedClaudeSession session) implements SessionOpenResult {
+    record MissingWorkingDirectory(ManagedAgentSession session) implements SessionOpenResult {
     }
 
-    record MissingConversation(ManagedClaudeSession session) implements SessionOpenResult {
+    record MissingConversation(ManagedAgentSession session) implements SessionOpenResult {
     }
 }

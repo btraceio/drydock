@@ -1,7 +1,7 @@
 package app.drydock.domain;
 
 /**
- * Lifecycle status of a {@link ManagedClaudeSession} (plan section 10.2).
+ * Lifecycle status of a {@link ManagedAgentSession} (plan section 10.2).
  */
 public enum SessionStatus {
     INACTIVE,
@@ -9,5 +9,6 @@ public enum SessionStatus {
     RUNNING,
     EXITED,
     FAILED,
-    MISSING_WORKING_DIRECTORY
+    MISSING_WORKING_DIRECTORY,
+    UNSUPPORTED_AGENT
 }

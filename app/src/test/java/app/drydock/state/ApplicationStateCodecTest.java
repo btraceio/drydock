@@ -1,7 +1,8 @@
 package app.drydock.state;
 
+import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.ApplicationState;
-import app.drydock.domain.ManagedClaudeSession;
+import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.PrState;
 import app.drydock.domain.Repository;
@@ -180,9 +181,10 @@ class ApplicationStateCodecTest {
         // A false value protects a pre-existing branch from deletion.
         Repository repo = new Repository(RepositoryId.newId(), Path.of("/tmp/repo"), "repo",
                 Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT);
-        ManagedClaudeSession session = new ManagedClaudeSession(
+        ManagedAgentSession session = new ManagedAgentSession(
                 ManagedSessionId.newId(),
                 repo.id(),
+                AgentKind.CLAUDE,
                 "test session",
                 Optional.empty(),
                 Optional.empty(),

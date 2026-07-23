@@ -131,9 +131,9 @@ public final class SessionActivityWatcher implements AutoCloseable {
      * when the user switches to a session -- the badge exists to say "this one
      * needs you", and looking at it answers that.
      */
-    public void acknowledge(String claudeSessionId) {
-        if (claudeSessionId != null) {
-            acknowledged.put(claudeSessionId, SessionActivity.NEEDS_ATTENTION);
+    public void acknowledge(String agentSessionId) {
+        if (agentSessionId != null) {
+            acknowledged.put(agentSessionId, SessionActivity.NEEDS_ATTENTION);
         }
     }
 
@@ -146,16 +146,16 @@ public final class SessionActivityWatcher implements AutoCloseable {
      * care may ignore it, since failure only means the file waits for the next
      * startup purge.</p>
      */
-    public CompletableFuture<Void> forget(String claudeSessionId) {
-        if (claudeSessionId == null) {
+    public CompletableFuture<Void> forget(String agentSessionId) {
+        if (agentSessionId == null) {
             return CompletableFuture.completedFuture(null);
         }
-        acknowledged.remove(claudeSessionId);
+        acknowledged.remove(agentSessionId);
         return CompletableFuture.runAsync(() -> {
             try {
-                Files.deleteIfExists(activityDirectory.resolve(claudeSessionId));
+                Files.deleteIfExists(activityDirectory.resolve(agentSessionId));
             } catch (IOException | RuntimeException e) {
-                LOG.log(Level.DEBUG, "Could not clear activity state for " + claudeSessionId + ": " + e.getMessage());
+                LOG.log(Level.DEBUG, "Could not clear activity state for " + agentSessionId + ": " + e.getMessage());
             }
         }, executor);
     }

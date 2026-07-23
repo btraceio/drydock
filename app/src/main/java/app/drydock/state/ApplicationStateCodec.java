@@ -1,7 +1,8 @@
 package app.drydock.state;
 
 import app.drydock.domain.ApplicationState;
-import app.drydock.domain.ManagedClaudeSession;
+import app.drydock.agent.api.AgentKind;
+import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.PrState;
 import app.drydock.domain.Repository;
@@ -115,7 +116,7 @@ public final class ApplicationStateCodec {
         root.put("repositories", new JsonArray(repositories));
 
         List<JsonValue> sessions = new ArrayList<>();
-        for (ManagedClaudeSession session : state.sessions()) {
+        for (ManagedAgentSession session : state.sessions()) {
             sessions.add(sessionToJson(session));
         }
         root.put("sessions", new JsonArray(sessions));
@@ -141,13 +142,13 @@ public final class ApplicationStateCodec {
         return obj;
     }
 
-    private static JsonValue sessionToJson(ManagedClaudeSession session) {
+    private static JsonValue sessionToJson(ManagedAgentSession session) {
         JsonObject obj = JsonObject.empty();
         obj.put("id", new JsonString(session.id().value().toString()));
         obj.put("repositoryId", new JsonString(session.repositoryId().value().toString()));
         obj.put("displayName", new JsonString(session.displayName()));
-        obj.put("claudeSessionId", optionalStringToJson(session.claudeSessionId()));
-        obj.put("claudeSessionName", optionalStringToJson(session.claudeSessionName()));
+        obj.put("claudeSessionId", optionalStringToJson(session.agentSessionId()));
+        obj.put("claudeSessionName", optionalStringToJson(session.agentSessionName()));
         obj.put("workingDirectory", new JsonString(session.workingDirectory().toString()));
         obj.put("worktreeRoot", session.worktreeRoot()
                 .<JsonValue>map(p -> new JsonString(p.toString()))
@@ -202,7 +203,7 @@ public final class ApplicationStateCodec {
         // schemaVersion 1 (Milestone 4) has no "sessions" member at all; that
         // and a schemaVersion-2 document that simply omits it both decode to
         // an empty list rather than failing (migration path, see class doc).
-        List<ManagedClaudeSession> sessions = new ArrayList<>();
+        List<ManagedAgentSession> sessions = new ArrayList<>();
         if (root.has("sessions")) {
             for (JsonValue sessionValue : asArray(root.get("sessions"), "sessions").elements()) {
                 sessions.add(sessionFromJson(asObject(sessionValue, "sessions[]")));
@@ -248,13 +249,13 @@ public final class ApplicationStateCodec {
         }
     }
 
-    private static ManagedClaudeSession sessionFromJson(JsonObject obj) {
+    private static ManagedAgentSession sessionFromJson(JsonObject obj) {
         try {
             ManagedSessionId id = ManagedSessionId.of(requireString(obj, "id"));
             RepositoryId repositoryId = RepositoryId.of(requireString(obj, "repositoryId"));
             String displayName = requireString(obj, "displayName");
-            Optional<String> claudeSessionId = optionalString(obj, "claudeSessionId");
-            Optional<String> claudeSessionName = optionalString(obj, "claudeSessionName");
+            Optional<String> agentSessionId = optionalString(obj, "claudeSessionId");
+            Optional<String> agentSessionName = optionalString(obj, "claudeSessionName");
             Path workingDirectory = Path.of(requireString(obj, "workingDirectory"));
             Optional<Path> worktreeRoot = optionalString(obj, "worktreeRoot").map(Path::of);
             SessionStatus status = SessionStatus.valueOf(requireString(obj, "status"));
@@ -276,9 +277,9 @@ public final class ApplicationStateCodec {
             // malformed value decodes to true. No schema bump.
             boolean branchCreatedHere = !(obj.get("branchCreatedHere") instanceof JsonBoolean b)
                     || b.value();
-            return new ManagedClaudeSession(id, repositoryId, displayName, claudeSessionId, claudeSessionName,
-                    workingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, lastExitCode, prState, prNumber,
-                    branchCreatedHere);
+            return new ManagedAgentSession(id, repositoryId, AgentKind.CLAUDE, displayName, agentSessionId,
+                    agentSessionName, workingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, lastExitCode,
+                    prState, prNumber, branchCreatedHere);
         } catch (IllegalArgumentException | DateTimeException e) {
             throw new StateDecodeException("Malformed session entry: " + e.getMessage());
         }

@@ -6,7 +6,7 @@ import app.drydock.app.SessionOpenResult;
 import app.drydock.claude.ConversationCatalog;
 import app.drydock.claude.ConversationCatalog.Conversation;
 import app.drydock.claude.SessionActivityWatcher;
-import app.drydock.domain.ManagedClaudeSession;
+import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.Repository;
 import app.drydock.domain.SessionActivity;
@@ -527,7 +527,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         // the REAL session id: the launch persists the session almost
         // immediately, and a sidebar resume racing the launch must find
         // this pending tab instead of starting a second surface.
-        ManagedClaudeSession prepared = sessionManager.prepareSession(repository);
+        ManagedAgentSession prepared = sessionManager.prepareSession(repository);
         OpenSessionTab placeholderTab = showPendingTab(prepared.id(), "Starting...",
                 Optional.of(repository), repository.root());
 
@@ -593,7 +593,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                                        Optional<String> task, boolean branchCreatedHere) {
         // Keyed under the real session id for the same launch-race reason
         // as openNewSession.
-        ManagedClaudeSession prepared =
+        ManagedAgentSession prepared =
                 sessionManager.prepareWorktreeSession(repository, branch, worktreeRoot, branchCreatedHere);
         OpenSessionTab placeholderTab = showPendingTab(prepared.id(), branch,
                 Optional.of(repository), worktreeRoot);
@@ -614,7 +614,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * starting a second surface for it.
      */
     @Override
-    public void resumeSession(ManagedClaudeSession session) {
+    public void resumeSession(ManagedAgentSession session) {
         OpenSessionTab alreadyOpen = openTabs.containsKey(session.id())
                 ? openTabs.get(session.id()) : pendingTabs.get(session.id());
         if (alreadyOpen != null) {
@@ -641,7 +641,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * conversation's title.
      */
     public void resumeConversation(Repository repository, Conversation conversation) {
-        ManagedClaudeSession adopted = sessionManager.adoptConversation(
+        ManagedAgentSession adopted = sessionManager.adoptConversation(
                 repository, conversation.sessionId(), conversation.title());
         resumeSession(adopted);
     }
@@ -660,14 +660,14 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * scan is skipped entirely and the notice falls back to its
      * unqualified "Resumed session." form.</p>
      */
-    private void showResumeNotice(OpenSessionTab tab, ManagedClaudeSession session) {
+    private void showResumeNotice(OpenSessionTab tab, ManagedAgentSession session) {
         boolean remote = repositoryFor(session).map(Repository::isRemote).orElse(false);
         Thread.ofVirtual().start(() -> {
             int messageCount = 0;
             if (!remote) {
                 try {
                     messageCount = conversationCatalog.listConversations(session.workingDirectory()).stream()
-                            .filter(conversation -> session.claudeSessionId()
+                            .filter(conversation -> session.agentSessionId()
                                     .map(conversation.sessionId()::equals).orElse(false))
                             .mapToInt(Conversation::messageCount)
                             .findFirst()
@@ -691,7 +691,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         });
     }
 
-    private Optional<Repository> repositoryFor(ManagedClaudeSession session) {
+    private Optional<Repository> repositoryFor(ManagedAgentSession session) {
         return repositoryManager.repositories().stream()
                 .filter(repository -> repository.id().equals(session.repositoryId()))
                 .findFirst();
@@ -712,7 +712,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         }
     }
 
-    private void handleResumeResult(ManagedClaudeSession requested, OpenSessionTab placeholderTab,
+    private void handleResumeResult(ManagedAgentSession requested, OpenSessionTab placeholderTab,
                                      SessionOpenResult result, Throwable ex) {
         if (ex != null) {
             removeTab(placeholderTab);
@@ -753,7 +753,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * offer a fresh conversation under the same name, or deleting the
      * session -- never a dead terminal.
      */
-    private void promptForMissingConversation(ManagedClaudeSession session) {
+    private void promptForMissingConversation(ManagedAgentSession session) {
         ButtonType startFresh = new ButtonType("Start new conversation");
         ButtonType delete = new ButtonType("Delete session");
 
@@ -816,7 +816,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     }
 
     /** Plan section 11.2 / 20: a real, specific dialog for a session whose working directory vanished. */
-    private void promptForReplacementDirectory(ManagedClaudeSession missingSession) {
+    private void promptForReplacementDirectory(ManagedAgentSession missingSession) {
         Alert notice = new Alert(Alert.AlertType.WARNING);
         notice.setTitle("Working directory missing");
         notice.setHeaderText("The working directory for \"" + missingSession.displayName() + "\" no longer exists");
@@ -838,7 +838,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             return;
         }
 
-        ManagedClaudeSession updated = sessionManager.reassignWorkingDirectory(missingSession.id(), chosen.toPath());
+        ManagedAgentSession updated = sessionManager.reassignWorkingDirectory(missingSession.id(), chosen.toPath());
         publishSessions();
         resumeSession(updated);
     }
@@ -898,7 +898,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         Optional<String> live = sessionManager.sessions().stream()
                 .filter(session -> session.id().equals(sessionId))
                 .findFirst()
-                .flatMap(ManagedClaudeSession::claudeSessionId);
+                .flatMap(ManagedAgentSession::agentSessionId);
         return live.isPresent() ? live : Optional.ofNullable(knownClaudeIds.get(sessionId));
     }
 
@@ -965,7 +965,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
     /** Convenience for a rename UI trigger (context menu / ⌘R): prompts for the new name in a dialog. */
     @Override
-    public void promptRenameSession(ManagedClaudeSession session) {
+    public void promptRenameSession(ManagedAgentSession session) {
         TextInputDialog dialog = new TextInputDialog(session.displayName());
         dialog.setTitle("Rename session");
         dialog.setHeaderText("Rename \"" + session.displayName() + "\"");
@@ -1054,8 +1054,8 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         watcher.poll().thenAccept(byClaudeId -> Platform.runLater(() -> {
             activityPollInFlight = false;
             Map<ManagedSessionId, SessionActivity> byManagedId = new HashMap<>();
-            for (ManagedClaudeSession session : sessionManager.sessions()) {
-                session.claudeSessionId().ifPresent(claudeId -> {
+            for (ManagedAgentSession session : sessionManager.sessions()) {
+                session.agentSessionId().ifPresent(claudeId -> {
                     knownClaudeIds.put(session.id(), claudeId);
                     SessionActivity activity = byClaudeId.get(claudeId);
                     if (activity != null) {
@@ -1082,7 +1082,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         sessionManager.sessions().stream()
                 .filter(session -> session.id().equals(sessionId.get()))
                 .findFirst()
-                .flatMap(ManagedClaudeSession::claudeSessionId)
+                .flatMap(ManagedAgentSession::agentSessionId)
                 .ifPresent(watcher::acknowledge);
     }
 

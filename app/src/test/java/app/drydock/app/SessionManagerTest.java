@@ -1,11 +1,12 @@
 package app.drydock.app;
 
 import app.drydock.agent.api.AgentContext;
+import app.drydock.agent.api.AgentKind;
 import app.drydock.agent.api.AgentRegistry;
 import app.drydock.agent.providers.claude.ClaudeAgentProvider;
 import app.drydock.claude.ClaudeExecutableLocator;
 import app.drydock.domain.ApplicationState;
-import app.drydock.domain.ManagedClaudeSession;
+import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.PrState;
 import app.drydock.domain.RepositoryId;
@@ -88,15 +89,16 @@ class SessionManagerTest {
         return new SessionManager(stateRepository, registry, backgroundExecutor);
     }
 
-    private ManagedClaudeSession sessionWith(Path workingDirectory, Optional<String> claudeSessionId,
-                                              Optional<String> claudeSessionName) {
+    private ManagedAgentSession sessionWith(Path workingDirectory, Optional<String> agentSessionId,
+                                              Optional<String> agentSessionName) {
         Instant now = Instant.now();
-        return new ManagedClaudeSession(
+        return new ManagedAgentSession(
                 ManagedSessionId.newId(),
                 RepositoryId.newId(),
+                AgentKind.CLAUDE,
                 "example session",
-                claudeSessionId,
-                claudeSessionName,
+                agentSessionId,
+                agentSessionName,
                 workingDirectory,
                 Optional.empty(),
                 SessionStatus.INACTIVE,
@@ -112,11 +114,11 @@ class SessionManagerTest {
 
     @Test
     void loadNormalizesStaleRunningAndStartingSessionsToInactive() {
-        ManagedClaudeSession wasRunning = sessionWith(Path.of("/tmp"), Optional.empty(), Optional.empty())
+        ManagedAgentSession wasRunning = sessionWith(Path.of("/tmp"), Optional.empty(), Optional.empty())
                 .withStatus(SessionStatus.RUNNING);
-        ManagedClaudeSession wasStarting = sessionWith(Path.of("/tmp"), Optional.empty(), Optional.empty())
+        ManagedAgentSession wasStarting = sessionWith(Path.of("/tmp"), Optional.empty(), Optional.empty())
                 .withStatus(SessionStatus.STARTING);
-        ManagedClaudeSession wasExited = sessionWith(Path.of("/tmp"), Optional.empty(), Optional.empty())
+        ManagedAgentSession wasExited = sessionWith(Path.of("/tmp"), Optional.empty(), Optional.empty())
                 .withStatus(SessionStatus.EXITED);
 
         SessionManager manager = newManager(new InMemoryStateRepository(List.of(wasRunning, wasStarting, wasExited)));
@@ -145,7 +147,7 @@ class SessionManagerTest {
         Files.delete(deleted);
         assertTrue(Files.notExists(deleted));
 
-        ManagedClaudeSession session = sessionWith(deleted, Optional.empty(), Optional.empty());
+        ManagedAgentSession session = sessionWith(deleted, Optional.empty(), Optional.empty());
         InMemoryStateRepository stateRepository = new InMemoryStateRepository(List.of(session));
         SessionManager manager = newManager(stateRepository);
 
@@ -162,7 +164,7 @@ class SessionManagerTest {
 
     @Test
     void checkResumeBlockedIsEmptyWhenTheWorkingDirectoryExistsAndNoSessionIsActive(@TempDir Path tempDir) {
-        ManagedClaudeSession session = sessionWith(tempDir, Optional.empty(), Optional.empty());
+        ManagedAgentSession session = sessionWith(tempDir, Optional.empty(), Optional.empty());
         SessionManager manager = newManager(new InMemoryStateRepository(List.of(session)));
 
         Optional<SessionOpenResult> blocked = manager.checkResumeBlocked(session.id());
@@ -184,13 +186,13 @@ class SessionManagerTest {
         Path deleted = tempDir.resolve("gone2");
         Files.createDirectory(deleted);
         Files.delete(deleted);
-        ManagedClaudeSession session = sessionWith(deleted, Optional.empty(), Optional.empty())
+        ManagedAgentSession session = sessionWith(deleted, Optional.empty(), Optional.empty())
                 .withStatus(SessionStatus.MISSING_WORKING_DIRECTORY);
         InMemoryStateRepository stateRepository = new InMemoryStateRepository(List.of(session));
         SessionManager manager = newManager(stateRepository);
 
         Path replacement = Files.createDirectory(tempDir.resolve("replacement"));
-        ManagedClaudeSession updated = manager.reassignWorkingDirectory(session.id(), replacement);
+        ManagedAgentSession updated = manager.reassignWorkingDirectory(session.id(), replacement);
 
         assertEquals(replacement.toAbsolutePath().normalize(), updated.workingDirectory());
         assertEquals(SessionStatus.INACTIVE, updated.status());
@@ -201,11 +203,11 @@ class SessionManagerTest {
 
     @Test
     void renameSessionUpdatesAndPersistsTheDisplayName(@TempDir Path tempDir) {
-        ManagedClaudeSession session = sessionWith(tempDir, Optional.empty(), Optional.empty());
+        ManagedAgentSession session = sessionWith(tempDir, Optional.empty(), Optional.empty());
         InMemoryStateRepository stateRepository = new InMemoryStateRepository(List.of(session));
         SessionManager manager = newManager(stateRepository);
 
-        ManagedClaudeSession renamed = manager.renameSession(session.id(), "new name");
+        ManagedAgentSession renamed = manager.renameSession(session.id(), "new name");
 
         assertEquals("new name", renamed.displayName());
         flushState(stateRepository);
@@ -214,11 +216,11 @@ class SessionManagerTest {
 
     @Test
     void updatePrStateUpdatesAndPersistsStateAndNumber(@TempDir Path tempDir) {
-        ManagedClaudeSession session = sessionWith(tempDir, Optional.empty(), Optional.empty());
+        ManagedAgentSession session = sessionWith(tempDir, Optional.empty(), Optional.empty());
         InMemoryStateRepository stateRepository = new InMemoryStateRepository(List.of(session));
         SessionManager manager = newManager(stateRepository);
 
-        ManagedClaudeSession updated = manager.updatePrState(session.id(), PrState.OPEN, Optional.of(129));
+        ManagedAgentSession updated = manager.updatePrState(session.id(), PrState.OPEN, Optional.of(129));
 
         assertEquals(PrState.OPEN, updated.prState());
         assertEquals(129, updated.prNumber().orElseThrow());
@@ -232,7 +234,7 @@ class SessionManagerTest {
         private volatile ApplicationState state;
         private final List<ApplicationState> saves = new ArrayList<>();
 
-        InMemoryStateRepository(List<ManagedClaudeSession> sessions) {
+        InMemoryStateRepository(List<ManagedAgentSession> sessions) {
             state = ApplicationState.empty().withSessions(sessions);
         }
 

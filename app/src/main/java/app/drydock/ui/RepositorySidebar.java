@@ -4,7 +4,7 @@ import app.drydock.app.ExternalEditorLauncher;
 import app.drydock.app.FinderLauncher;
 import app.drydock.app.RepositoryManager;
 import app.drydock.app.SessionManager;
-import app.drydock.domain.ManagedClaudeSession;
+import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.PrState;
 import app.drydock.domain.Repository;
@@ -137,7 +137,7 @@ public final class RepositorySidebar extends VBox {
      * came from worktree discovery or repo removal -- which never used to
      * trigger a status re-fetch either.
      */
-    private List<ManagedClaudeSession> statusRefreshedFor = List.of();
+    private List<ManagedAgentSession> statusRefreshedFor = List.of();
 
     /**
      * Coalesces async-completion rebuilds: N git-status/worktree results
@@ -164,7 +164,7 @@ public final class RepositorySidebar extends VBox {
     /** Tree node payload: a repository row, a session row, or an unopened (discovered) worktree row. */
     sealed interface SidebarNode {
         record RepoNode(Repository repository) implements SidebarNode { }
-        record SessionNode(ManagedClaudeSession session, Repository repository) implements SidebarNode { }
+        record SessionNode(ManagedAgentSession session, Repository repository) implements SidebarNode { }
         record UnopenedWorktreeNode(WorktreeService.Worktree worktree, Repository repository)
                 implements SidebarNode { }
     }
@@ -431,7 +431,7 @@ public final class RepositorySidebar extends VBox {
      */
     private void updateFooter() {
         int runningTotal = 0;
-        for (ManagedClaudeSession session : viewModel.sessions()) {
+        for (ManagedAgentSession session : viewModel.sessions()) {
             if (session.status() == SessionStatus.RUNNING || session.status() == SessionStatus.STARTING) {
                 runningTotal++;
             }
@@ -509,7 +509,7 @@ public final class RepositorySidebar extends VBox {
     /** Drops cached menus/tooltips whose row no longer exists (deleted sessions, removed repos/worktrees). */
     private void pruneRowCaches() {
         Set<ManagedSessionId> sessionIds = new HashSet<>();
-        for (ManagedClaudeSession session : viewModel.sessions()) {
+        for (ManagedAgentSession session : viewModel.sessions()) {
             sessionIds.add(session.id());
         }
         sessionMenus.keySet().retainAll(sessionIds);
@@ -626,7 +626,7 @@ public final class RepositorySidebar extends VBox {
      * outside the app; kept visible so it can still be cleaned up).
      */
     private List<SidebarNode> childNodesFor(Repository repository) {
-        List<ManagedClaudeSession> sessions = sessionsFor(repository);
+        List<ManagedAgentSession> sessions = sessionsFor(repository);
         List<WorktreeService.Worktree> worktrees = viewModel.worktrees(repository.id()).orElse(null);
         if (worktrees == null) {
             // Discovery hasn't run yet for this repo: kick it off and show
@@ -638,22 +638,22 @@ public final class RepositorySidebar extends VBox {
         }
 
         List<SidebarNode> children = new ArrayList<>();
-        Set<ManagedClaudeSession> placed = new LinkedHashSet<>();
+        Set<ManagedAgentSession> placed = new LinkedHashSet<>();
         for (WorktreeService.Worktree worktree : worktrees) {
             if (worktree.mainCheckout()) {
-                List<ManagedClaudeSession> mainSessions = sessions.stream()
+                List<ManagedAgentSession> mainSessions = sessions.stream()
                         .filter(session -> session.worktreeRoot().isEmpty())
                         .toList();
                 if (mainSessions.isEmpty()) {
                     children.add(new SidebarNode.UnopenedWorktreeNode(worktree, repository));
                 } else {
-                    for (ManagedClaudeSession session : mainSessions) {
+                    for (ManagedAgentSession session : mainSessions) {
                         children.add(new SidebarNode.SessionNode(session, repository));
                         placed.add(session);
                     }
                 }
             } else {
-                Optional<ManagedClaudeSession> match = sessions.stream()
+                Optional<ManagedAgentSession> match = sessions.stream()
                         .filter(session -> session.worktreeRoot()
                                 .map(root -> root.equals(worktree.path()))
                                 .orElse(false))
@@ -666,7 +666,7 @@ public final class RepositorySidebar extends VBox {
                 }
             }
         }
-        for (ManagedClaudeSession session : sessions) {
+        for (ManagedAgentSession session : sessions) {
             if (!placed.contains(session) && session.worktreeRoot().isPresent()) {
                 children.add(new SidebarNode.SessionNode(session, repository));
             }
@@ -714,10 +714,10 @@ public final class RepositorySidebar extends VBox {
         };
     }
 
-    private List<ManagedClaudeSession> sessionsFor(Repository repository) {
+    private List<ManagedAgentSession> sessionsFor(Repository repository) {
         return viewModel.sessions().stream()
                 .filter(session -> session.repositoryId().equals(repository.id()))
-                .sorted(Comparator.comparing(ManagedClaudeSession::displayName, String.CASE_INSENSITIVE_ORDER))
+                .sorted(Comparator.comparing(ManagedAgentSession::displayName, String.CASE_INSENSITIVE_ORDER))
                 .toList();
     }
 
@@ -866,7 +866,7 @@ public final class RepositorySidebar extends VBox {
 
     /** Fetches per-worktree status for every worktree session (branch tag + dirty dot per worktree checkout). */
     private void refreshWorktreeStatuses() {
-        for (ManagedClaudeSession session : viewModel.sessions()) {
+        for (ManagedAgentSession session : viewModel.sessions()) {
             session.worktreeRoot().ifPresent(this::refreshWorktreeStatus);
         }
     }
@@ -944,7 +944,7 @@ public final class RepositorySidebar extends VBox {
         });
     }
 
-    private void onDeleteSession(ManagedClaudeSession session) {
+    private void onDeleteSession(ManagedAgentSession session) {
         Alert confirm = new Alert(AlertType.CONFIRMATION);
         confirm.setTitle("Delete session");
         confirm.setHeaderText("Delete session \"" + session.displayName() + "\"?");
@@ -1058,7 +1058,7 @@ public final class RepositorySidebar extends VBox {
                         "ahead/behind is as of the last fetch on " + repository.remote().host()));
             }
 
-            List<ManagedClaudeSession> sessions = sessionsFor(repository);
+            List<ManagedAgentSession> sessions = sessionsFor(repository);
             boolean anyRunning = sessions.stream().anyMatch(s -> SessionStatusStyles.isRunning(s.status()));
             HBox branchRow = new HBox(6, branch);
             branchRow.setAlignment(Pos.CENTER_LEFT);
@@ -1142,7 +1142,7 @@ public final class RepositorySidebar extends VBox {
             return meta.toString();
         }
 
-        private HBox buildSessionRow(ManagedClaudeSession session, Repository repository) {
+        private HBox buildSessionRow(ManagedAgentSession session, Repository repository) {
             Region dot = SessionStatusStyles.createDot(8, session.status());
 
             Label name = new Label(session.displayName());
@@ -1315,7 +1315,7 @@ public final class RepositorySidebar extends VBox {
     // ---- Cached per-row context menus ---------------------------------------
 
     /** Applies {@code action} to the CURRENT version of the session, resolved through the model. */
-    private void withLiveSession(ManagedSessionId sessionId, Consumer<ManagedClaudeSession> action) {
+    private void withLiveSession(ManagedSessionId sessionId, Consumer<ManagedAgentSession> action) {
         viewModel.sessionById(sessionId).ifPresent(action);
     }
 

@@ -1,6 +1,6 @@
 package app.drydock.ui.model;
 
-import app.drydock.domain.ManagedClaudeSession;
+import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionActivity;
@@ -63,7 +63,7 @@ public final class WorkspaceViewModel {
 
     private final List<Listener> listeners = new CopyOnWriteArrayList<>();
 
-    private List<ManagedClaudeSession> sessions = List.of();
+    private List<ManagedAgentSession> sessions = List.of();
     private final Map<RepositoryId, GitStatus> repoStatuses = new HashMap<>();
     private final Map<RepositoryId, Throwable> repoStatusFailures = new HashMap<>();
     private final Map<Path, GitStatus> worktreeStatuses = new HashMap<>();
@@ -82,12 +82,12 @@ public final class WorkspaceViewModel {
     // ---- Sessions -----------------------------------------------------------
 
     /** The current session snapshot (immutable). */
-    public List<ManagedClaudeSession> sessions() {
+    public List<ManagedAgentSession> sessions() {
         return sessions;
     }
 
     /** The current version of one session, resolved by id (for cached menus/handlers that must not go stale). */
-    public Optional<ManagedClaudeSession> sessionById(ManagedSessionId sessionId) {
+    public Optional<ManagedAgentSession> sessionById(ManagedSessionId sessionId) {
         return sessions.stream().filter(session -> session.id().equals(sessionId)).findFirst();
     }
 
@@ -100,9 +100,9 @@ public final class WorkspaceViewModel {
      * repository (the repo header aggregates its sessions' status/count).
      * Emits nothing when the snapshot is identical.
      */
-    public void setSessions(List<ManagedClaudeSession> newSessions) {
-        List<ManagedClaudeSession> updated = List.copyOf(newSessions);
-        List<ManagedClaudeSession> previous = sessions;
+    public void setSessions(List<ManagedAgentSession> newSessions) {
+        List<ManagedAgentSession> updated = List.copyOf(newSessions);
+        List<ManagedAgentSession> previous = sessions;
         if (previous.equals(updated)) {
             return;
         }
@@ -134,14 +134,14 @@ public final class WorkspaceViewModel {
      * structural too because the sidebar SORTS sibling session rows by it,
      * so a rename can reorder rows.
      */
-    private static boolean isRowLevelChange(List<ManagedClaudeSession> previous,
-                                            List<ManagedClaudeSession> updated) {
+    private static boolean isRowLevelChange(List<ManagedAgentSession> previous,
+                                            List<ManagedAgentSession> updated) {
         if (previous.size() != updated.size()) {
             return false;
         }
         for (int i = 0; i < updated.size(); i++) {
-            ManagedClaudeSession before = previous.get(i);
-            ManagedClaudeSession after = updated.get(i);
+            ManagedAgentSession before = previous.get(i);
+            ManagedAgentSession after = updated.get(i);
             if (!before.id().equals(after.id())
                     || !before.repositoryId().equals(after.repositoryId())
                     || !before.worktreeRoot().equals(after.worktreeRoot())

@@ -9,7 +9,7 @@ import java.util.Objects;
  * session) produces a new {@code ApplicationState} via {@link
  * #withRepositories} / {@link #withUi} / {@link #withSessions}.
  *
- * <p>{@code sessions} holds only the persisted {@link ManagedClaudeSession}
+ * <p>{@code sessions} holds only the persisted {@link ManagedAgentSession}
  * metadata (plan section 10.2). It deliberately does not yet include any
  * open-tab/UI-open-state tracking -- that belongs to {@link WorkspaceUiState}
  * in a later milestone step, once the terminal-tab UI itself exists (plan
@@ -18,7 +18,7 @@ import java.util.Objects;
  */
 public record ApplicationState(
         List<Repository> repositories,
-        List<ManagedClaudeSession> sessions,
+        List<ManagedAgentSession> sessions,
         WorkspaceUiState ui
 ) {
 
@@ -36,7 +36,7 @@ public record ApplicationState(
         return new ApplicationState(newRepositories, sessions, ui);
     }
 
-    public ApplicationState withSessions(List<ManagedClaudeSession> newSessions) {
+    public ApplicationState withSessions(List<ManagedAgentSession> newSessions) {
         return new ApplicationState(repositories, newSessions, ui);
     }
 

@@ -4,7 +4,7 @@ import java.util.Objects;
 import java.util.UUID;
 
 /**
- * Identity of a {@link ManagedClaudeSession}, mirroring {@link RepositoryId}.
+ * Identity of a {@link ManagedAgentSession}, mirroring {@link RepositoryId}.
  *
  * <p>This is the <em>application</em>-assigned session identifier. It is
  * deliberately distinct from a Claude-Code-assigned session ID/name and from
