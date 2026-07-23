@@ -181,13 +181,21 @@ The icon PNG is therefore bundled as a jar resource (e.g. a 1024×1024
 or throws `UnsupportedOperationException` on platforms without the feature —
 guard it so a non-macOS run (which is already unsupported) degrades cleanly.
 
-**New artwork.** The current `assets/app-icon.icns` is Claude-branded (terracotta
-fill + white CLI-prompt chevron). It is being **replaced** with a drydock-themed
-mark on a non-terracotta palette. The new source art regenerates *both*
-`assets/app-icon.icns` (used by `appImage`/`launcher.sh`) and the bundled
-`icon/drydock.png` (used by the jbang path), so the two launchers stay visually
-identical. The artwork direction is decided separately; the mechanism above is
-agnostic to which mark wins.
+**New artwork — chosen direction: "Bot in dock".** The current
+`assets/app-icon.icns` is Claude-branded (terracotta fill + white CLI-prompt
+chevron). It is **replaced** with a drydock-themed mark: a friendly **agent
+(bot) cradled on keel blocks in a dry dock** — face with glowing teal eyes and a
+signal spark, beside the caisson, on the dock floor. The metaphor is exact:
+Drydock is where you dock your `claude` **agents** for service, so the vessel
+under repair is an agent, not a ship. Palette (deliberately off Claude
+terracotta): deep navy ground `#173347`→`#0A1721`, bone `#EDE7DA` bot, teal
+`#17A2A2` eyes/spark, brass `#E0A23C` keel blocks.
+
+The refined source art regenerates *both* `assets/app-icon.icns` (used by
+`appImage` / `launcher.sh`) and the bundled `icon/drydock.png` (used by the jbang
+path), so both launchers look identical. First-pass vectors were reviewed
+(artifact, 2026-07-23); the plan covers refining the spark, weighting, and
+small-size (32 px) hinting, then producing the multi-resolution iconset.
 
 ## 7. Known limitations (explicit, by design)
 
