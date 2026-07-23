@@ -38,6 +38,15 @@ public interface AgentProvider {
 
     AgentCapabilities probeCapabilities();
 
+    /**
+     * Whether this integration supports SSH-remote sessions. This is a static
+     * fact about the integration (not something detected from the CLI), so
+     * implementations MUST make this CHEAP and non-blocking: no process
+     * spawns, no filesystem or network I/O. Safe to call on the JavaFX
+     * Application Thread.
+     */
+    boolean supportsRemote();
+
     List<String> envScrubList();
 
     LaunchPlan buildCreateCommand(CreateContext c);

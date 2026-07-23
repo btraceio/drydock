@@ -14,11 +14,13 @@ import java.util.ServiceLoader;
 /**
  * Discovers {@link AgentProvider}s (via {@link ServiceLoader}), inits each with
  * the shared {@link AgentContext}, caches availability and remote-capability
- * once, and resolves the default agent for a new session. Both are computed
- * off the FX thread by the caller of {@link #create} (construction probes
- * {@code locateExecutable} and {@code probeCapabilities}, either of which may
- * block); every other reader (e.g. the UI building a picker) only ever reads
- * the cached maps, so it never needs to probe -- and never blocks the FX
+ * once, and resolves the default agent for a new session. Availability is
+ * computed off the FX thread by the caller of {@link #create} (construction
+ * probes {@code locateExecutable}, which may block on filesystem I/O);
+ * remote-capability comes from {@link AgentProvider#supportsRemote()}, which
+ * is cheap and non-blocking by contract, so it imposes no such requirement.
+ * Every other reader (e.g. the UI building a picker) only ever reads the
+ * cached maps, so it never needs to probe -- and never blocks the FX
  * thread -- to know whether an agent is available or remote-capable.
  */
 public final class AgentRegistry {
@@ -57,9 +59,9 @@ public final class AgentRegistry {
             availability.put(provider.kind(), available);
             boolean remote;
             try {
-                remote = provider.probeCapabilities().supportsRemote();
+                remote = provider.supportsRemote();
             } catch (RuntimeException e) {
-                LOG.log(Level.WARNING, () -> "Capability probe failed for " + provider.kind() + ": " + e);
+                LOG.log(Level.WARNING, () -> "Remote-capability check failed for " + provider.kind() + ": " + e);
                 remote = false;
             }
             remoteCapability.put(provider.kind(), remote);
@@ -95,7 +97,7 @@ public final class AgentRegistry {
 
     /**
      * Whether {@code kind}'s provider reports remote-session support, per
-     * {@link app.drydock.agent.spi.AgentProvider#probeCapabilities()}. Cached
+     * {@link app.drydock.agent.spi.AgentProvider#supportsRemote()}. Cached
      * at construction time (alongside {@link #isAvailable}) so callers never
      * need to re-probe -- and, in particular, so the UI can read this
      * synchronously off the FX thread without triggering a process spawn.

@@ -30,6 +30,7 @@ class FakeAgentProviderTest {
         @Override public Optional<Path> locateExecutable() { return Optional.of(Path.of("/bin/true")); }
         @Override public String describeSearched() { return "PATH"; }
         @Override public AgentCapabilities probeCapabilities() { return new AgentCapabilities(true, true, "1.0"); }
+        @Override public boolean supportsRemote() { return true; }
         @Override public List<String> envScrubList() { return List.of("FAKE_VAR"); }
         @Override public LaunchPlan buildCreateCommand(CreateContext c) { return LaunchPlan.of("fake " + c.sessionId(), true); }
         @Override public LaunchPlan buildResumeCommand(ResumeContext r) { return LaunchPlan.of("fake --resume", false); }

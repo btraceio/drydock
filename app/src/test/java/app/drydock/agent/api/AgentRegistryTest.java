@@ -35,6 +35,7 @@ class AgentRegistryTest {
         }
         @Override public String describeSearched() { return "PATH"; }
         @Override public AgentCapabilities probeCapabilities() { return new AgentCapabilities(remoteCapable, true, "1"); }
+        @Override public boolean supportsRemote() { return remoteCapable; }
         @Override public List<String> envScrubList() { return List.of(); }
         @Override public LaunchPlan buildCreateCommand(CreateContext c) { return LaunchPlan.of("x", false); }
         @Override public LaunchPlan buildResumeCommand(ResumeContext r) { return LaunchPlan.of("x", false); }
@@ -91,7 +92,7 @@ class AgentRegistryTest {
                 List.of(new ClaudeAgentProvider(new ClaudeExecutableLocator())), ctx());
         // Claude supports remote; the helper returns it for a remote repo.
         assertTrue(registry.agents().stream()
-                .filter(a -> registry.provider(a.kind()).get().probeCapabilities().supportsRemote())
+                .filter(a -> registry.supportsRemote(a.kind()))
                 .map(Agent::kind).toList().contains(AgentKind.CLAUDE));
     }
 
