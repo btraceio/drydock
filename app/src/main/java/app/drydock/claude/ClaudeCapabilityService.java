@@ -82,7 +82,7 @@ public final class ClaudeCapabilityService implements AutoCloseable {
      * {@code CompletionException}. Must never be called from the JavaFX
      * application thread.
      */
-    ClaudeCapabilities detectCapabilitiesBlocking() {
+    public ClaudeCapabilities detectCapabilitiesBlocking() {
         Path claude = locator.locate()
                 .orElseThrow(() -> new ClaudeExecutableNotFoundException(locator.describeSearched()));
 
