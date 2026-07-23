@@ -130,3 +130,26 @@ Drydock manages agentic CLIs behind an SPI. To add one (reference impl:
    `ActivityReporter` (the Codex spike is the worked example).
 6. Add provider unit tests + a registry availability/default case, and slot
    the agent into `AgentKind.preferenceOrder()`.
+
+## Git worktrees & submodules
+
+`third_party/ghostty` is a git **submodule**, and submodule *working trees are
+per-worktree* even though the clone (`.git/modules/...`) is shared. A worktree
+created with `git worktree add` starts with an **empty** `third_party/ghostty`
+until you run, inside that worktree:
+
+```
+git submodule update --init third_party/ghostty   # or: --init --recursive
+```
+
+An empty `third_party/ghostty` (0 entries, gitlink shown as `-<sha>` by
+`git submodule status`) means "not checked out in this worktree", **not**
+"wiped" — the content is still in the shared module store and in your other
+worktrees. Re-init; don't re-clone the repo. The native build (`buildGhosttyNative`,
+and therefore `run`/`runtimeImage`) reads this working tree, so it fails with a
+confusing error when the submodule is uninitialized.
+
+Zig is separate: the build needs **0.15.x** (not the newer `zig` that may be on
+`PATH`). If your default `zig` is 0.16+, point the build at the pinned one via
+`ZIG_BIN` (e.g. `ZIG_BIN=/usr/local/opt/zig@0.15/bin/zig ./gradlew run`); a
+`brew install zig@0.15` lives at that path.
