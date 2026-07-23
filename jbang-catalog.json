@@ -1,0 +1,17 @@
+{
+  "aliases": {
+    "drydock": {
+      "script-ref": "io.btraceio:drydock:0.1.0",
+      "description": "Drydock — manage local Git repos and claude CLI sessions (macOS, arm64/x86_64).",
+      "java-version": "26",
+      "main": "app.drydock.launcher.JBangBootstrap",
+      "runtime-options": [
+        "--enable-native-access=ALL-UNNAMED",
+        "--add-exports=javafx.graphics/com.sun.glass.ui=ALL-UNNAMED",
+        "-Dfile.encoding=UTF-8",
+        "-Djava.awt.headless=false",
+        "-Xdock:name=Drydock"
+      ]
+    }
+  }
+}

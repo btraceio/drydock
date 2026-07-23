@@ -12,6 +12,7 @@ import app.drydock.git.GhCliService;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.WorktreeService;
 import app.drydock.github.GitHubService;
+import app.drydock.launcher.DockIcon;
 import app.drydock.review.AnnotationStore;
 import app.drydock.search.SessionSearchService;
 import app.drydock.state.JsonApplicationStateRepository;
@@ -145,6 +146,11 @@ public final class DrydockApplication extends Application {
     }
 
     private void startOnFxThread(Stage primaryStage) {
+        // Set the macOS dock icon here (on the FX thread, toolkit already up)
+        // rather than in the jbang bootstrap -- doing AWT/Taskbar work before
+        // Glass initializes risks an NSApplication main-thread conflict.
+        DockIcon.applyDockIcon();
+
         // Diagnostic override (see the app.drydock.diag.* section in
         // app/build.gradle.kts): lets automated visual verification run
         // against a throwaway state file instead of the user's real

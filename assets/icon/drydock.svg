@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="gDock" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#173347"/><stop offset="1" stop-color="#0A1721"/>
+    </linearGradient>
+    <radialGradient id="gloss" cx="0.3" cy="0.12" r="0.9">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.16"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="228" fill="url(#gDock)"/>
+  <rect width="1024" height="1024" rx="228" fill="url(#gloss)"/>
+  <!-- caisson water hint -->
+  <rect x="800" y="300" width="126" height="470" rx="10" fill="#17A2A2" opacity="0.26"/>
+  <g fill="none" stroke="#17A2A2" stroke-width="14" stroke-linecap="round" opacity="0.65">
+    <line x1="820" y1="404" x2="906" y2="404"/><line x1="820" y1="474" x2="906" y2="474"/>
+    <line x1="820" y1="544" x2="906" y2="544"/>
+  </g>
+  <!-- antenna + agent spark -->
+  <line x1="512" y1="352" x2="512" y2="300" stroke="#EDE7DA" stroke-width="18" stroke-linecap="round"/>
+  <path d="M 512 250 C 520 284 528 292 562 300 C 528 308 520 316 512 350
+           C 504 316 496 308 462 300 C 496 292 504 284 512 250 Z" fill="#17A2A2"/>
+  <!-- head / body -->
+  <rect x="318" y="352" width="388" height="276" rx="60" fill="#EDE7DA"/>
+  <!-- eyes -->
+  <circle cx="446" cy="472" r="40" fill="#123040"/>
+  <circle cx="578" cy="472" r="40" fill="#123040"/>
+  <circle cx="460" cy="460" r="12" fill="#17A2A2"/>
+  <circle cx="592" cy="460" r="12" fill="#17A2A2"/>
+  <!-- smile -->
+  <path d="M 452 552 Q 512 586 572 552" fill="none" stroke="#123040" stroke-width="16" stroke-linecap="round"/>
+  <!-- keel blocks -->
+  <g fill="#E0A23C">
+    <rect x="316" y="628" width="48" height="52" rx="6"/><rect x="436" y="628" width="48" height="52" rx="6"/>
+    <rect x="556" y="628" width="48" height="52" rx="6"/><rect x="660" y="628" width="48" height="52" rx="6"/>
+  </g>
+  <!-- dock floor -->
+  <rect x="180" y="690" width="664" height="12" rx="6" fill="#F2F6F4" opacity="0.85"/>
+</svg>
