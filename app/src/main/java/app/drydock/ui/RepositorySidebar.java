@@ -35,6 +35,7 @@ import javafx.scene.control.ContextMenu;
 import javafx.scene.control.Label;
 import javafx.scene.control.MenuButton;
 import javafx.scene.control.MenuItem;
+import javafx.scene.control.OverrunStyle;
 import javafx.scene.control.SeparatorMenuItem;
 import javafx.scene.control.TextField;
 import javafx.scene.control.Tooltip;
@@ -46,6 +47,7 @@ import javafx.scene.input.MouseButton;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
+import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
 import javafx.stage.DirectoryChooser;
 import javafx.stage.Window;
@@ -1092,8 +1094,14 @@ public final class RepositorySidebar extends VBox {
             Label name = new Label(repository.displayName());
             name.getStyleClass().add("repo-name");
 
-            Label branch = new Label(repoMetaText(repository));
+            // When a transient rescan note is present it owns the whole line
+            // (branch text = note, no counts).
+            String note = rescanNotes.get(repository.id());
+            Label branch = new Label(note != null ? note : "⎇ " + branchTextFor(repository));
             branch.getStyleClass().add("repo-branch");
+            branch.setTextOverrun(OverrunStyle.LEADING_ELLIPSIS);
+            HBox.setHgrow(branch, Priority.ALWAYS);
+            branch.setMaxWidth(Double.MAX_VALUE);
             Throwable failure = viewModel.repoStatusFailure(repository.id()).orElse(null);
             if (failure != null) {
                 branch.setTooltip(new Tooltip(String.valueOf(failure.getMessage())));
@@ -1102,9 +1110,13 @@ public final class RepositorySidebar extends VBox {
                         "ahead/behind is as of the last fetch on " + repository.remote().host()));
             }
 
+            Label counts = new Label(repoCountsText(repository));
+            counts.getStyleClass().add("repo-count-meta");
+            counts.setMinWidth(Region.USE_PREF_SIZE);
+
             List<ManagedClaudeSession> sessions = sessionsFor(repository);
             boolean anyRunning = sessions.stream().anyMatch(s -> SessionStatusStyles.isRunning(s.status()));
-            HBox branchRow = new HBox(6, branch);
+            HBox branchRow = new HBox(6, branch, counts);
             branchRow.setAlignment(Pos.CENTER_LEFT);
             if (anyRunning) {
                 branchRow.getChildren().add(SessionStatusStyles.createDot(5, SessionStatus.RUNNING));
@@ -1165,25 +1177,27 @@ public final class RepositorySidebar extends VBox {
             return row;
         }
 
-        /** Repo meta line: {@code ⎇ <base> · <n> worktrees · <m> unopened} once discovery has run. */
-        private String repoMetaText(Repository repository) {
-            String note = rescanNotes.get(repository.id());
-            if (note != null) {
-                return note;
+        /** Just the counts fragment: {@code · 3 wt · 1 stale}, or "" before discovery / when a note is showing. */
+        private String repoCountsText(Repository repository) {
+            if (rescanNotes.get(repository.id()) != null) {
+                return "";
             }
-            StringBuilder meta = new StringBuilder("⎇ ").append(branchTextFor(repository));
             SidebarChildren classified = childrenOf(repository);
-            if (classified != null) {
-                meta.append(" · ").append(classified.worktreeCount()).append(" wt");
-                if (classified.staleCount() > 0) {
-                    meta.append(" · ").append(classified.staleCount()).append(" stale");
-                }
+            if (classified == null) {
+                return "";
             }
-            return meta.toString();
+            StringBuilder counts = new StringBuilder(" · ").append(classified.worktreeCount()).append(" wt");
+            if (classified.staleCount() > 0) {
+                counts.append(" · ").append(classified.staleCount()).append(" stale");
+            }
+            return counts.toString();
         }
 
         private HBox buildSessionRow(ManagedClaudeSession session, Repository repository) {
-            Region dot = SessionStatusStyles.createDot(8, session.status());
+            boolean live = SessionStatusStyles.isRunning(session.status());
+            Region dot = SessionStatusStyles.createDot(8, session.status(), live);
+            StackPane statusCol = new StackPane(dot);
+            statusCol.getStyleClass().add("child-row-status");
 
             Label name = new Label(session.displayName());
             name.getStyleClass().add("session-name");
@@ -1231,7 +1245,7 @@ public final class RepositorySidebar extends VBox {
             actions.setAlignment(Pos.CENTER_RIGHT);
             actions.visibleProperty().bind(hoverProperty());
 
-            HBox row = new HBox(8, dot, text, actions);
+            HBox row = new HBox(8, statusCol, text, actions);
             if (prChip != null) {
                 row.getChildren().add(row.getChildren().indexOf(actions), prChip);
             }
@@ -1251,9 +1265,8 @@ public final class RepositorySidebar extends VBox {
                 resumePill.getStyleClass().add("resume-pill");
                 row.getChildren().add(row.getChildren().indexOf(actions), resumePill);
             }
-            row.getStyleClass().add("session-row");
+            row.getStyleClass().addAll("session-row", "child-row");
             row.setAlignment(Pos.CENTER_LEFT);
-            row.setPadding(new Insets(5, 8, 5, 16));
             if (viewModel.activeSession().filter(session.id()::equals).isPresent()) {
                 row.getStyleClass().add("active");
             }
@@ -1294,6 +1307,8 @@ public final class RepositorySidebar extends VBox {
         private HBox buildUnopenedRow(WorktreeService.Worktree worktree, Repository repository) {
             Label icon = new Label(worktree.mainCheckout() ? "⎇" : "◫");
             icon.getStyleClass().add("worktree-unopened-icon");
+            StackPane statusCol = new StackPane(icon);
+            statusCol.getStyleClass().add("child-row-status");
 
             String branch = worktree.branch().orElse(worktree.detached() ? "(detached)" : "(no branch)");
             Label name = new Label(branch);
@@ -1314,19 +1329,18 @@ public final class RepositorySidebar extends VBox {
                 }
             });
 
-            HBox row = new HBox(8, icon, text, startPill);
+            HBox row = new HBox(8, statusCol, text, startPill);
             if (!worktree.mainCheckout()) {
                 Button delete = quickAction("🗑", "Delete worktree & branch", true,
                         () -> onDeleteUnopenedWorktree(repository, worktree));
                 delete.getStyleClass().add("worktree-delete-button");
                 row.getChildren().add(delete);
             }
-            row.getStyleClass().add("worktree-unopened-row");
+            row.getStyleClass().addAll("worktree-unopened-row", "child-row");
             if (recentlyDiscovered.contains(worktree.path())) {
                 row.getStyleClass().add("worktree-discovered");
             }
             row.setAlignment(Pos.CENTER_LEFT);
-            row.setPadding(new Insets(5, 8, 5, 16));
             Tooltip.install(row, unopenedTooltips.computeIfAbsent(worktree.path(),
                     path -> new Tooltip("Discovered via git worktree list\n" + path)));
             row.setOnMouseClicked(event -> {
@@ -1349,6 +1363,8 @@ public final class RepositorySidebar extends VBox {
 
             Label caret = new Label(expanded ? "▾" : "▸");
             caret.getStyleClass().add("repo-caret");
+            StackPane statusCol = new StackPane(caret);
+            statusCol.getStyleClass().add("child-row-status");
             Label label = new Label(worktrees.size() + (worktrees.size() == 1
                     ? " stale worktree" : " stale worktrees"));
             label.getStyleClass().add("stale-summary");
@@ -1359,10 +1375,9 @@ public final class RepositorySidebar extends VBox {
             clean.setFocusTraversable(false);
             clean.setOnAction(e -> cleanStaleWorktrees(repository, worktrees));
 
-            HBox summary = new HBox(7, caret, label, clean);
-            summary.getStyleClass().add("stale-summary-row");
+            HBox summary = new HBox(7, statusCol, label, clean);
+            summary.getStyleClass().addAll("stale-summary-row", "child-row");
             summary.setAlignment(Pos.CENTER_LEFT);
-            summary.setPadding(new Insets(5, 8, 5, 16));
             summary.setOnMouseClicked(event -> {
                 if (event.getButton() == MouseButton.PRIMARY) {
                     if (expanded) {
