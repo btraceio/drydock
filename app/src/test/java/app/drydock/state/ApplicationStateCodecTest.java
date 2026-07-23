@@ -175,6 +175,48 @@ class ApplicationStateCodecTest {
     }
 
     @Test
+    void missingAgentKindDecodesAsClaude() {
+        // Build a session JSON WITHOUT agentKind (pre-migration shape) and decode it.
+        String json = """
+                {"schemaVersion":2,"repositories":[],"sessions":[
+                  {"id":"22222222-3333-4444-5555-666666666666","repositoryId":"%s","displayName":"Session 1",
+                   "claudeSessionId":"abc","workingDirectory":"/tmp",
+                   "status":"INACTIVE","createdAt":"2020-01-01T00:00:00Z","lastOpenedAt":"2020-01-01T00:00:00Z",
+                   "prState":"NONE","branchCreatedHere":true}]}""".formatted(REPO_ID);
+        ApplicationState state = ApplicationStateCodec.fromJson(JsonParser.parse(json));
+        ManagedAgentSession session = state.sessions().get(0);
+        assertEquals(AgentKind.CLAUDE, session.agentKind());
+        assertEquals(Optional.of("abc"), session.agentSessionId()); // legacy field name still read
+    }
+
+    @Test
+    void unknownAgentKindIsRetainedAsUnsupported() {
+        String json = """
+                {"schemaVersion":2,"repositories":[],"sessions":[
+                  {"id":"22222222-3333-4444-5555-666666666666","repositoryId":"%s","agentKind":"gemini","displayName":"Session 1",
+                   "workingDirectory":"/tmp","status":"INACTIVE",
+                   "createdAt":"2020-01-01T00:00:00Z","lastOpenedAt":"2020-01-01T00:00:00Z",
+                   "prState":"NONE","branchCreatedHere":true}]}""".formatted(REPO_ID);
+        ApplicationState state = ApplicationStateCodec.fromJson(JsonParser.parse(json));
+        ManagedAgentSession session = state.sessions().get(0);
+        assertEquals(SessionStatus.UNSUPPORTED_AGENT, session.status());
+        assertEquals(AgentKind.CLAUDE, session.agentKind()); // placeholder kind; status marks it unusable
+    }
+
+    @Test
+    void agentKindRoundTrips() {
+        ManagedAgentSession session = new ManagedAgentSession(
+                ManagedSessionId.newId(), RepositoryId.of(REPO_ID), AgentKind.CODEX, "Session 1",
+                Optional.of("id"), Optional.empty(), Path.of("/tmp"), Optional.empty(),
+                SessionStatus.RUNNING, Instant.EPOCH, Instant.EPOCH, Optional.empty(),
+                PrState.NONE, Optional.empty(), true);
+        ApplicationState state = ApplicationState.empty().withSessions(List.of(session));
+        ApplicationState roundTripped = ApplicationStateCodec.fromJson(ApplicationStateCodec.toJson(state));
+        assertEquals(AgentKind.CODEX, roundTripped.sessions().get(0).agentKind());
+        assertEquals(Optional.of("id"), roundTripped.sessions().get(0).agentSessionId());
+    }
+
+    @Test
     void sessionWithBranchCreatedHereFalseRoundTrips() {
         // Regression guard: if encode/decode flips or drops an explicit
         // false on branchCreatedHere, the whole suite must break.

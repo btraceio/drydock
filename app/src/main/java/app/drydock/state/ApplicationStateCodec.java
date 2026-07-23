@@ -52,8 +52,9 @@ import java.util.Set;
  *       "id": "<uuid>",
  *       "repositoryId": "<uuid>",
  *       "displayName": "...",
- *       "claudeSessionId": "<string>" | null,
- *       "claudeSessionName": "<string>" | null,
+ *       "agentKind": "claude" | "codex" | "pi",
+ *       "agentSessionId": "<string>" | null,
+ *       "agentSessionName": "<string>" | null,
  *       "workingDirectory": "/absolute/normalized/path",
  *       "worktreeRoot": "/absolute/normalized/path" | null,
  *       "status": "INACTIVE" | "STARTING" | "RUNNING" | "EXITED" | "FAILED" | "MISSING_WORKING_DIRECTORY",
@@ -90,7 +91,17 @@ import java.util.Set;
  * version 2: every session persisted before it existed did create its own
  * branch, so an absent or malformed value decodes to {@code true}, not
  * {@code false} -- the opposite default would silently stop drydock from
- * deleting branches it is responsible for. {@link #toJson}
+ * deleting branches it is responsible for. The {@code agentKind} member was
+ * likewise added leniently within version 2: sessions persisted before
+ * multi-agent support existed have no {@code agentKind} and decode as
+ * {@link app.drydock.agent.api.AgentKind#CLAUDE}; an unrecognized value
+ * (e.g. from a dropped or renamed provider) is retained but forced to
+ * {@link SessionStatus#UNSUPPORTED_AGENT} rather than discarded or thrown.
+ * The persisted id/name fields were renamed from {@code claudeSessionId}/
+ * {@code claudeSessionName} to {@code agentSessionId}/{@code
+ * agentSessionName}; {@link #fromJson} accepts both the new and legacy
+ * names for one migration window, while {@link #toJson} only ever writes
+ * the new names. {@link #toJson}
  * always writes the current version. Any {@code schemaVersion} other than 1
  * or 2 is treated as malformed input (throws {@link StateDecodeException}),
  * consistent with how unknown versions were already rejected before this change.</p>
@@ -147,8 +158,9 @@ public final class ApplicationStateCodec {
         obj.put("id", new JsonString(session.id().value().toString()));
         obj.put("repositoryId", new JsonString(session.repositoryId().value().toString()));
         obj.put("displayName", new JsonString(session.displayName()));
-        obj.put("claudeSessionId", optionalStringToJson(session.agentSessionId()));
-        obj.put("claudeSessionName", optionalStringToJson(session.agentSessionName()));
+        obj.put("agentKind", new JsonString(session.agentKind().persistedName()));
+        obj.put("agentSessionId", optionalStringToJson(session.agentSessionId()));
+        obj.put("agentSessionName", optionalStringToJson(session.agentSessionName()));
         obj.put("workingDirectory", new JsonString(session.workingDirectory().toString()));
         obj.put("worktreeRoot", session.worktreeRoot()
                 .<JsonValue>map(p -> new JsonString(p.toString()))
@@ -254,11 +266,25 @@ public final class ApplicationStateCodec {
             ManagedSessionId id = ManagedSessionId.of(requireString(obj, "id"));
             RepositoryId repositoryId = RepositoryId.of(requireString(obj, "repositoryId"));
             String displayName = requireString(obj, "displayName");
-            Optional<String> agentSessionId = optionalString(obj, "claudeSessionId");
-            Optional<String> agentSessionName = optionalString(obj, "claudeSessionName");
+            // Lenient-additive: sessions written before multi-agent support
+            // have no agentKind and are Claude. An UNRECOGNIZED value is
+            // retained but marked UNSUPPORTED_AGENT (a dropped/renamed
+            // provider must not nuke the session list).
+            String rawKind = obj.get("agentKind") instanceof JsonString ks ? ks.value() : null;
+            Optional<AgentKind> parsedKind = rawKind == null
+                    ? Optional.of(AgentKind.CLAUDE)
+                    : AgentKind.fromPersisted(rawKind);
+            AgentKind agentKind = parsedKind.orElse(AgentKind.CLAUDE);
+            // Accept both the new and legacy field names for one migration window.
+            Optional<String> agentSessionId = optionalString(obj, "agentSessionId")
+                    .or(() -> optionalString(obj, "claudeSessionId"));
+            Optional<String> agentSessionName = optionalString(obj, "agentSessionName")
+                    .or(() -> optionalString(obj, "claudeSessionName"));
             Path workingDirectory = Path.of(requireString(obj, "workingDirectory"));
             Optional<Path> worktreeRoot = optionalString(obj, "worktreeRoot").map(Path::of);
-            SessionStatus status = SessionStatus.valueOf(requireString(obj, "status"));
+            SessionStatus status = parsedKind.isEmpty()
+                    ? SessionStatus.UNSUPPORTED_AGENT
+                    : SessionStatus.valueOf(requireString(obj, "status"));
             Instant createdAt = Instant.parse(requireString(obj, "createdAt"));
             Instant lastOpenedAt = Instant.parse(requireString(obj, "lastOpenedAt"));
             Optional<Integer> lastExitCode = obj.get("lastExitCode") instanceof JsonNumber n
@@ -277,7 +303,7 @@ public final class ApplicationStateCodec {
             // malformed value decodes to true. No schema bump.
             boolean branchCreatedHere = !(obj.get("branchCreatedHere") instanceof JsonBoolean b)
                     || b.value();
-            return new ManagedAgentSession(id, repositoryId, AgentKind.CLAUDE, displayName, agentSessionId,
+            return new ManagedAgentSession(id, repositoryId, agentKind, displayName, agentSessionId,
                     agentSessionName, workingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, lastExitCode,
                     prState, prNumber, branchCreatedHere);
         } catch (IllegalArgumentException | DateTimeException e) {
