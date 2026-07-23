@@ -366,7 +366,10 @@
     -fx-padding: 1 6 1 6;
 }
 
-.tab-close-button {
+/* Our own ✕ button in the session tab graphic. Deliberately NOT named
+   "tab-close-button" — that is TabPaneSkin's own class for the close glyph
+   inside every Tab, and styling it here reached into every TabPane. */
+.session-tab-close {
     -fx-min-width: 17px;  -fx-max-width: 17px;
     -fx-min-height: 17px; -fx-max-height: 17px;
     -fx-background-color: transparent;
@@ -376,7 +379,7 @@
     -fx-padding: 0;
     -fx-cursor: hand;
 }
-.tab-close-button:hover {
+.session-tab-close:hover {
     -fx-background-color: -drydock-active-bg;
     -fx-text-fill: -drydock-text;
 }
@@ -1061,13 +1064,59 @@
 .viewer-tabs .tab .focus-indicator {
     -fx-border-color: transparent;
 }
+/* TabPaneSkin's own close glyph: the cross is the StackPane's
+   -fx-background-color painted through modena's -fx-shape, so text fill does
+   nothing here -- and neither would -fx-background-radius or a second
+   background layer. NGRegion.renderBackgroundShape fills every layer through
+   the cross path and never reads the corner radii, so the rounded hover
+   plate .session-tab-close gets is not reachable on this node. Colour-only
+   hover it is. -fx-effect drops modena's white dropshadow. */
+.viewer-tabs .tab-close-button {
+    -fx-min-width: 17px;  -fx-max-width: 17px;
+    -fx-min-height: 17px; -fx-max-height: 17px;
+    -fx-background-color: -drydock-text-faint;
+    -fx-padding: 0;
+    -fx-cursor: hand;
+    -fx-effect: null;
+}
+.viewer-tabs .tab-close-button:hover {
+    -fx-background-color: -drydock-text;
+}
 .viewer-tab-label {
     -fx-text-fill: -drydock-text-dim;
     -fx-font-size: 12px;
     -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-max-width: 160px;
 }
 .viewer-tabs .tab:selected .viewer-tab-label {
     -fx-text-fill: -drydock-text;
+}
+/* Overflow ("▾ more tabs") corner: modena paints it blue-grey, which is
+   glaring inside the -drydock-tabbar strip. The .container StackPane is
+   TabPaneSkin's own wrapper between .control-buttons-tab and the button --
+   every modena rule for this corner goes through it, so ours must too, or
+   the > chain matches nothing. The -fx-background-insets resets drop
+   modena's stale offsets: a single-layer author fill takes insets[0], which
+   for .arrow is `0 0 -1 0` and stretches the mark 1px downward. */
+.viewer-tabs > .tab-header-area > .control-buttons-tab {
+    -fx-padding: 0;
+    -fx-background-color: -drydock-tabbar;
+}
+.viewer-tabs > .tab-header-area > .control-buttons-tab > .container {
+    -fx-padding: 0;
+}
+.viewer-tabs > .tab-header-area > .control-buttons-tab > .container > .tab-down-button {
+    -fx-background-color: transparent;
+    -fx-background-insets: 0;
+    -fx-padding: 0 6 0 6;
+}
+.viewer-tabs > .tab-header-area > .control-buttons-tab > .container > .tab-down-button > .arrow {
+    -fx-background-color: -drydock-text-faint;
+    -fx-background-insets: 0;
+    -fx-effect: null;
+}
+.viewer-tabs > .tab-header-area > .control-buttons-tab > .container > .tab-down-button:hover > .arrow {
+    -fx-background-color: -drydock-text;
 }
 .viewer-breadcrumb {
     -fx-background-color: -drydock-code-bg;
@@ -1134,7 +1183,7 @@
     -fx-fill: -drydock-code-text;
 }
 .code-area .caret {
-    -fx-stroke: transparent;
+    -fx-stroke: -drydock-code-text;
 }
 .code-area .lineno {
     -fx-background-color: -drydock-code-bg;

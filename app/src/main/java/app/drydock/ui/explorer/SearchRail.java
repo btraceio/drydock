@@ -20,6 +20,7 @@ import javafx.scene.control.ScrollPane;
 import javafx.scene.control.TextField;
 import javafx.scene.control.ToggleButton;
 import javafx.scene.control.ToggleGroup;
+import javafx.scene.control.Tooltip;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
@@ -322,6 +323,16 @@ final class SearchRail extends VBox {
         HBox row = new HBox(6, check, caret, badge, name, spacer);
         row.setAlignment(Pos.CENTER_LEFT);
         row.getStyleClass().add("result-file-row");
+
+        // The bare name is ambiguous across modules, and Text mode shows no
+        // path at all. On the row, not the group, so the match lines below
+        // stay uncovered. Deliberately uncached, unlike RepositorySidebar's
+        // tooltips: install() hangs it off the node's own property map, so a
+        // discarded row takes its tooltip with it and a cache would only buy
+        // one allocation per row against a pruning lifecycle to get wrong.
+        Tooltip pathTip = new Tooltip(relativePath.toString());
+        pathTip.setShowDelay(Duration.millis(400));
+        Tooltip.install(row, pathTip);
 
         if (matchCount >= 0) {
             if (diffFileTest.test(relativePath)) {

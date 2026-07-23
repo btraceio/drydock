@@ -28,17 +28,23 @@ import javafx.scene.control.Alert;
 import javafx.scene.control.ButtonType;
 import javafx.scene.control.TextInputControl;
 import javafx.scene.control.Tooltip;
+import javafx.scene.image.PixelFormat;
+import javafx.scene.image.PixelReader;
+import javafx.scene.image.WritableImage;
 import javafx.scene.input.KeyCode;
 import javafx.scene.input.KeyEvent;
 import javafx.stage.Stage;
 import javafx.stage.WindowEvent;
 
+import java.awt.image.BufferedImage;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.charset.StandardCharsets;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import javax.imageio.ImageIO;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -381,6 +387,7 @@ public final class DrydockApplication extends Application {
                                 mainWorkspace.diagTypeInExplorer(arg);
                                 System.out.println("[diag] explorer typed " + arg.length() + " chars");
                             }
+                            case "shot" -> diagSnapshot(primaryStage, Path.of(arg));
                             default -> System.out.println("[diag] mark " + arg);
                         }
                     });
@@ -720,6 +727,50 @@ public final class DrydockApplication extends Application {
         } catch (RuntimeException e) {
             LOG.log(Level.WARNING, "Shutdown step failed: " + what, e);
         }
+    }
+
+    /**
+     * Diagnostic-only: writes a PNG of the window's scene graph to {@code target}.
+     *
+     * <p>This exists because {@code screencapture} needs macOS Screen Recording
+     * permission, which an automated agent's process does not necessarily hold
+     * -- and a scene snapshot is in any case the more precise instrument for
+     * checking CSS: it captures what JavaFX rendered, with no other window able
+     * to overlap it and no need for the app to be frontmost. It cannot see
+     * popup windows (tooltips, menus, the tab overflow list), which live in
+     * their own scenes.
+     *
+     * <p>Must be called on the FX thread; the snapshot itself is an FX-thread
+     * operation, and only the PNG encoding is handed to a background thread.
+     */
+    private static void diagSnapshot(Stage stage, Path target) {
+        WritableImage image = stage.getScene().snapshot(null);
+        int width = (int) image.getWidth();
+        int height = (int) image.getHeight();
+        // The snapshot is a fresh, detached copy that nothing else references
+        // or mutates, so reading its pixels off the FX thread is safe even
+        // though PixelReader carries no general thread-safety guarantee.
+        PixelReader pixels = image.getPixelReader();
+        Thread writer = new Thread(() -> {
+            try {
+                BufferedImage buffer = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
+                // No SwingFXUtils here: javafx.swing is not one of the modules
+                // this app builds against (see app/build.gradle.kts), so the
+                // pixels are copied by hand.
+                int[] row = new int[width];
+                for (int y = 0; y < height; y++) {
+                    pixels.getPixels(0, y, width, 1, PixelFormat.getIntArgbInstance(), row, 0, width);
+                    buffer.setRGB(0, y, width, 1, row, 0, width);
+                }
+                Files.createDirectories(target.toAbsolutePath().getParent());
+                ImageIO.write(buffer, "png", target.toFile());
+                System.out.println("[diag] shot " + target + " (" + width + "x" + height + ")");
+            } catch (IOException | RuntimeException e) {
+                System.out.println("[diag] shot failed: " + e);
+            }
+        }, "diag-snapshot");
+        writer.setDaemon(true);
+        writer.start();
     }
 
     /** Diagnostic-only: runs {@code work} on the FX thread and waits for its result. */

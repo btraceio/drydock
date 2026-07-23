@@ -713,8 +713,12 @@ final class FileViewer extends BorderPane {
     /** Surfaces a failed write; the buffer is kept and the next edit or Cmd+S retries. */
     private void showSaveErrorBanner(Tab tab, FileEditSession session) {
         if (!ownsBannerRow(tab)) {
-            // Nothing re-raises a save failure later, so the selection listener
-            // re-derives it from the session's ERROR state (raiseBannerFor).
+            // Nothing re-raises a save failure later. For a tab still in the
+            // pane that is fine: reselecting it re-derives the banner from the
+            // session's ERROR state (raiseBannerFor). A tab that has already
+            // been closed has no such second chance -- its session is dropped
+            // and never reselected -- so closeTab logs at WARNING whenever the
+            // close flush leaves the buffer unwritten, ERROR or not.
             return;
         }
         resetEditBanner(tab);
@@ -1068,7 +1072,37 @@ final class FileViewer extends BorderPane {
         updateStatusChip();
         if (closingSession != null && file != null) {
             if (pending != null) {
-                pending.whenComplete((ignored, error) -> sessions.remove(file, closingSession));
+                pending.whenComplete((ignored, error) -> {
+                    // The tab has already left the pane, so showSaveErrorBanner
+                    // early-returns and the session is about to be dropped:
+                    // this is the only trace a close-time loss will ever leave.
+                    // A successful flush leaves CLEAN; SAVING means the
+                    // debounce's own write is still in flight and may yet land.
+                    // Everything else lost the bytes: ERROR from a failed write,
+                    // CONFLICT from this flush's pre-write disk re-read (the
+                    // close gesture is only vetoed for an ALREADY-known
+                    // conflict), or DIRTY from a write the MISSING gate vetoed
+                    // or the executor rejected at shutdown. A throwable from the
+                    // future is a task that died in a way writeIfDirty never
+                    // recorded (so no state to name); CONFLICT and vetoed DIRTY
+                    // carry no throwable, so the state name is the diagnosis.
+                    FileEditSession.State state = closingSession.state();
+                    boolean lost = error != null
+                            || (state != FileEditSession.State.CLEAN
+                                && state != FileEditSession.State.SAVING);
+                    if (lost) {
+                        String message = "Unsaved edits to " + file
+                                + " were NOT written while closing the tab"
+                                + (error != null ? "" : " (" + state + ")");
+                        Throwable cause = error != null ? error : closingSession.lastError();
+                        if (cause != null) {
+                            LOG.log(Level.WARNING, message, cause);
+                        } else {
+                            LOG.log(Level.WARNING, message);
+                        }
+                    }
+                    sessions.remove(file, closingSession);
+                });
             } else {
                 sessions.remove(file, closingSession);
             }

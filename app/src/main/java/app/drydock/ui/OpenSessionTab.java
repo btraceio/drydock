@@ -543,7 +543,7 @@ final class OpenSessionTab {
         tabLabels.getChildren().setAll(tabRepoLabel, tabTitleLabel);
         tabLabels.setAlignment(Pos.CENTER_LEFT);
 
-        tabCloseButton.getStyleClass().add("tab-close-button");
+        tabCloseButton.getStyleClass().add("session-tab-close");
         tabCloseButton.setFocusTraversable(false);
         tabCloseButton.setOnAction(e -> onCloseRequested.run());
 

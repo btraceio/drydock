@@ -116,10 +116,14 @@ what is actually on screen is a faint ghost on hover — not literally nothing.
   `TabClosingPolicy.UNAVAILABLE` — its skin never creates a close button, so
   the rename cannot make a second ✕ appear there.
 - Add `.viewer-tabs .tab-close-button`, restoring what the renamed rule used
-  to supply (17px box, zero padding, background radius, hand cursor) and
-  painting the glyph `-drydock-text-faint`, `-drydock-text` on hover with
-  `-drydock-active-bg` behind it. Set `-fx-effect: null` to drop modena's
-  white dropshadow, which reads as muddy against the light theme.
+  to supply (17px box, zero padding, hand cursor) and painting the glyph
+  `-drydock-text-faint`, `-drydock-text` on hover. Set `-fx-effect: null` to
+  drop modena's white dropshadow, which reads as muddy against the light
+  theme. No hover plate here, unlike `.session-tab-close`: modena shapes this
+  StackPane, and JavaFX fills every background layer through that shape while
+  ignoring `-fx-background-radius`, so the ✕ can only change colour. (Picking
+  follows the shape too, so a plate would light up only while the cursor sat
+  on the glyph's own strokes.)
 - Cap `.viewer-tab-label` at 160px (`app.css:1064`), matching the session tab
   labels (`OpenSessionTab.java:1220-1223`). The graphic is badge + name +
   dirty dot and the ✕ now sits beside it; without a cap a long filename
@@ -164,6 +168,42 @@ and the Explorer's tests are pure logic (`FileContentTest`,
 `FileEditSessionTest`, `SyntaxHighlighterTest`). Adding a UI test harness is
 out of scope; this is verified by running the app.
 
+**What the 2026-07-22 pass could and could not reach.** Neither documented
+route worked on the development machine that day:
+
+- `screencapture` failed with "could not create image from display" — the
+  agent's process does not hold macOS Screen Recording permission, whatever
+  the shell that granted it once did. `docs/architecture.md` claims this
+  permission is granted; that is now true only for some processes.
+- The app launches and renders, but `ghostty_surface_new` returns NULL, so no
+  session tab opens and the Explorer is unreachable from the running app.
+  (`third_party/ghostty` was a dirty submodule at the time; not investigated,
+  as it is unrelated to these changes.)
+
+Two things came out of that. A `shot:<path>` verb was added to
+`app.drydock.diag.explorerScript`: it writes a PNG of the window's scene graph
+with `Scene.snapshot`, which needs no Screen Recording permission, cannot be
+overlapped by another window, and does not need the app frontmost — but it
+cannot see popup windows (tooltips, menus, the tab overflow list), which have
+their own scenes. And the rendering itself was verified in a standalone
+JavaFX harness that loads the real `app.css` + theme stylesheets and builds
+the exact nodes under test (`viewer-tabs` `TabPane` with closable tabs, an
+editable and a read-only `CodeArea`, a `Tooltip`), snapshotting each.
+
+That harness confirmed, in both themes: the caret paints
+(`stroke=0xc9ccd3ff` dark / `0x3b3d44ff` light — the resolved
+`-drydock-code-text`, no longer transparent) and sits at the caret position;
+the read-only area's caret node reports `visible=false`, so the library
+suppresses it with no CSS gate, as §1 claims; the ✕ renders on every file tab;
+a 63-character filename ellipsizes at the 160px cap; the tooltip renders
+themed with the full relative path; and the overflow corner is a bare themed
+▾ rather than modena's blue-grey pill.
+
+It could not confirm the in-app behaviours: hover states, a real close click
+and its flush, the conflict veto, and the tooltip attached to an actual search
+result. Those remain unverified and need either a machine where a session
+opens or a human.
+
 The repo's diagnostic driver is the vehicle for the caret:
 `app/build.gradle.kts:104-110` forwards `-Papp.drydock.diag.*`, and
 `DrydockApplication.java:348-390` implements `explorerScript` with
@@ -182,6 +222,9 @@ Checklist:
    it closes the tab and flushes.
 5. The unsaved-conflict veto still refuses the close and re-raises its banner.
 6. Session tabs (top strip) are visually unchanged after the class rename.
+7. Open enough Explorer file tabs that the header area overflows and the
+   tabs-menu button appears: its corner is themed, not modena blue-grey, in
+   both themes.
 
-Items 3 and 4 have no diag verb (no hover, no tab-close, no second-file open)
-and are hand-verified.
+Items 3, 4 and 7 have no diag verb (no hover, no tab-close, no second-file
+open) and are hand-verified.
