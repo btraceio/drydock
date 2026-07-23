@@ -25,6 +25,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -138,6 +139,14 @@ class SessionManagerTest {
         ApplicationState updated = SessionManager.repoWithLastUsedAgent(state, repo.id(), AgentKind.CODEX);
 
         assertEquals(Optional.of(AgentKind.CODEX), updated.repositories().get(0).settings().lastUsedAgent());
+    }
+
+    @Test
+    void seedClaimedIdsCollectsAssignedAgentSessionIds() {
+        ManagedAgentSession withId = sessionWith(Path.of("/tmp"), Optional.of("id-1"), Optional.empty())
+                .withAgentKind(AgentKind.CODEX);
+        ApplicationState state = ApplicationState.empty().withSessions(List.of(withId));
+        assertEquals(Set.of("id-1"), SessionManager.seedClaimedIds(state));
     }
 
     // ---- startup normalization of stale statuses ---------------------------

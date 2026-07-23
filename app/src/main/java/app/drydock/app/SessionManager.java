@@ -5,6 +5,7 @@ import app.drydock.agent.api.AgentRegistry;
 import app.drydock.agent.api.CreateContext;
 import app.drydock.agent.api.LaunchPlan;
 import app.drydock.agent.api.ResumeContext;
+import app.drydock.agent.api.SessionIdDiscovery;
 import app.drydock.agent.api.SessionIdStrategy;
 import app.drydock.agent.spi.AgentProvider;
 import app.drydock.domain.ApplicationState;
@@ -32,6 +33,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -99,6 +101,14 @@ public final class SessionManager implements AutoCloseable {
     private final ActiveSessionRegistry activeRegistry = new ActiveSessionRegistry();
     private final Map<ManagedSessionId, TerminalSurface> activeSurfaces = new ConcurrentHashMap<>();
 
+    /**
+     * Agent session ids already bound to a {@link ManagedAgentSession}
+     * (seeded from persisted state at construction, then grown as DISCOVERED
+     * launches claim a fresh id) so post-launch discovery never re-binds an
+     * id that already belongs to another session.
+     */
+    private final Set<String> claimedAgentSessionIds;
+
     public SessionManager(ApplicationStateRepository stateRepository, AgentRegistry registry) {
         this(stateRepository, registry, Executors.newVirtualThreadPerTaskExecutor(), true);
     }
@@ -119,6 +129,21 @@ public final class SessionManager implements AutoCloseable {
         this.backgroundExecutor = backgroundExecutor;
         this.ownsExecutor = ownsExecutor;
         stateStore.update(SessionManager::normalizeLoadedState);
+        this.claimedAgentSessionIds = seedClaimedIds(stateStore.state());
+    }
+
+    /**
+     * Pure helper: every {@code agentSessionId} already assigned to a
+     * persisted session, so a fresh {@link SessionManager} (e.g. after a
+     * restart) never lets post-launch DISCOVERED-id discovery re-bind an id
+     * that some other session already owns.
+     */
+    static Set<String> seedClaimedIds(ApplicationState state) {
+        Set<String> ids = ConcurrentHashMap.newKeySet();
+        for (ManagedAgentSession s : state.sessions()) {
+            s.agentSessionId().ifPresent(ids::add);
+        }
+        return ids;
     }
 
     /**
@@ -205,11 +230,40 @@ public final class SessionManager implements AutoCloseable {
                 : "";
         String workingDir = remote.isPresent() ? System.getProperty("user.home") : initial.workingDirectory().toString();
 
+        // DISCOVERED providers mint their own id only after launch: snapshot
+        // the id store BEFORE spawning (so discovery can tell "new since
+        // launch" from "already there") and remember when we launched, both
+        // captured as locals so the post-create discovery stage below can
+        // close over them.
+        Optional<SessionIdDiscovery> discovery = provider.idStrategy() == SessionIdStrategy.DISCOVERED
+                ? registry.idDiscovery(provider.kind())
+                : Optional.empty();
+        Path discoverCwd = initial.workingDirectory();
+        Object idSnapshot = discovery.map(d -> d.snapshot(discoverCwd)).orElse(null);
+        Instant launchedAt = Instant.now();
+
         // Metadata persistence is disk I/O; keep it off the (FX) caller thread.
         return CompletableFuture.runAsync(() -> persistNewSession(initial), backgroundExecutor)
                 .thenCompose(ignored -> buildAndLaunchCreate(provider, displayName, sessionId,
                         initial.workingDirectory(), remote, app, host, scaleFactor, workingDir))
-                .handleAsync((launch, ex) -> finalizeCreate(initial, sessionId, launch, ex), backgroundExecutor);
+                .handleAsync((launch, ex) -> finalizeCreate(initial, sessionId, launch, ex), backgroundExecutor)
+                .thenApplyAsync(result -> {
+                    // Best-effort DISCOVERED id capture; only when the create
+                    // actually opened. Never fails the launch: discover()
+                    // returns empty on failure/ambiguity and resume falls
+                    // back to the interactive picker.
+                    if (discovery.isPresent() && result instanceof SessionOpenResult.Opened opened) {
+                        discovery.get().discover(discoverCwd, launchedAt, idSnapshot, claimedAgentSessionIds)
+                                .ifPresent(id -> {
+                                    // discover() already atomically claimed
+                                    // `id` in claimedAgentSessionIds.
+                                    persistUpdatedSession(requireSession(opened.session().id())
+                                            .withAgentSessionId(Optional.of(id)));
+                                    activeRegistry.tryMarkActive(id, opened.session().id());
+                                });
+                    }
+                    return result;
+                }, backgroundExecutor);
     }
 
     /**
