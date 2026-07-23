@@ -5,7 +5,7 @@ import app.drydock.agent.api.AgentContext;
 import app.drydock.agent.api.AgentRegistry;
 import app.drydock.app.RepositoryManager;
 import app.drydock.app.SessionManager;
-import app.drydock.claude.SessionActivityWatcher;
+import app.drydock.activity.SessionActivityWatcher;
 import app.drydock.domain.Repository;
 import app.drydock.git.ChangedLineService;
 import app.drydock.git.DiffService;

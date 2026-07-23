@@ -1,7 +1,7 @@
 package app.drydock.agent.providers.claude;
 
 import app.drydock.agent.api.ConversationSource;
-import app.drydock.claude.ConversationCatalog;
+import app.drydock.agent.providers.claude.internal.ConversationCatalog;
 
 import java.nio.file.Files;
 import java.nio.file.Path;

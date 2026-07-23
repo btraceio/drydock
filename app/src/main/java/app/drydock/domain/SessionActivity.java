@@ -2,7 +2,7 @@ package app.drydock.domain;
 
 /**
  * What a running session's Claude is currently doing, as reported by the
- * hooks installed by {@code app.drydock.claude.ClaudeHookInstaller}.
+ * hooks installed by {@code app.drydock.agent.providers.claude.internal.ClaudeHookInstaller}.
  *
  * <p>Deliberately orthogonal to {@link SessionStatus}, which models the
  * terminal process lifecycle (launched, exited, failed). The two answer

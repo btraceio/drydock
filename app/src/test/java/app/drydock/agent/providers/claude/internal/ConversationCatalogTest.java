@@ -1,6 +1,6 @@
-package app.drydock.claude;
+package app.drydock.agent.providers.claude.internal;
 
-import app.drydock.claude.ConversationCatalog.Conversation;
+import app.drydock.agent.providers.claude.internal.ConversationCatalog.Conversation;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 

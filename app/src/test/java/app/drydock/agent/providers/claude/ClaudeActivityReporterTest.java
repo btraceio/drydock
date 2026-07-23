@@ -1,6 +1,6 @@
 package app.drydock.agent.providers.claude;
 
-import app.drydock.claude.ClaudeHookInstaller;
+import app.drydock.agent.providers.claude.internal.ClaudeHookInstaller;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 

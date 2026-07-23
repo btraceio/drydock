@@ -2,7 +2,7 @@ package app.drydock.agent.api;
 
 import app.drydock.agent.providers.claude.ClaudeAgentProvider;
 import app.drydock.agent.spi.AgentProvider;
-import app.drydock.claude.ClaudeExecutableLocator;
+import app.drydock.agent.providers.claude.internal.ClaudeExecutableLocator;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;

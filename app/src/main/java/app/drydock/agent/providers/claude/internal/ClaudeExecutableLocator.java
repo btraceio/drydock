@@ -1,4 +1,4 @@
-package app.drydock.claude;
+package app.drydock.agent.providers.claude.internal;
 
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;

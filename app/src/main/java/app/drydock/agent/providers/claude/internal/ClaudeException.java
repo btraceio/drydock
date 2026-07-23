@@ -1,4 +1,4 @@
-package app.drydock.claude;
+package app.drydock.agent.providers.claude.internal;
 
 /**
  * Base type for the distinct Claude-integration failure modes that must

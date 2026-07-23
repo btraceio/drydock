@@ -1,7 +1,7 @@
 package app.drydock.agent.providers.claude;
 
 import app.drydock.agent.api.ActivityReporter;
-import app.drydock.claude.ClaudeHookInstaller;
+import app.drydock.agent.providers.claude.internal.ClaudeHookInstaller;
 
 import java.io.IOException;
 import java.nio.file.Path;

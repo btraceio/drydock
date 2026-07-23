@@ -1,4 +1,4 @@
-package app.drydock.claude;
+package app.drydock.activity;
 
 import app.drydock.domain.SessionActivity;
 
@@ -77,7 +77,7 @@ public final class SessionActivityWatcher implements AutoCloseable {
         return CompletableFuture.supplyAsync(this::readBlocking, executor);
     }
 
-    Map<String, SessionActivity> readBlocking() {
+    public Map<String, SessionActivity> readBlocking() {
         if (!Files.isDirectory(activityDirectory)) {
             return Map.of();
         }

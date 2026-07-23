@@ -1,4 +1,4 @@
-package app.drydock.claude;
+package app.drydock.agent.providers.claude.internal;
 
 import java.nio.file.Path;
 

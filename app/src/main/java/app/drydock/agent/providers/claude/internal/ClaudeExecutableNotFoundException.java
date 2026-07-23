@@ -1,4 +1,4 @@
-package app.drydock.claude;
+package app.drydock.agent.providers.claude.internal;
 
 /**
  * No usable {@code claude} executable could be found: neither an explicitly

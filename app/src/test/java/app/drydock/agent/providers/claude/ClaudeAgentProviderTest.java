@@ -6,7 +6,7 @@ import app.drydock.agent.api.CreateContext;
 import app.drydock.agent.api.LaunchPlan;
 import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdStrategy;
-import app.drydock.claude.ClaudeExecutableLocator;
+import app.drydock.agent.providers.claude.internal.ClaudeExecutableLocator;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;

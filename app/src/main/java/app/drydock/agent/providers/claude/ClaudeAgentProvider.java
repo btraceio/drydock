@@ -10,11 +10,11 @@ import app.drydock.agent.api.LaunchPlan;
 import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdStrategy;
 import app.drydock.agent.spi.AgentProvider;
-import app.drydock.claude.ClaudeCapabilities;
-import app.drydock.claude.ClaudeCapabilityService;
-import app.drydock.claude.ClaudeExecutableLocator;
-import app.drydock.claude.ClaudeHookInstaller;
-import app.drydock.claude.ConversationCatalog;
+import app.drydock.agent.providers.claude.internal.ClaudeCapabilities;
+import app.drydock.agent.providers.claude.internal.ClaudeCapabilityService;
+import app.drydock.agent.providers.claude.internal.ClaudeExecutableLocator;
+import app.drydock.agent.providers.claude.internal.ClaudeHookInstaller;
+import app.drydock.agent.providers.claude.internal.ConversationCatalog;
 import app.drydock.process.SshCommandBuilder;
 
 import java.nio.file.Path;
@@ -24,7 +24,7 @@ import java.util.Optional;
 /**
  * Claude Code as an {@link AgentProvider}. Command strings are identical to the
  * pre-seam {@code SessionManager} output. Delegates discovery/capabilities/
- * catalog/activity to the existing {@code app.drydock.claude} classes.
+ * catalog/activity to the existing {@code app.drydock.agent.providers.claude.internal} classes.
  */
 public final class ClaudeAgentProvider implements AgentProvider {
 

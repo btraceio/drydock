@@ -1,4 +1,4 @@
-package app.drydock.claude;
+package app.drydock.agent.providers.claude.internal;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;

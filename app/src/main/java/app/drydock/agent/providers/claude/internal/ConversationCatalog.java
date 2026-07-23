@@ -1,4 +1,4 @@
-package app.drydock.claude;
+package app.drydock.agent.providers.claude.internal;
 
 import app.drydock.state.json.JsonParser;
 import app.drydock.state.json.JsonValue;

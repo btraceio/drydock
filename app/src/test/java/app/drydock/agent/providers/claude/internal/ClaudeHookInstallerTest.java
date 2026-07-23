@@ -1,5 +1,6 @@
-package app.drydock.claude;
+package app.drydock.agent.providers.claude.internal;
 
+import app.drydock.activity.SessionActivityWatcher;
 import app.drydock.domain.SessionActivity;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;

@@ -102,3 +102,31 @@ cycles were a documented data-loss bug).
 - Custom Gradle tasks declare precise, non-overlapping inputs/outputs
   (fingerprint the ghostty submodule by commit hash, not its file tree) so
   up-to-date checks and caching stay correct.
+
+## Adding an agent provider
+
+Drydock manages agentic CLIs behind an SPI. To add one (reference impl:
+`app.drydock.agent.providers.claude.ClaudeAgentProvider`):
+
+1. Add an `AgentKind` constant and its stable `persistedName()` (a wire
+   contract — never rename an existing one).
+2. Create `app.drydock.agent.providers.<x>.<X>AgentProvider` implementing
+   `app.drydock.agent.spi.AgentProvider`; keep tool-specific internals under
+   `app.drydock.agent.providers.<x>.internal` (see
+   `app.drydock.agent.providers.claude.internal` for the shape: executable
+   discovery, capability probing, hook installation, conversation cataloging,
+   and the tool's own exception hierarchy all live there). Provider-agnostic
+   shared types (e.g. the activity watcher) stay out of any provider's
+   `internal` package — see `app.drydock.activity.SessionActivityWatcher`.
+3. Register it: add the FQCN to
+   `app/src/main/resources/META-INF/services/app.drydock.agent.spi.AgentProvider`.
+   (Future JPMS target: `provides app.drydock.agent.spi.AgentProvider with …`.)
+4. Implement the core: `locateExecutable`, `probeCapabilities`,
+   `buildCreateCommand`/`buildResumeCommand` (return `LaunchPlan.unsupported()`
+   for a context you cannot serve, e.g. remote), `envScrubList`, `idStrategy`.
+   Return `Optional.empty()` from `conversations()`/`activity()` until built.
+   Build/probe methods may block — they run off the FX thread.
+5. Empirically verify the CLI's activity-hook contract before implementing
+   `ActivityReporter` (the Codex spike is the worked example).
+6. Add provider unit tests + a registry availability/default case, and slot
+   the agent into `AgentKind.preferenceOrder()`.

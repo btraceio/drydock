@@ -1,4 +1,4 @@
-package app.drydock.claude;
+package app.drydock.activity;
 
 import app.drydock.domain.SessionActivity;
 import org.junit.jupiter.api.AfterAll;
