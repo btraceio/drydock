@@ -62,7 +62,8 @@ class ClaudeHookInstallerTest {
     /** Reads back what the script wrote, through the same watcher the app uses. */
     private static SessionActivity observedActivity(Path base) {
         return new SessionActivityWatcher(base.resolve("activity"), EXECUTOR)
-                .readBlocking()
+                .poll()
+                .join()
                 .getOrDefault(SESSION_ID, SessionActivity.UNKNOWN);
     }
 

@@ -77,7 +77,7 @@ public final class SessionActivityWatcher implements AutoCloseable {
         return CompletableFuture.supplyAsync(this::readBlocking, executor);
     }
 
-    public Map<String, SessionActivity> readBlocking() {
+    Map<String, SessionActivity> readBlocking() {
         if (!Files.isDirectory(activityDirectory)) {
             return Map.of();
         }
