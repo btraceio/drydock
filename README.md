@@ -113,6 +113,11 @@ build/image/bin/drydock
 `.app`/`.dmg` packaging is not implemented yet; build from source or use the
 runtime image.
 
+## Releasing
+
+See [docs/RELEASING.md](docs/RELEASING.md) for how releases are staged to Maven
+Central and finalized.
+
 ## Contributing
 
 The design, milestone reports, and native-integration findings live in
