@@ -79,8 +79,8 @@ jobs:
         with:
           distribution: temurin
           java-version: |
-            17
             26
+            17
       - name: Stage to Central Portal
         env:
           GPG_SIGNING_KEY: ${{ secrets.GPG_SIGNING_KEY }}
