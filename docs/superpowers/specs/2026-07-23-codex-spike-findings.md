@@ -103,3 +103,26 @@ during implementation**, not a blocker.
 - `-C/--cd <dir>` sets cwd; `codex` requires a git repo unless
   `--skip-git-repo-check` (Drydock sessions are always in a repo/worktree, so no
   flag needed).
+
+## Validated in implementation (Plan B, 2026-07-23)
+
+- **Unit suite green** with BOTH providers registered (`META-INF/services` lists
+  `ClaudeAgentProvider` + `CodexAgentProvider`); `AgentRegistry` discovers both via
+  `ServiceLoader`; `codex` on PATH → Codex reports available.
+- **Command shapes verified by unit tests:** create = `env -u CODEX_SANDBOX -u
+  CODEX_SANDBOX_NETWORK_DISABLED codex` (no id, no `--settings`); resume =
+  `codex resume '<id>'` when known, else `codex resume` (picker, never `--last`);
+  remote → `LaunchPlan.unsupported()`.
+- **DISCOVERED id capture:** snapshot+claim tested (`CodexIdDiscoveryTest`), incl.
+  the ambiguity-bail (2+ candidates → picker, no wrong bind) and atomic-claim
+  cases; wired into `SessionManager` off the FX thread and detached from the
+  surface reveal (does not delay the terminal).
+- **Version probe:** `probeCapabilities().version` comes from `codex --version`
+  (not a literal), via `CodexVersionProbe`.
+- **On-screen picker (pixel) check DEFERRED:** the isolated instance launched
+  and reached the New-session modal, but the display was asleep so `screencapture`
+  returned "could not create image from display". The picker's Codex entry is
+  confirmed *functionally* (registry discovers Codex + available; `AgentSelector`
+  renders one toggle per `registry.agents()`; the Plan A screenshot already
+  showed the picker rendering agents). Re-capture when the display is awake for a
+  belt-and-suspenders pixel confirmation.
