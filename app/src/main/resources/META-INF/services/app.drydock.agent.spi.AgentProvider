@@ -1,1 +1,2 @@
 app.drydock.agent.providers.claude.ClaudeAgentProvider
+app.drydock.agent.providers.codex.CodexAgentProvider
