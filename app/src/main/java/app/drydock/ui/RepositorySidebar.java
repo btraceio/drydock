@@ -385,6 +385,55 @@ public final class RepositorySidebar extends VBox {
                 .toList();
     }
 
+    /** Wrapping index of the next live session; {@code -1} when there are none. */
+    static int nextLiveIndex(int count, int current, int direction) {
+        if (count == 0) {
+            return -1;
+        }
+        if (current < 0) {
+            return direction > 0 ? 0 : count - 1;
+        }
+        return ((current + direction) % count + count) % count;
+    }
+
+    /**
+     * Moves selection to the next/previous running session (top-to-bottom across
+     * repos, wrapping) and opens it. Skips idle sessions, worktrees, and buckets.
+     */
+    public void focusAdjacentLiveSession(int direction) {
+        List<ManagedClaudeSession> live = new ArrayList<>();
+        for (Repository repository : sorted(repositoryManager.repositories())) {
+            SidebarChildren classified = childrenOf(repository);
+            if (classified != null) {
+                live.addAll(classified.liveSessions());
+            }
+        }
+        if (live.isEmpty()) {
+            return;
+        }
+        ManagedSessionId selectedId = selectedSessionId();
+        int current = -1;
+        for (int i = 0; i < live.size(); i++) {
+            if (live.get(i).id().equals(selectedId)) {
+                current = i;
+                break;
+            }
+        }
+        ManagedClaudeSession target = live.get(nextLiveIndex(live.size(), current, direction));
+        // Same entry point as a row click; opening the session drives selection,
+        // and syncActiveSelection() then expands the owning repo and scrolls the
+        // row into view.
+        navigator.resumeSession(target);
+    }
+
+    private ManagedSessionId selectedSessionId() {
+        TreeItem<SidebarNode> selected = tree.getSelectionModel().getSelectedItem();
+        if (selected != null && selected.getValue() instanceof SidebarNode.SessionNode sessionNode) {
+            return sessionNode.session().id();
+        }
+        return null;
+    }
+
     private void onRepositoriesChanged() {
         for (Repository repository : repositoryManager.repositories()) {
             if (viewModel.repoStatus(repository.id()).isEmpty()

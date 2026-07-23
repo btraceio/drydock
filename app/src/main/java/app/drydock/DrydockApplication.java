@@ -531,6 +531,12 @@ public final class DrydockApplication extends Application {
             } else if (cmd && event.getCode() == KeyCode.CLOSE_BRACKET) {
                 mainWorkspace.selectNextSessionTab();
                 event.consume();
+            } else if (cmd && event.getCode() == KeyCode.DOWN) {
+                sidebar.focusAdjacentLiveSession(+1);
+                event.consume();
+            } else if (cmd && event.getCode() == KeyCode.UP) {
+                sidebar.focusAdjacentLiveSession(-1);
+                event.consume();
             } else if (cmd && event.getCode() == KeyCode.DIGIT0) {
                 appShell.toggleSidebar();
                 event.consume();

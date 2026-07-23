@@ -178,4 +178,17 @@ class SidebarChildrenTest {
         assertEquals(List.of("orphan"),
                 result.idleSessions().stream().map(ManagedClaudeSession::displayName).toList());
     }
+
+    @Test
+    void nextLiveIndex_wrapsForward() {
+        assertEquals(0, RepositorySidebar.nextLiveIndex(3, 2, +1));
+        assertEquals(2, RepositorySidebar.nextLiveIndex(3, 0, -1));
+        assertEquals(0, RepositorySidebar.nextLiveIndex(3, -1, +1)); // nothing selected → first
+        assertEquals(2, RepositorySidebar.nextLiveIndex(3, -1, -1)); // nothing selected → last
+    }
+
+    @Test
+    void nextLiveIndex_noLiveSessions_returnsMinusOne() {
+        assertEquals(-1, RepositorySidebar.nextLiveIndex(0, -1, +1));
+    }
 }
