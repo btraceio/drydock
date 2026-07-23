@@ -194,7 +194,10 @@ jobs:
   wait-for-maven:
     name: Wait for Maven Central
     needs: [setup, stage-maven]
-    if: ${{ needs.setup.outputs.dry_run != 'true' }}
+    # stage-maven runs under `if: always()`, so this job must also use the
+    # explicit always()+result pattern; a plain implicit success() gate here
+    # gets skipped on push events downstream of an always() job.
+    if: ${{ always() && needs.stage-maven.result == 'success' && needs.setup.outputs.dry_run != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
@@ -216,7 +219,7 @@ jobs:
   create-github-release:
     name: Create GitHub Release
     needs: [setup, wait-for-maven]
-    if: ${{ needs.setup.outputs.dry_run != 'true' }}
+    if: ${{ always() && needs.wait-for-maven.result == 'success' && needs.setup.outputs.dry_run != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
