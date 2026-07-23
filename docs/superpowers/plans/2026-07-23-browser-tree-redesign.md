@@ -430,7 +430,7 @@ private List<SidebarNode> childNodesFor(Repository repository) {
 }
 ```
 
-- [ ] **Step 2: Rederive `repoMetaText` counts from `classify`, delete `additionalWorktreeCount`**
+- [ ] **Step 2: Rederive `repoMetaText` counts from `classify`**
 
 Rewrite `repoMetaText` (`RepositorySidebar.java:1125-1143`) so the numbers come from the same `SidebarChildren`. Keep it a single string for now (the label split is Task 4):
 
@@ -453,18 +453,34 @@ private String repoMetaText(Repository repository) {
 }
 ```
 
-Then delete the now-unused `additionalWorktreeCount` method (`RepositorySidebar.java:677-684`). Build will flag any remaining caller.
+- [ ] **Step 3: Rederive the footer counts, then delete `additionalWorktreeCount`**
 
-- [ ] **Step 3: Build and run the unit suite**
+`additionalWorktreeCount` has a live caller in `updateFooter` (`RepositorySidebar.java:445`), and the footer also computes `unopenedTotal` by filtering `childNodesFor(...)` for `UnopenedWorktreeNode` (`:446-448`) — that filter will silently drop stale worktrees in Task 3 once they move into `StaleWorktreesNode`. Rederive both from `classify` now, preserving today's meaning (`unopened` = worktrees with no session, which continues to include the stale ones). Replace the per-repo loop body (`:441-448`) with:
+
+```java
+for (Repository repository : repositoryManager.repositories()) {
+    SidebarChildren classified = childrenOf(repository);
+    if (classified == null) {
+        continue;
+    }
+    worktreeTotal += classified.worktreeCount();
+    unopenedTotal += (int) classified.openWorktrees().stream().filter(w -> !w.mainCheckout()).count()
+            + classified.staleCount();
+}
+```
+
+Then delete the now-unused `additionalWorktreeCount` method (`RepositorySidebar.java:677-684`).
+
+- [ ] **Step 4: Build and run the unit suite**
 
 Run: `./gradlew :app:test --tests 'app.drydock.ui.SidebarChildrenTest' :app:classes`
-Expected: PASS + compiles. If `additionalWorktreeCount` had another caller, resolve it to `childrenOf(...).worktreeCount()`.
+Expected: PASS + compiles cleanly. If the compiler still reports a caller of `additionalWorktreeCount`, resolve it to `childrenOf(...).worktreeCount()`.
 
-- [ ] **Step 4: Verify on screen**
+- [ ] **Step 5: Verify on screen**
 
-Launch the app (`./gradlew run`), expand `olifer` and `btrace`. Confirm: children order is live sessions → idle sessions → worktrees; the `olifer` header shows the correct `N wt` (not `0 worktrees`) matching the visible worktree row; no crash on repos mid-discovery. Compare against `scratchpad/sidebar-before.png`.
+Launch the app (`./gradlew run`), expand `olifer` and `btrace`. Confirm: children order is live sessions → idle sessions → worktrees; the `olifer` header shows the correct `N wt` (not `0 worktrees`) matching the visible worktree row; the footer's `running · N worktrees · M unopened` still reads sensibly; no crash on repos mid-discovery. Compare against `scratchpad/sidebar-before.png`.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add app/src/main/java/app/drydock/ui/RepositorySidebar.java
@@ -510,6 +526,29 @@ case SidebarNode.StaleWorktreesNode staleNode -> {
     setContextMenu(null);
 }
 ```
+
+**Every exhaustive switch over the sealed `SidebarNode` must gain a case or the build fails.** There are three besides `updateItem`. Add to `activateNode` (`RepositorySidebar.java:322-328`) — Enter/Space on the bucket toggles its expansion:
+
+```java
+case SidebarNode.StaleWorktreesNode staleNode -> {
+    RepositoryId repoId = staleNode.repository().id();
+    if (!staleBucketExpanded.add(repoId)) {
+        staleBucketExpanded.remove(repoId);
+    }
+    requestRebuild();
+}
+```
+
+Add to `matchesNode` (`RepositorySidebar.java:696-714`) — the bucket matches when any contained worktree's branch or path matches the filter query:
+
+```java
+case SidebarNode.StaleWorktreesNode staleNode -> staleNode.worktrees().stream().anyMatch(worktree -> {
+    String text = worktree.branch().orElse("") + " " + worktree.path();
+    return text.toLowerCase(Locale.ROOT).contains(query);
+});
+```
+
+Check `updateWorktreeRow`'s switch (`~534`) — it has a `default`, so it compiles unchanged; stale-bucket rows update only via full rebuild, which is fine (the bucket has no per-row incremental update).
 
 - [ ] **Step 2: Emit one `StaleWorktreesNode` from `childNodesFor`**
 
@@ -608,14 +647,23 @@ private void cleanStaleWorktrees(Repository repository, List<WorktreeService.Wor
             .whenComplete((v, ignored) -> Platform.runLater(() -> {
                 refreshWorktrees(repository, false);
                 if (!skippedPaths.isEmpty()) {
-                    setRescanNote(repository, "kept " + skippedPaths.size()
+                    // Transient status note, cleared after 2.4s — mirrors the
+                    // "Already up to date" rescan note (RepositorySidebar.java:765-771).
+                    rescanNotes.put(repository.id(), "kept " + skippedPaths.size()
                             + " with uncommitted changes");
+                    updateRepoRow(repository.id());
+                    PauseTransition clearNote = new PauseTransition(Duration.seconds(2.4));
+                    clearNote.setOnFinished(e -> {
+                        rescanNotes.remove(repository.id());
+                        updateRepoRow(repository.id());
+                    });
+                    clearNote.play();
                 }
             }));
 }
 ```
 
-(Add top-of-file imports for `java.util.Collections`, `java.util.concurrent.CompletableFuture`, and `java.util.List` if not already present. If a `setRescanNote(...)` helper does not already exist, use the existing `rescanNotes.put(repository.id(), ...)` + `updateRepoRow(repository.id())` pattern instead.)
+(Add top-of-file imports for `java.util.Collections`, `java.util.concurrent.CompletableFuture`, and `java.util.List` if not already present. `rescanNotes`, `updateRepoRow`, `PauseTransition`, and `Duration` are already used in this file.)
 
 - [ ] **Step 4: Build**
 
@@ -684,27 +732,62 @@ Region dot = SessionStatusStyles.createDot(8, session.status(), live);
 
 - [ ] **Step 3: Put every child row on one fixed gutter**
 
-Remove the per-row inline `setPadding(new Insets(5, 8, 5, 16))` from `buildSessionRow` (~1216) and `buildUnopenedRow` (~1289). Instead give session, unopened, and stale rows the same left gutter via a shared style class (`child-row`) added in CSS (Step 5). Keep the status column fixed-width so dots and the `◫` glyph align: wrap the leading dot/glyph in a `StackPane`/`Region` of fixed width (e.g. 16px) via `.child-row-status { -fx-min-width: 16; -fx-alignment: center; }`.
+Remove the per-row inline `setPadding(new Insets(5, 8, 5, 16))` from `buildSessionRow` (~1216) and `buildUnopenedRow` (~1289), and the `setPadding` on the stale summary row from Task 3's `buildStaleRow`. The gutter now comes from a shared style class — **add the class explicitly on each row** (CSS alone does nothing without this):
+
+- in `buildSessionRow`, on the returned `row`: `row.getStyleClass().add("child-row");`
+- in `buildUnopenedRow`, on the returned `row`: `row.getStyleClass().add("child-row");`
+- in `buildStaleRow`, on the `summary` HBox: `summary.getStyleClass().add("child-row");`
+
+Keep the status column fixed-width so dots and the `◫` glyph align vertically. Wrap the leading dot/glyph of each row in a fixed-width container:
+
+```java
+StackPane statusCol = new StackPane(dot); // or the ◫ Label for worktree rows
+statusCol.getStyleClass().add("child-row-status");
+```
+
+and use `statusCol` as the row's first child in place of the bare `dot`/`icon`. For the stale summary row the caret occupies this column, so wrap `caret` the same way. (`.child-row-status { -fx-min-width: 16; -fx-alignment: center; }` in Step 5 gives it the fixed width.)
 
 - [ ] **Step 4: Split the repo header meta into branch + counts labels**
 
-In `buildRepoRow` (`RepositorySidebar.java:1051-1069`) replace the single `branch` label with two, so the branch ellipsizes but the counts never do. Introduce a `repoCountsText(Repository)` (branch-less counts) alongside `branchTextFor`, or split `repoMetaText`'s output at the first `·`:
+In `buildRepoRow` (`RepositorySidebar.java:1051-1069`) replace the single `branch` label with two, so the branch ellipsizes but the counts never do. Add a `repoCountsText` helper (branch-less counts, derived from the same `classify`) next to `repoMetaText`:
 
 ```java
-Label branch = new Label("⎇ " + branchTextFor(repository));
+/** Just the counts fragment: {@code · 3 wt · 1 stale}, or "" before discovery / when a note is showing. */
+private String repoCountsText(Repository repository) {
+    if (rescanNotes.get(repository.id()) != null) {
+        return "";
+    }
+    SidebarChildren classified = childrenOf(repository);
+    if (classified == null) {
+        return "";
+    }
+    StringBuilder counts = new StringBuilder(" · ").append(classified.worktreeCount()).append(" wt");
+    if (classified.staleCount() > 0) {
+        counts.append(" · ").append(classified.staleCount()).append(" stale");
+    }
+    return counts.toString();
+}
+```
+
+Then split the label in `buildRepoRow`:
+
+```java
+// When a transient rescan note is present it owns the whole line (branch text = note, no counts).
+String note = rescanNotes.get(repository.id());
+Label branch = new Label(note != null ? note : "⎇ " + branchTextFor(repository));
 branch.getStyleClass().add("repo-branch");
 branch.setTextOverrun(OverrunStyle.LEADING_ELLIPSIS);
 HBox.setHgrow(branch, Priority.ALWAYS);
 branch.setMaxWidth(Double.MAX_VALUE);
 
-Label counts = new Label(repoCountsText(repository)); // "· 3 wt · 1 stale", or "" pre-discovery
+Label counts = new Label(repoCountsText(repository)); // "" when a note is showing or pre-discovery
 counts.getStyleClass().add("repo-count-meta");
 counts.setMinWidth(Region.USE_PREF_SIZE); // never shrinks
 
 HBox branchRow = new HBox(6, branch, counts);
 ```
 
-Keep the existing running-dot append and the `rescanNotes` override (when a note is present, show it in `branch` and blank `counts`).
+Keep the existing running-dot append onto `branchRow`, and keep the failure/remote `Tooltip` logic (`RepositorySidebar.java:1053-1059`) — install it on the `branch` label. `repoMetaText` (from Task 2) becomes unused after this split; delete it once the compiler confirms no remaining caller. (`OverrunStyle` and `Region` need imports if not already present.)
 
 - [ ] **Step 5: CSS — gutter, status column, hollow dot, stale + count styles**
 
@@ -820,7 +903,10 @@ void focusAdjacentLiveSession(int direction) {
         }
     }
     ManagedClaudeSession target = live.get(nextLiveIndex(live.size(), current, direction));
-    navigator.resumeSession(target); // expands repo + scrolls + opens, matching a row click
+    // Same entry point as a row click; opening the session drives selection,
+    // and syncActiveSelection() (RepositorySidebar.java:568) then expands the
+    // owning repo and scrolls the row into view.
+    navigator.resumeSession(target);
 }
 ```
 
