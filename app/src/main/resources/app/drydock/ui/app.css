@@ -218,6 +218,20 @@
     -fx-text-fill: -drydock-text-faint;
 }
 
+/* Counts fragment of the repo header meta line (branch + · N wt · M stale):
+   split from the branch label so a long branch name ellipsizes while the
+   counts stay fully visible. */
+.repo-count-meta {
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-family: "JetBrains Mono", "Menlo";
+    -fx-font-size: 10px;
+}
+
+/* One fixed indent gutter shared by every child row (session / unopened
+   worktree / stale summary) so their status columns line up. */
+.child-row { -fx-padding: 5 8 5 16; }
+.child-row-status { -fx-min-width: 16; -fx-alignment: center; }
+
 /* Small square hover-action buttons on repo/session rows (22px). */
 .row-action-button {
     -fx-min-width: 22px;  -fx-max-width: 22px;
@@ -238,13 +252,8 @@
 }
 
 .session-row {
-    -fx-padding: 5 8 5 8;
     -fx-background-radius: 8px;
     -fx-cursor: hand;
-    /* 11px left rule marking the child indent. */
-    -fx-border-color: transparent transparent transparent -drydock-border;
-    -fx-border-width: 0 0 0 1;
-    -fx-border-insets: 0 0 0 0;
 }
 .session-row:hover {
     -fx-background-color: -drydock-hover;
@@ -282,6 +291,15 @@
 .status-dot:error {
     -fx-background-color: -drydock-error;
     -fx-effect: dropshadow(gaussian, -drydock-error-soft, 3, 1.0, 0, 0);
+}
+/* Idle sessions render hollow (ring only); error color always fills, so a
+   FAILED idle session still shows a solid error dot (see .status-dot:error
+   above, which wins by declaration order for the fill color itself). */
+.status-dot.dot-hollow {
+    -fx-background-color: transparent;
+    -fx-border-color: -drydock-text-dim;
+    -fx-border-width: 1.5;
+    -fx-border-radius: 100;
 }
 
 .sidebar-footer {
@@ -1574,6 +1592,13 @@
 .worktree-delete-button:hover {
     -fx-background-color: -drydock-error-soft;
 }
+
+/* ---- Collapsed stale-worktree bucket -------------------------------------- */
+
+.stale-summary-row { -fx-padding: 5 8 5 16; }
+.stale-summary { -fx-text-fill: -drydock-text-faint; -fx-font-size: 11px; }
+.stale-clean-button { -fx-font-size: 10.5px; }
+.stale-path { -fx-text-fill: -drydock-text-faint; -fx-font-family: "JetBrains Mono", "Menlo"; -fx-font-size: 10px; }
 
 /* ---- Diff Review tab (design handoff section C) -------------------------- */
 

@@ -1,3 +1,5 @@
+import org.gradle.external.javadoc.StandardJavadocDocletOptions
+
 plugins {
     application
     id("org.openjfx.javafxplugin")
@@ -7,12 +9,19 @@ plugins {
     // runtimeImage/appImage packaging (typed tasks + templates under
     // app/packaging/; see buildSrc/src/main/kotlin/drydock.packaging.gradle.kts).
     id("drydock.packaging")
+    `maven-publish`
+    signing
 }
+
+group = "io.btraceio"
+version = "0.1.0"
 
 java {
     toolchain {
         languageVersion.set(JavaLanguageVersion.of(26))
     }
+    withSourcesJar()
+    withJavadocJar()
 }
 
 // JavaFX 26. The javafx-gradle-plugin resolves the correct platform
@@ -83,6 +92,45 @@ tasks.test {
     useJUnitPlatform()
 }
 
+// Thin, publishable jar for the jbang launcher: the app's own classes and
+// resources (including icon/drydock.png) plus both macOS arch slices of the
+// two native dylibs. JavaFX/richtextfx are NOT bundled -- they are declared as
+// classifier-less POM dependencies (see the publishing block) so jbang
+// resolves the host-correct classifier at run time.
+tasks.register<Jar>("jbangJar") {
+    group = "distribution"
+    description = "Natives-bundled jar for `jbang drydock@...` (io.btraceio:drydock)."
+    archiveBaseName.set("drydock")
+    archiveClassifier.set("")
+
+    dependsOn(rootProject.tasks.named("buildGhosttyNative"))
+    dependsOn(rootProject.tasks.named("buildNativeHost"))
+
+    from(sourceSets.main.get().output)
+
+    val nativeDir = rootProject.layout.buildDirectory.dir("native")
+    listOf("macos-arm64", "macos-x86_64").forEach { arch ->
+        from(nativeDir.map { it.dir(arch) }) {
+            include("libghostty.dylib", "libdrydockterminalhost.dylib")
+            into("native/$arch")
+        }
+    }
+
+    // Ghostty is MIT-licensed; ship its notice inside the jar.
+    from(rootProject.layout.projectDirectory.file("third_party/ghostty/LICENSE")) {
+        into("META-INF/licenses")
+        rename { "LICENSE-ghostty.txt" }
+    }
+
+    manifest {
+        attributes(
+            "Implementation-Title" to "Drydock",
+            "Implementation-Version" to project.version.toString(),
+            "Main-Class" to "app.drydock.launcher.JBangBootstrap"
+        )
+    }
+}
+
 tasks.named<JavaExec>("run") {
     // The real application now embeds Ghostty terminal surfaces (Milestone
     // 5's terminal-tabs UI), so `run` needs both native libraries built
@@ -116,4 +164,75 @@ tasks.named<JavaExec>("run") {
         systemProperty("glass.platform", "Monocle")
         systemProperty("monocle.platform", "Headless")
     }
+}
+
+publishing {
+    publications {
+        create<MavenPublication>("drydock") {
+            groupId = "io.btraceio"
+            artifactId = "drydock"
+            version = project.version.toString()
+
+            // The natives-bundled jar is the main artifact -- NOT
+            // components["java"], whose POM would leak the javafx-gradle
+            // plugin's host-specific classifiers.
+            artifact(tasks.named("jbangJar"))
+            artifact(tasks.named("sourcesJar"))
+            artifact(tasks.named("javadocJar"))
+
+            pom {
+                name.set("Drydock")
+                description.set("Manage local Git repositories and the claude CLI sessions you run against them (macOS).")
+                url.set("https://github.com/btraceio/drydock")
+                licenses {
+                    license {
+                        name.set("MIT License")
+                        url.set("https://opensource.org/licenses/MIT")
+                    }
+                }
+                developers {
+                    developer {
+                        id.set("jbachorik")
+                        name.set("Jaroslav Bachorik")
+                    }
+                }
+                scm {
+                    url.set("https://github.com/btraceio/drydock")
+                    connection.set("scm:git:https://github.com/btraceio/drydock.git")
+                }
+                // Runtime deps declared here, classifier-less, so jbang
+                // resolves the host classifier + module path at run time.
+                withXml {
+                    val dependencies = asNode().appendNode("dependencies")
+                    fun runtimeDep(groupId: String, artifactId: String, dependencyVersion: String) {
+                        val dependency = dependencies.appendNode("dependency")
+                        dependency.appendNode("groupId", groupId)
+                        dependency.appendNode("artifactId", artifactId)
+                        dependency.appendNode("version", dependencyVersion)
+                        dependency.appendNode("scope", "runtime")
+                    }
+                    runtimeDep("org.openjfx", "javafx-base", "26")
+                    runtimeDep("org.openjfx", "javafx-graphics", "26")
+                    runtimeDep("org.openjfx", "javafx-controls", "26")
+                    runtimeDep("org.fxmisc.richtext", "richtextfx", "0.11.7")
+                }
+            }
+        }
+    }
+    repositories {
+        mavenLocal()
+        // Central release repo is added when wiring the actual release
+        // (Sonatype credentials via ~/.gradle/gradle.properties); out of scope
+        // for local verification.
+    }
+}
+
+tasks.named<Javadoc>("javadoc") {
+    (options as StandardJavadocDocletOptions).addStringOption("Xdoclint:none", "-quiet")
+}
+
+signing {
+    // Sign only for a real publish, never for publishToMavenLocal.
+    setRequired({ gradle.taskGraph.allTasks.any { it.name.startsWith("publish") && it.name.contains("Repository") && !it.name.contains("MavenLocal") } })
+    sign(publishing.publications["drydock"])
 }

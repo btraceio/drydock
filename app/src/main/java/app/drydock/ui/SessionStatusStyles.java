@@ -54,8 +54,22 @@ final class SessionStatusStyles {
      * status is running.
      */
     static Region createDot(int sizePx, SessionStatus initialStatus) {
+        return createDot(sizePx, initialStatus, true);
+    }
+
+    /**
+     * As {@link #createDot(int, SessionStatus)}, but {@code filled=false}
+     * renders a hollow ring (the design's idle treatment) instead of a solid
+     * dot. Error color always fills -- a FAILED idle session still shows a
+     * filled error dot, never hollow, so the failure signal is never
+     * weakened by the idle treatment.
+     */
+    static Region createDot(int sizePx, SessionStatus initialStatus, boolean filled) {
         Region dot = new Region();
         dot.getStyleClass().addAll("status-dot", "dot-" + sizePx);
+        if (!filled && !isError(initialStatus)) {
+            dot.getStyleClass().add("dot-hollow");
+        }
 
         FadeTransition fade = new FadeTransition(Duration.seconds(1), dot);
         fade.setFromValue(1.0);

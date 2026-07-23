@@ -55,6 +55,33 @@ Run `./scripts/verify-environment.sh` to check most prerequisites automatically.
 > ```
 > Gradle's toolchain support then auto-detects the installed JDK 26 for the app.
 
+## Run with jbang (no JDK/Gradle needed)
+
+If you have [jbang](https://www.jbang.dev) installed, you can run Drydock without
+installing a JDK, Gradle, or the native toolchain:
+
+```bash
+jbang drydock@btraceio/drydock
+```
+
+jbang provisions a **Temurin JDK 26** and JavaFX automatically. The app's classes
+and the required native libraries (`libghostty`, `libdrydockterminalhost`, for
+both Apple Silicon and Intel) ship inside the `io.btraceio:drydock` Maven Central
+jar; on first launch they are extracted to `~/Library/Caches/drydock/native/`.
+
+First launch downloads the JDK and dependencies, so it's slower than subsequent
+runs. A few warnings on startup are benign and can be ignored: `WARNING: Unknown
+module: javafx.graphics` (JavaFX runs from the classpath, so the export flag is
+a harmless no-op), a jbang/Gson reflective-final-field warning, and — only when
+run without a display — `CVDisplayLink error` lines.
+
+**Limitations vs. the packaged app.** A jbang launch is a plain JVM process, not a
+signed/notarized `.app` bundle: no Finder double-click and no bundle identity
+(the dock name and Bot-in-dock icon are still set). For the polished,
+double-clickable app, build the `.app` with `./gradlew appImage`. The dylib load
+relies on Temurin's `disable-library-validation` entitlement; a non-Temurin JDK
+may refuse to load them.
+
 ## Building and running
 
 Ghostty is vendored as a pinned Git submodule, so initialize submodules first:
