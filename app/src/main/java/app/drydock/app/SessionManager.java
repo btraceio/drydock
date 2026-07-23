@@ -13,6 +13,7 @@ import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.PrState;
 import app.drydock.domain.Repository;
+import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SshRemote;
 import app.drydock.state.ApplicationStateRepository;
@@ -175,14 +176,14 @@ public final class SessionManager implements AutoCloseable {
      * id would not be found by a concurrent open of the freshly persisted
      * real id -- yielding a duplicate surface and a leaked native pair.
      */
-    public ManagedAgentSession prepareSession(Repository repository) {
-        return newSessionMetadata(repository, defaultDisplayName(repository));
+    public ManagedAgentSession prepareSession(Repository repository, AgentKind agentKind) {
+        return newSessionMetadata(repository, defaultDisplayName(repository), agentKind);
     }
 
     /** As {@link #prepareSession}, for a session living inside an already-created worktree checkout. */
     public ManagedAgentSession prepareWorktreeSession(Repository repository, String displayName, Path worktreeRoot,
-                                                        boolean branchCreatedHere) {
-        return newSessionMetadata(repository, displayName, Optional.of(worktreeRoot), branchCreatedHere);
+                                                        boolean branchCreatedHere, AgentKind agentKind) {
+        return newSessionMetadata(repository, displayName, agentKind, Optional.of(worktreeRoot), branchCreatedHere);
     }
 
     /** Launches a session minted by {@link #prepareSession}/{@link #prepareWorktreeSession}. */
@@ -288,8 +289,24 @@ public final class SessionManager implements AutoCloseable {
             activeRegistry.tryMarkActive(agentSessionId, running.id());
         }
         persistUpdatedSession(running);
+        // Records the agent kind actually used so the next session opened in
+        // this repository defaults to it (AgentSelector's per-repo default).
+        RepositoryId createdRepositoryId = running.repositoryId();
+        AgentKind createdAgentKind = running.agentKind();
+        stateStore.update(s -> repoWithLastUsedAgent(s, createdRepositoryId, createdAgentKind));
         activeSurfaces.put(running.id(), launch.surface());
         return new SessionOpenResult.Opened(running, launch.surface());
+    }
+
+    /**
+     * Pure transform: returns {@code state} with {@code repositoryId}'s
+     * settings updated to record {@code kind} as its last-used agent (a
+     * no-op if no repository matches, e.g. it was removed concurrently).
+     */
+    static ApplicationState repoWithLastUsedAgent(ApplicationState state, RepositoryId repositoryId, AgentKind kind) {
+        return state.withRepositories(state.repositories().stream()
+                .map(r -> r.id().equals(repositoryId) ? r.withSettings(r.settings().withLastUsedAgent(kind)) : r)
+                .toList());
     }
 
     // ---- 11.2 Resume a session ---------------------------------------------
@@ -627,7 +644,11 @@ public final class SessionManager implements AutoCloseable {
     }
 
     private ManagedAgentSession newSessionMetadata(Repository repository, String displayName) {
-        return newSessionMetadata(repository, displayName, Optional.empty(), true);
+        return newSessionMetadata(repository, displayName, AgentKind.CLAUDE, Optional.empty(), true);
+    }
+
+    private ManagedAgentSession newSessionMetadata(Repository repository, String displayName, AgentKind agentKind) {
+        return newSessionMetadata(repository, displayName, agentKind, Optional.empty(), true);
     }
 
     /**
@@ -638,13 +659,13 @@ public final class SessionManager implements AutoCloseable {
      * and so whether it may later delete it; it has no safe default, which
      * is why every worktree caller must state it.
      */
-    private ManagedAgentSession newSessionMetadata(Repository repository, String displayName,
+    private ManagedAgentSession newSessionMetadata(Repository repository, String displayName, AgentKind agentKind,
                                                     Optional<Path> worktreeRoot, boolean branchCreatedHere) {
         Instant now = Instant.now();
         return new ManagedAgentSession(
                 ManagedSessionId.newId(),
                 repository.id(),
-                AgentKind.CLAUDE,
+                agentKind,
                 displayName,
                 Optional.empty(),
                 Optional.empty(),

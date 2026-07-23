@@ -9,7 +9,9 @@ import app.drydock.domain.ApplicationState;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.PrState;
+import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryId;
+import app.drydock.domain.RepositorySettings;
 import app.drydock.domain.SessionStatus;
 import app.drydock.state.ApplicationStateRepository;
 import org.junit.jupiter.api.AfterEach;
@@ -108,6 +110,34 @@ class SessionManagerTest {
                 PrState.NONE,
                 Optional.empty(),
                 true);
+    }
+
+    private Repository someRepository() {
+        Instant now = Instant.now();
+        return new Repository(RepositoryId.newId(), Path.of("/tmp/drydock-test-repo"), "example repo", now, now,
+                RepositorySettings.DEFAULT);
+    }
+
+    // ---- Task 11: agent picker / lastUsedAgent persistence -----------------
+
+    @Test
+    void prepareSessionRecordsChosenAgentKind() {
+        InMemoryStateRepository stateRepository = new InMemoryStateRepository(List.of());
+        SessionManager manager = newManager(stateRepository);
+
+        ManagedAgentSession prepared = manager.prepareSession(someRepository(), AgentKind.CLAUDE);
+
+        assertEquals(AgentKind.CLAUDE, prepared.agentKind());
+    }
+
+    @Test
+    void lastUsedAgentTransformUpdatesTheRepo() {
+        Repository repo = someRepository();
+        ApplicationState state = ApplicationState.empty().withRepositories(List.of(repo));
+
+        ApplicationState updated = SessionManager.repoWithLastUsedAgent(state, repo.id(), AgentKind.CODEX);
+
+        assertEquals(Optional.of(AgentKind.CODEX), updated.repositories().get(0).settings().lastUsedAgent());
     }
 
     // ---- startup normalization of stale statuses ---------------------------

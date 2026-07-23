@@ -1,5 +1,7 @@
 package app.drydock.ui;
 
+import app.drydock.agent.api.AgentKind;
+import app.drydock.agent.api.AgentRegistry;
 import app.drydock.app.RepositoryManager;
 import app.drydock.app.SessionManager;
 import app.drydock.app.SessionOpenResult;
@@ -73,6 +75,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Supplier;
+import java.util.stream.Collectors;
 
 /**
  * The main pane (design handoff section 4): a {@link TabPane} of terminal
@@ -99,6 +102,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     private static final double TAB_STRIP_HEIGHT = 50;
 
     private final SessionManager sessionManager;
+    private final AgentRegistry agentRegistry;
     private final RepositoryManager repositoryManager;
     private final GitStatusService gitStatusService;
     private final WorktreeService worktreeService;
@@ -203,12 +207,14 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      */
     private boolean terminalsObscured;
 
-    public MainWorkspace(SessionManager sessionManager, RepositoryManager repositoryManager,
+    public MainWorkspace(SessionManager sessionManager, AgentRegistry agentRegistry,
+                          RepositoryManager repositoryManager,
                           GitStatusService gitStatusService, SessionSearchService searchService,
                           GhCliService ghCliService, WorktreeService worktreeService, DiffService diffService,
                           ChangedLineService changedLineService, AnnotationStore annotationStore,
                           WorkspaceViewModel viewModel, Stage stage) {
         this.sessionManager = sessionManager;
+        this.agentRegistry = agentRegistry;
         this.repositoryManager = repositoryManager;
         this.gitStatusService = gitStatusService;
         this.worktreeService = worktreeService;
@@ -413,15 +419,21 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         if (modalLayer == null) {
             return;
         }
+        Optional<AgentKind> defaultKind = agentRegistry.resolveDefault(repository.settings().lastUsedAgent());
+        if (defaultKind.isEmpty()) {
+            showNoAgentAvailable();
+            return;
+        }
         String branch = worktree.branch().orElse(worktree.detached() ? "(detached)" : repository.displayName());
-        StartSessionModal modal = new StartSessionModal(branch, worktree.path(), modalLayer::close, task -> {
+        StartSessionModal modal = new StartSessionModal(branch, worktree.path(), agentRegistry, defaultKind.get(),
+                modalLayer::close, (task, agent) -> {
             clearUnopenedWorktreeState();
             if (worktree.mainCheckout()) {
-                openNewSession(repository, task);
+                openNewSession(repository, task, agent);
             } else {
                 // Discovered on disk: drydock did not create this branch, so
                 // removing the worktree must never force-delete it.
-                openNewWorktreeSession(repository, branch, worktree.path(), task, false);
+                openNewWorktreeSession(repository, branch, worktree.path(), task, false, agent);
             }
         });
         modalLayer.show(modal);
@@ -515,19 +527,73 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
     // ---- Opening ------------------------------------------------------------
 
-    /** Plan section 11.1 / 12 "New Claude session": creates a brand-new session and opens it in a new tab. */
+    /**
+     * Plan section 11.1 / 12 "New Claude session": this is the plain,
+     * no-worktree-context entry point (sidebar "+" menu, ⌘N) -- it never
+     * had a modal before this task, but a session now always needs a
+     * chosen {@link AgentKind}, so it shows a compact agent-picker modal
+     * (the same {@link StartSessionModal} the worktree-handoff flow uses,
+     * targeted at the repository's main checkout) before launching. If no
+     * agent CLI is available at all, launching is blocked with a message
+     * instead of showing a picker with every option disabled.
+     */
     @Override
     public void openNewSession(Repository repository) {
-        openNewSession(repository, Optional.empty());
+        Optional<AgentKind> defaultKind = agentRegistry.resolveDefault(repository.settings().lastUsedAgent());
+        if (defaultKind.isEmpty()) {
+            showNoAgentAvailable();
+            return;
+        }
+        if (modalLayer == null) {
+            // Defensive fallback only (modalLayer is wired before any user
+            // interaction is possible): launch with the resolved default
+            // rather than silently doing nothing.
+            openNewSession(repository, Optional.empty(), defaultKind.get());
+            return;
+        }
+        StartSessionModal modal = new StartSessionModal(repository.displayName(), repository.root(), agentRegistry,
+                defaultKind.get(), modalLayer::close,
+                (task, agent) -> openNewSession(repository, task, agent));
+        modalLayer.show(modal);
     }
 
-    /** As {@link #openNewSession(Repository)}, optionally typing a task into the fresh session's terminal. */
-    public void openNewSession(Repository repository, Optional<String> task) {
+    /**
+     * As {@link #openNewSession(Repository)}, but launches immediately with
+     * the resolved default agent instead of showing the picker modal --
+     * for the {@code -Dapp.drydock.diag.autoCreateSession=true} diagnostic
+     * hook, which needs a session to appear without a click so screenshot
+     * harnesses keep working. If no agent CLI is available at all, this
+     * matches the plain path's blocked-message behavior rather than
+     * launching (there's nothing to launch with).
+     */
+    public void openNewSessionWithDefaultAgent(Repository repository) {
+        Optional<AgentKind> defaultKind = agentRegistry.resolveDefault(repository.settings().lastUsedAgent());
+        if (defaultKind.isEmpty()) {
+            showNoAgentAvailable();
+            return;
+        }
+        openNewSession(repository, Optional.empty(), defaultKind.get());
+    }
+
+    /** Shown when {@link AgentRegistry#resolveDefault} finds no available agent CLI at all. */
+    private void showNoAgentAvailable() {
+        String searched = agentRegistry.agents().stream()
+                .map(agent -> agent.displayName() + ": " + agent.describeSearched())
+                .collect(Collectors.joining("; "));
+        Alert alert = new Alert(Alert.AlertType.WARNING);
+        alert.setTitle("No agent CLI found");
+        alert.setHeaderText("No agent CLI found");
+        alert.setContentText("Searched: " + searched);
+        alert.showAndWait();
+    }
+
+    /** As {@link #openNewSession(Repository)}, with an explicit agent and optionally typing a task into the fresh session's terminal. */
+    public void openNewSession(Repository repository, Optional<String> task, AgentKind agent) {
         // Prepared (not just a fresh id) so the placeholder is keyed under
         // the REAL session id: the launch persists the session almost
         // immediately, and a sidebar resume racing the launch must find
         // this pending tab instead of starting a second surface.
-        ManagedAgentSession prepared = sessionManager.prepareSession(repository);
+        ManagedAgentSession prepared = sessionManager.prepareSession(repository, agent);
         OpenSessionTab placeholderTab = showPendingTab(prepared.id(), "Starting...",
                 Optional.of(repository), repository.root());
 
@@ -573,7 +639,9 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                             return;
                         }
                         modalLayer.close();
-                        openNewWorktreeSession(repository, branch, created, task, existing.isEmpty());
+                        AgentKind defaultKind = agentRegistry.resolveDefault(repository.settings().lastUsedAgent())
+                                .orElse(AgentKind.CLAUDE);
+                        openNewWorktreeSession(repository, branch, created, task, existing.isEmpty(), defaultKind);
                     }));
                 });
         modalLayer.show(holder[0]);
@@ -590,11 +658,11 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * branch: only then may removing the worktree also delete it.</p>
      */
     public void openNewWorktreeSession(Repository repository, String branch, Path worktreeRoot,
-                                       Optional<String> task, boolean branchCreatedHere) {
+                                       Optional<String> task, boolean branchCreatedHere, AgentKind agent) {
         // Keyed under the real session id for the same launch-race reason
         // as openNewSession.
         ManagedAgentSession prepared =
-                sessionManager.prepareWorktreeSession(repository, branch, worktreeRoot, branchCreatedHere);
+                sessionManager.prepareWorktreeSession(repository, branch, worktreeRoot, branchCreatedHere, agent);
         OpenSessionTab placeholderTab = showPendingTab(prepared.id(), branch,
                 Optional.of(repository), worktreeRoot);
 

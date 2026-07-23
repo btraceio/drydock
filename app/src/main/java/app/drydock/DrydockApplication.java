@@ -181,9 +181,9 @@ public final class DrydockApplication extends Application {
         WorkspaceViewModel viewModel = new WorkspaceViewModel();
         viewModel.setSessions(sessionManager.sessions());
 
-        mainWorkspace = new MainWorkspace(sessionManager, repositoryManager, gitStatusService, searchService,
-                ghCliService, worktreeService, diffService, changedLineService, annotationStore, viewModel,
-                primaryStage);
+        mainWorkspace = new MainWorkspace(sessionManager, agentRegistry, repositoryManager, gitStatusService,
+                searchService, ghCliService, worktreeService, diffService, changedLineService, annotationStore,
+                viewModel, primaryStage);
         RepositorySidebar sidebar =
                 new RepositorySidebar(repositoryManager, gitStatusService, worktreeService, sessionManager,
                         mainWorkspace, viewModel);
@@ -495,7 +495,7 @@ public final class DrydockApplication extends Application {
                                 diagPopup.show(primaryStage, primaryStage.getX() + 40, primaryStage.getY() + 80);
                                 System.out.println("[diag] popup shown before session");
                             }
-                            mainWorkspace.openNewSession(repo);
+                            mainWorkspace.openNewSessionWithDefaultAgent(repo);
                             System.out.println("[diag] openNewSession called for " + repo.displayName());
                             if (diagPopup != null) {
                                 diagPopup.hide();
