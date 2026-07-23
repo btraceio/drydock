@@ -13,9 +13,13 @@ import java.util.ServiceLoader;
 
 /**
  * Discovers {@link AgentProvider}s (via {@link ServiceLoader}), inits each with
- * the shared {@link AgentContext}, caches availability once, and resolves the
- * default agent for a new session. Availability is computed off the FX thread
- * by the caller of {@link #create} (construction probes {@code locateExecutable}).
+ * the shared {@link AgentContext}, caches availability and remote-capability
+ * once, and resolves the default agent for a new session. Both are computed
+ * off the FX thread by the caller of {@link #create} (construction probes
+ * {@code locateExecutable} and {@code probeCapabilities}, either of which may
+ * block); every other reader (e.g. the UI building a picker) only ever reads
+ * the cached maps, so it never needs to probe -- and never blocks the FX
+ * thread -- to know whether an agent is available or remote-capable.
  */
 public final class AgentRegistry {
 
@@ -23,6 +27,7 @@ public final class AgentRegistry {
 
     private final Map<AgentKind, AgentProvider> providers = new EnumMap<>(AgentKind.class);
     private final Map<AgentKind, Boolean> availability = new EnumMap<>(AgentKind.class);
+    private final Map<AgentKind, Boolean> remoteCapability = new EnumMap<>(AgentKind.class);
 
     /** Discovers providers via ServiceLoader. Call off the FX thread (probes executables). */
     public static AgentRegistry create(AgentContext ctx) {
@@ -50,6 +55,14 @@ public final class AgentRegistry {
                 available = false;
             }
             availability.put(provider.kind(), available);
+            boolean remote;
+            try {
+                remote = provider.probeCapabilities().supportsRemote();
+            } catch (RuntimeException e) {
+                LOG.log(Level.WARNING, () -> "Capability probe failed for " + provider.kind() + ": " + e);
+                remote = false;
+            }
+            remoteCapability.put(provider.kind(), remote);
         }
     }
 
@@ -81,16 +94,38 @@ public final class AgentRegistry {
     }
 
     /**
+     * Whether {@code kind}'s provider reports remote-session support, per
+     * {@link app.drydock.agent.spi.AgentProvider#probeCapabilities()}. Cached
+     * at construction time (alongside {@link #isAvailable}) so callers never
+     * need to re-probe -- and, in particular, so the UI can read this
+     * synchronously off the FX thread without triggering a process spawn.
+     */
+    public boolean supportsRemote(AgentKind kind) {
+        return remoteCapability.getOrDefault(kind, false);
+    }
+
+    /**
      * Resolves the pre-selected default: the repo's last-used agent if still
      * available, else the first available agent in preference order, else empty
      * (no agent CLI found).
      */
     public Optional<AgentKind> resolveDefault(Optional<AgentKind> repoLastUsed) {
-        if (repoLastUsed.isPresent() && isAvailable(repoLastUsed.get())) {
+        return resolveDefault(repoLastUsed, false);
+    }
+
+    /**
+     * As {@link #resolveDefault(Optional)}, but when {@code requireRemote} is
+     * true, agents that don't report {@link #supportsRemote} are skipped
+     * entirely -- used when the target repository is remote, so only
+     * remote-capable agents are ever offered as the default.
+     */
+    public Optional<AgentKind> resolveDefault(Optional<AgentKind> repoLastUsed, boolean requireRemote) {
+        if (repoLastUsed.isPresent() && isAvailable(repoLastUsed.get())
+                && (!requireRemote || supportsRemote(repoLastUsed.get()))) {
             return repoLastUsed;
         }
         for (AgentKind kind : AgentKind.preferenceOrder()) {
-            if (isAvailable(kind)) {
+            if (isAvailable(kind) && (!requireRemote || supportsRemote(kind))) {
                 return Optional.of(kind);
             }
         }

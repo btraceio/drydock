@@ -26,7 +26,28 @@ final class AgentSelector extends VBox {
         return registry.resolveDefault(repoLastUsed);
     }
 
+    /** As {@link #initialSelection(AgentRegistry, Optional)}, gated to remote-capable agents. */
+    static Optional<AgentKind> initialSelection(AgentRegistry registry, Optional<AgentKind> repoLastUsed,
+                                                 boolean requireRemoteCapability) {
+        return registry.resolveDefault(repoLastUsed, requireRemoteCapability);
+    }
+
     AgentSelector(AgentRegistry registry, AgentKind preselected, Consumer<AgentKind> onSelect) {
+        this(registry, preselected, false, onSelect);
+    }
+
+    /**
+     * @param requireRemoteCapability when true (target repository is remote),
+     *                                 agents that don't report
+     *                                 {@link AgentRegistry#supportsRemote} are
+     *                                 disabled too, alongside unavailable
+     *                                 ones. {@code registry} already has this
+     *                                 cached (see {@link AgentRegistry}), so
+     *                                 no probing happens here -- safe to call
+     *                                 on the FX thread.
+     */
+    AgentSelector(AgentRegistry registry, AgentKind preselected, boolean requireRemoteCapability,
+                  Consumer<AgentKind> onSelect) {
         this.selected = preselected;
         setSpacing(6);
         Label label = new Label("Agent");
@@ -34,15 +55,19 @@ final class AgentSelector extends VBox {
         HBox toggles = new HBox(6);
         ToggleGroup group = new ToggleGroup();
         for (Agent agent : registry.agents()) {
+            boolean remoteOk = !requireRemoteCapability || registry.supportsRemote(agent.kind());
+            boolean disabled = !agent.isAvailable() || !remoteOk;
             ToggleButton button = new ToggleButton(agent.displayName());
             button.getStyleClass().add("agent-toggle");
             button.setToggleGroup(group);
             button.setUserData(agent.kind());
-            button.setDisable(!agent.isAvailable());
+            button.setDisable(disabled);
             if (!agent.isAvailable()) {
                 button.setTooltip(new Tooltip("Not found. Searched: " + agent.describeSearched()));
+            } else if (!remoteOk) {
+                button.setTooltip(new Tooltip("Doesn't support remote sessions"));
             }
-            if (agent.kind() == preselected && agent.isAvailable()) {
+            if (agent.kind() == preselected && !disabled) {
                 button.setSelected(true);
             }
             button.setOnAction(e -> {

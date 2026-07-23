@@ -419,14 +419,15 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         if (modalLayer == null) {
             return;
         }
-        Optional<AgentKind> defaultKind = agentRegistry.resolveDefault(repository.settings().lastUsedAgent());
+        boolean requireRemote = repository.isRemote();
+        Optional<AgentKind> defaultKind = agentRegistry.resolveDefault(repository.settings().lastUsedAgent(), requireRemote);
         if (defaultKind.isEmpty()) {
             showNoAgentAvailable();
             return;
         }
         String branch = worktree.branch().orElse(worktree.detached() ? "(detached)" : repository.displayName());
         StartSessionModal modal = new StartSessionModal(branch, worktree.path(), agentRegistry, defaultKind.get(),
-                modalLayer::close, (task, agent) -> {
+                requireRemote, modalLayer::close, (task, agent) -> {
             clearUnopenedWorktreeState();
             if (worktree.mainCheckout()) {
                 openNewSession(repository, task, agent);
@@ -539,7 +540,8 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      */
     @Override
     public void openNewSession(Repository repository) {
-        Optional<AgentKind> defaultKind = agentRegistry.resolveDefault(repository.settings().lastUsedAgent());
+        boolean requireRemote = repository.isRemote();
+        Optional<AgentKind> defaultKind = agentRegistry.resolveDefault(repository.settings().lastUsedAgent(), requireRemote);
         if (defaultKind.isEmpty()) {
             showNoAgentAvailable();
             return;
@@ -552,7 +554,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             return;
         }
         StartSessionModal modal = new StartSessionModal(repository.displayName(), repository.root(), agentRegistry,
-                defaultKind.get(), modalLayer::close,
+                defaultKind.get(), requireRemote, modalLayer::close,
                 (task, agent) -> openNewSession(repository, task, agent));
         modalLayer.show(modal);
     }
@@ -567,7 +569,8 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * launching (there's nothing to launch with).
      */
     public void openNewSessionWithDefaultAgent(Repository repository) {
-        Optional<AgentKind> defaultKind = agentRegistry.resolveDefault(repository.settings().lastUsedAgent());
+        Optional<AgentKind> defaultKind = agentRegistry.resolveDefault(
+                repository.settings().lastUsedAgent(), repository.isRemote());
         if (defaultKind.isEmpty()) {
             showNoAgentAvailable();
             return;
@@ -639,7 +642,8 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                             return;
                         }
                         modalLayer.close();
-                        AgentKind defaultKind = agentRegistry.resolveDefault(repository.settings().lastUsedAgent())
+                        AgentKind defaultKind = agentRegistry
+                                .resolveDefault(repository.settings().lastUsedAgent(), repository.isRemote())
                                 .orElse(AgentKind.CLAUDE);
                         openNewWorktreeSession(repository, branch, created, task, existing.isEmpty(), defaultKind);
                     }));

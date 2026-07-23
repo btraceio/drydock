@@ -41,6 +41,20 @@ final class StartSessionModal extends VBox {
 
     StartSessionModal(String branch, Path worktreePath, AgentRegistry registry, AgentKind preselected,
                        Runnable onClose, StartHandler onStart) {
+        this(branch, worktreePath, registry, preselected, false, onClose, onStart);
+    }
+
+    /**
+     * @param requireRemoteCapability true when the target repository is
+     *                                 remote (see {@link app.drydock.domain.Repository#isRemote()}):
+     *                                 the {@link AgentSelector} then disables
+     *                                 any agent that isn't remote-capable, and
+     *                                 {@code preselected} is expected to
+     *                                 already be resolved accordingly (see
+     *                                 {@link app.drydock.agent.api.AgentRegistry#resolveDefault(Optional, boolean)}).
+     */
+    StartSessionModal(String branch, Path worktreePath, AgentRegistry registry, AgentKind preselected,
+                       boolean requireRemoteCapability, Runnable onClose, StartHandler onStart) {
         this.registry = registry;
         this.branch = branch;
         this.worktreePath = worktreePath;
@@ -64,7 +78,8 @@ final class StartSessionModal extends VBox {
         target.getStyleClass().add("worktree-base-chip");
         target.setWrapText(true);
 
-        AgentSelector selector = new AgentSelector(registry, preselected, kind -> refreshPreview(kind));
+        AgentSelector selector = new AgentSelector(registry, preselected, requireRemoteCapability,
+                kind -> refreshPreview(kind));
 
         TextArea taskField = new TextArea();
         taskField.getStyleClass().add("worktree-task");
