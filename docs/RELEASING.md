@@ -39,3 +39,23 @@ Two ways to trigger `.github/workflows/release.yml`:
 
 If you don't click Publish within 30 minutes, `wait-for-maven` times out and the
 release is not finalized; re-run that job (or the workflow) after publishing.
+
+## Debugging the pipeline without cutting a release
+
+To exercise the fragile parts of the pipeline (the macOS runner setup — Zig,
+Metal toolchain, JDKs — plus the Gradle build and GPG signing) **without**
+minting a real release, use the **dry run** input:
+
+Actions -> Release -> Run workflow, enter the version, and tick **`dry_run`**.
+
+With `dry_run` on, the workflow builds from the branch you launched it on and:
+
+- **skips** `prepare` — no version bump, no commit, no tag, no push;
+- runs `stage-maven` but publishes **`:app:publishToMavenLocal`** (into the
+  runner's `~/.m2/repository`) instead of staging to the Central Portal — so the
+  full build + in-memory GPG signing path is validated with real secrets;
+- **skips** `wait-for-maven` and `create-github-release`.
+
+The result: a full end-to-end run that leaves zero traces (no tags, no Central
+deployment, no GitHub release) and can be re-run as many times as needed. It
+needs `GPG_SIGNING_KEY`/`GPG_SIGNING_PWD`; Sonatype credentials are not used.
