@@ -45,8 +45,12 @@ supplies both.
 A new Gradle task assembles a single jar published to **Maven Central** under the
 existing btraceio Sonatype domain:
 
-- **Coordinate:** `io.btraceio:drydock:0.1.0` (reuses the btrace project's
-  existing Central publishing + GPG signing config; no new Sonatype setup).
+- **Coordinate:** `io.btraceio:drydock:0.1.0`. The **GPG key and Sonatype
+  account** are reused from btrace (no new *credentials*), and `io.btraceio` is
+  already a verified namespace — but the Gradle **publish/sign wiring is net-new
+  in this repo** (it currently has no `maven-publish`/`signing` config, no
+  `-sources`/`-javadoc` jars, no POM metadata). Treat that wiring as real work,
+  not a copy-paste.
 - **Contents:**
   - all `app.drydock.*` compiled classes,
   - the new bootstrap class (§4),
@@ -61,12 +65,24 @@ existing btraceio Sonatype domain:
   ride *inside* the jar precisely because they are the one thing not otherwise
   available on Maven.
 - **Central-required sidecars:** signed `-sources` and `-javadoc` jars and a
-  signed POM, exactly as btrace already produces. Only the **main** jar carries
-  the dylibs. Bundling `.dylib` resources in a Central jar is well-trodden
-  (sqlite-jdbc, JNA-style artifacts do the same) — no policy risk.
-- **POM stays minimal.** The native libs are bundled resources, not declared
-  dependencies. JavaFX/richtextfx are supplied by the catalog alias (§5), **not**
-  the POM — see §5 for why.
+  signed POM. Only the **main** jar carries the dylibs. Bundling `.dylib`
+  resources in a Central jar is well-trodden (sqlite-jdbc, JNA-style artifacts do
+  the same) — no policy risk. **Attribution:** libghostty is MIT-licensed
+  (Ghostty), so the jar and POM `<licenses>` must carry Ghostty's MIT
+  copyright/permission notice plus a NOTICE of the local
+  `ghostty-install-macos-shared-lib.patch` modification (verify the submodule's
+  actual LICENSE at plan time).
+- **The POM declares the runtime deps.** JavaFX (`javafx-base`/`-controls`/
+  `-graphics:26`) and `richtextfx:0.11.7` are **classifier-less** dependencies in
+  this POM — this is what jbang resolves (host-correct classifier + module path)
+  when it runs the GAV. They are *not* in an alias `deps:` block, which jbang
+  drops for a GAV `ref` (see §5, corrected after adversarial review). The native
+  libs remain bundled resources, not dependencies.
+- **Manifest must carry `Implementation-Version`.** The bootstrap's
+  version-stamped cache dir (§4) reads `Package.getImplementationVersion()`,
+  which returns the jar manifest's `Implementation-Version` — this is **not**
+  written automatically; the jar task must set it explicitly, with a test, or the
+  bootstrap reads `null` and upgrade-isolation silently breaks.
 
 The dylibs consumed by this task are the same universal-built artifacts the
 `buildGhosttyNative` / `buildNativeHost` tasks already produce under
@@ -80,15 +96,26 @@ New class `app.drydock.launcher.JBangBootstrap` (small, ~30 lines). At launch it
    as `NativeLibraryLocator.detectArchDirectoryName()` (`x86_64`/`amd64` →
    `macos-x86_64`, `aarch64`/`arm64` → `macos-arm64`; anything else is a clear
    unsupported-arch error).
-2. Computes a **version-stamped** cache root:
-   `~/.cache/drydock/native/<version>/` (version read from a bundled
-   properties/manifest value, so upgrades never collide with a stale extraction).
+2. Computes a **version-stamped** cache root under the macOS caches convention:
+   `~/Library/Caches/drydock/native/<version>/`. `<version>` comes from
+   `JBangBootstrap.class.getPackage().getImplementationVersion()` (the jar
+   manifest's `Implementation-Version` — which the jar task MUST set, see §3);
+   stamping by version means upgrades never collide with a stale extraction. If
+   the version is somehow `null`, fall back to a content hash of the bundled
+   dylib rather than an unstamped shared dir.
 3. If `<cacheRoot>/macos-<arch>/libghostty.dylib` is absent, copies **both** the
    current arch's dylibs from its own classpath resources
-   (`native/macos-<arch>/…`) into `<cacheRoot>/macos-<arch>/`. Extraction is
-   done by the JVM writing files, which does **not** attach the
-   `com.apple.quarantine` xattr, so Gatekeeper does not block the subsequent
-   `dlopen` of the ad-hoc-signed slices.
+   (`native/macos-<arch>/…`) into `<cacheRoot>/macos-<arch>/`, writing to a temp
+   file + atomic rename so concurrent first-launches don't tear. The dlopen of
+   the copied slices succeeds for two reasons: (a) JVM-written files carry no
+   `com.apple.quarantine` xattr, and — the load-critical one — (b) the
+   provisioned JDK is Temurin, whose hardened runtime ships
+   `com.apple.security.cs.disable-library-validation`, so a notarized `java`
+   is permitted to load the ad-hoc-signed (arm64) / unsigned (x86_64) third-party
+   dylibs. **This assumes a Temurin/Adoptium JDK; the plan must pin/verify the
+   vendor**, since a JDK built *without* that entitlement would fail the load with
+   a code-signature error regardless of quarantine. The copy preserves the
+   embedded ad-hoc signature (plain file copy; no re-sign).
 4. Sets **both** native-locator properties to the *root* (the locator appends
    `macos-<arch>/<file>` itself — see `NativeLibraryLocator.resolveLibraryPath`,
    which resolves `<root>/<archDir>/<fileName>`):
@@ -96,7 +123,9 @@ New class `app.drydock.launcher.JBangBootstrap` (small, ~30 lines). At launch it
    - `app.drydock.terminalhost.nativeDir=<cacheRoot>`
 
    Both may share one root, exactly like the jlink image's `lib/` directory.
-5. Calls `app.drydock.Main.main(args)`.
+5. Calls `app.drydock.Main.main(args)`. **The dock icon is NOT set here** — see
+   §6; doing AWT `Taskbar` work before JavaFX's Cocoa toolkit starts risks a
+   main-thread conflict, so icon-setting moves onto the FX thread inside the app.
 
 This is the only genuinely new **runtime** code. Extraction must be safe against
 concurrent first-launches (write to a temp dir + atomic rename, or tolerate an
@@ -107,11 +136,8 @@ already-present file).
 A `jbang-catalog.json` committed at the repo root defines an alias `drydock`:
 
 - `java-version: 26` — jbang provisions/caches the JDK.
-- `main: app.drydock.launcher.JBangBootstrap`
-- `deps:`
-  - `org.openjfx:javafx-base:26`, `org.openjfx:javafx-controls:26`,
-    `org.openjfx:javafx-graphics:26`
-  - `org.fxmisc.richtext:richtextfx:0.11.7`
+- `main: app.drydock.launcher.JBangBootstrap` (overrides whatever `Main-Class`
+  the jar manifest carries — verified).
 - `runtime-options:`
   - `--enable-native-access=ALL-UNNAMED`
   - `--add-exports=javafx.graphics/com.sun.glass.ui=ALL-UNNAMED`
@@ -120,24 +146,41 @@ A `jbang-catalog.json` committed at the repo root defines an alias `drydock`:
   - `-Xdock:name=Drydock` (dock/menu-bar label; a launch-time JVM arg, so the
     alias is the right place for it — see §6).
 - **ref (artifact):** `io.btraceio:drydock:0.1.0` (the Central GAV).
+- **No alias `deps:`** — see the correction below.
 
-**Why JavaFX lives in the alias `deps`, not the published POM:** jbang's JavaFX
-handling — picking the host's `mac`/`mac-aarch64` classifier and configuring the
-module path — keys off `org.openjfx` deps it sees *directly*. Declaring them as
-alias deps guarantees that handling. Relying on transitive resolution from a
-static POM risks a host-wrong classifier being baked in. So the app POM omits
-them and the alias supplies them.
+**JavaFX/richtextfx live in the published POM, NOT in alias `deps` (corrected
+after adversarial review).** The runtime deps are declared as normal,
+**classifier-less** dependencies in the `io.btraceio:drydock` POM:
 
-**Empirically confirmed (jbang 0.101.0):** deps supplied via `--deps` (exactly
-how an alias `deps:` expands at run time) receive the full JavaFX treatment —
-jbang resolved the platform classifier jars and launched with
-`java --module-path <the openjfx jars> …`. On an x86_64 host it correctly picked
-the `-mac` (x86_64) classifier. So the pure-alias approach works; **no
-`.java`-with-`//DEPS` launcher script is required.** The one item left to verify
-at plan time is that jbang also picks `mac-aarch64` on an Apple Silicon host
-(couldn't be tested on the x86_64 dev machine); if it ever mis-picks, the
-fallback is a per-arch classifier pin, but jbang's resolution proved arch-aware
-here.
+- `org.openjfx:javafx-base:26`, `org.openjfx:javafx-controls:26`,
+  `org.openjfx:javafx-graphics:26`
+- `org.fxmisc.richtext:richtextfx:0.11.7`
+
+**Why the earlier "alias `deps`" plan was wrong (proven, jbang 0.101.0):** when
+an alias's `ref` is a **GAV**, jbang **silently drops the alias `deps`** — they
+never reach the JVM (confirmed: JavaFX landed on neither module-path nor
+classpath, and `--add-exports` then failed with *"Unknown module:
+javafx.graphics"*). My first probe only exercised `--deps` on a *source* script,
+a different code path, so it gave a false green. The POM route is what actually
+works **and** is host-correct: jbang honors a GAV's POM dependencies and
+**recomputes the host classifier at run time** — from a classifier-less
+`org.openjfx:*` POM dep it resolved the `-mac` (x86_64) slice and put JavaFX on
+the module path with `--add-exports` resolving cleanly. So §5's original premise
+("a static POM risks a host-wrong classifier") was backwards; the POM is exactly
+what makes classifier selection correct and per-host.
+
+Equivalent fallback (also proven): commit a tiny `Launcher.java` carrying
+`//DEPS io.btraceio:drydock:0.1.0` + `//DEPS org.openjfx:*` and point the alias
+`ref` at that file. The POM route is preferred (nothing to commit, deps travel
+with the artifact); the `//DEPS` route is the backstop if POM resolution ever
+misbehaves.
+
+**Still to verify at plan time (arm64):** the classifier resolution proved
+genuinely host-driven on x86_64 (picked `-mac`), so `mac-aarch64` on Apple
+Silicon is low-risk but untested on this Intel dev machine. Also re-run against
+JavaFX **26** specifically (the probe used 26's POM shape but an older cached
+classifier jar in one run) to confirm 26's `mac`/`mac-aarch64` artifacts get the
+same treatment.
 
 **End-user commands:**
 
@@ -169,17 +212,22 @@ explicitly. They split by *when* they can be set:
   `runtime-options` at launch, so this goes straight in the alias (§5). No file
   needed.
 - **Dock icon** — `-Xdock:icon=<path>` needs an absolute file path at launch,
-  which a Central jar resource cannot provide. Instead set it **at run time**
-  via `java.awt.Taskbar.getTaskbar().setIconImage(image)`: the bootstrap loads
-  the icon PNG from its own classpath resources and sets it before delegating to
-  `Main`. AWT/`Taskbar` is available because `-Djava.awt.headless=false` is
-  already set. This is the standard approach for non-bundled JavaFX apps on
-  macOS and avoids the path-at-launch problem entirely.
+  which a Central jar resource cannot provide, so the icon is set **at run time**
+  via `java.awt.Taskbar.getTaskbar().setIconImage(image)` from the bundled PNG.
+  **Ordering is the risk (flagged by adversarial review):** Drydock already
+  drives Glass/Cocoa on the macOS main thread and hands `NSView*` pointers to a
+  native host shim, so bringing up AWT's own Cocoa/`NSApplication` *before*
+  JavaFX starts (i.e. in the pre-`Main` bootstrap) is exactly the fragile
+  AWT-vs-Glass main-thread case. Therefore **set the icon from inside the running
+  app on the JavaFX thread** (e.g. early in `DrydockApplication.start`, or via
+  `Platform.runLater` after `Platform.startup`), NOT in `JBangBootstrap` before
+  `Main`. This must be **verified by running the actual app** on macOS (per the
+  project rule to verify UI changes on-screen), on both arches. `Taskbar`/
+  `isSupported(Feature.ICON_IMAGE)` is guarded so a non-macOS run degrades
+  cleanly. AWT is available because `-Djava.awt.headless=false` is set.
 
-The icon PNG is therefore bundled as a jar resource (e.g. a 1024×1024
-`icon/drydock.png`) alongside the dylibs (§3). `Taskbar.setIconImage` is a no-op
-or throws `UnsupportedOperationException` on platforms without the feature —
-guard it so a non-macOS run (which is already unsupported) degrades cleanly.
+The icon PNG is bundled as a jar resource (e.g. a 1024×1024 `icon/drydock.png`)
+alongside the dylibs (§3).
 
 **New artwork — chosen direction: "Bot in dock".** The current
 `assets/app-icon.icns` is Claude-branded (terracotta fill + white CLI-prompt
@@ -229,17 +277,26 @@ small-size (32 px) hinting, then producing the multi-resolution iconset.
 ## 9. Work summary (for the plan)
 
 1. Gradle task: assemble the natives-bundled `io.btraceio:drydock` main jar
-   (classes + bootstrap + both-arch dylib resources), depending on
-   `buildGhosttyNative` / `buildNativeHost`.
-2. Central publishing wiring reusing the btrace GPG/Sonatype config: main jar +
-   signed `-sources`, `-javadoc`, POM.
-3. `app.drydock.launcher.JBangBootstrap` (arch detect, safe extraction, property
-   set, dock-icon via `Taskbar.setIconImage`, delegate to `Main`).
-4. New drydock-themed app artwork → regenerate `assets/app-icon.icns` **and** the
-   bundled `icon/drydock.png`; add `-Xdock:name=Drydock` to the alias.
-5. `jbang-catalog.json` alias `drydock` (java-version, deps, runtime-options,
-   main, GAV ref).
+   (classes + bootstrap + both-arch dylib resources + icon PNG), depending on
+   `buildGhosttyNative` / `buildNativeHost`. **Set `Implementation-Version` in the
+   manifest** (with a test asserting the bootstrap reads it back). Include Ghostty
+   MIT license + patch NOTICE in the jar.
+2. Central publish/sign wiring — **net-new in this repo** (add `maven-publish` +
+   `signing`, `-sources`/`-javadoc` jars, POM metadata **including the JavaFX +
+   richtextfx classifier-less runtime deps** and `<licenses>`), reusing btrace's
+   GPG key + Sonatype account.
+3. `app.drydock.launcher.JBangBootstrap` (arch detect, safe temp+atomic
+   extraction to `~/Library/Caches/…`, version-stamped, set `nativeDir`
+   properties, delegate to `Main` — **no icon work here**).
+4. Dock icon on the **FX thread** inside the app (not the bootstrap) from the
+   bundled PNG, guarded via `Taskbar.isSupported`; **verify on-screen** on both
+   arches. New "Bot in dock" artwork → regenerate `assets/app-icon.icns` **and**
+   `icon/drydock.png`; add `-Xdock:name=Drydock` to the alias.
+5. `jbang-catalog.json` alias `drydock` (`java-version: 26`, `runtime-options`,
+   `main`, GAV `ref` — **no alias `deps`**; deps come from the POM).
 6. Docs: a README/run section for the `jbang drydock@…` path and its limitations.
-7. Verification: on a clean machine (or a JDK-less shell), `jbang drydock@…`
-   launches a working Drydock with a live terminal tab, correct dock name/icon,
-   and correct JavaFX classifier on **both** arm64 and x86_64.
+7. Verification (the review's must-fix set): after the POM-deps fix, confirm
+   `jbang drydock@…` actually launches a working Drydock with a live terminal
+   tab, correct dock name/icon, and host-correct JavaFX classifier on **both**
+   arm64 and x86_64, using a **Temurin** JDK 26 (dylib load depends on its
+   `disable-library-validation` entitlement).
