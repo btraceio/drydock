@@ -9,6 +9,9 @@ plugins {
     id("drydock.packaging")
 }
 
+group = "io.btraceio"
+version = "0.1.0"
+
 java {
     toolchain {
         languageVersion.set(JavaLanguageVersion.of(26))
@@ -81,6 +84,45 @@ dependencies {
 
 tasks.test {
     useJUnitPlatform()
+}
+
+// Thin, publishable jar for the jbang launcher: the app's own classes and
+// resources (including icon/drydock.png) plus both macOS arch slices of the
+// two native dylibs. JavaFX/richtextfx are NOT bundled -- they are declared as
+// classifier-less POM dependencies (see the publishing block) so jbang
+// resolves the host-correct classifier at run time.
+tasks.register<Jar>("jbangJar") {
+    group = "distribution"
+    description = "Natives-bundled jar for `jbang drydock@...` (io.btraceio:drydock)."
+    archiveBaseName.set("drydock")
+    archiveClassifier.set("")
+
+    dependsOn(rootProject.tasks.named("buildGhosttyNative"))
+    dependsOn(rootProject.tasks.named("buildNativeHost"))
+
+    from(sourceSets.main.get().output)
+
+    val nativeDir = rootProject.layout.buildDirectory.dir("native")
+    listOf("macos-arm64", "macos-x86_64").forEach { arch ->
+        from(nativeDir.map { it.dir(arch) }) {
+            include("libghostty.dylib", "libdrydockterminalhost.dylib")
+            into("native/$arch")
+        }
+    }
+
+    // Ghostty is MIT-licensed; ship its notice inside the jar.
+    from(rootProject.layout.projectDirectory.file("third_party/ghostty/LICENSE")) {
+        into("META-INF/licenses")
+        rename { "LICENSE-ghostty.txt" }
+    }
+
+    manifest {
+        attributes(
+            "Implementation-Title" to "Drydock",
+            "Implementation-Version" to project.version.toString(),
+            "Main-Class" to "app.drydock.launcher.JBangBootstrap"
+        )
+    }
 }
 
 tasks.named<JavaExec>("run") {
