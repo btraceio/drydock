@@ -112,6 +112,10 @@ public final class AgentRegistry {
         return provider(kind).flatMap(AgentProvider::activity);
     }
 
+    public Optional<SessionIdDiscovery> idDiscovery(AgentKind kind) {
+        return provider(kind).flatMap(AgentProvider::idDiscovery);
+    }
+
     public boolean isAvailable(AgentKind kind) {
         return availability.getOrDefault(kind, false);
     }

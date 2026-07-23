@@ -8,6 +8,7 @@ import app.drydock.agent.api.ConversationSource;
 import app.drydock.agent.api.CreateContext;
 import app.drydock.agent.api.LaunchPlan;
 import app.drydock.agent.api.ResumeContext;
+import app.drydock.agent.api.SessionIdDiscovery;
 import app.drydock.agent.api.SessionIdStrategy;
 
 import java.nio.file.Path;
@@ -58,4 +59,7 @@ public interface AgentProvider {
     Optional<ConversationSource> conversations();
 
     Optional<ActivityReporter> activity();
+
+    /** Present only for DISCOVERED-strategy providers; empty for PRESET. */
+    Optional<SessionIdDiscovery> idDiscovery();
 }

@@ -8,6 +8,7 @@ import app.drydock.agent.api.ConversationSource;
 import app.drydock.agent.api.CreateContext;
 import app.drydock.agent.api.LaunchPlan;
 import app.drydock.agent.api.ResumeContext;
+import app.drydock.agent.api.SessionIdDiscovery;
 import app.drydock.agent.api.SessionIdStrategy;
 import app.drydock.agent.spi.AgentProvider;
 import app.drydock.agent.providers.claude.internal.ClaudeCapabilities;
@@ -144,6 +145,11 @@ public final class ClaudeAgentProvider implements AgentProvider {
     @Override
     public Optional<ActivityReporter> activity() {
         return Optional.of(activityReporter);
+    }
+
+    @Override
+    public Optional<SessionIdDiscovery> idDiscovery() {
+        return Optional.empty();   // Claude is PRESET
     }
 
     /** Uncached, like the pre-seam code: every launch/resume re-probes. Runs on the caller's (background) thread. */

@@ -8,6 +8,7 @@ import app.drydock.agent.api.ConversationSource;
 import app.drydock.agent.api.CreateContext;
 import app.drydock.agent.api.LaunchPlan;
 import app.drydock.agent.api.ResumeContext;
+import app.drydock.agent.api.SessionIdDiscovery;
 import app.drydock.agent.api.SessionIdStrategy;
 import org.junit.jupiter.api.Test;
 
@@ -37,6 +38,7 @@ class FakeAgentProviderTest {
         @Override public SessionIdStrategy idStrategy() { return SessionIdStrategy.PRESET; }
         @Override public Optional<ConversationSource> conversations() { return Optional.empty(); }
         @Override public Optional<ActivityReporter> activity() { return Optional.empty(); }
+        @Override public Optional<SessionIdDiscovery> idDiscovery() { return Optional.empty(); }
     }
 
     @Test

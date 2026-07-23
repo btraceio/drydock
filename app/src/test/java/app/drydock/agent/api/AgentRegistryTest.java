@@ -42,6 +42,7 @@ class AgentRegistryTest {
         @Override public SessionIdStrategy idStrategy() { return SessionIdStrategy.PRESET; }
         @Override public Optional<ConversationSource> conversations() { return Optional.empty(); }
         @Override public Optional<ActivityReporter> activity() { return Optional.empty(); }
+        @Override public Optional<SessionIdDiscovery> idDiscovery() { return Optional.empty(); }
     }
 
     private static AgentContext ctx() {
@@ -134,5 +135,12 @@ class AgentRegistryTest {
         CreateContext createContext = new CreateContext("name", "id", Path.of("/tmp"), Optional.empty());
         assertEquals("(no provider for " + AgentKind.CODEX.persistedName() + ")",
                 registry.previewCreateCommand(AgentKind.CODEX, createContext));
+    }
+
+    @Test
+    void idDiscoveryDefaultsEmptyForProvidersWithoutIt() {
+        AgentRegistry registry = new AgentRegistry(
+                List.of(new StubProvider(AgentKind.CLAUDE, true)), ctx());
+        assertTrue(registry.idDiscovery(AgentKind.CLAUDE).isEmpty());
     }
 }
