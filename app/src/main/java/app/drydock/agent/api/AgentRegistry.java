@@ -33,7 +33,8 @@ public final class AgentRegistry {
         return new AgentRegistry(discovered, ctx);
     }
 
-    AgentRegistry(List<AgentProvider> discovered, AgentContext ctx) {
+    /** For tests/callers that want to hand-pick providers instead of discovering them via {@link ServiceLoader}. */
+    public AgentRegistry(List<AgentProvider> discovered, AgentContext ctx) {
         for (AgentProvider provider : discovered) {
             if (providers.containsKey(provider.kind())) {
                 LOG.log(Level.WARNING, "Duplicate provider for {0}; keeping the first", provider.kind());

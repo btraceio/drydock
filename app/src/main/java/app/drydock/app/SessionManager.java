@@ -1,8 +1,12 @@
 package app.drydock.app;
 
-import app.drydock.claude.ClaudeCapabilities;
-import app.drydock.claude.ClaudeCapabilityService;
-import app.drydock.claude.ConversationCatalog;
+import app.drydock.agent.api.AgentKind;
+import app.drydock.agent.api.AgentRegistry;
+import app.drydock.agent.api.CreateContext;
+import app.drydock.agent.api.LaunchPlan;
+import app.drydock.agent.api.ResumeContext;
+import app.drydock.agent.api.SessionIdStrategy;
+import app.drydock.agent.spi.AgentProvider;
 import app.drydock.domain.ApplicationState;
 import app.drydock.domain.BranchOwnership;
 import app.drydock.domain.ManagedClaudeSession;
@@ -11,7 +15,6 @@ import app.drydock.domain.PrState;
 import app.drydock.domain.Repository;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SshRemote;
-import app.drydock.process.SshCommandBuilder;
 import app.drydock.state.ApplicationStateRepository;
 import app.drydock.terminal.api.TerminalHostView;
 import app.drydock.terminal.api.TerminalRuntime;
@@ -46,8 +49,8 @@ import java.util.function.UnaryOperator;
  * TerminalSurface#closeGracefully(long, long, Runnable)}.
  *
  * <p><b>Threading (plan section 18):</b> {@link #createSession} and {@link
- * #resumeSession} do their slow work -- {@link ClaudeCapabilityService}
- * detection and persistence I/O -- on a background executor, and only touch
+ * #resumeSession} do their slow work -- {@link AgentProvider} capability
+ * probing and persistence I/O -- on a background executor, and only touch
  * {@link TerminalSurface}/{@link TerminalRuntime}/{@link TerminalHostView} via
  * {@link Platform#runLater}, per {@link TerminalHostView}'s own documented
  * "JavaFX Application Thread only" constraint. Callers get back a {@link
@@ -64,7 +67,8 @@ import java.util.function.UnaryOperator;
  * {@code login}/{@code bash -c "exec -l ..."} wrapping). There is no
  * argument-list overload to call
  * instead. This class therefore builds the command as a single
- * single-quoted-argument string ({@link #shellQuote}) rather than an actual
+ * single-quoted-argument string ({@code ClaudeAgentProvider.shellQuote})
+ * rather than an actual
  * {@code String[]}/{@code List<String>} argument vector; every dynamic value
  * placed into it (display name, Claude session id/name) is quoted so it
  * cannot be interpreted as additional shell syntax. Likewise, plan section
@@ -86,53 +90,56 @@ public final class SessionManager implements AutoCloseable {
     /** How long {@link #close} waits for queued background work (state saves) before giving up. */
     private static final long CLOSE_AWAIT_TERMINATION_SECONDS = 2;
 
-    /**
-     * Stand-in when capability detection fails on the resume path: every flag
-     * off, so the command falls back to the plain {@code claude --resume} form
-     * that worked before any capability was consulted. Matches
-     * {@link app.drydock.claude.ClaudeCapabilityService}'s documented "fail
-     * conservatively" default rather than guessing a flag is available.
-     */
-    private static final ClaudeCapabilities NO_CAPABILITIES =
-            new ClaudeCapabilities(false, true, false, false, false, "unknown");
-
     private final ApplicationStateStore stateStore;
-    private final ClaudeCapabilityService capabilityService;
+    private final AgentRegistry registry;
     private final ExecutorService backgroundExecutor;
     private final boolean ownsExecutor;
-
-    /**
-     * Settings file injecting the session-activity hooks, absent until
-     * {@link #useActivitySettings} succeeds at startup. Volatile because
-     * launches run on the background executor while installation completes
-     * on another thread; a launch that races installation simply omits the
-     * flag and reports no activity, which is the intended degradation.
-     */
-    private volatile Optional<Path> activitySettings = Optional.empty();
 
     private final ActiveSessionRegistry activeRegistry = new ActiveSessionRegistry();
     private final Map<ManagedSessionId, TerminalSurface> activeSurfaces = new ConcurrentHashMap<>();
 
-    public SessionManager(ApplicationStateRepository stateRepository, ClaudeCapabilityService capabilityService) {
-        this(stateRepository, capabilityService, Executors.newVirtualThreadPerTaskExecutor(), true);
+    public SessionManager(ApplicationStateRepository stateRepository, AgentRegistry registry) {
+        this(stateRepository, registry, Executors.newVirtualThreadPerTaskExecutor(), true);
     }
 
     /** For callers/tests that want to supply (and own the shutdown of) their own executor. */
-    public SessionManager(ApplicationStateRepository stateRepository, ClaudeCapabilityService capabilityService,
+    public SessionManager(ApplicationStateRepository stateRepository, AgentRegistry registry,
                            ExecutorService backgroundExecutor) {
-        this(stateRepository, capabilityService, backgroundExecutor, false);
+        this(stateRepository, registry, backgroundExecutor, false);
     }
 
-    private SessionManager(ApplicationStateRepository stateRepository, ClaudeCapabilityService capabilityService,
+    private SessionManager(ApplicationStateRepository stateRepository, AgentRegistry registry,
                             ExecutorService backgroundExecutor, boolean ownsExecutor) {
         // The store is shared with every other manager built against the
         // same repository instance (see ApplicationStateStore.forRepository),
         // so cross-manager read-modify-write cycles serialize on ONE lock.
         this.stateStore = ApplicationStateStore.forRepository(stateRepository);
-        this.capabilityService = capabilityService;
+        this.registry = registry;
         this.backgroundExecutor = backgroundExecutor;
         this.ownsExecutor = ownsExecutor;
         stateStore.update(SessionManager::normalizeLoadedState);
+    }
+
+    /**
+     * Plan A ships only {@link AgentKind#CLAUDE}; {@code ManagedClaudeSession}
+     * gains a persisted {@code agentKind} field in a follow-up task, at which
+     * point every call site below becomes {@code session.agentKind()}. Kept
+     * as a single named seam so that rename is a one-line change here instead
+     * of a hunt through every call site in this class.
+     */
+    private static AgentKind agentKindOf(ManagedClaudeSession session) {
+        return AgentKind.CLAUDE;
+    }
+
+    /**
+     * Lets a diagnostic override win over a provider-built command, keyed by
+     * agent kind first (so multiple agent kinds can be overridden
+     * independently) and falling back to the un-keyed property for backward
+     * compatibility with existing diagnostic tooling.
+     */
+    private static String diagOverride(AgentKind kind, String built) {
+        return System.getProperty("app.drydock.diag.command." + kind.persistedName(),
+                System.getProperty("app.drydock.diag.command", built));
     }
 
     /**
@@ -152,18 +159,6 @@ public final class SessionManager implements AutoCloseable {
                 })
                 .toList();
         return loaded.withSessions(normalized);
-    }
-
-    /** Read-only view into claude's transcript store, for {@code checkResumeBlocked}'s missing-conversation probe. */
-    private final ConversationCatalog conversationCatalog = new ConversationCatalog();
-
-    /**
-     * Points subsequently launched sessions at {@code settingsFile} so their
-     * Claude reports activity back to this app. Passing {@code null} disables
-     * the injection (used when hook installation failed).
-     */
-    public void useActivitySettings(Path settingsFile) {
-        this.activitySettings = Optional.ofNullable(settingsFile);
     }
 
     public ApplicationState state() {
@@ -222,45 +217,57 @@ public final class SessionManager implements AutoCloseable {
     private CompletableFuture<SessionOpenResult> launchNewSession(ManagedClaudeSession initial, String displayName,
                                                                   TerminalRuntime app, TerminalHostView host,
                                                                   double scaleFactor) {
-        // Generated up front so this app -- not claude -- decides the Claude
-        // session id: launching with `claude --session-id '<uuid>'` (when the
-        // installed claude supports it) makes the session id known without
-        // having to scrape it from claude's output or state files, so a
-        // later resume can target this EXACT conversation via
-        // `claude --resume '<uuid>'` (see buildResumeCommand's fallback
-        // chain) instead of dropping the user into the interactive picker.
-        String claudeSessionId = UUID.randomUUID().toString();
-
-        // Remote repositories get the degraded remote contract (spec):
-        // plain ssh-wrapped claude, no local capability probe (the REMOTE
-        // claude's capabilities are unknown), and never a pre-generated
-        // session id -- the remote claude was never told about it.
+        AgentKind kind = agentKindOf(initial);
+        AgentProvider provider = registry.provider(kind)
+                .orElseThrow(() -> new IllegalStateException("No provider for " + kind));
         Optional<SshRemote> remote = remoteFor(repositoryFor(initial));
-        if (remote.isPresent()) {
-            String command = buildRemoteCreateCommand(remote.get());
-            return CompletableFuture.runAsync(() -> persistNewSession(initial), backgroundExecutor)
-                    .thenCompose(ignored -> createSurfaceOnFxThread(app, host, scaleFactor, command,
-                            System.getProperty("user.home"))
-                            .thenApply(surface -> new CreateLaunch(new CreatePlan(command, false), surface)))
-                    .handleAsync((launch, ex) -> finalizeCreate(initial, claudeSessionId, launch, ex),
-                            backgroundExecutor);
-        }
+        // Generated up front (for PRESET providers) so this app -- not the
+        // agent CLI -- decides the session id: launching with a pre-supplied
+        // id (when the provider supports it) makes it known without having
+        // to scrape it from the tool's output or state files, so a later
+        // resume can target this EXACT conversation directly instead of
+        // dropping the user into an interactive picker. DISCOVERED providers
+        // mint their own id, so none is generated here.
+        String sessionId = provider.idStrategy() == SessionIdStrategy.PRESET
+                ? UUID.randomUUID().toString()
+                : "";
+        String workingDir = remote.isPresent() ? System.getProperty("user.home") : initial.workingDirectory().toString();
 
         // Metadata persistence is disk I/O; keep it off the (FX) caller thread.
         return CompletableFuture.runAsync(() -> persistNewSession(initial), backgroundExecutor)
-                .thenCompose(ignored -> capabilityService.detectCapabilities())
-                .thenApplyAsync(caps -> {
-                    String command = System.getProperty("app.drydock.diag.command",
-                            buildCreateCommand(caps, displayName, claudeSessionId, activitySettings));
-                    // contains() rather than caps.supportsSessionId(): a
+                .thenCompose(ignored -> buildAndLaunchCreate(provider, displayName, sessionId,
+                        initial.workingDirectory(), remote, app, host, scaleFactor, workingDir))
+                .handleAsync((launch, ex) -> finalizeCreate(initial, sessionId, launch, ex), backgroundExecutor);
+    }
+
+    /**
+     * Builds a provider's create command (on the background executor -- it
+     * may block on capability probing) and, once built, opens the resulting
+     * {@link TerminalSurface} on the FX thread. Shared by {@link
+     * #launchNewSession} and {@link #startFreshConversation}, the two paths
+     * that mint a brand-new agent conversation.
+     */
+    private CompletableFuture<CreateLaunch> buildAndLaunchCreate(AgentProvider provider, String displayName,
+                                                                  String sessionId, Path targetWorkingDirectory,
+                                                                  Optional<SshRemote> remote, TerminalRuntime app,
+                                                                  TerminalHostView host, double scaleFactor,
+                                                                  String surfaceWorkingDirectory) {
+        return CompletableFuture.supplyAsync(() -> {
+                    CreateContext ctx = new CreateContext(displayName, sessionId, targetWorkingDirectory, remote);
+                    LaunchPlan plan = provider.buildCreateCommand(ctx);
+                    if (!plan.supported()) {
+                        throw new IllegalStateException(
+                                provider.kind() + " cannot launch this session (remote unsupported)");
+                    }
+                    // contains() rather than plan.sessionIdUsed() alone: a
                     // diag command override never carries the id even when
-                    // the flag is supported.
-                    return new CreatePlan(command, command.contains(claudeSessionId));
+                    // the provider's own plan says it used it.
+                    String command = diagOverride(provider.kind(), plan.command());
+                    return new CreatePlan(command, plan.sessionIdUsed() && command.contains(sessionId));
                 }, backgroundExecutor)
                 .thenCompose(plan -> createSurfaceOnFxThread(app, host, scaleFactor, plan.command(),
-                        initial.workingDirectory().toString())
-                        .thenApply(surface -> new CreateLaunch(plan, surface)))
-                .handleAsync((launch, ex) -> finalizeCreate(initial, claudeSessionId, launch, ex), backgroundExecutor);
+                        surfaceWorkingDirectory)
+                        .thenApply(surface -> new CreateLaunch(plan, surface)));
     }
 
     /** The launch command plus whether it actually carries the pre-generated {@code --session-id}. */
@@ -317,35 +324,27 @@ public final class SessionManager implements AutoCloseable {
                         return CompletableFuture.completedFuture(blocked.get());
                     }
                     ManagedClaudeSession session = requireSession(sessionId);
+                    AgentKind kind = agentKindOf(session);
+                    AgentProvider provider = registry.provider(kind)
+                            .orElseThrow(() -> new IllegalStateException("No provider for " + kind));
                     Optional<SshRemote> remote = remoteFor(repositoryFor(session));
-                    if (remote.isPresent()) {
-                        String command = buildRemoteResumeCommand(remote.get(), session);
-                        return createSurfaceOnFxThread(app, host, scaleFactor, command,
-                                        System.getProperty("user.home"))
-                                .handleAsync((surface, ex) -> finalizeResume(session, surface, ex),
-                                        backgroundExecutor);
-                    }
-                    // Capabilities gate the activity --settings flag. Resume must
-                    // NOT inherit their failure mode: before this flag existed,
-                    // buildResumeCommand was a pure function of persisted metadata
-                    // and could not fail, and detectCapabilities is uncached --
-                    // every call spawns `claude --version` + `--help`. Letting it
-                    // throw here would sink a resume over a cosmetic badge, the
-                    // exact inversion activitySettingsFlag promises not to make,
-                    // so a probe failure degrades to "no activity reporting".
-                    return capabilityService.detectCapabilities()
-                            .exceptionally(ex -> {
-                                LOG.log(Level.WARNING, () -> "Claude capability detection failed while resuming "
-                                        + sessionId + "; resuming without activity reporting: " + unwrap(ex));
-                                return NO_CAPABILITIES;
-                            })
-                            .thenCompose(caps -> {
-                                String command = buildResumeCommand(session, caps, activitySettings);
-                                return createSurfaceOnFxThread(app, host, scaleFactor, command,
-                                                session.workingDirectory().toString())
-                                        .handleAsync((surface, ex) -> finalizeResume(session, surface, ex),
-                                                backgroundExecutor);
-                            });
+                    String workingDir = remote.isPresent()
+                            ? System.getProperty("user.home")
+                            : session.workingDirectory().toString();
+                    // Command construction (including any capability probing
+                    // it needs) runs entirely on the background executor; a
+                    // probe failure inside the provider degrades to its own
+                    // conservative fallback rather than sinking the resume
+                    // (see ClaudeAgentProvider.detectCaps).
+                    return CompletableFuture.supplyAsync(() -> {
+                                ResumeContext ctx = new ResumeContext(session.claudeSessionId(),
+                                        session.claudeSessionName(), session.workingDirectory(), remote);
+                                return provider.buildResumeCommand(ctx).command();
+                            }, backgroundExecutor)
+                            .thenCompose(command -> createSurfaceOnFxThread(app, host, scaleFactor, command,
+                                    workingDir)
+                                    .handleAsync((surface, ex) -> finalizeResume(session, surface, ex),
+                                            backgroundExecutor));
                 });
     }
 
@@ -408,15 +407,16 @@ public final class SessionManager implements AutoCloseable {
             return Optional.of(new SessionOpenResult.MissingWorkingDirectory(missing));
         }
 
-        // A pinned conversation id whose transcript claude no longer has on
-        // disk would make `claude --resume '<id>'` exit immediately with "No
-        // conversation found" -- detect it up front (same transcript layout
-        // ConversationCatalog reads) so the UI can offer a fresh start or
-        // deletion instead of presenting a dead terminal.
+        // A pinned conversation id whose transcript the agent no longer has
+        // on disk would make a resume-by-id exit immediately with "No
+        // conversation found" -- detect it up front via the provider's
+        // ConversationSource so the UI can offer a fresh start or deletion
+        // instead of presenting a dead terminal.
         if (!remoteSession && claudeSessionId.isPresent()) {
-            Path transcript = conversationCatalog.projectDirFor(session.workingDirectory())
-                    .resolve(claudeSessionId.get() + ".jsonl");
-            if (Files.notExists(transcript)) {
+            boolean missing = registry.conversations(agentKindOf(session))
+                    .map(cs -> !cs.transcriptExists(session.workingDirectory(), claudeSessionId.get()))
+                    .orElse(false); // no catalog → never block on a missing transcript
+            if (missing) {
                 return Optional.of(new SessionOpenResult.MissingConversation(session));
             }
         }
@@ -433,7 +433,6 @@ public final class SessionManager implements AutoCloseable {
      */
     public CompletableFuture<SessionOpenResult> startFreshConversation(ManagedSessionId sessionId, TerminalRuntime app,
                                                                         TerminalHostView host, double scaleFactor) {
-        String claudeSessionId = UUID.randomUUID().toString();
         // The stale-id clear persists to disk; keep it off the (FX) caller thread.
         return CompletableFuture.supplyAsync(() -> {
                     ManagedClaudeSession cleared = requireSession(sessionId).withClaudeSessionId(Optional.empty());
@@ -441,26 +440,20 @@ public final class SessionManager implements AutoCloseable {
                     return cleared;
                 }, backgroundExecutor)
                 .thenCompose(cleared -> {
+                    AgentKind kind = agentKindOf(cleared);
+                    AgentProvider provider = registry.provider(kind)
+                            .orElseThrow(() -> new IllegalStateException("No provider for " + kind));
                     Optional<SshRemote> remote = remoteFor(repositoryFor(cleared));
-                    if (remote.isPresent()) {
-                        String command = buildRemoteCreateCommand(remote.get());
-                        return createSurfaceOnFxThread(app, host, scaleFactor, command,
-                                        System.getProperty("user.home"))
-                                .thenApply(surface -> new CreateLaunch(new CreatePlan(command, false), surface))
-                                .handleAsync((launch, ex) -> finalizeCreate(cleared, claudeSessionId, launch, ex),
-                                        backgroundExecutor);
-                    }
-                    return capabilityService.detectCapabilities()
-                        .thenApplyAsync(caps -> {
-                            String command = buildCreateCommand(caps, cleared.displayName(), claudeSessionId,
-                                    activitySettings);
-                            return new CreatePlan(command, command.contains(claudeSessionId));
-                        }, backgroundExecutor)
-                        .thenCompose(plan -> createSurfaceOnFxThread(app, host, scaleFactor, plan.command(),
-                                cleared.workingDirectory().toString())
-                                .thenApply(surface -> new CreateLaunch(plan, surface)))
-                        .handleAsync((launch, ex) -> finalizeCreate(cleared, claudeSessionId, launch, ex),
-                                backgroundExecutor);
+                    String freshSessionId = provider.idStrategy() == SessionIdStrategy.PRESET
+                            ? UUID.randomUUID().toString()
+                            : "";
+                    String workingDir = remote.isPresent()
+                            ? System.getProperty("user.home")
+                            : cleared.workingDirectory().toString();
+                    return buildAndLaunchCreate(provider, cleared.displayName(), freshSessionId,
+                            cleared.workingDirectory(), remote, app, host, scaleFactor, workingDir)
+                            .handleAsync((launch, ex) -> finalizeCreate(cleared, freshSessionId, launch, ex),
+                                    backgroundExecutor);
                 });
     }
 
@@ -619,105 +612,6 @@ public final class SessionManager implements AutoCloseable {
         // durable before shutdown proceeds (AGENTS.md: services writing
         // files from background threads must expose a flush).
         stateStore.flush();
-    }
-
-    // ---- Command construction (pure; unit-testable without a window) ------
-
-    /**
-     * Strips the nested-Claude-Code environment markers before launching
-     * {@code claude}. When these variables are present (i.e. this app was
-     * itself launched from inside a Claude Code session -- a terminal
-     * driven by claude, a dev workflow, etc.), the spawned interactive
-     * claude detects the nesting and does NOT persist its transcript: the
-     * session then cannot be resumed later ("No conversation found with
-     * session ID ..."), silently defeating this manager's whole
-     * resume-exact-session feature. Verified empirically: an interactive
-     * {@code claude --session-id <uuid>} run with these variables present
-     * saves nothing under any id; the identical run with them stripped
-     * saves and resumes normally. Managed sessions must always behave like
-     * real standalone sessions, so they are unconditionally stripped.
-     */
-    static final String ENV_CLEANUP_PREFIX = "env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT"
-            + " -u CLAUDE_CODE_EXECPATH -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION"
-            + " -u CLAUDE_EFFORT ";
-
-    /**
-     * Plan section 11.1: {@code claude -n '<name>'} if supported, else plain
-     * {@code claude}; additionally {@code --session-id '<uuid>'} when
-     * supported, so the exact Claude conversation is known up front and a
-     * later resume can target it directly (see {@link #buildResumeCommand}).
-     */
-    static String buildCreateCommand(ClaudeCapabilities capabilities, String displayName, String claudeSessionId,
-                                     Optional<Path> activitySettings) {
-        StringBuilder command = new StringBuilder(ENV_CLEANUP_PREFIX).append("claude");
-        if (capabilities.supportsName()) {
-            command.append(" -n ").append(shellQuote(displayName));
-        }
-        if (capabilities.supportsSessionId()) {
-            command.append(" --session-id ").append(shellQuote(claudeSessionId));
-        }
-        command.append(activitySettingsFlag(capabilities, activitySettings));
-        return command.toString();
-    }
-
-    /** Plan section 11.2's exact fallback chain: id, then name, then bare {@code --resume}. */
-    static String buildResumeCommand(ManagedClaudeSession session, ClaudeCapabilities capabilities,
-                                     Optional<Path> activitySettings) {
-        String suffix = activitySettingsFlag(capabilities, activitySettings);
-        if (session.claudeSessionId().isPresent()) {
-            return ENV_CLEANUP_PREFIX + "claude --resume " + shellQuote(session.claudeSessionId().get()) + suffix;
-        }
-        if (session.claudeSessionName().isPresent()) {
-            return ENV_CLEANUP_PREFIX + "claude --resume " + shellQuote(session.claudeSessionName().get()) + suffix;
-        }
-        return ENV_CLEANUP_PREFIX + "claude --resume" + suffix;
-    }
-
-    /**
-     * Remote sessions (spec: degraded remote contract) launch plain
-     * {@code claude} over {@code ssh -t}: no {@code -n}/{@code --session-id}
-     * (the REMOTE claude's capabilities are unknown and unprobed), no
-     * {@code --settings} (the activity-hook settings file is a local path
-     * the remote host cannot see), no {@link #ENV_CLEANUP_PREFIX} (those
-     * variables live in THIS process's environment, which ssh does not
-     * forward). TERM handling and quoting live in {@link SshCommandBuilder}.
-     */
-    static String buildRemoteCreateCommand(SshRemote remote) {
-        return SshCommandBuilder.interactiveSessionCommand(remote, "exec claude");
-    }
-
-    /** Remote resume: trust the stored id/name — the transcript lives on the remote host and is not checked locally. */
-    static String buildRemoteResumeCommand(SshRemote remote, ManagedClaudeSession session) {
-        String exec = "exec claude --resume";
-        if (session.claudeSessionId().isPresent()) {
-            exec += " " + SshCommandBuilder.posixQuote(session.claudeSessionId().get());
-        } else if (session.claudeSessionName().isPresent()) {
-            exec += " " + SshCommandBuilder.posixQuote(session.claudeSessionName().get());
-        }
-        return SshCommandBuilder.interactiveSessionCommand(remote, exec);
-    }
-
-    /**
-     * Adds {@code --settings <file>} so the session reports its activity back
-     * to this app (see {@code app.drydock.claude.ClaudeHookInstaller}). Empty
-     * whenever the installed claude lacks the flag or the hook install failed,
-     * because a session that runs without a status badge is strictly better
-     * than one that fails to launch over a cosmetic feature.
-     *
-     * <p>Hooks declared this way MERGE with the user's own hooks rather than
-     * replacing them, and are invisible to a {@code claude} started outside
-     * this app.</p>
-     */
-    private static String activitySettingsFlag(ClaudeCapabilities capabilities, Optional<Path> activitySettings) {
-        if (!capabilities.supportsSettings() || activitySettings.isEmpty()) {
-            return "";
-        }
-        return " --settings " + shellQuote(activitySettings.get().toString());
-    }
-
-    /** Wraps {@code value} as a single POSIX shell single-quoted argument, safe against embedded shell metacharacters. */
-    static String shellQuote(String value) {
-        return "'" + value.replace("'", "'\\''") + "'";
     }
 
     // ---- Helpers ------------------------------------------------------------

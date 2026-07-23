@@ -1,7 +1,8 @@
 package app.drydock.app;
 
-import app.drydock.claude.ClaudeCapabilities;
-import app.drydock.claude.ClaudeCapabilityService;
+import app.drydock.agent.api.AgentContext;
+import app.drydock.agent.api.AgentRegistry;
+import app.drydock.agent.providers.claude.ClaudeAgentProvider;
 import app.drydock.claude.ClaudeExecutableLocator;
 import app.drydock.domain.ApplicationState;
 import app.drydock.domain.ManagedClaudeSession;
@@ -9,7 +10,6 @@ import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.PrState;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionStatus;
-import app.drydock.domain.SshRemote;
 import app.drydock.state.ApplicationStateRepository;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -31,12 +31,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Covers exactly the parts of {@link SessionManager} that are testable
- * without a real window (see the class Javadoc there):
+ * without a real window (see the class Javadoc there). Note: command-string
+ * construction for the create/resume fallback chain now lives in {@code
+ * ClaudeAgentProviderTest} -- {@link SessionManager} only routes through
+ * {@code AgentRegistry}/{@code AgentProvider} and no longer builds commands
+ * itself.
  *
  * <ul>
- *   <li>the plan section 11.2 resume fallback-chain -- pure argument-list
- *       (well: single-command-string, per the {@code GhosttySurface}
- *       constraint documented there) construction;</li>
  *   <li>plan section 11.2's MISSING_WORKING_DIRECTORY detection;</li>
  *   <li>metadata mutations ({@link SessionManager#reassignWorkingDirectory},
  *       {@link SessionManager#renameSession}) that only touch persistence,
@@ -80,9 +81,11 @@ class SessionManagerTest {
 
     private SessionManager newManager(InMemoryStateRepository stateRepository) {
         backgroundExecutor = Executors.newVirtualThreadPerTaskExecutor();
-        ClaudeCapabilityService capabilityService =
-                new ClaudeCapabilityService(new ClaudeExecutableLocator(Path.of("/nonexistent/claude")));
-        return new SessionManager(stateRepository, capabilityService, backgroundExecutor);
+        AgentContext ctx = new AgentContext(Path.of("/tmp/drydock-test"), Path.of("/tmp/drydock-test/activity"),
+                backgroundExecutor);
+        AgentRegistry registry = new AgentRegistry(
+                List.of(new ClaudeAgentProvider(new ClaudeExecutableLocator(Path.of("/nonexistent/claude")))), ctx);
+        return new SessionManager(stateRepository, registry, backgroundExecutor);
     }
 
     private ManagedClaudeSession sessionWith(Path workingDirectory, Optional<String> claudeSessionId,
@@ -131,164 +134,6 @@ class SessionManagerTest {
                 .findFirst()
                 .orElseThrow()
                 .status();
-    }
-
-    // ---- 11.2 resume fallback chain (pure command construction) -----------
-
-    /** No activity-hook settings injected, so these assertions stay about the fallback chain alone. */
-    private static final Optional<Path> NO_SETTINGS = Optional.empty();
-
-    private static ClaudeCapabilities caps(boolean name, boolean sessionId, boolean settings) {
-        return new ClaudeCapabilities(name, true, false, sessionId, settings, "1.0.0");
-    }
-
-    @Test
-    void resumeCommandPrefersTheClaudeSessionIdWhenKnown() {
-        ManagedClaudeSession session = sessionWith(Path.of("/tmp"), Optional.of("abc-123"), Optional.of("ignored-name"));
-
-        assertEquals(SessionManager.ENV_CLEANUP_PREFIX + "claude --resume 'abc-123'",
-                SessionManager.buildResumeCommand(session, caps(true, true, false), NO_SETTINGS));
-    }
-
-    @Test
-    void resumeCommandFallsBackToTheClaudeSessionNameWhenNoIdIsKnown() {
-        ManagedClaudeSession session = sessionWith(Path.of("/tmp"), Optional.empty(), Optional.of("my-name"));
-
-        assertEquals(SessionManager.ENV_CLEANUP_PREFIX + "claude --resume 'my-name'",
-                SessionManager.buildResumeCommand(session, caps(true, true, false), NO_SETTINGS));
-    }
-
-    @Test
-    void resumeCommandFallsBackToTheBareOfficialPickerWhenNeitherIsKnown() {
-        ManagedClaudeSession session = sessionWith(Path.of("/tmp"), Optional.empty(), Optional.empty());
-
-        assertEquals(SessionManager.ENV_CLEANUP_PREFIX + "claude --resume",
-                SessionManager.buildResumeCommand(session, caps(true, true, false), NO_SETTINGS));
-    }
-
-    @Test
-    void resumeCommandShellQuotesAnIdContainingASingleQuote() {
-        ManagedClaudeSession session = sessionWith(Path.of("/tmp"), Optional.of("weird'id"), Optional.empty());
-
-        assertEquals(SessionManager.ENV_CLEANUP_PREFIX + "claude --resume 'weird'\\''id'",
-                SessionManager.buildResumeCommand(session, caps(true, true, false), NO_SETTINGS));
-    }
-
-    // ---- 11.1 create command -------------------------------------------------
-
-    @Test
-    void createCommandIncludesNameFlagWhenSupported() {
-        assertEquals(SessionManager.ENV_CLEANUP_PREFIX + "claude -n 'my session'",
-                SessionManager.buildCreateCommand(caps(true, false, false), "my session", "uuid-1", NO_SETTINGS));
-    }
-
-    @Test
-    void createCommandOmitsNameFlagWhenNotSupported() {
-        assertEquals(SessionManager.ENV_CLEANUP_PREFIX + "claude",
-                SessionManager.buildCreateCommand(caps(false, false, false), "my session", "uuid-1", NO_SETTINGS));
-    }
-
-    @Test
-    void createCommandPinsTheSessionIdWhenSupported() {
-        assertEquals(SessionManager.ENV_CLEANUP_PREFIX + "claude -n 'my session' --session-id 'uuid-1'",
-                SessionManager.buildCreateCommand(caps(true, true, false), "my session", "uuid-1", NO_SETTINGS));
-    }
-
-    @Test
-    void createCommandOmitsTheSessionIdWhenNotSupported() {
-        assertEquals(SessionManager.ENV_CLEANUP_PREFIX + "claude",
-                SessionManager.buildCreateCommand(caps(false, false, false), "my session", "uuid-1", NO_SETTINGS));
-    }
-
-    // ---- activity-hook settings injection ------------------------------------
-
-    @Test
-    void createCommandInjectsTheActivitySettingsWhenSupported() {
-        assertEquals(SessionManager.ENV_CLEANUP_PREFIX
-                        + "claude -n 'my session' --session-id 'uuid-1' --settings '/tmp/hooks/settings.json'",
-                SessionManager.buildCreateCommand(caps(true, true, true), "my session", "uuid-1",
-                        Optional.of(Path.of("/tmp/hooks/settings.json"))));
-    }
-
-    @Test
-    void resumeCommandInjectsTheActivitySettingsWhenSupported() {
-        ManagedClaudeSession session = sessionWith(Path.of("/tmp"), Optional.of("abc-123"), Optional.empty());
-
-        assertEquals(SessionManager.ENV_CLEANUP_PREFIX
-                        + "claude --resume 'abc-123' --settings '/tmp/hooks/settings.json'",
-                SessionManager.buildResumeCommand(session, caps(true, true, true),
-                        Optional.of(Path.of("/tmp/hooks/settings.json"))));
-    }
-
-    /** The bare-picker fallback still reports activity: correlation comes from the hook payload, not the command line. */
-    @Test
-    void barePickerResumeStillInjectsTheActivitySettings() {
-        ManagedClaudeSession session = sessionWith(Path.of("/tmp"), Optional.empty(), Optional.empty());
-
-        assertEquals(SessionManager.ENV_CLEANUP_PREFIX + "claude --resume --settings '/tmp/hooks/settings.json'",
-                SessionManager.buildResumeCommand(session, caps(true, true, true),
-                        Optional.of(Path.of("/tmp/hooks/settings.json"))));
-    }
-
-    @Test
-    void activitySettingsAreOmittedWhenTheInstalledClaudeLacksTheFlag() {
-        assertEquals(SessionManager.ENV_CLEANUP_PREFIX + "claude -n 'my session' --session-id 'uuid-1'",
-                SessionManager.buildCreateCommand(caps(true, true, false), "my session", "uuid-1",
-                        Optional.of(Path.of("/tmp/hooks/settings.json"))));
-    }
-
-    /**
-     * Regression: resume used to be a pure function of persisted metadata and
-     * could not fail. Adding the activity --settings flag put uncached
-     * capability detection in front of it; a probe failure must degrade to
-     * "no activity reporting", never sink the resume itself. This asserts the
-     * command built from the conservative all-false fallback capabilities.
-     */
-    @Test
-    void resumeFallsBackToThePlainCommandWhenCapabilitiesAreUnknown() {
-        ManagedClaudeSession session = sessionWith(Path.of("/tmp"), Optional.of("abc-123"), Optional.empty());
-
-        assertEquals(SessionManager.ENV_CLEANUP_PREFIX + "claude --resume 'abc-123'",
-                SessionManager.buildResumeCommand(session, caps(false, false, false),
-                        Optional.of(Path.of("/tmp/hooks/settings.json"))));
-    }
-
-    @Test
-    void activitySettingsPathWithASpaceIsShellQuoted() {
-        assertEquals(SessionManager.ENV_CLEANUP_PREFIX
-                        + "claude --settings '/Users/x/Application Support/hooks/settings.json'",
-                SessionManager.buildCreateCommand(caps(false, false, true), "my session", "uuid-1",
-                        Optional.of(Path.of("/Users/x/Application Support/hooks/settings.json"))));
-    }
-
-    // ---- degraded remote session contract (command construction) -----------
-
-    @Test
-    void remoteCreateCommandIsSshWrappedPlainClaude() {
-        SshRemote remote = new SshRemote("user@h", "/srv/app");
-        String command = SessionManager.buildRemoteCreateCommand(remote);
-        // Pessimistic flag set: no -n, no --session-id, no --settings — the
-        // remote claude's capabilities are unknown and the activity-hook
-        // settings file is a LOCAL path (spec: degraded remote contract).
-        assertEquals("ssh -t -- 'user@h' "
-                + "'export TERM=xterm-256color; cd '\\''/srv/app'\\'' && exec claude'", command);
-    }
-
-    @Test
-    void remoteResumeCommandTrustsStoredId() {
-        SshRemote remote = new SshRemote("user@h", "/srv/app");
-        ManagedClaudeSession session = sessionWith(Path.of("/tmp"), Optional.of("abc-123"), Optional.empty());
-        String command = SessionManager.buildRemoteResumeCommand(remote, session);
-        assertTrue(command.contains("--resume"));
-        assertTrue(command.contains("abc-123"));
-        assertTrue(command.startsWith("ssh -t -- 'user@h' '"));
-    }
-
-    @Test
-    void remoteResumeCommandFallsBackToBareResume() {
-        SshRemote remote = new SshRemote("user@h", "/srv/app");
-        ManagedClaudeSession session = sessionWith(Path.of("/tmp"), Optional.empty(), Optional.empty());
-        assertTrue(SessionManager.buildRemoteResumeCommand(remote, session).endsWith("exec claude --resume'"));
     }
 
     // ---- MISSING_WORKING_DIRECTORY detection --------------------------------
