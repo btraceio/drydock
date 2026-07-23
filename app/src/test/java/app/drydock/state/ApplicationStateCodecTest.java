@@ -245,4 +245,28 @@ class ApplicationStateCodecTest {
 
         assertFalse(decoded.sessions().getFirst().branchCreatedHere());
     }
+
+    @Test
+    void repositoryLastUsedAgentRoundTrips() {
+        Repository repo = new Repository(RepositoryId.newId(), Path.of("/tmp/repo"), "repo",
+                Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT)
+                .withSettings(RepositorySettings.DEFAULT.withLastUsedAgent(AgentKind.CODEX));
+        ApplicationState state = ApplicationState.empty().withRepositories(List.of(repo));
+
+        ApplicationState back = ApplicationStateCodec.fromJson(ApplicationStateCodec.toJson(state));
+
+        assertEquals(Optional.of(AgentKind.CODEX), back.repositories().get(0).settings().lastUsedAgent());
+    }
+
+    @Test
+    void repositoryWithoutLastUsedAgentDecodesEmpty() {
+        // A repo whose settings object is empty (pre-migration) → empty lastUsedAgent.
+        Repository repo = new Repository(RepositoryId.newId(), Path.of("/tmp/repo"), "repo",
+                Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT);
+        ApplicationState state = ApplicationState.empty().withRepositories(List.of(repo));
+
+        ApplicationState back = ApplicationStateCodec.fromJson(ApplicationStateCodec.toJson(state));
+
+        assertTrue(back.repositories().get(0).settings().lastUsedAgent().isEmpty());
+    }
 }

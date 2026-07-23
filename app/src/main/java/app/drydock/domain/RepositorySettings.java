@@ -1,16 +1,28 @@
 package app.drydock.domain;
 
-/**
- * Per-repository settings placeholder (plan section 10.1).
- *
- * <p>No fields yet -- Milestone 4 has nothing repository-specific to
- * configure. Deliberately kept as an empty record rather than skipped
- * entirely so the persisted schema already has a stable {@code settings}
- * slot for later milestones to extend without a migration (plan rule
- * 27.2: do not scaffold later milestones, but this is the *current*
- * milestone's own field, per plan section 10.1's record shape).</p>
- */
-public record RepositorySettings() {
+import app.drydock.agent.api.AgentKind;
 
-    public static final RepositorySettings DEFAULT = new RepositorySettings();
+import java.util.Objects;
+import java.util.Optional;
+
+/**
+ * Per-repository preferences (plan section 10.1).
+ *
+ * <p>Currently holds only the last agent kind used in this repository, so
+ * the UI can default a new session's agent picker to whatever was used
+ * last time (a later milestone). Kept as a record with a stable {@code
+ * settings} slot so future preferences can be added without a schema
+ * migration.</p>
+ */
+public record RepositorySettings(Optional<AgentKind> lastUsedAgent) {
+
+    public static final RepositorySettings DEFAULT = new RepositorySettings(Optional.empty());
+
+    public RepositorySettings {
+        Objects.requireNonNull(lastUsedAgent, "lastUsedAgent");
+    }
+
+    public RepositorySettings withLastUsedAgent(AgentKind agent) {
+        return new RepositorySettings(Optional.of(agent));
+    }
 }

@@ -97,6 +97,10 @@ import java.util.Set;
  * {@link app.drydock.agent.api.AgentKind#CLAUDE}; an unrecognized value
  * (e.g. from a dropped or renamed provider) is retained but forced to
  * {@link SessionStatus#UNSUPPORTED_AGENT} rather than discarded or thrown.
+ * The repository {@code settings.lastUsedAgent} member was likewise added
+ * leniently within version 2: an absent or unrecognized value decodes to
+ * {@link app.drydock.domain.RepositorySettings#DEFAULT} (no preference)
+ * rather than throwing.
  * The persisted id/name fields were renamed from {@code claudeSessionId}/
  * {@code claudeSessionName} to {@code agentSessionId}/{@code
  * agentSessionName}; {@link #fromJson} accepts both the new and legacy
@@ -143,7 +147,10 @@ public final class ApplicationStateCodec {
         obj.put("displayName", new JsonString(repository.displayName()));
         obj.put("addedAt", new JsonString(repository.addedAt().toString()));
         obj.put("lastOpenedAt", new JsonString(repository.lastOpenedAt().toString()));
-        obj.put("settings", JsonObject.empty());
+        JsonObject settings = JsonObject.empty();
+        repository.settings().lastUsedAgent()
+                .ifPresent(a -> settings.put("lastUsedAgent", new JsonString(a.persistedName())));
+        obj.put("settings", settings);
         if (repository.isRemote()) {
             JsonObject remote = JsonObject.empty();
             remote.put("host", new JsonString(repository.remote().host()));
@@ -237,10 +244,26 @@ public final class ApplicationStateCodec {
             Instant addedAt = Instant.parse(requireString(obj, "addedAt"));
             Instant lastOpenedAt = Instant.parse(requireString(obj, "lastOpenedAt"));
             return new Repository(id, root, displayName, addedAt, lastOpenedAt,
-                    RepositorySettings.DEFAULT, remoteFromJson(obj));
+                    settingsFromJson(obj), remoteFromJson(obj));
         } catch (IllegalArgumentException | DateTimeException e) {
             throw new StateDecodeException("Malformed repository entry: " + e.getMessage());
         }
+    }
+
+    /**
+     * Decodes the {@code "settings"} member's {@code lastUsedAgent}, added
+     * (leniently, within schemaVersion 2 — see class doc) so the UI can
+     * default a new session's agent picker to whichever agent was last used
+     * in this repository. Absent or unparseable decodes to {@link
+     * RepositorySettings#DEFAULT} rather than failing.
+     */
+    private static RepositorySettings settingsFromJson(JsonObject obj) {
+        if (obj.get("settings") instanceof JsonObject s && s.get("lastUsedAgent") instanceof JsonString la) {
+            return AgentKind.fromPersisted(la.value())
+                    .map(RepositorySettings.DEFAULT::withLastUsedAgent)
+                    .orElse(RepositorySettings.DEFAULT);
+        }
+        return RepositorySettings.DEFAULT;
     }
 
     /**
