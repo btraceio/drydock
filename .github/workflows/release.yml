@@ -95,19 +95,20 @@ jobs:
       - name: Stage to Central Portal
         if: ${{ github.event.inputs.dry_run != 'true' }}
         env:
-          GPG_SIGNING_KEY: ${{ secrets.GPG_SIGNING_KEY }}
-          GPG_SIGNING_PWD: ${{ secrets.GPG_SIGNING_PWD }}
-          SONATYPE_USERNAME: ${{ secrets.SONATYPE_USERNAME }}
-          SONATYPE_PASSWORD: ${{ secrets.SONATYPE_PASSWORD }}
+          # Reuse the existing org secrets; vanniktech reads them via these
+          # ORG_GRADLE_PROJECT_* Gradle-property env vars. SONATYPE_* must be a
+          # Central Portal token (central.sonatype.com/account), not legacy OSSRH.
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.SONATYPE_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.SONATYPE_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.GPG_SIGNING_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyId: ${{ secrets.GPG_KEY_ID }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.GPG_SIGNING_PWD }}
         run: |
-          ./gradlew :app:publishAllPublicationsToSonatypeRepository \
+          ./gradlew :app:publishAllPublicationsToMavenCentralRepository \
             --no-daemon --stacktrace \
             -Dorg.gradle.java.installations.fromEnv=JAVA_HOME_17_ARM64,JAVA_HOME_26_ARM64
-      - name: Dry run - build and sign to mavenLocal
+      - name: Dry run - build to mavenLocal
         if: ${{ github.event.inputs.dry_run == 'true' }}
-        env:
-          GPG_SIGNING_KEY: ${{ secrets.GPG_SIGNING_KEY }}
-          GPG_SIGNING_PWD: ${{ secrets.GPG_SIGNING_PWD }}
         run: |
           ./gradlew :app:publishToMavenLocal \
             --no-daemon --stacktrace \

@@ -9,8 +9,11 @@ plugins {
     // runtimeImage/appImage packaging (typed tasks + templates under
     // app/packaging/; see buildSrc/src/main/kotlin/drydock.packaging.gradle.kts).
     id("drydock.packaging")
-    `maven-publish`
-    signing
+    // Central Portal Publisher API + in-memory signing. The `.base` variant
+    // does NOT auto-create a publication from components["java"] (which would
+    // leak JavaFX host-specific classifiers into the POM); we keep the custom
+    // `drydock` publication below and let vanniktech handle transport+signing.
+    id("com.vanniktech.maven.publish.base") version "0.35.0"
 }
 
 group = "io.btraceio"
@@ -231,17 +234,13 @@ tasks.named<Javadoc>("javadoc") {
     (options as StandardJavadocDocletOptions).addStringOption("Xdoclint:none", "-quiet")
 }
 
-signing {
-    // Sign only for a real publish, never for publishToMavenLocal.
-    setRequired({ gradle.taskGraph.allTasks.any { it.name.startsWith("publish") && it.name.contains("Repository") && !it.name.contains("MavenLocal") } })
-
-    // In-memory PGP key for CI (mirrors btrace's btrace-dist). Falls back to
-    // the default gpg-agent/keyring when the env/props are absent (local dev).
-    val signingKey = (findProperty("gpg.signing.key") as String?) ?: System.getenv("GPG_SIGNING_KEY")
-    val signingPwd = (findProperty("gpg.signing.pwd") as String?) ?: System.getenv("GPG_SIGNING_PWD")
-    if (signingKey != null && signingPwd != null) {
-        useInMemoryPgpKeys(signingKey, signingPwd)
-    }
-
-    sign(publishing.publications["drydock"])
+// Central Portal Publisher API transport + signing for the custom `drydock`
+// publication created above. Credentials come from Gradle properties / env
+// (ORG_GRADLE_PROJECT_mavenCentralUsername/Password) and the in-memory GPG key
+// (ORG_GRADLE_PROJECT_signingInMemoryKey/KeyId/KeyPassword). signAllPublications
+// skips signing for publishToMavenLocal, so local/dry-run installs stay usable
+// without keys.
+mavenPublishing {
+    publishToMavenCentral()
+    signAllPublications()
 }

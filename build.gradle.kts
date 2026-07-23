@@ -9,18 +9,12 @@ plugins {
     // Applied only in subprojects; declared here (with apply false) so the
     // version is resolved once for the whole build.
     id("org.openjfx.javafxplugin") version "0.1.0" apply false
-    // Central Portal staging: adds a `sonatype` publishing repository and the
-    // publish*ToSonatypeRepository tasks. Applied at the root so the plugin can
-    // resolve its package group from rootProject.group.
-    id("io.github.gradle-nexus.publish-plugin") version "2.0.0"
 }
 
-// The nexus-publish plugin resolves its Central Portal staging profile
-// (packageGroup) from rootProject.group and selects the release vs snapshot
-// endpoint from whether rootProject.version ends in "-SNAPSHOT". The :app
-// publication carries its own group/version for the artifact coordinates;
-// these root values exist solely for the plugin, and the release workflow's
-// prepare job keeps them in sync with app/build.gradle.kts.
+// Central Portal publishing is configured on the :app module via the
+// com.vanniktech.maven.publish.base plugin (Central Portal Publisher API).
+// The root group/version are kept in sync with app/build.gradle.kts by the
+// release workflow's prepare job.
 group = "io.btraceio"
 version = "0.1.0"
 
@@ -155,25 +149,4 @@ tasks.register<Exec>("buildNativeHost") {
     outputs.file(ghosttyNativeOutputDir.map { it.dir("macos-arm64").file("libdrydockterminalhost.dylib") })
 
     commandLine("bash", "${rootDir}/scripts/build-native-host.sh")
-}
-
-// Maven Central release automation via the Central Portal (OSSRH sunset
-// 2025-06-30). Credentials are the Central Portal USER TOKEN, not a legacy
-// OSSRH login. Left unset locally -> the publish task fails only when actually
-// run, so `publishToMavenLocal` and every other task stay usable offline.
-nexusPublishing {
-    repositories {
-        sonatype {
-            nexusUrl.set(uri("https://ossrh-staging-api.central.sonatype.com/service/local/"))
-            snapshotRepositoryUrl.set(uri("https://central.sonatype.com/repository/maven-snapshots/"))
-            username.set(
-                providers.gradleProperty("sonatype.username")
-                    .orElse(providers.environmentVariable("SONATYPE_USERNAME"))
-            )
-            password.set(
-                providers.gradleProperty("sonatype.password")
-                    .orElse(providers.environmentVariable("SONATYPE_PASSWORD"))
-            )
-        }
-    }
 }
