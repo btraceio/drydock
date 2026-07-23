@@ -59,7 +59,6 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -439,13 +438,13 @@ public final class RepositorySidebar extends VBox {
         int worktreeTotal = 0;
         int unopenedTotal = 0;
         for (Repository repository : repositoryManager.repositories()) {
-            if (viewModel.worktrees(repository.id()).isEmpty()) {
+            SidebarChildren classified = childrenOf(repository);
+            if (classified == null) {
                 continue;
             }
-            worktreeTotal += additionalWorktreeCount(repository);
-            unopenedTotal += (int) childNodesFor(repository).stream()
-                    .filter(child -> child instanceof SidebarNode.UnopenedWorktreeNode)
-                    .count();
+            worktreeTotal += classified.worktreeCount();
+            unopenedTotal += (int) classified.openWorktrees().stream().filter(w -> !w.mainCheckout()).count()
+                    + classified.staleCount();
         }
         if (!viewModel.anyWorktreesDiscovered()) {
             worktreeTotal = (int) viewModel.sessions().stream()
@@ -618,69 +617,42 @@ public final class RepositorySidebar extends VBox {
     }
 
     /**
-     * The worktree-first children of one repository row: the main checkout's
-     * sessions (or the main checkout itself, unopened), then every
-     * additional worktree on disk -- as a session row when a managed
-     * session lives in it, else as an unopened row -- then any worktree
-     * session whose directory discovery no longer reports (e.g. removed
-     * outside the app; kept visible so it can still be cleaned up).
+     * The banded children of one repository row: live sessions, then idle
+     * sessions, then open (non-stale) worktrees, then stale worktrees --
+     * ordering and classification delegated to {@link SidebarChildren}.
+     * Stale worktrees are rendered as ordinary unopened rows for now; a
+     * later task collapses them into a single bucket node.
      */
     private List<SidebarNode> childNodesFor(Repository repository) {
-        List<ManagedClaudeSession> sessions = sessionsFor(repository);
-        List<WorktreeService.Worktree> worktrees = viewModel.worktrees(repository.id()).orElse(null);
-        if (worktrees == null) {
-            // Discovery hasn't run yet for this repo: kick it off and show
-            // the session-derived rows meanwhile.
+        SidebarChildren classified = childrenOf(repository);
+        if (classified == null) {
+            // Discovery hasn't run yet: kick it off and show session-derived rows meanwhile.
             refreshWorktrees(repository, false);
-            return new ArrayList<>(sessions.stream()
+            return new ArrayList<>(sessionsFor(repository).stream()
                     .map(session -> (SidebarNode) new SidebarNode.SessionNode(session, repository))
                     .toList());
         }
-
         List<SidebarNode> children = new ArrayList<>();
-        Set<ManagedClaudeSession> placed = new LinkedHashSet<>();
-        for (WorktreeService.Worktree worktree : worktrees) {
-            if (worktree.mainCheckout()) {
-                List<ManagedClaudeSession> mainSessions = sessions.stream()
-                        .filter(session -> session.worktreeRoot().isEmpty())
-                        .toList();
-                if (mainSessions.isEmpty()) {
-                    children.add(new SidebarNode.UnopenedWorktreeNode(worktree, repository));
-                } else {
-                    for (ManagedClaudeSession session : mainSessions) {
-                        children.add(new SidebarNode.SessionNode(session, repository));
-                        placed.add(session);
-                    }
-                }
-            } else {
-                Optional<ManagedClaudeSession> match = sessions.stream()
-                        .filter(session -> session.worktreeRoot()
-                                .map(root -> root.equals(worktree.path()))
-                                .orElse(false))
-                        .findFirst();
-                if (match.isPresent()) {
-                    children.add(new SidebarNode.SessionNode(match.get(), repository));
-                    placed.add(match.get());
-                } else {
-                    children.add(new SidebarNode.UnopenedWorktreeNode(worktree, repository));
-                }
-            }
+        for (ManagedClaudeSession session : classified.orderedSessions()) {
+            children.add(new SidebarNode.SessionNode(session, repository));
         }
-        for (ManagedClaudeSession session : sessions) {
-            if (!placed.contains(session) && session.worktreeRoot().isPresent()) {
-                children.add(new SidebarNode.SessionNode(session, repository));
-            }
+        for (WorktreeService.Worktree worktree : classified.openWorktrees()) {
+            children.add(new SidebarNode.UnopenedWorktreeNode(worktree, repository));
+        }
+        // Task 3 replaces this inline listing with a single StaleWorktreesNode.
+        for (WorktreeService.Worktree worktree : classified.staleWorktrees()) {
+            children.add(new SidebarNode.UnopenedWorktreeNode(worktree, repository));
         }
         return children;
     }
 
-    /** Count of additional (non-main) worktrees on disk, once discovery has run. */
-    private int additionalWorktreeCount(Repository repository) {
+    /** Classifies a repo's worktrees + sessions, or {@code null} if discovery hasn't run yet. */
+    private SidebarChildren childrenOf(Repository repository) {
         List<WorktreeService.Worktree> worktrees = viewModel.worktrees(repository.id()).orElse(null);
         if (worktrees == null) {
-            return 0;
+            return null;
         }
-        return (int) worktrees.stream().filter(worktree -> !worktree.mainCheckout()).count();
+        return SidebarChildren.classify(worktrees, sessionsFor(repository), viewModel::activityOf);
     }
 
     private boolean matchesRepo(Repository repository, String query) {
@@ -1128,15 +1100,11 @@ public final class RepositorySidebar extends VBox {
                 return note;
             }
             StringBuilder meta = new StringBuilder("⎇ ").append(branchTextFor(repository));
-            List<WorktreeService.Worktree> worktrees = viewModel.worktrees(repository.id()).orElse(null);
-            if (worktrees != null) {
-                int additional = additionalWorktreeCount(repository);
-                meta.append(" · ").append(additional).append(additional == 1 ? " worktree" : " worktrees");
-                long unopened = childNodesFor(repository).stream()
-                        .filter(child -> child instanceof SidebarNode.UnopenedWorktreeNode)
-                        .count();
-                if (unopened > 0) {
-                    meta.append(" · ").append(unopened).append(" unopened");
+            SidebarChildren classified = childrenOf(repository);
+            if (classified != null) {
+                meta.append(" · ").append(classified.worktreeCount()).append(" wt");
+                if (classified.staleCount() > 0) {
+                    meta.append(" · ").append(classified.staleCount()).append(" stale");
                 }
             }
             return meta.toString();
