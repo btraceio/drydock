@@ -41,6 +41,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.UnaryOperator;
 
 /**
@@ -232,28 +233,45 @@ public final class SessionManager implements AutoCloseable {
 
         // DISCOVERED providers mint their own id only after launch: snapshot
         // the id store BEFORE spawning (so discovery can tell "new since
-        // launch" from "already there") and remember when we launched, both
-        // captured as locals so the post-create discovery stage below can
-        // close over them.
+        // launch" from "already there") and remember when we launched. The
+        // snapshot is disk I/O (Files.walk over the rollout store), so it
+        // must run on the background executor, never on the calling (FX)
+        // thread -- captured via holders since it is produced mid-chain (in
+        // the very first async stage, before the process spawns) but only
+        // consumed by the discovery stage at the end.
         Optional<SessionIdDiscovery> discovery = provider.idStrategy() == SessionIdStrategy.DISCOVERED
                 ? registry.idDiscovery(provider.kind())
                 : Optional.empty();
         Path discoverCwd = initial.workingDirectory();
-        Object idSnapshot = discovery.map(d -> d.snapshot(discoverCwd)).orElse(null);
-        Instant launchedAt = Instant.now();
+        AtomicReference<Object> snapshotRef = new AtomicReference<>();
+        AtomicReference<Instant> launchedAtRef = new AtomicReference<>();
 
         // Metadata persistence is disk I/O; keep it off the (FX) caller thread.
-        return CompletableFuture.runAsync(() -> persistNewSession(initial), backgroundExecutor)
+        // The DISCOVERED snapshot/timestamp are captured in this same
+        // pre-spawn stage so they still land before buildAndLaunchCreate
+        // spawns the process (otherwise the new session's own rollout would
+        // already be in the snapshot and discovery could never find it).
+        CompletableFuture<SessionOpenResult> createFuture = CompletableFuture.runAsync(() -> {
+                    persistNewSession(initial);
+                    discovery.ifPresent(d -> snapshotRef.set(d.snapshot(discoverCwd)));
+                    launchedAtRef.set(Instant.now());
+                }, backgroundExecutor)
                 .thenCompose(ignored -> buildAndLaunchCreate(provider, displayName, sessionId,
                         initial.workingDirectory(), remote, app, host, scaleFactor, workingDir))
-                .handleAsync((launch, ex) -> finalizeCreate(initial, sessionId, launch, ex), backgroundExecutor)
-                .thenApplyAsync(result -> {
-                    // Best-effort DISCOVERED id capture; only when the create
-                    // actually opened. Never fails the launch: discover()
-                    // returns empty on failure/ambiguity and resume falls
-                    // back to the interactive picker.
-                    if (discovery.isPresent() && result instanceof SessionOpenResult.Opened opened) {
-                        discovery.get().discover(discoverCwd, launchedAt, idSnapshot, claimedAgentSessionIds)
+                .handleAsync((launch, ex) -> finalizeCreate(initial, sessionId, launch, ex), backgroundExecutor);
+
+        if (discovery.isPresent()) {
+            // Detached side effect: discovery polls for ~5s, which must
+            // never delay the surface reveal callers are awaiting on
+            // createFuture. Never fails the launch: discover() returns
+            // empty on failure/ambiguity and resume falls back to the
+            // interactive picker; any RuntimeException it throws is caught
+            // and logged rather than treated as a launch failure.
+            createFuture.thenAcceptAsync(result -> {
+                if (result instanceof SessionOpenResult.Opened opened) {
+                    try {
+                        discovery.get().discover(discoverCwd, launchedAtRef.get(), snapshotRef.get(),
+                                        claimedAgentSessionIds)
                                 .ifPresent(id -> {
                                     // discover() already atomically claimed
                                     // `id` in claimedAgentSessionIds.
@@ -261,9 +279,14 @@ public final class SessionManager implements AutoCloseable {
                                             .withAgentSessionId(Optional.of(id)));
                                     activeRegistry.tryMarkActive(id, opened.session().id());
                                 });
+                    } catch (RuntimeException e) {
+                        LOG.log(Level.WARNING, () -> "Codex id discovery failed for " + opened.session().id()
+                                + "; resume will use the picker: " + e);
                     }
-                    return result;
-                }, backgroundExecutor);
+                }
+            }, backgroundExecutor);
+        }
+        return createFuture;
     }
 
     /**
