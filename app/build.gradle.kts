@@ -50,6 +50,10 @@ application {
     applicationDefaultJvmArgs = listOf(
         "-Dfile.encoding=UTF-8",
         "-Djava.awt.headless=false",
+        // macOS: label the dock tile "Drydock" (matches app/packaging/launcher.sh
+        // and the jbang catalog). The menu-bar/Cmd-Tab app name is set separately
+        // by Main's early AWT init; -Xdock:name only covers the dock tile.
+        "-Xdock:name=Drydock",
         // Required now that DrydockApplication (Milestone 5's terminal-tabs UI)
         // loads libghostty/the native host shim via FFM.
         "--enable-native-access=ALL-UNNAMED",

@@ -150,9 +150,9 @@ public final class DrydockApplication extends Application {
     }
 
     private void startOnFxThread(Stage primaryStage) {
-        // Set the macOS dock icon here (on the FX thread, toolkit already up)
-        // rather than in the jbang bootstrap -- doing AWT/Taskbar work before
-        // Glass initializes risks an NSApplication main-thread conflict.
+        // Set the macOS dock icon here (on the FX thread, toolkit already up) --
+        // doing AWT/Taskbar work before Glass initializes risks an NSApplication
+        // main-thread conflict. The app name is set far earlier, in Main.
         DockIcon.applyDockIcon();
 
         // Diagnostic override (see the app.drydock.diag.* section in
