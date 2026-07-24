@@ -10,6 +10,7 @@ import app.drydock.agent.api.LaunchPlan;
 import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdDiscovery;
 import app.drydock.agent.api.SessionIdStrategy;
+import app.drydock.agent.api.SnapshotClaimDiscovery;
 import app.drydock.agent.providers.codex.internal.CodexExecutableLocator;
 import app.drydock.agent.providers.codex.internal.CodexRolloutStore;
 import app.drydock.agent.providers.codex.internal.CodexVersionProbe;
@@ -30,7 +31,7 @@ public final class CodexAgentProvider implements AgentProvider {
 
     private final CodexExecutableLocator locator;
     private CodexConversationSource conversationSource;
-    private CodexIdDiscovery idDiscovery;
+    private SessionIdDiscovery idDiscovery;
 
     /** Public no-arg constructor required by {@link java.util.ServiceLoader}. */
     public CodexAgentProvider() {
@@ -56,7 +57,7 @@ public final class CodexAgentProvider implements AgentProvider {
     public void init(AgentContext ctx) {
         CodexRolloutStore store = new CodexRolloutStore();
         this.conversationSource = new CodexConversationSource(store);
-        this.idDiscovery = new CodexIdDiscovery(store);
+        this.idDiscovery = new SnapshotClaimDiscovery(store);
     }
 
     @Override

@@ -1,5 +1,6 @@
 package app.drydock.agent.providers.codex.internal;
 
+import app.drydock.agent.api.CandidateSource;
 import app.drydock.state.json.JsonParser;
 import app.drydock.state.json.JsonValue;
 
@@ -33,7 +34,7 @@ import java.util.stream.Stream;
  * stray or half-written file must not break scanning for every other
  * session.</p>
  */
-public final class CodexRolloutStore {
+public final class CodexRolloutStore implements CandidateSource {
 
     private static final Logger LOG = System.getLogger(CodexRolloutStore.class.getName());
     private static final String ROLLOUT_GLOB = "rollout-*.jsonl";
@@ -76,7 +77,7 @@ public final class CodexRolloutStore {
      * whose id is not in {@code snapshotIds}, sorted earliest-first.
      *
      * <p>The store does not know about claimed ids or ambiguity between
-     * candidates -- that is {@code CodexIdDiscovery}'s concern. Earliest
+     * candidates -- that is {@code SnapshotClaimDiscovery}'s concern. Earliest
      * first (rather than newest first) so that, under concurrent same-cwd
      * launches, each launch's discovery tends to claim the rollout closest
      * to its own {@code launchedAt} rather than a later launch's fresher
@@ -88,7 +89,7 @@ public final class CodexRolloutStore {
      * launchedAt} boundary does not exclude a session launched just before
      * its rollout file is stamped.</p>
      *
-     * <p>This is the hot path -- {@code CodexIdDiscovery.discover} polls it
+     * <p>This is the hot path -- {@code SnapshotClaimDiscovery.discover} polls it
      * up to ~20 times per launch -- so unlike {@link #forWorkingDirectory}
      * it does NOT walk the whole {@code sessionsRoot} tree. A just-launched
      * rollout lands in {@code launchedAt}'s {@code YYYY/MM/DD} date-bucket
@@ -109,6 +110,20 @@ public final class CodexRolloutStore {
         }
         candidates.sort(Comparator.comparing(RolloutMeta::timestamp));
         return candidates;
+    }
+
+    /** {@link CandidateSource} view: same as {@link #idsFor(Path)}. */
+    @Override
+    public Set<String> snapshotIds(Path workingDirectory) {
+        return idsFor(workingDirectory);
+    }
+
+    /** {@link CandidateSource} view: {@link #newCandidates(Path, Instant, Set)} mapped to ids. */
+    @Override
+    public List<String> newCandidateIds(Path workingDirectory, Instant launchedAt, Set<String> snapshotIds) {
+        return newCandidates(workingDirectory, launchedAt, snapshotIds).stream()
+                .map(RolloutMeta::id)
+                .toList();
     }
 
     /** Whether a rollout file whose name contains {@code id} exists. */
