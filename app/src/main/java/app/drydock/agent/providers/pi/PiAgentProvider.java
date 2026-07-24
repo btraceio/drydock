@@ -11,6 +11,7 @@ import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdDiscovery;
 import app.drydock.agent.api.SessionIdStrategy;
 import app.drydock.agent.api.SnapshotClaimDiscovery;
+import app.drydock.agent.providers.AgentCommands;
 import app.drydock.agent.providers.pi.internal.PiExecutableLocator;
 import app.drydock.agent.providers.pi.internal.PiSessionStore;
 import app.drydock.agent.providers.pi.internal.PiVersionProbe;
@@ -86,7 +87,7 @@ public final class PiAgentProvider implements AgentProvider {
         if (c.remote().isPresent()) {
             return LaunchPlan.unsupported();   // Pi declines remote
         }
-        return LaunchPlan.of(envPrefix() + "pi", false);   // DISCOVERED: no id
+        return LaunchPlan.of(AgentCommands.envPrefix(ENV_SCRUB) + "pi", false);   // DISCOVERED: no id
     }
 
     @Override
@@ -95,10 +96,11 @@ public final class PiAgentProvider implements AgentProvider {
             return LaunchPlan.unsupported();
         }
         if (r.agentSessionId().isPresent()) {
-            return LaunchPlan.of(envPrefix() + "pi --session " + shellQuote(r.agentSessionId().get()), false);
+            return LaunchPlan.of(AgentCommands.envPrefix(ENV_SCRUB) + "pi --session "
+                    + AgentCommands.shellQuote(r.agentSessionId().get()), false);
         }
         // Unknown id -> picker. NEVER --continue/--last (same-cwd ambiguity).
-        return LaunchPlan.of(envPrefix() + "pi --resume", false);
+        return LaunchPlan.of(AgentCommands.envPrefix(ENV_SCRUB) + "pi --resume", false);
     }
 
     @Override
@@ -121,18 +123,4 @@ public final class PiAgentProvider implements AgentProvider {
         return Optional.of(idDiscovery);
     }
 
-    private static String envPrefix() {
-        if (ENV_SCRUB.isEmpty()) {
-            return "";
-        }
-        StringBuilder sb = new StringBuilder("env");
-        for (String v : ENV_SCRUB) {
-            sb.append(" -u ").append(v);
-        }
-        return sb.append(' ').toString();
-    }
-
-    static String shellQuote(String value) {
-        return "'" + value.replace("'", "'\\''") + "'";
-    }
 }

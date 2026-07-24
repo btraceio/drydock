@@ -11,6 +11,7 @@ import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdDiscovery;
 import app.drydock.agent.api.SessionIdStrategy;
 import app.drydock.agent.api.SnapshotClaimDiscovery;
+import app.drydock.agent.providers.AgentCommands;
 import app.drydock.agent.providers.codex.internal.CodexExecutableLocator;
 import app.drydock.agent.providers.codex.internal.CodexRolloutStore;
 import app.drydock.agent.providers.codex.internal.CodexVersionProbe;
@@ -86,7 +87,7 @@ public final class CodexAgentProvider implements AgentProvider {
         if (c.remote().isPresent()) {
             return LaunchPlan.unsupported();   // Codex declines remote
         }
-        return LaunchPlan.of(envPrefix() + "codex", false);   // DISCOVERED: no id; no --settings
+        return LaunchPlan.of(AgentCommands.envPrefix(ENV_SCRUB) + "codex", false);   // DISCOVERED: no id; no --settings
     }
 
     @Override
@@ -95,10 +96,11 @@ public final class CodexAgentProvider implements AgentProvider {
             return LaunchPlan.unsupported();
         }
         if (r.agentSessionId().isPresent()) {
-            return LaunchPlan.of(envPrefix() + "codex resume " + shellQuote(r.agentSessionId().get()), false);
+            return LaunchPlan.of(AgentCommands.envPrefix(ENV_SCRUB) + "codex resume "
+                    + AgentCommands.shellQuote(r.agentSessionId().get()), false);
         }
         // Unknown id (or name) -> cwd-filtered picker. NEVER --last (same-cwd ambiguity).
-        return LaunchPlan.of(envPrefix() + "codex resume", false);
+        return LaunchPlan.of(AgentCommands.envPrefix(ENV_SCRUB) + "codex resume", false);
     }
 
     @Override
@@ -121,18 +123,4 @@ public final class CodexAgentProvider implements AgentProvider {
         return Optional.of(idDiscovery);
     }
 
-    private static String envPrefix() {
-        if (ENV_SCRUB.isEmpty()) {
-            return "";
-        }
-        StringBuilder sb = new StringBuilder("env");
-        for (String v : ENV_SCRUB) {
-            sb.append(" -u ").append(v);
-        }
-        return sb.append(' ').toString();
-    }
-
-    static String shellQuote(String value) {
-        return "'" + value.replace("'", "'\\''") + "'";
-    }
 }

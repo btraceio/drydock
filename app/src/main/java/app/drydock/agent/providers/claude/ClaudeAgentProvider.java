@@ -10,6 +10,7 @@ import app.drydock.agent.api.LaunchPlan;
 import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdDiscovery;
 import app.drydock.agent.api.SessionIdStrategy;
+import app.drydock.agent.providers.AgentCommands;
 import app.drydock.agent.spi.AgentProvider;
 import app.drydock.agent.providers.claude.internal.ClaudeCapabilities;
 import app.drydock.agent.providers.claude.internal.ClaudeCapabilityService;
@@ -94,10 +95,10 @@ public final class ClaudeAgentProvider implements AgentProvider {
         StringBuilder command = new StringBuilder(ENV_CLEANUP_PREFIX).append("claude");
         boolean sessionIdUsed = false;
         if (caps.supportsName()) {
-            command.append(" -n ").append(shellQuote(c.displayName()));
+            command.append(" -n ").append(AgentCommands.shellQuote(c.displayName()));
         }
         if (caps.supportsSessionId()) {
-            command.append(" --session-id ").append(shellQuote(c.sessionId()));
+            command.append(" --session-id ").append(AgentCommands.shellQuote(c.sessionId()));
             sessionIdUsed = true;
         }
         command.append(activitySettingsFlag(caps));
@@ -117,10 +118,10 @@ public final class ClaudeAgentProvider implements AgentProvider {
         }
         String suffix = activitySettingsFlag(detectCaps());
         if (r.agentSessionId().isPresent()) {
-            return LaunchPlan.of(ENV_CLEANUP_PREFIX + "claude --resume " + shellQuote(r.agentSessionId().get()) + suffix, false);
+            return LaunchPlan.of(ENV_CLEANUP_PREFIX + "claude --resume " + AgentCommands.shellQuote(r.agentSessionId().get()) + suffix, false);
         }
         if (r.agentSessionName().isPresent()) {
-            return LaunchPlan.of(ENV_CLEANUP_PREFIX + "claude --resume " + shellQuote(r.agentSessionName().get()) + suffix, false);
+            return LaunchPlan.of(ENV_CLEANUP_PREFIX + "claude --resume " + AgentCommands.shellQuote(r.agentSessionName().get()) + suffix, false);
         }
         return LaunchPlan.of(ENV_CLEANUP_PREFIX + "claude --resume" + suffix, false);
     }
@@ -160,10 +161,7 @@ public final class ClaudeAgentProvider implements AgentProvider {
         if (!caps.supportsSettings() || settings.isEmpty()) {
             return "";
         }
-        return " --settings " + shellQuote(settings.get().toString());
+        return " --settings " + AgentCommands.shellQuote(settings.get().toString());
     }
 
-    static String shellQuote(String value) {
-        return "'" + value.replace("'", "'\\''") + "'";
-    }
 }
