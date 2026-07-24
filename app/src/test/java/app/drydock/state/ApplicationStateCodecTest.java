@@ -25,6 +25,7 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -268,5 +269,86 @@ class ApplicationStateCodecTest {
         ApplicationState back = ApplicationStateCodec.fromJson(ApplicationStateCodec.toJson(state));
 
         assertTrue(back.repositories().get(0).settings().lastUsedAgent().isEmpty());
+    }
+
+    /**
+     * A well-formed session document, as a template for the strict-decode
+     * regression tests below: each replaces exactly one field of {@link
+     * #VALID_SESSION} with something malformed, pinning that field as a
+     * genuinely-strict field of {@code sessionFromJson} (as opposed to the
+     * lenient fields exercised elsewhere in this file).
+     */
+    private static String sessionDocument(String sessionJson) {
+        return """
+                {
+                  "schemaVersion": 2,
+                  "repositories": [
+                    {
+                      "id": "%s",
+                      "root": "/tmp/repo",
+                      "displayName": "repo",
+                      "addedAt": "2026-01-01T00:00:00Z",
+                      "lastOpenedAt": "2026-01-02T00:00:00Z",
+                      "settings": {}
+                    }
+                  ],
+                  "sessions": [%s],
+                  "ui": {"selectedRepositoryId": null, "sidebarWidth": 260.0, "expandedRepositoryIds": []}
+                }
+                """.formatted(REPO_ID, sessionJson);
+    }
+
+    private static final String VALID_SESSION = """
+            {
+              "id": "22222222-3333-4444-5555-666666666666",
+              "repositoryId": "%s",
+              "displayName": "s",
+              "workingDirectory": "/tmp/repo",
+              "status": "INACTIVE",
+              "createdAt": "2026-01-01T00:00:00Z",
+              "lastOpenedAt": "2026-01-02T00:00:00Z"
+            }
+            """.formatted(REPO_ID);
+
+    @Test
+    void sessionMissingIdThrowsStateDecodeException() {
+        // requireString(obj, "id") throws when the field is absent.
+        String session = VALID_SESSION.replace(
+                "\"id\": \"22222222-3333-4444-5555-666666666666\",\n", "");
+
+        assertThrows(StateDecodeException.class,
+                () -> ApplicationStateCodec.fromJson(JsonParser.parse(sessionDocument(session))));
+    }
+
+    @Test
+    void sessionMissingRepositoryIdThrowsStateDecodeException() {
+        // requireString(obj, "repositoryId") throws when the field is absent.
+        String session = VALID_SESSION.replace(
+                "\"repositoryId\": \"" + REPO_ID + "\",\n", "");
+
+        assertThrows(StateDecodeException.class,
+                () -> ApplicationStateCodec.fromJson(JsonParser.parse(sessionDocument(session))));
+    }
+
+    @Test
+    void sessionWithUnparseableCreatedAtThrowsStateDecodeException() {
+        // Instant.parse(requireString(obj, "createdAt")) throws DateTimeException,
+        // caught and rethrown as StateDecodeException.
+        String session = VALID_SESSION.replace(
+                "\"createdAt\": \"2026-01-01T00:00:00Z\"", "\"createdAt\": \"not-an-instant\"");
+
+        assertThrows(StateDecodeException.class,
+                () -> ApplicationStateCodec.fromJson(JsonParser.parse(sessionDocument(session))));
+    }
+
+    @Test
+    void sessionWithInvalidStatusThrowsStateDecodeException() {
+        // SessionStatus.valueOf(requireString(obj, "status")) throws
+        // IllegalArgumentException for an unrecognized enum constant.
+        String session = VALID_SESSION.replace(
+                "\"status\": \"INACTIVE\"", "\"status\": \"NOT_A_REAL_STATUS\"");
+
+        assertThrows(StateDecodeException.class,
+                () -> ApplicationStateCodec.fromJson(JsonParser.parse(sessionDocument(session))));
     }
 }
