@@ -11,6 +11,8 @@ import java.lang.System.Logger.Level;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashSet;
@@ -55,14 +57,7 @@ public final class CodexRolloutStore {
      */
     public List<RolloutMeta> forWorkingDirectory(Path cwd) {
         Path normalizedCwd = cwd.toAbsolutePath().normalize();
-        List<RolloutMeta> matches = new ArrayList<>();
-        for (Path file : rolloutFiles()) {
-            readMeta(file).ifPresent(meta -> {
-                if (meta.source().equals("cli") && meta.cwd().equals(normalizedCwd)) {
-                    matches.add(meta);
-                }
-            });
-        }
+        List<RolloutMeta> matches = readMatching(rolloutFiles(), normalizedCwd);
         matches.sort(Comparator.comparing(RolloutMeta::timestamp).reversed());
         return matches;
     }
@@ -92,10 +87,22 @@ public final class CodexRolloutStore {
      * e.g. {@code 2026-07-23T19:27:59.508Z}), so the {@code timestamp >=
      * launchedAt} boundary does not exclude a session launched just before
      * its rollout file is stamped.</p>
+     *
+     * <p>This is the hot path -- {@code CodexIdDiscovery.discover} polls it
+     * up to ~20 times per launch -- so unlike {@link #forWorkingDirectory}
+     * it does NOT walk the whole {@code sessionsRoot} tree. A just-launched
+     * rollout lands in {@code launchedAt}'s {@code YYYY/MM/DD} date-bucket
+     * directory, so only that bucket plus the adjacent day before and after
+     * (computed in the system default zone, to be robust to the rollout
+     * filename's local-looking time vs. the UTC {@code session_meta}
+     * timestamp) are scanned -- at most 3 directories, regardless of how
+     * much older history exists.</p>
      */
     public List<RolloutMeta> newCandidates(Path cwd, Instant launchedAt, Set<String> snapshotIds) {
+        Path normalizedCwd = cwd.toAbsolutePath().normalize();
+        List<Path> files = rolloutFilesInBuckets(dateBucketDirs(launchedAt));
         List<RolloutMeta> candidates = new ArrayList<>();
-        for (RolloutMeta meta : forWorkingDirectory(cwd)) {
+        for (RolloutMeta meta : readMatching(files, normalizedCwd)) {
             if (!meta.timestamp().isBefore(launchedAt) && !snapshotIds.contains(meta.id())) {
                 candidates.add(meta);
             }
@@ -128,6 +135,45 @@ public final class CodexRolloutStore {
             LOG.log(Level.DEBUG, () -> "Failed to walk " + sessionsRoot, e);
             return List.of();
         }
+    }
+
+    /** {@code launchedAt}'s date bucket plus the day before and after, in the system default zone. */
+    private List<Path> dateBucketDirs(Instant launchedAt) {
+        LocalDate date = launchedAt.atZone(ZoneId.systemDefault()).toLocalDate();
+        List<Path> dirs = new ArrayList<>(3);
+        for (LocalDate d : List.of(date.minusDays(1), date, date.plusDays(1))) {
+            dirs.add(sessionsRoot.resolve(String.format("%04d/%02d/%02d",
+                    d.getYear(), d.getMonthValue(), d.getDayOfMonth())));
+        }
+        return dirs;
+    }
+
+    /** Rollout files directly under the given date-bucket directories; a missing bucket contributes nothing. */
+    private List<Path> rolloutFilesInBuckets(List<Path> bucketDirs) {
+        List<Path> files = new ArrayList<>();
+        for (Path dir : bucketDirs) {
+            if (!Files.isDirectory(dir)) {
+                continue;
+            }
+            try (Stream<Path> stream = Files.walk(dir)) {
+                stream.filter(CodexRolloutStore::matchesRolloutName).forEach(files::add);
+            } catch (IOException e) {
+                LOG.log(Level.DEBUG, () -> "Failed to walk " + dir, e);
+            }
+        }
+        return files;
+    }
+
+    private List<RolloutMeta> readMatching(List<Path> files, Path normalizedCwd) {
+        List<RolloutMeta> matches = new ArrayList<>();
+        for (Path file : files) {
+            readMeta(file).ifPresent(meta -> {
+                if (meta.source().equals("cli") && meta.cwd().equals(normalizedCwd)) {
+                    matches.add(meta);
+                }
+            });
+        }
+        return matches;
     }
 
     private static boolean matchesRolloutName(Path path) {

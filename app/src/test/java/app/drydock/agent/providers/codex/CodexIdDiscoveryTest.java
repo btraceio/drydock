@@ -10,6 +10,10 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CyclicBarrier;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -32,7 +36,7 @@ class CodexIdDiscoveryTest {
         rollout(root, "new11111-0000-0000-0000-000000000000", "/repo/a", "2026-07-23T11:00:00Z");
         CodexIdDiscovery discovery = new CodexIdDiscovery(new CodexRolloutStore(root), 1, 0);
         Optional<String> id = discovery.discover(Path.of("/repo/a"),
-                Instant.parse("2026-07-23T10:00:00Z"), snap, java.util.concurrent.ConcurrentHashMap.newKeySet());
+                Instant.parse("2026-07-23T10:00:00Z"), snap, ConcurrentHashMap.newKeySet());
         assertTrue(id.isPresent());
         assertEquals("new11111-0000-0000-0000-000000000000", id.get());
     }
@@ -43,15 +47,15 @@ class CodexIdDiscoveryTest {
         CodexRolloutStore store = new CodexRolloutStore(root);
         CodexIdDiscovery discovery = new CodexIdDiscovery(store, 1, 0);
         assertTrue(discovery.discover(Path.of("/repo/a"), Instant.parse("2026-07-23T10:00:00Z"),
-                store.idsFor(Path.of("/repo/a")), java.util.concurrent.ConcurrentHashMap.newKeySet()).isEmpty());
+                store.idsFor(Path.of("/repo/a")), ConcurrentHashMap.newKeySet()).isEmpty());
     }
 
     @Test
     void ambiguousTwoNewRolloutsBailToPickerWithoutBinding(@TempDir Path root) throws IOException {
         // Two same-cwd launches: snapshot is empty, then TWO new unclaimed rollouts appear.
-        java.util.Set<String> claimed = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        Set<String> claimed = ConcurrentHashMap.newKeySet();
         CodexRolloutStore store = new CodexRolloutStore(root);
-        java.util.Set<String> snap = store.idsFor(Path.of("/repo/a"));   // empty
+        Set<String> snap = store.idsFor(Path.of("/repo/a"));   // empty
         rollout(root, "aaa00000-0000-0000-0000-000000000000", "/repo/a", "2026-07-23T11:00:00Z");
         rollout(root, "bbb00000-0000-0000-0000-000000000000", "/repo/a", "2026-07-23T11:01:00Z");
         CodexIdDiscovery discovery = new CodexIdDiscovery(new CodexRolloutStore(root), 1, 0);
@@ -63,14 +67,59 @@ class CodexIdDiscoveryTest {
     @Test
     void concurrentSingleCandidateClaimsAreDistinct(@TempDir Path root) throws IOException {
         // One new rollout, two discoveries racing the SAME claimed set: exactly one binds it.
-        java.util.Set<String> claimed = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        Set<String> claimed = ConcurrentHashMap.newKeySet();
         CodexRolloutStore store = new CodexRolloutStore(root);
-        java.util.Set<String> snap = store.idsFor(Path.of("/repo/a"));
+        Set<String> snap = store.idsFor(Path.of("/repo/a"));
         rollout(root, "ccc00000-0000-0000-0000-000000000000", "/repo/a", "2026-07-23T11:00:00Z");
         CodexIdDiscovery d = new CodexIdDiscovery(new CodexRolloutStore(root), 1, 0);
         Optional<String> first = d.discover(Path.of("/repo/a"), Instant.parse("2026-07-23T10:00:00Z"), snap, claimed);
         Optional<String> second = d.discover(Path.of("/repo/a"), Instant.parse("2026-07-23T10:00:00Z"), snap, claimed);
         assertTrue(first.isPresent());
         assertTrue(second.isEmpty());   // already claimed -> second finds no unclaimed candidate
+    }
+
+    @Test
+    void racingDiscoveriesOnSharedClaimedSetProduceExactlyOneWinner(@TempDir Path root) throws Exception {
+        // Real concurrency (not the sequential test above): two threads call discover(...) on the
+        // SAME claimed set for the SAME single candidate, released together via a barrier so they
+        // overlap. This exercises the claimedIds.add(id) == false branch -- the loser must fall
+        // through and re-poll rather than returning the id or bailing -- which a sequential test
+        // can never reach because the first call always completes before the second starts.
+        Set<String> claimed = ConcurrentHashMap.newKeySet();
+        CodexRolloutStore store = new CodexRolloutStore(root);
+        Set<String> snap = store.idsFor(Path.of("/repo/a"));
+        rollout(root, "ddd00000-0000-0000-0000-000000000000", "/repo/a", "2026-07-23T11:00:00Z");
+
+        // Small attempts / no sleep so the losing thread (which finds nothing unclaimed on its
+        // remaining polls) terminates quickly and deterministically.
+        CodexIdDiscovery a = new CodexIdDiscovery(new CodexRolloutStore(root), 3, 0);
+        CodexIdDiscovery b = new CodexIdDiscovery(new CodexRolloutStore(root), 3, 0);
+        CyclicBarrier barrier = new CyclicBarrier(2);
+
+        CompletableFuture<Optional<String>> f1 = CompletableFuture.supplyAsync(() -> {
+            awaitUninterruptibly(barrier);
+            return a.discover(Path.of("/repo/a"), Instant.parse("2026-07-23T10:00:00Z"), snap, claimed);
+        });
+        CompletableFuture<Optional<String>> f2 = CompletableFuture.supplyAsync(() -> {
+            awaitUninterruptibly(barrier);
+            return b.discover(Path.of("/repo/a"), Instant.parse("2026-07-23T10:00:00Z"), snap, claimed);
+        });
+
+        Optional<String> r1 = f1.join();
+        Optional<String> r2 = f2.join();
+
+        long winners = Stream.of(r1, r2).filter(Optional::isPresent).count();
+        assertEquals(1, winners, "exactly one racer should claim the sole candidate");
+        assertEquals(Set.of("ddd00000-0000-0000-0000-000000000000"), claimed);
+        String won = r1.isPresent() ? r1.get() : r2.get();
+        assertEquals("ddd00000-0000-0000-0000-000000000000", won);
+    }
+
+    private static void awaitUninterruptibly(CyclicBarrier barrier) {
+        try {
+            barrier.await();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 }

@@ -61,4 +61,24 @@ class CodexRolloutStoreTest {
         assertTrue(store.existsForId("ffff6666-0000-0000-0000-000000000006"));
         assertFalse(store.existsForId("00000000-0000-0000-0000-000000000000"));
     }
+
+    @Test
+    void newCandidatesIgnoresUnrelatedOldBucketButExistsForIdStillFindsIt(@TempDir Path root) throws IOException {
+        // Far in the past, well outside the +/-1 day window newCandidates bounds itself to.
+        String oldId = "aaaa0000-0000-0000-0000-000000000000";
+        writeRollout(root, "2020-01-01", oldId, "/repo/a", "2020-01-01T10:00:00Z", "cli");
+        String newId = "bbbb0000-0000-0000-0000-000000000000";
+        writeRollout(root, "2026-07-23", newId, "/repo/a", "2026-07-23T11:00:00Z", "cli");
+        CodexRolloutStore store = new CodexRolloutStore(root);
+
+        var found = store.newCandidates(Path.of("/repo/a"),
+                Instant.parse("2026-07-23T10:00:00Z"), Set.of());
+        // Only the rollout in/near launchedAt's date bucket is returned; the old, unrelated
+        // bucket is never scanned by the bounded hot path.
+        assertEquals(List.of(newId), found.stream().map(CodexRolloutStore.RolloutMeta::id).toList());
+
+        // The full-tree scan used to look up a specific id by name is unbounded and still
+        // finds the old rollout.
+        assertTrue(store.existsForId(oldId));
+    }
 }
