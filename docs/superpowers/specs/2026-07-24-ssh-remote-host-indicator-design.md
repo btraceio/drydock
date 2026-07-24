@@ -56,18 +56,29 @@ In `buildRepoRow`, wrap the repo name and the (conditional) host chip in a small
 ```java
 HBox nameRow = new HBox(6, name);
 nameRow.setAlignment(Pos.CENTER_LEFT);
+// Preserve the truncation the name had when it sat directly in the VBox:
+// inside an HBox it would otherwise revert to preferred width and let a long
+// repo name blow out the row.
+HBox.setHgrow(name, Priority.ALWAYS);
+name.setMaxWidth(Double.MAX_VALUE);
 if (repository.isRemote()) {
     nameRow.getChildren().add(buildRemoteChip(repository));
 }
 VBox text = new VBox(1, nameRow, branchRow);
 ```
 
-For a local repo the `HBox` contains only `name`, so the row is visually
-identical to today.
+For a local repo the `HBox` contains only `name` (now hgrow'd), so the row is
+visually identical to today. The chip keeps its intrinsic (capped) width — with
+`name` taking the flexible space, the chip is never squeezed off, and a long
+name ellipsizes before crowding the chip.
 
 ### The chip
 
-A helper `buildRemoteChip(Repository)` returns a `Label`:
+A **package-private static** helper `buildRemoteChip(Repository)` returns a
+`Label`. Making it static and package-private (rather than a private instance
+method on `SidebarTreeCell`) gives the tests a reachable seam without standing up
+TestFX rendering infrastructure — the helper depends only on its `Repository`
+argument. It returns a `Label`:
 
 - Text: `"⇅ " + host`, where `host = repository.remote().host()`.
 - Style class: `repo-remote-chip` (new, added to `app.css`).
@@ -89,7 +100,8 @@ Add `.repo-remote-chip` to `app.css`, modeled on `.branch-tag` /
 - `-fx-text-fill: -drydock-accent;`
 - `-fx-background-radius: 4px;`
 - `-fx-padding: 0 5 0 5;`
-- `-fx-font-family: "JetBrains Mono";`
+- `-fx-font-family: "JetBrains Mono", "Menlo", monospace;` (full stack, matching
+  the rest of `app.css`)
 - `-fx-font-size: 10.5px;`
 
 Using shared `-drydock-*` tokens means light and dark themes both work with no
@@ -97,13 +109,30 @@ theme-specific rules.
 
 ## Testing
 
-- Follow the existing `RepositorySidebar` UI-test pattern (confirmed during
-  planning). At minimum:
-  - A remote `Repository` produces a repo row containing a `.repo-remote-chip`
-    node whose text includes the host.
-  - A local `Repository` produces a repo row with no `.repo-remote-chip` node.
-- Visual verification by running the app (register/inspect a remote repo row)
-  in addition to the automated test.
+There is **no existing `RepositorySidebar` render/UI-test pattern** in the repo —
+the only sidebar test (`app/src/test/java/app/drydock/ui/SidebarChildrenTest.java`)
+exercises pure domain logic (`SidebarChildren.classify`, static
+`RepositorySidebar.nextLiveIndex`), and no test uses TestFX. `buildRepoRow` is a
+private method on the private inner `SidebarTreeCell`, coupled to `viewModel`
+and friends, so it is not directly testable. Rather than stand up TestFX
+rendering infrastructure for a cosmetic chip, the chip logic lives in the
+**package-private static `buildRemoteChip(Repository)`** helper (see Design), and
+tests target that helper directly:
+
+- `buildRemoteChip(remoteRepo)` returns a `Label` whose style classes contain
+  `repo-remote-chip` and whose text contains the host.
+- The tooltip is `"Remote host: " + host`.
+- A JavaFX toolkit may need initialising for `Label`/`Tooltip` construction;
+  the build already sets `testfx.headless` / Monocle system properties
+  (`build.gradle.kts:169-172`), so a minimal headless toolkit-init in the test
+  (or `@BeforeAll new JFXPanel()` / Monocle) is sufficient — no TestFX robot.
+- The *presence/absence* decision (chip only when `isRemote()`) is exercised by
+  a small package-private predicate or by asserting `buildRepoRow` is only ever
+  passed the chip for remote repos — kept trivial since `isRemote()` is the sole
+  gate.
+
+Visual verification by running the app (register/inspect a remote repo row) in
+addition to the automated helper test.
 
 ## Risks / notes
 
