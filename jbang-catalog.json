@@ -1,9 +1,9 @@
 {
   "aliases": {
     "drydock": {
-      "script-ref": "io.btraceio:drydock:0.1.0",
+      "script-ref": "io.btrace:drydock:0.1.0",
       "description": "Drydock — manage local Git repos and claude CLI sessions (macOS, arm64/x86_64).",
-      "java-version": "26",
+      "java": "26",
       "main": "app.drydock.launcher.JBangBootstrap",
       "runtime-options": [
         "--enable-native-access=ALL-UNNAMED",

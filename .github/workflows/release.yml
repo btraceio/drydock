@@ -1,0 +1,248 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. 0.1.0)'
+        required: true
+        type: string
+      dry_run:
+        description: 'Debug run: build+sign to mavenLocal, skip tag/push, Central publish, and GitHub release'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  setup:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      ref: ${{ steps.resolve.outputs.ref }}
+      dry_run: ${{ steps.resolve.outputs.dry_run }}
+    steps:
+      - id: resolve
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          # Empty on push events; "true"/"false" on workflow_dispatch. Normalized
+          # to a concrete string output below so downstream jobs never evaluate
+          # github.event.inputs on a push (where the inputs context is absent).
+          INPUT_DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            V="${GITHUB_REF_NAME#v}"; REF="${GITHUB_REF_NAME}"
+          else
+            V="$INPUT_VERSION"; REF="v${V}"
+          fi
+          if ! echo "$V" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Invalid version '$V' (expected X.Y.Z)"; exit 1
+          fi
+          if [ "$INPUT_DRY_RUN" = "true" ]; then DRY=true; else DRY=false; fi
+          {
+            echo "version=$V"
+            echo "ref=$REF"
+            echo "dry_run=$DRY"
+          } >> "$GITHUB_OUTPUT"
+
+  prepare:
+    name: Bump version and tag
+    needs: setup
+    if: ${{ github.event_name == 'workflow_dispatch' && needs.setup.outputs.dry_run != 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Bump, commit, tag, push
+        env:
+          V: ${{ needs.setup.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          sed -i -E "s/^version = \".*\"/version = \"${V}\"/" app/build.gradle.kts
+          sed -i -E "s/^version = \".*\"/version = \"${V}\"/" build.gradle.kts
+          sed -i -E "s|(\"script-ref\": \"io\.btrace:drydock:)[^\"]*(\")|\1${V}\2|" jbang-catalog.json
+          grep -q "version = \"${V}\"" app/build.gradle.kts || { echo "::error::version bump failed"; exit 1; }
+          grep -q "version = \"${V}\"" build.gradle.kts || { echo "::error::root version bump failed"; exit 1; }
+          grep -q "io.btrace:drydock:${V}" jbang-catalog.json || { echo "::error::catalog bump failed"; exit 1; }
+          git add app/build.gradle.kts build.gradle.kts jbang-catalog.json
+          git commit -m "Release v${V}"
+          git tag -a "v${V}" -m "Release v${V}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+          git push origin "v${V}"
+
+  # Build each macOS arch slice natively on its own runner, both on the macOS 15
+  # image generation. ghostty's pkg/macos references kCVPixelFormatType_30RGB_r210,
+  # a CoreVideo constant added in the macOS 15 SDK; the older macos-14 image
+  # (14.5 SDK) lacks it and the ghostty build fails regardless of native vs
+  # cross-compile. arm64 -> macos-15, x86_64 -> macos-15-intel.
+  native:
+    name: Build native (${{ matrix.arch }})
+    needs: [setup, prepare]
+    if: ${{ always() && needs.setup.result == 'success' && (needs.prepare.result == 'success' || needs.prepare.result == 'skipped') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x86_64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # In a dry run the tag does not exist yet (prepare is skipped), so
+          # build from the triggering ref instead of needs.setup.outputs.ref.
+          ref: ${{ needs.setup.outputs.dry_run == 'true' && github.ref || needs.setup.outputs.ref }}
+          submodules: recursive
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.15.2
+      - name: Ensure Metal Toolchain
+        run: xcodebuild -downloadComponent MetalToolchain || echo "Metal Toolchain already present or bundled"
+      - name: Build native libraries (${{ matrix.arch }})
+        env:
+          NATIVE_ARCHES: ${{ matrix.arch }}
+        run: |
+          bash scripts/build-ghostty.sh
+          bash scripts/build-native-host.sh
+      - name: Upload native libraries
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: natives-macos-${{ matrix.arch }}
+          path: |
+            build/native/macos-${{ matrix.arch }}/libghostty.dylib
+            build/native/macos-${{ matrix.arch }}/libdrydockterminalhost.dylib
+          if-no-files-found: error
+
+  stage-maven:
+    name: Stage to Maven Central
+    needs: [setup, prepare, native]
+    if: ${{ always() && needs.setup.result == 'success' && needs.native.result == 'success' && (needs.prepare.result == 'success' || needs.prepare.result == 'skipped') }}
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # In a dry run the tag does not exist yet (prepare is skipped), so
+          # build from the triggering ref instead of needs.setup.outputs.ref.
+          ref: ${{ needs.setup.outputs.dry_run == 'true' && github.ref || needs.setup.outputs.ref }}
+          submodules: recursive
+      - name: Download arm64 native libraries
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: natives-macos-arm64
+          path: build/native/macos-arm64
+      - name: Download x86_64 native libraries
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: natives-macos-x86_64
+          path: build/native/macos-x86_64
+      - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: |
+            26
+            17
+      - name: Stage to Central Portal
+        if: ${{ needs.setup.outputs.dry_run != 'true' }}
+        env:
+          # Reuse the existing org secrets; vanniktech reads them via these
+          # ORG_GRADLE_PROJECT_* Gradle-property env vars. SONATYPE_* must be a
+          # Central Portal token (central.sonatype.com/account), not legacy OSSRH.
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.SONATYPE_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.SONATYPE_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.GPG_SIGNING_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyId: ${{ secrets.GPG_KEY_ID }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.GPG_SIGNING_PWD }}
+        run: |
+          ./gradlew :app:publishAllPublicationsToMavenCentralRepository \
+            --no-daemon --stacktrace \
+            -Pnatives.prebuilt=true \
+            -Dorg.gradle.java.installations.fromEnv=JAVA_HOME_17_ARM64,JAVA_HOME_26_ARM64
+      - name: Dry run - build to mavenLocal
+        if: ${{ needs.setup.outputs.dry_run == 'true' }}
+        run: |
+          ./gradlew :app:publishToMavenLocal \
+            --no-daemon --stacktrace \
+            -Pnatives.prebuilt=true \
+            -Dorg.gradle.java.installations.fromEnv=JAVA_HOME_17_ARM64,JAVA_HOME_26_ARM64
+      - name: Upload jbangJar for the release job
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: drydock-jbang-jar
+          path: app/build/libs/drydock-${{ needs.setup.outputs.version }}.jar
+          if-no-files-found: error
+      - name: Staging complete
+        if: ${{ needs.setup.outputs.dry_run != 'true' }}
+        run: |
+          echo "Artifacts STAGED. Review and click Publish at:"
+          echo "  https://central.sonatype.com/publishing/deployments"
+      - name: Dry run complete
+        if: ${{ needs.setup.outputs.dry_run == 'true' }}
+        run: |
+          echo "DRY RUN complete. Built and signed to ~/.m2/repository."
+          echo "No tag pushed, nothing staged to Central, no GitHub release created."
+
+  wait-for-maven:
+    name: Wait for Maven Central
+    needs: [setup, stage-maven]
+    # stage-maven runs under `if: always()`, so this job must also use the
+    # explicit always()+result pattern; a plain implicit success() gate here
+    # gets skipped on push events downstream of an always() job.
+    if: ${{ always() && needs.stage-maven.result == 'success' && needs.setup.outputs.dry_run != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Poll repo1 for the released POM
+        run: |
+          V="${{ needs.setup.outputs.version }}"
+          URL="https://repo1.maven.org/maven2/io/btrace/drydock/${V}/drydock-${V}.pom"
+          echo "Waiting for ${URL}"
+          echo "Click Publish at https://central.sonatype.com/publishing/deployments"
+          for i in $(seq 1 60); do
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' "$URL")
+            if [ "$CODE" = "200" ]; then echo "Available on Maven Central."; exit 0; fi
+            echo "Attempt ${i}/60: HTTP ${CODE} - waiting 30s..."
+            sleep 30
+          done
+          echo "::error::Timed out after 30 min. Release not finalized on Central."
+          exit 1
+
+  create-github-release:
+    name: Create GitHub Release
+    needs: [setup, wait-for-maven]
+    if: ${{ always() && needs.wait-for-maven.result == 'success' && needs.setup.outputs.dry_run != 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.setup.outputs.ref }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: drydock-jbang-jar
+          path: dist
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          V="${{ needs.setup.outputs.version }}"
+          JAR="dist/drydock-${V}.jar"
+          # Idempotent: if a release already exists for this tag (e.g. a manual
+          # placeholder, or a re-run), attach/refresh the jar instead of failing.
+          if gh release view "v${V}" >/dev/null 2>&1; then
+            echo "Release v${V} already exists; uploading jbangJar (clobber)."
+            gh release upload "v${V}" "$JAR" --clobber
+          else
+            gh release create "v${V}" \
+              --title "Drydock v${V}" \
+              --generate-notes \
+              "$JAR"
+          fi

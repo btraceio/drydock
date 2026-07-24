@@ -9,11 +9,14 @@ plugins {
     // runtimeImage/appImage packaging (typed tasks + templates under
     // app/packaging/; see buildSrc/src/main/kotlin/drydock.packaging.gradle.kts).
     id("drydock.packaging")
-    `maven-publish`
-    signing
+    // Central Portal Publisher API + in-memory signing. The `.base` variant
+    // does NOT auto-create a publication from components["java"] (which would
+    // leak JavaFX host-specific classifiers into the POM); we keep the custom
+    // `drydock` publication below and let vanniktech handle transport+signing.
+    id("com.vanniktech.maven.publish.base") version "0.35.0"
 }
 
-group = "io.btraceio"
+group = "io.btrace"
 version = "0.1.0"
 
 java {
@@ -99,12 +102,16 @@ tasks.test {
 // resolves the host-correct classifier at run time.
 tasks.register<Jar>("jbangJar") {
     group = "distribution"
-    description = "Natives-bundled jar for `jbang drydock@...` (io.btraceio:drydock)."
+    description = "Natives-bundled jar for `jbang drydock@...` (io.btrace:drydock)."
     archiveBaseName.set("drydock")
     archiveClassifier.set("")
 
     dependsOn(rootProject.tasks.named("buildGhosttyNative"))
     dependsOn(rootProject.tasks.named("buildNativeHost"))
+    // With -Pnatives.prebuilt=true the two build tasks above are skipped; this
+    // verifies the downloaded dylibs are present so the jar is never packaged
+    // with missing natives.
+    dependsOn(rootProject.tasks.named("checkPrebuiltNatives"))
 
     from(sourceSets.main.get().output)
 
@@ -169,7 +176,7 @@ tasks.named<JavaExec>("run") {
 publishing {
     publications {
         create<MavenPublication>("drydock") {
-            groupId = "io.btraceio"
+            groupId = "io.btrace"
             artifactId = "drydock"
             version = project.version.toString()
 
@@ -231,8 +238,13 @@ tasks.named<Javadoc>("javadoc") {
     (options as StandardJavadocDocletOptions).addStringOption("Xdoclint:none", "-quiet")
 }
 
-signing {
-    // Sign only for a real publish, never for publishToMavenLocal.
-    setRequired({ gradle.taskGraph.allTasks.any { it.name.startsWith("publish") && it.name.contains("Repository") && !it.name.contains("MavenLocal") } })
-    sign(publishing.publications["drydock"])
+// Central Portal Publisher API transport + signing for the custom `drydock`
+// publication created above. Credentials come from Gradle properties / env
+// (ORG_GRADLE_PROJECT_mavenCentralUsername/Password) and the in-memory GPG key
+// (ORG_GRADLE_PROJECT_signingInMemoryKey/KeyId/KeyPassword). signAllPublications
+// skips signing for publishToMavenLocal, so local/dry-run installs stay usable
+// without keys.
+mavenPublishing {
+    publishToMavenCentral()
+    signAllPublications()
 }
