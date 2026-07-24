@@ -280,7 +280,7 @@ public final class SessionManager implements AutoCloseable {
                                     activeRegistry.tryMarkActive(id, opened.session().id());
                                 });
                     } catch (RuntimeException e) {
-                        LOG.log(Level.WARNING, () -> "Codex id discovery failed for " + opened.session().id()
+                        LOG.log(Level.WARNING, () -> provider.kind() + " id discovery failed for " + opened.session().id()
                                 + "; resume will use the picker: " + e);
                     }
                 }

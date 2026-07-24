@@ -6,7 +6,7 @@ import java.util.Optional;
 import java.util.Set;
 
 /**
- * Captures the session id a DISCOVERED-strategy tool (Codex) mints for itself.
+ * Captures the session id a DISCOVERED-strategy tool (Codex, Pi) mints for itself.
  * The tool assigns its own id only after launch, so Drydock snapshots the id
  * store just before spawning and claims the first new matching record after.
  *
