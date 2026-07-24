@@ -234,7 +234,15 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           V="${{ needs.setup.outputs.version }}"
-          gh release create "v${V}" \
-            --title "Drydock v${V}" \
-            --generate-notes \
-            "dist/drydock-${V}.jar"
+          JAR="dist/drydock-${V}.jar"
+          # Idempotent: if a release already exists for this tag (e.g. a manual
+          # placeholder, or a re-run), attach/refresh the jar instead of failing.
+          if gh release view "v${V}" >/dev/null 2>&1; then
+            echo "Release v${V} already exists; uploading jbangJar (clobber)."
+            gh release upload "v${V}" "$JAR" --clobber
+          else
+            gh release create "v${V}" \
+              --title "Drydock v${V}" \
+              --generate-notes \
+              "$JAR"
+          fi
