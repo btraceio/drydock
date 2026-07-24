@@ -1171,6 +1171,16 @@ public final class RepositorySidebar extends VBox {
 
             Label name = new Label(repository.displayName());
             name.getStyleClass().add("repo-name");
+            // Keep the truncation `name` had when it sat directly in the VBox:
+            // inside an HBox it would otherwise take preferred width and let a
+            // long repo name blow out the row.
+            HBox.setHgrow(name, Priority.ALWAYS);
+            name.setMaxWidth(Double.MAX_VALUE);
+            HBox nameRow = new HBox(6, name);
+            nameRow.setAlignment(Pos.CENTER_LEFT);
+            if (repository.isRemote()) {
+                nameRow.getChildren().add(buildRemoteChip(repository));
+            }
 
             // When a transient rescan note is present it owns the whole line
             // (branch text = note, no counts).
@@ -1200,7 +1210,7 @@ public final class RepositorySidebar extends VBox {
                 branchRow.getChildren().add(SessionStatusStyles.createDot(5, SessionStatus.RUNNING));
             }
 
-            VBox text = new VBox(1, name, branchRow);
+            VBox text = new VBox(1, nameRow, branchRow);
             HBox.setHgrow(text, Priority.ALWAYS);
 
             Label count = new Label(String.valueOf(sessions.size()));
