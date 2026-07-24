@@ -119,10 +119,9 @@ during implementation**, not a blocker.
   surface reveal (does not delay the terminal).
 - **Version probe:** `probeCapabilities().version` comes from `codex --version`
   (not a literal), via `CodexVersionProbe`.
-- **On-screen picker (pixel) check DEFERRED:** the isolated instance launched
-  and reached the New-session modal, but the display was asleep so `screencapture`
-  returned "could not create image from display". The picker's Codex entry is
-  confirmed *functionally* (registry discovers Codex + available; `AgentSelector`
-  renders one toggle per `registry.agents()`; the Plan A screenshot already
-  showed the picker rendering agents). Re-capture when the display is awake for a
-  belt-and-suspenders pixel confirmation.
+- **On-screen picker (pixel) check DONE (2026-07-24):** the isolated instance's
+  New-session modal shows BOTH `Claude` and `Codex` as selectable Agent toggles
+  (screenshotted). Codex is a first-class picker entry. The Codex-*selected* title/
+  preview change ("Start a Codex session" + `codex` command) is unit-validated via
+  the agent-tracking modal logic; a scripted click to capture that exact state was
+  flaky (native-button coordinate mapping) and not pursued further.
