@@ -1,6 +1,6 @@
 # Releasing Drydock to Maven Central
 
-Drydock publishes `io.btraceio:drydock` to Maven Central via the
+Drydock publishes `io.btrace:drydock` to Maven Central via the
 [Central Portal](https://central.sonatype.com), using the
 [`com.vanniktech.maven.publish`](https://vanniktech.github.io/gradle-maven-publish-plugin/)
 plugin (Central Portal Publisher API — **not** the legacy OSSRH staging-profile

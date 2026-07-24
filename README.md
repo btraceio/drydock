@@ -66,7 +66,7 @@ jbang drydock@btraceio/drydock
 
 jbang provisions a **Temurin JDK 26** and JavaFX automatically. The app's classes
 and the required native libraries (`libghostty`, `libdrydockterminalhost`, for
-both Apple Silicon and Intel) ship inside the `io.btraceio:drydock` Maven Central
+both Apple Silicon and Intel) ship inside the `io.btrace:drydock` Maven Central
 jar; on first launch they are extracted to `~/Library/Caches/drydock/native/`.
 
 First launch downloads the JDK and dependencies, so it's slower than subsequent

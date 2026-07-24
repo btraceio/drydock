@@ -16,7 +16,7 @@ plugins {
     id("com.vanniktech.maven.publish.base") version "0.35.0"
 }
 
-group = "io.btraceio"
+group = "io.btrace"
 version = "0.1.0"
 
 java {
@@ -102,7 +102,7 @@ tasks.test {
 // resolves the host-correct classifier at run time.
 tasks.register<Jar>("jbangJar") {
     group = "distribution"
-    description = "Natives-bundled jar for `jbang drydock@...` (io.btraceio:drydock)."
+    description = "Natives-bundled jar for `jbang drydock@...` (io.btrace:drydock)."
     archiveBaseName.set("drydock")
     archiveClassifier.set("")
 
@@ -176,7 +176,7 @@ tasks.named<JavaExec>("run") {
 publishing {
     publications {
         create<MavenPublication>("drydock") {
-            groupId = "io.btraceio"
+            groupId = "io.btrace"
             artifactId = "drydock"
             version = project.version.toString()
 

@@ -68,10 +68,10 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           sed -i -E "s/^version = \".*\"/version = \"${V}\"/" app/build.gradle.kts
           sed -i -E "s/^version = \".*\"/version = \"${V}\"/" build.gradle.kts
-          sed -i -E "s|(\"script-ref\": \"io\.btraceio:drydock:)[^\"]*(\")|\1${V}\2|" jbang-catalog.json
+          sed -i -E "s|(\"script-ref\": \"io\.btrace:drydock:)[^\"]*(\")|\1${V}\2|" jbang-catalog.json
           grep -q "version = \"${V}\"" app/build.gradle.kts || { echo "::error::version bump failed"; exit 1; }
           grep -q "version = \"${V}\"" build.gradle.kts || { echo "::error::root version bump failed"; exit 1; }
-          grep -q "io.btraceio:drydock:${V}" jbang-catalog.json || { echo "::error::catalog bump failed"; exit 1; }
+          grep -q "io.btrace:drydock:${V}" jbang-catalog.json || { echo "::error::catalog bump failed"; exit 1; }
           git add app/build.gradle.kts build.gradle.kts jbang-catalog.json
           git commit -m "Release v${V}"
           git tag -a "v${V}" -m "Release v${V}"
@@ -204,7 +204,7 @@ jobs:
       - name: Poll repo1 for the released POM
         run: |
           V="${{ needs.setup.outputs.version }}"
-          URL="https://repo1.maven.org/maven2/io/btraceio/drydock/${V}/drydock-${V}.pom"
+          URL="https://repo1.maven.org/maven2/io/btrace/drydock/${V}/drydock-${V}.pom"
           echo "Waiting for ${URL}"
           echo "Click Publish at https://central.sonatype.com/publishing/deployments"
           for i in $(seq 1 60); do
