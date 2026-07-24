@@ -112,6 +112,20 @@ public final class PiSessionStore implements CandidateSource {
     /**
      * Every session for {@code cwd} with {@code timestamp >= launchedAt}
      * whose id is not in {@code snapshotIds}, sorted earliest-first.
+     *
+     * <p>pi records the {@code session} record's {@code timestamp} field at
+     * sub-second (millisecond) precision (verified from a real session, e.g.
+     * {@code 2026-07-24T10:09:09.964Z}), so the {@code timestamp >=
+     * launchedAt} boundary does not accidentally exclude a session launched
+     * just before its file is stamped. Codex relies on the same property --
+     * see {@code CodexRolloutStore.newCandidates}.</p>
+     *
+     * <p>Unlike Codex's hot-path discovery, which is optimized to scan only a
+     * few date-bucket directories, this re-scans the whole per-cwd directory
+     * (via {@link #forWorkingDirectory}) on every poll. That is intentional
+     * and acceptable here: pi's per-cwd directory is small (one directory per
+     * cwd, not Codex's global date-bucketed tree), so a full re-scan is cheap
+     * and there is no analogous optimization to make.</p>
      */
     public List<SessionMeta> newCandidates(Path cwd, Instant launchedAt, Set<String> snapshotIds) {
         List<SessionMeta> candidates = new ArrayList<>();
@@ -140,6 +154,9 @@ public final class PiSessionStore implements CandidateSource {
 
     /** Whether a session file whose name contains {@code id} exists in {@code cwd}'s directory. */
     public boolean existsForId(Path cwd, String id) {
+        if (id == null || id.isBlank()) {
+            return false;
+        }
         for (Path file : sessionFiles(cwd)) {
             if (file.getFileName().toString().contains(id)) {
                 return true;
