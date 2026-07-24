@@ -1,5 +1,6 @@
 package app.drydock.agent.providers.claude.internal;
 
+import java.io.File;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.Files;
@@ -8,6 +9,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.regex.Pattern;
 
 /**
  * Discovers the installed {@code claude} executable once and caches the
@@ -104,7 +106,7 @@ public final class ClaudeExecutableLocator {
         String pathEnv = System.getenv("PATH");
         searched.add("PATH" + (pathEnv == null ? " (not set)" : ""));
         if (pathEnv != null) {
-            for (String dir : pathEnv.split(java.util.regex.Pattern.quote(java.io.File.pathSeparator))) {
+            for (String dir : pathEnv.split(Pattern.quote(File.pathSeparator))) {
                 if (dir.isBlank()) {
                     continue;
                 }

@@ -19,7 +19,6 @@ import app.drydock.agent.providers.claude.internal.ConversationCatalog;
 import app.drydock.process.SshCommandBuilder;
 
 import java.nio.file.Path;
-import java.util.List;
 import java.util.Optional;
 
 /**
@@ -84,12 +83,6 @@ public final class ClaudeAgentProvider implements AgentProvider {
     @Override
     public boolean supportsRemote() {
         return true;
-    }
-
-    @Override
-    public List<String> envScrubList() {
-        return List.of("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_EXECPATH",
-                "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_EFFORT");
     }
 
     @Override

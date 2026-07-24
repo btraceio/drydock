@@ -12,7 +12,6 @@ import app.drydock.agent.api.SessionIdDiscovery;
 import app.drydock.agent.api.SessionIdStrategy;
 
 import java.nio.file.Path;
-import java.util.List;
 import java.util.Optional;
 
 /**
@@ -47,8 +46,6 @@ public interface AgentProvider {
      * Application Thread.
      */
     boolean supportsRemote();
-
-    List<String> envScrubList();
 
     LaunchPlan buildCreateCommand(CreateContext c);
 

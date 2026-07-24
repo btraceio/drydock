@@ -81,11 +81,6 @@ public final class CodexAgentProvider implements AgentProvider {
     }
 
     @Override
-    public List<String> envScrubList() {
-        return ENV_SCRUB;
-    }
-
-    @Override
     public LaunchPlan buildCreateCommand(CreateContext c) {
         if (c.remote().isPresent()) {
             return LaunchPlan.unsupported();   // Codex declines remote
