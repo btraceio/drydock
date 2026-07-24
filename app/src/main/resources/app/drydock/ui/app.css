@@ -1239,6 +1239,14 @@
     -fx-text-fill: -drydock-accent;
     -fx-background-color: -drydock-accent-soft;
 }
+.repo-remote-chip {
+    -fx-font-size: 10.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-background-radius: 4px;
+    -fx-padding: 0 5 0 5;
+    -fx-text-fill: -drydock-accent;
+    -fx-background-color: -drydock-accent-soft;
+}
 .dirty-dot {
     -fx-background-color: -drydock-dirty;
     -fx-background-radius: 100px;

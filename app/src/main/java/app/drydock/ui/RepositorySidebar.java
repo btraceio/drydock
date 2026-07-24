@@ -398,6 +398,33 @@ public final class RepositorySidebar extends VBox {
                 .toList();
     }
 
+    /** Display text for a remote-host chip: a sync glyph followed by the host. */
+    static String remoteChipText(String host) {
+        return "⇅ " + host;
+    }
+
+    /** Tooltip text for a remote-host chip: the full (untruncated) host. */
+    static String remoteChipTooltipText(String host) {
+        return "Remote host: " + host;
+    }
+
+    /**
+     * Builds the sidebar chip that marks a repo as remote and names its host.
+     * Package-private + static so the pure text helpers it delegates to can be
+     * unit-tested; the Label/Tooltip wiring itself is verified by running the
+     * app. Only ever called for repositories where {@code isRemote()} is true,
+     * so {@code remote().host()} is non-null.
+     */
+    static Label buildRemoteChip(Repository repository) {
+        String host = repository.remote().host();
+        Label chip = new Label(remoteChipText(host));
+        chip.getStyleClass().add("repo-remote-chip");
+        chip.setTextOverrun(OverrunStyle.LEADING_ELLIPSIS);
+        chip.setMaxWidth(160);
+        chip.setTooltip(new Tooltip(remoteChipTooltipText(host)));
+        return chip;
+    }
+
     /** Wrapping index of the next live session; {@code -1} when there are none. */
     static int nextLiveIndex(int count, int current, int direction) {
         if (count == 0) {
@@ -1235,6 +1262,16 @@ public final class RepositorySidebar extends VBox {
 
             Label name = new Label(repository.displayName());
             name.getStyleClass().add("repo-name");
+            // Keep the truncation `name` had when it sat directly in the VBox:
+            // inside an HBox it would otherwise take preferred width and let a
+            // long repo name blow out the row.
+            HBox.setHgrow(name, Priority.ALWAYS);
+            name.setMaxWidth(Double.MAX_VALUE);
+            HBox nameRow = new HBox(6, name);
+            nameRow.setAlignment(Pos.CENTER_LEFT);
+            if (repository.isRemote()) {
+                nameRow.getChildren().add(buildRemoteChip(repository));
+            }
 
             // When a transient rescan note is present it owns the whole line
             // (branch text = note, no counts).
@@ -1264,7 +1301,7 @@ public final class RepositorySidebar extends VBox {
                 branchRow.getChildren().add(SessionStatusStyles.createDot(5, SessionStatus.RUNNING));
             }
 
-            VBox text = new VBox(1, name, branchRow);
+            VBox text = new VBox(1, nameRow, branchRow);
             HBox.setHgrow(text, Priority.ALWAYS);
 
             Label count = new Label(String.valueOf(sessions.size()));
