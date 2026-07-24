@@ -26,8 +26,10 @@ record SidebarChildren(
         List<ManagedClaudeSession> idleSessions,
         List<Worktree> openWorktrees,
         List<Worktree> staleWorktrees,
+        List<Worktree> lockedWorktrees,
         int worktreeCount,
-        int staleCount) {
+        int staleCount,
+        int lockedCount) {
 
     /** {@code liveSessions} followed by {@code idleSessions}, in display order. */
     List<ManagedClaudeSession> orderedSessions() {
@@ -47,12 +49,13 @@ record SidebarChildren(
         List<ManagedClaudeSession> sessionRows = new ArrayList<>();
         List<Worktree> openWorktrees = new ArrayList<>();
         List<Worktree> staleWorktrees = new ArrayList<>();
+        List<Worktree> lockedWorktrees = new ArrayList<>();
 
         // Match sessions to worktrees exactly as childNodesFor did.
         for (Worktree worktree : worktrees) {
             if (worktree.mainCheckout()) {
                 if (mainSessions.isEmpty()) {
-                    bucket(worktree, openWorktrees, staleWorktrees);
+                    bucket(worktree, openWorktrees, staleWorktrees, lockedWorktrees);
                 } else {
                     sessionRows.addAll(mainSessions);
                     placed.addAll(mainSessions);
@@ -66,7 +69,7 @@ record SidebarChildren(
                     sessionRows.add(match.get());
                     placed.add(match.get());
                 } else {
-                    bucket(worktree, openWorktrees, staleWorktrees);
+                    bucket(worktree, openWorktrees, staleWorktrees, lockedWorktrees);
                 }
             }
         }
@@ -100,19 +103,41 @@ record SidebarChildren(
                 .thenComparing(worktree -> worktree.branch().map(String::toLowerCase).orElse(""))
                 .thenComparing(worktree -> worktree.path().toString()));
 
+        // Locked worktrees: branch-named first, then branch-less by path
+        // (sphinx's detached range-* worktrees land here in path order).
+        lockedWorktrees.sort(Comparator
+                .comparingInt((Worktree worktree) -> worktree.branch().isPresent() ? 0 : 1)
+                .thenComparing(worktree -> worktree.branch().map(String::toLowerCase).orElse(""))
+                .thenComparing(worktree -> worktree.path().toString()));
+
         int worktreeCount = (int) openWorktrees.stream().filter(w -> !w.mainCheckout()).count()
                 + (int) sessionRows.stream().filter(s -> s.worktreeRoot().isPresent()).count();
 
         return new SidebarChildren(List.copyOf(live), List.copyOf(idle),
-                List.copyOf(openWorktrees), List.copyOf(staleWorktrees),
-                worktreeCount, staleWorktrees.size());
+                List.copyOf(openWorktrees), List.copyOf(staleWorktrees), List.copyOf(lockedWorktrees),
+                worktreeCount, staleWorktrees.size(), lockedWorktrees.size());
     }
 
+    /**
+     * Three-way classification of a bucketed (session-less) worktree. A
+     * <em>locked</em> one is set aside deliberately -- a tool holds it (sphinx
+     * locks its {@code .sphinx/worktrees/*} while initializing) -- and folds
+     * into its own collapsed group rather than cluttering the open rows or
+     * being offered up for an unconfirmed {@code Clean}; the main checkout and
+     * an ordinary named worktree stay open; a prunable or detached one is
+     * stale.
+     */
     private static void bucket(Worktree worktree,
-            List<Worktree> open, List<Worktree> stale) {
-        boolean isStale = !worktree.locked() && !worktree.mainCheckout()
-                && (worktree.prunable() || worktree.detached());
-        (isStale ? stale : open).add(worktree);
+            List<Worktree> open, List<Worktree> stale, List<Worktree> locked) {
+        if (worktree.mainCheckout()) {
+            open.add(worktree);
+        } else if (worktree.locked()) {
+            locked.add(worktree);
+        } else if (worktree.prunable() || worktree.detached()) {
+            stale.add(worktree);
+        } else {
+            open.add(worktree);
+        }
     }
 
     private static boolean isRunning(SessionStatus status) {

@@ -124,6 +124,9 @@ public final class RepositorySidebar extends VBox {
     /** Repos whose stale bucket is expanded. Distinct from {@code collapsed} (repo-level). */
     private final Set<RepositoryId> staleBucketExpanded = new HashSet<>();
 
+    /** Repos whose locked-worktree bucket is expanded. */
+    private final Set<RepositoryId> lockedBucketExpanded = new HashSet<>();
+
     /** Repositories with a rescan in flight (spins the ⟳ button, prevents double-scans). */
     private final Set<RepositoryId> scanning = ConcurrentHashMap.newKeySet();
     /** Worktree paths discovered by the latest rescan, highlighted one-shot until the timer clears them. */
@@ -175,6 +178,8 @@ public final class RepositorySidebar extends VBox {
         record UnopenedWorktreeNode(WorktreeService.Worktree worktree, Repository repository)
                 implements SidebarNode { }
         record StaleWorktreesNode(List<WorktreeService.Worktree> worktrees, Repository repository)
+                implements SidebarNode { }
+        record LockedWorktreesNode(List<WorktreeService.Worktree> worktrees, Repository repository)
                 implements SidebarNode { }
     }
 
@@ -338,6 +343,13 @@ public final class RepositorySidebar extends VBox {
                 RepositoryId repoId = staleNode.repository().id();
                 if (!staleBucketExpanded.add(repoId)) {
                     staleBucketExpanded.remove(repoId);
+                }
+                requestRebuild();
+            }
+            case SidebarNode.LockedWorktreesNode lockedNode -> {
+                RepositoryId repoId = lockedNode.repository().id();
+                if (!lockedBucketExpanded.add(repoId)) {
+                    lockedBucketExpanded.remove(repoId);
                 }
                 requestRebuild();
             }
@@ -508,9 +520,9 @@ public final class RepositorySidebar extends VBox {
             if (classified == null) {
                 continue;
             }
-            worktreeTotal += classified.worktreeCount() + classified.staleCount();
+            worktreeTotal += classified.worktreeCount() + classified.staleCount() + classified.lockedCount();
             unopenedTotal += (int) classified.openWorktrees().stream().filter(w -> !w.mainCheckout()).count()
-                    + classified.staleCount();
+                    + classified.staleCount() + classified.lockedCount();
         }
         if (!viewModel.anyWorktreesDiscovered()) {
             worktreeTotal = (int) viewModel.sessions().stream()
@@ -595,6 +607,7 @@ public final class RepositorySidebar extends VBox {
         unopenedTooltips.keySet().retainAll(worktreePaths);
         collapsed.retainAll(repoIds);
         staleBucketExpanded.retainAll(repoIds);
+        lockedBucketExpanded.retainAll(repoIds);
     }
 
     /** Re-renders the one row backed by {@code worktreeRoot} (a worktree session row or an unopened row). */
@@ -686,9 +699,9 @@ public final class RepositorySidebar extends VBox {
 
     /**
      * The banded children of one repository row: live sessions, then idle
-     * sessions, then open (non-stale) worktrees, then a single collapsed
-     * stale-worktrees bucket (if any) -- ordering and classification
-     * delegated to {@link SidebarChildren}.
+     * sessions, then open worktrees, then a collapsed locked-worktrees bucket
+     * and a collapsed stale-worktrees bucket (each if non-empty) -- ordering
+     * and classification delegated to {@link SidebarChildren}.
      */
     private List<SidebarNode> childNodesFor(Repository repository) {
         SidebarChildren classified = childrenOf(repository);
@@ -705,6 +718,9 @@ public final class RepositorySidebar extends VBox {
         }
         for (WorktreeService.Worktree worktree : classified.openWorktrees()) {
             children.add(new SidebarNode.UnopenedWorktreeNode(worktree, repository));
+        }
+        if (!classified.lockedWorktrees().isEmpty()) {
+            children.add(new SidebarNode.LockedWorktreesNode(classified.lockedWorktrees(), repository));
         }
         if (!classified.staleWorktrees().isEmpty()) {
             children.add(new SidebarNode.StaleWorktreesNode(classified.staleWorktrees(), repository));
@@ -750,6 +766,10 @@ public final class RepositorySidebar extends VBox {
                 yield text.toLowerCase(Locale.ROOT).contains(query);
             }
             case SidebarNode.StaleWorktreesNode staleNode -> staleNode.worktrees().stream().anyMatch(worktree -> {
+                String text = worktree.branch().orElse("") + " " + worktree.path();
+                return text.toLowerCase(Locale.ROOT).contains(query);
+            });
+            case SidebarNode.LockedWorktreesNode lockedNode -> lockedNode.worktrees().stream().anyMatch(worktree -> {
                 String text = worktree.branch().orElse("") + " " + worktree.path();
                 return text.toLowerCase(Locale.ROOT).contains(query);
             });
@@ -978,6 +998,43 @@ public final class RepositorySidebar extends VBox {
                 }));
     }
 
+    /**
+     * Batch-remove the locked bucket. Unlike the stale bucket, every worktree
+     * here is locked on purpose, so there is no "clean subset" to remove
+     * quietly: one confirm that spells out the override, then a forced
+     * (double-force) removal of each -- discarding any uncommitted work and the
+     * lock alike. Per-worktree failures are surfaced individually.
+     */
+    private void cleanLockedWorktrees(Repository repository, List<WorktreeService.Worktree> worktrees) {
+        Alert confirm = new Alert(AlertType.CONFIRMATION);
+        confirm.setTitle("Clean locked worktrees");
+        confirm.setHeaderText("Remove " + worktrees.size() + " locked worktree"
+                + (worktrees.size() == 1 ? "" : "s") + "?");
+        confirm.setContentText("These worktrees are locked -- something may still be using them "
+                + "(a tool mid-setup). Removing them overrides the lock and discards any uncommitted "
+                + "work. Remove anyway?");
+        if (confirm.showAndWait().filter(button -> button == ButtonType.OK).isEmpty()) {
+            return;
+        }
+        List<CompletableFuture<Void>> removals = new ArrayList<>();
+        for (WorktreeService.Worktree worktree : worktrees) {
+            removals.add(worktreeService.removeForced(repository.root(), worktree.path(), deletableBranchOf(worktree))
+                    .handle((v, failure) -> {
+                        Platform.runLater(() -> {
+                            if (failure != null) {
+                                UiErrors.show("Could not remove worktree", failure);
+                            } else {
+                                viewModel.removeWorktreeStatus(worktree.path());
+                            }
+                        });
+                        return null;
+                    }));
+        }
+        CompletableFuture
+                .allOf(removals.toArray(CompletableFuture[]::new))
+                .whenComplete((v, ignored) -> Platform.runLater(() -> refreshWorktrees(repository, false)));
+    }
+
     // ---- Git status ---------------------------------------------------------
 
     private void refreshAllStatuses() {
@@ -1163,6 +1220,10 @@ public final class RepositorySidebar extends VBox {
                     setGraphic(buildStaleRow(staleNode.worktrees(), staleNode.repository()));
                     setContextMenu(null);
                 }
+                case SidebarNode.LockedWorktreesNode lockedNode -> {
+                    setGraphic(buildLockedRow(lockedNode.worktrees(), lockedNode.repository()));
+                    setContextMenu(null);
+                }
             }
         }
 
@@ -1258,7 +1319,7 @@ public final class RepositorySidebar extends VBox {
             return row;
         }
 
-        /** Just the counts fragment: {@code · 3 wt · 1 stale}, or "" before discovery / when a note is showing. */
+        /** Just the counts fragment: {@code · 3 wt · 2 locked · 1 stale}, or "" before discovery / when a note is showing. */
         private String repoCountsText(Repository repository) {
             if (rescanNotes.get(repository.id()) != null) {
                 return "";
@@ -1268,6 +1329,9 @@ public final class RepositorySidebar extends VBox {
                 return "";
             }
             StringBuilder counts = new StringBuilder(" · ").append(classified.worktreeCount()).append(" wt");
+            if (classified.lockedCount() > 0) {
+                counts.append(" · ").append(classified.lockedCount()).append(" locked");
+            }
             if (classified.staleCount() > 0) {
                 counts.append(" · ").append(classified.staleCount()).append(" stale");
             }
@@ -1475,6 +1539,58 @@ public final class RepositorySidebar extends VBox {
             if (expanded) {
                 for (WorktreeService.Worktree worktree : worktrees) {
                     Label path = new Label(shortPath(worktree.path()));
+                    path.getStyleClass().add("stale-path");
+                    path.setPadding(new Insets(2, 8, 2, 34));
+                    box.getChildren().add(path);
+                }
+            }
+            return box;
+        }
+
+        /**
+         * The collapsed locked bucket: {@code ▸ N locked worktrees} + a Clean
+         * action. Like the stale bucket, but these worktrees are locked -- held
+         * on purpose by whatever created them -- so cleaning force-removes them
+         * and demands an explicit confirmation first (see
+         * {@link #cleanLockedWorktrees}). Reuses the stale bucket's styling.
+         */
+        private VBox buildLockedRow(List<WorktreeService.Worktree> worktrees, Repository repository) {
+            boolean expanded = lockedBucketExpanded.contains(repository.id());
+
+            Label caret = new Label(expanded ? "▾" : "▸");
+            caret.getStyleClass().add("repo-caret");
+            StackPane statusCol = new StackPane(caret);
+            statusCol.getStyleClass().add("child-row-status");
+            Label label = new Label(worktrees.size() + (worktrees.size() == 1
+                    ? " locked worktree" : " locked worktrees"));
+            label.getStyleClass().add("stale-summary");
+            HBox.setHgrow(label, Priority.ALWAYS);
+
+            Button clean = new Button("Clean ↺");
+            clean.getStyleClass().add("stale-clean-button");
+            clean.setFocusTraversable(false);
+            clean.setOnAction(e -> cleanLockedWorktrees(repository, worktrees));
+
+            HBox summary = new HBox(7, statusCol, label, clean);
+            summary.getStyleClass().addAll("stale-summary-row", "child-row");
+            summary.setAlignment(Pos.CENTER_LEFT);
+            summary.setOnMouseClicked(event -> {
+                if (event.getButton() == MouseButton.PRIMARY) {
+                    if (expanded) {
+                        lockedBucketExpanded.remove(repository.id());
+                    } else {
+                        lockedBucketExpanded.add(repository.id());
+                    }
+                    requestRebuild();
+                    event.consume();
+                }
+            });
+
+            VBox box = new VBox(summary);
+            if (expanded) {
+                for (WorktreeService.Worktree worktree : worktrees) {
+                    Label path = new Label(shortPath(worktree.path())
+                            + worktree.lockReason().map(reason -> "  (" + reason + ")").orElse(""));
                     path.getStyleClass().add("stale-path");
                     path.setPadding(new Insets(2, 8, 2, 34));
                     box.getChildren().add(path);

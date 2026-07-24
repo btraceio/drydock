@@ -119,12 +119,29 @@ class SidebarChildrenTest {
     }
 
     @Test
-    void staleRule_locked_neverStale() {
+    void lockedRule_locked_goesToLockedBucketNotStaleOrOpen() {
+        // A locked worktree (even one that is also detached and prunable) is
+        // held on purpose: it folds into its own bucket, never stale, never a
+        // cluttering open row.
         SidebarChildren result = SidebarChildren.classify(
                 List.of(main(), wt(null, true, true, true)),
                 List.of(), noActivity());
         assertTrue(result.staleWorktrees().isEmpty());
-        assertEquals(1, result.openWorktrees().stream().filter(w -> !w.mainCheckout()).count());
+        assertEquals(0, result.openWorktrees().stream().filter(w -> !w.mainCheckout()).count());
+        assertEquals(1, result.lockedWorktrees().size());
+        assertEquals(1, result.lockedCount());
+    }
+
+    @Test
+    void lockedRule_lockedWithSession_staysASession() {
+        ManagedClaudeSession onLocked = session("onlocked", Path.of("/wt/held"),
+                SessionStatus.RUNNING, Instant.ofEpochSecond(10));
+        SidebarChildren result = SidebarChildren.classify(
+                List.of(main(), wt("held", false, false, true)),
+                List.of(onLocked), noActivity());
+        assertTrue(result.lockedWorktrees().isEmpty());
+        assertEquals(List.of("onlocked"),
+                result.liveSessions().stream().map(ManagedClaudeSession::displayName).toList());
     }
 
     @Test
@@ -139,7 +156,7 @@ class SidebarChildrenTest {
     void openWorktrees_sortByBranchThenBranchlessByPath() {
         SidebarChildren result = SidebarChildren.classify(
                 List.of(main(), wt("zebra", false, false, false),
-                        wt("alpha", false, false, false), wt(null, false, false, true)),
+                        wt("alpha", false, false, false), wt(null, false, false, false)),
                 List.of(), noActivity());
         List<String> order = result.openWorktrees().stream()
                 .filter(w -> !w.mainCheckout())
