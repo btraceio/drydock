@@ -64,6 +64,14 @@ installing a JDK, Gradle, or the native toolchain:
 jbang drydock@btraceio/drydock
 ```
 
+Use the **catalog alias** (above), not the bare `io.btrace:drydock:0.1.0`
+Maven coordinate: the alias carries the required JDK version and JVM flags,
+which a plain coordinate cannot. If jbang launches on an older JVM — you'll see
+`InvalidModuleDescriptorException: Unsupported major.minor version 68.0` while
+reading a JavaFX module — jbang could not provision JDK 26. Fix it with
+`jbang jdk install 26` (and `jbang version --update` if jbang is old), then
+re-run with `jbang --fresh drydock@btraceio/drydock`.
+
 jbang provisions a **Temurin JDK 26** and JavaFX automatically. The app's classes
 and the required native libraries (`libghostty`, `libdrydockterminalhost`, for
 both Apple Silicon and Intel) ship inside the `io.btrace:drydock` Maven Central
