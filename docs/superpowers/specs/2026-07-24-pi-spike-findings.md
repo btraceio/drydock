@@ -94,3 +94,12 @@ Revisit if pi's rpc/extension surface offers a clean event stream later.
   a shared base could be extracted, but the layouts differ (Codex date-buckets +
   content-cwd vs. Pi per-cwd-dir + filename-id), so a Pi-specific store is fine for
   the first cut. Note for a future refactor, don't force it now.
+
+## Validated in implementation (Plan C, 2026-07-24)
+
+- **Unit suite green** with THREE providers registered (`META-INF/services`: Claude+Codex+Pi); `AgentRegistry` discovers all three; `pi` on PATH → Pi available.
+- **Discovery machinery reused:** Codex's race-safe logic was extracted to a generic `SnapshotClaimDiscovery` over a `CandidateSource`; `CodexIdDiscovery` was deleted; Pi's `PiSessionStore` implements `CandidateSource` and Pi uses the same generic discovery.
+- **Command shapes (unit-tested):** create = `env -u PI_CODING_AGENT pi` (no id, no settings); resume = `pi --session '<id>'` when known else `pi --resume` (picker); remote → `LaunchPlan.unsupported()`.
+- **encodeCwdDir canonicalizes** via `toRealPath()` (verified against pi's real-path bucketing incl. a symlink test); `forWorkingDirectory` cross-checks the first-line `cwd`.
+- **Version probe:** `probeCapabilities().version` from `pi --version` (bare `0.71.1`), via `PiVersionProbe`.
+- **On-screen picker (pixel) check DONE:** the New-session modal shows THREE selectable Agent toggles — **Claude, Codex, Pi** (screenshotted). Pi is a first-class picker entry. The Pi-selected title/preview change is unit-validated via the agent-tracking modal logic (scripted native-button click to capture that exact state was flaky, not pursued).
