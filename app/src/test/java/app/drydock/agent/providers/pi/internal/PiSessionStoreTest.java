@@ -1,5 +1,6 @@
 package app.drydock.agent.providers.pi.internal;
 
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -91,7 +92,7 @@ class PiSessionStoreTest {
             Files.createSymbolicLink(link, real);
         } catch (UnsupportedOperationException | IOException e) {
             // Symlinks may be unsupported/unprivileged on some platforms/CI; skip rather than fail spuriously.
-            return;
+            Assumptions.assumeTrue(false, "symlinks unsupported here");
         }
         assertEquals(PiSessionStore.encodeCwdDir(real), PiSessionStore.encodeCwdDir(link));
     }

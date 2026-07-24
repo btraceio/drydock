@@ -72,12 +72,7 @@ public final class PiSessionStore implements CandidateSource {
      * discovery silently find nothing.</p>
      */
     public static String encodeCwdDir(Path cwd) {
-        Path real;
-        try {
-            real = cwd.toRealPath();
-        } catch (IOException e) {
-            real = cwd.toAbsolutePath().normalize();
-        }
+        Path real = canonicalize(cwd);
         String s = real.toString();
         if (s.startsWith("/")) {
             s = s.substring(1);
