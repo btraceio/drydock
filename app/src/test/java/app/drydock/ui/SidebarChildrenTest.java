@@ -4,7 +4,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import app.drydock.domain.ManagedClaudeSession;
+import app.drydock.agent.api.AgentKind;
+import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.PrState;
 import app.drydock.domain.RepositoryId;
@@ -33,9 +34,9 @@ class SidebarChildrenTest {
                 Optional.ofNullable(branch), false, detached, prunable, locked, Optional.empty());
     }
 
-    private static ManagedClaudeSession session(String name, Path worktreeRoot,
+    private static ManagedAgentSession session(String name, Path worktreeRoot,
             SessionStatus status, Instant lastOpened) {
-        return new ManagedClaudeSession(ManagedSessionId.newId(), REPO, name,
+        return new ManagedAgentSession(ManagedSessionId.newId(), REPO, AgentKind.CLAUDE, name,
                 Optional.empty(), Optional.empty(),
                 worktreeRoot == null ? ROOT : worktreeRoot,
                 Optional.ofNullable(worktreeRoot),
@@ -49,35 +50,35 @@ class SidebarChildrenTest {
 
     @Test
     void banding_putsLiveSessionsBeforeIdle() {
-        ManagedClaudeSession live = session("live", Path.of("/wt/a"),
+        ManagedAgentSession live = session("live", Path.of("/wt/a"),
                 SessionStatus.RUNNING, Instant.ofEpochSecond(10));
-        ManagedClaudeSession idle = session("idle", null,
+        ManagedAgentSession idle = session("idle", null,
                 SessionStatus.INACTIVE, Instant.ofEpochSecond(20));
         SidebarChildren result = SidebarChildren.classify(
                 List.of(main(), wt("a", false, false, false)),
                 List.of(live, idle), noActivity());
-        assertEquals(List.of("live"), result.liveSessions().stream().map(ManagedClaudeSession::displayName).toList());
-        assertEquals(List.of("idle"), result.idleSessions().stream().map(ManagedClaudeSession::displayName).toList());
+        assertEquals(List.of("live"), result.liveSessions().stream().map(ManagedAgentSession::displayName).toList());
+        assertEquals(List.of("idle"), result.idleSessions().stream().map(ManagedAgentSession::displayName).toList());
     }
 
     @Test
     void liveBand_sortsMostRecentFirst() {
-        ManagedClaudeSession older = session("older", Path.of("/wt/a"),
+        ManagedAgentSession older = session("older", Path.of("/wt/a"),
                 SessionStatus.RUNNING, Instant.ofEpochSecond(10));
-        ManagedClaudeSession newer = session("newer", Path.of("/wt/b"),
+        ManagedAgentSession newer = session("newer", Path.of("/wt/b"),
                 SessionStatus.RUNNING, Instant.ofEpochSecond(30));
         SidebarChildren result = SidebarChildren.classify(
                 List.of(main(), wt("a", false, false, false), wt("b", false, false, false)),
                 List.of(older, newer), noActivity());
         assertEquals(List.of("newer", "older"),
-                result.liveSessions().stream().map(ManagedClaudeSession::displayName).toList());
+                result.liveSessions().stream().map(ManagedAgentSession::displayName).toList());
     }
 
     @Test
     void liveBand_pinsNeedsAttentionFirst() {
-        ManagedClaudeSession fresh = session("fresh", Path.of("/wt/a"),
+        ManagedAgentSession fresh = session("fresh", Path.of("/wt/a"),
                 SessionStatus.RUNNING, Instant.ofEpochSecond(50));
-        ManagedClaudeSession waiting = session("waiting", Path.of("/wt/b"),
+        ManagedAgentSession waiting = session("waiting", Path.of("/wt/b"),
                 SessionStatus.RUNNING, Instant.ofEpochSecond(10));
         Map<ManagedSessionId, SessionActivity> activity =
                 Map.of(waiting.id(), SessionActivity.NEEDS_ATTENTION);
@@ -86,7 +87,7 @@ class SidebarChildrenTest {
                 List.of(fresh, waiting),
                 id -> activity.getOrDefault(id, SessionActivity.UNKNOWN));
         assertEquals(List.of("waiting", "fresh"),
-                result.liveSessions().stream().map(ManagedClaudeSession::displayName).toList());
+                result.liveSessions().stream().map(ManagedAgentSession::displayName).toList());
     }
 
     @Test
@@ -108,14 +109,14 @@ class SidebarChildrenTest {
 
     @Test
     void staleRule_prunableWithSession_neverStale_staysASession() {
-        ManagedClaudeSession onStale = session("onstale", Path.of("/wt/gone"),
+        ManagedAgentSession onStale = session("onstale", Path.of("/wt/gone"),
                 SessionStatus.RUNNING, Instant.ofEpochSecond(10));
         SidebarChildren result = SidebarChildren.classify(
                 List.of(main(), wt("gone", false, true, false)),
                 List.of(onStale), noActivity());
         assertTrue(result.staleWorktrees().isEmpty());
         assertEquals(List.of("onstale"),
-                result.liveSessions().stream().map(ManagedClaudeSession::displayName).toList());
+                result.liveSessions().stream().map(ManagedAgentSession::displayName).toList());
     }
 
     @Test
@@ -166,7 +167,7 @@ class SidebarChildrenTest {
 
     @Test
     void counts_wtIncludesSessionBackedWorktrees_staleDisjoint() {
-        ManagedClaudeSession onWt = session("onwt", Path.of("/wt/a"),
+        ManagedAgentSession onWt = session("onwt", Path.of("/wt/a"),
                 SessionStatus.INACTIVE, Instant.ofEpochSecond(10));
         SidebarChildren result = SidebarChildren.classify(
                 List.of(main(), wt("a", false, false, false),
@@ -188,12 +189,12 @@ class SidebarChildrenTest {
 
     @Test
     void orphanSession_whoseWorktreeDirIsGone_stillAppears() {
-        ManagedClaudeSession orphan = session("orphan", Path.of("/wt/vanished"),
+        ManagedAgentSession orphan = session("orphan", Path.of("/wt/vanished"),
                 SessionStatus.INACTIVE, Instant.ofEpochSecond(10));
         SidebarChildren result = SidebarChildren.classify(
                 List.of(main()), List.of(orphan), noActivity());
         assertEquals(List.of("orphan"),
-                result.idleSessions().stream().map(ManagedClaudeSession::displayName).toList());
+                result.idleSessions().stream().map(ManagedAgentSession::displayName).toList());
     }
 
     @Test

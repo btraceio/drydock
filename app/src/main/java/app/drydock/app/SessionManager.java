@@ -1,17 +1,22 @@
 package app.drydock.app;
 
-import app.drydock.claude.ClaudeCapabilities;
-import app.drydock.claude.ClaudeCapabilityService;
-import app.drydock.claude.ConversationCatalog;
+import app.drydock.agent.api.AgentKind;
+import app.drydock.agent.api.AgentRegistry;
+import app.drydock.agent.api.CreateContext;
+import app.drydock.agent.api.LaunchPlan;
+import app.drydock.agent.api.ResumeContext;
+import app.drydock.agent.api.SessionIdDiscovery;
+import app.drydock.agent.api.SessionIdStrategy;
+import app.drydock.agent.spi.AgentProvider;
 import app.drydock.domain.ApplicationState;
 import app.drydock.domain.BranchOwnership;
-import app.drydock.domain.ManagedClaudeSession;
+import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.PrState;
 import app.drydock.domain.Repository;
+import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SshRemote;
-import app.drydock.process.SshCommandBuilder;
 import app.drydock.state.ApplicationStateRepository;
 import app.drydock.terminal.api.TerminalHostView;
 import app.drydock.terminal.api.TerminalRuntime;
@@ -28,6 +33,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -35,19 +41,20 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.UnaryOperator;
 
 /**
- * Orchestrates creating and resuming {@link ManagedClaudeSession}s (plan
+ * Orchestrates creating and resuming {@link ManagedAgentSession}s (plan
  * section 11): generates/persists session metadata via {@link
  * ApplicationStateRepository}, launches the real {@code claude} CLI inside a
  * {@link TerminalSurface}, enforces duplicate-open protection (plan section
  * 11.3), and closes sessions using {@link
  * TerminalSurface#closeGracefully(long, long, Runnable)}.
  *
- * <p><b>Threading (plan section 18):</b> {@link #createSession} and {@link
- * #resumeSession} do their slow work -- {@link ClaudeCapabilityService}
- * detection and persistence I/O -- on a background executor, and only touch
+ * <p><b>Threading (plan section 18):</b> {@link #launchSession} and {@link
+ * #resumeSession} do their slow work -- {@link AgentProvider} capability
+ * probing and persistence I/O -- on a background executor, and only touch
  * {@link TerminalSurface}/{@link TerminalRuntime}/{@link TerminalHostView} via
  * {@link Platform#runLater}, per {@link TerminalHostView}'s own documented
  * "JavaFX Application Thread only" constraint. Callers get back a {@link
@@ -64,7 +71,8 @@ import java.util.function.UnaryOperator;
  * {@code login}/{@code bash -c "exec -l ..."} wrapping). There is no
  * argument-list overload to call
  * instead. This class therefore builds the command as a single
- * single-quoted-argument string ({@link #shellQuote}) rather than an actual
+ * single-quoted-argument string ({@code ClaudeAgentProvider.shellQuote})
+ * rather than an actual
  * {@code String[]}/{@code List<String>} argument vector; every dynamic value
  * placed into it (display name, Claude session id/name) is quoted so it
  * cannot be interpreted as additional shell syntax. Likewise, plan section
@@ -86,53 +94,68 @@ public final class SessionManager implements AutoCloseable {
     /** How long {@link #close} waits for queued background work (state saves) before giving up. */
     private static final long CLOSE_AWAIT_TERMINATION_SECONDS = 2;
 
-    /**
-     * Stand-in when capability detection fails on the resume path: every flag
-     * off, so the command falls back to the plain {@code claude --resume} form
-     * that worked before any capability was consulted. Matches
-     * {@link app.drydock.claude.ClaudeCapabilityService}'s documented "fail
-     * conservatively" default rather than guessing a flag is available.
-     */
-    private static final ClaudeCapabilities NO_CAPABILITIES =
-            new ClaudeCapabilities(false, true, false, false, false, "unknown");
-
     private final ApplicationStateStore stateStore;
-    private final ClaudeCapabilityService capabilityService;
+    private final AgentRegistry registry;
     private final ExecutorService backgroundExecutor;
     private final boolean ownsExecutor;
-
-    /**
-     * Settings file injecting the session-activity hooks, absent until
-     * {@link #useActivitySettings} succeeds at startup. Volatile because
-     * launches run on the background executor while installation completes
-     * on another thread; a launch that races installation simply omits the
-     * flag and reports no activity, which is the intended degradation.
-     */
-    private volatile Optional<Path> activitySettings = Optional.empty();
 
     private final ActiveSessionRegistry activeRegistry = new ActiveSessionRegistry();
     private final Map<ManagedSessionId, TerminalSurface> activeSurfaces = new ConcurrentHashMap<>();
 
-    public SessionManager(ApplicationStateRepository stateRepository, ClaudeCapabilityService capabilityService) {
-        this(stateRepository, capabilityService, Executors.newVirtualThreadPerTaskExecutor(), true);
+    /**
+     * Agent session ids already bound to a {@link ManagedAgentSession}
+     * (seeded from persisted state at construction, then grown as DISCOVERED
+     * launches claim a fresh id) so post-launch discovery never re-binds an
+     * id that already belongs to another session.
+     */
+    private final Set<String> claimedAgentSessionIds;
+
+    public SessionManager(ApplicationStateRepository stateRepository, AgentRegistry registry) {
+        this(stateRepository, registry, Executors.newVirtualThreadPerTaskExecutor(), true);
     }
 
     /** For callers/tests that want to supply (and own the shutdown of) their own executor. */
-    public SessionManager(ApplicationStateRepository stateRepository, ClaudeCapabilityService capabilityService,
+    public SessionManager(ApplicationStateRepository stateRepository, AgentRegistry registry,
                            ExecutorService backgroundExecutor) {
-        this(stateRepository, capabilityService, backgroundExecutor, false);
+        this(stateRepository, registry, backgroundExecutor, false);
     }
 
-    private SessionManager(ApplicationStateRepository stateRepository, ClaudeCapabilityService capabilityService,
+    private SessionManager(ApplicationStateRepository stateRepository, AgentRegistry registry,
                             ExecutorService backgroundExecutor, boolean ownsExecutor) {
         // The store is shared with every other manager built against the
         // same repository instance (see ApplicationStateStore.forRepository),
         // so cross-manager read-modify-write cycles serialize on ONE lock.
         this.stateStore = ApplicationStateStore.forRepository(stateRepository);
-        this.capabilityService = capabilityService;
+        this.registry = registry;
         this.backgroundExecutor = backgroundExecutor;
         this.ownsExecutor = ownsExecutor;
         stateStore.update(SessionManager::normalizeLoadedState);
+        this.claimedAgentSessionIds = seedClaimedIds(stateStore.state());
+    }
+
+    /**
+     * Pure helper: every {@code agentSessionId} already assigned to a
+     * persisted session, so a fresh {@link SessionManager} (e.g. after a
+     * restart) never lets post-launch DISCOVERED-id discovery re-bind an id
+     * that some other session already owns.
+     */
+    static Set<String> seedClaimedIds(ApplicationState state) {
+        Set<String> ids = ConcurrentHashMap.newKeySet();
+        for (ManagedAgentSession s : state.sessions()) {
+            s.agentSessionId().ifPresent(ids::add);
+        }
+        return ids;
+    }
+
+    /**
+     * Lets a diagnostic override win over a provider-built command, keyed by
+     * agent kind first (so multiple agent kinds can be overridden
+     * independently) and falling back to the un-keyed property for backward
+     * compatibility with existing diagnostic tooling.
+     */
+    private static String diagOverride(AgentKind kind, String built) {
+        return System.getProperty("app.drydock.diag.command." + kind.persistedName(),
+                System.getProperty("app.drydock.diag.command", built));
     }
 
     /**
@@ -145,7 +168,7 @@ public final class SessionManager implements AutoCloseable {
      * anything reads them.
      */
     private static ApplicationState normalizeLoadedState(ApplicationState loaded) {
-        List<ManagedClaudeSession> normalized = loaded.sessions().stream()
+        List<ManagedAgentSession> normalized = loaded.sessions().stream()
                 .map(session -> switch (session.status()) {
                     case RUNNING, STARTING -> session.withStatus(SessionStatus.INACTIVE);
                     default -> session;
@@ -154,33 +177,15 @@ public final class SessionManager implements AutoCloseable {
         return loaded.withSessions(normalized);
     }
 
-    /** Read-only view into claude's transcript store, for {@code checkResumeBlocked}'s missing-conversation probe. */
-    private final ConversationCatalog conversationCatalog = new ConversationCatalog();
-
-    /**
-     * Points subsequently launched sessions at {@code settingsFile} so their
-     * Claude reports activity back to this app. Passing {@code null} disables
-     * the injection (used when hook installation failed).
-     */
-    public void useActivitySettings(Path settingsFile) {
-        this.activitySettings = Optional.ofNullable(settingsFile);
-    }
-
     public ApplicationState state() {
         return stateStore.state();
     }
 
-    public List<ManagedClaudeSession> sessions() {
+    public List<ManagedAgentSession> sessions() {
         return stateStore.state().sessions();
     }
 
     // ---- 11.1 Create a new session ----------------------------------------
-
-    /** Creates a new session with a generated default display name (plan section 11.1). */
-    public CompletableFuture<SessionOpenResult> createSession(Repository repository, TerminalRuntime app,
-                                                               TerminalHostView host, double scaleFactor) {
-        return createSession(repository, defaultDisplayName(repository), app, host, scaleFactor);
-    }
 
     /**
      * Mints the metadata for a brand-new session (generated display name)
@@ -191,76 +196,127 @@ public final class SessionManager implements AutoCloseable {
      * id would not be found by a concurrent open of the freshly persisted
      * real id -- yielding a duplicate surface and a leaked native pair.
      */
-    public ManagedClaudeSession prepareSession(Repository repository) {
-        return newSessionMetadata(repository, defaultDisplayName(repository));
+    public ManagedAgentSession prepareSession(Repository repository, AgentKind agentKind) {
+        return newSessionMetadata(repository, defaultDisplayName(repository), agentKind);
     }
 
     /** As {@link #prepareSession}, for a session living inside an already-created worktree checkout. */
-    public ManagedClaudeSession prepareWorktreeSession(Repository repository, String displayName, Path worktreeRoot,
-                                                        boolean branchCreatedHere) {
-        return newSessionMetadata(repository, displayName, Optional.of(worktreeRoot), branchCreatedHere);
+    public ManagedAgentSession prepareWorktreeSession(Repository repository, String displayName, Path worktreeRoot,
+                                                        boolean branchCreatedHere, AgentKind agentKind) {
+        return newSessionMetadata(repository, displayName, agentKind, Optional.of(worktreeRoot), branchCreatedHere);
     }
 
     /** Launches a session minted by {@link #prepareSession}/{@link #prepareWorktreeSession}. */
-    public CompletableFuture<SessionOpenResult> launchSession(ManagedClaudeSession prepared, TerminalRuntime app,
+    public CompletableFuture<SessionOpenResult> launchSession(ManagedAgentSession prepared, TerminalRuntime app,
                                                               TerminalHostView host, double scaleFactor) {
         return launchNewSession(prepared, prepared.displayName(), app, host, scaleFactor);
     }
 
-    /**
-     * Creates a new session with an explicit display name (plan section
-     * 11.1's "allow immediate renaming" -- a caller can generate its own
-     * name, or rename after the fact via {@link #renameSession}, which this
-     * step does not itself provide UI for).
-     */
-    public CompletableFuture<SessionOpenResult> createSession(Repository repository, String displayName,
-                                                               TerminalRuntime app, TerminalHostView host,
-                                                               double scaleFactor) {
-        return launchNewSession(newSessionMetadata(repository, displayName), displayName, app, host, scaleFactor);
-    }
-
-    private CompletableFuture<SessionOpenResult> launchNewSession(ManagedClaudeSession initial, String displayName,
+    private CompletableFuture<SessionOpenResult> launchNewSession(ManagedAgentSession initial, String displayName,
                                                                   TerminalRuntime app, TerminalHostView host,
                                                                   double scaleFactor) {
-        // Generated up front so this app -- not claude -- decides the Claude
-        // session id: launching with `claude --session-id '<uuid>'` (when the
-        // installed claude supports it) makes the session id known without
-        // having to scrape it from claude's output or state files, so a
-        // later resume can target this EXACT conversation via
-        // `claude --resume '<uuid>'` (see buildResumeCommand's fallback
-        // chain) instead of dropping the user into the interactive picker.
-        String claudeSessionId = UUID.randomUUID().toString();
-
-        // Remote repositories get the degraded remote contract (spec):
-        // plain ssh-wrapped claude, no local capability probe (the REMOTE
-        // claude's capabilities are unknown), and never a pre-generated
-        // session id -- the remote claude was never told about it.
+        AgentKind kind = initial.agentKind();
+        AgentProvider provider = registry.provider(kind)
+                .orElseThrow(() -> new IllegalStateException("No provider for " + kind));
         Optional<SshRemote> remote = remoteFor(repositoryFor(initial));
-        if (remote.isPresent()) {
-            String command = buildRemoteCreateCommand(remote.get());
-            return CompletableFuture.runAsync(() -> persistNewSession(initial), backgroundExecutor)
-                    .thenCompose(ignored -> createSurfaceOnFxThread(app, host, scaleFactor, command,
-                            System.getProperty("user.home"))
-                            .thenApply(surface -> new CreateLaunch(new CreatePlan(command, false), surface)))
-                    .handleAsync((launch, ex) -> finalizeCreate(initial, claudeSessionId, launch, ex),
-                            backgroundExecutor);
-        }
+        // Generated up front (for PRESET providers) so this app -- not the
+        // agent CLI -- decides the session id: launching with a pre-supplied
+        // id (when the provider supports it) makes it known without having
+        // to scrape it from the tool's output or state files, so a later
+        // resume can target this EXACT conversation directly instead of
+        // dropping the user into an interactive picker. DISCOVERED providers
+        // mint their own id, so none is generated here.
+        String sessionId = provider.idStrategy() == SessionIdStrategy.PRESET
+                ? UUID.randomUUID().toString()
+                : "";
+        String workingDir = remote.isPresent() ? System.getProperty("user.home") : initial.workingDirectory().toString();
+
+        // DISCOVERED providers mint their own id only after launch: snapshot
+        // the id store BEFORE spawning (so discovery can tell "new since
+        // launch" from "already there") and remember when we launched. The
+        // snapshot is disk I/O (Files.walk over the rollout store), so it
+        // must run on the background executor, never on the calling (FX)
+        // thread -- captured via holders since it is produced mid-chain (in
+        // the very first async stage, before the process spawns) but only
+        // consumed by the discovery stage at the end.
+        Optional<SessionIdDiscovery> discovery = provider.idStrategy() == SessionIdStrategy.DISCOVERED
+                ? registry.idDiscovery(provider.kind())
+                : Optional.empty();
+        Path discoverCwd = initial.workingDirectory();
+        AtomicReference<Object> snapshotRef = new AtomicReference<>();
+        AtomicReference<Instant> launchedAtRef = new AtomicReference<>();
 
         // Metadata persistence is disk I/O; keep it off the (FX) caller thread.
-        return CompletableFuture.runAsync(() -> persistNewSession(initial), backgroundExecutor)
-                .thenCompose(ignored -> capabilityService.detectCapabilities())
-                .thenApplyAsync(caps -> {
-                    String command = System.getProperty("app.drydock.diag.command",
-                            buildCreateCommand(caps, displayName, claudeSessionId, activitySettings));
-                    // contains() rather than caps.supportsSessionId(): a
+        // The DISCOVERED snapshot/timestamp are captured in this same
+        // pre-spawn stage so they still land before buildAndLaunchCreate
+        // spawns the process (otherwise the new session's own rollout would
+        // already be in the snapshot and discovery could never find it).
+        CompletableFuture<SessionOpenResult> createFuture = CompletableFuture.runAsync(() -> {
+                    persistNewSession(initial);
+                    discovery.ifPresent(d -> snapshotRef.set(d.snapshot(discoverCwd)));
+                    launchedAtRef.set(Instant.now());
+                }, backgroundExecutor)
+                .thenCompose(ignored -> buildAndLaunchCreate(provider, displayName, sessionId,
+                        initial.workingDirectory(), remote, app, host, scaleFactor, workingDir))
+                .handleAsync((launch, ex) -> finalizeCreate(initial, sessionId, launch, ex), backgroundExecutor);
+
+        if (discovery.isPresent()) {
+            // Detached side effect: discovery polls for ~5s, which must
+            // never delay the surface reveal callers are awaiting on
+            // createFuture. Never fails the launch: discover() returns
+            // empty on failure/ambiguity and resume falls back to the
+            // interactive picker; any RuntimeException it throws is caught
+            // and logged rather than treated as a launch failure.
+            createFuture.thenAcceptAsync(result -> {
+                if (result instanceof SessionOpenResult.Opened opened) {
+                    try {
+                        discovery.get().discover(discoverCwd, launchedAtRef.get(), snapshotRef.get(),
+                                        claimedAgentSessionIds)
+                                .ifPresent(id -> {
+                                    // discover() already atomically claimed
+                                    // `id` in claimedAgentSessionIds.
+                                    updateSession(opened.session().id(),
+                                            s -> s.withAgentSessionId(Optional.of(id)));
+                                    activeRegistry.tryMarkActive(id, opened.session().id());
+                                });
+                    } catch (RuntimeException e) {
+                        LOG.log(Level.WARNING, () -> provider.kind() + " id discovery failed for " + opened.session().id()
+                                + "; resume will use the picker: " + e);
+                    }
+                }
+            }, backgroundExecutor);
+        }
+        return createFuture;
+    }
+
+    /**
+     * Builds a provider's create command (on the background executor -- it
+     * may block on capability probing) and, once built, opens the resulting
+     * {@link TerminalSurface} on the FX thread. Shared by {@link
+     * #launchNewSession} and {@link #startFreshConversation}, the two paths
+     * that mint a brand-new agent conversation.
+     */
+    private CompletableFuture<CreateLaunch> buildAndLaunchCreate(AgentProvider provider, String displayName,
+                                                                  String sessionId, Path targetWorkingDirectory,
+                                                                  Optional<SshRemote> remote, TerminalRuntime app,
+                                                                  TerminalHostView host, double scaleFactor,
+                                                                  String surfaceWorkingDirectory) {
+        return CompletableFuture.supplyAsync(() -> {
+                    CreateContext ctx = new CreateContext(displayName, sessionId, targetWorkingDirectory, remote);
+                    LaunchPlan plan = provider.buildCreateCommand(ctx);
+                    if (!plan.supported()) {
+                        throw new IllegalStateException(
+                                provider.kind() + " cannot launch this session (remote unsupported)");
+                    }
+                    // contains() rather than plan.sessionIdUsed() alone: a
                     // diag command override never carries the id even when
-                    // the flag is supported.
-                    return new CreatePlan(command, command.contains(claudeSessionId));
+                    // the provider's own plan says it used it.
+                    String command = diagOverride(provider.kind(), plan.command());
+                    return new CreatePlan(command, plan.sessionIdUsed() && command.contains(sessionId));
                 }, backgroundExecutor)
                 .thenCompose(plan -> createSurfaceOnFxThread(app, host, scaleFactor, plan.command(),
-                        initial.workingDirectory().toString())
-                        .thenApply(surface -> new CreateLaunch(plan, surface)))
-                .handleAsync((launch, ex) -> finalizeCreate(initial, claudeSessionId, launch, ex), backgroundExecutor);
+                        surfaceWorkingDirectory)
+                        .thenApply(surface -> new CreateLaunch(plan, surface)));
     }
 
     /** The launch command plus whether it actually carries the pre-generated {@code --session-id}. */
@@ -268,7 +324,7 @@ public final class SessionManager implements AutoCloseable {
 
     private record CreateLaunch(CreatePlan plan, TerminalSurface surface) { }
 
-    private SessionOpenResult finalizeCreate(ManagedClaudeSession initial, String claudeSessionId,
+    private SessionOpenResult finalizeCreate(ManagedAgentSession initial, String agentSessionId,
                                               CreateLaunch launch, Throwable ex) {
         if (ex != null) {
             Throwable cause = unwrap(ex);
@@ -283,17 +339,33 @@ public final class SessionManager implements AutoCloseable {
             }
             throw wrap(cause);
         }
-        ManagedClaudeSession running = initial.withStatus(SessionStatus.RUNNING).withLastOpenedAt(Instant.now());
+        ManagedAgentSession running = initial.withStatus(SessionStatus.RUNNING).withLastOpenedAt(Instant.now());
         // Only persist the Claude session id if the launch command actually
         // used it -- persisting an id claude never saw would make a later
         // resume target a nonexistent conversation.
         if (launch.plan().sessionIdUsed()) {
-            running = running.withClaudeSessionId(Optional.of(claudeSessionId));
-            activeRegistry.tryMarkActive(claudeSessionId, running.id());
+            running = running.withAgentSessionId(Optional.of(agentSessionId));
+            activeRegistry.tryMarkActive(agentSessionId, running.id());
         }
         persistUpdatedSession(running);
+        // Records the agent kind actually used so the next session opened in
+        // this repository defaults to it (AgentSelector's per-repo default).
+        RepositoryId createdRepositoryId = running.repositoryId();
+        AgentKind createdAgentKind = running.agentKind();
+        stateStore.update(s -> repoWithLastUsedAgent(s, createdRepositoryId, createdAgentKind));
         activeSurfaces.put(running.id(), launch.surface());
         return new SessionOpenResult.Opened(running, launch.surface());
+    }
+
+    /**
+     * Pure transform: returns {@code state} with {@code repositoryId}'s
+     * settings updated to record {@code kind} as its last-used agent (a
+     * no-op if no repository matches, e.g. it was removed concurrently).
+     */
+    static ApplicationState repoWithLastUsedAgent(ApplicationState state, RepositoryId repositoryId, AgentKind kind) {
+        return state.withRepositories(state.repositories().stream()
+                .map(r -> r.id().equals(repositoryId) ? r.withSettings(r.settings().withLastUsedAgent(kind)) : r)
+                .toList());
     }
 
     // ---- 11.2 Resume a session ---------------------------------------------
@@ -316,50 +388,42 @@ public final class SessionManager implements AutoCloseable {
                     if (blocked.isPresent()) {
                         return CompletableFuture.completedFuture(blocked.get());
                     }
-                    ManagedClaudeSession session = requireSession(sessionId);
+                    ManagedAgentSession session = requireSession(sessionId);
+                    AgentKind kind = session.agentKind();
+                    AgentProvider provider = registry.provider(kind)
+                            .orElseThrow(() -> new IllegalStateException("No provider for " + kind));
                     Optional<SshRemote> remote = remoteFor(repositoryFor(session));
-                    if (remote.isPresent()) {
-                        String command = buildRemoteResumeCommand(remote.get(), session);
-                        return createSurfaceOnFxThread(app, host, scaleFactor, command,
-                                        System.getProperty("user.home"))
-                                .handleAsync((surface, ex) -> finalizeResume(session, surface, ex),
-                                        backgroundExecutor);
-                    }
-                    // Capabilities gate the activity --settings flag. Resume must
-                    // NOT inherit their failure mode: before this flag existed,
-                    // buildResumeCommand was a pure function of persisted metadata
-                    // and could not fail, and detectCapabilities is uncached --
-                    // every call spawns `claude --version` + `--help`. Letting it
-                    // throw here would sink a resume over a cosmetic badge, the
-                    // exact inversion activitySettingsFlag promises not to make,
-                    // so a probe failure degrades to "no activity reporting".
-                    return capabilityService.detectCapabilities()
-                            .exceptionally(ex -> {
-                                LOG.log(Level.WARNING, () -> "Claude capability detection failed while resuming "
-                                        + sessionId + "; resuming without activity reporting: " + unwrap(ex));
-                                return NO_CAPABILITIES;
-                            })
-                            .thenCompose(caps -> {
-                                String command = buildResumeCommand(session, caps, activitySettings);
-                                return createSurfaceOnFxThread(app, host, scaleFactor, command,
-                                                session.workingDirectory().toString())
-                                        .handleAsync((surface, ex) -> finalizeResume(session, surface, ex),
-                                                backgroundExecutor);
-                            });
+                    String workingDir = remote.isPresent()
+                            ? System.getProperty("user.home")
+                            : session.workingDirectory().toString();
+                    // Command construction (including any capability probing
+                    // it needs) runs entirely on the background executor; a
+                    // probe failure inside the provider degrades to its own
+                    // conservative fallback rather than sinking the resume
+                    // (see ClaudeAgentProvider.detectCaps).
+                    return CompletableFuture.supplyAsync(() -> {
+                                ResumeContext ctx = new ResumeContext(session.agentSessionId(),
+                                        session.agentSessionName(), session.workingDirectory(), remote);
+                                return provider.buildResumeCommand(ctx).command();
+                            }, backgroundExecutor)
+                            .thenCompose(command -> createSurfaceOnFxThread(app, host, scaleFactor, command,
+                                    workingDir)
+                                    .handleAsync((surface, ex) -> finalizeResume(session, surface, ex),
+                                            backgroundExecutor));
                 });
     }
 
-    private SessionOpenResult finalizeResume(ManagedClaudeSession session, TerminalSurface surface, Throwable ex) {
+    private SessionOpenResult finalizeResume(ManagedAgentSession session, TerminalSurface surface, Throwable ex) {
         if (ex != null) {
             Throwable cause = unwrap(ex);
             LOG.log(Level.WARNING, () -> "Failed to resume session " + session.id() + ": " + cause.getMessage());
             persistUpdatedSession(session.withStatus(SessionStatus.FAILED));
             throw wrap(cause);
         }
-        ManagedClaudeSession running = session.withStatus(SessionStatus.RUNNING).withLastOpenedAt(Instant.now());
+        ManagedAgentSession running = session.withStatus(SessionStatus.RUNNING).withLastOpenedAt(Instant.now());
         persistUpdatedSession(running);
         activeSurfaces.put(running.id(), surface);
-        session.claudeSessionId().ifPresent(claudeId -> activeRegistry.tryMarkActive(claudeId, running.id()));
+        session.agentSessionId().ifPresent(claudeId -> activeRegistry.tryMarkActive(claudeId, running.id()));
         return new SessionOpenResult.Opened(running, surface);
     }
 
@@ -387,11 +451,19 @@ public final class SessionManager implements AutoCloseable {
         // here used to block FX-thread callers of this manager's other
         // (then-synchronized) methods. State reads/writes take the store's
         // own short-lived lock only.
-        ManagedClaudeSession session = requireSession(sessionId);
+        ManagedAgentSession session = requireSession(sessionId);
 
-        Optional<String> claudeSessionId = session.claudeSessionId();
-        if (claudeSessionId.isPresent()) {
-            Optional<ManagedSessionId> active = activeRegistry.activeSessionId(claudeSessionId.get());
+        // An unrecognized persisted agentKind raw-name decodes to this
+        // status with a placeholder agentKind() == CLAUDE (see the
+        // ManagedAgentSession decoder); launching it would silently run the
+        // wrong agent in that worktree, so it must never reach a launch.
+        if (session.status() == SessionStatus.UNSUPPORTED_AGENT) {
+            return Optional.of(new SessionOpenResult.UnsupportedAgent(session));
+        }
+
+        Optional<String> agentSessionId = session.agentSessionId();
+        if (agentSessionId.isPresent()) {
+            Optional<ManagedSessionId> active = activeRegistry.activeSessionId(agentSessionId.get());
             if (active.isPresent() && !active.get().equals(sessionId)) {
                 TerminalSurface activeSurface = activeSurfaces.get(active.get());
                 if (activeSurface != null) {
@@ -403,20 +475,21 @@ public final class SessionManager implements AutoCloseable {
         boolean remoteSession = repositoryFor(session).map(Repository::isRemote).orElse(false);
 
         if (!remoteSession && Files.notExists(session.workingDirectory())) {
-            ManagedClaudeSession missing = session.withStatus(SessionStatus.MISSING_WORKING_DIRECTORY);
+            ManagedAgentSession missing = session.withStatus(SessionStatus.MISSING_WORKING_DIRECTORY);
             persistUpdatedSession(missing);
             return Optional.of(new SessionOpenResult.MissingWorkingDirectory(missing));
         }
 
-        // A pinned conversation id whose transcript claude no longer has on
-        // disk would make `claude --resume '<id>'` exit immediately with "No
-        // conversation found" -- detect it up front (same transcript layout
-        // ConversationCatalog reads) so the UI can offer a fresh start or
-        // deletion instead of presenting a dead terminal.
-        if (!remoteSession && claudeSessionId.isPresent()) {
-            Path transcript = conversationCatalog.projectDirFor(session.workingDirectory())
-                    .resolve(claudeSessionId.get() + ".jsonl");
-            if (Files.notExists(transcript)) {
+        // A pinned conversation id whose transcript the agent no longer has
+        // on disk would make a resume-by-id exit immediately with "No
+        // conversation found" -- detect it up front via the provider's
+        // ConversationSource so the UI can offer a fresh start or deletion
+        // instead of presenting a dead terminal.
+        if (!remoteSession && agentSessionId.isPresent()) {
+            boolean missing = registry.conversations(session.agentKind())
+                    .map(cs -> !cs.transcriptExists(session.workingDirectory(), agentSessionId.get()))
+                    .orElse(false); // no catalog → never block on a missing transcript
+            if (missing) {
                 return Optional.of(new SessionOpenResult.MissingConversation(session));
             }
         }
@@ -433,50 +506,43 @@ public final class SessionManager implements AutoCloseable {
      */
     public CompletableFuture<SessionOpenResult> startFreshConversation(ManagedSessionId sessionId, TerminalRuntime app,
                                                                         TerminalHostView host, double scaleFactor) {
-        String claudeSessionId = UUID.randomUUID().toString();
         // The stale-id clear persists to disk; keep it off the (FX) caller thread.
         return CompletableFuture.supplyAsync(() -> {
-                    ManagedClaudeSession cleared = requireSession(sessionId).withClaudeSessionId(Optional.empty());
+                    ManagedAgentSession cleared = requireSession(sessionId).withAgentSessionId(Optional.empty());
                     persistUpdatedSession(cleared);
                     return cleared;
                 }, backgroundExecutor)
                 .thenCompose(cleared -> {
+                    AgentKind kind = cleared.agentKind();
+                    AgentProvider provider = registry.provider(kind)
+                            .orElseThrow(() -> new IllegalStateException("No provider for " + kind));
                     Optional<SshRemote> remote = remoteFor(repositoryFor(cleared));
-                    if (remote.isPresent()) {
-                        String command = buildRemoteCreateCommand(remote.get());
-                        return createSurfaceOnFxThread(app, host, scaleFactor, command,
-                                        System.getProperty("user.home"))
-                                .thenApply(surface -> new CreateLaunch(new CreatePlan(command, false), surface))
-                                .handleAsync((launch, ex) -> finalizeCreate(cleared, claudeSessionId, launch, ex),
-                                        backgroundExecutor);
-                    }
-                    return capabilityService.detectCapabilities()
-                        .thenApplyAsync(caps -> {
-                            String command = buildCreateCommand(caps, cleared.displayName(), claudeSessionId,
-                                    activitySettings);
-                            return new CreatePlan(command, command.contains(claudeSessionId));
-                        }, backgroundExecutor)
-                        .thenCompose(plan -> createSurfaceOnFxThread(app, host, scaleFactor, plan.command(),
-                                cleared.workingDirectory().toString())
-                                .thenApply(surface -> new CreateLaunch(plan, surface)))
-                        .handleAsync((launch, ex) -> finalizeCreate(cleared, claudeSessionId, launch, ex),
-                                backgroundExecutor);
+                    String freshSessionId = provider.idStrategy() == SessionIdStrategy.PRESET
+                            ? UUID.randomUUID().toString()
+                            : "";
+                    String workingDir = remote.isPresent()
+                            ? System.getProperty("user.home")
+                            : cleared.workingDirectory().toString();
+                    return buildAndLaunchCreate(provider, cleared.displayName(), freshSessionId,
+                            cleared.workingDirectory(), remote, app, host, scaleFactor, workingDir)
+                            .handleAsync((launch, ex) -> finalizeCreate(cleared, freshSessionId, launch, ex),
+                                    backgroundExecutor);
                 });
     }
 
     /** Explicitly reassigns a session's working directory (plan section 11.2), e.g. after the user picks a replacement. */
-    public ManagedClaudeSession reassignWorkingDirectory(ManagedSessionId sessionId, Path newWorkingDirectory) {
+    public ManagedAgentSession reassignWorkingDirectory(ManagedSessionId sessionId, Path newWorkingDirectory) {
         Path normalized = newWorkingDirectory.toAbsolutePath().normalize();
         return updateSession(sessionId,
                 session -> session.withWorkingDirectory(normalized).withStatus(SessionStatus.INACTIVE));
     }
 
-    public ManagedClaudeSession renameSession(ManagedSessionId sessionId, String newDisplayName) {
+    public ManagedAgentSession renameSession(ManagedSessionId sessionId, String newDisplayName) {
         return updateSession(sessionId, session -> session.withDisplayName(newDisplayName));
     }
 
     /** Records the observed PR lifecycle state of a worktree session's branch (Finish-panel reconciliation). */
-    public ManagedClaudeSession updatePrState(ManagedSessionId sessionId, PrState prState,
+    public ManagedAgentSession updatePrState(ManagedSessionId sessionId, PrState prState,
                                               Optional<Integer> prNumber) {
         return updateSession(sessionId, session -> session.withPr(prState, prNumber));
     }
@@ -487,24 +553,24 @@ public final class SessionManager implements AutoCloseable {
      * the normal {@link #resumeSession} path can reopen that exact
      * conversation via {@code claude --resume '<id>'}. Idempotent per
      * Claude session id: if a managed session already tracks {@code
-     * claudeSessionId}, that session is returned unchanged instead of
+     * agentSessionId}, that session is returned unchanged instead of
      * creating a duplicate row.
      */
-    public ManagedClaudeSession adoptConversation(Repository repository, String claudeSessionId,
+    public ManagedAgentSession adoptConversation(Repository repository, String agentSessionId,
                                                   String displayName) {
-        ManagedClaudeSession[] result = new ManagedClaudeSession[1];
+        ManagedAgentSession[] result = new ManagedAgentSession[1];
         stateStore.update(state -> {
-            Optional<ManagedClaudeSession> existing = state.sessions().stream()
-                    .filter(session -> session.claudeSessionId().map(claudeSessionId::equals).orElse(false))
+            Optional<ManagedAgentSession> existing = state.sessions().stream()
+                    .filter(session -> session.agentSessionId().map(agentSessionId::equals).orElse(false))
                     .findFirst();
             if (existing.isPresent()) {
                 result[0] = existing.get();
                 return state;
             }
-            ManagedClaudeSession adopted = newSessionMetadata(repository, displayName)
-                    .withClaudeSessionId(Optional.of(claudeSessionId));
+            ManagedAgentSession adopted = newSessionMetadata(repository, displayName)
+                    .withAgentSessionId(Optional.of(agentSessionId));
             result[0] = adopted;
-            List<ManagedClaudeSession> updated = new ArrayList<>(state.sessions());
+            List<ManagedAgentSession> updated = new ArrayList<>(state.sessions());
             updated.add(adopted);
             return state.withSessions(updated);
         });
@@ -572,17 +638,17 @@ public final class SessionManager implements AutoCloseable {
      * @return the updated session, or empty if the session no longer exists
      *         or was not RUNNING
      */
-    public Optional<ManagedClaudeSession> markSessionExited(ManagedSessionId sessionId) {
-        ManagedClaudeSession[] result = new ManagedClaudeSession[1];
+    public Optional<ManagedAgentSession> markSessionExited(ManagedSessionId sessionId) {
+        ManagedAgentSession[] result = new ManagedAgentSession[1];
         stateStore.update(state -> {
-            Optional<ManagedClaudeSession> running = state.sessions().stream()
+            Optional<ManagedAgentSession> running = state.sessions().stream()
                     .filter(session -> session.id().equals(sessionId))
                     .filter(session -> session.status() == SessionStatus.RUNNING)
                     .findFirst();
             if (running.isEmpty()) {
                 return state;
             }
-            ManagedClaudeSession updated = running.get().withStatus(SessionStatus.EXITED);
+            ManagedAgentSession updated = running.get().withStatus(SessionStatus.EXITED);
             result[0] = updated;
             return withReplacedSession(state, updated);
         });
@@ -592,7 +658,7 @@ public final class SessionManager implements AutoCloseable {
     private void onSurfaceClosed(ManagedSessionId sessionId, TerminalSurface surface) {
         activeSurfaces.remove(sessionId, surface);
         findSession(sessionId).ifPresent(session -> {
-            session.claudeSessionId().ifPresent(activeRegistry::release);
+            session.agentSessionId().ifPresent(activeRegistry::release);
             persistUpdatedSession(session.withStatus(SessionStatus.EXITED));
         });
     }
@@ -621,105 +687,6 @@ public final class SessionManager implements AutoCloseable {
         stateStore.flush();
     }
 
-    // ---- Command construction (pure; unit-testable without a window) ------
-
-    /**
-     * Strips the nested-Claude-Code environment markers before launching
-     * {@code claude}. When these variables are present (i.e. this app was
-     * itself launched from inside a Claude Code session -- a terminal
-     * driven by claude, a dev workflow, etc.), the spawned interactive
-     * claude detects the nesting and does NOT persist its transcript: the
-     * session then cannot be resumed later ("No conversation found with
-     * session ID ..."), silently defeating this manager's whole
-     * resume-exact-session feature. Verified empirically: an interactive
-     * {@code claude --session-id <uuid>} run with these variables present
-     * saves nothing under any id; the identical run with them stripped
-     * saves and resumes normally. Managed sessions must always behave like
-     * real standalone sessions, so they are unconditionally stripped.
-     */
-    static final String ENV_CLEANUP_PREFIX = "env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT"
-            + " -u CLAUDE_CODE_EXECPATH -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION"
-            + " -u CLAUDE_EFFORT ";
-
-    /**
-     * Plan section 11.1: {@code claude -n '<name>'} if supported, else plain
-     * {@code claude}; additionally {@code --session-id '<uuid>'} when
-     * supported, so the exact Claude conversation is known up front and a
-     * later resume can target it directly (see {@link #buildResumeCommand}).
-     */
-    static String buildCreateCommand(ClaudeCapabilities capabilities, String displayName, String claudeSessionId,
-                                     Optional<Path> activitySettings) {
-        StringBuilder command = new StringBuilder(ENV_CLEANUP_PREFIX).append("claude");
-        if (capabilities.supportsName()) {
-            command.append(" -n ").append(shellQuote(displayName));
-        }
-        if (capabilities.supportsSessionId()) {
-            command.append(" --session-id ").append(shellQuote(claudeSessionId));
-        }
-        command.append(activitySettingsFlag(capabilities, activitySettings));
-        return command.toString();
-    }
-
-    /** Plan section 11.2's exact fallback chain: id, then name, then bare {@code --resume}. */
-    static String buildResumeCommand(ManagedClaudeSession session, ClaudeCapabilities capabilities,
-                                     Optional<Path> activitySettings) {
-        String suffix = activitySettingsFlag(capabilities, activitySettings);
-        if (session.claudeSessionId().isPresent()) {
-            return ENV_CLEANUP_PREFIX + "claude --resume " + shellQuote(session.claudeSessionId().get()) + suffix;
-        }
-        if (session.claudeSessionName().isPresent()) {
-            return ENV_CLEANUP_PREFIX + "claude --resume " + shellQuote(session.claudeSessionName().get()) + suffix;
-        }
-        return ENV_CLEANUP_PREFIX + "claude --resume" + suffix;
-    }
-
-    /**
-     * Remote sessions (spec: degraded remote contract) launch plain
-     * {@code claude} over {@code ssh -t}: no {@code -n}/{@code --session-id}
-     * (the REMOTE claude's capabilities are unknown and unprobed), no
-     * {@code --settings} (the activity-hook settings file is a local path
-     * the remote host cannot see), no {@link #ENV_CLEANUP_PREFIX} (those
-     * variables live in THIS process's environment, which ssh does not
-     * forward). TERM handling and quoting live in {@link SshCommandBuilder}.
-     */
-    static String buildRemoteCreateCommand(SshRemote remote) {
-        return SshCommandBuilder.interactiveSessionCommand(remote, "exec claude");
-    }
-
-    /** Remote resume: trust the stored id/name — the transcript lives on the remote host and is not checked locally. */
-    static String buildRemoteResumeCommand(SshRemote remote, ManagedClaudeSession session) {
-        String exec = "exec claude --resume";
-        if (session.claudeSessionId().isPresent()) {
-            exec += " " + SshCommandBuilder.posixQuote(session.claudeSessionId().get());
-        } else if (session.claudeSessionName().isPresent()) {
-            exec += " " + SshCommandBuilder.posixQuote(session.claudeSessionName().get());
-        }
-        return SshCommandBuilder.interactiveSessionCommand(remote, exec);
-    }
-
-    /**
-     * Adds {@code --settings <file>} so the session reports its activity back
-     * to this app (see {@code app.drydock.claude.ClaudeHookInstaller}). Empty
-     * whenever the installed claude lacks the flag or the hook install failed,
-     * because a session that runs without a status badge is strictly better
-     * than one that fails to launch over a cosmetic feature.
-     *
-     * <p>Hooks declared this way MERGE with the user's own hooks rather than
-     * replacing them, and are invisible to a {@code claude} started outside
-     * this app.</p>
-     */
-    private static String activitySettingsFlag(ClaudeCapabilities capabilities, Optional<Path> activitySettings) {
-        if (!capabilities.supportsSettings() || activitySettings.isEmpty()) {
-            return "";
-        }
-        return " --settings " + shellQuote(activitySettings.get().toString());
-    }
-
-    /** Wraps {@code value} as a single POSIX shell single-quoted argument, safe against embedded shell metacharacters. */
-    static String shellQuote(String value) {
-        return "'" + value.replace("'", "'\\''") + "'";
-    }
-
     // ---- Helpers ------------------------------------------------------------
 
     private CompletableFuture<TerminalSurface> createSurfaceOnFxThread(TerminalRuntime app, TerminalHostView host,
@@ -743,8 +710,12 @@ public final class SessionManager implements AutoCloseable {
         return "Session " + (existing + 1);
     }
 
-    private ManagedClaudeSession newSessionMetadata(Repository repository, String displayName) {
-        return newSessionMetadata(repository, displayName, Optional.empty(), true);
+    private ManagedAgentSession newSessionMetadata(Repository repository, String displayName) {
+        return newSessionMetadata(repository, displayName, AgentKind.CLAUDE, Optional.empty(), true);
+    }
+
+    private ManagedAgentSession newSessionMetadata(Repository repository, String displayName, AgentKind agentKind) {
+        return newSessionMetadata(repository, displayName, agentKind, Optional.empty(), true);
     }
 
     /**
@@ -755,12 +726,13 @@ public final class SessionManager implements AutoCloseable {
      * and so whether it may later delete it; it has no safe default, which
      * is why every worktree caller must state it.
      */
-    private ManagedClaudeSession newSessionMetadata(Repository repository, String displayName,
+    private ManagedAgentSession newSessionMetadata(Repository repository, String displayName, AgentKind agentKind,
                                                     Optional<Path> worktreeRoot, boolean branchCreatedHere) {
         Instant now = Instant.now();
-        return new ManagedClaudeSession(
+        return new ManagedAgentSession(
                 ManagedSessionId.newId(),
                 repository.id(),
+                agentKind,
                 displayName,
                 Optional.empty(),
                 Optional.empty(),
@@ -784,9 +756,9 @@ public final class SessionManager implements AutoCloseable {
         return BranchOwnership.mayDeleteBranchOf(sessions(), worktreeRoot);
     }
 
-    private void persistNewSession(ManagedClaudeSession session) {
+    private void persistNewSession(ManagedAgentSession session) {
         stateStore.update(state -> {
-            List<ManagedClaudeSession> updated = new ArrayList<>(state.sessions());
+            List<ManagedAgentSession> updated = new ArrayList<>(state.sessions());
             updated.add(session);
             return state.withSessions(updated);
         });
@@ -802,16 +774,16 @@ public final class SessionManager implements AutoCloseable {
      * manager's read-modify-write runs under the store's single lock, and
      * disk writes happen on the store's background writer, never here.
      */
-    private void persistUpdatedSession(ManagedClaudeSession updatedSession) {
+    private void persistUpdatedSession(ManagedAgentSession updatedSession) {
         stateStore.update(state -> withReplacedSession(state, updatedSession));
     }
 
     /** Applies the atomic find-and-change-one-session pattern shared by the metadata mutators. */
-    private ManagedClaudeSession updateSession(ManagedSessionId sessionId,
-                                               UnaryOperator<ManagedClaudeSession> change) {
-        ManagedClaudeSession[] result = new ManagedClaudeSession[1];
+    private ManagedAgentSession updateSession(ManagedSessionId sessionId,
+                                               UnaryOperator<ManagedAgentSession> change) {
+        ManagedAgentSession[] result = new ManagedAgentSession[1];
         stateStore.update(state -> {
-            ManagedClaudeSession session = state.sessions().stream()
+            ManagedAgentSession session = state.sessions().stream()
                     .filter(existing -> existing.id().equals(sessionId))
                     .findFirst()
                     .orElseThrow(() -> new UnknownSessionException(sessionId));
@@ -821,23 +793,23 @@ public final class SessionManager implements AutoCloseable {
         return result[0];
     }
 
-    private static ApplicationState withReplacedSession(ApplicationState state, ManagedClaudeSession updatedSession) {
+    private static ApplicationState withReplacedSession(ApplicationState state, ManagedAgentSession updatedSession) {
         return state.withSessions(state.sessions().stream()
                 .map(existing -> existing.id().equals(updatedSession.id()) ? updatedSession : existing)
                 .toList());
     }
 
-    private ManagedClaudeSession requireSession(ManagedSessionId sessionId) {
+    private ManagedAgentSession requireSession(ManagedSessionId sessionId) {
         return findSession(sessionId).orElseThrow(() -> new UnknownSessionException(sessionId));
     }
 
-    private Optional<ManagedClaudeSession> findSession(ManagedSessionId sessionId) {
+    private Optional<ManagedAgentSession> findSession(ManagedSessionId sessionId) {
         return stateStore.state().sessions().stream()
                 .filter(session -> session.id().equals(sessionId))
                 .findFirst();
     }
 
-    private Optional<Repository> repositoryFor(ManagedClaudeSession session) {
+    private Optional<Repository> repositoryFor(ManagedAgentSession session) {
         return stateStore.state().repositories().stream()
                 .filter(repository -> repository.id().equals(session.repositoryId()))
                 .findFirst();

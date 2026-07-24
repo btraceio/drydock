@@ -1,7 +1,7 @@
 package app.drydock.ui;
 
 import app.drydock.app.SessionManager;
-import app.drydock.domain.ManagedClaudeSession;
+import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.PrState;
 import app.drydock.domain.Repository;
@@ -68,7 +68,7 @@ final class WorktreeLifecycleController {
      * completion and poll step checks before touching UI.
      */
     private final Function<ManagedSessionId, OpenSessionTab> openTab;
-    private final Function<ManagedClaudeSession, Optional<Repository>> repositoryFor;
+    private final Function<ManagedAgentSession, Optional<Repository>> repositoryFor;
     /** Invoked (on the FX Application Thread) after any session/PR state change the sidebar must reflect. */
     private final Runnable onSessionsChanged;
     /** Invoked after a deleted worktree's session row is removed (delegates to {@code MainWorkspace.noteSessionDeleted}). */
@@ -80,7 +80,7 @@ final class WorktreeLifecycleController {
     WorktreeLifecycleController(SessionManager sessionManager, GitStatusService gitStatusService,
                                 GhCliService ghCliService, WorktreeService worktreeService,
                                 Function<ManagedSessionId, OpenSessionTab> openTab,
-                                Function<ManagedClaudeSession, Optional<Repository>> repositoryFor,
+                                Function<ManagedAgentSession, Optional<Repository>> repositoryFor,
                                 Runnable onSessionsChanged, Consumer<ManagedSessionId> onSessionDeleted) {
         this.sessionManager = sessionManager;
         this.gitStatusService = gitStatusService;
@@ -102,7 +102,7 @@ final class WorktreeLifecycleController {
      * asynchronously (worktree checkout vs the repository's main checkout).
      */
     void setupWorktreeHeader(OpenSessionTab tab, ManagedSessionId sessionId, Path worktreeRoot) {
-        ManagedClaudeSession session = sessionById(sessionId).orElse(null);
+        ManagedAgentSession session = sessionById(sessionId).orElse(null);
         Repository repository = session == null ? null : repositoryFor.apply(session).orElse(null);
         if (session == null || repository == null) {
             return;
@@ -136,7 +136,7 @@ final class WorktreeLifecycleController {
                 }));
     }
 
-    private Optional<ManagedClaudeSession> sessionById(ManagedSessionId sessionId) {
+    private Optional<ManagedAgentSession> sessionById(ManagedSessionId sessionId) {
         return sessionManager.sessions().stream().filter(s -> s.id().equals(sessionId)).findFirst();
     }
 
@@ -154,7 +154,7 @@ final class WorktreeLifecycleController {
      * the reconciled state.
      */
     private void showFinishPanel(ManagedSessionId sessionId, Path worktreeRoot, String branch, String base) {
-        ManagedClaudeSession session = sessionById(sessionId).orElse(null);
+        ManagedAgentSession session = sessionById(sessionId).orElse(null);
         if (session == null || modalLayer == null) {
             return;
         }
@@ -189,7 +189,7 @@ final class WorktreeLifecycleController {
                     GitChangeSummary summary = data.summary();
                     Optional<GhCliService.PrInfo> prInfo = data.prInfo();
 
-                    ManagedClaudeSession current = sessionById(sessionId).orElse(null);
+                    ManagedAgentSession current = sessionById(sessionId).orElse(null);
                     if (current == null) {
                         modalLayer.close();
                         return;

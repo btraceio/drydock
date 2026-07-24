@@ -1,7 +1,8 @@
 package app.drydock.state;
 
+import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.ApplicationState;
-import app.drydock.domain.ManagedClaudeSession;
+import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.PrState;
 import app.drydock.domain.Repository;
@@ -24,6 +25,7 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -174,15 +176,58 @@ class ApplicationStateCodecTest {
     }
 
     @Test
+    void missingAgentKindDecodesAsClaude() {
+        // Build a session JSON WITHOUT agentKind (pre-migration shape) and decode it.
+        String json = """
+                {"schemaVersion":2,"repositories":[],"sessions":[
+                  {"id":"22222222-3333-4444-5555-666666666666","repositoryId":"%s","displayName":"Session 1",
+                   "claudeSessionId":"abc","workingDirectory":"/tmp",
+                   "status":"INACTIVE","createdAt":"2020-01-01T00:00:00Z","lastOpenedAt":"2020-01-01T00:00:00Z",
+                   "prState":"NONE","branchCreatedHere":true}]}""".formatted(REPO_ID);
+        ApplicationState state = ApplicationStateCodec.fromJson(JsonParser.parse(json));
+        ManagedAgentSession session = state.sessions().get(0);
+        assertEquals(AgentKind.CLAUDE, session.agentKind());
+        assertEquals(Optional.of("abc"), session.agentSessionId()); // legacy field name still read
+    }
+
+    @Test
+    void unknownAgentKindIsRetainedAsUnsupported() {
+        String json = """
+                {"schemaVersion":2,"repositories":[],"sessions":[
+                  {"id":"22222222-3333-4444-5555-666666666666","repositoryId":"%s","agentKind":"gemini","displayName":"Session 1",
+                   "workingDirectory":"/tmp","status":"INACTIVE",
+                   "createdAt":"2020-01-01T00:00:00Z","lastOpenedAt":"2020-01-01T00:00:00Z",
+                   "prState":"NONE","branchCreatedHere":true}]}""".formatted(REPO_ID);
+        ApplicationState state = ApplicationStateCodec.fromJson(JsonParser.parse(json));
+        ManagedAgentSession session = state.sessions().get(0);
+        assertEquals(SessionStatus.UNSUPPORTED_AGENT, session.status());
+        assertEquals(AgentKind.CLAUDE, session.agentKind()); // placeholder kind; status marks it unusable
+    }
+
+    @Test
+    void agentKindRoundTrips() {
+        ManagedAgentSession session = new ManagedAgentSession(
+                ManagedSessionId.newId(), RepositoryId.of(REPO_ID), AgentKind.CODEX, "Session 1",
+                Optional.of("id"), Optional.empty(), Path.of("/tmp"), Optional.empty(),
+                SessionStatus.RUNNING, Instant.EPOCH, Instant.EPOCH, Optional.empty(),
+                PrState.NONE, Optional.empty(), true);
+        ApplicationState state = ApplicationState.empty().withSessions(List.of(session));
+        ApplicationState roundTripped = ApplicationStateCodec.fromJson(ApplicationStateCodec.toJson(state));
+        assertEquals(AgentKind.CODEX, roundTripped.sessions().get(0).agentKind());
+        assertEquals(Optional.of("id"), roundTripped.sessions().get(0).agentSessionId());
+    }
+
+    @Test
     void sessionWithBranchCreatedHereFalseRoundTrips() {
         // Regression guard: if encode/decode flips or drops an explicit
         // false on branchCreatedHere, the whole suite must break.
         // A false value protects a pre-existing branch from deletion.
         Repository repo = new Repository(RepositoryId.newId(), Path.of("/tmp/repo"), "repo",
                 Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT);
-        ManagedClaudeSession session = new ManagedClaudeSession(
+        ManagedAgentSession session = new ManagedAgentSession(
                 ManagedSessionId.newId(),
                 repo.id(),
+                AgentKind.CLAUDE,
                 "test session",
                 Optional.empty(),
                 Optional.empty(),
@@ -200,5 +245,110 @@ class ApplicationStateCodecTest {
         ApplicationState decoded = ApplicationStateCodec.fromJson(ApplicationStateCodec.toJson(state));
 
         assertFalse(decoded.sessions().getFirst().branchCreatedHere());
+    }
+
+    @Test
+    void repositoryLastUsedAgentRoundTrips() {
+        Repository repo = new Repository(RepositoryId.newId(), Path.of("/tmp/repo"), "repo",
+                Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT)
+                .withSettings(RepositorySettings.DEFAULT.withLastUsedAgent(AgentKind.CODEX));
+        ApplicationState state = ApplicationState.empty().withRepositories(List.of(repo));
+
+        ApplicationState back = ApplicationStateCodec.fromJson(ApplicationStateCodec.toJson(state));
+
+        assertEquals(Optional.of(AgentKind.CODEX), back.repositories().get(0).settings().lastUsedAgent());
+    }
+
+    @Test
+    void repositoryWithoutLastUsedAgentDecodesEmpty() {
+        // A repo whose settings object is empty (pre-migration) → empty lastUsedAgent.
+        Repository repo = new Repository(RepositoryId.newId(), Path.of("/tmp/repo"), "repo",
+                Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT);
+        ApplicationState state = ApplicationState.empty().withRepositories(List.of(repo));
+
+        ApplicationState back = ApplicationStateCodec.fromJson(ApplicationStateCodec.toJson(state));
+
+        assertTrue(back.repositories().get(0).settings().lastUsedAgent().isEmpty());
+    }
+
+    /**
+     * A well-formed session document, as a template for the strict-decode
+     * regression tests below: each replaces exactly one field of {@link
+     * #VALID_SESSION} with something malformed, pinning that field as a
+     * genuinely-strict field of {@code sessionFromJson} (as opposed to the
+     * lenient fields exercised elsewhere in this file).
+     */
+    private static String sessionDocument(String sessionJson) {
+        return """
+                {
+                  "schemaVersion": 2,
+                  "repositories": [
+                    {
+                      "id": "%s",
+                      "root": "/tmp/repo",
+                      "displayName": "repo",
+                      "addedAt": "2026-01-01T00:00:00Z",
+                      "lastOpenedAt": "2026-01-02T00:00:00Z",
+                      "settings": {}
+                    }
+                  ],
+                  "sessions": [%s],
+                  "ui": {"selectedRepositoryId": null, "sidebarWidth": 260.0, "expandedRepositoryIds": []}
+                }
+                """.formatted(REPO_ID, sessionJson);
+    }
+
+    private static final String VALID_SESSION = """
+            {
+              "id": "22222222-3333-4444-5555-666666666666",
+              "repositoryId": "%s",
+              "displayName": "s",
+              "workingDirectory": "/tmp/repo",
+              "status": "INACTIVE",
+              "createdAt": "2026-01-01T00:00:00Z",
+              "lastOpenedAt": "2026-01-02T00:00:00Z"
+            }
+            """.formatted(REPO_ID);
+
+    @Test
+    void sessionMissingIdThrowsStateDecodeException() {
+        // requireString(obj, "id") throws when the field is absent.
+        String session = VALID_SESSION.replace(
+                "\"id\": \"22222222-3333-4444-5555-666666666666\",\n", "");
+
+        assertThrows(StateDecodeException.class,
+                () -> ApplicationStateCodec.fromJson(JsonParser.parse(sessionDocument(session))));
+    }
+
+    @Test
+    void sessionMissingRepositoryIdThrowsStateDecodeException() {
+        // requireString(obj, "repositoryId") throws when the field is absent.
+        String session = VALID_SESSION.replace(
+                "\"repositoryId\": \"" + REPO_ID + "\",\n", "");
+
+        assertThrows(StateDecodeException.class,
+                () -> ApplicationStateCodec.fromJson(JsonParser.parse(sessionDocument(session))));
+    }
+
+    @Test
+    void sessionWithUnparseableCreatedAtThrowsStateDecodeException() {
+        // Instant.parse(requireString(obj, "createdAt")) throws DateTimeException,
+        // caught and rethrown as StateDecodeException.
+        String session = VALID_SESSION.replace(
+                "\"createdAt\": \"2026-01-01T00:00:00Z\"", "\"createdAt\": \"not-an-instant\"");
+
+        assertThrows(StateDecodeException.class,
+                () -> ApplicationStateCodec.fromJson(JsonParser.parse(sessionDocument(session))));
+    }
+
+    @Test
+    void sessionWithInvalidStatusThrowsStateDecodeException() {
+        // SessionStatus.valueOf(requireString(obj, "status")) throws
+        // IllegalArgumentException for an unrecognized enum constant.
+        String session = VALID_SESSION.replace(
+                "\"status\": \"INACTIVE\"", "\"status\": \"NOT_A_REAL_STATUS\"");
+
+        assertThrows(StateDecodeException.class,
+                () -> ApplicationStateCodec.fromJson(JsonParser.parse(sessionDocument(session))));
     }
 }

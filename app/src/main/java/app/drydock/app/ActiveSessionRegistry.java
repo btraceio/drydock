@@ -23,7 +23,7 @@ final class ActiveSessionRegistry {
     private final Map<String, ManagedSessionId> activeByClaudeSessionId = new ConcurrentHashMap<>();
 
     /**
-     * Attempts to mark {@code claudeSessionId} as actively open under {@code
+     * Attempts to mark {@code agentSessionId} as actively open under {@code
      * sessionId}. Returns {@link Optional#empty()} if it was not already
      * open (and is now registered as active), or the id of the {@link
      * ManagedSessionId} that already holds it open otherwise (in which case
@@ -31,19 +31,19 @@ final class ActiveSessionRegistry {
      * session instead of opening a second surface for the same Claude
      * session).
      */
-    Optional<ManagedSessionId> tryMarkActive(String claudeSessionId, ManagedSessionId sessionId) {
-        ManagedSessionId existing = activeByClaudeSessionId.putIfAbsent(claudeSessionId, sessionId);
+    Optional<ManagedSessionId> tryMarkActive(String agentSessionId, ManagedSessionId sessionId) {
+        ManagedSessionId existing = activeByClaudeSessionId.putIfAbsent(agentSessionId, sessionId);
         return Optional.ofNullable(existing);
     }
 
-    /** The {@link ManagedSessionId} currently holding {@code claudeSessionId} open, if any. */
-    Optional<ManagedSessionId> activeSessionId(String claudeSessionId) {
-        return Optional.ofNullable(activeByClaudeSessionId.get(claudeSessionId));
+    /** The {@link ManagedSessionId} currently holding {@code agentSessionId} open, if any. */
+    Optional<ManagedSessionId> activeSessionId(String agentSessionId) {
+        return Optional.ofNullable(activeByClaudeSessionId.get(agentSessionId));
     }
 
-    /** Releases {@code claudeSessionId}, e.g. once its surface has been closed. */
-    void release(String claudeSessionId) {
-        activeByClaudeSessionId.remove(claudeSessionId);
+    /** Releases {@code agentSessionId}, e.g. once its surface has been closed. */
+    void release(String agentSessionId) {
+        activeByClaudeSessionId.remove(agentSessionId);
     }
 
     boolean isEmpty() {

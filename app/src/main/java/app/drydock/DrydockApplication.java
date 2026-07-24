@@ -1,10 +1,11 @@
 package app.drydock;
 
+import app.drydock.agent.api.Agent;
+import app.drydock.agent.api.AgentContext;
+import app.drydock.agent.api.AgentRegistry;
 import app.drydock.app.RepositoryManager;
 import app.drydock.app.SessionManager;
-import app.drydock.claude.ClaudeCapabilityService;
-import app.drydock.claude.ClaudeHookInstaller;
-import app.drydock.claude.SessionActivityWatcher;
+import app.drydock.activity.SessionActivityWatcher;
 import app.drydock.domain.Repository;
 import app.drydock.git.ChangedLineService;
 import app.drydock.git.DiffService;
@@ -48,6 +49,8 @@ import java.nio.file.Path;
 import javax.imageio.ImageIO;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.Base64;
@@ -103,7 +106,8 @@ public final class DrydockApplication extends Application {
     private DiffService diffService;
     private SessionSearchService searchService;
     private GhCliService ghCliService;
-    private ClaudeCapabilityService claudeCapabilityService;
+    private AgentRegistry agentRegistry;
+    private ExecutorService agentContextExecutor;
     private SessionActivityWatcher activityWatcher;
     private CompletableFuture<Void> hookInstall;
     private RepositoryManager repositoryManager;
@@ -168,9 +172,13 @@ public final class DrydockApplication extends Application {
         diffService = new DiffService();
         searchService = new SessionSearchService();
         ghCliService = new GhCliService();
-        claudeCapabilityService = new ClaudeCapabilityService();
+        Path stateDir = stateRepository.stateFile().getParent();
+        Path activityDir = stateDir.resolve("activity");
+        agentContextExecutor = Executors.newVirtualThreadPerTaskExecutor();
+        AgentContext agentContext = new AgentContext(stateDir, activityDir, agentContextExecutor);
+        agentRegistry = AgentRegistry.create(agentContext);
         repositoryManager = new RepositoryManager(stateRepository, gitStatusService);
-        sessionManager = new SessionManager(stateRepository, claudeCapabilityService);
+        sessionManager = new SessionManager(stateRepository, agentRegistry);
         ChangedLineService changedLineService = new ChangedLineService(diffService);
         annotationStore = new AnnotationStore(AnnotationStore.siblingOf(stateRepository.stateFile()));
 
@@ -179,14 +187,14 @@ public final class DrydockApplication extends Application {
         WorkspaceViewModel viewModel = new WorkspaceViewModel();
         viewModel.setSessions(sessionManager.sessions());
 
-        mainWorkspace = new MainWorkspace(sessionManager, repositoryManager, gitStatusService, searchService,
-                ghCliService, worktreeService, diffService, changedLineService, annotationStore, viewModel,
-                primaryStage);
+        mainWorkspace = new MainWorkspace(sessionManager, agentRegistry, repositoryManager, gitStatusService,
+                searchService, ghCliService, worktreeService, diffService, changedLineService, annotationStore,
+                viewModel, primaryStage);
         RepositorySidebar sidebar =
                 new RepositorySidebar(repositoryManager, gitStatusService, worktreeService, sessionManager,
                         mainWorkspace, viewModel);
 
-        installSessionActivityHooks(stateRepository.stateFile().getParent());
+        installSessionActivityHooks(activityDir);
 
         appShell = new AppShell(primaryStage, WINDOW_TITLE, sidebar, mainWorkspace,
                 repositoryManager.state().ui().sidebarWidth(),
@@ -493,7 +501,7 @@ public final class DrydockApplication extends Application {
                                 diagPopup.show(primaryStage, primaryStage.getX() + 40, primaryStage.getY() + 80);
                                 System.out.println("[diag] popup shown before session");
                             }
-                            mainWorkspace.openNewSession(repo);
+                            mainWorkspace.openNewSessionWithDefaultAgent(repo);
                             System.out.println("[diag] openNewSession called for " + repo.displayName());
                             if (diagPopup != null) {
                                 diagPopup.hide();
@@ -660,10 +668,10 @@ public final class DrydockApplication extends Application {
         if (sessionManager != null) {
             closeQuietly("SessionManager", sessionManager::close);
         }
-        if (claudeCapabilityService != null) {
-            closeQuietly("ClaudeCapabilityService", claudeCapabilityService::close);
-        }
         closeQuietly("hook install", this::awaitHookInstall);
+        if (agentContextExecutor != null) {
+            closeQuietly("agent executor", agentContextExecutor::shutdownNow);
+        }
         if (activityWatcher != null) {
             closeQuietly("SessionActivityWatcher", activityWatcher::close);
         }
@@ -685,27 +693,36 @@ public final class DrydockApplication extends Application {
     }
 
     /**
-     * Installs the Claude hooks that report session activity, then points the
-     * session manager and workspace at them. Runs off the FX thread (file
-     * writes), and a failure is logged and swallowed: activity badges are a
-     * convenience, and no part of launching or resuming a session depends on
-     * them.
+     * Installs every available agent's activity hooks (Plan A: Claude only),
+     * then points the workspace at the one shared {@link
+     * SessionActivityWatcher} watching {@code activityDirectory}. Runs off
+     * the FX thread (file writes), and a failure is logged and swallowed:
+     * activity badges are a convenience, and no part of launching or
+     * resuming a session depends on them -- see the carry-forward fix in
+     * {@code ClaudeActivityReporter#settingsFile()}, which reports empty
+     * (never a stale/never-written path) until {@code install()} actually
+     * succeeds.
      */
-    private void installSessionActivityHooks(Path stateDirectory) {
-        ClaudeHookInstaller installer = new ClaudeHookInstaller(stateDirectory);
+    private void installSessionActivityHooks(Path activityDirectory) {
         // A virtual thread, not the no-arg runAsync's ForkJoinPool.commonPool()
         // (AGENTS.md: "a background executor ... or a virtual thread"). Kept in a
         // field so stop() can await this file-writing work instead of racing it.
         hookInstall = CompletableFuture.runAsync(() -> {
-            try {
-                installer.install();
-            } catch (IOException e) {
-                throw new UncheckedIOException(e);
+            for (Agent agent : agentRegistry.agents()) {
+                if (!agent.isAvailable()) {
+                    continue;
+                }
+                agentRegistry.activity(agent.kind()).ifPresent(reporter -> {
+                    try {
+                        reporter.install();
+                    } catch (IOException e) {
+                        throw new UncheckedIOException(e);
+                    }
+                });
             }
         }, task -> Thread.ofVirtual().name("drydock-hook-install").start(task))
                 .thenRun(() -> Platform.runLater(() -> {
-                    sessionManager.useActivitySettings(installer.settingsFile());
-                    activityWatcher = new SessionActivityWatcher(installer.activityDirectory());
+                    activityWatcher = new SessionActivityWatcher(activityDirectory);
                     mainWorkspace.useActivityWatcher(activityWatcher);
                 }))
                 .exceptionally(ex -> {

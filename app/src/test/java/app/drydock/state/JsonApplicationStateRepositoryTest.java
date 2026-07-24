@@ -1,7 +1,8 @@
 package app.drydock.state;
 
+import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.ApplicationState;
-import app.drydock.domain.ManagedClaudeSession;
+import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.PrState;
 import app.drydock.domain.Repository;
@@ -119,14 +120,15 @@ class JsonApplicationStateRepositoryTest {
     }
 
     @Test
-    void saveThenLoadRoundTripsManagedClaudeSessions() throws IOException {
+    void saveThenLoadRoundTripsManagedAgentSessions() throws IOException {
         Path repoRoot = Files.createDirectory(tempDir.resolve("repo-root"));
         Repository repo = sampleRepository(repoRoot);
         Path workingDirectory = Files.createDirectory(tempDir.resolve("session-working-dir"));
         Path worktreeRoot = Files.createDirectory(tempDir.resolve("session-worktree"));
-        ManagedClaudeSession session = new ManagedClaudeSession(
+        ManagedAgentSession session = new ManagedAgentSession(
                 ManagedSessionId.newId(),
                 repo.id(),
+                AgentKind.CLAUDE,
                 "my session",
                 Optional.of("claude-session-id-abc"),
                 Optional.of("claude-session-name"),
@@ -154,9 +156,10 @@ class JsonApplicationStateRepositoryTest {
         Path repoRoot = Files.createDirectory(tempDir.resolve("repo-root"));
         Repository repo = sampleRepository(repoRoot);
         Path workingDirectory = Files.createDirectory(tempDir.resolve("session-working-dir"));
-        ManagedClaudeSession session = new ManagedClaudeSession(
+        ManagedAgentSession session = new ManagedAgentSession(
                 ManagedSessionId.newId(),
                 repo.id(),
+                AgentKind.CLAUDE,
                 "bare session",
                 Optional.empty(),
                 Optional.empty(),

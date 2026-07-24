@@ -1,6 +1,6 @@
 package app.drydock.app;
 
-import app.drydock.domain.ManagedClaudeSession;
+import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.terminal.api.TerminalSurface;
 
@@ -28,22 +28,30 @@ import app.drydock.terminal.api.TerminalSurface;
  *       was created. Offer to start a fresh conversation under the same
  *       name ({@link SessionManager#startFreshConversation}) or delete the
  *       session.</li>
+ *   <li>{@link UnsupportedAgent} -- the session was persisted with {@link
+ *       app.drydock.domain.SessionStatus#UNSUPPORTED_AGENT} (its {@code
+ *       agentKind} decoded from an unrecognized raw name and is only a
+ *       placeholder); no surface was created, since launching it would
+ *       silently run the wrong agent.</li>
  * </ul>
  */
 public sealed interface SessionOpenResult {
 
-    ManagedClaudeSession session();
+    ManagedAgentSession session();
 
-    record Opened(ManagedClaudeSession session, TerminalSurface surface) implements SessionOpenResult {
+    record Opened(ManagedAgentSession session, TerminalSurface surface) implements SessionOpenResult {
     }
 
-    record AlreadyOpen(ManagedClaudeSession session, ManagedSessionId activeSessionId,
+    record AlreadyOpen(ManagedAgentSession session, ManagedSessionId activeSessionId,
                         TerminalSurface activeSurface) implements SessionOpenResult {
     }
 
-    record MissingWorkingDirectory(ManagedClaudeSession session) implements SessionOpenResult {
+    record MissingWorkingDirectory(ManagedAgentSession session) implements SessionOpenResult {
     }
 
-    record MissingConversation(ManagedClaudeSession session) implements SessionOpenResult {
+    record MissingConversation(ManagedAgentSession session) implements SessionOpenResult {
+    }
+
+    record UnsupportedAgent(ManagedAgentSession session) implements SessionOpenResult {
     }
 }

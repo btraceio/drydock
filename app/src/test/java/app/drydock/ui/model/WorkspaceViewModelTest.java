@@ -1,6 +1,7 @@
 package app.drydock.ui.model;
 
-import app.drydock.domain.ManagedClaudeSession;
+import app.drydock.agent.api.AgentKind;
+import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.PrState;
 import app.drydock.domain.RepositoryId;
@@ -71,9 +72,9 @@ class WorkspaceViewModelTest {
         model.addListener(listener);
     }
 
-    private ManagedClaudeSession session(ManagedSessionId id, RepositoryId repositoryId, String name) {
+    private ManagedAgentSession session(ManagedSessionId id, RepositoryId repositoryId, String name) {
         Instant t = Instant.parse("2026-01-01T00:00:00Z");
-        return new ManagedClaudeSession(id, repositoryId, name, Optional.empty(), Optional.empty(),
+        return new ManagedAgentSession(id, repositoryId, AgentKind.CLAUDE, name, Optional.empty(), Optional.empty(),
                 Path.of("/tmp/repo").toAbsolutePath(), Optional.empty(), SessionStatus.INACTIVE,
                 t, t, Optional.empty(), PrState.NONE, Optional.empty(), true);
     }
@@ -86,7 +87,7 @@ class WorkspaceViewModelTest {
 
     @Test
     void identicalSessionSnapshotEmitsNothing() {
-        ManagedClaudeSession s = session(ManagedSessionId.newId(), repoA, "One");
+        ManagedAgentSession s = session(ManagedSessionId.newId(), repoA, "One");
         model.setSessions(List.of(s));
         listener.events.clear();
         model.setSessions(List.of(s));
@@ -101,7 +102,7 @@ class WorkspaceViewModelTest {
 
     @Test
     void removingASessionIsStructural() {
-        ManagedClaudeSession s = session(ManagedSessionId.newId(), repoA, "One");
+        ManagedAgentSession s = session(ManagedSessionId.newId(), repoA, "One");
         model.setSessions(List.of(s));
         listener.events.clear();
         model.setSessions(List.of());
@@ -111,8 +112,8 @@ class WorkspaceViewModelTest {
     @Test
     void statusFlipIsRowLevelAndTouchesTheRepoHeader() {
         ManagedSessionId id = ManagedSessionId.newId();
-        ManagedClaudeSession s = session(id, repoA, "One");
-        ManagedClaudeSession other = session(ManagedSessionId.newId(), repoB, "Two");
+        ManagedAgentSession s = session(id, repoA, "One");
+        ManagedAgentSession other = session(ManagedSessionId.newId(), repoB, "Two");
         model.setSessions(List.of(s, other));
         listener.events.clear();
 
@@ -124,8 +125,8 @@ class WorkspaceViewModelTest {
     void twoChangedSessionsInOneRepoEmitOneRepoChange() {
         ManagedSessionId id1 = ManagedSessionId.newId();
         ManagedSessionId id2 = ManagedSessionId.newId();
-        ManagedClaudeSession s1 = session(id1, repoA, "One");
-        ManagedClaudeSession s2 = session(id2, repoA, "Two");
+        ManagedAgentSession s1 = session(id1, repoA, "One");
+        ManagedAgentSession s2 = session(id2, repoA, "Two");
         model.setSessions(List.of(s1, s2));
         listener.events.clear();
 
@@ -137,7 +138,7 @@ class WorkspaceViewModelTest {
     @Test
     void renameIsStructuralBecauseRowsSortByDisplayName() {
         ManagedSessionId id = ManagedSessionId.newId();
-        ManagedClaudeSession s = session(id, repoA, "One");
+        ManagedAgentSession s = session(id, repoA, "One");
         model.setSessions(List.of(s));
         listener.events.clear();
 
@@ -147,8 +148,8 @@ class WorkspaceViewModelTest {
 
     @Test
     void reorderingSessionsIsStructural() {
-        ManagedClaudeSession s1 = session(ManagedSessionId.newId(), repoA, "One");
-        ManagedClaudeSession s2 = session(ManagedSessionId.newId(), repoA, "Two");
+        ManagedAgentSession s1 = session(ManagedSessionId.newId(), repoA, "One");
+        ManagedAgentSession s2 = session(ManagedSessionId.newId(), repoA, "Two");
         model.setSessions(List.of(s1, s2));
         listener.events.clear();
 
@@ -159,7 +160,7 @@ class WorkspaceViewModelTest {
     @Test
     void sessionByIdResolvesTheCurrentSnapshot() {
         ManagedSessionId id = ManagedSessionId.newId();
-        ManagedClaudeSession s = session(id, repoA, "One");
+        ManagedAgentSession s = session(id, repoA, "One");
         model.setSessions(List.of(s));
         model.setSessions(List.of(s.withStatus(SessionStatus.RUNNING)));
 

@@ -1,6 +1,6 @@
 package app.drydock.ui;
 
-import app.drydock.domain.ManagedClaudeSession;
+import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.Repository;
 import app.drydock.git.WorktreeService;
@@ -22,7 +22,7 @@ import java.util.concurrent.CompletableFuture;
 public interface WorkspaceNavigator {
 
     /** Opens (or focuses, if already open) a tab for {@code session}. */
-    void resumeSession(ManagedClaudeSession session);
+    void resumeSession(ManagedAgentSession session);
 
     /** Closes the session's tab/surface (a no-op future if it is not open). */
     CompletableFuture<Void> closeSession(ManagedSessionId sessionId);
@@ -40,7 +40,7 @@ public interface WorkspaceNavigator {
     void showUnopenedWorktree(Repository repository, WorktreeService.Worktree worktree);
 
     /** Prompts for a new display name and renames {@code session}. */
-    void promptRenameSession(ManagedClaudeSession session);
+    void promptRenameSession(ManagedAgentSession session);
 
     /** The session backing the currently selected tab, if any (drives the sidebar's active row). */
     Optional<ManagedSessionId> activeSessionId();

@@ -1,5 +1,6 @@
 package app.drydock.domain;
 
+import app.drydock.agent.api.AgentKind;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
@@ -16,10 +17,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class BranchOwnershipTest {
 
-    private static ManagedClaudeSession session(Path worktreeRoot, boolean branchCreatedHere) {
+    private static ManagedAgentSession session(Path worktreeRoot, boolean branchCreatedHere) {
         Instant now = Instant.parse("2026-07-22T00:00:00Z");
-        return new ManagedClaudeSession(
-                ManagedSessionId.newId(), RepositoryId.newId(), "s",
+        return new ManagedAgentSession(
+                ManagedSessionId.newId(), RepositoryId.newId(), AgentKind.CLAUDE, "s",
                 Optional.empty(), Optional.empty(),
                 worktreeRoot, Optional.of(worktreeRoot),
                 SessionStatus.INACTIVE, now, now, Optional.empty(),

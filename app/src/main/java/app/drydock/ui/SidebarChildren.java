@@ -1,6 +1,6 @@
 package app.drydock.ui;
 
-import app.drydock.domain.ManagedClaudeSession;
+import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.SessionActivity;
 import app.drydock.domain.SessionStatus;
@@ -22,8 +22,8 @@ import java.util.function.Function;
  * into tree rows.
  */
 record SidebarChildren(
-        List<ManagedClaudeSession> liveSessions,
-        List<ManagedClaudeSession> idleSessions,
+        List<ManagedAgentSession> liveSessions,
+        List<ManagedAgentSession> idleSessions,
         List<Worktree> openWorktrees,
         List<Worktree> staleWorktrees,
         List<Worktree> lockedWorktrees,
@@ -32,21 +32,21 @@ record SidebarChildren(
         int lockedCount) {
 
     /** {@code liveSessions} followed by {@code idleSessions}, in display order. */
-    List<ManagedClaudeSession> orderedSessions() {
-        List<ManagedClaudeSession> all = new ArrayList<>(liveSessions);
+    List<ManagedAgentSession> orderedSessions() {
+        List<ManagedAgentSession> all = new ArrayList<>(liveSessions);
         all.addAll(idleSessions);
         return all;
     }
 
     static SidebarChildren classify(List<Worktree> worktrees,
-            List<ManagedClaudeSession> sessions,
+            List<ManagedAgentSession> sessions,
             Function<ManagedSessionId, SessionActivity> activityOf) {
 
-        List<ManagedClaudeSession> mainSessions = sessions.stream()
+        List<ManagedAgentSession> mainSessions = sessions.stream()
                 .filter(session -> session.worktreeRoot().isEmpty()).toList();
-        Set<ManagedClaudeSession> placed = new LinkedHashSet<>();
+        Set<ManagedAgentSession> placed = new LinkedHashSet<>();
 
-        List<ManagedClaudeSession> sessionRows = new ArrayList<>();
+        List<ManagedAgentSession> sessionRows = new ArrayList<>();
         List<Worktree> openWorktrees = new ArrayList<>();
         List<Worktree> staleWorktrees = new ArrayList<>();
         List<Worktree> lockedWorktrees = new ArrayList<>();
@@ -61,7 +61,7 @@ record SidebarChildren(
                     placed.addAll(mainSessions);
                 }
             } else {
-                Optional<ManagedClaudeSession> match = sessions.stream()
+                Optional<ManagedAgentSession> match = sessions.stream()
                         .filter(session -> session.worktreeRoot()
                                 .map(root -> root.equals(worktree.path())).orElse(false))
                         .findFirst();
@@ -74,7 +74,7 @@ record SidebarChildren(
             }
         }
         // Orphan sessions whose worktree directory no longer exists.
-        for (ManagedClaudeSession session : sessions) {
+        for (ManagedAgentSession session : sessions) {
             if (!placed.contains(session) && session.worktreeRoot().isPresent()) {
                 sessionRows.add(session);
             }
@@ -82,15 +82,15 @@ record SidebarChildren(
 
         // Band the session rows: live first, then idle. NEEDS_ATTENTION pins to
         // the front of the live band; otherwise most-recently-opened first.
-        Comparator<ManagedClaudeSession> byRecency =
-                Comparator.comparing(ManagedClaudeSession::lastOpenedAt).reversed();
-        List<ManagedClaudeSession> live = new ArrayList<>();
-        List<ManagedClaudeSession> idle = new ArrayList<>();
-        for (ManagedClaudeSession session : sessionRows) {
+        Comparator<ManagedAgentSession> byRecency =
+                Comparator.comparing(ManagedAgentSession::lastOpenedAt).reversed();
+        List<ManagedAgentSession> live = new ArrayList<>();
+        List<ManagedAgentSession> idle = new ArrayList<>();
+        for (ManagedAgentSession session : sessionRows) {
             (isRunning(session.status()) ? live : idle).add(session);
         }
         live.sort(Comparator
-                .comparingInt((ManagedClaudeSession session) ->
+                .comparingInt((ManagedAgentSession session) ->
                         activityOf.apply(session.id()) == SessionActivity.NEEDS_ATTENTION ? 0 : 1)
                 .thenComparing(byRecency));
         idle.sort(byRecency);

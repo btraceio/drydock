@@ -74,4 +74,8 @@ public record Repository(
     public Repository withDisplayName(String newDisplayName) {
         return new Repository(id, root, newDisplayName, addedAt, lastOpenedAt, settings, remote);
     }
+
+    public Repository withSettings(RepositorySettings newSettings) {
+        return new Repository(id, root, displayName, addedAt, lastOpenedAt, newSettings, remote);
+    }
 }

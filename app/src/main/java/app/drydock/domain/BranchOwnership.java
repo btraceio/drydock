@@ -17,12 +17,12 @@ public final class BranchOwnership {
     private BranchOwnership() {
     }
 
-    public static boolean mayDeleteBranchOf(List<ManagedClaudeSession> sessions, Path worktreeRoot) {
+    public static boolean mayDeleteBranchOf(List<ManagedAgentSession> sessions, Path worktreeRoot) {
         Path normalized = worktreeRoot.toAbsolutePath().normalize();
         return sessions.stream()
                 .filter(session -> session.worktreeRoot()
                         .map(root -> root.toAbsolutePath().normalize().equals(normalized))
                         .orElse(false))
-                .anyMatch(ManagedClaudeSession::branchCreatedHere);
+                .anyMatch(ManagedAgentSession::branchCreatedHere);
     }
 }

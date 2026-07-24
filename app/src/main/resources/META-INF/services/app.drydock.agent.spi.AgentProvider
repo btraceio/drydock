@@ -1,0 +1,3 @@
+app.drydock.agent.providers.claude.ClaudeAgentProvider
+app.drydock.agent.providers.codex.CodexAgentProvider
+app.drydock.agent.providers.pi.PiAgentProvider
