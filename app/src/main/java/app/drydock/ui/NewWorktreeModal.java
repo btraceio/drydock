@@ -1,5 +1,7 @@
 package app.drydock.ui;
 
+import app.drydock.agent.api.AgentKind;
+import app.drydock.agent.api.AgentRegistry;
 import app.drydock.config.UserConfig;
 import app.drydock.domain.Repository;
 import app.drydock.git.BranchCatalog;
@@ -30,7 +32,8 @@ import java.util.concurrent.atomic.AtomicReference;
  * picker, the fork-from base (an editable combo box defaulting to the repo's
  * current branch, populated with local branches), a worktree directory
  * auto-derived from the branch slug (editable; auto-derivation stops after a
- * manual edit), and an optional "Start Claude with a task" text. The footer
+ * manual edit), an {@link AgentSelector}, and an optional "Start Claude with
+ * a task" text. The footer
  * previews the literal {@code git worktree add} command this modal runs --
  * merge and delete (see {@code WorktreeLifecycleController}) run their own
  * git mutations directly too.
@@ -49,7 +52,7 @@ final class NewWorktreeModal extends VBox {
      */
     interface CreateHandler {
         void create(Optional<BranchRef> existing, String branch, String base, Path directory,
-                    Optional<String> task);
+                    Optional<String> task, AgentKind agent);
     }
 
     private final ComboBox<BranchRef> branchField = new ComboBox<>();
@@ -60,6 +63,7 @@ final class NewWorktreeModal extends VBox {
     private final ComboBox<String> baseField = new ComboBox<>();
     private final TextField directoryField = new TextField();
     private final TextArea taskField = new TextArea();
+    private final AgentSelector agentSelector;
     private final Label commandPreview = new Label();
     private final Label errorLine = new Label();
     private final Button createButton = new Button("Create worktree");
@@ -85,6 +89,7 @@ final class NewWorktreeModal extends VBox {
     private boolean derivingDirectory;
 
     NewWorktreeModal(Repository repository, GitStatusService gitStatusService, WorktreeService worktreeService,
+                     AgentRegistry agentRegistry, AgentKind preselected, boolean requireRemoteCapability,
                      Runnable onClose, CreateHandler onCreate) {
         getStyleClass().add("modal");
         setMaxWidth(520);
@@ -120,6 +125,8 @@ final class NewWorktreeModal extends VBox {
         taskField.setPromptText("Optional: describe the task; it is typed into the new session's Claude");
         taskField.setPrefRowCount(3);
         taskField.setWrapText(true);
+
+        agentSelector = new AgentSelector(agentRegistry, preselected, requireRemoteCapability, kind -> { });
 
         Path home = Path.of(System.getProperty("user.home"));
         AtomicReference<Optional<Path>> worktreesDirectory = new AtomicReference<>(Optional.empty());
@@ -208,7 +215,7 @@ final class NewWorktreeModal extends VBox {
             Optional<BranchRef> existing = catalog == null ? Optional.empty() : catalog.lookup(branchText());
             onCreate.create(existing, localBranchName(), baseText(),
                     Path.of(directoryField.getText().strip()).toAbsolutePath().normalize(),
-                    task.isEmpty() ? Optional.empty() : Optional.of(task));
+                    task.isEmpty() ? Optional.empty() : Optional.of(task), agentSelector.selected());
         });
         Region footerSpacer = new Region();
         HBox.setHgrow(footerSpacer, Priority.ALWAYS);
@@ -219,6 +226,7 @@ final class NewWorktreeModal extends VBox {
                 labelledRow(branchLabel, branchRow),
                 baseGroup,
                 fieldGroup("Worktree directory", directoryField),
+                agentSelector,
                 fieldGroup("Start Claude with a task", taskField),
                 commandPreview, hintLine, errorLine, buttons);
 

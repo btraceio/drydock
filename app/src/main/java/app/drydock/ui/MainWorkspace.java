@@ -625,9 +625,17 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * the modal open.
      */
     public void promptNewWorktree(Repository repository, ModalLayer modalLayer) {
+        boolean requireRemote = repository.isRemote();
+        Optional<AgentKind> defaultKind = agentRegistry.resolveDefault(repository.settings().lastUsedAgent(),
+                requireRemote);
+        if (defaultKind.isEmpty()) {
+            showNoAgentAvailable();
+            return;
+        }
         NewWorktreeModal[] holder = new NewWorktreeModal[1];
-        holder[0] = new NewWorktreeModal(repository, gitStatusService, worktreeService, modalLayer::close,
-                (existing, branch, base, directory, task) -> {
+        holder[0] = new NewWorktreeModal(repository, gitStatusService, worktreeService, agentRegistry,
+                defaultKind.get(), requireRemote, modalLayer::close,
+                (existing, branch, base, directory, task, agent) -> {
                     holder[0].showCreating();
                     CompletableFuture<Path> creation = existing
                             .map(ref -> gitStatusService.addWorktreeForBranch(
@@ -640,14 +648,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                             return;
                         }
                         modalLayer.close();
-                        Optional<AgentKind> defaultKind = agentRegistry
-                                .resolveDefault(repository.settings().lastUsedAgent(), repository.isRemote());
-                        if (defaultKind.isEmpty()) {
-                            showNoAgentAvailable();
-                            return;
-                        }
-                        openNewWorktreeSession(repository, branch, created, task, existing.isEmpty(),
-                                defaultKind.get());
+                        openNewWorktreeSession(repository, branch, created, task, existing.isEmpty(), agent);
                     }));
                 });
         modalLayer.show(holder[0]);
