@@ -40,8 +40,8 @@
 - `app/src/main/java/app/drydock/agent/providers/pi/PiConversationSource.java`
 - Append to `app/src/main/resources/META-INF/services/app.drydock.agent.spi.AgentProvider`.
 
-**Modified:**
-- `app/src/main/java/app/drydock/agent/providers/codex/CodexIdDiscovery.java` — becomes a thin construction over `SnapshotClaimDiscovery` (or is replaced at its call site), and `CodexRolloutStore` implements `CandidateSource`. Codex behavior + tests unchanged.
+**Modified / deleted:**
+- **Delete** `app/src/main/java/app/drydock/agent/providers/codex/CodexIdDiscovery.java` and `app/src/test/java/app/drydock/agent/providers/codex/CodexIdDiscoveryTest.java` — replaced by the generic `SnapshotClaimDiscovery` (+ `SnapshotClaimDiscoveryTest`). `CodexAgentProvider.init` wires `new SnapshotClaimDiscovery(store)` instead of `new CodexIdDiscovery(store)`. `CodexRolloutStore` implements `CandidateSource`. Codex runtime behavior is unchanged (same race logic, same attempts/sleep, same store).
 
 ---
 
@@ -49,15 +49,16 @@
 
 **Files:**
 - Create: `app/src/main/java/app/drydock/agent/api/CandidateSource.java`, `SnapshotClaimDiscovery.java`
-- Modify: `CodexRolloutStore.java` (implement `CandidateSource`), `CodexIdDiscovery.java` (delegate to `SnapshotClaimDiscovery`), `CodexAgentProvider` (unchanged wiring — still `new CodexIdDiscovery(store)`)
-- Test: `app/src/test/java/app/drydock/agent/api/SnapshotClaimDiscoveryTest.java` (new — port the race/ambiguity cases); keep `CodexIdDiscoveryTest` green.
+- Delete: `app/src/main/java/app/drydock/agent/providers/codex/CodexIdDiscovery.java`, `app/src/test/java/app/drydock/agent/providers/codex/CodexIdDiscoveryTest.java`
+- Modify: `CodexRolloutStore.java` (implement `CandidateSource`), `CodexAgentProvider.java` (`init` wires `new SnapshotClaimDiscovery(store)`)
+- Test: `app/src/test/java/app/drydock/agent/api/SnapshotClaimDiscoveryTest.java` (new — port CodexIdDiscoveryTest's race/ambiguity/concurrency cases over a `FakeCandidateSource`).
 
 **Interfaces:**
 - Produces:
   - `interface CandidateSource { Set<String> snapshotIds(Path cwd); List<String> newCandidateIds(Path cwd, Instant launchedAt, Set<String> snapshotIds); }` — `newCandidateIds` returns ids new-since-snapshot, `timestamp >= launchedAt`, **earliest-first**.
-  - `SnapshotClaimDiscovery implements SessionIdDiscovery` — ctor `(CandidateSource source)` + `(CandidateSource, int attempts, long sleepMillis)`; `snapshot(cwd)` = `source.snapshotIds(cwd)`; `discover(...)` = the EXACT logic currently in `CodexIdDiscovery` (candidates = `newCandidateIds` minus claimed; ==1 → atomic `claimedIds.add(id)` (false → re-poll); >=2 → bail empty; ==0 → poll; bounded attempts).
+  - `SnapshotClaimDiscovery implements SessionIdDiscovery` (a `final` class — **do NOT subclass it**; both providers construct it directly) — ctor `(CandidateSource source)` + `(CandidateSource, int attempts, long sleepMillis)`; `snapshot(cwd)` = `source.snapshotIds(cwd)`; `discover(...)` = the EXACT logic currently in `CodexIdDiscovery` (candidates = `newCandidateIds` minus claimed; ==1 → atomic `claimedIds.add(id)` (false → re-poll); >=2 → bail empty; ==0 → poll; bounded attempts 20/250ms; same INFO logs).
 
-This centralizes the subtle, review-hardened race logic so Codex and Pi share one implementation and one test suite.
+This centralizes the subtle, review-hardened race logic so Codex and Pi share one implementation and one test suite. **`CodexIdDiscovery` is deleted, not subclassed** (the generic class stays `final`); `CodexAgentProvider` constructs `SnapshotClaimDiscovery` directly. The Codex discover-logic coverage moves to `SnapshotClaimDiscoveryTest`; Codex's store-level coverage stays in `CodexRolloutStoreTest`.
 
 - [ ] **Step 1: Write the failing test** — port `CodexIdDiscoveryTest`'s cases to a `FakeCandidateSource` (a `Map<Path,List<String>>` you control), asserting: discovers the single new id; empty when nothing new; **ambiguity bail** (2 candidates → empty, claimed set untouched); **atomic single-claim** (two sequential discovers on a shared claimed set → first present, second empty); **true concurrency** (two threads, one candidate, `CyclicBarrier` → exactly one winner, no double-claim). Reuse the structure from the existing `CodexIdDiscoveryTest` (read it) but over the fake source, not a filesystem store.
 
@@ -180,14 +181,17 @@ public final class SnapshotClaimDiscovery implements SessionIdDiscovery {
     }
 }
 ```
-Then: make `CodexRolloutStore implements CandidateSource` — add `snapshotIds(cwd)` (= existing `idsFor(cwd)`) and `newCandidateIds(cwd, launchedAt, snap)` (= `newCandidates(...)` mapped to `.id()`). Replace `CodexIdDiscovery`'s body so it either **extends/delegates to** `SnapshotClaimDiscovery` (e.g. `CodexIdDiscovery(store)` → `super(store)` or holds a `SnapshotClaimDiscovery` and forwards), keeping its public constructors so `CodexAgentProvider` and `CodexIdDiscoveryTest` compile unchanged. Simplest: keep `CodexIdDiscovery extends SnapshotClaimDiscovery` with the same constructors delegating to `super`.
+Then wire Codex to the generic class:
+- Make `CodexRolloutStore implements CandidateSource` — add `snapshotIds(cwd)` (= existing `idsFor(cwd)`) and `newCandidateIds(cwd, launchedAt, snap)` (= `newCandidates(...)` mapped to `RolloutMeta::id`). Keep `idsFor`/`newCandidates`/`existsForId`/`forWorkingDirectory` as-is (they're still used by `CodexConversationSource`).
+- **Delete** `CodexIdDiscovery.java`. In `CodexAgentProvider.init`, change the field type from `CodexIdDiscovery` to `SessionIdDiscovery` (or `SnapshotClaimDiscovery`) and construct `new SnapshotClaimDiscovery(store)`; `idDiscovery()` returns it (already `Optional.of(...)`).
+- **Delete** `CodexIdDiscoveryTest.java` (its discover-logic cases are ported to `SnapshotClaimDiscoveryTest` over the fake source; `CodexRolloutStoreTest` keeps the store-level `newCandidates` coverage). Do not leave a dangling test referencing the deleted class.
 
-- [ ] **Step 4: Run** — `./gradlew test --tests "app.drydock.agent.api.SnapshotClaimDiscoveryTest" --tests "app.drydock.agent.providers.codex.*"` then full `./gradlew test`. All green; Codex tests unchanged.
+- [ ] **Step 4: Run** — `./gradlew test --tests "app.drydock.agent.api.SnapshotClaimDiscoveryTest" --tests "app.drydock.agent.providers.codex.*"` then full `./gradlew test`. All green; Codex runtime behavior unchanged. Guard: `grep -rn "CodexIdDiscovery" app/src` → no matches.
 
 - [ ] **Step 5: Commit**
 ```bash
-git add app/src/main/java/app/drydock/agent/api/CandidateSource.java app/src/main/java/app/drydock/agent/api/SnapshotClaimDiscovery.java app/src/main/java/app/drydock/agent/providers/codex app/src/test/java/app/drydock/agent/api/SnapshotClaimDiscoveryTest.java
-git commit -m "refactor(agent): extract generic SnapshotClaimDiscovery over a CandidateSource (shared by Codex+Pi)"
+git add -A app/src/main/java/app/drydock/agent app/src/test/java/app/drydock/agent
+git commit -m "refactor(agent): extract generic SnapshotClaimDiscovery over CandidateSource; drop CodexIdDiscovery"
 ```
 
 ---
@@ -212,23 +216,27 @@ Mirror `CodexExecutableLocator` exactly (read it): binary name `pi`, fallbacks `
 **Interfaces:**
 - Consumes: `app.drydock.state.json.JsonParser`; `app.drydock.agent.api.CandidateSource`.
 - Produces: `PiSessionStore implements CandidateSource` with:
-  - `PiSessionStore()` (root `~/.pi/agent/sessions`) / `PiSessionStore(Path sessionsRoot)` (tests).
+  - `PiSessionStore()` — default root resolved as: `PI_CODING_AGENT_SESSION_DIR` env if set, else `PI_CODING_AGENT_DIR`/`sessions` if that env is set, else `~/.pi/agent/sessions` (pi honors these to relocate storage — verified in pi's config; falling back to the default matches the common case). `PiSessionStore(Path sessionsRoot)` for tests.
   - `record SessionMeta(String id, Path cwd, Instant timestamp, Path file)`.
-  - `static String encodeCwdDir(Path cwd)` — the spike encoding: drop leading `/`, `/`→`-`, wrap `--`…`--`.
-  - `List<SessionMeta> forWorkingDirectory(Path cwd)` — parse the first line of each `*.jsonl` under `sessionsRoot/<encodeCwdDir>/`; keep records whose first-line `type=="session"` and `cwd` (normalized) matches; newest-first. Missing dir → empty; malformed line → skip (no throw).
+  - `static String encodeCwdDir(Path cwd)` — **canonicalize first, then encode**. pi buckets by the OS-resolved real path, not the literal string (verified: `/tmp/x` → `--private-tmp-x--` because `/tmp`→`/private/tmp` on macOS). So: `Path real = cwd.toRealPath()` (fall back to `cwd.toAbsolutePath().normalize()` if the path doesn't exist / `toRealPath` throws), then drop the leading `/`, replace `/`→`-`, wrap `--`…`--`. Verified encoding leaves other chars (`.`, spaces) untouched — only `/` is transformed. **This is load-bearing:** a wrong dir name makes discovery silently find nothing, so canonicalization is required, not optional.
+  - `List<SessionMeta> forWorkingDirectory(Path cwd)` — parse the first line of each `*.jsonl` under `sessionsRoot/<encodeCwdDir(cwd)>/`; keep records whose first-line `type=="session"` AND whose first-line `cwd` (real-path-canonicalized, compared to the canonicalized `cwd`) matches — the content-`cwd` cross-check defends against any encoding mismatch. Newest-first. Missing dir → empty; malformed/other line → skip (no throw).
   - `snapshotIds(cwd)` (CandidateSource) — ids from `forWorkingDirectory`.
   - `newCandidateIds(cwd, launchedAt, snapshotIds)` (CandidateSource) — from `forWorkingDirectory`, keep `timestamp >= launchedAt` && id∉snapshotIds, **earliest-first**, mapped to id.
   - `List<Conversation-ish> listConversations(cwd)` and `boolean existsForId(cwd, id)` for the ConversationSource (Task 5). `existsForId` scans the cwd dir for a filename containing the id (no parse). (Pi ids are per-cwd, so scope to the cwd dir.)
 
 Reads only the FIRST line of each file. Because storage is per-cwd, no full-tree walk and no date-bucket logic — scan the single `<encodeCwdDir>` directory.
 
-- [ ] **Step 1: failing test** (fixture tree; verify encoding + filters + ordering):
+- [ ] **Step 1: failing test** (fixture tree; verify encoding + filters + ordering). Build fixtures using the store's OWN `encodeCwdDir(cwd)` so the test stays consistent with the canonicalization, and set each file's first-line `cwd` to the canonicalized cwd string:
 ```java
-// build sessionsRoot/<encodeCwdDir(/repo/a)>/<ts>_<id>.jsonl with first line
-// {"type":"session","id":"<id>","timestamp":"<iso>","cwd":"/repo/a"}
-// assert: forWorkingDirectory(/repo/a) returns matching, newest-first;
+// cwd = a real @TempDir subdir (so toRealPath resolves); write
+//   sessionsRoot/<encodeCwdDir(cwd)>/<ts>_<id>.jsonl  first line:
+//   {"type":"session","id":"<id>","timestamp":"<iso>","cwd":"<cwd.toRealPath()>"}
+// assert: forWorkingDirectory(cwd) returns matching, newest-first;
 //         newCandidateIds skips snapshot ids + earlier-than-launchedAt, earliest-first;
-//         existsForId finds by id; unrelated cwd dir excluded; encodeCwdDir("/repo/a") == "--repo-a--".
+//         existsForId(cwd, id) finds by id; a file under an UNRELATED cwd dir is excluded.
+// Canonicalization test: encodeCwdDir on a path that is a SYMLINK to the real dir yields the
+//   SAME encoded name as the real dir (mirrors pi resolving /tmp -> /private/tmp on macOS).
+// Fallback test: encodeCwdDir(Path.of("/repo/a")) (nonexistent) == "--repo-a--" (normalize fallback).
 ```
 - [ ] **Step 2:** red.
 - [ ] **Step 3:** implement (parse via `JsonParser`; confirm its API by reading `JsonParser.java`/`JsonValue`; guard missing dir; skip malformed).
@@ -337,8 +345,13 @@ app.drydock.agent.providers.pi.PiAgentProvider
 - Registration + preference order (PI already in `preferenceOrder`) → Task 6. ✓
 - On-screen validation → Task 7. ✓
 
-**Placeholder scan:** none — every task has concrete code or a precise mirror-of-Codex instruction with the exact facts (encoding, env marker, commands) from the spike. `PiVersionProbe.parseVersion` requires confirming `pi --version`'s exact output shape (flagged in Task 5).
+**Placeholder scan:** none. `pi --version` confirmed to print a **bare `0.71.1`** (no prefix), so `parseVersion` is concrete; the only "inside pi" env marker is confirmed to be `PI_CODING_AGENT`. Every task has concrete code or a precise mirror-of-Codex instruction with exact spike facts.
 
-**Type consistency:** `CandidateSource.{snapshotIds,newCandidateIds}` consistent across Tasks 1, 3. `SnapshotClaimDiscovery` ctors consistent Tasks 1, 6. `PiSessionStore.{forWorkingDirectory,snapshotIds,newCandidateIds,existsForId,SessionMeta}` consistent Tasks 3, 4, 6. `AgentProvider.idDiscovery()`/`supportsRemote()`, `LaunchPlan.of/unsupported`, `AgentKind.PI`/`SessionIdStrategy.DISCOVERED` from Plans A/B.
+**Type consistency:** `CandidateSource.{snapshotIds,newCandidateIds}` consistent across Tasks 1, 3. `SnapshotClaimDiscovery` (final; constructed, never subclassed) ctors consistent Tasks 1, 6. `PiSessionStore.{forWorkingDirectory,snapshotIds,newCandidateIds,existsForId,SessionMeta,encodeCwdDir}` consistent Tasks 3, 4, 6. `AgentProvider.idDiscovery()`/`supportsRemote()` (note: `envScrubList()` was removed in a fast-follow — PiAgentProvider must NOT implement it), `LaunchPlan.of/unsupported`, `AgentKind.PI`/`SessionIdStrategy.DISCOVERED` from Plans A/B.
 
-**Known follow-ups (not gaps):** Pi activity deferred (no non-invasive hook); `PiSessionStore`/`CodexRolloutStore` still separate stores (layouts differ; a shared base is optional future work, not forced here); `existsForId` scoped to the cwd dir (Pi ids are per-cwd, so no full-tree scan needed).
+**Adversarial-review fixes folded in (2026-07-24):**
+- `SnapshotClaimDiscovery` stays `final`; `CodexIdDiscovery` is **deleted** (not subclassed) and both providers construct the generic class directly — fixes the final-vs-extends compile contradiction.
+- `PiSessionStore.encodeCwdDir` **canonicalizes via `toRealPath()`** before encoding (pi buckets by the OS-resolved real path — verified `/tmp/x`→`--private-tmp-x--`), with a `normalize()` fallback; `forWorkingDirectory` also cross-checks the first-line `cwd` field. Prevents silent discovery failure on symlinked paths (e.g. macOS `/tmp`,`/var`).
+- `PiSessionStore` honors `PI_CODING_AGENT_SESSION_DIR`/`PI_CODING_AGENT_DIR` for the session root (pi supports relocating storage), defaulting to `~/.pi/agent/sessions`.
+
+**Known follow-ups (not gaps):** Pi activity deferred (no non-invasive hook); `PiSessionStore`/`CodexRolloutStore` remain separate stores (layouts differ — Codex date-buckets+content-cwd vs. Pi per-cwd-dir; a shared base is optional future work, not forced here — the shared part, the race logic, IS now extracted); `existsForId` scoped to the cwd dir (Pi ids are per-cwd).
