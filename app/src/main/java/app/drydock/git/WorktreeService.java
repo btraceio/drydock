@@ -50,11 +50,12 @@ public final class WorktreeService implements AutoCloseable {
      * always the main checkout ({@link #mainCheckout()}); a detached or
      * bare entry has no {@link #branch()}. A {@link #prunable()} entry's
      * directory is gone from disk but still owns its branch, and a
-     * {@link #locked()} one refuses removal -- both still block
+     * {@link #locked()} one refuses removal (its {@link #lockReason()} is
+     * git's recorded explanation, when it gave one) -- both still block
      * {@code git worktree add} on that branch.
      */
     public record Worktree(Path path, Optional<String> branch, boolean mainCheckout, boolean detached,
-                           boolean prunable, boolean locked) {
+                           boolean prunable, boolean locked, Optional<String> lockReason) {
     }
 
     public WorktreeService() {
@@ -149,34 +150,46 @@ public final class WorktreeService implements AutoCloseable {
 
         // Guard OFF the main checkout: deleting it would destroy the
         // repository. Resolved against the live worktree list rather than
-        // trusting the caller's idea of which entry is main.
+        // trusting the caller's idea of which entry is main -- and the same
+        // pass captures the target's own entry, whose lock state decides
+        // below whether a refusal is a force-able lock or real dirt.
         Path normalizedTarget = worktreePath.toAbsolutePath().normalize();
+        Optional<Worktree> targetEntry = Optional.empty();
         for (Worktree worktree : listBlocking(repositoryRoot)) {
-            if (worktree.mainCheckout() && samePath(worktree.path(), normalizedTarget)) {
-                throw new IllegalArgumentException(
-                        "Refusing to remove the main checkout at " + normalizedTarget);
+            if (samePath(worktree.path(), normalizedTarget)) {
+                if (worktree.mainCheckout()) {
+                    throw new IllegalArgumentException(
+                            "Refusing to remove the main checkout at " + normalizedTarget);
+                }
+                targetEntry = Optional.of(worktree);
             }
         }
 
-        List<String> removeCommand = List.of(
-                git.toString(), "-C", repositoryRoot.toString(),
-                "worktree", "remove", normalizedTarget.toString());
-        ProcessResult removed = force ? null : run(removeCommand);
-        if (force || removed.exitCode() != 0) {
-            if (force || mayRetryWithForce(git, normalizedTarget)) {
-                List<String> forceRemoveCommand = List.of(
-                        git.toString(), "-C", repositoryRoot.toString(),
-                        "worktree", "remove", "--force", normalizedTarget.toString());
-                ProcessResult forced = run(forceRemoveCommand);
-                if (forced.exitCode() != 0) {
-                    throw new GitCommandFailedException(forceRemoveCommand, forced.exitCode(), ProcessRunner.excerpt(forced.stderr()));
+        if (force) {
+            // User-confirmed destructive delete: double-force overrides both
+            // uncommitted work and a lock -- a single --force discards the
+            // former but git still refuses a locked worktree without the second.
+            forceRemove(git, repositoryRoot, normalizedTarget);
+        } else {
+            List<String> removeCommand = List.of(
+                    git.toString(), "-C", repositoryRoot.toString(),
+                    "worktree", "remove", normalizedTarget.toString());
+            ProcessResult removed = run(removeCommand);
+            if (removed.exitCode() != 0) {
+                if (targetEntry.map(Worktree::locked).orElse(false)) {
+                    // A lock is a deliberate "do not remove" marker, not lost
+                    // work, and no plain --force overrides it: surface it (with
+                    // git's reason) so the UI can ask before double-forcing.
+                    throw new WorktreeLockedException(normalizedTarget, targetEntry.flatMap(Worktree::lockReason));
+                } else if (mayRetryWithForce(git, normalizedTarget)) {
+                    forceRemove(git, repositoryRoot, normalizedTarget);
+                } else if (Files.exists(normalizedTarget) && !isClean(git, normalizedTarget)) {
+                    // The refusal protects real uncommitted work: report it as
+                    // such so the UI can offer a confirmed forced delete.
+                    throw new WorktreeNotCleanException(normalizedTarget);
+                } else {
+                    throw new GitCommandFailedException(removeCommand, removed.exitCode(), ProcessRunner.excerpt(removed.stderr()));
                 }
-            } else if (Files.exists(normalizedTarget) && !isClean(git, normalizedTarget)) {
-                // The refusal protects real uncommitted work: report it as
-                // such so the UI can offer a confirmed forced delete.
-                throw new WorktreeNotCleanException(normalizedTarget);
-            } else {
-                throw new GitCommandFailedException(removeCommand, removed.exitCode(), ProcessRunner.excerpt(removed.stderr()));
             }
         }
 
@@ -223,6 +236,24 @@ public final class WorktreeService implements AutoCloseable {
         ProcessResult result = run(command);
         if (result.exitCode() != 0) {
             throw new GitCommandFailedException(command, result.exitCode(), ProcessRunner.excerpt(result.stderr()));
+        }
+    }
+
+    /**
+     * Removes {@code worktree} with a doubled {@code --force}. The second
+     * {@code --force} is what lets git remove a <em>locked</em> worktree; a
+     * single one clears only uncommitted work. Reached solely after the
+     * caller has decided the removal is safe -- a user-confirmed override of
+     * a lock or dirt, or one of {@link #mayRetryWithForce}'s no-work-to-lose
+     * refusals (never a lock: those are diverted to confirmation upstream).
+     */
+    private static void forceRemove(Path git, Path repositoryRoot, Path worktree) {
+        List<String> command = List.of(
+                git.toString(), "-C", repositoryRoot.toString(),
+                "worktree", "remove", "--force", "--force", worktree.toString());
+        ProcessResult forced = run(command);
+        if (forced.exitCode() != 0) {
+            throw new GitCommandFailedException(command, forced.exitCode(), ProcessRunner.excerpt(forced.stderr()));
         }
     }
 
@@ -322,12 +353,13 @@ public final class WorktreeService implements AutoCloseable {
         boolean bare = false;
         boolean prunable = false;
         boolean locked = false;
+        Optional<String> lockReason = Optional.empty();
 
         for (String rawLine : stdout.split("\n", -1)) {
             String line = rawLine.strip();
             if (line.isEmpty()) {
                 if (path != null && !bare) {
-                    worktrees.add(new Worktree(path, branch, worktrees.isEmpty(), detached, prunable, locked));
+                    worktrees.add(new Worktree(path, branch, worktrees.isEmpty(), detached, prunable, locked, lockReason));
                 }
                 path = null;
                 branch = Optional.empty();
@@ -335,6 +367,7 @@ public final class WorktreeService implements AutoCloseable {
                 bare = false;
                 prunable = false;
                 locked = false;
+                lockReason = Optional.empty();
             } else if (line.startsWith("worktree ")) {
                 path = Path.of(line.substring("worktree ".length())).normalize();
             } else if (line.startsWith("branch ")) {
@@ -349,10 +382,12 @@ public final class WorktreeService implements AutoCloseable {
                 prunable = true;
             } else if (line.equals("locked") || line.startsWith("locked ")) {
                 locked = true;
+                String reason = line.equals("locked") ? "" : line.substring("locked ".length()).strip();
+                lockReason = reason.isEmpty() ? Optional.empty() : Optional.of(reason);
             }
         }
         if (path != null && !bare) {
-            worktrees.add(new Worktree(path, branch, worktrees.isEmpty(), detached, prunable, locked));
+            worktrees.add(new Worktree(path, branch, worktrees.isEmpty(), detached, prunable, locked, lockReason));
         }
         return List.copyOf(worktrees);
     }

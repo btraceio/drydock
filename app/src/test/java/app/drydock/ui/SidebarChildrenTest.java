@@ -25,12 +25,12 @@ class SidebarChildrenTest {
     private static final Path ROOT = Path.of("/repo");
 
     private static Worktree main() {
-        return new Worktree(ROOT, Optional.of("main"), true, false, false, false);
+        return new Worktree(ROOT, Optional.of("main"), true, false, false, false, Optional.empty());
     }
 
     private static Worktree wt(String branch, boolean detached, boolean prunable, boolean locked) {
         return new Worktree(Path.of("/wt/" + (branch == null ? "x" : branch)),
-                Optional.ofNullable(branch), false, detached, prunable, locked);
+                Optional.ofNullable(branch), false, detached, prunable, locked, Optional.empty());
     }
 
     private static ManagedClaudeSession session(String name, Path worktreeRoot,
@@ -129,7 +129,7 @@ class SidebarChildrenTest {
 
     @Test
     void staleRule_mainCheckout_neverStale() {
-        Worktree detachedMain = new Worktree(ROOT, Optional.empty(), true, true, false, false);
+        Worktree detachedMain = new Worktree(ROOT, Optional.empty(), true, true, false, false, Optional.empty());
         SidebarChildren result = SidebarChildren.classify(
                 List.of(detachedMain), List.of(), noActivity());
         assertTrue(result.staleWorktrees().isEmpty());

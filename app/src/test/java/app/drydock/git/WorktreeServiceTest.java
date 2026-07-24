@@ -151,6 +151,34 @@ class WorktreeServiceTest {
         assertTrue(Files.exists(repo.resolve("README.md")));
     }
 
+    @Test
+    void removeOfALockedWorktreeSurfacesTheLockWithItsReasonInsteadOfForcing(
+            @TempDir Path repoDir, @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/locked").get();
+        runGit(repo, "worktree", "lock", "--reason", "initializing", worktree.toString());
+
+        CompletionException completion = assertThrows(CompletionException.class,
+                () -> service.remove(repo, worktree, Optional.of("feat/locked")).join());
+        WorktreeLockedException locked = assertInstanceOf(WorktreeLockedException.class, completion.getCause());
+        assertEquals(Optional.of("initializing"), locked.lockReason());
+        assertTrue(Files.exists(worktree));
+    }
+
+    @Test
+    void forcedRemoveDeletesALockedWorktreeAndItsBranch(@TempDir Path repoDir, @TempDir Path worktreeParent)
+            throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/locked-force").get();
+        runGit(repo, "worktree", "lock", worktree.toString());
+
+        service.removeForced(repo, worktree, Optional.of("feat/locked-force")).get();
+
+        assertFalse(Files.exists(worktree));
+        assertEquals(1, service.list(repo).get().size());
+        assertFalse(runGitCapture(repo, "branch", "--list", "feat/locked-force").contains("feat/locked-force"));
+    }
+
     /**
      * Pins the discriminator the force-fallback gate is built on: a
      * submodule only blocks a plain remove once it has been checked out
@@ -349,6 +377,27 @@ class WorktreeServiceTest {
         assertEquals(Optional.of("ghost"), worktrees.get(1).branch());
         assertTrue(worktrees.get(2).locked());
         assertFalse(worktrees.get(2).prunable());
+        assertEquals(Optional.empty(), worktrees.get(2).lockReason());
+    }
+
+    @Test
+    void parseReadsTheLockReasonWhenGitRecordsOne() {
+        String porcelain = """
+                worktree /repo
+                HEAD 1111111111111111111111111111111111111111
+                branch refs/heads/main
+
+                worktree /held
+                HEAD 2222222222222222222222222222222222222222
+                branch refs/heads/held-branch
+                locked initializing
+
+                """;
+
+        List<WorktreeService.Worktree> worktrees = WorktreeService.parse(porcelain);
+
+        assertTrue(worktrees.get(1).locked());
+        assertEquals(Optional.of("initializing"), worktrees.get(1).lockReason());
     }
 
     private static void deleteRecursively(Path root) throws IOException {

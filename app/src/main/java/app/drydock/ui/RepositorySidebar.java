@@ -15,6 +15,7 @@ import app.drydock.git.GitStatus;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.GitTarget;
 import app.drydock.git.SshUnreachableException;
+import app.drydock.git.WorktreeLockedException;
 import app.drydock.git.WorktreeNotCleanException;
 import app.drydock.git.WorktreeService;
 import app.drydock.ui.model.WorkspaceViewModel;
@@ -841,8 +842,11 @@ public final class RepositorySidebar extends VBox {
         worktreeService.remove(repository.root(), worktree.path(), deletableBranchOf(worktree))
                 .whenComplete((v, failure) -> Platform.runLater(() -> {
                     if (failure != null) {
-                        if (UiErrors.unwrap(failure) instanceof WorktreeNotCleanException) {
+                        Throwable cause = UiErrors.unwrap(failure);
+                        if (cause instanceof WorktreeNotCleanException) {
                             confirmForcedWorktreeDelete(repository, worktree);
+                        } else if (cause instanceof WorktreeLockedException locked) {
+                            confirmLockedWorktreeDelete(repository, worktree, locked.lockReason());
                         } else {
                             UiErrors.show("Could not delete worktree", failure);
                         }
@@ -866,6 +870,32 @@ public final class RepositorySidebar extends VBox {
         confirm.setContentText("The worktree at " + worktree.path()
                 + " contains modified or untracked files. Deleting it will discard them permanently. "
                 + "Delete anyway?");
+        confirm.showAndWait().filter(button -> button == ButtonType.OK).ifPresent(button ->
+                worktreeService.removeForced(repository.root(), worktree.path(), deletableBranchOf(worktree))
+                        .whenComplete((v, failure) -> Platform.runLater(() -> {
+                            if (failure != null) {
+                                UiErrors.show("Could not delete worktree", failure);
+                                return;
+                            }
+                            viewModel.removeWorktreeStatus(worktree.path());
+                            refreshWorktrees(repository, false);
+                        })));
+    }
+
+    /**
+     * The plain remove was refused because the worktree is locked -- a
+     * deliberate marker (e.g. a tool that set it up is still mid-flight):
+     * name the lock and its reason, then override it with a double-force
+     * removal only once the user has confirmed.
+     */
+    private void confirmLockedWorktreeDelete(Repository repository, WorktreeService.Worktree worktree,
+            Optional<String> lockReason) {
+        Alert confirm = new Alert(AlertType.CONFIRMATION);
+        confirm.setTitle("Delete worktree");
+        confirm.setHeaderText("\"" + worktree.branch().orElse(worktree.path().getFileName().toString())
+                + "\" is locked" + lockReason.map(reason -> " (" + reason + ")").orElse(""));
+        confirm.setContentText("The worktree at " + worktree.path()
+                + " is locked; removing it may disrupt whatever set the lock. Delete anyway?");
         confirm.showAndWait().filter(button -> button == ButtonType.OK).ifPresent(button ->
                 worktreeService.removeForced(repository.root(), worktree.path(), deletableBranchOf(worktree))
                         .whenComplete((v, failure) -> Platform.runLater(() -> {
