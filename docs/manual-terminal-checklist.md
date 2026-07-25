@@ -84,3 +84,26 @@ Javadoc for a second, related finding (`ghostty_surface_text` is
 paste-only semantics, and gets wrapped in bracketed-paste markers once the
 shell enables bracketed paste -- ordinary typed characters must go through
 `ghostty_surface_key`/`sendCharKey` instead).
+
+## Settings — terminal font size
+
+1. Open a Claude session so a ghostty surface is live.
+2. Open Settings (⌘,) and drag **Terminal size** to 18.
+3. The running terminal's text grows immediately — not only new sessions.
+4. Toggle the theme (⌘⇧L). The terminal re-themes and **keeps** size 18.
+   (A regression here means the size went back to a per-surface override,
+   which `ghostty_surface_update_config` discards.)
+5. Quit and relaunch. The terminal opens at 18.
+
+## Settings — interface font size
+
+1. Open Settings and sweep **Interface size** across 11 → 16.
+2. At both extremes check for clipping in: the title bar and traffic
+   lights, the sidebar filter field, the icon buttons, a combo-box popup
+   (New worktree ▸ Fork from), a right-click context menu, and a tooltip.
+   The popups and menus must scale with everything else — they are separate
+   scene graphs, and an implementation that only styled the main scene would
+   leave them at 13px.
+3. Fixed-height controls (filter field 32px, icon buttons 30px, title bar
+   44px) do not grow; confirm their text still fits at 16.
+4. Quit and relaunch. The size is restored with no visible re-layout flash.
