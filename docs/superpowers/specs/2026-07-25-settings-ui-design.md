@@ -57,20 +57,36 @@ consistency concern.
 **leniently**, consistent with how `sidebarWidth` / `theme` already decode:
 
 - member absent → default,
-- member present but not a number → default,
-- number outside the allowed range → clamped to the range.
+- member present but not a number → default.
 
 A malformed value is never a reason to fail the whole decode. The change is
 purely additive to the JSON schema; documents written before this change
 decode to the defaults.
 
-Ranges (also enforced by the sliders):
+The codec deliberately does **not** clamp, matching `sidebarWidth`
+(`ApplicationStateCodec.java:304-306` accepts any number; the SplitPane
+clamps at use). Range ownership sits in exactly one place — the point of
+application — so a hand-edited out-of-range value is honoured as far as it
+can be rather than silently rewritten:
 
-- `uiFontSize`: 11.0 – 16.0
-- `terminalFontSize`: 10.0 – 18.0
+- `uiFontSize`: clamped to 11.0 – 16.0 by `ThemeManager.setUiFontSize`,
+- `terminalFontSize`: clamped to 10.0 – 18.0 by `TerminalThemes`.
 
-Writes go through the existing single-writer `ApplicationStateStore`; the
-modal never does its own load-then-save.
+The sliders expose the same ranges, so in normal use the clamp never fires.
+
+### Who writes it
+
+`RepositoryManager` is the only holder of the `ApplicationStateStore` and
+already owns the equivalent writes (`updateSidebarWidth` /`updateTheme`,
+`RepositoryManager.java:181,190`). It gains `updateUiFontSize(double)` and
+`updateTerminalFontSize(double)` in the same shape: a state-transform
+submitted to the single writer, never a load-then-save. `SettingsModal`
+receives these as callbacks from the `DrydockApplication` wiring, exactly as
+the existing modals do; it holds no reference to the store.
+
+Because every ui write is a transform against the single writer, a
+shutdown-time sidebar-width write cannot clobber a font size the modal wrote
+(verified: `RepositoryManager.java:181,190`).
 
 ### `UserConfig` write support
 
@@ -82,6 +98,12 @@ modal never does its own load-then-save.
 - `saveAsync(UserConfig)` — as `save`, on a virtual thread, returning a
   `CompletableFuture<Void>`, because the caller is on the FX thread.
 
+- `flushPendingSaves()` — awaits any in-flight `saveAsync`, mirroring
+  `AnnotationStore.flushPendingSaves`, per AGENTS.md's rule that a service
+  writing files from a background thread must expose a flush so tests and
+  shutdown do not race pending writes. Called from `DrydockApplication.stop()`
+  alongside the existing flushes.
+
 Failure is surfaced to the caller (the future completes exceptionally); it
 is not swallowed. This is deliberately asymmetric with `load()`, which
 tolerates a missing or malformed file and falls back to `empty()` — a failed
@@ -91,43 +113,95 @@ reported.
 ## Interface font size
 
 All 142 `-fx-font-size` declarations live in a single file, `app.css`; there
-are none in Java and none in the theme sheets. They are converted to `em`
-units relative to the `.root` base (`N px` → `N/13 em`), leaving `.root` at
-`-fx-font-size: 13px`.
+are none in Java, none in the theme sheets, and no `-fx-font` shorthand or
+`Font.font(…)`/`setFont(…)` call anywhere in `app/src`.
 
-`ThemeManager` gains:
+**`app.css` is not rewritten.** Instead, `UiFontScale` (new, package-private
+in `app.drydock.ui`) generates a scaled copy of the sheet at runtime: it
+reads `app.css` from the classpath, multiplies every `-fx-font-size: <n>px`
+literal by `size / 13.0`, and writes the result to a temp file whose URL is
+used in place of `app.css` in `scene.getStylesheets()`. Results are cached
+per size, and the scale-1.0 case returns the original resource URL
+untouched. This mirrors the extract-to-temp-file pattern `TerminalThemes`
+already uses for ghostty configs.
 
-- `setUiFontSize(double)` — stamps `-fx-font-size: <n>px` as an inline style
-  on the scene root, which overrides the `.root` rule and cascades to every
-  `em`-relative declaration.
-- `setTheme(UiTheme)` — an absolute setter; only `toggle()` exists today,
-  and the modal's radio needs to set a specific value. `toggle()` is
-  reimplemented in terms of it, and both keep firing `onThemeChanged` so the
-  title-bar glyph and persistence stay in sync.
+Two approaches were rejected, both of which look correct and are not:
 
-Padding, spacing, and fixed heights remain in px and therefore do not scale.
-The 11–16px range is chosen so layouts stay intact across it; a wider range
-would clip.
+- **Converting the declarations to `em`.** JavaFX resolves font-relative
+  sizes against the font inherited from the nearest styleable ancestor, not
+  against `.root`, so nested rules would compound: `.code-area` (12px,
+  `app.css:1195`) containing `.lineno` (11px, `app.css:1206`) would yield
+  13 × 0.923 × 0.846 = 10.15px instead of 11px. Every converted line looks
+  individually correct, so the error would not survive review — it would
+  survive *past* it.
+- **An inline `-fx-font-size` on the scene root.** It does override the
+  `.root` rule, but combo popups, context menus and tooltips are separate
+  scene graphs that an inline style on this scene's root never reaches —
+  a fact `app.css:1304-1306` already documents. They would stay at 13px
+  while the rest of the UI scaled. A *stylesheet* does reach them, which is
+  precisely how app.css styles `.combo-box-popup .list-cell` and
+  `.menu-item .label` today.
+
+`ThemeManager` owns the swap, since it already owns
+`scene.getStylesheets().setAll(app.css, theme.css)`:
+
+- `setUiFontSize(double)` — clamps to 11–16, generates/looks up the scaled
+  sheet, and re-applies both stylesheets.
+- `setTheme(UiTheme)` — an absolute setter; only `toggle()` exists today
+  (`ThemeManager.java:52-56`) and the modal's radio needs to set a specific
+  value. `toggle()` is reimplemented in terms of it, and both keep firing
+  `onThemeChanged` so the title-bar glyph and persistence stay in sync.
+- The constructor takes the persisted `uiFontSize` alongside `initialTheme`,
+  so the scaled sheet is in place before first layout rather than being
+  applied as a visible re-layout after startup.
+
+Generating the sheet touches the filesystem, so it runs off the FX thread on
+first use for a given size and is applied via `Platform.runLater`; the
+startup case is generated before the scene is shown.
+
+Scaling covers font sizes only. Stock JavaFX controls (modena) express
+padding in `em`, so their padding scales with the root font size for free;
+`app.css`'s own fixed `-fx-min-height`/`-fx-max-height` rules (24 of each,
+e.g. `.filter-field` 32px, `.icon-button` 30px, `.title-bar` 44px) do not.
+That mismatch, not the text itself, is what bounds the range: 11–16 is the
+band to be confirmed by the manual check below, and the slider is capped
+there.
 
 ## Terminal font size
 
-`ghostty_surface_config_s` already declares a `font_size` float at offset 32
-(`GhosttyAppBinding.SURFACE_CONFIG_LAYOUT`) that nothing currently sets, so
-libghostty applies its own default.
+The size goes into the generated ghostty config file, not the surface
+struct. `TerminalThemes.configFileFor(UiTheme)` (`TerminalThemes.java:28-46`)
+already extracts a per-theme `.conf` to a temp file; it gains the font size
+as a second parameter, keys its cache on `(theme, size)`, and appends a
+`font-size = <n>` line to the extracted config.
 
-- `TerminalSpec` gains a `float fontSize` component; `0` means "use
-  libghostty's default".
-- `GhosttySurface.create` writes the field when the value is `> 0`, using an
-  offset derived from `SURFACE_CONFIG_LAYOUT` via
-  `PathElement.groupElement("font_size")` rather than a hard-coded literal,
-  per the repository's native-interop rule on struct writes.
-- `TerminalSpec.loginShell` and every other construction site passes the
-  persisted setting.
+Applying a change then reuses the path a theme toggle already takes:
+`MainWorkspace.applyTerminalTheme` (`MainWorkspace.java:435-441`) loops the
+open tabs, and `TerminalBridge` (`TerminalBridge.java:345-357`) calls
+`ghostty_app_update_config` followed by `ghostty_surface_update_config` on
+each surface (`GhosttySurface.java:276-285`). So the terminal size applies
+**live to already-running sessions**, like the theme does. The `Applies to
+new sessions` caption in the mockup is therefore dropped.
 
-The field is per-surface and read at `ghostty_surface_new` time, so a change
-takes effect for **newly opened sessions only**; already-running surfaces
-keep their size. The modal states this explicitly under the slider rather
-than pretending otherwise.
+The rejected alternative was the per-surface route: `ghostty_surface_config_s`
+does declare an unset `font_size` float at offset 32
+(`GhosttyAppBinding.SURFACE_CONFIG_LAYOUT`), and writing it at
+`ghostty_surface_new` looks like the natural seam. It is a trap — the very
+next theme toggle calls `ghostty_surface_update_config`, which re-derives the
+surface's config from the app config and drops the per-surface override, so
+the user's terminal size would silently reset mid-session. It would also
+have rippled a new component through `TerminalSpec`, `TerminalRuntime`,
+`GhosttyApp`, `GhosttySurface.create`, `OpenSessionTab`, `SessionManager`,
+three spike source sets, and `TerminalSpecTest`. The config-file route
+changes one class.
+
+One assumption to verify before building on it: that libghostty honours
+`font-size` in a config file loaded via `ghostty_config_load_file`.
+`third_party/ghostty` is an unpopulated submodule, so it cannot be confirmed
+from this checkout. **Verification step, first task in the plan:** append
+`font-size = 20` to a `terminal-*.conf`, run the app, open a session, and
+confirm the text is visibly larger. If it is not honoured, terminal font
+size is cut from this round rather than reinstating the per-surface route.
 
 ## The modal
 
@@ -143,7 +217,6 @@ automatic hiding of the native terminal view while the modal is up
 │   Theme           ( ● Dark   ○ Light )        │
 │   Interface size   11 ──●───── 16     13 px   │
 │   Terminal size    10 ────●─── 18     13 px   │
-│                    Applies to new sessions    │
 │                                               │
 │ Worktrees                                     │
 │   Directory   [ ~/dev/wt          ] [Browse…] │
@@ -163,8 +236,8 @@ Behaviour:
 - **Interface size** slider → `ThemeManager.setUiFontSize` live while
   dragging, so the effect is visible immediately; the state write is
   debounced and happens on release, not per pixel.
-- **Terminal size** slider → persisted only; read at the next surface
-  creation.
+- **Terminal size** slider → same shape: applied live to open surfaces via
+  the existing theme-reapply path, persisted on release.
 - **Worktrees directory** → `UserConfig.loadAsync` when the modal opens, with
   the field disabled and showing a "Loading…" prompt until it resolves;
   `DirectoryChooser` behind `Browse…`; `saveAsync` on commit with the field
@@ -175,6 +248,14 @@ Behaviour:
 The modal holds no blocking I/O on the FX thread, per the repository's async
 rules.
 
+### Opening it
+
+`⌘,` is handled in `DrydockApplication`'s existing scene key filter, and is
+**inert while a modal is already showing** (`modalLayer.isShowingModal()`),
+so it cannot replace an open Start-session or New-worktree modal underneath
+the user. The gear button is unreachable in that state anyway, since the
+backdrop covers the title bar.
+
 ## Testing
 
 Following the repository's existing pure-logic test style
@@ -182,16 +263,28 @@ Following the repository's existing pure-logic test style
 
 - `ApplicationStateCodecTest`: round-trip of `uiFontSize` /
   `terminalFontSize`; absent members decode to defaults; non-numeric members
-  decode to defaults; out-of-range numbers clamp; none of these fail the
-  overall decode.
+  decode to defaults; an out-of-range number survives the decode unchanged
+  (clamping belongs to the consumer); none of these fail the overall decode.
 - `UserConfigTest`: `save` → `load` round-trip; save over an existing
   malformed file; save when `~/.drydock` does not yet exist; the temp file
   is not left behind.
+- `UiFontScaleTest` — the substantive new unit test, since this is where the
+  rejected `em` approach would have gone wrong silently. Against a fixture
+  stylesheet: every `-fx-font-size: Npx` is scaled by the factor and nothing
+  else in the text is touched (colors, `-fx-min-height`, `em` values,
+  comments, `-fx-font-family`); a nested rule pair scales
+  proportionally rather than compounding (12px/11px at factor 16/13 →
+  14.77px/13.54px, ratio preserved); fractional sources like `12.5px`
+  survive; scale 1.0 is an identity that returns the original resource.
 - A small pure helper for slider clamping / display formatting, tested
   directly, keeping `SettingsModal` itself thin enough to need no UI test.
-- `docs/manual-terminal-checklist.md` gains a terminal-font-size step: open a
-  session, change the setting, open a second session, confirm the new
-  surface uses the new size and the first is unchanged.
+- `docs/manual-terminal-checklist.md` gains two steps: (a) with a session
+  open, change the terminal size and confirm the **running** surface resizes
+  and survives a subsequent theme toggle without reverting; (b) sweep the
+  interface size across 11–16 and confirm no clipping in the title bar,
+  filter field, icon buttons, combo popups, context menus, and tooltips —
+  the fixed-height rules and separate popup scene graphs being the two known
+  risks.
 
 ## Deliberately out of scope
 
@@ -200,7 +293,9 @@ Following the repository's existing pure-logic test style
   than any global value; a global override would fight it.
 - **Skip delete confirmations.** Cheap to wire, but it removes the only
   safety net on an irreversible, destructive action.
-- **Live terminal resize.** Would need a libghostty API call against running
-  surfaces; the new-sessions-only behaviour is stated in the UI instead.
 - **Per-repository settings.** `RepositorySettings` stays an empty record;
   nothing in this round is repository-scoped.
+- **Scaling padding, spacing, and fixed heights.** Only font sizes scale.
+  Making the fixed `-fx-min-height`/`-fx-max-height` rules scale too would
+  mean scaling the title bar and traffic lights, which are sized against
+  macOS conventions. The capped 11–16 range is the accepted trade.
