@@ -135,14 +135,14 @@ class SidebarChildrenTest {
 
     @Test
     void lockedRule_lockedWithSession_staysASession() {
-        ManagedClaudeSession onLocked = session("onlocked", Path.of("/wt/held"),
+        ManagedAgentSession onLocked = session("onlocked", Path.of("/wt/held"),
                 SessionStatus.RUNNING, Instant.ofEpochSecond(10));
         SidebarChildren result = SidebarChildren.classify(
                 List.of(main(), wt("held", false, false, true)),
                 List.of(onLocked), noActivity());
         assertTrue(result.lockedWorktrees().isEmpty());
         assertEquals(List.of("onlocked"),
-                result.liveSessions().stream().map(ManagedClaudeSession::displayName).toList());
+                result.liveSessions().stream().map(ManagedAgentSession::displayName).toList());
     }
 
     @Test
