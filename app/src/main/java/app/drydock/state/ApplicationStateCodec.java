@@ -69,7 +69,10 @@ import java.util.Set;
  *   "ui": {
  *     "selectedRepositoryId": "<uuid>" | null,
  *     "sidebarWidth": 260.0,
- *     "expandedRepositoryIds": ["<uuid>", ...]
+ *     "expandedRepositoryIds": ["<uuid>", ...],
+ *     "theme": "DARK" | "LIGHT",
+ *     "uiFontSize": 13.0,
+ *     "terminalFontSize": 13.0
  *   }
  * }
  * }</pre>
@@ -204,6 +207,8 @@ public final class ApplicationStateCodec {
         }
         obj.put("expandedRepositoryIds", new JsonArray(expanded));
         obj.put("theme", new JsonString(ui.theme().name()));
+        obj.put("uiFontSize", JsonNumber.of(ui.uiFontSize()));
+        obj.put("terminalFontSize", JsonNumber.of(ui.terminalFontSize()));
         return obj;
     }
 
@@ -375,8 +380,18 @@ public final class ApplicationStateCodec {
                 ? UiTheme.fromPersisted(s.value())
                 : UiTheme.DARK;
 
-        return new WorkspaceUiState(selected, sidebarWidth, expanded, theme,
-                WorkspaceUiState.DEFAULT_UI_FONT_SIZE, WorkspaceUiState.DEFAULT_TERMINAL_FONT_SIZE);
+        // Cosmetic, so lenient like sidebarWidth: absent or non-numeric
+        // falls back to the design default. Deliberately NOT clamped here
+        // -- ThemeManager and TerminalThemes own their ranges at the point
+        // of application, so a hand-edited value is never silently rewritten.
+        double uiFontSize = obj.get("uiFontSize") instanceof JsonNumber n
+                ? n.asDouble()
+                : WorkspaceUiState.DEFAULT_UI_FONT_SIZE;
+        double terminalFontSize = obj.get("terminalFontSize") instanceof JsonNumber n
+                ? n.asDouble()
+                : WorkspaceUiState.DEFAULT_TERMINAL_FONT_SIZE;
+
+        return new WorkspaceUiState(selected, sidebarWidth, expanded, theme, uiFontSize, terminalFontSize);
     }
 
     private static int readSchemaVersion(JsonObject root) {
