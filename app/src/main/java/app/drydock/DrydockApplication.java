@@ -6,6 +6,7 @@ import app.drydock.agent.api.AgentRegistry;
 import app.drydock.app.RepositoryManager;
 import app.drydock.app.SessionManager;
 import app.drydock.activity.SessionActivityWatcher;
+import app.drydock.config.UserConfig;
 import app.drydock.domain.Repository;
 import app.drydock.git.ChangedLineService;
 import app.drydock.git.DiffService;
@@ -660,6 +661,7 @@ public final class DrydockApplication extends Application {
                 closeQuietly("sidebar-width persistence", () -> repositoryManager.updateSidebarWidth(sidebarWidth));
             }
         }
+        closeQuietly("UserConfig saves", UserConfig::flushPendingSaves);
         if (gitHubService != null) {
             closeQuietly("GitHubService", gitHubService::close);
         }
