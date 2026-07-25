@@ -1457,7 +1457,13 @@ final class FakeMcpSessionContext implements McpSessionContext {
 
     @Override
     public List<ReviewAnnotation> annotations(ManagedSessionId caller) {
-        return List.copyOf(annotations);
+        // Honors the interface contract: "the calling session's annotations".
+        // An unscoped fake would let a cross-session test pass for the wrong
+        // reason -- the router would have to filter again, putting session
+        // ownership (domain logic) back into the adapter layer.
+        return annotations.stream()
+                .filter(annotation -> annotation.sessionId().equals(caller))
+                .toList();
     }
 
     @Override
