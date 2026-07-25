@@ -30,6 +30,7 @@ final class ShortcutsOverlay {
             {"Toggle sidebar", "⌘0"},
             {"Filter repositories", "⌘F"},
             {"Toggle theme", "⌘⇧L"},
+            {"Settings", "⌘,"},
             {"Cancel / close", "Esc"},
     };
 

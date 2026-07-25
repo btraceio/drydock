@@ -8,6 +8,7 @@ import app.drydock.app.SessionManager;
 import app.drydock.activity.SessionActivityWatcher;
 import app.drydock.config.UserConfig;
 import app.drydock.domain.Repository;
+import app.drydock.domain.UiTheme;
 import app.drydock.git.ChangedLineService;
 import app.drydock.git.DiffService;
 import app.drydock.git.GhCliService;
@@ -23,6 +24,7 @@ import app.drydock.ui.GitHubCloneModal;
 import app.drydock.ui.MainWorkspace;
 import app.drydock.ui.RemoteRepositoryModal;
 import app.drydock.ui.RepositorySidebar;
+import app.drydock.ui.SettingsModal;
 import app.drydock.ui.model.WorkspaceViewModel;
 import app.drydock.ui.review.ReviewView;
 import javafx.application.Application;
@@ -210,6 +212,58 @@ public final class DrydockApplication extends Application {
                 DEFAULT_SCENE_WIDTH, DEFAULT_SCENE_HEIGHT);
 
         mainWorkspace.setThemeProvider(() -> appShell.themeManager().theme());
+        mainWorkspace.setTerminalFontSizeProvider(
+                () -> repositoryManager.state().ui().terminalFontSize());
+
+        appShell.setOnShowSettings(() -> appShell.modalLayer().show(
+                new SettingsModal(new SettingsModal.Settings() {
+                    @Override
+                    public UiTheme theme() {
+                        return appShell.themeManager().theme();
+                    }
+
+                    @Override
+                    public void setTheme(UiTheme theme) {
+                        // Persists and re-themes terminals via AppShell's own
+                        // onThemeChanged callback; no duplicate write here.
+                        appShell.themeManager().setTheme(theme);
+                    }
+
+                    @Override
+                    public double uiFontSize() {
+                        return appShell.themeManager().uiFontSize();
+                    }
+
+                    @Override
+                    public void setUiFontSize(double size) {
+                        appShell.themeManager().setUiFontSize(size);
+                        repositoryManager.updateUiFontSize(size);
+                    }
+
+                    @Override
+                    public double terminalFontSize() {
+                        return repositoryManager.state().ui().terminalFontSize();
+                    }
+
+                    @Override
+                    public void setTerminalFontSize(double size) {
+                        // Persist first: applyTerminalFontSize re-reads the
+                        // size through the provider above.
+                        repositoryManager.updateTerminalFontSize(size);
+                        mainWorkspace.applyTerminalTheme(appShell.themeManager().theme());
+                    }
+
+                    @Override
+                    public CompletableFuture<Optional<Path>> loadWorktreesDirectory() {
+                        return UserConfig.loadAsync().thenApply(UserConfig::worktreesDirectory);
+                    }
+
+                    @Override
+                    public CompletableFuture<Void> saveWorktreesDirectory(Optional<Path> directory) {
+                        return UserConfig.saveAsync(new UserConfig(directory));
+                    }
+                }, appShell.modalLayer()::close)));
+
         mainWorkspace.setModalLayer(appShell.modalLayer());
         mainWorkspace.setOnToggleSidebar(appShell::toggleSidebar);
         // The native ghostty view paints over in-scene modals; hide it while
@@ -585,6 +639,15 @@ public final class DrydockApplication extends Application {
                 mainWorkspace.activeSessionId().flatMap(id -> sessionManager.sessions().stream()
                                 .filter(s -> s.id().equals(id)).findFirst())
                         .ifPresent(mainWorkspace::promptRenameSession);
+                event.consume();
+            } else if (cmd && event.getCode() == KeyCode.COMMA) {
+                // Inert while another modal is up: ⌘, must never replace an
+                // in-progress Start-session or New-worktree modal underneath
+                // the user. (The gear button is unreachable then anyway --
+                // the backdrop covers the title bar.)
+                if (!appShell.modalLayer().isShowingModal()) {
+                    appShell.showSettings();
+                }
                 event.consume();
             } else if (!inTextInput && !cmd && event.isShiftDown()
                     && event.getCode() == KeyCode.SLASH) {

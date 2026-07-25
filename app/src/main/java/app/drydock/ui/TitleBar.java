@@ -32,7 +32,7 @@ final class TitleBar extends StackPane {
     private double dragOffsetX;
     private double dragOffsetY;
 
-    TitleBar(Stage stage, String title, Runnable onHelp, Runnable onThemeToggle,
+    TitleBar(Stage stage, String title, Runnable onHelp, Runnable onSettings, Runnable onThemeToggle,
              Runnable onSidebarToggle) {
         getStyleClass().add("title-bar");
 
@@ -52,8 +52,10 @@ final class TitleBar extends StackPane {
 
         Button helpButton = iconButton("?", "Keyboard shortcuts (?)");
         helpButton.setOnAction(e -> onHelp.run());
+        Button settingsButton = iconButton("⚙", "Settings (⌘,)");
+        settingsButton.setOnAction(e -> onSettings.run());
         themeButton.setOnAction(e -> onThemeToggle.run());
-        HBox right = new HBox(4, helpButton, themeButton);
+        HBox right = new HBox(4, helpButton, settingsButton, themeButton);
         right.setAlignment(Pos.CENTER_RIGHT);
 
         HBox sides = new HBox(lights, spacer(), right);
