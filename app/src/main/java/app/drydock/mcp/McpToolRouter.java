@@ -174,7 +174,7 @@ public final class McpToolRouter {
         boolean addressed = optionalBooleanArg(args, "addressed", false);
 
         ReviewAnnotation annotation = context.annotations(caller).stream()
-                .filter(candidate -> candidate.id().equals(id) && candidate.sessionId().equals(caller))
+                .filter(candidate -> candidate.id().equals(id))
                 .findFirst()
                 .orElseThrow(() -> new McpToolException("No such annotation '" + id + "'."));
 
