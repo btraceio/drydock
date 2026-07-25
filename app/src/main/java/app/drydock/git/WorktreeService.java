@@ -26,9 +26,13 @@ import java.util.concurrent.Executors;
  * of an <em>unopened</em> worktree ({@code git worktree remove} +
  * {@code git branch -D}), guarded off the main checkout and falling back
  * to {@code --force} only for refusals that cannot cost the user work
- * (see {@link #mayRetryWithForce}). {@link #mergeIntoBase(Path, String)}
- * merges a worktree's branch into whatever base branch is checked out in
- * the main checkout ({@code git merge --no-ff}).
+ * (see {@link #mayRetryWithForce}). {@link #merge(Path, String, MergeTarget)}
+ * runs {@code git merge --no-ff} and then {@link #verifyMerge} inspects the
+ * repository to establish what actually happened, rather than inferring
+ * success from git's exit code: an exit code cannot distinguish a real
+ * merge from an agent's {@code checkout <branch>} or {@code reset --hard}
+ * while resolving a conflict, and getting that wrong is what would let the
+ * caller delete a branch that still held the only copy of the work.
  *
  * <p>Mirrors {@link GitStatusService}'s process/executor style: argument
  * lists (never a shell string), all work on a background virtual-thread
@@ -245,21 +249,13 @@ public final class WorktreeService implements AutoCloseable {
     }
 
     private static MergeTarget inspectMergeTarget(Path git, Path mainCheckout, String branch) {
-        // --quiet: a detached HEAD is an empty result, not an error.
-        Optional<String> baseBranch = firstLine(run(List.of(
-                git.toString(), "-C", mainCheckout.toString(), "symbolic-ref", "--quiet", "--short", "HEAD")));
-        List<String> headCommand = List.of(
-                git.toString(), "-C", mainCheckout.toString(), "rev-parse", "HEAD");
-        ProcessResult head = run(headCommand);
-        if (head.exitCode() != 0) {
-            throw new GitCommandFailedException(headCommand, head.exitCode(), ProcessRunner.excerpt(head.stderr()));
-        }
+        BaseState base = baseStateOf(git, mainCheckout);
         // refs/heads/ so a tag or a file of the same name can never answer
         // for the branch, and so the argument cannot start with '-'.
         Optional<String> tip = firstLine(run(List.of(
                 git.toString(), "-C", mainCheckout.toString(),
                 "rev-parse", "--verify", "--quiet", "--end-of-options", "refs/heads/" + branch)));
-        return new MergeTarget(baseBranch, head.stdout().strip(), tip, inProgressIn(git, mainCheckout));
+        return new MergeTarget(base.branch(), base.headOid(), tip, base.inProgress());
     }
 
     /**
@@ -325,36 +321,161 @@ public final class WorktreeService implements AutoCloseable {
     }
 
     /**
-     * Merges {@code branch} into whatever base branch is currently checked
-     * out in the main checkout at {@code mainCheckout}
-     * ({@code git merge --no-ff <branch>}), on this service's background
-     * executor. The future completes exceptionally with a
-     * {@link GitCommandFailedException} on conflict or any other failure --
-     * merge conflicts are surfaced to the user rather than resolved
-     * automatically, since there is no agent in the loop to reason about
-     * them.
+     * What a merge attempt actually did, established by inspecting the
+     * repository rather than by trusting an exit code or parsing stderr.
+     *
+     * <p>Ancestry ({@code merge-base --is-ancestor}) is deliberately NOT
+     * the success oracle: a bare {@code checkout <branch>} or a {@code
+     * reset --hard} in the main checkout makes it true, and both are
+     * reachable by the agent that resolves conflicts -- after which the
+     * caller would delete the branch that holds the only copy of the work.
+     * {@link Merged} requires a commit on the expected base branch whose
+     * parents are the recorded pre-merge HEAD and the recorded branch
+     * tip.</p>
      */
-    public CompletableFuture<Void> mergeIntoBase(Path mainCheckout, String branch) {
+    public sealed interface MergeVerdict {
+
+        /** A real merge commit of the recorded tip now sits on the base branch. */
+        record Merged(String mergeCommitOid) implements MergeVerdict { }
+
+        /** The branch was already merged before the attempt; nothing to do but clean up. */
+        record AlreadyMerged() implements MergeVerdict { }
+
+        /** The merge stopped with unmerged index entries; {@code unmergedPaths} is never empty. */
+        record Conflicted(List<String> unmergedPaths) implements MergeVerdict { }
+
+        /** Nothing in progress and the branch is not merged -- from a poll, an aborted merge. */
+        record NotMerged() implements MergeVerdict { }
+
+        /** Git declined: a hook veto, a dirty base checkout, an unknown revision. */
+        record Refused(String detail) implements MergeVerdict { }
+
+        /** A repository state we did not predict; never treated as success. */
+        record Indeterminate(String detail) implements MergeVerdict { }
+    }
+
+    /**
+     * Runs {@code git merge --no-ff <branch>} in the main checkout and then
+     * {@linkplain #verifyMerge verifies} the result. {@code target} must be
+     * the {@link MergeTarget} captured immediately before this call: its
+     * recorded HEAD and branch tip are what the verification is against.
+     *
+     * <p>The future completes exceptionally only for infrastructure
+     * failures (no git executable, an unreadable repository). A merge that
+     * did not happen is a {@link MergeVerdict}, not an exception, because
+     * every outcome has its own user-facing copy and its own next step.</p>
+     */
+    public CompletableFuture<MergeVerdict> merge(Path mainCheckout, String branch, MergeTarget target) {
         return CompletableFuture.supplyAsync(() -> {
-            mergeIntoBaseBlocking(mainCheckout, branch);
-            return null;
+            Path git = locator.locate()
+                    .orElseThrow(() -> new GitExecutableNotFoundException(locator.describeSearched()));
+            // --end-of-options: a branch name that looks like an option must
+            // reach git as a branch name, never be parsed as a flag.
+            List<String> command = List.of(
+                    git.toString(), "-C", mainCheckout.toString(),
+                    "merge", "--no-ff", "--end-of-options", branch);
+            ProcessResult result = run(command);
+            MergeVerdict verdict = verify(git, mainCheckout, target);
+            if (verdict instanceof MergeVerdict.NotMerged) {
+                return result.exitCode() == 0
+                        ? new MergeVerdict.Indeterminate(
+                                "git reported success but " + branch + " is not merged")
+                        : new MergeVerdict.Refused(ProcessRunner.excerpt(result.stderr()));
+            }
+            return verdict;
         }, executor);
     }
 
-    /** Synchronous form of {@link #mergeIntoBase}, package-private for tests. */
-    void mergeIntoBaseBlocking(Path mainCheckout, String branch) {
-        Path git = locator.locate()
-                .orElseThrow(() -> new GitExecutableNotFoundException(locator.describeSearched()));
+    /**
+     * Re-verifies {@code target} without touching the repository -- the poll
+     * used while an agent resolves conflicts in the main checkout.
+     */
+    public CompletableFuture<MergeVerdict> verifyMerge(Path mainCheckout, MergeTarget target) {
+        return CompletableFuture.supplyAsync(() -> {
+            Path git = locator.locate()
+                    .orElseThrow(() -> new GitExecutableNotFoundException(locator.describeSearched()));
+            return verify(git, mainCheckout, target);
+        }, executor);
+    }
 
-        // --end-of-options: a branch name that looks like an option must
-        // reach git as a branch name, never be parsed as a flag.
-        List<String> command = List.of(
+    private static MergeVerdict verify(Path git, Path mainCheckout, MergeTarget target) {
+        String tip = target.branchTipOid().orElseThrow(() -> new IllegalArgumentException(
+                "inspectMergeTarget found no branch tip; the merge should never have been attempted"));
+        BaseState now = baseStateOf(git, mainCheckout);
+        if (!now.branch().equals(target.baseBranch())) {
+            return new MergeVerdict.Indeterminate("the main checkout is no longer on "
+                    + target.baseBranch().orElse("the branch it was on"));
+        }
+        if (!now.headOid().equals(target.baseHeadOid())) {
+            List<String> parents = parentsOf(git, mainCheckout, now.headOid());
+            if (parents.contains(target.baseHeadOid()) && parents.contains(tip)) {
+                return new MergeVerdict.Merged(now.headOid());
+            }
+            return new MergeVerdict.Indeterminate(target.baseBranch().orElse("the base branch")
+                    + " moved to a commit that is not a merge of the branch");
+        }
+        List<String> unmerged = linesOf(run(List.of(
                 git.toString(), "-C", mainCheckout.toString(),
-                "merge", "--no-ff", "--end-of-options", branch);
+                "diff", "--name-only", "--diff-filter=U")));
+        if (!unmerged.isEmpty()) {
+            return new MergeVerdict.Conflicted(unmerged);
+        }
+        if (now.inProgress() == MergeTarget.InProgress.MERGE) {
+            // (now.inProgress() comes from BaseState -- see baseStateOf below.)
+            // MERGE_HEAD with a clean index: git stopped before committing
+            // (a pre-merge-commit hook veto, --no-commit). Not a conflict --
+            // and `git commit` would not re-run that hook.
+            return new MergeVerdict.Refused("git stopped before committing the merge");
+        }
+        if (isAncestor(git, mainCheckout, tip)) {
+            return new MergeVerdict.AlreadyMerged();
+        }
+        return new MergeVerdict.NotMerged();
+    }
+
+    /** The base branch, its HEAD oid, and any sequencer operation in progress. */
+    private record BaseState(Optional<String> branch, String headOid, MergeTarget.InProgress inProgress) { }
+
+    /**
+     * The main checkout's own state, without the branch-tip lookup: what
+     * verification reads. Split out so {@code verify} never has to name a
+     * branch it does not care about.
+     */
+    private static BaseState baseStateOf(Path git, Path mainCheckout) {
+        // --quiet: a detached HEAD is an empty result, not an error.
+        Optional<String> branch = firstLine(run(List.of(
+                git.toString(), "-C", mainCheckout.toString(), "symbolic-ref", "--quiet", "--short", "HEAD")));
+        List<String> headCommand = List.of(
+                git.toString(), "-C", mainCheckout.toString(), "rev-parse", "HEAD");
+        ProcessResult head = run(headCommand);
+        if (head.exitCode() != 0) {
+            throw new GitCommandFailedException(headCommand, head.exitCode(), ProcessRunner.excerpt(head.stderr()));
+        }
+        return new BaseState(branch, head.stdout().strip(), inProgressIn(git, mainCheckout));
+    }
+
+    private static boolean isAncestor(Path git, Path mainCheckout, String oid) {
+        return run(List.of(git.toString(), "-C", mainCheckout.toString(),
+                "merge-base", "--is-ancestor", "--end-of-options", oid, "HEAD")).exitCode() == 0;
+    }
+
+    /** The parent oids of {@code oid}, from {@code rev-list --parents -n1}. */
+    private static List<String> parentsOf(Path git, Path mainCheckout, String oid) {
+        List<String> command = List.of(git.toString(), "-C", mainCheckout.toString(),
+                "rev-list", "--parents", "-n", "1", "--end-of-options", oid);
         ProcessResult result = run(command);
         if (result.exitCode() != 0) {
             throw new GitCommandFailedException(command, result.exitCode(), ProcessRunner.excerpt(result.stderr()));
         }
+        List<String> tokens = List.of(result.stdout().strip().split("\\s+"));
+        return tokens.size() <= 1 ? List.of() : tokens.subList(1, tokens.size());
+    }
+
+    private static List<String> linesOf(ProcessResult result) {
+        if (result.exitCode() != 0 || result.stdout().isBlank()) {
+            return List.of();
+        }
+        return result.stdout().strip().lines().toList();
     }
 
     /**

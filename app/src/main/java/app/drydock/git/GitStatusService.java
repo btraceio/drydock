@@ -202,7 +202,7 @@ public final class GitStatusService implements AutoCloseable {
      * branch {@code branch}, forked from the repository's current HEAD
      * ({@code git worktree add <dir> -b <branch>}), on this service's
      * background executor. Merge and delete
-     * ({@link WorktreeService#mergeIntoBase}, {@link WorktreeService#remove})
+     * ({@link WorktreeService#merge}, {@link WorktreeService#remove})
      * also run directly; only PR creation is handed off to the Claude
      * session in the terminal, since {@code gh pr create} needs the user's
      * own gh auth.

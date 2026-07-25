@@ -268,25 +268,8 @@ final class WorktreeLifecycleController {
         if (tab == null) {
             return;
         }
-        Repository repository = sessionById(sessionId).flatMap(repositoryFor).orElse(null);
-        if (repository == null) {
-            return;
-        }
-        tab.showHandoffRunning("Merging…");
-        worktreeService.mergeIntoBase(repository.root(), branch)
-                .whenComplete((v, ex) -> Platform.runLater(() -> {
-                    if (openTab.apply(sessionId) == null) {
-                        return;
-                    }
-                    if (ex != null) {
-                        tab.restoreFinishButton();
-                        UiErrors.show("Could not merge '" + branch + "' into '" + base + "'", ex);
-                        return;
-                    }
-                    tab.showHandoffDone("Merged");
-                    refreshWorktreeChipsLater(sessionId, worktreeRoot, base);
-                    restoreFinishLater(tab, sessionId);
-                }));
+        tab.restoreFinishButton();
+        tab.showTransientNotice("⏺ Merge is being rebuilt — see Task 6 of the merge-and-finish plan.");
     }
 
     private void handoffCreatePr(ManagedSessionId sessionId, Path worktreeRoot, String branch) {

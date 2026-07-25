@@ -290,36 +290,100 @@ class WorktreeServiceTest {
     }
 
     @Test
-    void mergeIntoBaseMergesTheBranchIntoTheMainCheckout(@TempDir Path repoDir, @TempDir Path worktreeParent)
+    void mergeRecordsARealMergeCommitOfTheRecordedTip(@TempDir Path repoDir, @TempDir Path worktreeParent)
             throws Exception {
         Path repo = initCommittedRepo(repoDir);
         Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/mergeable").get();
-        Files.writeString(worktree.resolve("feature.txt"), "new feature\n");
-        runGit(worktree, "add", "feature.txt");
-        runGit(worktree, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "add feature");
+        commitFile(worktree, "feature.txt", "new feature\n", "add feature");
+        WorktreeService.MergeTarget target = service.inspectMergeTarget(repo, "feat/mergeable").get();
 
-        service.mergeIntoBase(repo, "feat/mergeable").get();
+        WorktreeService.MergeVerdict verdict = service.merge(repo, "feat/mergeable", target).get();
 
+        WorktreeService.MergeVerdict.Merged merged =
+                assertInstanceOf(WorktreeService.MergeVerdict.Merged.class, verdict);
+        assertEquals(runGitCapture(repo, "rev-parse", "HEAD").strip(), merged.mergeCommitOid());
         assertTrue(Files.exists(repo.resolve("feature.txt")));
-        assertTrue(runGitCapture(repo, "log", "--oneline", "-1").toLowerCase(java.util.Locale.ROOT)
-                .contains("merge"));
     }
 
     @Test
-    void mergeIntoBaseFailsInsteadOfResolvingAConflict(@TempDir Path repoDir, @TempDir Path worktreeParent)
+    void mergeOfAnUpToDateBranchIsAlreadyMerged(@TempDir Path repoDir, @TempDir Path worktreeParent)
             throws Exception {
         Path repo = initCommittedRepo(repoDir);
-        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/conflict").get();
-        Files.writeString(worktree.resolve("README.md"), "worktree version\n");
-        runGit(worktree, "add", "README.md");
-        runGit(worktree, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "wt change");
-        Files.writeString(repo.resolve("README.md"), "main version\n");
-        runGit(repo, "add", "README.md");
-        runGit(repo, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "main change");
+        gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/nothing").get();
+        WorktreeService.MergeTarget target = service.inspectMergeTarget(repo, "feat/nothing").get();
 
-        CompletionException completion = assertThrows(CompletionException.class,
-                () -> service.mergeIntoBase(repo, "feat/conflict").join());
-        assertInstanceOf(GitCommandFailedException.class, completion.getCause());
+        assertInstanceOf(WorktreeService.MergeVerdict.AlreadyMerged.class,
+                service.merge(repo, "feat/nothing", target).get());
+    }
+
+    @Test
+    void mergeReportsTheConflictedPaths(@TempDir Path repoDir, @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        conflictingBranch(repo, worktreeParent, "feat/conflict");
+        WorktreeService.MergeTarget target = service.inspectMergeTarget(repo, "feat/conflict").get();
+
+        WorktreeService.MergeVerdict.Conflicted conflicted = assertInstanceOf(
+                WorktreeService.MergeVerdict.Conflicted.class, service.merge(repo, "feat/conflict", target).get());
+        assertEquals(List.of("README.md"), conflicted.unmergedPaths());
+    }
+
+    @Test
+    void mergeStoppedByAPreMergeCommitHookIsRefusedNotConflicted(@TempDir Path repoDir,
+            @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/hooked").get();
+        commitFile(worktree, "feature.txt", "new feature\n", "add feature");
+        // git commit does NOT re-run pre-merge-commit, so treating this as a
+        // conflict and telling an agent to "just commit" would override the veto.
+        Path hook = Path.of(runGitCapture(repo, "rev-parse", "--absolute-git-dir").strip())
+                .resolve("hooks").resolve("pre-merge-commit");
+        Files.createDirectories(hook.getParent());
+        Files.writeString(hook, "#!/bin/sh\nexit 1\n");
+        hook.toFile().setExecutable(true);
+        WorktreeService.MergeTarget target = service.inspectMergeTarget(repo, "feat/hooked").get();
+
+        assertInstanceOf(WorktreeService.MergeVerdict.Refused.class, service.merge(repo, "feat/hooked", target).get());
+    }
+
+    @Test
+    void verifyMergeAcceptsStrategyOursBecauseItIsStillARealMergeCommit(@TempDir Path repoDir,
+            @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/ours").get();
+        commitFile(worktree, "feature.txt", "new feature\n", "add feature");
+        WorktreeService.MergeTarget target = service.inspectMergeTarget(repo, "feat/ours").get();
+        // `merge -s ours` makes merge-base --is-ancestor pass while the tree
+        // contains none of the branch's work: ancestry is not the oracle.
+        runGit(repo, "-c", "user.name=Test", "-c", "user.email=test@example.com",
+                "merge", "-s", "ours", "--no-ff", "feat/ours");
+
+        assertInstanceOf(WorktreeService.MergeVerdict.Merged.class, service.verifyMerge(repo, target).get());
+        assertFalse(Files.exists(repo.resolve("feature.txt")));
+    }
+
+    @Test
+    void verifyMergeIsIndeterminateWhenTheBaseBranchChanged(@TempDir Path repoDir,
+            @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/drift").get();
+        WorktreeService.MergeTarget target = service.inspectMergeTarget(repo, "feat/drift").get();
+        runGit(repo, "checkout", "-b", "release/2.0");
+
+        assertInstanceOf(WorktreeService.MergeVerdict.Indeterminate.class, service.verifyMerge(repo, target).get());
+    }
+
+    @Test
+    void verifyMergeIsNotMergedAfterAnAbort(@TempDir Path repoDir, @TempDir Path worktreeParent)
+            throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        conflictingBranch(repo, worktreeParent, "feat/aborted");
+        WorktreeService.MergeTarget target = service.inspectMergeTarget(repo, "feat/aborted").get();
+        assertInstanceOf(WorktreeService.MergeVerdict.Conflicted.class,
+                service.merge(repo, "feat/aborted", target).get());
+
+        runGit(repo, "merge", "--abort");
+
+        assertInstanceOf(WorktreeService.MergeVerdict.NotMerged.class, service.verifyMerge(repo, target).get());
     }
 
     @Test
@@ -487,6 +551,13 @@ class WorktreeServiceTest {
                 }
             });
         }
+    }
+
+    private static void commitFile(Path checkout, String name, String content, String message)
+            throws IOException, InterruptedException {
+        Files.writeString(checkout.resolve(name), content);
+        runGit(checkout, "add", name);
+        runGit(checkout, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", message);
     }
 
     private static Path initCommittedRepo(Path parent) throws IOException, InterruptedException {
