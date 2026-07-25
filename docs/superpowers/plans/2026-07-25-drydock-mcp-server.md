@@ -826,7 +826,7 @@ public final class McpSessionRegistry {
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `./gradlew :app:test --tests 'app.drydock.mcp.McpSessionRegistryTest'`
-Expected: PASS (14 tests)
+Expected: PASS (16 tests)
 
 - [ ] **Step 5: Commit**
 
