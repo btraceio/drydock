@@ -120,6 +120,44 @@ class AnnotationStoreTest {
         assertTrue(store.forSession(ManagedSessionId.newId()).isEmpty());
     }
 
+    /**
+     * Documents the store-level contract {@code ReviewView.sendToClaude()}
+     * relies on for its fix: a caller that lists annotations, then hands off
+     * to something that can take a while (there: a synchronous post into the
+     * live terminal), must re-read by id via {@link AnnotationStore#byId}
+     * before writing a status change -- not compute it from the list entry
+     * it captured before the hand-off. This proves the store returns the
+     * up-to-date value (with the concurrent reply) when read that way, so a
+     * write built from it does not clobber the other writer's change.
+     */
+    @Test
+    void byIdReflectsAConcurrentUpdateMadeAfterAnEarlierListRead(@TempDir Path dir) {
+        AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"));
+        ReviewAnnotation annotation = sample(ManagedSessionId.newId());
+        store.add(annotation);
+
+        // Simulate the caller's initial list read (e.g. sendToClaude's
+        // `forScope` snapshot) capturing the pre-reply value...
+        ReviewAnnotation captured = store.forSession(annotation.sessionId()).get(0);
+
+        // ...while another writer appends a reply during the hand-off window.
+        ReviewAnnotation withReply = annotation.withReply(
+                new ReviewAnnotation.Message("Claude", AT.plusSeconds(5), "already on it"));
+        store.update(withReply);
+
+        // A write computed from the freshly re-read value keeps the reply;
+        // one computed from `captured` would silently drop it.
+        ReviewAnnotation fresh = store.byId(annotation.id()).orElseThrow();
+        assertEquals(2, fresh.thread().size());
+        ReviewAnnotation correctlyComputed = fresh.withStatus(AnnotationStatus.SENT);
+        assertEquals(2, correctlyComputed.thread().size(), "re-reading before writing preserves the concurrent reply");
+
+        ReviewAnnotation staleComputed = captured.withStatus(AnnotationStatus.SENT);
+        assertEquals(1, staleComputed.thread().size(),
+                "computing from the captured value would have discarded the concurrent reply");
+        store.flushPendingSaves();
+    }
+
     @Test
     void changeListenerFiresOnAddUpdateAndRemove(@TempDir Path dir) throws Exception {
         try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {

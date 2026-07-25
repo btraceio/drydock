@@ -858,22 +858,116 @@ public final class ReviewView extends BorderPane {
     /**
      * Reacts to a change made by another writer (the MCP tool router runs on
      * its own executor, so this notification can arrive off the FX thread --
-     * hence {@link Platform#runLater}). {@link #cardNodes} may be holding a
-     * node built from the old value, so it is evicted before the row is
-     * rebuilt from the current store state. A {@code null} id (bulk change,
-     * e.g. a deleted session) or an id that no longer resolves (removed)
-     * rebuilds the whole file's rows rather than guessing which one to touch.
+     * hence {@link Platform#runLater}).
+     *
+     * <p>{@link #annotationStore} is one instance shared by every open
+     * session tab (see {@code MainWorkspace}), so most notifications are not
+     * about this view at all -- e.g. deleting session A fires a bulk ({@code
+     * null}) change that every open tab's {@link ReviewView} receives,
+     * including session B's, which must not lose an in-progress reply draft
+     * or jump its scroll position over data that never belonged to it. Row
+     * work ({@link #cardNodes} eviction, {@link #replaceCardRow}, {@link
+     * #renderSelectedFile()}) only happens when this view actually has
+     * something rendered that the change could have touched; {@link
+     * #updateSummary()} is cheap and always safe to re-run since it simply
+     * recomputes counts from the (session, scope)-filtered truth.</p>
      */
     private void onAnnotationChanged(String annotationId) {
         Platform.runLater(() -> {
             if (annotationId == null) {
-                renderSelectedFile();
+                if (bulkChangeAffectsRenderedCards()) {
+                    renderSelectedFile();
+                }
             } else {
-                cardNodes.remove(annotationId);
-                annotationStore.byId(annotationId).ifPresentOrElse(this::replaceCardRow, this::renderSelectedFile);
+                onSingleAnnotationChanged(annotationId);
             }
             updateSummary();
         });
+    }
+
+    /** How {@link #onSingleAnnotationChanged} must react to a single-annotation notification. */
+    enum ChangeRoute {
+        /** Not this view's data (another session/scope), or nothing on screen to touch. */
+        IGNORE,
+        /** The card is already rendered; swap its row in place. */
+        REPLACE_ROW,
+        /** Relevant to the file on screen but not (or no longer) rendered; rebuild the file's rows. */
+        REBUILD_FILE
+    }
+
+    /**
+     * Pure routing decision for a single-annotation change notification --
+     * no FX or store access, so it is unit-testable without a live FX
+     * Application Thread (see {@code ReviewViewChangeRoutingTest}).
+     *
+     * @param current the annotation's current value, or {@code null} if it no longer exists (removed)
+     */
+    static ChangeRoute routeSingleAnnotationChange(ManagedSessionId viewSessionId, DiffScope viewScope,
+            String selectedFilePath, boolean rendered, ReviewAnnotation current) {
+        if (current == null) {
+            // Removed: only a problem if this view was showing its card.
+            return rendered ? ChangeRoute.REBUILD_FILE : ChangeRoute.IGNORE;
+        }
+        if (!current.sessionId().equals(viewSessionId) || current.scope() != viewScope) {
+            return ChangeRoute.IGNORE; // another session's or scope's annotation.
+        }
+        if (rendered) {
+            return ChangeRoute.REPLACE_ROW;
+        }
+        if (selectedFilePath != null && current.file().equals(selectedFilePath)) {
+            // Newly relevant to the file on screen (e.g. an add by another
+            // writer): REPLACE_ROW can only swap a row that already exists,
+            // so making the card appear needs a full rebuild.
+            return ChangeRoute.REBUILD_FILE;
+        }
+        return ChangeRoute.IGNORE; // relevant to this session/scope, but a different file.
+    }
+
+    /** Reacts to a change to one annotation, filtered to what this view actually has at stake. */
+    private void onSingleAnnotationChanged(String annotationId) {
+        boolean rendered = isCardRendered(annotationId);
+        ReviewAnnotation current = annotationStore.byId(annotationId).orElse(null);
+        String selectedFilePath = selectedFile == null ? null : selectedFile.path();
+        switch (routeSingleAnnotationChange(sessionId, scope, selectedFilePath, rendered, current)) {
+            case IGNORE -> { }
+            case REPLACE_ROW -> {
+                cardNodes.remove(annotationId);
+                replaceCardRow(current);
+            }
+            case REBUILD_FILE -> {
+                cardNodes.remove(annotationId);
+                renderSelectedFile();
+            }
+        }
+    }
+
+    /** True if {@link #diffRows} currently holds a card for {@code annotationId}. */
+    private boolean isCardRendered(String annotationId) {
+        for (ReviewRow row : diffRows) {
+            if (row instanceof ReviewRow.AnnotationCard card && card.annotation().id().equals(annotationId)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * True if a bulk ({@code null}-id) change could have affected a card
+     * this view is currently showing -- i.e. one of its rendered
+     * annotations no longer exists. {@code removeSession} is the only
+     * source of a bulk change, and it always removes a whole session's
+     * annotations in one shot, so this is the only way it can reach a card
+     * on screen; a bulk change to some other session's data leaves every
+     * id this view has rendered still resolvable.
+     */
+    private boolean bulkChangeAffectsRenderedCards() {
+        for (ReviewRow row : diffRows) {
+            if (row instanceof ReviewRow.AnnotationCard card
+                    && annotationStore.byId(card.annotation().id()).isEmpty()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -1016,7 +1110,16 @@ public final class ReviewView extends BorderPane {
         // Record only the hand-off (SENT, no fabricated reply, no timer);
         // the banner's "Re-run diff" shows the real result.
         for (ReviewAnnotation annotation : open) {
-            ReviewAnnotation updated = annotation.withStatus(AnnotationStatus.SENT);
+            // Re-read: promptSender.accept above is a synchronous hand-off
+            // into the live terminal, wide enough for another writer to have
+            // changed this thread since `open` was read. Computing from the
+            // captured value would discard that change (same hazard as the
+            // toggle/reply handlers above).
+            ReviewAnnotation current = annotationStore.byId(annotation.id()).orElse(null);
+            if (current == null) {
+                continue;
+            }
+            ReviewAnnotation updated = current.withStatus(AnnotationStatus.SENT);
             annotationStore.update(updated);
             replaceCardRow(updated);
         }
