@@ -627,6 +627,29 @@ class McpSessionRegistryTest {
         ManagedSessionId session = ManagedSessionId.newId();
         registry.mint(session, Spawn.ALLOWED);
 
+        // Charge once, then refund twice. The second refund has nothing left to
+        // release. Without the floor the counter would reach -1, buying this
+        // session a fifth worktree: the loop below would end at 4 rather than 5
+        // and the final charge would not throw. Refunding with no prior charge
+        // would NOT exercise this -- refund() returns early on an absent
+        // counter, so the clamp is never reached.
+        registry.chargeWorktree(session);
+        registry.refundWorktree(session);
+        registry.refundWorktree(session);
+
+        for (int i = 0; i < McpSessionRegistry.MAX_WORKTREES_PER_SESSION; i++) {
+            registry.chargeWorktree(session);
+        }
+        assertThrows(McpBudgetExhaustedException.class, () -> registry.chargeWorktree(session));
+    }
+
+    @Test
+    void refundingWithNoPriorChargeIsSilent() throws Exception {
+        // Separate from the floor test above: this covers refund()'s absent-counter
+        // early return, which is a different branch from the clamp.
+        ManagedSessionId session = ManagedSessionId.newId();
+        registry.mint(session, Spawn.ALLOWED);
+
         registry.refundWorktree(session);
         registry.refundSession(session);
 
@@ -826,7 +849,7 @@ public final class McpSessionRegistry {
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `./gradlew :app:test --tests 'app.drydock.mcp.McpSessionRegistryTest'`
-Expected: PASS (16 tests)
+Expected: PASS (17 tests)
 
 - [ ] **Step 5: Commit**
 
