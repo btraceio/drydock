@@ -30,7 +30,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * and never expects a human to hand-edit). Deliberately tiny: one field for
  * now, {@code worktreesDirectory} -- the directory new worktrees are
  * created under, in place of the {@code <home>/dev/wt} default (see
- * {@link app.drydock.ui.WorktreeNaming}).
+ * {@link app.drydock.git.WorktreeNaming}).
  *
  * <p>{@link #load()} never throws for a missing or malformed config file:
  * it logs a warning for malformed input and falls back to {@link #empty()},

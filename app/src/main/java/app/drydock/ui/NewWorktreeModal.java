@@ -8,6 +8,7 @@ import app.drydock.git.BranchCatalog;
 import app.drydock.git.BranchRef;
 import app.drydock.git.GitBranchState;
 import app.drydock.git.GitStatusService;
+import app.drydock.git.WorktreeNaming;
 import app.drydock.git.WorktreeService;
 import javafx.application.Platform;
 import javafx.geometry.Pos;
