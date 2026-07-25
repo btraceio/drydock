@@ -227,7 +227,13 @@ enum BranchResult { DELETED, KEPT_NOT_OURS, DELETE_FAILED }
 
 It removes the worktree, deletes the branch when
 `SessionManager.mayDeleteBranchOf` allows it, deletes the session, then runs
-`onSessionDeleted` and `onSessionsChanged`. Today's equivalent is a private
+`onSessionDeleted` and `onSessionsChanged`.
+
+Invariant: **the session is deleted only if the worktree is gone.** A branch
+that could not be deleted does not stop it, but a worktree that survived
+does — that worktree still holds files the user has to look at, and the
+session's terminal and conversation are how they look. Closing it would
+throw away the context needed to finish the job. Today's equivalent is a private
 lambda body inside `handoffDelete`, gated on the tab still being open and
 ignoring `deleteSession`'s failure — so "session closed" can be reported when
 it was not. Duplicating the app's most destructive sequence into a second
@@ -249,9 +255,10 @@ and any file it wrote there makes `git worktree remove` refuse with
 
 ```
 ✓ Merged feat/x into main
-  Worktree removed · branch feat/x deleted · session closed
-  Worktree kept — it has uncommitted changes · branch feat/x kept · session closed
-  Worktree removed · branch feat/x kept (already existed) · session closed
+  worktree removed · branch feat/x deleted · session closed
+  worktree removed · branch feat/x kept (already existed) · session closed
+  worktree removed · branch feat/x kept (could not delete) · session closed
+  worktree kept — it has uncommitted changes · branch feat/x kept · session left open
 ```
 
 "branch kept (already existed)" comes from `mayDeleteBranchOf`, matching the
@@ -311,23 +318,24 @@ partial; the modal says what happened per step.
    submodule but
    reports a submodule commit bump; `remove` throws
    `BranchNotDeletedException` when only the branch deletion fails.
-2. Headless flow test with faked services: happy path merges then cleans up
-   and reports each step; unclean worktree stops in pre-flight without
-   merging; base-branch drift stops without merging; detached HEAD stops
-   without merging; `Conflicted` sends a prompt and deletes nothing until
-   the poll returns `Merged`; `merge --abort` during the hand-off ends in
-   `STOPPED` with nothing deleted; poll timeout deletes nothing; a
-   branch-delete failure still closes the session and says so; a
-   worktree-removal failure after a successful merge reports the merge as
-   done and the worktree as kept; a closed tab mid-flow still terminates the
-   modal.
-3. `cleanUpWorktreeSession` under the existing delete path stays covered by
-   whatever `handoffDelete` coverage exists; the refactor must not change
-   its observable behaviour except for no longer ignoring `deleteSession`'s
-   failure.
+2. No test in this repository touches JavaFX, and the flow's decisions are
+   what matter, so the decision logic and every string it produces live in
+   an FX-free `MergeFinishDecision` that maps (pre-flight state | verdict |
+   cleanup outcome | timeout) → next step + copy. Tested directly: unclean
+   worktree, detached HEAD, base drift, each in-progress operation and a
+   missing branch each stop without merging; `Conflicted` produces the
+   hand-off prompt before the hand-off and "keep waiting" after it;
+   `NotMerged` after the hand-off stops as abandoned; `Refused` and
+   `Indeterminate` keep waiting during the hand-off and stop before it; each
+   `CleanupOutcome` shape produces its own detail line.
+3. `WorktreeSessionCleanup` takes the worktree removal and session deletion
+   as narrow interfaces, so its outcome composition is tested with fakes and
+   no git: branch-delete failure still deletes the session, worktree-removal
+   failure does not, a branch that is not ours is reported as kept.
 
-UI copy itself is not unit-tested, consistent with the rest of the `ui`
-package.
+The FX shell — `MergeAndFinishFlow`'s modal rendering and async plumbing —
+is not unit-tested, consistent with the rest of the `ui` package, and is
+verified by running the app.
 
 ## Out of scope
 
