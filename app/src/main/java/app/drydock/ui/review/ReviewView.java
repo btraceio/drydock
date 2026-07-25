@@ -990,11 +990,15 @@ public final class ReviewView extends BorderPane {
         status.getStyleClass().addAll("review-status-pill", switch (annotation.status()) {
             case OPEN -> "status-open";
             case SENT -> "status-sent";
+            case ADDRESSED -> "status-addressed";
             case RESOLVED -> "status-resolved";
             case FIXED -> "status-fixed";
         });
 
-        Button toggle = new Button(annotation.status() == AnnotationStatus.OPEN ? "Resolve" : "Reopen");
+        boolean resolvable = annotation.status() == AnnotationStatus.OPEN
+                || annotation.status() == AnnotationStatus.SENT
+                || annotation.status() == AnnotationStatus.ADDRESSED;
+        Button toggle = new Button(resolvable ? "Resolve" : "Reopen");
         toggle.getStyleClass().add("review-thread-action");
         toggle.setFocusTraversable(false);
         toggle.setOnAction(e -> {
@@ -1005,8 +1009,11 @@ public final class ReviewView extends BorderPane {
             if (current == null) {
                 return;
             }
+            boolean currentResolvable = current.status() == AnnotationStatus.OPEN
+                    || current.status() == AnnotationStatus.SENT
+                    || current.status() == AnnotationStatus.ADDRESSED;
             ReviewAnnotation updated = current.withStatus(
-                    current.status() == AnnotationStatus.OPEN ? AnnotationStatus.RESOLVED : AnnotationStatus.OPEN);
+                    currentResolvable ? AnnotationStatus.RESOLVED : AnnotationStatus.OPEN);
             annotationStore.update(updated);
             replaceCardRow(updated);
             updateSummary();
@@ -1018,8 +1025,11 @@ public final class ReviewView extends BorderPane {
         header.setAlignment(Pos.CENTER_LEFT);
 
         VBox card = new VBox(8, header);
-        card.getStyleClass().addAll("review-thread-card",
-                annotation.status() == AnnotationStatus.FIXED ? "thread-fixed" : "thread-normal");
+        card.getStyleClass().addAll("review-thread-card", switch (annotation.status()) {
+            case FIXED -> "thread-fixed";
+            case ADDRESSED -> "thread-addressed";
+            case OPEN, SENT, RESOLVED -> "thread-normal";
+        });
 
         for (ReviewAnnotation.Message message : annotation.thread()) {
             Label author = new Label(message.author());
@@ -1072,8 +1082,10 @@ public final class ReviewView extends BorderPane {
         List<ReviewAnnotation> annotations = annotationStore.forScope(sessionId, scope);
         long open = annotations.stream().filter(a -> a.status() == AnnotationStatus.OPEN).count();
         long sent = annotations.stream().filter(a -> a.status() == AnnotationStatus.SENT).count();
+        long addressed = annotations.stream().filter(a -> a.status() == AnnotationStatus.ADDRESSED).count();
         summaryLabel.setText(open + " open · " + annotations.size()
-                + (annotations.size() == 1 ? " annotation" : " annotations") + " · " + sent + " sent");
+                + (annotations.size() == 1 ? " annotation" : " annotations")
+                + " · " + sent + " sent" + (addressed > 0 ? " · " + addressed + " addressed" : ""));
         sendButton.setDisable(open == 0);
     }
 
