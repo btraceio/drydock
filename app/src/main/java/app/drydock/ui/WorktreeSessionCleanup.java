@@ -2,6 +2,7 @@ package app.drydock.ui;
 
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.git.BranchNotDeletedException;
+import app.drydock.git.WorktreeLockedException;
 import app.drydock.git.WorktreeNotCleanException;
 
 import java.lang.System.Logger;
@@ -9,6 +10,7 @@ import java.lang.System.Logger.Level;
 import java.nio.file.Path;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Supplier;
 
 /**
  * The one implementation of "this worktree session is finished": remove the
@@ -63,12 +65,42 @@ final class WorktreeSessionCleanup {
     CompletableFuture<MergeFinishDecision.CleanupOutcome> run(ManagedSessionId sessionId, Path repositoryRoot,
                                                               Path worktreeRoot, String branch,
                                                               boolean mayDeleteBranch) {
-        Optional<String> branchToDelete = mayDeleteBranch ? Optional.of(branch) : Optional.empty();
-        return removal.remove(repositoryRoot, worktreeRoot, branchToDelete)
-                .handle((ignored, failure) -> classify(failure, mayDeleteBranch))
+        // A blank branch name is never ours to pass to `git branch -D`
+        // (WorktreeService.removeBlocking silently skips it), so treating it
+        // as deletable here would report BranchResult.DELETED for a branch
+        // nothing actually touched -- "branch  deleted" (double space) in
+        // MergeFinishDecision.forCleanup.
+        boolean deleteBranch = mayDeleteBranch && !branch.isBlank();
+        Optional<String> branchToDelete = deleteBranch ? Optional.of(branch) : Optional.empty();
+        return attempt(() -> removal.remove(repositoryRoot, worktreeRoot, branchToDelete))
+                .handle((ignored, failure) -> classify(failure, deleteBranch))
                 .thenCompose(partial -> partial.worktreeRemoved()
                         ? closeSession(sessionId, partial)
                         : CompletableFuture.completedFuture(partial));
+    }
+
+    /**
+     * Guards a collaborator call so a synchronous throw or a {@code null}
+     * return becomes a failed future instead of escaping {@link #run} itself
+     * or completing the returned future exceptionally further down the
+     * chain -- both are real at shutdown: {@code WorktreeService::remove}
+     * begins with {@code CompletableFuture.supplyAsync(..., executor)},
+     * which throws {@code RejectedExecutionException} once that executor is
+     * shut down, and {@code SessionManager.deleteSession} calls
+     * {@code Platform.runLater} ({@code IllegalStateException} once the
+     * toolkit has stopped). Without this, the class's "never completes
+     * exceptionally" guarantee would not hold at exactly the moment
+     * (app shutdown, mid-cleanup) it matters most.
+     */
+    private static CompletableFuture<Void> attempt(Supplier<CompletableFuture<Void>> call) {
+        try {
+            CompletableFuture<Void> future = call.get();
+            return future == null
+                    ? CompletableFuture.failedFuture(new NullPointerException("collaborator returned null"))
+                    : future;
+        } catch (Throwable t) {
+            return CompletableFuture.failedFuture(t);
+        }
     }
 
     /**
@@ -101,9 +133,20 @@ final class WorktreeSessionCleanup {
         // pairing with worktreeRemoved=false), and the session must stay
         // open so its terminal and conversation are still there to act on
         // whatever is keeping the worktree dirty.
-        String reason = cause instanceof WorktreeNotCleanException
-                ? "it has uncommitted changes"
-                : Optional.ofNullable(cause.getMessage()).orElse(cause.getClass().getSimpleName());
+        String reason;
+        if (cause instanceof WorktreeNotCleanException) {
+            reason = "it has uncommitted changes";
+        } else if (cause instanceof WorktreeLockedException locked) {
+            // Lower-case fragment, consistent with "it has uncommitted
+            // changes", and names the confirmed-override escape hatch
+            // (WorktreeService.removeForced, which RepositorySidebar already
+            // offers) rather than the raw exception message -- a capitalised
+            // sentence restating a path the panel already shows, with no
+            // hint that a retry exists.
+            reason = "it is locked" + locked.lockReason().map(r -> " (" + r + ")").orElse("");
+        } else {
+            reason = Optional.ofNullable(cause.getMessage()).orElse(cause.getClass().getSimpleName());
+        }
         return new MergeFinishDecision.CleanupOutcome(false,
                 MergeFinishDecision.BranchResult.NOT_ATTEMPTED, false, Optional.of(reason));
     }
@@ -117,7 +160,7 @@ final class WorktreeSessionCleanup {
      */
     private CompletableFuture<MergeFinishDecision.CleanupOutcome> closeSession(
             ManagedSessionId sessionId, MergeFinishDecision.CleanupOutcome partial) {
-        return deletion.delete(sessionId).handle((ignored, failure) -> {
+        return attempt(() -> deletion.delete(sessionId)).handle((ignored, failure) -> {
             if (failure == null) {
                 return new MergeFinishDecision.CleanupOutcome(partial.worktreeRemoved(), partial.branch(),
                         true, partial.worktreeKeptReason());

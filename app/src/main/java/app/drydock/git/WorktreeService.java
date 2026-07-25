@@ -233,7 +233,22 @@ public final class WorktreeService implements AutoCloseable {
             List<String> branchCommand = List.of(
                     git.toString(), "-C", repositoryRoot.toString(),
                     "branch", "-D", "--end-of-options", branch.get());
-            ProcessResult deleted = run(branchCommand);
+            ProcessResult deleted;
+            try {
+                deleted = run(branchCommand);
+            } catch (GitException e) {
+                // The worktree half above already succeeded, so a timeout, a
+                // spawn failure, or an interrupt here must still surface as
+                // BranchNotDeletedException, never as the bare
+                // GitCommandFailedException/GitCommandInterruptedException
+                // run() throws for those. WorktreeSessionCleanup.classify
+                // trusts that only BranchNotDeletedException means "worktree
+                // gone, branch failed"; anything else reports the worktree
+                // itself as kept, which would be false here -- it is already
+                // gone. This wraps and rethrows without touching the
+                // interrupt flag run() already set for the interrupt case.
+                throw new BranchNotDeletedException(branch.get(), e);
+            }
             if (deleted.exitCode() != 0) {
                 throw new BranchNotDeletedException(branch.get(), deleted.exitCode(),
                         ProcessRunner.excerpt(deleted.stderr()));

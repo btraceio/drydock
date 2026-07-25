@@ -115,6 +115,68 @@ class WorktreeServiceTest {
         assertTrue(runGitCapture(repo, "branch", "--list", "feat/kept").contains("feat/kept"));
     }
 
+    /**
+     * Fix round 1, finding 2: a branch-delete failure that is not a real
+     * non-zero exit (a timeout, a spawn failure, an interrupt) must still
+     * surface as {@link BranchNotDeletedException}, not the bare {@link
+     * GitCommandInterruptedException}/{@code GitCommandFailedException}
+     * {@code run()} throws for those -- otherwise {@code
+     * WorktreeSessionCleanup.classify} (which trusts that only {@code
+     * BranchNotDeletedException} means "worktree gone, branch failed") would
+     * report an already-removed worktree as kept, which is false. There is
+     * no git hook for branch deletion (unlike {@code pre-merge-commit}), so
+     * a thin git-passthrough wrapper stands in for {@code git} and only
+     * slows down {@code branch -D}; the worktree-remove half still runs
+     * against the real repository and is confirmed gone by the time the
+     * interrupt lands. Mirrors {@code
+     * mergeBlockingPropagatesAnInterruptWithoutProducingAVerdict}'s
+     * worker-thread-interrupt technique, since {@code
+     * CompletableFuture.cancel} does not interrupt a running task.
+     *
+     * <p>A genuine spawn-IOException variant of this same wrap was judged
+     * too contorted to fixture safely (it would require racing a rename of
+     * the real git executable between the two git invocations); see the
+     * fix-round-1 report.</p>
+     */
+    @Test
+    void removeBlockingWrapsABranchDeleteInterruptAsBranchNotDeletedException(@TempDir Path repoDir,
+            @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/slow-delete").get();
+        Path fakeGit = worktreeParent.resolve("fake-git.sh");
+        Files.writeString(fakeGit, """
+                #!/bin/sh
+                prev=""
+                for arg in "$@"; do
+                  if [ "$prev" = "branch" ] && [ "$arg" = "-D" ]; then
+                    sleep 30
+                  fi
+                  prev="$arg"
+                done
+                exec git "$@"
+                """);
+        fakeGit.toFile().setExecutable(true);
+        WorktreeService slowBranchDelete = new WorktreeService(new GitExecutableLocator(fakeGit));
+
+        java.util.concurrent.atomic.AtomicReference<Throwable> thrown = new java.util.concurrent.atomic.AtomicReference<>();
+        Thread worker = new Thread(() -> {
+            try {
+                slowBranchDelete.removeBlocking(repo, worktree, Optional.of("feat/slow-delete"), false);
+            } catch (Throwable t) {
+                thrown.set(t);
+            }
+        });
+        worker.start();
+        Thread.sleep(1000); // let the worktree remove finish and the branch-delete sleep start
+        worker.interrupt();
+        worker.join(java.time.Duration.ofSeconds(10).toMillis());
+
+        assertFalse(worker.isAlive(), "the worker thread should have unblocked on the interrupt");
+        assertFalse(Files.exists(worktree), "the worktree half must have already succeeded");
+        BranchNotDeletedException failure = assertInstanceOf(BranchNotDeletedException.class, thrown.get());
+        assertInstanceOf(GitCommandInterruptedException.class, failure.getCause());
+    }
+
     @Test
     void removeWithoutABranchOnlyRemovesTheWorktree(@TempDir Path repoDir, @TempDir Path worktreeParent)
             throws Exception {

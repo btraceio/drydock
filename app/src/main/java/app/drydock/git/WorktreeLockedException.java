@@ -23,7 +23,13 @@ public final class WorktreeLockedException extends GitException {
     private final Path worktreePath;
     private final Optional<String> lockReason;
 
-    WorktreeLockedException(Path worktreePath, Optional<String> lockReason) {
+    /**
+     * Public for consistency: most of this package's exception constructors
+     * already are, and this type is already a public final class with public
+     * accessors, so narrower construction visibility exposed no new concept,
+     * only an inconsistency.
+     */
+    public WorktreeLockedException(Path worktreePath, Optional<String> lockReason) {
         super("The worktree at " + worktreePath + " is locked"
                 + lockReason.map(reason -> " (reason: " + reason + ")").orElse(""));
         this.worktreePath = worktreePath;
