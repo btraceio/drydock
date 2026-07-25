@@ -158,6 +158,9 @@ public final class ReviewView extends BorderPane {
     /** View-owned annotation-card nodes by annotation id, so reply drafts survive cell recycling. */
     private final Map<String, Node> cardNodes = new HashMap<>();
 
+    /** Unsubscribes {@link #onAnnotationChanged} from {@link #annotationStore}; run by {@link #dispose()}. */
+    private final Runnable annotationChangesUnsubscribe;
+
     public ReviewView(ManagedSessionId sessionId, Path checkoutRoot, Path repositoryRoot,
                       DiffService diffService, ChangedLineService changedLineService,
                       GitStatusService gitStatusService, AnnotationStore annotationStore,
@@ -169,6 +172,10 @@ public final class ReviewView extends BorderPane {
         this.annotationStore = annotationStore;
         this.promptSender = promptSender;
         this.explorerBridge = explorerBridge;
+        // The store now has more than one writer (the MCP tool router runs
+        // on its own executor), so this view must be told to re-read a card
+        // it already built rather than trust the value it was built from.
+        this.annotationChangesUnsubscribe = annotationStore.addChangeListener(this::onAnnotationChanged);
 
         getStyleClass().add("review-root");
 
@@ -848,6 +855,37 @@ public final class ReviewView extends BorderPane {
         return cardNodes.computeIfAbsent(annotation.id(), id -> buildAnnotationCard(annotation));
     }
 
+    /**
+     * Reacts to a change made by another writer (the MCP tool router runs on
+     * its own executor, so this notification can arrive off the FX thread --
+     * hence {@link Platform#runLater}). {@link #cardNodes} may be holding a
+     * node built from the old value, so it is evicted before the row is
+     * rebuilt from the current store state. A {@code null} id (bulk change,
+     * e.g. a deleted session) or an id that no longer resolves (removed)
+     * rebuilds the whole file's rows rather than guessing which one to touch.
+     */
+    private void onAnnotationChanged(String annotationId) {
+        Platform.runLater(() -> {
+            if (annotationId == null) {
+                renderSelectedFile();
+            } else {
+                cardNodes.remove(annotationId);
+                annotationStore.byId(annotationId).ifPresentOrElse(this::replaceCardRow, this::renderSelectedFile);
+            }
+            updateSummary();
+        });
+    }
+
+    /**
+     * Unsubscribes from {@link #annotationStore}'s change notifications.
+     * Must be called when this view's session tab is discarded (lifecycle
+     * symmetry -- see {@code MainWorkspace#removeTab}), or a closed view
+     * keeps receiving events for the life of the process.
+     */
+    public void dispose() {
+        annotationChangesUnsubscribe.run();
+    }
+
     private Node buildAnnotationCard(ReviewAnnotation annotation) {
         Label rangeChip = new Label(annotation.startKey().equals(annotation.endKey())
                 ? keyLabel(annotation.startKey())
@@ -866,9 +904,15 @@ public final class ReviewView extends BorderPane {
         toggle.getStyleClass().add("review-thread-action");
         toggle.setFocusTraversable(false);
         toggle.setOnAction(e -> {
-            ReviewAnnotation updated = annotation.withStatus(annotation.status() == AnnotationStatus.OPEN
-                    ? AnnotationStatus.RESOLVED
-                    : AnnotationStatus.OPEN);
+            // Re-read: another writer (the MCP tool router) may have changed
+            // this thread since this card was built, and computing from the
+            // captured value would discard their change.
+            ReviewAnnotation current = annotationStore.byId(annotation.id()).orElse(null);
+            if (current == null) {
+                return;
+            }
+            ReviewAnnotation updated = current.withStatus(
+                    current.status() == AnnotationStatus.OPEN ? AnnotationStatus.RESOLVED : AnnotationStatus.OPEN);
             annotationStore.update(updated);
             replaceCardRow(updated);
             updateSummary();
@@ -906,7 +950,13 @@ public final class ReviewView extends BorderPane {
             if (message.isEmpty()) {
                 return;
             }
-            ReviewAnnotation updated = annotation.withReply(
+            // Re-read for the same reason as the toggle above: a stale
+            // captured annotation would discard a concurrent MCP-side change.
+            ReviewAnnotation current = annotationStore.byId(annotation.id()).orElse(null);
+            if (current == null) {
+                return;
+            }
+            ReviewAnnotation updated = current.withReply(
                     new ReviewAnnotation.Message("You", Instant.now(), message));
             annotationStore.update(updated);
             replaceCardRow(updated);

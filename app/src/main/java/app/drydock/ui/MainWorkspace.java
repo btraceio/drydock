@@ -158,6 +158,15 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      */
     private final Map<OpenSessionTab, SessionExplorerView> openExplorers = new LinkedHashMap<>();
 
+    /**
+     * Every Review view built by {@link #createOpenSessionTab}'s factory,
+     * keyed by the tab that owns it, so {@link #removeTab} can unsubscribe
+     * it from {@link AnnotationStore}'s change notifications (lifecycle
+     * symmetry: a discarded view must stop receiving events). Mirrors
+     * {@link #openExplorers}.
+     */
+    private final Map<OpenSessionTab, ReviewView> openReviews = new LinkedHashMap<>();
+
     /** Sessions whose self-exit has already been recorded, so the watcher fires once per exit. */
     private final Set<ManagedSessionId> exitRecorded = new HashSet<>();
 
@@ -1296,6 +1305,10 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         if (explorer != null) {
             explorer.dispose();
         }
+        ReviewView review = openReviews.remove(openTab);
+        if (review != null) {
+            review.dispose();
+        }
         // Must run before removing the tab's node from the TabPane below:
         // that removal synchronously fires JavaFX property-invalidation
         // listeners (e.g. the placeholder's localToSceneTransformProperty)
@@ -1434,19 +1447,23 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             // openTab.sessionId() rather than the constructor parameter: the
             // factory runs lazily (first Review open), by which time a created
             // session's tab has adopted the real id -- annotations must key on it.
-            repository.ifPresent(repo -> openTab.setReviewFactory(() -> new ReviewView(
-                    openTab.sessionId(), searchRoot, repo.root(), diffService, changedLineService, gitStatusService,
-                    annotationStore, openTab::sendPrompt, new ReviewView.ExplorerBridge() {
-                        @Override
-                        public void openFileAtLine(Path relativeFile, int line) {
-                            openTab.openExplorerAt(relativeFile, line);
-                        }
+            repository.ifPresent(repo -> openTab.setReviewFactory(() -> {
+                ReviewView review = new ReviewView(
+                        openTab.sessionId(), searchRoot, repo.root(), diffService, changedLineService,
+                        gitStatusService, annotationStore, openTab::sendPrompt, new ReviewView.ExplorerBridge() {
+                            @Override
+                            public void openFileAtLine(Path relativeFile, int line) {
+                                openTab.openExplorerAt(relativeFile, line);
+                            }
 
-                        @Override
-                        public void searchText(String token) {
-                            openTab.searchInExplorer(token);
-                        }
-                    })));
+                            @Override
+                            public void searchText(String token) {
+                                openTab.searchInExplorer(token);
+                            }
+                        });
+                openReviews.put(openTab, review);
+                return review;
+            }));
 
             // Branch of the session's own checkout: for a worktree session the
             // search root IS the worktree, so its branch (not the main

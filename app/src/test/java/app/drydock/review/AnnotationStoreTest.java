@@ -8,9 +8,11 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class AnnotationStoreTest {
@@ -116,6 +118,71 @@ class AnnotationStoreTest {
         AnnotationStore store = new AnnotationStore(file);
 
         assertTrue(store.forSession(ManagedSessionId.newId()).isEmpty());
+    }
+
+    @Test
+    void changeListenerFiresOnAddUpdateAndRemove(@TempDir Path dir) throws Exception {
+        try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
+            List<String> events = new ArrayList<>();
+            store.addChangeListener(events::add);
+
+            ReviewAnnotation annotation = ReviewAnnotation.create(ManagedSessionId.newId(), DiffScope.BASE,
+                    "src/Main.java", "n1", "n1",
+                    new ReviewAnnotation.Message("You", Instant.EPOCH, "look here"));
+
+            store.add(annotation);
+            store.update(annotation.withStatus(AnnotationStatus.SENT));
+            store.remove(annotation.id());
+
+            assertEquals(List.of(annotation.id(), annotation.id(), annotation.id()), events);
+        }
+    }
+
+    @Test
+    void removingASessionFiresOneBulkChange(@TempDir Path dir) throws Exception {
+        try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
+            ManagedSessionId session = ManagedSessionId.newId();
+            store.add(ReviewAnnotation.create(session, DiffScope.BASE, "a.java", "n1", "n1",
+                    new ReviewAnnotation.Message("You", Instant.EPOCH, "one")));
+            store.add(ReviewAnnotation.create(session, DiffScope.BASE, "b.java", "n2", "n2",
+                    new ReviewAnnotation.Message("You", Instant.EPOCH, "two")));
+
+            List<String> events = new ArrayList<>();
+            store.addChangeListener(events::add);
+            store.removeSession(session);
+
+            assertEquals(1, events.size());
+            assertNull(events.get(0), "a bulk change reports a null id");
+        }
+    }
+
+    @Test
+    void unsubscribingStopsDelivery(@TempDir Path dir) throws Exception {
+        try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
+            List<String> events = new ArrayList<>();
+            Runnable unsubscribe = store.addChangeListener(events::add);
+            unsubscribe.run();
+
+            store.add(ReviewAnnotation.create(ManagedSessionId.newId(), DiffScope.BASE, "a.java", "n1", "n1",
+                    new ReviewAnnotation.Message("You", Instant.EPOCH, "one")));
+
+            assertTrue(events.isEmpty());
+        }
+    }
+
+    @Test
+    void aThrowingListenerDoesNotBreakTheWrite(@TempDir Path dir) throws Exception {
+        try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
+            store.addChangeListener(id -> {
+                throw new IllegalStateException("listener blew up");
+            });
+
+            ReviewAnnotation annotation = ReviewAnnotation.create(ManagedSessionId.newId(), DiffScope.BASE,
+                    "a.java", "n1", "n1", new ReviewAnnotation.Message("You", Instant.EPOCH, "one"));
+            store.add(annotation);
+
+            assertTrue(store.byId(annotation.id()).isPresent(), "the write must survive a bad listener");
+        }
     }
 
     private static void waitForFile(Path file) throws InterruptedException {
