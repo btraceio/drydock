@@ -199,6 +199,7 @@ public final class DrydockApplication extends Application {
         appShell = new AppShell(primaryStage, WINDOW_TITLE, sidebar, mainWorkspace,
                 repositoryManager.state().ui().sidebarWidth(),
                 repositoryManager.state().ui().theme(),
+                repositoryManager.state().ui().uiFontSize(),
                 theme -> {
                     repositoryManager.updateTheme(theme);
                     // Terminals follow the app theme: re-theme every live

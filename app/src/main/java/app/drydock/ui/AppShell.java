@@ -47,8 +47,8 @@ public final class AppShell {
     private final Region collapsedRail = buildCollapsedRail();
 
     public AppShell(Stage stage, String title, Region sidebar, Region mainPane,
-                    double initialSidebarWidth, UiTheme initialTheme, Consumer<UiTheme> onThemeChanged,
-                    double sceneWidth, double sceneHeight) {
+                    double initialSidebarWidth, UiTheme initialTheme, double initialUiFontSize,
+                    Consumer<UiTheme> onThemeChanged, double sceneWidth, double sceneHeight) {
         this.sidebar = sidebar;
 
         sidebar.setMinWidth(SIDEBAR_MIN);
@@ -67,7 +67,7 @@ public final class AppShell {
         StackPane root = new StackPane(shell, modalLayer);
 
         scene = new Scene(root, sceneWidth, sceneHeight);
-        themeManager = new ThemeManager(scene, initialTheme, theme -> {
+        themeManager = new ThemeManager(scene, initialTheme, initialUiFontSize, theme -> {
             titleBar.showThemeGlyphFor(theme);
             onThemeChanged.accept(theme);
         });

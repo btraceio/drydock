@@ -11,10 +11,11 @@ import java.util.function.Consumer;
 
 /**
  * Runtime theming (design handoff "Target stack"): the scene always carries
- * {@code app.css} (structure, no colors) plus exactly one of {@code
- * theme-dark.css} / {@code theme-light.css} (color tokens only). Toggling
- * swaps the token sheet in place; persistence of the choice is delegated to
- * the {@code onThemeChanged} callback so this class stays free of any state
+ * a (possibly font-scaled, see {@link UiFontScale}) {@code app.css}
+ * (structure, no colors) plus exactly one of {@code theme-dark.css} /
+ * {@code theme-light.css} (color tokens only). Toggling swaps the token
+ * sheet in place; persistence of the choice is delegated to the {@code
+ * onThemeChanged} callback so this class stays free of any state
  * dependency.
  *
  * <p>Also owns one-time registration of the bundled JetBrains Mono faces
@@ -38,11 +39,14 @@ public final class ThemeManager {
     private final Scene scene;
     private final Consumer<UiTheme> onThemeChanged;
     private UiTheme theme;
+    private double uiFontSize;
 
-    public ThemeManager(Scene scene, UiTheme initialTheme, Consumer<UiTheme> onThemeChanged) {
+    public ThemeManager(Scene scene, UiTheme initialTheme, double initialUiFontSize,
+                        Consumer<UiTheme> onThemeChanged) {
         this.scene = scene;
         this.onThemeChanged = onThemeChanged;
         this.theme = initialTheme;
+        this.uiFontSize = Math.clamp(initialUiFontSize, UiFontScale.MIN_FONT_SIZE, UiFontScale.MAX_FONT_SIZE);
         loadBundledFonts();
         apply();
     }
@@ -51,15 +55,42 @@ public final class ThemeManager {
         return theme;
     }
 
+    public double uiFontSize() {
+        return uiFontSize;
+    }
+
     public void toggle() {
-        theme = theme.other();
+        setTheme(theme.other());
+    }
+
+    /** Sets the theme absolutely (the settings modal's radio); {@link #toggle} delegates here. */
+    public void setTheme(UiTheme newTheme) {
+        if (newTheme == theme) {
+            return;
+        }
+        theme = newTheme;
         apply();
         onThemeChanged.accept(theme);
     }
 
+    /**
+     * Applies an interface font size by swapping in a stylesheet whose
+     * font sizes are scaled (see {@link UiFontScale}); clamped here because
+     * this is the point of application. Persisting the choice is the
+     * caller's job, exactly as with the theme.
+     */
+    public void setUiFontSize(double newUiFontSize) {
+        double clamped = Math.clamp(newUiFontSize, UiFontScale.MIN_FONT_SIZE, UiFontScale.MAX_FONT_SIZE);
+        if (clamped == uiFontSize) {
+            return;
+        }
+        uiFontSize = clamped;
+        apply();
+    }
+
     private void apply() {
         scene.getStylesheets().setAll(
-                resource("app.css"),
+                UiFontScale.stylesheetFor(uiFontSize),
                 resource(theme.stylesheet()));
     }
 
