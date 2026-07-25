@@ -375,7 +375,8 @@ public final class ApplicationStateCodec {
                 ? UiTheme.fromPersisted(s.value())
                 : UiTheme.DARK;
 
-        return new WorkspaceUiState(selected, sidebarWidth, expanded, theme);
+        return new WorkspaceUiState(selected, sidebarWidth, expanded, theme,
+                WorkspaceUiState.DEFAULT_UI_FONT_SIZE, WorkspaceUiState.DEFAULT_TERMINAL_FONT_SIZE);
     }
 
     private static int readSchemaVersion(JsonObject root) {
