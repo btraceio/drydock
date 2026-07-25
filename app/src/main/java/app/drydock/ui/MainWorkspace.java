@@ -15,6 +15,7 @@ import app.drydock.domain.SessionActivity;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SshRemote;
 import app.drydock.domain.UiTheme;
+import app.drydock.domain.WorkspaceUiState;
 import app.drydock.git.ChangedLineService;
 import app.drydock.git.DiffService;
 import app.drydock.git.GhCliService;
@@ -196,6 +197,9 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
     /** Current UI theme, for terminal config selection; wired by DrydockApplication once the shell exists. */
     private Supplier<UiTheme> themeProvider = () -> UiTheme.DARK;
+
+    /** Where new and re-themed terminals read the persisted font size from. */
+    private Supplier<Double> terminalFontSizeProvider = () -> WorkspaceUiState.DEFAULT_TERMINAL_FONT_SIZE;
 
     /**
      * True while a modal is showing. The ghostty terminal is a NATIVE view
@@ -443,9 +447,22 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         this.themeProvider = provider == null ? () -> UiTheme.DARK : provider;
     }
 
-    /** Re-themes every open terminal to {@code theme} (called on the FX thread by the theme toggle). */
+    /** Wires where terminals read the configured font size from (settings modal). */
+    public void setTerminalFontSizeProvider(Supplier<Double> provider) {
+        this.terminalFontSizeProvider =
+                provider == null ? () -> WorkspaceUiState.DEFAULT_TERMINAL_FONT_SIZE : provider;
+    }
+
+    /**
+     * Re-applies the terminal config to every open terminal (called on the FX
+     * thread by the theme toggle and by the settings modal's font-size
+     * slider). ghostty re-reads the whole config file, so theme and font size
+     * travel together over this one path -- which is exactly why the size
+     * lives in the config rather than in the per-surface struct, where
+     * {@code ghostty_surface_update_config} would discard it.
+     */
     public void applyTerminalTheme(UiTheme theme) {
-        Path configFile = TerminalThemes.configFileFor(theme);
+        Path configFile = TerminalThemes.configFileFor(theme, terminalFontSizeProvider.get());
         for (OpenSessionTab open : openTabs.values()) {
             open.applyTerminalTheme(configFile);
         }
@@ -1277,7 +1294,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             if (holder[0] != null) {
                 holder[0].tickAndDraw();
             }
-        }, Optional.of(TerminalThemes.configFileFor(themeProvider.get())));
+        }, Optional.of(TerminalThemes.configFileFor(themeProvider.get(), terminalFontSizeProvider.get())));
         TerminalHostView host;
         try {
             host = TerminalFactory.createHostForCurrentWindow();
@@ -1302,7 +1319,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         });
         openTab.setShellTerminalProvider(onWakeup -> {
             TerminalRuntime shellRuntime = TerminalFactory.createRuntime(onWakeup,
-                    Optional.of(TerminalThemes.configFileFor(themeProvider.get())));
+                    Optional.of(TerminalThemes.configFileFor(themeProvider.get(), terminalFontSizeProvider.get())));
             TerminalHostView shellHost;
             try {
                 shellHost = TerminalFactory.createHostForCurrentWindow();
