@@ -18,6 +18,8 @@ import java.nio.file.StandardCopyOption;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
@@ -99,76 +101,146 @@ public record UserConfig(Optional<Path> worktreesDirectory) {
      * <p>Unlike {@link #load()}, a failure here throws: a save is a
      * user-visible action, and one that silently did nothing is worse than
      * one that reports why.</p>
+     *
+     * <p>{@code configFile} is resolved to an absolute path first so it
+     * always has a parent directory to create the temp file in -- a bare
+     * relative filename with no parent segment would otherwise force the
+     * temp file into the JVM's default temp directory, which can be a
+     * different filesystem and break {@link StandardCopyOption#ATOMIC_MOVE}.
+     * A path that resolves to a filesystem root (no parent even after that)
+     * is rejected outright rather than silently falling back.</p>
      */
     static void save(UserConfig config, Path configFile) throws IOException {
-        JsonObject root = JsonObject.empty();
-        if (Files.exists(configFile)) {
-            try {
-                if (JsonParser.parse(Files.readString(configFile, StandardCharsets.UTF_8))
-                        instanceof JsonObject existing) {
-                    root = existing;
-                }
-            } catch (IOException | JsonParseException e) {
-                LOG.log(Level.WARNING, "Existing config " + configFile
-                        + " is unreadable or malformed; replacing it", e);
-            }
+        Path resolvedConfigFile = configFile.toAbsolutePath().normalize();
+        Path parent = resolvedConfigFile.getParent();
+        if (parent == null) {
+            throw new IOException("Cannot save config to a path with no parent directory: " + resolvedConfigFile);
         }
-        JsonObject finalRoot = root;
-        finalRoot.members().remove("worktreesDirectory");
-        config.worktreesDirectory().ifPresent(dir ->
-                finalRoot.put("worktreesDirectory", new JsonString(dir.toString())));
 
-        Path parent = configFile.getParent();
-        if (parent != null) {
-            Files.createDirectories(parent);
-        }
+        JsonObject root = readExistingRootOrEmpty(resolvedConfigFile);
+        root.members().remove("worktreesDirectory");
+        config.worktreesDirectory().ifPresent(dir -> root.put("worktreesDirectory", new JsonString(dir.toString())));
+
+        Files.createDirectories(parent);
         Path temp = Files.createTempFile(parent, "config", ".json.tmp");
         try {
             Files.writeString(temp, JsonWriter.write(root), StandardCharsets.UTF_8);
-            Files.move(temp, configFile, StandardCopyOption.REPLACE_EXISTING,
+            Files.move(temp, resolvedConfigFile, StandardCopyOption.REPLACE_EXISTING,
                     StandardCopyOption.ATOMIC_MOVE);
         } finally {
             Files.deleteIfExists(temp);
         }
     }
 
-    private static final AtomicReference<CompletableFuture<Void>> PENDING_SAVE =
-            new AtomicReference<>(CompletableFuture.completedFuture(null));
+    /** Best-effort read of {@code configFile}'s existing top-level object, for {@link #save} to preserve unknown members. */
+    private static JsonObject readExistingRootOrEmpty(Path configFile) {
+        if (Files.exists(configFile)) {
+            try {
+                if (JsonParser.parse(Files.readString(configFile, StandardCharsets.UTF_8))
+                        instanceof JsonObject existing) {
+                    return existing;
+                }
+            } catch (IOException | JsonParseException e) {
+                LOG.log(Level.WARNING, "Existing config " + configFile
+                        + " is unreadable or malformed; replacing it", e);
+            }
+        }
+        return JsonObject.empty();
+    }
+
+    /**
+     * Runs saves for {@link #saveAsync} one at a time. A plain "one virtual
+     * thread per call" approach (as an earlier version of this class did)
+     * lets concurrent saves race: the settings modal commits on both
+     * field-blur and Browse, which can fire back-to-back, and with
+     * unordered threads the stale call's {@code Files.move} can land after
+     * the fresh one's, silently reverting the file. A single-thread executor
+     * makes writes happen in submission order, same as {@code
+     * AnnotationStore.saveExecutor}.
+     */
+    private static final ExecutorService SAVE_EXECUTOR =
+            Executors.newSingleThreadExecutor(runnable -> Thread.ofVirtual().unstarted(runnable));
+
+    /**
+     * Newest-wins pending save, mirroring {@code AnnotationStore.pendingSnapshot}:
+     * {@link #saveAsync} always writes the *whole* config, so a call that
+     * arrives while an earlier one is still queued (not yet picked up by
+     * {@link #SAVE_EXECUTOR}'s single thread) can simply replace it instead
+     * of enqueuing a second, soon-to-be-overwritten write. Only one task is
+     * ever queued at a time; {@link #runPendingSave} is what drains it.
+     */
+    private static final AtomicReference<PendingSave> PENDING_SAVE = new AtomicReference<>();
+
+    private record PendingSave(UserConfig config, CompletableFuture<Void> future) {
+    }
 
     /**
      * As {@link #save}, off the caller's thread -- the settings modal calls
      * this from the FX thread, where a synchronous write is forbidden. The
      * returned future completes exceptionally on failure so the caller can
      * surface it; it is never swallowed.
+     *
+     * <p>Concurrent calls coalesce onto {@link #PENDING_SAVE} rather than
+     * racing independent threads (see {@link #SAVE_EXECUTOR}'s Javadoc). A
+     * call that gets superseded before it is written still has its returned
+     * future completed -- with the outcome of the save that superseded it --
+     * so a caller awaiting it never hangs.</p>
+     *
+     * <p><b>Tests:</b> {@link #PENDING_SAVE} and {@link #SAVE_EXECUTOR} are
+     * static, i.e. shared by the whole test JVM. A test that calls this must
+     * call {@link #flushPendingSaves()} (in a {@code finally}, before its
+     * {@code @TempDir} is removed) so a write cannot leak into, or race, an
+     * unrelated test.</p>
      */
     public static CompletableFuture<Void> saveAsync(UserConfig config) {
         CompletableFuture<Void> future = new CompletableFuture<>();
-        PENDING_SAVE.set(future);
-        Thread.ofVirtual().start(() -> {
-            try {
-                save(config, defaultConfigFile());
-                future.complete(null);
-            } catch (IOException | RuntimeException e) {
-                future.completeExceptionally(e);
-            }
-        });
+        PendingSave superseded = PENDING_SAVE.getAndSet(new PendingSave(config, future));
+        if (superseded == null) {
+            SAVE_EXECUTOR.execute(UserConfig::runPendingSave);
+        } else {
+            future.whenComplete((ignoredValue, error) -> {
+                if (error != null) {
+                    superseded.future().completeExceptionally(error);
+                } else {
+                    superseded.future().complete(null);
+                }
+            });
+        }
         return future;
     }
 
+    private static void runPendingSave() {
+        PendingSave pending = PENDING_SAVE.getAndSet(null);
+        if (pending == null) {
+            // Nothing left to do: a coalesced call already claimed this slot.
+            return;
+        }
+        try {
+            save(pending.config(), defaultConfigFile());
+            pending.future().complete(null);
+        } catch (IOException | RuntimeException e) {
+            pending.future().completeExceptionally(e);
+        }
+    }
+
     /**
-     * Awaits any in-flight {@link #saveAsync} (AGENTS.md: a service writing
-     * files from a background thread exposes a flush, so shutdown and tests
-     * do not race a pending write). Bounded, because a wedged disk must not
-     * hang shutdown -- the atomic move means the worst case is a stale file,
-     * never a corrupt one.
+     * Awaits every {@link #saveAsync} queued so far (AGENTS.md: a service
+     * writing files from a background thread exposes a flush, so shutdown
+     * and tests do not race a pending write). Submitting a no-op to {@link
+     * #SAVE_EXECUTOR} and awaiting it works because the executor is single
+     * threaded and FIFO: the no-op cannot run until every save task queued
+     * ahead of it has finished, so awaiting the no-op transitively awaits
+     * all of them -- same trick as {@code AnnotationStore.flushPendingSaves}.
+     * Bounded, because a wedged disk must not hang shutdown -- the atomic
+     * move means the worst case is a stale file, never a corrupt one.
      */
     public static void flushPendingSaves() {
         try {
-            PENDING_SAVE.get().get(10, TimeUnit.SECONDS);
+            SAVE_EXECUTOR.submit(() -> { }).get(10, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         } catch (ExecutionException | TimeoutException e) {
-            // saveAsync's caller already reported the failure to the user.
+            // saveAsync's own future already reported the failure to its caller.
         }
     }
 }

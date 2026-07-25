@@ -1,5 +1,11 @@
 package app.drydock.config;
 
+import app.drydock.state.json.JsonParser;
+import app.drydock.state.json.JsonValue;
+import app.drydock.state.json.JsonValue.JsonNumber;
+import app.drydock.state.json.JsonValue.JsonObject;
+import app.drydock.state.json.JsonValue.JsonString;
+
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -9,6 +15,7 @@ import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class UserConfigTest {
@@ -103,14 +110,21 @@ class UserConfigTest {
     void savePreservesMembersItDoesNotKnowAbout(@TempDir Path tempDir) throws Exception {
         // The file is human-editable and may grow keys this build predates;
         // rewriting it must not silently delete the user's other settings.
+        // A plain substring check would still pass if the value were
+        // mangled or the key duplicated, so parse the result and check the
+        // actual structure instead.
         Path configFile = tempDir.resolve("config.json");
         Files.writeString(configFile, "{\"worktreesDirectory\":\"/old\",\"somethingElse\":42}");
 
         UserConfig.save(new UserConfig(Optional.of(Path.of("/tmp/worktrees"))), configFile);
 
         String written = Files.readString(configFile);
-        assertTrue(written.contains("somethingElse"), written);
-        assertTrue(written.contains("/tmp/worktrees"), written);
+        JsonValue parsed = JsonParser.parse(written);
+        JsonObject root = assertInstanceOf(JsonObject.class, parsed, written);
+        assertEquals(new JsonNumber("42"), root.get("somethingElse"), written);
+        assertEquals(new JsonString(Path.of("/tmp/worktrees").toString()), root.get("worktreesDirectory"), written);
+        assertEquals(1, written.split("worktreesDirectory", -1).length - 1,
+                "worktreesDirectory must appear exactly once: " + written);
     }
 
     @Test
@@ -121,5 +135,57 @@ class UserConfigTest {
         UserConfig.save(UserConfig.empty(), configFile);
 
         assertEquals(Optional.empty(), UserConfig.load(configFile).worktreesDirectory());
+    }
+
+    // ---- saveAsync / flushPendingSaves ----
+    //
+    // saveAsync always writes to UserConfig.defaultConfigFile(), which is
+    // derived from the "user.home" system property, so these tests point
+    // that property at a @TempDir for their duration. PENDING_SAVE and
+    // SAVE_EXECUTOR are static -- shared by the whole test JVM -- so every
+    // test below flushes in a finally block before restoring the property
+    // and letting its @TempDir be deleted; otherwise a write queued by one
+    // test could still be in flight (or land after) when the next test's
+    // directory no longer exists.
+
+    @Test
+    void racingSaveAsyncCallsLeaveTheLastValueOnDiskAfterFlush(@TempDir Path tempDir) throws Exception {
+        String originalUserHome = System.getProperty("user.home");
+        System.setProperty("user.home", tempDir.toString());
+        try {
+            UserConfig.saveAsync(new UserConfig(Optional.of(Path.of("/tmp/worktrees-A"))));
+            UserConfig.saveAsync(new UserConfig(Optional.of(Path.of("/tmp/worktrees-B"))));
+            UserConfig.flushPendingSaves();
+
+            assertEquals(Optional.of(Path.of("/tmp/worktrees-B")),
+                    UserConfig.load(UserConfig.defaultConfigFile()).worktreesDirectory());
+        } finally {
+            UserConfig.flushPendingSaves();
+            System.setProperty("user.home", originalUserHome);
+        }
+    }
+
+    @Test
+    void flushPendingSavesWaitsForEveryQueuedSaveBeforeReturning(@TempDir Path tempDir) throws Exception {
+        String originalUserHome = System.getProperty("user.home");
+        System.setProperty("user.home", tempDir.toString());
+        try {
+            int calls = 50;
+            for (int i = 0; i < calls; i++) {
+                UserConfig.saveAsync(new UserConfig(Optional.of(Path.of("/tmp/worktrees-" + i))));
+            }
+            UserConfig.flushPendingSaves();
+
+            // If flushPendingSaves returned before every queued save had
+            // actually finished writing, a straggler could still overwrite
+            // the file after this point with something other than the
+            // last-issued value -- so the file's content read right here,
+            // with no waiting or retrying, must already be final.
+            assertEquals(Optional.of(Path.of("/tmp/worktrees-" + (calls - 1))),
+                    UserConfig.load(UserConfig.defaultConfigFile()).worktreesDirectory());
+        } finally {
+            UserConfig.flushPendingSaves();
+            System.setProperty("user.home", originalUserHome);
+        }
     }
 }
