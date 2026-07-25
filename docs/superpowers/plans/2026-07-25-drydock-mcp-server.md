@@ -465,6 +465,7 @@ git commit -m "feat(review): add ADDRESSED status with full Review-view handling
   - `boolean maySpawn(ManagedSessionId)`
   - `void chargeWorktree(ManagedSessionId) throws McpBudgetExhaustedException`
   - `void chargeSession(ManagedSessionId) throws McpBudgetExhaustedException`
+  - `void refundWorktree(ManagedSessionId)`, `void refundSession(ManagedSessionId)` — used when the charged operation then fails, so the limit is never exceeded but a failure costs nothing
   - `void revoke(ManagedSessionId)`
   - `static final int MAX_WORKTREES_PER_SESSION = 4`, `MAX_SESSIONS_PER_SESSION = 4`
   - `class McpBudgetExhaustedException extends Exception` (nested or its own file; the router turns it into an `McpToolException`)
@@ -603,6 +604,36 @@ class McpSessionRegistryTest {
         }
 
         registry.chargeSession(session);
+    }
+
+    @Test
+    void aRefundReleasesTheCharge() throws Exception {
+        // Callers charge before the operation so the limit can never be
+        // exceeded, then refund if the operation fails, so a failure is free.
+        ManagedSessionId session = ManagedSessionId.newId();
+        registry.mint(session, Spawn.ALLOWED);
+
+        registry.chargeWorktree(session);
+        registry.refundWorktree(session);
+
+        for (int i = 0; i < McpSessionRegistry.MAX_WORKTREES_PER_SESSION; i++) {
+            registry.chargeWorktree(session);
+        }
+        assertThrows(McpBudgetExhaustedException.class, () -> registry.chargeWorktree(session));
+    }
+
+    @Test
+    void aRefundNeverDropsTheCounterBelowZero() throws Exception {
+        ManagedSessionId session = ManagedSessionId.newId();
+        registry.mint(session, Spawn.ALLOWED);
+
+        registry.refundWorktree(session);
+        registry.refundSession(session);
+
+        for (int i = 0; i < McpSessionRegistry.MAX_WORKTREES_PER_SESSION; i++) {
+            registry.chargeWorktree(session);
+        }
+        assertThrows(McpBudgetExhaustedException.class, () -> registry.chargeWorktree(session));
     }
 
     @Test
@@ -746,6 +777,23 @@ public final class McpSessionRegistry {
 
     public void chargeSession(ManagedSessionId sessionId) throws McpBudgetExhaustedException {
         charge(sessionsStarted, sessionId, MAX_SESSIONS_PER_SESSION, "sessions");
+    }
+
+    /** Releases a charge whose operation then failed. Never drops below zero. */
+    public void refundWorktree(ManagedSessionId sessionId) {
+        refund(worktreesCreated, sessionId);
+    }
+
+    /** Releases a charge whose operation then failed. Never drops below zero. */
+    public void refundSession(ManagedSessionId sessionId) {
+        refund(sessionsStarted, sessionId);
+    }
+
+    private static void refund(Map<ManagedSessionId, AtomicInteger> counters, ManagedSessionId sessionId) {
+        AtomicInteger counter = counters.get(sessionId);
+        if (counter != null) {
+            counter.updateAndGet(current -> current > 0 ? current - 1 : 0);
+        }
     }
 
     private static void charge(Map<ManagedSessionId, AtomicInteger> counters, ManagedSessionId sessionId,
@@ -1911,7 +1959,7 @@ git commit -m "feat(mcp): let an agent reply to review threads and claim them ad
 - Test: `app/src/test/java/app/drydock/mcp/McpToolRouterWorktreeTest.java`
 
 **Interfaces:**
-- Consumes: `McpSessionContext.createWorktree` / `remoteNames` (Task 6), `BranchNames.validate` (Task 5), `McpSessionRegistry.maySpawn` / `chargeWorktree` (Task 4).
+- Consumes: `McpSessionContext.createWorktree` / `remoteNames` (Task 6), `BranchNames.validate` (Task 5), `McpSessionRegistry.maySpawn` / `chargeWorktree` / `refundWorktree` (Task 4).
 - Produces: no new public signatures.
 
 - [ ] **Step 1: Write the failing test**
@@ -2071,9 +2119,9 @@ In `McpToolRouter`, in this order — the order is the point of the last two tes
 3. Require a non-blank `branch`; read optional `start_point`.
 4. `BranchNames.validate(branch, context.remoteNames(caller))`.
 5. `context.createWorktree(caller, branch, startPoint)`, letting `McpToolException` propagate unchanged — the underlying service already produces actionable text.
-6. **Only on success**, `registry.chargeWorktree(caller)`, translating `McpBudgetExhaustedException` into `McpToolException`.
+6. **Charge before, refund on failure.** `registry.chargeWorktree(caller)` immediately before step 5, translating `McpBudgetExhaustedException` into `McpToolException`; if `createWorktree` then throws, `registry.refundWorktree(caller)` before rethrowing.
 
-Charging after success means a rejected name or a git failure does not consume budget. It also means a successful create just past the limit is kept rather than orphaned — check the budget *before* step 5 as well, so the limit is not exceeded by one; charge after so failures are free. Implement both: a pre-check that throws when the counter is already at the limit, and the charge afterwards.
+Charging first means the limit can never be exceeded, even by one; refunding on failure means a rejected branch name or a git failure costs nothing. Validation (steps 1–4) happens before the charge, so those failures never touch the budget either.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -2099,7 +2147,7 @@ git commit -m "feat(mcp): worktree_create with branch validation and a budget"
 **Note on the test's paths.** Membership is decided on **real** paths, so this test uses `@TempDir` and real directories, including a real symlink. Fabricated paths like `/repos/drydock` cannot be used: `toRealPath()` throws on a path that does not exist.
 
 **Interfaces:**
-- Consumes: `McpSessionContext.realWorktreesOf` / `startSession` (Task 6), `PromptSafety.validate` (Task 5), `McpSessionRegistry.maySpawn` / `chargeSession` (Task 4).
+- Consumes: `McpSessionContext.realWorktreesOf` / `startSession` (Task 6), `PromptSafety.validate` (Task 5), `McpSessionRegistry.maySpawn` / `chargeSession` / `refundSession` (Task 4).
 - Produces: no new public signatures.
 
 - [ ] **Step 1: Write the failing test**
@@ -2318,7 +2366,7 @@ In `McpToolRouter`, in this order:
 3. Require a non-blank `worktree_path`; read the optional `prompt` and, when present, `PromptSafety.validate(prompt)`.
 4. Resolve the target: `Path.of(raw).toAbsolutePath()`, then `toRealPath()`. Catch `IOException` (including `NoSuchFileException`) and throw `McpToolException` naming the path and saying it does not exist.
 5. Fetch `context.realWorktreesOf(caller)` and require an **exact `Path.equals` match**. No `startsWith`. On no match, throw `McpToolException` naming the rejected path and stating it is not a worktree of this session's repository.
-6. Pre-check the session budget, then `context.startSession(resolved, prompt)`, then charge on success.
+6. `registry.chargeSession(caller)`, then `context.startSession(resolved, prompt)`, calling `registry.refundSession(caller)` if it throws. Same reasoning as `worktree_create`: charge first so the limit holds, refund so failures are free, and validate before charging.
 7. Return `session_id` and `worktree_path` (the resolved real path).
 
 - [ ] **Step 4: Run test to verify it passes**
