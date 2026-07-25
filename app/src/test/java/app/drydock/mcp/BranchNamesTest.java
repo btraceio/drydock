@@ -35,9 +35,24 @@ class BranchNamesTest {
     }
 
     @Test
-    void aRemoteNameThatIsOnlyAPrefixOfTheFirstComponentIsFine() {
-        // "originals" is not the remote "origin"; only a whole first component counts.
-        assertThrows(McpToolException.class, () -> BranchNames.validate("origin/x", REMOTES));
+    void theRemoteCheckIsCaseInsensitiveBecauseRefFilesAreOnMacOs() {
+        // .git/refs/heads/<name> is a plain file open() on the macOS default
+        // case-insensitive filesystem, so "Origin/main" would land in the same
+        // place as "origin/main" and shadow refs/remotes/origin/main just the
+        // same. Verified against real git 2.49 in a throwaway repo: `git
+        // branch Origin/main HEAD` exits 0, and `origin/main` then resolves to
+        // the agent-chosen commit instead of the fetched upstream one.
+        assertThrows(McpToolException.class, () -> BranchNames.validate("Origin/main", REMOTES));
+        assertThrows(McpToolException.class, () -> BranchNames.validate("Upstream/main", REMOTES));
+    }
+
+    @Test
+    void aRemoteNameContainingASlashIsMatchedAsAWholeComponentNotJustTheFirstSegment() {
+        // git permits remote.foo/bar.url, so a remote's own name can contain a
+        // slash; the check must compare against the whole remote name, not
+        // just branch.split("/")[0].
+        Set<String> remotes = Set.of("foo/bar");
+        assertThrows(McpToolException.class, () -> BranchNames.validate("foo/bar/main", remotes));
     }
 
     @Test
@@ -51,6 +66,12 @@ class BranchNamesTest {
     }
 
     @Test
+    void aLeadingSlashOrEmptyPathComponentIsRejected() {
+        assertThrows(McpToolException.class, () -> BranchNames.validate("/leading", REMOTES));
+        assertThrows(McpToolException.class, () -> BranchNames.validate("a//b", REMOTES));
+    }
+
+    @Test
     void namesGitItselfRejectsAreRefusedWithItsOwnComplaint() {
         assertThrows(McpToolException.class, () -> BranchNames.validate("has space", REMOTES));
         assertThrows(McpToolException.class, () -> BranchNames.validate("..", REMOTES));
@@ -58,11 +79,25 @@ class BranchNamesTest {
         assertThrows(McpToolException.class, () -> BranchNames.validate("trailing.lock", REMOTES));
         assertThrows(McpToolException.class, () -> BranchNames.validate("a..b", REMOTES));
         assertThrows(McpToolException.class, () -> BranchNames.validate("a~b", REMOTES));
+        assertThrows(McpToolException.class, () -> BranchNames.validate("a@{b", REMOTES));
+        assertThrows(McpToolException.class, () -> BranchNames.validate("trailing-slash/", REMOTES));
+        assertThrows(McpToolException.class, () -> BranchNames.validate("has\\backslash", REMOTES));
+        assertThrows(McpToolException.class, () -> BranchNames.validate("has\u0007control", REMOTES));
     }
 
     @Test
     void blankAndNullAreRefused() {
+        // "" is blank without containing any of the forbidden characters, so
+        // this pins the isBlank() check itself rather than the space-is-a-
+        // forbidden-character rule (a plain "   " would still be caught by
+        // that rule even if the blank check were deleted).
+        assertThrows(McpToolException.class, () -> BranchNames.validate("", REMOTES));
         assertThrows(McpToolException.class, () -> BranchNames.validate("   ", REMOTES));
         assertThrows(McpToolException.class, () -> BranchNames.validate(null, REMOTES));
+    }
+
+    @Test
+    void aNullRemoteNamesSetIsRefusedRatherThanThrowingANullPointerException() {
+        assertThrows(McpToolException.class, () -> BranchNames.validate("feat/x", null));
     }
 }
