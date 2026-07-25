@@ -235,7 +235,8 @@ public final class WorktreeService implements AutoCloseable {
                     "branch", "-D", "--end-of-options", branch.get());
             ProcessResult deleted = run(branchCommand);
             if (deleted.exitCode() != 0) {
-                throw new GitCommandFailedException(branchCommand, deleted.exitCode(), ProcessRunner.excerpt(deleted.stderr()));
+                throw new BranchNotDeletedException(branch.get(), deleted.exitCode(),
+                        ProcessRunner.excerpt(deleted.stderr()));
             }
         }
     }

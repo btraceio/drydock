@@ -93,6 +93,29 @@ class WorktreeServiceTest {
     }
 
     @Test
+    void removeReportsAFailedBranchDeletionDistinctly(@TempDir Path repoDir, @TempDir Path worktreeParent)
+            throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/kept").get();
+        // A second worktree on the branch keeps `git branch -D` from
+        // succeeding after the first worktree is gone.
+        Path second = worktreeParent.resolve("second");
+        // --force: git otherwise refuses to check out a branch that is
+        // already checked out in another worktree, which is the fixture's
+        // whole point here.
+        runGit(repo, "worktree", "add", "--force", second.toString(), "feat/kept");
+
+        CompletionException completion = assertThrows(CompletionException.class,
+                () -> service.remove(repo, worktree, Optional.of("feat/kept")).join());
+
+        BranchNotDeletedException failure =
+                assertInstanceOf(BranchNotDeletedException.class, completion.getCause());
+        assertEquals("feat/kept", failure.branch());
+        assertFalse(Files.exists(worktree));
+        assertTrue(runGitCapture(repo, "branch", "--list", "feat/kept").contains("feat/kept"));
+    }
+
+    @Test
     void removeWithoutABranchOnlyRemovesTheWorktree(@TempDir Path repoDir, @TempDir Path worktreeParent)
             throws Exception {
         Path repo = initCommittedRepo(repoDir);
