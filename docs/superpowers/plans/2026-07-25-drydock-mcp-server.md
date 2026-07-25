@@ -968,14 +968,34 @@ class BranchNamesTest {
     }
 
     @Test
-    void aRemoteNameThatIsOnlyAPrefixOfTheFirstComponentIsFine() {
-        // "originals" is not the remote "origin"; only a whole first component counts.
+    void aBranchWhoseFirstComponentIsExactlyARemoteIsRefused() {
         assertThrows(McpToolException.class, () -> BranchNames.validate("origin/x", REMOTES));
     }
 
     @Test
     void aBranchWhoseFirstComponentMerelyStartsWithARemoteNameIsAccepted() throws Exception {
+        // "originals" is not the remote "origin"; only a whole first component counts.
         BranchNames.validate("originals/x", REMOTES);
+    }
+
+    @Test
+    void theRemoteCheckIsCaseInsensitiveBecauseRefFilesAreOnMacOs() {
+        // Loose ref lookup is a plain open() of .git/refs/heads/<name>, so on a
+        // case-insensitive filesystem -- the macOS default, and Drydock is a
+        // macOS app -- "Origin/main" occupies the same file as "origin/main"
+        // and shadows the remote-tracking ref identically. Verified against
+        // real git: `git branch Origin/main HEAD` exits 0 and afterwards
+        // `origin/main` resolves to the new branch's commit.
+        assertThrows(McpToolException.class, () -> BranchNames.validate("Origin/main", REMOTES));
+        assertThrows(McpToolException.class, () -> BranchNames.validate("UPSTREAM/main", REMOTES));
+    }
+
+    @Test
+    void aRemoteWhoseOwnNameContainsASlashIsAlsoRefused() {
+        // git permits remote.foo/bar.url, so the first path component is not
+        // always the whole remote name.
+        assertThrows(McpToolException.class,
+                () -> BranchNames.validate("foo/bar/main", Set.of("foo/bar")));
     }
 
     @Test
@@ -991,6 +1011,19 @@ class BranchNamesTest {
         assertThrows(McpToolException.class, () -> BranchNames.validate("trailing.lock", REMOTES));
         assertThrows(McpToolException.class, () -> BranchNames.validate("a..b", REMOTES));
         assertThrows(McpToolException.class, () -> BranchNames.validate("a~b", REMOTES));
+        // One case per remaining rule, so deleting any single rule turns this red.
+        assertThrows(McpToolException.class, () -> BranchNames.validate("a@{1}", REMOTES));
+        assertThrows(McpToolException.class, () -> BranchNames.validate("a//b", REMOTES));
+        assertThrows(McpToolException.class, () -> BranchNames.validate("a/", REMOTES));
+        assertThrows(McpToolException.class, () -> BranchNames.validate("/a", REMOTES));
+        assertThrows(McpToolException.class, () -> BranchNames.validate("a\\b", REMOTES));
+        assertThrows(McpToolException.class, () -> BranchNames.validate("ab", REMOTES));
+        assertThrows(McpToolException.class, () -> BranchNames.validate(".hidden", REMOTES));
+    }
+
+    @Test
+    void aNullRemoteSetIsAnActionableFailureNotANullPointer() {
+        assertThrows(McpToolException.class, () -> BranchNames.validate("feat/x", null));
     }
 
     @Test
@@ -1158,7 +1191,13 @@ Create `app/src/main/java/app/drydock/mcp/BranchNames.java`. Implement `validate
 
 - Reject null/blank with a message naming the `branch` argument.
 - Reject a name starting with `refs/`.
-- Split on `/`; if the **first whole component** equals any entry in `remoteNames`, reject with a message that names the remote and explains the shadowing ("`origin/main` as a local branch shadows the remote-tracking ref; pick a name that does not start with a remote name").
+- Reject a name that begins with any remote's name followed by `/`, compared **case-insensitively**, with a message that names the remote and explains the shadowing ("`origin/main` as a local branch shadows the remote-tracking ref; pick a name that does not start with a remote name"). Use `branch.regionMatches(true, 0, remote + "/", 0, remote.length() + 1)` per remote — one rule that covers three cases at once:
+  - the plain `origin/main` hijack;
+  - **case differences.** Loose ref lookup is a plain `open()` of `.git/refs/heads/<name>`, so on a case-insensitive filesystem — the macOS default, and this is a macOS app — `Origin/main` occupies the same file as `origin/main` and shadows the remote-tracking ref identically. Verified against real git: `git branch Origin/main HEAD` exits 0, and afterwards `origin/main` resolves to the new branch's commit. A case-sensitive `Set.contains` check is bypassed by one capital letter;
+  - **remotes whose own name contains `/`.** git permits `remote.foo/bar.url`, so the first path component is not always the whole remote name.
+
+  It still accepts `originals/x`, because `regionMatches` against `"origin/"` fails at the `/`. Say all of this in the Javadoc, or it will be "simplified" back to a `Set.contains` on the first component.
+- Reject a null `remoteNames` as an `McpToolException`, not a raw `NullPointerException` — the caller turns this message into agent-visible text.
 - Apply git's own refname rules locally rather than spawning git, because this runs per tool call and the rules are stable: reject a component that is empty, starts with `.`, or ends with `.lock`; reject `..`, a leading `-`, a trailing `/` or `.`, and any of ` ~^:?*[\` or ASCII control characters, and the sequences `@{` and `//`.
 
 Do not spawn `git check-ref-format` — `ProcessRunner` is for real work, and a per-call process spawn to validate a string is not it. Note in the Javadoc that the rules mirror `git check-ref-format --branch` and cite it.
@@ -1174,7 +1213,7 @@ Javadoc must cite the delivery path — `MainWorkspace.sendTaskWhenReady` collap
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `./gradlew :app:test --tests 'app.drydock.mcp.AnnotationLinesTest' --tests 'app.drydock.mcp.BranchNamesTest' --tests 'app.drydock.mcp.PromptSafetyTest'`
-Expected: PASS (22 tests)
+Expected: PASS (25 tests)
 
 - [ ] **Step 5: Commit**
 
