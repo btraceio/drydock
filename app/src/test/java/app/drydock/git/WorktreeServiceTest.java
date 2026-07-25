@@ -400,6 +400,83 @@ class WorktreeServiceTest {
         assertEquals(Optional.of("initializing"), worktrees.get(1).lockReason());
     }
 
+    @Test
+    void inspectMergeTargetReportsTheBaseBranchHeadAndBranchTip(@TempDir Path repoDir,
+            @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/x").get();
+        String head = runGitCapture(repo, "rev-parse", "HEAD").strip();
+
+        WorktreeService.MergeTarget target = service.inspectMergeTarget(repo, "feat/x").get();
+
+        assertEquals(Optional.of("main"), target.baseBranch());
+        assertEquals(head, target.baseHeadOid());
+        assertEquals(Optional.of(head), target.branchTipOid());
+        assertEquals(WorktreeService.MergeTarget.InProgress.NONE, target.inProgress());
+    }
+
+    @Test
+    void inspectMergeTargetReportsADetachedMainCheckout(@TempDir Path repoDir) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        runGit(repo, "checkout", "--detach");
+
+        WorktreeService.MergeTarget target = service.inspectMergeTarget(repo, "main").get();
+
+        assertTrue(target.baseBranch().isEmpty());
+    }
+
+    @Test
+    void inspectMergeTargetReportsAMissingBranch(@TempDir Path repoDir) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+
+        WorktreeService.MergeTarget target = service.inspectMergeTarget(repo, "feat/never-existed").get();
+
+        assertTrue(target.branchTipOid().isEmpty());
+    }
+
+    @Test
+    void inspectMergeTargetReportsAMergeAlreadyInProgress(@TempDir Path repoDir,
+            @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        conflictingBranch(repo, worktreeParent, "feat/conflict");
+        // Leaves MERGE_HEAD behind: the merge stops, we do not abort it.
+        runGitAllowingFailure(repo, "merge", "--no-ff", "feat/conflict");
+
+        WorktreeService.MergeTarget target = service.inspectMergeTarget(repo, "feat/conflict").get();
+
+        assertEquals(WorktreeService.MergeTarget.InProgress.MERGE, target.inProgress());
+    }
+
+    @Test
+    void inspectMergeTargetReportsARebaseInProgress(@TempDir Path repoDir,
+            @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        conflictingBranch(repo, worktreeParent, "feat/rebase");
+        runGitAllowingFailure(repo, "-c", "user.name=Test", "-c", "user.email=test@example.com",
+                "rebase", "feat/rebase");
+
+        WorktreeService.MergeTarget target = service.inspectMergeTarget(repo, "feat/rebase").get();
+
+        assertEquals(WorktreeService.MergeTarget.InProgress.REBASE, target.inProgress());
+    }
+
+    @Test
+    void isWorktreeCleanIgnoresADirtySubmoduleButReportsUntrackedFiles(@TempDir Path repoDir,
+            @TempDir Path worktreeParent) throws Exception {
+        Path repo = initRepoWithSubmodule(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/sub").get();
+        initSubmodulesIn(worktree);
+        // Exactly Drydock's own third_party/ghostty situation: the build
+        // leaves modified content inside the submodule on every run.
+        Files.writeString(worktree.resolve("vendor").resolve("lib.txt"), "patched by the build\n");
+
+        assertTrue(service.isWorktreeClean(worktree).get());
+
+        Files.writeString(worktree.resolve("scratch.txt"), "untracked\n");
+
+        assertFalse(service.isWorktreeClean(worktree).get());
+    }
+
     private static void deleteRecursively(Path root) throws IOException {
         try (var paths = Files.walk(root)) {
             paths.sorted(Comparator.reverseOrder()).forEach(path -> {
@@ -446,6 +523,32 @@ class WorktreeServiceTest {
      */
     private static void initSubmodulesIn(Path worktree) throws IOException, InterruptedException {
         runGit(worktree, "-c", "protocol.file.allow=always", "submodule", "update", "--init");
+    }
+
+    /**
+     * Creates {@code branch} in a worktree with a commit that conflicts with
+     * a commit made on the main checkout's README, so a merge or rebase of
+     * it always stops.
+     */
+    private static void conflictingBranch(Path repo, Path worktreeParent, String branch)
+            throws IOException, InterruptedException {
+        Path worktree = worktreeParent.resolve(branch.replace('/', '-'));
+        runGit(repo, "worktree", "add", worktree.toString(), "-b", branch);
+        Files.writeString(worktree.resolve("README.md"), "worktree version\n");
+        runGit(worktree, "add", "README.md");
+        runGit(worktree, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "wt change");
+        Files.writeString(repo.resolve("README.md"), "main version\n");
+        runGit(repo, "add", "README.md");
+        runGit(repo, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "main change");
+    }
+
+    /** For git commands whose non-zero exit is the point of the fixture. */
+    private static void runGitAllowingFailure(Path repo, String... args) throws IOException, InterruptedException {
+        List<String> command = new java.util.ArrayList<>(List.of("git", "-C", repo.toString()));
+        command.addAll(List.of(args));
+        Process process = new ProcessBuilder(command).redirectErrorStream(true).start();
+        process.getInputStream().readAllBytes();
+        process.waitFor();
     }
 
     private static void runGit(Path repo, String... args) throws IOException, InterruptedException {

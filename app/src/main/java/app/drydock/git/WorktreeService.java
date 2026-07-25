@@ -58,6 +58,27 @@ public final class WorktreeService implements AutoCloseable {
                            boolean prunable, boolean locked, Optional<String> lockReason) {
     }
 
+    /**
+     * The main checkout's merge-relevant state, captured in one pass
+     * immediately before a merge is attempted, and again afterwards to
+     * decide what actually happened.
+     *
+     * <p>{@link #baseBranch()} is empty when HEAD is detached -- a merge
+     * committed there is reachable only from the reflog once the source
+     * branch is deleted, so it is a refusal, not a label. {@link
+     * #branchTipOid()} is empty when the branch is gone. {@link
+     * #inProgress()} is what keeps a merge the <em>user</em> left open from
+     * being mistaken for one of ours: our own {@code git merge} exits 128
+     * ("Merging is not possible because you have unmerged files") while
+     * {@code MERGE_HEAD} sits there from their merge.</p>
+     */
+    public record MergeTarget(Optional<String> baseBranch, String baseHeadOid,
+                              Optional<String> branchTipOid, InProgress inProgress) {
+
+        /** A sequencer operation already running in the main checkout. */
+        public enum InProgress { NONE, MERGE, REBASE, CHERRY_PICK, REVERT, BISECT }
+    }
+
     public WorktreeService() {
         this(new GitExecutableLocator());
     }
@@ -204,6 +225,103 @@ public final class WorktreeService implements AutoCloseable {
                 throw new GitCommandFailedException(branchCommand, deleted.exitCode(), ProcessRunner.excerpt(deleted.stderr()));
             }
         }
+    }
+
+    /**
+     * Captures the main checkout's merge-relevant state on this service's
+     * background executor. Never throws for "not on a branch" or "branch
+     * missing" -- those are reported in the result, because the caller has
+     * distinct user-facing copy for each.
+     */
+    public CompletableFuture<MergeTarget> inspectMergeTarget(Path mainCheckout, String branch) {
+        return CompletableFuture.supplyAsync(() -> inspectMergeTargetBlocking(mainCheckout, branch), executor);
+    }
+
+    /** Synchronous form of {@link #inspectMergeTarget}, package-private for tests. */
+    MergeTarget inspectMergeTargetBlocking(Path mainCheckout, String branch) {
+        Path git = locator.locate()
+                .orElseThrow(() -> new GitExecutableNotFoundException(locator.describeSearched()));
+        return inspectMergeTarget(git, mainCheckout, branch);
+    }
+
+    private static MergeTarget inspectMergeTarget(Path git, Path mainCheckout, String branch) {
+        // --quiet: a detached HEAD is an empty result, not an error.
+        Optional<String> baseBranch = firstLine(run(List.of(
+                git.toString(), "-C", mainCheckout.toString(), "symbolic-ref", "--quiet", "--short", "HEAD")));
+        List<String> headCommand = List.of(
+                git.toString(), "-C", mainCheckout.toString(), "rev-parse", "HEAD");
+        ProcessResult head = run(headCommand);
+        if (head.exitCode() != 0) {
+            throw new GitCommandFailedException(headCommand, head.exitCode(), ProcessRunner.excerpt(head.stderr()));
+        }
+        // refs/heads/ so a tag or a file of the same name can never answer
+        // for the branch, and so the argument cannot start with '-'.
+        Optional<String> tip = firstLine(run(List.of(
+                git.toString(), "-C", mainCheckout.toString(),
+                "rev-parse", "--verify", "--quiet", "--end-of-options", "refs/heads/" + branch)));
+        return new MergeTarget(baseBranch, head.stdout().strip(), tip, inProgressIn(git, mainCheckout));
+    }
+
+    /**
+     * Which sequencer operation the main checkout is in the middle of.
+     * Rebase is checked first: a conflicted rebase records {@code
+     * REBASE_HEAD} plus a {@code rebase-merge}/{@code rebase-apply}
+     * directory rather than {@code MERGE_HEAD}, and the directory is the
+     * signal that survives every git version we support.
+     */
+    private static MergeTarget.InProgress inProgressIn(Path git, Path mainCheckout) {
+        Path gitDir = absoluteGitDir(git, mainCheckout);
+        if (Files.isDirectory(gitDir.resolve("rebase-merge")) || Files.isDirectory(gitDir.resolve("rebase-apply"))) {
+            return MergeTarget.InProgress.REBASE;
+        }
+        if (Files.exists(gitDir.resolve("MERGE_HEAD"))) {
+            return MergeTarget.InProgress.MERGE;
+        }
+        if (Files.exists(gitDir.resolve("CHERRY_PICK_HEAD"))) {
+            return MergeTarget.InProgress.CHERRY_PICK;
+        }
+        if (Files.exists(gitDir.resolve("REVERT_HEAD"))) {
+            return MergeTarget.InProgress.REVERT;
+        }
+        if (Files.exists(gitDir.resolve("BISECT_LOG"))) {
+            return MergeTarget.InProgress.BISECT;
+        }
+        return MergeTarget.InProgress.NONE;
+    }
+
+    private static Path absoluteGitDir(Path git, Path checkout) {
+        List<String> command = List.of(
+                git.toString(), "-C", checkout.toString(), "rev-parse", "--absolute-git-dir");
+        ProcessResult result = run(command);
+        if (result.exitCode() != 0) {
+            throw new GitCommandFailedException(command, result.exitCode(), ProcessRunner.excerpt(result.stderr()));
+        }
+        return Path.of(result.stdout().strip());
+    }
+
+    /** The command's first output line, or empty when it failed or printed nothing. */
+    private static Optional<String> firstLine(ProcessResult result) {
+        if (result.exitCode() != 0) {
+            return Optional.empty();
+        }
+        String value = result.stdout().strip();
+        return value.isEmpty() ? Optional.empty() : Optional.of(value.lines().findFirst().orElse(value));
+    }
+
+    /**
+     * Whether the worktree at {@code worktree} holds uncommitted work,
+     * asked with the same predicate {@link #remove} uses -- see {@link
+     * #isClean(Path, Path)} for why {@code --ignore-submodules=dirty}
+     * matters here: gating the merge on {@code GitStatus.dirty()} instead
+     * would leave the action permanently disabled in any repository with a
+     * build-patched submodule, Drydock's own included.
+     */
+    public CompletableFuture<Boolean> isWorktreeClean(Path worktree) {
+        return CompletableFuture.supplyAsync(() -> {
+            Path git = locator.locate()
+                    .orElseThrow(() -> new GitExecutableNotFoundException(locator.describeSearched()));
+            return isClean(git, worktree);
+        }, executor);
     }
 
     /**
