@@ -100,10 +100,22 @@ tool is testable headlessly.
 ### Wiring into sessions
 
 `ClaudeHookInstaller` already writes a settings file that the spawned
-`claude` inherits; it takes on the MCP config too. Per session, Drydock
-writes an MCP server entry pointing at `http://127.0.0.1:<port>/mcp` with
-the session token in a header. The trust model is identical to the hooks':
-config Drydock owns, in a directory Drydock owns.
+`claude` inherits via `--settings`, and that is the model to copy — but not
+the file to reuse. That settings file is written once at startup and shared
+by every session, so it cannot carry a per-session token.
+
+Instead, a per-session file passed with `claude --mcp-config <file>`,
+holding an MCP server entry that points at `http://127.0.0.1:<port>/mcp`
+with the session token in a header. The trust model is identical to the
+hooks': config Drydock owns, in a directory Drydock owns. The file holds a
+bearer token, so it is created owner-readable only.
+
+`--mcp-config` is gated on a detected capability, exactly as `--settings`
+is gated on `ClaudeCapabilities.supportsSettings`: a `claude` without the
+flag launches without Drydock tools rather than failing to launch.
+`--strict-mcp-config` is deliberately not passed — it would suppress the
+user's own MCP servers, and Drydock's tools are an addition to their setup,
+not a replacement.
 
 ### Threading
 
@@ -159,13 +171,15 @@ Creates a worktree in the caller's repository, with the directory name
 derived by the existing `WorktreeNaming` slug rules. Returns the path and
 branch. Does not start a session.
 
-Worktree creation currently lives in `GitStatusService`
-(`createWorktreeBlocking`, `addWorktreeForBranchBlocking`), both
-package-private, while `WorktreeService` owns list, remove, and merge.
-This tool needs a caller-facing entry point, so the design folds in a
-small consolidation: expose creation through `WorktreeService` alongside
-the rest of the worktree lifecycle. This is the only pre-existing
-structural issue the design touches.
+Creation calls the existing public `GitStatusService.createWorktree(repositoryRoot,
+worktreeDirectory, branch, startPoint)`, which already returns a
+`CompletableFuture<Path>` off the FX thread.
+
+Worktree creation lives in `GitStatusService` while `WorktreeService` owns
+list, remove, and merge, which is an odd split. It is left alone: the
+public entry point this tool needs already exists, `WorktreeServiceTest`
+already drives creation through `GitStatusService`, and consolidating the
+two would be refactoring unrelated to this feature.
 
 ### `session_start(worktree_path, prompt?)`
 
