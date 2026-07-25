@@ -61,7 +61,6 @@ import java.util.concurrent.TimeoutException;
 import java.util.Base64;
 import java.util.Optional;
 import java.util.function.Supplier;
-import java.util.concurrent.TimeUnit;
 
 /**
  * The main window: a {@link SplitPane} with the repository sidebar (plan
