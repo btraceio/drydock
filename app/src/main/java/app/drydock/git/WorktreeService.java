@@ -44,6 +44,15 @@ public final class WorktreeService implements AutoCloseable {
     /** List/remove are quick local operations; a hung git must not park futures forever. */
     private static final Duration PROCESS_TIMEOUT = Duration.ofSeconds(15);
 
+    /**
+     * A merge is not a status query: a slow {@code pre-merge-commit} hook, a
+     * large tree, or submodule checkouts can all run well past
+     * {@link #PROCESS_TIMEOUT} (AGENTS.md: "short for status/query commands,
+     * long for clone-scale work"). Matches {@code GitStatusService}'s
+     * {@code FETCH_TIMEOUT}.
+     */
+    private static final Duration MERGE_PROCESS_TIMEOUT = Duration.ofMinutes(2);
+
     private final GitExecutableLocator locator;
     private final ExecutorService executor;
     private final boolean ownsExecutor;
@@ -374,9 +383,24 @@ public final class WorktreeService implements AutoCloseable {
             List<String> command = List.of(
                     git.toString(), "-C", mainCheckout.toString(),
                     "merge", "--no-ff", "--end-of-options", branch);
-            ProcessResult result = run(command);
+            ProcessResult result = null;
+            Optional<String> spawnFailureDetail = Optional.empty();
+            try {
+                result = run(command, MERGE_PROCESS_TIMEOUT);
+            } catch (GitCommandFailedException e) {
+                // The spawn itself failed (timed out, killed mid-merge, an IO
+                // error) -- not treated as fatal, and not assumed to be a
+                // no-op either: git may have left the repository mid-merge
+                // (a real conflict, or even a completed commit right before
+                // the timeout fired), and verify() below inspects that state
+                // directly instead of trusting this outcome either way.
+                spawnFailureDetail = Optional.of(e.stderrExcerpt());
+            }
             MergeVerdict verdict = verify(git, mainCheckout, target);
             if (verdict instanceof MergeVerdict.NotMerged) {
+                if (spawnFailureDetail.isPresent()) {
+                    return new MergeVerdict.Refused(spawnFailureDetail.get());
+                }
                 return result.exitCode() == 0
                         ? new MergeVerdict.Indeterminate(
                                 "git reported success but " + branch + " is not merged")
@@ -401,6 +425,16 @@ public final class WorktreeService implements AutoCloseable {
     private static MergeVerdict verify(Path git, Path mainCheckout, MergeTarget target) {
         String tip = target.branchTipOid().orElseThrow(() -> new IllegalArgumentException(
                 "inspectMergeTarget found no branch tip; the merge should never have been attempted"));
+        if (target.baseBranch().isEmpty()) {
+            // Not relied upon: a later task gates the merge action off a
+            // detached main checkout before this is ever called. But this is
+            // the boundary the destructive branch-delete step is gated on, so
+            // it must not depend on a caller upstream getting that right --
+            // MergeTarget's own javadoc calls a detached HEAD "a refusal, not
+            // a label", and Optional.empty().equals(Optional.empty()) would
+            // otherwise let the branch-equality check below wave it through.
+            return new MergeVerdict.Indeterminate("the main checkout was on a detached HEAD, not a branch");
+        }
         BaseState now = baseStateOf(git, mainCheckout);
         if (!now.branch().equals(target.baseBranch())) {
             return new MergeVerdict.Indeterminate("the main checkout is no longer on "
@@ -414,18 +448,21 @@ public final class WorktreeService implements AutoCloseable {
             return new MergeVerdict.Indeterminate(target.baseBranch().orElse("the base branch")
                     + " moved to a commit that is not a merge of the branch");
         }
-        List<String> unmerged = linesOf(run(List.of(
+        List<String> diffCommand = List.of(
                 git.toString(), "-C", mainCheckout.toString(),
-                "diff", "--name-only", "--diff-filter=U")));
+                "diff", "--name-only", "--diff-filter=U");
+        List<String> unmerged = linesOf(diffCommand, run(diffCommand));
         if (!unmerged.isEmpty()) {
             return new MergeVerdict.Conflicted(unmerged);
         }
         if (now.inProgress() == MergeTarget.InProgress.MERGE) {
             // (now.inProgress() comes from BaseState -- see baseStateOf below.)
-            // MERGE_HEAD with a clean index: git stopped before committing
-            // (a pre-merge-commit hook veto, --no-commit). Not a conflict --
-            // and `git commit` would not re-run that hook.
-            return new MergeVerdict.Refused("git stopped before committing the merge");
+            // MERGE_HEAD with no unmerged paths left: either a
+            // pre-merge-commit hook vetoed the commit (git commit would not
+            // re-run it), or an agent has staged every conflict's resolution
+            // but not yet committed. A poll cannot tell which apart, and
+            // "keep waiting" is the right next step either way.
+            return new MergeVerdict.Refused("a merge is open in the main checkout but not committed");
         }
         if (isAncestor(git, mainCheckout, tip)) {
             return new MergeVerdict.AlreadyMerged();
@@ -454,9 +491,23 @@ public final class WorktreeService implements AutoCloseable {
         return new BaseState(branch, head.stdout().strip(), inProgressIn(git, mainCheckout));
     }
 
+    /**
+     * {@code merge-base --is-ancestor} uses exit 1 for a real "no" and any
+     * other non-zero code for a failure (bad revision, corrupt repository) --
+     * collapsing both to {@code false} would report {@link MergeVerdict#NotMerged()}
+     * for an error the user never saw.
+     */
     private static boolean isAncestor(Path git, Path mainCheckout, String oid) {
-        return run(List.of(git.toString(), "-C", mainCheckout.toString(),
-                "merge-base", "--is-ancestor", "--end-of-options", oid, "HEAD")).exitCode() == 0;
+        List<String> command = List.of(git.toString(), "-C", mainCheckout.toString(),
+                "merge-base", "--is-ancestor", "--end-of-options", oid, "HEAD");
+        ProcessResult result = run(command);
+        if (result.exitCode() == 0) {
+            return true;
+        }
+        if (result.exitCode() == 1) {
+            return false;
+        }
+        throw new GitCommandFailedException(command, result.exitCode(), ProcessRunner.excerpt(result.stderr()));
     }
 
     /** The parent oids of {@code oid}, from {@code rev-list --parents -n1}. */
@@ -471,8 +522,17 @@ public final class WorktreeService implements AutoCloseable {
         return tokens.size() <= 1 ? List.of() : tokens.subList(1, tokens.size());
     }
 
-    private static List<String> linesOf(ProcessResult result) {
-        if (result.exitCode() != 0 || result.stdout().isBlank()) {
+    /**
+     * A non-zero exit (locked or corrupt index, unreadable worktree) is never
+     * silently equal to "no conflicted paths" -- verification would proceed
+     * to {@code Refused}/{@code NotMerged} and the user would be told
+     * something untrue about a real error.
+     */
+    private static List<String> linesOf(List<String> command, ProcessResult result) {
+        if (result.exitCode() != 0) {
+            throw new GitCommandFailedException(command, result.exitCode(), ProcessRunner.excerpt(result.stderr()));
+        }
+        if (result.stdout().isBlank()) {
             return List.of();
         }
         return result.stdout().strip().lines().toList();
@@ -634,13 +694,17 @@ public final class WorktreeService implements AutoCloseable {
     // ---- process execution (shared ProcessRunner, git-flavored failure translation) ----
 
     private static ProcessResult run(List<String> command) {
+        return run(command, PROCESS_TIMEOUT);
+    }
+
+    private static ProcessResult run(List<String> command, Duration timeout) {
         try {
-            return ProcessRunner.run(command, null, PROCESS_TIMEOUT);
+            return ProcessRunner.run(command, null, timeout);
         } catch (IOException e) {
             throw new GitCommandFailedException(command, -1, e.getMessage() == null ? "" : e.getMessage());
         } catch (ProcessTimeoutException e) {
             throw new GitCommandFailedException(command, -1,
-                    "timed out after " + PROCESS_TIMEOUT.toSeconds() + "s (killed)");
+                    "timed out after " + timeout.toSeconds() + "s (killed)");
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new GitCommandFailedException(command, -1, "interrupted while waiting for git");

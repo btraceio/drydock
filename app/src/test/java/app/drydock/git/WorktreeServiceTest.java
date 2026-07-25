@@ -345,6 +345,14 @@ class WorktreeServiceTest {
         assertInstanceOf(WorktreeService.MergeVerdict.Refused.class, service.merge(repo, "feat/hooked", target).get());
     }
 
+    /**
+     * Documents the honest boundary of the oracle: {@code Merged} proves a
+     * merge commit <em>of the recorded tip</em> exists on the base branch,
+     * not that its content landed in the tree. That is safe only because the
+     * recorded tip stays reachable from the base branch either way -- the
+     * later branch delete can never lose commits -- so accepting {@code -s
+     * ours} here is a deliberate, narrow limitation, not a latent bug.
+     */
     @Test
     void verifyMergeAcceptsStrategyOursBecauseItIsStillARealMergeCommit(@TempDir Path repoDir,
             @TempDir Path worktreeParent) throws Exception {
@@ -359,6 +367,27 @@ class WorktreeServiceTest {
 
         assertInstanceOf(WorktreeService.MergeVerdict.Merged.class, service.verifyMerge(repo, target).get());
         assertFalse(Files.exists(repo.resolve("feature.txt")));
+    }
+
+    /**
+     * Pins the parent-set check's negative branch: {@code reset --hard} onto
+     * the branch's tip makes {@code merge-base --is-ancestor} pass (ancestry
+     * is satisfied) while no merge commit of the recorded tip exists on the
+     * base branch at all. Verified by hand that replacing the parent-set
+     * check with a plain {@code isAncestor} call makes this test fail --
+     * see the Task 2 fix-round-1 report.
+     */
+    @Test
+    void verifyMergeIsIndeterminateAfterAResetHardOntoTheBranch(@TempDir Path repoDir,
+            @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/reset-hard").get();
+        commitFile(worktree, "feature.txt", "new feature\n", "add feature");
+        WorktreeService.MergeTarget target = service.inspectMergeTarget(repo, "feat/reset-hard").get();
+
+        runGit(repo, "reset", "--hard", "feat/reset-hard");
+
+        assertInstanceOf(WorktreeService.MergeVerdict.Indeterminate.class, service.verifyMerge(repo, target).get());
     }
 
     @Test
