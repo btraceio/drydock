@@ -9,6 +9,7 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -86,24 +87,94 @@ class MergeFinishDecisionTest {
     }
 
     @Test
-    void aMergedVerdictCleansUp() {
-        assertInstanceOf(MergeFinishDecision.Next.CleanUp.class, MergeFinishDecision.forVerdict(
-                new MergeVerdict.Merged(OID), "/repo", "feat/x", "main", false));
-        assertInstanceOf(MergeFinishDecision.Next.CleanUp.class, MergeFinishDecision.forVerdict(
-                new MergeVerdict.AlreadyMerged(), "/repo", "feat/x", "main", false));
+    void baseDriftWinsOverInProgressMissingBranchAndUncleanWorktree() {
+        // A target that would also trip in-progress, missing-branch, and unclean; only
+        // the drift headline may surface, pinning drift ahead of the other three checks.
+        MergeFinishDecision.Next.Stopped stopped = assertInstanceOf(MergeFinishDecision.Next.Stopped.class,
+                MergeFinishDecision.forPreflight(
+                        target(Optional.of("release/2.0"), Optional.empty(), MergeTarget.InProgress.MERGE),
+                        "main", "feat/x", false));
+
+        assertEquals("The main checkout is on release/2.0, not main", stopped.headline());
     }
 
     @Test
-    void aConflictHandsOffWithAFencedPrompt() {
+    void inProgressWinsOverMissingBranchAndUncleanWorktree() {
+        // A healthy base with an operation in progress, a missing branch, and an unclean
+        // worktree all at once; only the in-progress headline may surface.
+        MergeFinishDecision.Next.Stopped stopped = assertInstanceOf(MergeFinishDecision.Next.Stopped.class,
+                MergeFinishDecision.forPreflight(
+                        target(Optional.of("main"), Optional.empty(), MergeTarget.InProgress.MERGE),
+                        "main", "feat/x", false));
+
+        assertEquals("The main checkout has a merge in progress", stopped.headline());
+    }
+
+    @Test
+    void cleanUpIsReachableOnlyFromMergedOrAlreadyMerged() {
+        // The load-bearing invariant: CleanUp -- and therefore the destructive
+        // cleanup -- must be reachable from exactly Merged and AlreadyMerged, under
+        // both values of afterHandOff. Looping over all twelve cells pins this as one
+        // invariant instead of the two independent facts a future edit could erode
+        // without failing any single assertion.
+        List<MergeVerdict> verdicts = List.of(
+                new MergeVerdict.Merged(OID),
+                new MergeVerdict.AlreadyMerged(),
+                new MergeVerdict.Conflicted(List.of("README.md")),
+                new MergeVerdict.NotMerged(),
+                new MergeVerdict.Refused("hook said no"),
+                new MergeVerdict.Indeterminate("HEAD moved"));
+
+        for (MergeVerdict verdict : verdicts) {
+            for (boolean afterHandOff : List.of(false, true)) {
+                boolean expectCleanUp = verdict instanceof MergeVerdict.Merged
+                        || verdict instanceof MergeVerdict.AlreadyMerged;
+
+                MergeFinishDecision.Next next =
+                        MergeFinishDecision.forVerdict(verdict, "/repo", "feat/x", "main", afterHandOff);
+
+                assertEquals(expectCleanUp, next instanceof MergeFinishDecision.Next.CleanUp,
+                        verdict + " afterHandOff=" + afterHandOff);
+            }
+        }
+    }
+
+    @Test
+    void preHandOffNotMergedAndIndeterminateHaveTheirOwnCopy() {
+        // Exercised only by the loop above as "not CleanUp"; assert the actual copy too,
+        // since the loop can't tell a correct Stopped from a mangled one.
+        MergeFinishDecision.Next.Stopped notMerged = assertInstanceOf(MergeFinishDecision.Next.Stopped.class,
+                MergeFinishDecision.forVerdict(new MergeVerdict.NotMerged(), "/repo", "feat/x", "main", false));
+        assertEquals("Nothing was merged", notMerged.headline());
+        assertEquals("Git left main unchanged and reported no conflicts. Nothing was deleted.",
+                notMerged.detail());
+
+        MergeFinishDecision.Next.Stopped indeterminate = assertInstanceOf(MergeFinishDecision.Next.Stopped.class,
+                MergeFinishDecision.forVerdict(new MergeVerdict.Indeterminate("HEAD moved"),
+                        "/repo", "feat/x", "main", false));
+        assertEquals("Could not confirm the merge", indeterminate.headline());
+        assertEquals("HEAD moved", indeterminate.detail());
+    }
+
+    @Test
+    void aConflictHandsOffWithAPromptThatNamesTheFilesToEdit() {
         MergeFinishDecision.Next.HandOff handOff = assertInstanceOf(MergeFinishDecision.Next.HandOff.class,
                 MergeFinishDecision.forVerdict(new MergeVerdict.Conflicted(List.of("README.md", "src/A.java")),
                         "/repo", "feat/x", "main", false));
 
         assertEquals("Conflicts in 2 files — Claude is resolving them in the main checkout…",
                 handOff.headline());
-        assertTrue(handOff.prompt().contains("git -C /repo"));
-        assertTrue(handOff.prompt().contains("Do not modify this worktree"));
-        assertTrue(handOff.prompt().contains("merge --abort"));
+        // The whole prompt, verbatim: this is copy a user and an agent both read, so a
+        // partial contains() could pass while the sentence around it was mangled.
+        assertEquals("The merge of 'feat/x' into 'main' stopped on conflicts in the main checkout at /repo,"
+                        + " not in this worktree. The conflicted files to edit are:"
+                        + " /repo/README.md, /repo/src/A.java. Edit those files in place, then run"
+                        + " `git -C /repo add README.md`, `git -C /repo add src/A.java` for each resolved file"
+                        + " and `git -C /repo commit --no-edit` to finish. Do not modify this worktree."
+                        + " Do not run `git -C /repo merge --abort`, `git -C /repo reset --hard`,"
+                        + " `git -C /repo checkout`, or `git -C /repo merge -s ours`"
+                        + " — if you cannot resolve the conflicts, say so and stop.",
+                handOff.prompt());
     }
 
     @Test
@@ -181,8 +252,27 @@ class MergeFinishDecisionTest {
                 MergeFinishDecision.forTimeout("feat/x", "main", Optional.of("HEAD moved"));
 
         assertEquals("Merge not confirmed after 5 minutes", stopped.headline());
-        assertTrue(stopped.detail().contains("check the terminal"));
-        assertTrue(stopped.detail().contains("Nothing was deleted"));
-        assertTrue(stopped.detail().contains("HEAD moved"));
+        assertEquals("The merge of feat/x into main may still be open in the main checkout"
+                        + " — check the terminal. Nothing was deleted. Last check: HEAD moved",
+                stopped.detail());
+    }
+
+    @Test
+    void aTimeoutWithNoLastProbeHasNoTrailingLastCheckFragment() {
+        MergeFinishDecision.Next.Stopped stopped =
+                MergeFinishDecision.forTimeout("feat/x", "main", Optional.empty());
+
+        assertEquals("The merge of feat/x into main may still be open in the main checkout"
+                        + " — check the terminal. Nothing was deleted.",
+                stopped.detail());
+    }
+
+    @Test
+    void aRemovedWorktreeCannotPairWithANotAttemptedBranchResult() {
+        // NOT_ATTEMPTED means "the worktree survived, so nothing was tried" -- Task 5
+        // is the only producer of this record and must not be able to construct the
+        // contradiction of a removed worktree with an unattempted branch decision.
+        assertThrows(IllegalArgumentException.class, () -> new MergeFinishDecision.CleanupOutcome(
+                true, MergeFinishDecision.BranchResult.NOT_ATTEMPTED, true, Optional.empty()));
     }
 }

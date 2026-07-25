@@ -3,7 +3,9 @@ package app.drydock.ui;
 import app.drydock.git.WorktreeService.MergeTarget;
 import app.drydock.git.WorktreeService.MergeVerdict;
 
+import java.util.List;
 import java.util.Optional;
+import java.util.stream.Collectors;
 
 /**
  * The merge-and-finish flow's decisions and its user-visible copy, with no
@@ -43,9 +45,25 @@ final class MergeFinishDecision {
         record Stopped(String headline, String detail) implements Next { }
     }
 
-    /** What the cleanup managed to do, step by step. */
+    /**
+     * What the cleanup managed to do, step by step.
+     *
+     * @param worktreeKeptReason why the worktree survived, as a fragment meant to read after
+     *                           "worktree kept — "; ignored when {@code worktreeRemoved} is true
+     */
     record CleanupOutcome(boolean worktreeRemoved, BranchResult branch, boolean sessionDeleted,
-                          Optional<String> detail) {
+                          Optional<String> worktreeKeptReason) {
+
+        CleanupOutcome {
+            // NOT_ATTEMPTED means "the worktree survived, so the branch delete was never
+            // tried" -- pairing it with a removed worktree would be a contradiction Task 5
+            // could otherwise construct by accident, and forCleanup would render it as a
+            // bare "kept" with no reason for the user to act on.
+            if (worktreeRemoved && branch == BranchResult.NOT_ATTEMPTED) {
+                throw new IllegalArgumentException(
+                        "a removed worktree cannot have NOT_ATTEMPTED as its branch result");
+            }
+        }
     }
 
     /** The fate of the branch. {@code NOT_ATTEMPTED}: the worktree survived, so nothing was tried. */
@@ -88,7 +106,9 @@ final class MergeFinishDecision {
 
     private static String describe(MergeTarget.InProgress inProgress) {
         return switch (inProgress) {
-            case NONE -> "operation";
+            // The caller only reaches this branch guarded by `!= NONE`; landing here is a
+            // bug, not a state to word nicely for the user.
+            case NONE -> throw new IllegalArgumentException("guarded by the caller");
             case MERGE -> "merge";
             case REBASE -> "rebase";
             case CHERRY_PICK -> "cherry-pick";
@@ -115,7 +135,7 @@ final class MergeFinishDecision {
                             "Conflicts in " + conflicted.unmergedPaths().size()
                                     + (conflicted.unmergedPaths().size() == 1 ? " file" : " files")
                                     + " — Claude is resolving them in the main checkout…",
-                            handOffPrompt(mainCheckout, branch, base));
+                            handOffPrompt(mainCheckout, branch, base, conflicted.unmergedPaths()));
             case MergeVerdict.NotMerged ignored -> afterHandOff
                     ? new Next.Stopped("The merge was abandoned",
                             "The merge of " + branch + " into " + base
@@ -132,19 +152,33 @@ final class MergeFinishDecision {
     }
 
     /**
-     * The conflict hand-off prompt. Fenced deliberately: the agent's cwd is
-     * the worktree, not the main checkout, and the shortcuts it is told to
-     * avoid ({@code merge --abort}, {@code reset --hard}, {@code checkout},
-     * {@code -s ours}) are exactly the ones that would leave the repository
-     * looking merged without the work being in it.
+     * The conflict hand-off prompt. The agent's cwd is the worktree, not the
+     * main checkout, so every path and every command is spelled out against
+     * {@code mainCheckout} explicitly -- a relative path or a bare
+     * subcommand would read as being about the worktree the agent is
+     * sitting in, which is exactly the file the merge conflict is not in.
+     * The forbidden shortcuts ({@code merge --abort}, {@code reset --hard},
+     * {@code checkout}, {@code merge -s ours}) are each prefixed with
+     * {@code git -C <mainCheckout>} for the same reason: they are exactly
+     * the commands that would leave the main checkout looking merged
+     * without the work actually being in it.
      */
-    private static String handOffPrompt(String mainCheckout, String branch, String base) {
+    private static String handOffPrompt(String mainCheckout, String branch, String base,
+                                        List<String> unmergedPaths) {
+        String absolutePaths = unmergedPaths.stream()
+                .map(path -> mainCheckout + "/" + path)
+                .collect(Collectors.joining(", "));
+        String addCommands = unmergedPaths.stream()
+                .map(path -> "`git -C " + mainCheckout + " add " + path + "`")
+                .collect(Collectors.joining(", "));
         return "The merge of '" + branch + "' into '" + base + "' stopped on conflicts in the main checkout at "
-                + mainCheckout + ". Resolve the conflicted files there using `git -C " + mainCheckout
-                + " …` and complete the merge with `git -C " + mainCheckout + " commit`."
+                + mainCheckout + ", not in this worktree. The conflicted files to edit are: " + absolutePaths
+                + ". Edit those files in place, then run " + addCommands
+                + " for each resolved file and `git -C " + mainCheckout + " commit --no-edit` to finish."
                 + " Do not modify this worktree."
-                + " Do not run `merge --abort`, `reset --hard`, `checkout`, or `merge -s ours`"
-                + " — if you cannot resolve the conflicts, say so and stop.";
+                + " Do not run `git -C " + mainCheckout + " merge --abort`, `git -C " + mainCheckout
+                + " reset --hard`, `git -C " + mainCheckout + " checkout`, or `git -C " + mainCheckout
+                + " merge -s ours` — if you cannot resolve the conflicts, say so and stop.";
     }
 
     /**
@@ -158,7 +192,7 @@ final class MergeFinishDecision {
                 + (conflictsResolved ? " — conflicts resolved by Claude" : "");
         String worktree = outcome.worktreeRemoved()
                 ? "worktree removed"
-                : "worktree kept — " + outcome.detail().orElse("git refused to remove it");
+                : "worktree kept — " + outcome.worktreeKeptReason().orElse("git refused to remove it");
         String branchDetail = switch (outcome.branch()) {
             case DELETED -> "branch " + branch + " deleted";
             case KEPT_NOT_OURS -> "branch " + branch + " kept (already existed)";
