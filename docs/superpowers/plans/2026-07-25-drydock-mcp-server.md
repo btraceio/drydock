@@ -1174,7 +1174,7 @@ Javadoc must cite the delivery path — `MainWorkspace.sendTaskWhenReady` collap
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `./gradlew :app:test --tests 'app.drydock.mcp.AnnotationLinesTest' --tests 'app.drydock.mcp.BranchNamesTest' --tests 'app.drydock.mcp.PromptSafetyTest'`
-Expected: PASS (24 tests)
+Expected: PASS (22 tests)
 
 - [ ] **Step 5: Commit**
 
