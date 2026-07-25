@@ -604,21 +604,25 @@ Then at each call site pass `terminalFontSizeProvider.get()` as the second argum
 
 Import `app.drydock.domain.WorkspaceUiState` if not already imported.
 
-- [ ] **Step 5: Add the live re-apply entry point**
+- [ ] **Step 5: Document that the theme path now carries the size too**
 
-Still in `MainWorkspace`, next to `applyTerminalTheme(UiTheme)`:
+Do **not** add a separate `applyTerminalFontSize` method — it would be a
+pure delegate to `applyTerminalTheme`, which the reviewer would rightly flag.
+Instead extend `applyTerminalTheme`'s Javadoc so the shared purpose is
+discoverable from the one method that does the work:
 
 ```java
     /**
-     * Re-applies the terminal config to every open terminal after a font-size
-     * change (called on the FX thread by the settings modal). Reuses the theme
-     * path: ghostty re-reads the whole config, so size and theme travel
-     * together.
+     * Re-applies the terminal config to every open terminal (called on the FX
+     * thread by the theme toggle and by the settings modal's font-size
+     * slider). ghostty re-reads the whole config file, so theme and font size
+     * travel together over this one path -- which is exactly why the size
+     * lives in the config rather than in the per-surface struct, where
+     * {@code ghostty_surface_update_config} would discard it.
      */
-    public void applyTerminalFontSize(UiTheme theme) {
-        applyTerminalTheme(theme);
-    }
 ```
+
+Task 10 calls `applyTerminalTheme(...)` directly after a size change.
 
 - [ ] **Step 6: Run the tests**
 
@@ -1564,7 +1568,7 @@ git commit -m "Add the settings modal"
 - Modify: `app/src/main/java/app/drydock/DrydockApplication.java` (`installGlobalShortcuts` ~line 523, wiring ~line 191)
 
 **Interfaces:**
-- Consumes: `SettingsModal(Settings, Runnable)` (Task 9), `AppShell.modalLayer()`, `AppShell.themeManager()`.
+- Consumes: `SettingsModal(Settings, Runnable)` (Task 9), `AppShell.modalLayer()`, `AppShell.themeManager()`, `MainWorkspace.applyTerminalTheme(UiTheme)` (Task 5).
 - Produces: `AppShell.setOnShowSettings(Runnable)` and `AppShell.showSettings()`.
 
 - [ ] **Step 1: Add the gear button to the title bar**
@@ -1671,7 +1675,7 @@ In `DrydockApplication.start`, after the `mainWorkspace.setThemeProvider(...)` l
                         // Persist first: applyTerminalFontSize re-reads the
                         // size through the provider above.
                         repositoryManager.updateTerminalFontSize(size);
-                        mainWorkspace.applyTerminalFontSize(appShell.themeManager().theme());
+                        mainWorkspace.applyTerminalTheme(appShell.themeManager().theme());
                     }
 
                     @Override
