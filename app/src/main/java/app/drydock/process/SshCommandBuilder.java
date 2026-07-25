@@ -26,6 +26,12 @@ import java.util.StringJoiner;
  * joins; each command is a full connection. {@code ServerAliveInterval}
  * bounds post-connect stalls that {@code ConnectTimeout} (TCP connect
  * only) does not cover.</p>
+ *
+ * <p>Both forms send keep-alive probes, on deliberately different budgets.
+ * The batch form fails fast (~6s) so the status poller surfaces an
+ * unreachable host instead of stalling; the interactive form tolerates a
+ * ~3min blackout so a terminal the user is sitting in survives a wifi
+ * hiccup or a suspended laptop. Keep the two apart.</p>
  */
 public final class SshCommandBuilder {
 
@@ -37,6 +43,20 @@ public final class SshCommandBuilder {
             "-o", "ConnectTimeout=5",
             "-o", "ServerAliveInterval=3",
             "-o", "ServerAliveCountMax=2");
+
+    /**
+     * Keep-alive for interactive sessions, which are idle for long stretches
+     * while the user reads. The 30s channel-level probe is what resets the
+     * idle timers on NATs, firewalls and bastions in the path; six missed
+     * probes before ssh gives up = a ~3min tolerance. Deliberately no
+     * {@code TCPKeepAlive}: {@code yes} is already the OpenSSH default and
+     * these probes keep the socket too busy for TCP's own (~2h idle) timer
+     * to ever fire, so passing it would only override the user who set
+     * {@code no} on purpose to survive transient route outages. Passed on
+     * the command line, so it beats per-host ssh config values.
+     */
+    private static final String KEEPALIVE_OPTIONS =
+            "-o ServerAliveInterval=30 -o ServerAliveCountMax=6";
 
     private SshCommandBuilder() {
     }
@@ -59,7 +79,8 @@ public final class SshCommandBuilder {
 
     /**
      * A shell command string launching an interactive remote command in the
-     * embedded terminal: {@code ssh -t -- <host> '<remote>'}. No local
+     * embedded terminal: {@code ssh -t <keepalive opts> -- <host>
+     * '<remote>'}. No local
      * {@code exec} prefix -- on macOS (the only platform this app ships)
      * libghostty already wraps the command it is given in one, see {@link
      * app.drydock.terminal.api.TerminalSpec}; a second one would try to run a
@@ -75,7 +96,8 @@ public final class SshCommandBuilder {
     public static String interactiveSessionCommand(SshRemote remote, String remoteExec) {
         String remoteCommand = "export TERM=xterm-256color; cd " + posixQuote(remote.remotePath())
                 + " && " + remoteExec;
-        return "ssh -t -- " + posixQuote(remote.host()) + " " + posixQuote(remoteCommand);
+        return "ssh -t " + KEEPALIVE_OPTIONS + " -- "
+                + posixQuote(remote.host()) + " " + posixQuote(remoteCommand);
     }
 
     /** Wraps {@code value} as one POSIX single-quoted word, safe against embedded metacharacters. */

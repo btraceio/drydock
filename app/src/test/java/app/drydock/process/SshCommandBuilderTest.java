@@ -4,6 +4,8 @@ import app.drydock.domain.SshRemote;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -50,9 +52,35 @@ class SshCommandBuilderTest {
     @Test
     void interactiveSessionCommandShape() {
         String command = SshCommandBuilder.interactiveSessionCommand(remote, "exec claude");
-        assertEquals("ssh -t -- 'user@h' "
+        assertEquals("ssh -t -o ServerAliveInterval=30 -o ServerAliveCountMax=6"
+                + " -- 'user@h' "
                 + "'export TERM=xterm-256color; cd '\\''/srv/my repo'\\'' && exec claude'",
                 command);
+    }
+
+    @Test
+    void interactiveKeepAliveBudgetFarOutlivesTheBatchOne() {
+        // The poller behind the batch path must surface an unreachable host
+        // fast; a terminal the user is sitting in must ride out a wifi
+        // hiccup. Read both budgets back off the built commands so tuning
+        // one of them toward the other fails here.
+        int batch = keepAliveBudgetSeconds(String.join(" ",
+                SshCommandBuilder.remoteGitCommand(remote, List.of("status"))));
+        int interactive = keepAliveBudgetSeconds(
+                SshCommandBuilder.interactiveSessionCommand(remote, "exec claude"));
+        assertTrue(interactive >= 10 * batch,
+                "interactive budget " + interactive + "s must dwarf batch " + batch + "s");
+    }
+
+    /** {@code ServerAliveInterval * ServerAliveCountMax}: seconds of silence ssh tolerates. */
+    private static int keepAliveBudgetSeconds(String command) {
+        return optionValue(command, "ServerAliveInterval") * optionValue(command, "ServerAliveCountMax");
+    }
+
+    private static int optionValue(String command, String option) {
+        Matcher matcher = Pattern.compile(option + "=(\\d+)").matcher(command);
+        assertTrue(matcher.find(), option + " missing from: " + command);
+        return Integer.parseInt(matcher.group(1));
     }
 
     @Test
@@ -61,7 +89,8 @@ class SshCommandBuilderTest {
         // builder then local-quotes the whole remote command once more.
         String resume = "exec claude --resume " + SshCommandBuilder.posixQuote("abc-123");
         String command = SshCommandBuilder.interactiveSessionCommand(remote, resume);
-        assertTrue(command.startsWith("ssh -t -- 'user@h' '"));
+        assertTrue(command.startsWith("ssh -t "));
+        assertTrue(command.contains(" -- 'user@h' '"));
         assertTrue(command.contains("--resume"));
         assertTrue(command.endsWith("'"));
     }
