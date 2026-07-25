@@ -38,15 +38,22 @@ final class UiFontScale {
     private static final String BASE_RESOURCE = "/app/drydock/ui/app.css";
 
     /**
-     * Matches either a CSS comment (passed through untouched, so text inside
-     * a comment that merely looks like a declaration is never rewritten) or
-     * a {@code -fx-font-size} declaration's px literal, whatever the
-     * surrounding spacing. When the declaration alternative matches, group 1
-     * is the property and separator (preserved verbatim) and group 2 the
-     * number; both are {@code null} when the comment alternative matched.
+     * Matches a {@code -fx-font-size} declaration's px literal (first
+     * alternative) or a standalone CSS comment, passed through untouched so
+     * text that merely looks like a declaration is never rewritten (second
+     * alternative). The declaration alternative is tried first and allows
+     * whitespace and comments between the colon and the value -- {@code
+     * -fx-font-size: /* TODO bump *}{@code / 12px;} must still be recognised
+     * as one declaration, or the comment would otherwise be consumed by the
+     * standalone-comment alternative first, leaving the px literal beyond it
+     * silently unscaled. Group 1 (property, separator, and any intervening
+     * comments, preserved verbatim) and group 2 (the number) are set when
+     * the declaration alternative matches; both are {@code null} when the
+     * standalone-comment alternative matched instead.
      */
-    private static final Pattern FONT_SIZE =
-            Pattern.compile("/\\*.*?\\*/|(-fx-font-size\\s*:\\s*)(\\d+(?:\\.\\d+)?)px", Pattern.DOTALL);
+    private static final Pattern FONT_SIZE = Pattern.compile(
+            "(-fx-font-size\\s*:\\s*(?:/\\*.*?\\*/\\s*)*)(\\d+(?:\\.\\d+)?)px|/\\*.*?\\*/",
+            Pattern.DOTALL);
 
     private static final Map<Integer, String> GENERATED = new HashMap<>();
 

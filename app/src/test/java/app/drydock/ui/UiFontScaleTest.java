@@ -70,6 +70,18 @@ class UiFontScaleTest {
     }
 
     @Test
+    void scalesADeclarationWithACommentBetweenTheColonAndTheValue() {
+        // A comment sitting between the colon and the value must not split
+        // the declaration into an unrecognised property and a bare number:
+        // the whole thing is still one declaration and the px literal must
+        // still be scaled, with the comment text preserved verbatim.
+        String scaled = UiFontScale.scaleCss(
+                ".pill { -fx-font-size: /* TODO bump */ 12px; }", 2.0);
+
+        assertTrue(scaled.contains("-fx-font-size: /* TODO bump */ 24.0px"), scaled);
+    }
+
+    @Test
     void toleratesSpacingVariantsInTheSourceDeclaration() {
         String scaled = UiFontScale.scaleCss(".a{-fx-font-size:10px}", 2.0);
 
