@@ -1,15 +1,20 @@
 package app.drydock.ui;
 
 import app.drydock.domain.WorkspaceUiState;
+import javafx.application.Platform;
 
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
+import java.lang.System.Logger;
+import java.lang.System.Logger.Level;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Optional;
+import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -30,6 +35,8 @@ import java.util.regex.Pattern;
  * style does not.</p>
  */
 final class UiFontScale {
+
+    private static final Logger LOG = System.getLogger(UiFontScale.class.getName());
 
     /** Supported interface font sizes; the settings slider exposes the same band. */
     static final double MIN_FONT_SIZE = 11.0;
@@ -71,16 +78,63 @@ final class UiFontScale {
      * application and therefore owns the range. The default size returns the
      * bundled resource untouched; other sizes are generated once and cached.
      *
-     * <p>Touches the filesystem, so callers on the FX thread must only hit
-     * the cached or default path (see {@code ThemeManager}).</p>
+     * <p>Touches the filesystem on a cache miss, so this must only be called
+     * from the FX thread when the caller already knows the size is cached or
+     * default (e.g. {@code ThemeManager}'s constructor, which needs the sheet
+     * in place synchronously before the stage is shown). Any FX-thread caller
+     * that cannot make that guarantee -- a live slider drag, in particular --
+     * must go through {@link #stylesheetForAsync} instead.</p>
      */
     static synchronized String stylesheetFor(double fontSize) {
         double clamped = Math.clamp(fontSize, MIN_FONT_SIZE, MAX_FONT_SIZE);
-        int key = (int) Math.round(clamped * 2);   // 0.5px resolution, matching the slider
-        if (key == (int) Math.round(WorkspaceUiState.DEFAULT_UI_FONT_SIZE * 2)) {
+        int key = keyFor(clamped);
+        if (key == keyFor(WorkspaceUiState.DEFAULT_UI_FONT_SIZE)) {
             return baseStylesheetUrl();
         }
         return GENERATED.computeIfAbsent(key, k -> generate(k / 2.0));
+    }
+
+    /** Already-cached or default stylesheet for {@code fontSize}, with no filesystem access at all. */
+    private static synchronized Optional<String> cachedStylesheetFor(double fontSize) {
+        double clamped = Math.clamp(fontSize, MIN_FONT_SIZE, MAX_FONT_SIZE);
+        int key = keyFor(clamped);
+        if (key == keyFor(WorkspaceUiState.DEFAULT_UI_FONT_SIZE)) {
+            return Optional.of(baseStylesheetUrl());
+        }
+        return Optional.ofNullable(GENERATED.get(key));
+    }
+
+    private static int keyFor(double fontSize) {
+        return (int) Math.round(fontSize * 2);   // 0.5px resolution, matching the slider
+    }
+
+    /**
+     * As {@link #stylesheetFor}, but safe to call from the FX thread
+     * unconditionally: a cache hit (or the default size) resolves {@code
+     * onReady} synchronously with no I/O, and a cache miss generates on a
+     * virtual thread and hands the result back via {@link Platform#runLater}.
+     * A generation failure is logged and {@code onReady} is simply never
+     * called, leaving whatever stylesheet is currently applied in place --
+     * a slider drag that fails to produce a new size should not pop an
+     * error dialog over what is otherwise a purely cosmetic change.
+     */
+    static void stylesheetForAsync(double fontSize, Consumer<String> onReady) {
+        Optional<String> cached = cachedStylesheetFor(fontSize);
+        if (cached.isPresent()) {
+            onReady.accept(cached.get());
+            return;
+        }
+        Thread.ofVirtual().start(() -> {
+            String url;
+            try {
+                url = stylesheetFor(fontSize);
+            } catch (UncheckedIOException e) {
+                LOG.log(Level.WARNING, "Could not generate the scaled stylesheet for size "
+                        + fontSize + "; keeping the current stylesheet", e);
+                return;
+            }
+            Platform.runLater(() -> onReady.accept(url));
+        });
     }
 
     private static String generate(double fontSize) {

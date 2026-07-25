@@ -62,7 +62,21 @@ public record UserConfig(Optional<Path> worktreesDirectory) {
      */
     public static CompletableFuture<UserConfig> loadAsync() {
         CompletableFuture<UserConfig> future = new CompletableFuture<>();
-        Thread.ofVirtual().start(() -> future.complete(load()));
+        Thread.ofVirtual().start(() -> {
+            try {
+                future.complete(load());
+            } catch (Throwable t) {
+                // load() already catches everything it knows how to handle
+                // and falls back to empty(); anything reaching here is
+                // unexpected. Completing exceptionally (instead of letting
+                // it silently kill the thread) matters because the caller
+                // -- the settings modal -- disables its controls until this
+                // future completes one way or the other; an uncompleted
+                // future would leave them stuck at "Loading…" forever.
+                future.completeExceptionally(t);
+                throw t;
+            }
+        });
         return future;
     }
 
@@ -220,6 +234,19 @@ public record UserConfig(Optional<Path> worktreesDirectory) {
             pending.future().complete(null);
         } catch (IOException | RuntimeException e) {
             pending.future().completeExceptionally(e);
+        } catch (Throwable t) {
+            // Anything beyond IOException/RuntimeException is unexpected,
+            // but this runs on SAVE_EXECUTOR's single background thread: an
+            // uncaught throwable here would kill that thread silently and
+            // every future saveAsync call would queue forever with its
+            // future never completing (SAVE_EXECUTOR.execute would still
+            // "succeed" -- ThreadPoolExecutor just replaces the dead worker
+            // -- but PENDING_SAVE's coalescing means a caller waiting on
+            // this specific future would hang). Complete it exceptionally
+            // first so no caller of saveAsync/flushPendingSaves is left
+            // waiting forever, then rethrow so the failure is still visible.
+            pending.future().completeExceptionally(t);
+            throw t;
         }
     }
 

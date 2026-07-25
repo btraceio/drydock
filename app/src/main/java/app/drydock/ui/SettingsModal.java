@@ -29,6 +29,13 @@ import java.util.function.DoubleConsumer;
  * <p>Holds no manager or store: everything it can change arrives as a
  * callback in {@link Settings}, so persistence stays with the single state
  * writer and this class stays a view.</p>
+ *
+ * <p>The theme radio reads {@link Settings#theme()} once, at construction,
+ * and never again -- so nothing else may change the theme while this modal
+ * is open, or the radio would silently drift from reality with no way for
+ * the user to click it back (a same-value selection fires no {@code
+ * ToggleGroup} event). {@code DrydockApplication}'s ⌘⇧L branch is gated on
+ * {@code modalLayer().isShowingModal()} for exactly this reason.</p>
  */
 public final class SettingsModal extends VBox {
 
@@ -40,13 +47,19 @@ public final class SettingsModal extends VBox {
 
         double uiFontSize();
 
-        /** Applies the interface size live; persistence is the implementation's job. */
+        /** Applies the interface size live; called on every slider tick while dragging. */
         void setUiFontSize(double size);
+
+        /** Persists the interface size; called once, when a drag ends (see {@link #sizeRow}). */
+        void commitUiFontSize(double size);
 
         double terminalFontSize();
 
-        /** Applies the terminal size to running surfaces live; persistence likewise. */
+        /** Applies the terminal size to running surfaces live; called on every slider tick while dragging. */
         void setTerminalFontSize(double size);
+
+        /** Persists the terminal size; called once, when a drag ends (see {@link #sizeRow}). */
+        void commitTerminalFontSize(double size);
 
         CompletableFuture<Optional<Path>> loadWorktreesDirectory();
 
@@ -82,10 +95,14 @@ public final class SettingsModal extends VBox {
         getChildren().addAll(header,
                 sectionTitle("Appearance"),
                 themeRow(settings),
+                // The interface slider keeps its 0.5px resolution -- UiFontScale genuinely
+                // honours fractional sizes. The terminal slider is integer-only (see sizeRow):
+                // TerminalThemes rounds to int, so a fractional readout there would lie.
                 sizeRow("Interface size", UiFontScale.MIN_FONT_SIZE, UiFontScale.MAX_FONT_SIZE,
-                        settings.uiFontSize(), settings::setUiFontSize),
+                        settings.uiFontSize(), true, settings::setUiFontSize, settings::commitUiFontSize),
                 sizeRow("Terminal size", TerminalThemes.MIN_FONT_SIZE, TerminalThemes.MAX_FONT_SIZE,
-                        settings.terminalFontSize(), settings::setTerminalFontSize),
+                        settings.terminalFontSize(), false, settings::setTerminalFontSize,
+                        settings::commitTerminalFontSize),
                 sectionTitle("Worktrees"),
                 worktreesRow(settings),
                 footer);
@@ -101,13 +118,22 @@ public final class SettingsModal extends VBox {
         ToggleGroup group = new ToggleGroup();
         RadioButton dark = new RadioButton("Dark");
         RadioButton light = new RadioButton("Light");
+        dark.getStyleClass().add("settings-radio");
+        light.getStyleClass().add("settings-radio");
         dark.setToggleGroup(group);
         light.setToggleGroup(group);
         (settings.theme() == UiTheme.LIGHT ? light : dark).setSelected(true);
 
         // Applied on selection, not on Done: the whole modal is apply-on-change.
+        // `selected == light` is the real test; the `dark` fallback below is
+        // unreachable via the UI (the group always has one toggle selected,
+        // and DrydockApplication's cmd+shift+L branch is gated on the modal
+        // being closed -- see the class Javadoc), but naming it explicitly
+        // beats letting a null toggle silently coerce to DARK.
         group.selectedToggleProperty().addListener((obs, old, selected) ->
-                settings.setTheme(selected == light ? UiTheme.LIGHT : UiTheme.DARK));
+                settings.setTheme(selected == light ? UiTheme.LIGHT
+                        : selected == dark ? UiTheme.DARK
+                        : settings.theme()));
 
         return labelled("Theme", new HBox(12, dark, light));
     }
@@ -124,15 +150,31 @@ public final class SettingsModal extends VBox {
     }
 
     /**
-     * A font-size slider. The value applies live while dragging so the effect
-     * is visible, but the persisting callback fires only when the drag ends --
-     * a state write per pixel would be pointless disk traffic.
+     * A font-size slider. The value applies live while dragging (every tick
+     * calls {@code onChanged}) so the effect is visible immediately, but
+     * {@code onCommitted} -- the persisting callback -- fires only once the
+     * drag ends: a state write per pixel would be pointless disk traffic.
+     * {@link Slider#valueChangingProperty()} is what distinguishes the two --
+     * true for the whole span of a mouse drag -- so a discrete, non-drag
+     * change (an arrow key, a click that lands directly on a value with no
+     * drag) never sees it go true and instead commits immediately on the one
+     * {@code valueProperty} tick it produces, which is correct: there is no
+     * burst to debounce.
+     *
+     * @param halfStepResolution whether the slider snaps to 0.5 as well as
+     *                           whole values (the interface slider does,
+     *                           because {@link UiFontScale} honours the
+     *                           fraction; the terminal slider does not,
+     *                           because {@link TerminalThemes} rounds to
+     *                           int, so a fractional readout there would
+     *                           lie about what the terminal actually renders)
      */
     private static Region sizeRow(String caption, double min, double max, double initial,
-                                  DoubleConsumer onChanged) {
+                                  boolean halfStepResolution, DoubleConsumer onChanged, DoubleConsumer onCommitted) {
         Slider slider = new Slider(min, max, Math.clamp(initial, min, max));
+        slider.getStyleClass().add("settings-slider");
         slider.setMajorTickUnit(1);
-        slider.setMinorTickCount(1);
+        slider.setMinorTickCount(halfStepResolution ? 1 : 0);
         slider.setSnapToTicks(true);
         slider.setBlockIncrement(1);
 
@@ -143,6 +185,14 @@ public final class SettingsModal extends VBox {
         slider.valueProperty().addListener((obs, old, now) -> {
             value.setText(format(now.doubleValue()));
             onChanged.accept(now.doubleValue());
+            if (!slider.isValueChanging()) {
+                onCommitted.accept(now.doubleValue());
+            }
+        });
+        slider.valueChangingProperty().addListener((obs, was, changing) -> {
+            if (!changing) {
+                onCommitted.accept(slider.getValue());
+            }
         });
 
         HBox control = new HBox(10, slider, value);

@@ -2058,3 +2058,34 @@
     -fx-text-fill: -drydock-text-faint;
     -fx-padding: 0 0 0 132px;
 }
+
+/* Stock RadioButton/Slider render against modena's light-default look,
+ * which app.css never overrides globally (unlike CheckBox -- see
+ * .result-check above, the established precedent this follows): the radio
+ * caption is near-black on the dark theme and the slider track is light
+ * gray in both themes. Token-driven overrides for the two controls this
+ * modal is the only user of. */
+.settings-radio {
+    -fx-text-fill: -drydock-text;
+}
+.settings-radio .radio {
+    -fx-background-color: -drydock-input-bg;
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 1em;
+    -fx-background-radius: 1em;
+}
+.settings-radio:selected .radio {
+    -fx-border-color: -drydock-accent;
+}
+.settings-radio:selected .dot {
+    -fx-background-color: -drydock-accent;
+}
+.settings-slider .track {
+    -fx-background-color: -drydock-border-strong;
+    -fx-background-insets: 0;
+    -fx-pref-height: 4px;
+}
+.settings-slider .thumb {
+    -fx-background-color: -drydock-accent;
+    -fx-background-radius: 1em;
+}

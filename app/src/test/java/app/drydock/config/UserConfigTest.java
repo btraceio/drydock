@@ -8,6 +8,8 @@ import app.drydock.state.json.JsonValue.JsonString;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
+import org.junit.jupiter.api.parallel.Resources;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -68,6 +70,12 @@ class UserConfigTest {
     }
 
     @Test
+    // No parallelism is configured today (see the note above the saveAsync
+    // tests below), but this reads the developer's real ~/.drydock/config.json
+    // via "user.home" -- the same global the saveAsync tests below repoint --
+    // so it stays behind the same lock rather than depending on that staying
+    // true.
+    @ResourceLock(Resources.SYSTEM_PROPERTIES)
     void loadAsyncReturnsTheSameResultAsLoadOffTheCallingThread() throws Exception {
         UserConfig config = UserConfig.loadAsync().get();
 
@@ -149,6 +157,7 @@ class UserConfigTest {
     // directory no longer exists.
 
     @Test
+    @ResourceLock(Resources.SYSTEM_PROPERTIES)
     void racingSaveAsyncCallsLeaveTheLastValueOnDiskAfterFlush(@TempDir Path tempDir) throws Exception {
         String originalUserHome = System.getProperty("user.home");
         System.setProperty("user.home", tempDir.toString());
@@ -166,6 +175,7 @@ class UserConfigTest {
     }
 
     @Test
+    @ResourceLock(Resources.SYSTEM_PROPERTIES)
     void flushPendingSavesWaitsForEveryQueuedSaveBeforeReturning(@TempDir Path tempDir) throws Exception {
         String originalUserHome = System.getProperty("user.home");
         System.setProperty("user.home", tempDir.toString());

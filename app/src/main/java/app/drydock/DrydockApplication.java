@@ -236,7 +236,17 @@ public final class DrydockApplication extends Application {
 
                     @Override
                     public void setUiFontSize(double size) {
+                        // Live only; no persistence here. ThemeManager.setUiFontSize
+                        // generates off the FX thread on a cache miss, so this is
+                        // safe to call on every tick of the slider drag.
                         appShell.themeManager().setUiFontSize(size);
+                    }
+
+                    @Override
+                    public void commitUiFontSize(double size) {
+                        // Persists once the drag ends (SettingsModal.sizeRow); the
+                        // live value is already applied, so there is nothing left
+                        // to re-apply here.
                         repositoryManager.updateUiFontSize(size);
                     }
 
@@ -247,10 +257,18 @@ public final class DrydockApplication extends Application {
 
                     @Override
                     public void setTerminalFontSize(double size) {
-                        // Persist first: applyTerminalFontSize re-reads the
-                        // size through the provider above.
+                        // Live preview, not routed through repositoryManager.state()
+                        // (unlike commitTerminalFontSize below): mainWorkspace.applyTerminalTheme
+                        // reads the size back through terminalFontSizeProvider, which
+                        // would still see the OLD persisted value here.
+                        mainWorkspace.previewTerminalFontSize(size);
+                    }
+
+                    @Override
+                    public void commitTerminalFontSize(double size) {
+                        // Persist once the drag ends; the live surfaces already
+                        // show this size via setTerminalFontSize's preview above.
                         repositoryManager.updateTerminalFontSize(size);
-                        mainWorkspace.applyTerminalTheme(appShell.themeManager().theme());
                     }
 
                     @Override
@@ -600,7 +618,14 @@ public final class DrydockApplication extends Application {
                 return;
             }
             if (cmd && event.isShiftDown() && event.getCode() == KeyCode.L) {
-                appShell.toggleTheme();
+                // Gated like ⌘, below: the settings modal's theme radio reads
+                // the theme once at construction and has no listener on the
+                // manager, so a toggle underneath it would desync the radio
+                // from reality with no way for the user to click it back
+                // (SettingsModal's class Javadoc).
+                if (!appShell.modalLayer().isShowingModal()) {
+                    appShell.toggleTheme();
+                }
                 event.consume();
             } else if (cmd && event.getCode() == KeyCode.OPEN_BRACKET) {
                 mainWorkspace.selectPreviousSessionTab();

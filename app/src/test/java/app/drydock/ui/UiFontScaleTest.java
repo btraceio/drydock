@@ -2,6 +2,8 @@ package app.drydock.ui;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.concurrent.atomic.AtomicReference;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -102,5 +104,42 @@ class UiFontScaleTest {
 
         assertTrue(url.startsWith("file:"), url);
         assertFalse(url.equals(UiFontScale.baseStylesheetUrl()), url);
+    }
+
+    @Test
+    void asyncResolvesTheDefaultSizeSynchronouslyOnTheCallingThread() {
+        // The whole point of the async entry point is that an FX-thread
+        // caller can call it unconditionally; the default-size fast path
+        // must never hop to another thread to prove that.
+        Thread callingThread = Thread.currentThread();
+        AtomicReference<String> result = new AtomicReference<>();
+        AtomicReference<Thread> calledFrom = new AtomicReference<>();
+
+        UiFontScale.stylesheetForAsync(13.0, url -> {
+            result.set(url);
+            calledFrom.set(Thread.currentThread());
+        });
+
+        assertEquals(UiFontScale.baseStylesheetUrl(), result.get());
+        assertEquals(callingThread, calledFrom.get());
+    }
+
+    @Test
+    void asyncResolvesAnAlreadyCachedSizeSynchronouslyOnTheCallingThread() {
+        // Warm the cache via the synchronous path first (as ThemeManager's
+        // constructor does at startup), then confirm the async entry point
+        // recognises the cache hit and never leaves the calling thread.
+        String expected = UiFontScale.stylesheetFor(14.5);
+        Thread callingThread = Thread.currentThread();
+        AtomicReference<String> result = new AtomicReference<>();
+        AtomicReference<Thread> calledFrom = new AtomicReference<>();
+
+        UiFontScale.stylesheetForAsync(14.5, url -> {
+            result.set(url);
+            calledFrom.set(Thread.currentThread());
+        });
+
+        assertEquals(expected, result.get());
+        assertEquals(callingThread, calledFrom.get());
     }
 }

@@ -78,6 +78,13 @@ public final class ThemeManager {
      * font sizes are scaled (see {@link UiFontScale}); clamped here because
      * this is the point of application. Persisting the choice is the
      * caller's job, exactly as with the theme.
+     *
+     * <p>Called on every tick of the settings modal's slider while the user
+     * drags, so it must never block the FX thread: the lookup goes through
+     * {@link UiFontScale#stylesheetForAsync}, which resolves synchronously
+     * on a cache hit and off-thread on a miss. {@code uiFontSize} is
+     * re-checked when the async result lands so a stale callback from a
+     * superseded drag position can never clobber a newer one.</p>
      */
     public void setUiFontSize(double newUiFontSize) {
         double clamped = Math.clamp(newUiFontSize, UiFontScale.MIN_FONT_SIZE, UiFontScale.MAX_FONT_SIZE);
@@ -85,9 +92,20 @@ public final class ThemeManager {
             return;
         }
         uiFontSize = clamped;
-        apply();
+        UiFontScale.stylesheetForAsync(clamped, url -> {
+            if (clamped == uiFontSize) {
+                scene.getStylesheets().setAll(url, resource(theme.stylesheet()));
+            }
+        });
     }
 
+    /**
+     * Synchronous re-application, used by the constructor (before the stage
+     * is shown, where blocking is required, not merely tolerated -- see the
+     * class Javadoc) and by {@link #setTheme} (a cache hit guaranteed: the
+     * current {@link #uiFontSize}'s stylesheet was already generated to
+     * reach this state, so this never touches disk).
+     */
     private void apply() {
         scene.getStylesheets().setAll(
                 UiFontScale.stylesheetFor(uiFontSize),

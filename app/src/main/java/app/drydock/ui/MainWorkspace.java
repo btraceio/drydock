@@ -76,6 +76,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.DoubleSupplier;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
@@ -199,7 +200,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     private Supplier<UiTheme> themeProvider = () -> UiTheme.DARK;
 
     /** Where new and re-themed terminals read the persisted font size from. */
-    private Supplier<Double> terminalFontSizeProvider = () -> WorkspaceUiState.DEFAULT_TERMINAL_FONT_SIZE;
+    private DoubleSupplier terminalFontSizeProvider = () -> WorkspaceUiState.DEFAULT_TERMINAL_FONT_SIZE;
 
     /**
      * True while a modal is showing. The ghostty terminal is a NATIVE view
@@ -448,24 +449,50 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     }
 
     /** Wires where terminals read the configured font size from (settings modal). */
-    public void setTerminalFontSizeProvider(Supplier<Double> provider) {
+    public void setTerminalFontSizeProvider(DoubleSupplier provider) {
         this.terminalFontSizeProvider =
                 provider == null ? () -> WorkspaceUiState.DEFAULT_TERMINAL_FONT_SIZE : provider;
     }
 
     /**
      * Re-applies the terminal config to every open terminal (called on the FX
-     * thread by the theme toggle and by the settings modal's font-size
-     * slider). ghostty re-reads the whole config file, so theme and font size
-     * travel together over this one path -- which is exactly why the size
+     * thread by the theme toggle, and by the settings modal once a font-size
+     * drag commits). ghostty re-reads the whole config file, so theme and font
+     * size travel together over this one path -- which is exactly why the size
      * lives in the config rather than in the per-surface struct, where
      * {@code ghostty_surface_update_config} would discard it.
      */
     public void applyTerminalTheme(UiTheme theme) {
-        Path configFile = TerminalThemes.configFileFor(theme, terminalFontSizeProvider.get());
-        for (OpenSessionTab open : openTabs.values()) {
-            open.applyTerminalTheme(configFile);
-        }
+        applyTerminalConfig(theme, terminalFontSizeProvider.getAsDouble());
+    }
+
+    /**
+     * Live preview of a terminal font size while the settings modal's slider
+     * is being dragged: applied immediately to every open surface, bypassing
+     * {@link #terminalFontSizeProvider} (which reads persisted state) since
+     * the caller commits that separately, once, when the drag ends -- see
+     * {@code SettingsModal.sizeRow}. Reuses {@link #applyTerminalConfig}, so
+     * a rapid sequence of previews cannot block the FX thread either.
+     */
+    public void previewTerminalFontSize(double fontSize) {
+        applyTerminalConfig(themeProvider.get(), fontSize);
+    }
+
+    /**
+     * Extracts (or looks up) the config for {@code (theme, fontSize)} and
+     * applies it to every open terminal. Extraction happens off the FX
+     * thread on a cache miss (see {@link TerminalThemes#configFileForAsync}),
+     * which matters here because both callers above can fire on every tick
+     * of a slider drag; {@code openTabs} is read again inside the callback
+     * rather than captured up front, so a tab opened or closed while
+     * extraction is in flight is still handled correctly.
+     */
+    private void applyTerminalConfig(UiTheme theme, double fontSize) {
+        TerminalThemes.configFileForAsync(theme, fontSize, configFile -> {
+            for (OpenSessionTab open : openTabs.values()) {
+                open.applyTerminalTheme(configFile);
+            }
+        });
     }
 
     public boolean hasOpenSessions() {
@@ -1294,7 +1321,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             if (holder[0] != null) {
                 holder[0].tickAndDraw();
             }
-        }, Optional.of(TerminalThemes.configFileFor(themeProvider.get(), terminalFontSizeProvider.get())));
+        }, Optional.of(TerminalThemes.configFileFor(themeProvider.get(), terminalFontSizeProvider.getAsDouble())));
         TerminalHostView host;
         try {
             host = TerminalFactory.createHostForCurrentWindow();
@@ -1319,7 +1346,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         });
         openTab.setShellTerminalProvider(onWakeup -> {
             TerminalRuntime shellRuntime = TerminalFactory.createRuntime(onWakeup,
-                    Optional.of(TerminalThemes.configFileFor(themeProvider.get(), terminalFontSizeProvider.get())));
+                    Optional.of(TerminalThemes.configFileFor(themeProvider.get(), terminalFontSizeProvider.getAsDouble())));
             TerminalHostView shellHost;
             try {
                 shellHost = TerminalFactory.createHostForCurrentWindow();

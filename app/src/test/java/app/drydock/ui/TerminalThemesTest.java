@@ -7,6 +7,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -46,5 +47,26 @@ class TerminalThemesTest {
         assertEquals(darkThirteen, TerminalThemes.configFileFor(UiTheme.DARK, 13.0));
         assertNotEquals(darkThirteen, TerminalThemes.configFileFor(UiTheme.DARK, 14.0));
         assertNotEquals(darkThirteen, TerminalThemes.configFileFor(UiTheme.LIGHT, 13.0));
+    }
+
+    @Test
+    void asyncResolvesAnAlreadyCachedPairSynchronouslyOnTheCallingThread() {
+        // Warm the cache via the synchronous path first (as a theme toggle
+        // ordinarily would), then confirm the async entry point recognises
+        // the cache hit and never leaves the calling thread -- this is what
+        // lets MainWorkspace.applyTerminalTheme call it unconditionally from
+        // the settings modal's font-size slider.
+        Path expected = TerminalThemes.configFileFor(UiTheme.DARK, 12.0);
+        Thread callingThread = Thread.currentThread();
+        AtomicReference<Path> result = new AtomicReference<>();
+        AtomicReference<Thread> calledFrom = new AtomicReference<>();
+
+        TerminalThemes.configFileForAsync(UiTheme.DARK, 12.0, file -> {
+            result.set(file);
+            calledFrom.set(Thread.currentThread());
+        });
+
+        assertEquals(expected, result.get());
+        assertEquals(callingThread, calledFrom.get());
     }
 }
