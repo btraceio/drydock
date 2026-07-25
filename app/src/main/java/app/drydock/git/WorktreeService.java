@@ -375,39 +375,54 @@ public final class WorktreeService implements AutoCloseable {
      * every outcome has its own user-facing copy and its own next step.</p>
      */
     public CompletableFuture<MergeVerdict> merge(Path mainCheckout, String branch, MergeTarget target) {
-        return CompletableFuture.supplyAsync(() -> {
-            Path git = locator.locate()
-                    .orElseThrow(() -> new GitExecutableNotFoundException(locator.describeSearched()));
-            // --end-of-options: a branch name that looks like an option must
-            // reach git as a branch name, never be parsed as a flag.
-            List<String> command = List.of(
-                    git.toString(), "-C", mainCheckout.toString(),
-                    "merge", "--no-ff", "--end-of-options", branch);
-            ProcessResult result = null;
-            Optional<String> spawnFailureDetail = Optional.empty();
-            try {
-                result = run(command, MERGE_PROCESS_TIMEOUT);
-            } catch (GitCommandFailedException e) {
-                // The spawn itself failed (timed out, killed mid-merge, an IO
-                // error) -- not treated as fatal, and not assumed to be a
-                // no-op either: git may have left the repository mid-merge
-                // (a real conflict, or even a completed commit right before
-                // the timeout fired), and verify() below inspects that state
-                // directly instead of trusting this outcome either way.
-                spawnFailureDetail = Optional.of(e.stderrExcerpt());
+        return CompletableFuture.supplyAsync(() -> mergeBlocking(mainCheckout, branch, target), executor);
+    }
+
+    /**
+     * Synchronous form of {@link #merge}, package-private so a test can
+     * drive it on a thread of its own and interrupt that thread directly --
+     * {@link CompletableFuture#cancel} does not interrupt a running task, so
+     * exercising the interrupt path requires calling this directly.
+     */
+    MergeVerdict mergeBlocking(Path mainCheckout, String branch, MergeTarget target) {
+        Path git = locator.locate()
+                .orElseThrow(() -> new GitExecutableNotFoundException(locator.describeSearched()));
+        // --end-of-options: a branch name that looks like an option must
+        // reach git as a branch name, never be parsed as a flag.
+        List<String> command = List.of(
+                git.toString(), "-C", mainCheckout.toString(),
+                "merge", "--no-ff", "--end-of-options", branch);
+        ProcessResult result = null;
+        Optional<String> spawnFailureDetail = Optional.empty();
+        try {
+            // Deliberately catches only GitCommandFailedException, not its
+            // sibling GitCommandInterruptedException: a timeout or IO
+            // failure still leaves a verdict to establish (git may have left
+            // the repository mid-merge -- a real conflict, or even a
+            // completed commit right before the timeout fired -- and
+            // verify() below inspects that state directly instead of
+            // trusting this outcome either way), but an interrupt means the
+            // caller (future cancellation, executor shutdown) no longer
+            // wants any more work done, including the read-only git queries
+            // verify() would run. So an interrupt is left uncaught here and
+            // propagates with the thread's interrupt status still set (see
+            // run()) -- never silently swallowed, and never turned into a
+            // verdict.
+            result = run(command, MERGE_PROCESS_TIMEOUT);
+        } catch (GitCommandFailedException e) {
+            spawnFailureDetail = Optional.of(e.stderrExcerpt());
+        }
+        MergeVerdict verdict = verify(git, mainCheckout, target);
+        if (verdict instanceof MergeVerdict.NotMerged) {
+            if (spawnFailureDetail.isPresent()) {
+                return new MergeVerdict.Refused(spawnFailureDetail.get());
             }
-            MergeVerdict verdict = verify(git, mainCheckout, target);
-            if (verdict instanceof MergeVerdict.NotMerged) {
-                if (spawnFailureDetail.isPresent()) {
-                    return new MergeVerdict.Refused(spawnFailureDetail.get());
-                }
-                return result.exitCode() == 0
-                        ? new MergeVerdict.Indeterminate(
-                                "git reported success but " + branch + " is not merged")
-                        : new MergeVerdict.Refused(ProcessRunner.excerpt(result.stderr()));
-            }
-            return verdict;
-        }, executor);
+            return result.exitCode() == 0
+                    ? new MergeVerdict.Indeterminate(
+                            "git reported success but " + branch + " is not merged")
+                    : new MergeVerdict.Refused(ProcessRunner.excerpt(result.stderr()));
+        }
+        return verdict;
     }
 
     /**
@@ -706,8 +721,14 @@ public final class WorktreeService implements AutoCloseable {
             throw new GitCommandFailedException(command, -1,
                     "timed out after " + timeout.toSeconds() + "s (killed)");
         } catch (InterruptedException e) {
+            // Distinct type from the timeout/IO cases above: an interrupt
+            // means the caller no longer wants any git command run at all
+            // (see merge()'s catch block), where a timeout still permits one
+            // more read-only inspection. The flag is restored, never
+            // cleared, so it survives to whichever frame is prepared to act
+            // on it.
             Thread.currentThread().interrupt();
-            throw new GitCommandFailedException(command, -1, "interrupted while waiting for git");
+            throw new GitCommandInterruptedException(command);
         }
     }
 }

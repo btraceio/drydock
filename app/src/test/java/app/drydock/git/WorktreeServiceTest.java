@@ -346,6 +346,47 @@ class WorktreeServiceTest {
     }
 
     /**
+     * Fix round 2, finding 1: an interrupt during the merge spawn must not
+     * be turned into a verdict by falling through to {@code verify(...)} --
+     * unlike a timeout, an interrupt means the caller no longer wants any
+     * more git commands run. A slow {@code pre-merge-commit} hook keeps the
+     * top-level {@code git merge} process (and therefore
+     * {@code Process.waitFor}) blocked long enough to interrupt the worker
+     * thread from outside; {@code CompletableFuture.cancel} would not
+     * interrupt the running task, so this drives {@code mergeBlocking}
+     * directly on a thread of its own.
+     */
+    @Test
+    void mergeBlockingPropagatesAnInterruptWithoutProducingAVerdict(@TempDir Path repoDir,
+            @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/interrupt").get();
+        commitFile(worktree, "feature.txt", "new feature\n", "add feature");
+        Path hook = Path.of(runGitCapture(repo, "rev-parse", "--absolute-git-dir").strip())
+                .resolve("hooks").resolve("pre-merge-commit");
+        Files.createDirectories(hook.getParent());
+        Files.writeString(hook, "#!/bin/sh\nsleep 5\nexit 0\n");
+        hook.toFile().setExecutable(true);
+        WorktreeService.MergeTarget target = service.inspectMergeTarget(repo, "feat/interrupt").get();
+
+        java.util.concurrent.atomic.AtomicReference<Throwable> thrown = new java.util.concurrent.atomic.AtomicReference<>();
+        Thread worker = new Thread(() -> {
+            try {
+                service.mergeBlocking(repo, "feat/interrupt", target);
+            } catch (Throwable t) {
+                thrown.set(t);
+            }
+        });
+        worker.start();
+        Thread.sleep(500); // let the hook's sleep start before interrupting
+        worker.interrupt();
+        worker.join(java.time.Duration.ofSeconds(10).toMillis());
+
+        assertFalse(worker.isAlive(), "the worker thread should have unblocked on the interrupt");
+        assertInstanceOf(GitCommandInterruptedException.class, thrown.get());
+    }
+
+    /**
      * Documents the honest boundary of the oracle: {@code Merged} proves a
      * merge commit <em>of the recorded tip</em> exists on the base branch,
      * not that its content landed in the tree. That is safe only because the
