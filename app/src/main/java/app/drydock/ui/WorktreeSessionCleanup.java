@@ -1,0 +1,131 @@
+package app.drydock.ui;
+
+import app.drydock.domain.ManagedSessionId;
+import app.drydock.git.BranchNotDeletedException;
+import app.drydock.git.WorktreeNotCleanException;
+
+import java.lang.System.Logger;
+import java.lang.System.Logger.Level;
+import java.nio.file.Path;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+
+/**
+ * The one implementation of "this worktree session is finished": remove the
+ * worktree, delete the branch when it is ours, close the session. Used by
+ * both the Finish panel's Delete and the merge-and-finish flow -- the app's
+ * most destructive sequence exists once, and reports per step instead of
+ * throwing one opaque failure.
+ *
+ * <p>Invariant: the session is deleted only if the worktree is gone. A
+ * branch that could not be deleted is a leftover the caller can report and
+ * move on from, but a worktree that survived still holds files the user has
+ * to look at, and the session's terminal and conversation are how they look
+ * at them -- closing it would throw away the context needed to finish the
+ * job.</p>
+ *
+ * <p>Collaborators are narrow interfaces rather than {@code WorktreeService}
+ * and {@code SessionManager} so this class -- the app's most destructive
+ * sequence -- is testable with fakes and no git. Runs entirely off the FX
+ * thread and does no UI work; the caller renders the outcome. The returned
+ * future never completes exceptionally: every failure is folded into the
+ * outcome, because the caller has copy for each and a partial cleanup is not
+ * an error the user can retry blindly.</p>
+ */
+final class WorktreeSessionCleanup {
+
+    private static final Logger LOG = System.getLogger(WorktreeSessionCleanup.class.getName());
+
+    /** Matches {@code WorktreeService::remove}. */
+    interface WorktreeRemoval {
+        CompletableFuture<Void> remove(Path repositoryRoot, Path worktree, Optional<String> branch);
+    }
+
+    /** Matches {@code SessionManager::deleteSession}. */
+    interface SessionDeletion {
+        CompletableFuture<Void> delete(ManagedSessionId sessionId);
+    }
+
+    private final WorktreeRemoval removal;
+    private final SessionDeletion deletion;
+
+    WorktreeSessionCleanup(WorktreeRemoval removal, SessionDeletion deletion) {
+        this.removal = removal;
+        this.deletion = deletion;
+    }
+
+    /**
+     * Runs the sequence and reports what each step managed to do.
+     *
+     * @param mayDeleteBranch whether the branch is ours to delete (a branch
+     *                        drydock did not create outlives the worktree)
+     */
+    CompletableFuture<MergeFinishDecision.CleanupOutcome> run(ManagedSessionId sessionId, Path repositoryRoot,
+                                                              Path worktreeRoot, String branch,
+                                                              boolean mayDeleteBranch) {
+        Optional<String> branchToDelete = mayDeleteBranch ? Optional.of(branch) : Optional.empty();
+        return removal.remove(repositoryRoot, worktreeRoot, branchToDelete)
+                .handle((ignored, failure) -> classify(failure, mayDeleteBranch))
+                .thenCompose(partial -> partial.worktreeRemoved()
+                        ? closeSession(sessionId, partial)
+                        : CompletableFuture.completedFuture(partial));
+    }
+
+    /**
+     * Turns {@code WorktreeRemoval}'s result into the worktree/branch half
+     * of the outcome. {@code worktreeKeptReason} is populated only when the
+     * worktree survived -- {@link MergeFinishDecision.CleanupOutcome}'s
+     * contract is that the field means "why the worktree survived", and
+     * carrying anything else there (a branch-delete stderr excerpt, say)
+     * would be a fact silently dropped by every renderer that checks
+     * {@code worktreeRemoved} first, or worse, misread as the reason the
+     * worktree was kept.
+     */
+    private static MergeFinishDecision.CleanupOutcome classify(Throwable failure, boolean mayDeleteBranch) {
+        if (failure == null) {
+            return new MergeFinishDecision.CleanupOutcome(true,
+                    mayDeleteBranch ? MergeFinishDecision.BranchResult.DELETED
+                            : MergeFinishDecision.BranchResult.KEPT_NOT_OURS,
+                    false, Optional.empty());
+        }
+        Throwable cause = UiErrors.unwrap(failure);
+        if (cause instanceof BranchNotDeletedException) {
+            // The worktree is gone; only `git branch -D` refused. Not a
+            // reason to keep the session -- see the class invariant.
+            return new MergeFinishDecision.CleanupOutcome(true,
+                    MergeFinishDecision.BranchResult.DELETE_FAILED, false, Optional.empty());
+        }
+        // Anything else means the worktree half itself did not complete:
+        // NOT_ATTEMPTED is the only branch result a surviving worktree can
+        // report (CleanupOutcome's compact constructor rejects any other
+        // pairing with worktreeRemoved=false), and the session must stay
+        // open so its terminal and conversation are still there to act on
+        // whatever is keeping the worktree dirty.
+        String reason = cause instanceof WorktreeNotCleanException
+                ? "it has uncommitted changes"
+                : Optional.ofNullable(cause.getMessage()).orElse(cause.getClass().getSimpleName());
+        return new MergeFinishDecision.CleanupOutcome(false,
+                MergeFinishDecision.BranchResult.NOT_ATTEMPTED, false, Optional.of(reason));
+    }
+
+    /**
+     * Closes the session once the worktree is confirmed gone. A failure here
+     * is logged, never swallowed the way {@code handoffDelete}'s private
+     * lambda body reports "session closed" regardless of
+     * {@code deleteSession}'s outcome -- {@code sessionDeleted()} must
+     * reflect what actually happened.
+     */
+    private CompletableFuture<MergeFinishDecision.CleanupOutcome> closeSession(
+            ManagedSessionId sessionId, MergeFinishDecision.CleanupOutcome partial) {
+        return deletion.delete(sessionId).handle((ignored, failure) -> {
+            if (failure == null) {
+                return new MergeFinishDecision.CleanupOutcome(partial.worktreeRemoved(), partial.branch(),
+                        true, partial.worktreeKeptReason());
+            }
+            LOG.log(Level.WARNING, "Could not close session " + sessionId + " after worktree cleanup",
+                    UiErrors.unwrap(failure));
+            return new MergeFinishDecision.CleanupOutcome(partial.worktreeRemoved(), partial.branch(),
+                    false, partial.worktreeKeptReason());
+        });
+    }
+}

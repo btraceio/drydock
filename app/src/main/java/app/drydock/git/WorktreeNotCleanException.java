@@ -14,7 +14,8 @@ public final class WorktreeNotCleanException extends GitException {
 
     private final Path worktreePath;
 
-    WorktreeNotCleanException(Path worktreePath) {
+    /** Public: {@code app.drydock.ui}'s cleanup tests construct this directly; the type is already public contract. */
+    public WorktreeNotCleanException(Path worktreePath) {
         super("The worktree at " + worktreePath + " contains modified or untracked files");
         this.worktreePath = worktreePath;
     }

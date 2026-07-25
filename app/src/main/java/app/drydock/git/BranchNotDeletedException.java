@@ -14,7 +14,8 @@ public final class BranchNotDeletedException extends GitException {
     private final String branch;
     private final String stderrExcerpt;
 
-    BranchNotDeletedException(String branch, int exitCode, String stderrExcerpt) {
+    /** Public: {@code app.drydock.ui}'s cleanup tests construct this directly; the type is already public contract. */
+    public BranchNotDeletedException(String branch, int exitCode, String stderrExcerpt) {
         super("Could not delete branch " + branch + " (exit " + exitCode + ")"
                 + (stderrExcerpt.isBlank() ? "" : System.lineSeparator() + "stderr: " + stderrExcerpt));
         this.branch = branch;
