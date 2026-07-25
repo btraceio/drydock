@@ -13,6 +13,7 @@ import app.drydock.state.json.JsonValue.JsonNumber;
 import app.drydock.state.json.JsonValue.JsonObject;
 import app.drydock.state.json.JsonValue.JsonString;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.logging.Level;
@@ -49,10 +50,15 @@ public final class McpToolRouter {
                                 .put("scope", schemaString("Diff scope to filter by: WORKING_TREE, "
                                         + "UPSTREAM, or BASE. Omit for every scope."))),
                 descriptor("review_reply",
-                        "Replies to a review-annotation thread and marks it ADDRESSED.",
+                        "Appends a Claude-authored note to a review-annotation thread. Pass "
+                                + "addressed: true to claim the annotation as ADDRESSED; the human still "
+                                + "confirms with RESOLVED. Refused outright for threads already RESOLVED "
+                                + "or FIXED.",
                         JsonObject.empty()
-                                .put("annotation_id", schemaString("Id of the annotation to reply to."))
-                                .put("text", schemaString("Reply text."))),
+                                .put("id", schemaString("Id of the annotation to reply to."))
+                                .put("note", schemaString("Reply text to append to the thread."))
+                                .put("addressed", schemaBoolean("Whether to mark the annotation ADDRESSED. "
+                                        + "Defaults to false."))),
                 descriptor("worktree_create",
                         "Creates a new worktree for a branch in the caller's repository.",
                         JsonObject.empty()
@@ -76,7 +82,7 @@ public final class McpToolRouter {
     public JsonValue call(ManagedSessionId caller, String tool, JsonValue arguments) throws McpToolException {
         return switch (tool) {
             case "review_comments" -> reviewComments(caller, arguments);
-            case "review_reply" -> throw new McpToolException("not implemented yet");
+            case "review_reply" -> reviewReply(caller, arguments);
             case "worktree_create" -> throw new McpToolException("not implemented yet");
             case "session_start" -> throw new McpToolException("not implemented yet");
             case "repos_list" -> reposList(caller);
@@ -159,6 +165,33 @@ public final class McpToolRouter {
                 .put("thread", thread));
     }
 
+    // ---- review_reply ---------------------------------------------------
+
+    private JsonValue reviewReply(ManagedSessionId caller, JsonValue arguments) throws McpToolException {
+        JsonObject args = asObject(arguments);
+        String id = requiredStringArg(args, "id");
+        String note = requiredStringArg(args, "note");
+        boolean addressed = optionalBooleanArg(args, "addressed", false);
+
+        ReviewAnnotation annotation = context.annotations(caller).stream()
+                .filter(candidate -> candidate.id().equals(id) && candidate.sessionId().equals(caller))
+                .findFirst()
+                .orElseThrow(() -> new McpToolException("No such annotation '" + id + "'."));
+
+        if (annotation.status() == AnnotationStatus.RESOLVED || annotation.status() == AnnotationStatus.FIXED) {
+            throw new McpToolException("Annotation '" + id + "' is already " + annotation.status()
+                    + "; the human's verdict is final.");
+        }
+
+        ReviewAnnotation replied = annotation.withReply(new ReviewAnnotation.Message("Claude", Instant.now(), note));
+        ReviewAnnotation updated = addressed ? replied.withStatus(AnnotationStatus.ADDRESSED) : replied;
+        context.updateAnnotation(updated);
+
+        return JsonObject.empty()
+                .put("id", new JsonString(updated.id()))
+                .put("status", new JsonString(updated.status().name()));
+    }
+
     // ---- repos_list -------------------------------------------------------
 
     private JsonValue reposList(ManagedSessionId caller) throws McpToolException {
@@ -222,14 +255,19 @@ public final class McpToolRouter {
         return value.get();
     }
 
-    /** Optional string argument; blank or absent is treated as absent. */
-    private static Optional<String> optionalStringArg(JsonObject args, String key) {
+    /**
+     * Optional string argument; blank or absent is treated as absent. A
+     * present-but-wrong-typed argument (e.g. a JSON number) is rejected
+     * outright rather than silently treated as absent, so the agent is told
+     * "must be a string" instead of the more confusing "missing".
+     */
+    private static Optional<String> optionalStringArg(JsonObject args, String key) throws McpToolException {
         if (!args.has(key)) {
             return Optional.empty();
         }
         JsonValue value = args.get(key);
         if (!(value instanceof JsonString string)) {
-            return Optional.empty();
+            throw new McpToolException("Argument '" + key + "' must be a string.");
         }
         String text = string.value();
         if (text == null || text.isBlank()) {
@@ -275,6 +313,12 @@ public final class McpToolRouter {
     private static JsonValue schemaString(String description) {
         return JsonObject.empty()
                 .put("type", new JsonString("string"))
+                .put("description", new JsonString(description));
+    }
+
+    private static JsonValue schemaBoolean(String description) {
+        return JsonObject.empty()
+                .put("type", new JsonString("boolean"))
                 .put("description", new JsonString(description));
     }
 }
