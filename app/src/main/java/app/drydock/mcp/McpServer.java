@@ -79,6 +79,11 @@ public final class McpServer implements AutoCloseable {
         return "http://127.0.0.1:" + port + PATH;
     }
 
+    /** The socket's actual bound address, for tests that must not trust a literal-built string. */
+    public InetSocketAddress boundAddress() {
+        return server.getAddress();
+    }
+
     /** Null-safe and idempotent: safe to call before {@link #start()} and safe to call twice. */
     @Override
     public void close() {
@@ -123,9 +128,6 @@ public final class McpServer implements AutoCloseable {
                 sendEmpty(exchange, 403);
                 return;
             }
-            // The Host header cannot be set through java.net.http.HttpClient (it is
-            // restricted), so this branch is exercised by the manual checklist, not
-            // by McpServerTest -- the test substitutes X-Forwarded-Host instead.
             if (!originAllowed(exchange.getRequestHeaders().getFirst("Host"))) {
                 sendEmpty(exchange, 403);
                 return;
@@ -183,7 +185,15 @@ public final class McpServer implements AutoCloseable {
 
         private JsonValue toolsCall(ManagedSessionId caller, JsonValue params, JsonValue id) {
             JsonObject args = params instanceof JsonObject object ? object : JsonObject.empty();
-            String name = args.get("name") instanceof JsonString s ? s.value() : null;
+            JsonValue nameValue = args.get("name");
+            if (!(nameValue instanceof JsonString nameString)) {
+                // The router's dispatch is a plain String switch with no `case
+                // null`, so passing a missing/non-string name through would NPE
+                // and degrade into a -32603 internal error. Missing tool name is
+                // a predictable bad argument, not an internal failure.
+                return successResponse(id, toolCallResult(new JsonString("Missing required \"name\""), true));
+            }
+            String name = nameString.value();
             JsonValue arguments = args.get("arguments");
 
             try {

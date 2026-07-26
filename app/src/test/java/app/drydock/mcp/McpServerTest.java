@@ -6,10 +6,13 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.net.InetAddress;
+import java.net.Socket;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Optional;
@@ -48,8 +51,7 @@ class McpServerTest {
         }
     }
 
-    private HttpResponse<String> post(String body, String presentedToken, String origin, String host)
-            throws Exception {
+    private HttpResponse<String> post(String body, String presentedToken, String origin) throws Exception {
         HttpRequest.Builder request = HttpRequest.newBuilder(URI.create(server.endpointUrl()))
                 .timeout(Duration.ofSeconds(5))
                 .header("Content-Type", "application/json")
@@ -60,20 +62,57 @@ class McpServerTest {
         if (origin != null) {
             request.header("Origin", origin);
         }
-        if (host != null) {
-            request.header("X-Forwarded-Host", host);
-        }
         return client.send(request.build(), HttpResponse.BodyHandlers.ofString());
     }
 
     private HttpResponse<String> post(String body) throws Exception {
-        return post(body, token, null, null);
+        return post(body, token, null);
+    }
+
+    /**
+     * Sends a handcrafted request over a raw socket, because {@code HttpClient}
+     * refuses to set {@code Host} -- it is a restricted header. Returns the
+     * whole response, status line included.
+     */
+    private String rawPost(String hostHeader, String tokenHeader, String body) throws Exception {
+        try (Socket socket = new Socket(InetAddress.getLoopbackAddress(), server.port())) {
+            String request = "POST /mcp HTTP/1.1\r\n"
+                    + "Host: " + hostHeader + "\r\n"
+                    + (tokenHeader == null ? "" : TOKEN_HEADER + ": " + tokenHeader + "\r\n")
+                    + "Content-Type: application/json\r\n"
+                    + "Content-Length: " + body.getBytes(StandardCharsets.UTF_8).length + "\r\n"
+                    + "Connection: close\r\n\r\n"
+                    + body;
+            socket.getOutputStream().write(request.getBytes(StandardCharsets.UTF_8));
+            socket.getOutputStream().flush();
+            return new String(socket.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        }
     }
 
     @Test
-    void bindsOnLoopbackOnly() {
-        assertTrue(server.endpointUrl().startsWith("http://127.0.0.1:"), server.endpointUrl());
+    void bindsOnLoopbackOnly() throws Exception {
+        // Asserting on endpointUrl() would prove nothing: that string is built
+        // from a literal, so it reads "127.0.0.1" even if start() bound
+        // 0.0.0.0. Ask the socket what it is actually bound to.
+        assertTrue(server.boundAddress().getAddress().isLoopbackAddress(),
+                "must not be reachable off-host: " + server.boundAddress());
         assertTrue(server.port() > 0);
+    }
+
+    @Test
+    void aForeignHostHeaderIsRejected() throws Exception {
+        String response = rawPost("evil.example.com:" + server.port(), token, """
+                {"jsonrpc":"2.0","id":20,"method":"tools/list","params":{}}""");
+
+        assertTrue(response.startsWith("HTTP/1.1 403"), response);
+    }
+
+    @Test
+    void aLoopbackHostHeaderIsAccepted() throws Exception {
+        String response = rawPost("127.0.0.1:" + server.port(), token, """
+                {"jsonrpc":"2.0","id":21,"method":"tools/list","params":{}}""");
+
+        assertTrue(response.startsWith("HTTP/1.1 200"), response);
     }
 
     @Test
@@ -158,7 +197,7 @@ class McpServerTest {
     @Test
     void aMissingTokenIsRejected() throws Exception {
         HttpResponse<String> response = post("""
-                {"jsonrpc":"2.0","id":6,"method":"tools/list","params":{}}""", null, null, null);
+                {"jsonrpc":"2.0","id":6,"method":"tools/list","params":{}}""", null, null);
 
         assertEquals(401, response.statusCode());
     }
@@ -166,7 +205,7 @@ class McpServerTest {
     @Test
     void anUnknownTokenIsRejected() throws Exception {
         HttpResponse<String> response = post("""
-                {"jsonrpc":"2.0","id":7,"method":"tools/list","params":{}}""", "bogus-token", null, null);
+                {"jsonrpc":"2.0","id":7,"method":"tools/list","params":{}}""", "bogus-token", null);
 
         assertEquals(401, response.statusCode());
     }
@@ -185,7 +224,7 @@ class McpServerTest {
     void aForeignOriginIsRejectedEvenWithAValidToken() throws Exception {
         HttpResponse<String> response = post("""
                 {"jsonrpc":"2.0","id":9,"method":"tools/list","params":{}}""",
-                token, "https://evil.example.com", null);
+                token, "https://evil.example.com");
 
         assertEquals(403, response.statusCode());
     }
@@ -194,7 +233,7 @@ class McpServerTest {
     void aLoopbackOriginIsAccepted() throws Exception {
         HttpResponse<String> response = post("""
                 {"jsonrpc":"2.0","id":10,"method":"tools/list","params":{}}""",
-                token, "http://127.0.0.1:" + server.port(), null);
+                token, "http://127.0.0.1:" + server.port());
 
         assertEquals(200, response.statusCode());
     }
@@ -202,7 +241,7 @@ class McpServerTest {
     @Test
     void aMissingOriginIsAcceptedBecauseCliClientsSendNone() throws Exception {
         HttpResponse<String> response = post("""
-                {"jsonrpc":"2.0","id":11,"method":"tools/list","params":{}}""", token, null, null);
+                {"jsonrpc":"2.0","id":11,"method":"tools/list","params":{}}""", token, null);
 
         assertEquals(200, response.statusCode());
     }
@@ -238,8 +277,36 @@ class McpServerTest {
     }
 
     @Test
-    void neitherPortNorTokenIsEverLogged() {
+    void aToolCallWithNoNameIsAnActionableToolErrorNotAnInternalError() throws Exception {
+        // The router's dispatch is a String switch, which NPEs on a null
+        // selector. Left to reach it, a missing "name" surfaces as -32603 with a
+        // stack trace in the log -- the catch-all is a last resort, not the
+        // handler for a predictable bad argument.
+        HttpResponse<String> response = post("""
+                {"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"arguments":{}}}""");
+
+        assertEquals(200, response.statusCode());
+        assertFalse(response.body().contains("-32603"), response.body());
+        assertTrue(response.body().contains("\"isError\": true"), response.body());
+    }
+
+    @Test
+    void aToolCallWithANonStringNameIsAlsoAToolError() throws Exception {
+        HttpResponse<String> response = post("""
+                {"jsonrpc":"2.0","id":23,"method":"tools/call","params":{"name":7,"arguments":{}}}""");
+
+        assertEquals(200, response.statusCode());
+        assertFalse(response.body().contains("-32603"), response.body());
+        assertTrue(response.body().contains("\"isError\": true"), response.body());
+    }
+
+    @Test
+    void neitherPortNorTokenAppearsInToString() {
+        // The port half matters: toString() is the one place a debug log would
+        // most plausibly leak it.
         assertFalse(server.toString().contains(token), "token must not appear in toString()");
+        assertFalse(server.toString().contains(String.valueOf(server.port())),
+                "port must not appear in toString(): " + server.toString());
     }
 
     @Test
