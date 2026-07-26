@@ -226,8 +226,12 @@ Walk this with a human at the keyboard:
 10. Ask a session to call `session_start` with a path outside the repository
     (e.g. `/tmp`). Confirm it is refused, naming the path.
 11. Start a **remote SSH** session. Run `/mcp` and confirm no `drydock` server
-    is listed, and that the session's banner says Drydock tools are
-    unavailable for remote sessions.
+    is listed. (An earlier draft of this checklist also asked you to confirm a
+    banner saying Drydock tools are unavailable for remote sessions. No such
+    banner exists — nothing in the implementation builds one, and the claim was
+    withdrawn from the design; see the "Known gap" note under Scope in
+    `docs/superpowers/specs/2026-07-25-drydock-mcp-server-design.md`. Do not
+    treat its absence as a failure of this step.)
 12. Close a session, then confirm its file under `<base>/mcp/` is gone and
     that a `curl` with its old token gets 401.
 13. Build the packaged app (`./gradlew :app:appImage`), launch it, and repeat

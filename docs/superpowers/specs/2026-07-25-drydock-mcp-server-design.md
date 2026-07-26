@@ -69,7 +69,18 @@ Out of scope, with reasons:
   remote host and cannot reach `127.0.0.1` on the Mac without a reverse
   port-forward. This matches how worktrees, diffs, and Review are already
   unavailable for remotes — but unlike those, there is no disabled button
-  to make it legible, so the remote session's launch banner says so.
+  to make it legible.
+
+  **Known gap, deliberately not closed here.** An earlier draft of this design
+  promised the remote session's launch banner would say Drydock tools are
+  unavailable. No task in the implementation plan builds that banner, and the
+  claim was caught by review only after the wiring was complete. Rather than
+  add unreviewed UI in the final task, the promise is withdrawn: a remote
+  session simply has no `drydock` MCP server, and an agent asked to read review
+  comments there will report that the tool does not exist. That is a legibility
+  gap, not a correctness one — Review itself is already unavailable for remotes,
+  so there are usually no annotations to read. Adding the banner is cheap
+  follow-up work and should be its own change.
 
 ## Trust boundary
 
