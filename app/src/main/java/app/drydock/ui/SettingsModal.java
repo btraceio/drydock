@@ -261,9 +261,8 @@ public final class SettingsModal extends VBox {
             if (committing[0] || text.equals(lastCommitted[0])) {
                 return;
             }
-            committing[0] = true;
-            lastCommitted[0] = text;
             Optional<Path> directory = text.isEmpty() ? Optional.empty() : Optional.of(Path.of(text));
+            committing[0] = true;
             field.setDisable(true);
             browse.setDisable(true);
             settings.saveWorktreesDirectory(directory).whenComplete((ignored, failure) ->
@@ -277,6 +276,8 @@ public final class SettingsModal extends VBox {
                         browse.setDisable(false);
                         if (failure != null) {
                             UiErrors.show("Could not save the worktrees directory", failure);
+                        } else {
+                            lastCommitted[0] = text;
                         }
                     }));
         };
