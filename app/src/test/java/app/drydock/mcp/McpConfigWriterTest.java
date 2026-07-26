@@ -9,7 +9,13 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermission;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Set;
+import java.util.logging.Handler;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -107,7 +113,32 @@ class McpConfigWriterTest {
     @Test
     void purgeStaleOnAFreshInstallIsSilent(@TempDir Path base) {
         // The mcp/ directory does not exist yet on a first run; Files.list
-        // would throw NoSuchFileException.
-        new McpConfigWriter(base.resolve("never-created")).purgeStale();
+        // would throw NoSuchFileException. This is the expected, common
+        // case -- not just "does not throw" but "does not even warn".
+        Logger logger = Logger.getLogger(McpConfigWriter.class.getName());
+        List<LogRecord> published = new ArrayList<>();
+        Handler recorder = new Handler() {
+            @Override
+            public void publish(LogRecord record) {
+                published.add(record);
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        logger.addHandler(recorder);
+        try {
+            new McpConfigWriter(base.resolve("never-created")).purgeStale();
+
+            assertTrue(published.stream().noneMatch(record -> record.getLevel().intValue() >= Level.WARNING.intValue()),
+                    "a missing mcp/ directory on a first run is expected, not a warning: " + published);
+        } finally {
+            logger.removeHandler(recorder);
+        }
     }
 }

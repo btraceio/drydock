@@ -11,6 +11,7 @@ import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.FileAttribute;
@@ -126,9 +127,12 @@ public final class McpConfigWriter {
             for (Path file : stale.toList()) {
                 Files.deleteIfExists(file);
             }
+        } catch (NoSuchFileException e) {
+            // Expected, common case: on a first run mcp/ has never been
+            // created. Nothing to purge, and nothing worth a WARNING.
         } catch (IOException e) {
-            // Cosmetic cleanup, including the expected "directory does not
-            // exist yet" case on a first run: never fail startup over this.
+            // Cosmetic cleanup: a genuine failure here must not prevent
+            // startup, but is still worth surfacing.
             LOG.log(Level.WARNING, "Could not purge stale mcp configs: " + e.getMessage());
         }
     }
