@@ -215,10 +215,17 @@ public final class SettingsModal extends VBox {
     }
 
     private Region worktreesRow(Settings settings) {
+        // Reuses the New-worktree modal's classes rather than inventing new
+        // ones: this is the same kind of control doing the same job (a path
+        // input and its secondary action), and unstyled stock controls fall
+        // back to modena's light defaults, which render as a white field and
+        // a grey 3D button inside the dark modal.
         TextField field = new TextField();
+        field.getStyleClass().add("worktree-field");
         field.setPromptText("Loading…");
         field.setDisable(true);
         Button browse = new Button("Browse…");
+        browse.getStyleClass().add("worktree-cancel-button");
         browse.setDisable(true);
 
         Label hint = new Label("New worktrees are created here.");

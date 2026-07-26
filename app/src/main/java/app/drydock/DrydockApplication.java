@@ -9,6 +9,7 @@ import app.drydock.activity.SessionActivityWatcher;
 import app.drydock.config.UserConfig;
 import app.drydock.domain.Repository;
 import app.drydock.domain.UiTheme;
+import app.drydock.domain.WorkspaceUiState;
 import app.drydock.git.ChangedLineService;
 import app.drydock.git.DiffService;
 import app.drydock.git.GhCliService;
@@ -521,6 +522,48 @@ public final class DrydockApplication extends Application {
             reviewOpener.start();
         }
 
+        // Diagnostic hook for the Settings modal's visual and behavioural
+        // pass. The modal is the one part of the settings feature no unit
+        // test can reach (there is no JavaFX toolkit harness here), and its
+        // riskiest paths -- "does Esc lose a typed directory", "is the
+        // radio legible in both themes" -- are only observable in a running
+        // app, so they get a driver rather than an unverified claim.
+        //
+        // Value is a comma-separated "<atSeconds>:<verb>[:<arg>]" script,
+        // same shape as diag.explorerScript. Verbs:
+        //   open            show the Settings modal (as the gear button does)
+        //   theme:DARK      set the theme absolutely
+        //   uisize:15       drag the interface-size slider to 15
+        //   tsize:18        drag the terminal-size slider to 18
+        //   dirtext:/p      type into the worktrees-directory field
+        //   esc             close via the SAME path the Esc key filter uses
+        //   shot:/tmp/a.png snapshot the scene
+        //   dump            print the persisted sizes and the on-disk config
+        // Inert unless -Dapp.drydock.diag.settingsScript is set.
+        String settingsScript = System.getProperty("app.drydock.diag.settingsScript");
+        if (settingsScript != null) {
+            Thread driver = new Thread(() -> {
+                long start = System.nanoTime();
+                for (String step : settingsScript.split(",")) {
+                    String[] parts = step.split(":", 3);
+                    long atMillis = (long) (Double.parseDouble(parts[0].strip()) * 1000);
+                    long elapsed = (System.nanoTime() - start) / 1_000_000;
+                    if (elapsed < atMillis) {
+                        try {
+                            Thread.sleep(atMillis - elapsed);
+                        } catch (InterruptedException e) {
+                            return;
+                        }
+                    }
+                    String verb = parts[1].strip();
+                    String arg = parts.length > 2 ? parts[2] : "";
+                    Platform.runLater(() -> diagSettingsStep(primaryStage, verb, arg));
+                }
+            });
+            driver.setDaemon(true);
+            driver.start();
+        }
+
         // Diagnostic hook: sends 10 synthetic scroll-up events through the
         // selected tab's scroll path (verifies the Java ->
         // ghostty_surface_mouse_scroll pipeline without real NSEvents).
@@ -851,6 +894,107 @@ public final class DrydockApplication extends Application {
         } catch (RuntimeException e) {
             LOG.log(Level.WARNING, "Shutdown step failed: " + what, e);
         }
+    }
+
+    /**
+     * Diagnostic-only: one step of {@code app.drydock.diag.settingsScript}.
+     * Drives the Settings modal through the same entry points the UI uses --
+     * {@code showSettings} is what the gear button calls, and {@code esc}
+     * goes through {@code ModalLayer.close()} exactly as the scene's Esc
+     * filter does -- so what this exercises is the real path, not a
+     * test-only shortcut past it.
+     */
+    private void diagSettingsStep(Stage stage, String verb, String arg) {
+        try {
+            switch (verb) {
+                case "open" -> {
+                    appShell.showSettings();
+                    System.out.println("[diag] settings opened");
+                }
+                case "theme" -> {
+                    appShell.themeManager().setTheme(UiTheme.valueOf(arg.strip()));
+                    System.out.println("[diag] theme set to " + arg.strip());
+                }
+                case "uisize" -> {
+                    double size = Double.parseDouble(arg.strip());
+                    appShell.themeManager().setUiFontSize(size);
+                    repositoryManager.updateUiFontSize(size);
+                    System.out.println("[diag] interface size set to " + size);
+                }
+                case "tsize" -> {
+                    double size = Double.parseDouble(arg.strip());
+                    repositoryManager.updateTerminalFontSize(size);
+                    mainWorkspace.applyTerminalTheme(appShell.themeManager().theme());
+                    System.out.println("[diag] terminal size set to " + size);
+                }
+                case "dirtext" -> {
+                    TextInputControl field = diagSettingsDirectoryField();
+                    if (field == null) {
+                        System.out.println("[diag] dirtext: no directory field found (is the modal open?)");
+                    } else {
+                        field.setText(arg);
+                        System.out.println("[diag] dirtext typed: " + arg);
+                    }
+                }
+                case "esc" -> {
+                    appShell.modalLayer().close();
+                    System.out.println("[diag] modal closed via the Esc path");
+                }
+                case "type" -> {
+                    // Types into the focused terminal and presses Return.
+                    // Used to prove the terminal font size took effect
+                    // WITHOUT pixels: the ghostty surface is a native view
+                    // stacked above the JavaFX scene, so a scene snapshot
+                    // cannot see it, but `stty size` reports the cell grid,
+                    // which must change when the cell size does.
+                    arg.codePoints().forEach(cp -> {
+                        String ch = new String(Character.toChars(cp));
+                        mainWorkspace.diagPressKey(0, ch, ch);
+                    });
+                    mainWorkspace.diagPressKey(36, "\r", "\r");
+                    System.out.println("[diag] typed: " + arg);
+                }
+                case "view" -> {
+                    // The terminal sub-tab runs a plain login shell, so a
+                    // font-size check does not depend on `claude` being
+                    // installed or authenticated.
+                    if ("terminal".equals(arg.strip())) {
+                        mainWorkspace.showTerminalSubTab();
+                    } else {
+                        mainWorkspace.showClaudeSubTab();
+                    }
+                    System.out.println("[diag] view -> " + arg.strip());
+                }
+                case "shot" -> diagSnapshot(stage, Path.of(arg));
+                case "dump" -> {
+                    WorkspaceUiState ui = repositoryManager.state().ui();
+                    System.out.println("[diag] persisted uiFontSize=" + ui.uiFontSize()
+                            + " terminalFontSize=" + ui.terminalFontSize()
+                            + " theme=" + ui.theme());
+                    Path configFile = UserConfig.defaultConfigFile();
+                    System.out.println("[diag] config " + configFile + " -> "
+                            + (Files.exists(configFile)
+                            ? Files.readString(configFile).replace('\n', ' ')
+                            : "(absent)"));
+                }
+                default -> System.out.println("[diag] unknown settings verb " + verb);
+            }
+        } catch (IOException | RuntimeException e) {
+            System.out.println("[diag] settings step '" + verb + "' failed: " + e);
+        }
+    }
+
+    /**
+     * The Settings modal's worktrees-directory field, or {@code null} when the
+     * modal is not showing. Located by type: it is the modal's only text input.
+     */
+    private TextInputControl diagSettingsDirectoryField() {
+        for (javafx.scene.Node node : appShell.modalLayer().lookupAll(".text-field")) {
+            if (node instanceof TextInputControl field) {
+                return field;
+            }
+        }
+        return null;
     }
 
     /**
