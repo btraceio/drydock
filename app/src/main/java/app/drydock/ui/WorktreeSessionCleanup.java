@@ -91,16 +91,13 @@ final class WorktreeSessionCleanup {
      * toolkit has stopped). Without this, the class's "never completes
      * exceptionally" guarantee would not hold at exactly the moment
      * (app shutdown, mid-cleanup) it matters most.
+     *
+     * <p>The mechanism lives in {@link AsyncCalls} because the UI needs it in
+     * three places now; what is specific to this class is the guarantee above,
+     * which is why the reason it is applied here is documented here.</p>
      */
     private static CompletableFuture<Void> attempt(Supplier<CompletableFuture<Void>> call) {
-        try {
-            CompletableFuture<Void> future = call.get();
-            return future == null
-                    ? CompletableFuture.failedFuture(new NullPointerException("collaborator returned null"))
-                    : future;
-        } catch (Throwable t) {
-            return CompletableFuture.failedFuture(t);
-        }
+        return AsyncCalls.attempt(call);
     }
 
     /**

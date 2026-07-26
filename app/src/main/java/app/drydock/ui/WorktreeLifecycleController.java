@@ -52,7 +52,8 @@ import java.util.function.Supplier;
  * <p>Collaborators are injected: the services doing the actual git/gh
  * work, the modal layer the panels show through, and callbacks into the
  * workspace ({@code openTab} -- the liveness lookup every async completion
- * guards on; {@code onSessionsChanged}; {@code onSessionDeleted}). All
+ * re-resolves before touching a header, since a tab can be closed mid-git;
+ * {@code onSessionsChanged}; {@code onSessionDeleted}). All
  * methods run on the FX Application Thread; async completions hop back via
  * {@code Platform.runLater} exactly as before the extraction.</p>
  */
@@ -180,9 +181,16 @@ final class WorktreeLifecycleController {
         Region busy = busyModal("Inspecting worktree & checking PR state…");
         modalLayer.show(busy);
 
+        // Every probe below goes through AsyncCalls.attempt: the busy modal is
+        // already up, and each of these starts with supplyAsync on a service
+        // executor that throws RejectedExecutionException synchronously once
+        // the app is shutting down. Such a throw would escape showFinishPanel
+        // and leave that modal stranded with the native terminals hidden;
+        // routed into the chain it reaches the whenComplete below, which
+        // closes the modal and reports.
         CompletableFuture<Optional<GhCliService.PrInfo>> prRefresh =
                 ghCliService.isAvailable()
-                        ? ghCliService.viewPr(worktreeRoot, branch)
+                        ? AsyncCalls.attempt(() -> ghCliService.viewPr(worktreeRoot, branch))
                         : CompletableFuture.completedFuture(Optional.empty());
 
         record StatusAndSummary(GitStatus status, GitChangeSummary summary) { }
@@ -197,10 +205,11 @@ final class WorktreeLifecycleController {
         // authoritatively and refuses with a reason, whereas defaulting to
         // "unclean" would grey the action out and blame the user's changes
         // for a git failure that had nothing to do with them.
-        CompletableFuture<Boolean> cleanProbe = worktreeService.isWorktreeClean(worktreeRoot)
-                .exceptionally(ex -> true);
-        gitStatusService.getStatus(worktreeRoot)
-                .thenCombine(gitStatusService.getChangeSummary(worktreeRoot, base)
+        CompletableFuture<Boolean> cleanProbe =
+                AsyncCalls.attempt(() -> worktreeService.isWorktreeClean(worktreeRoot))
+                        .exceptionally(ex -> true);
+        AsyncCalls.attempt(() -> gitStatusService.getStatus(worktreeRoot))
+                .thenCombine(AsyncCalls.attempt(() -> gitStatusService.getChangeSummary(worktreeRoot, base))
                                 .exceptionally(ex -> new GitChangeSummary(0, List.of())),
                         StatusAndSummary::new)
                 .thenCombine(prRefresh.thenCombine(cleanProbe, PrAndClean::new),
@@ -374,30 +383,48 @@ final class WorktreeLifecycleController {
         cleanup.run(sessionId, repository.root(), worktreeRoot, branch,
                         sessionManager.mayDeleteBranchOf(worktreeRoot))
                 .whenComplete((outcome, ex) -> Platform.runLater(() -> {
+                    // Re-resolve rather than reuse the captured tab: ⌘W during
+                    // `git worktree remove` disposes it, and header updates on a
+                    // detached node (one of them arming a 5s PauseTransition)
+                    // are work nobody will ever see. The error alert and the
+                    // model updates below stay unconditional -- they are not
+                    // about a tab watching.
+                    OpenSessionTab live = openTab.apply(sessionId);
                     if (ex != null) {
-                        tab.restoreFinishButton();
+                        restoreFinishIfOpen(live);
                         UiErrors.show("Could not remove the worktree", ex);
                         return;
                     }
                     if (!outcome.worktreeRemoved()) {
-                        tab.restoreFinishButton();
+                        restoreFinishIfOpen(live);
                         UiErrors.show("Could not remove the worktree", "The worktree was kept",
                                 outcome.worktreeKeptReason().orElse("git refused to remove it"));
                         return;
                     }
-                    tab.showHandoffDone("Removed");
+                    // No "✓ Removed" pill: with the removal now confirmed
+                    // synchronously it would be negated in the same FX pulse --
+                    // by the tab's removal below, or by restoring the Finish
+                    // button when the session survived. The tab disappearing is
+                    // the feedback.
                     if (outcome.sessionDeleted()) {
                         onSessionDeleted.accept(sessionId);
-                    } else {
+                    } else if (live != null) {
                         // The worktree is gone but the session outlived it
-                        // (WorktreeSessionCleanup logged why). Saying so beats
-                        // a "✓ Removed" pill over a row that never disappears.
-                        tab.restoreFinishButton();
-                        tab.showTransientNotice(
+                        // (WorktreeSessionCleanup logged why). Saying so beats a
+                        // sidebar row that simply never disappears.
+                        live.restoreFinishButton();
+                        live.showTransientNotice(
                                 "⏺ Worktree removed, but the session stayed open — close its tab manually.");
                     }
                     onSessionsChanged.run();
                 }));
+    }
+
+    /** Puts the header's Finish ▸ back, if there is still a header to put it in. */
+    private static void restoreFinishIfOpen(OpenSessionTab tab) {
+        if (tab != null) {
+            tab.restoreFinishButton();
+        }
     }
 
     private void applyPrState(ManagedSessionId sessionId, PrState state, Optional<Integer> number) {

@@ -268,6 +268,48 @@ class MergeFinishDecisionTest {
     }
 
     @Test
+    void aPreFlightCallThatNeverRanStopsWithoutMerging() {
+        MergeFinishDecision.Next.Stopped stopped =
+                MergeFinishDecision.forFailedInspection("executor shut down");
+
+        assertEquals("Could not inspect the repository", stopped.headline());
+        assertEquals("executor shut down", stopped.detail());
+    }
+
+    @Test
+    void aMergeCallThatNeverRanReadsTheSameAsAMergeGitRefused() {
+        // One sentence for "could not merge X into Y", whether git refused or the
+        // call was never made -- two wordings for it would drift apart.
+        MergeFinishDecision.Next.Stopped refused = assertInstanceOf(MergeFinishDecision.Next.Stopped.class,
+                MergeFinishDecision.forVerdict(new MergeVerdict.Refused("hook said no"),
+                        "/repo", "feat/x", "main", false));
+        MergeFinishDecision.Next.Stopped neverRan =
+                MergeFinishDecision.forFailedMerge("feat/x", "main", "executor shut down");
+
+        assertEquals("Could not merge feat/x into main", neverRan.headline());
+        assertEquals(refused.headline(), neverRan.headline());
+        assertEquals("executor shut down", neverRan.detail());
+    }
+
+    @Test
+    void aCleanupThatNeverRanStillReportsTheMergeAsMerged() {
+        // The merge commit is in the base branch; a ✗ headline here would send the
+        // user looking for a merge that is already there.
+        MergeFinishDecision.Next.Done done =
+                MergeFinishDecision.forFailedCleanup("feat/x", "main", false, "executor shut down");
+
+        assertEquals("✓ Merged feat/x into main", done.headline());
+        assertEquals("cleanup did not run: executor shut down"
+                + " · worktree, branch and session left as they are", done.detail());
+    }
+
+    @Test
+    void aCleanupThatNeverRanStillCreditsResolvedConflicts() {
+        assertEquals("✓ Merged feat/x into main — conflicts resolved by Claude",
+                MergeFinishDecision.forFailedCleanup("feat/x", "main", true, "executor shut down").headline());
+    }
+
+    @Test
     void aRemovedWorktreeCannotPairWithANotAttemptedBranchResult() {
         // NOT_ATTEMPTED means "the worktree survived, so nothing was tried" -- Task 5
         // is the only producer of this record and must not be able to construct the

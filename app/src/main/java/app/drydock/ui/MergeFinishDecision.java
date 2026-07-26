@@ -188,8 +188,7 @@ final class MergeFinishDecision {
      * that is still open is never reported as closed.
      */
     static Next.Done forCleanup(CleanupOutcome outcome, String branch, String base, boolean conflictsResolved) {
-        String headline = "✓ Merged " + branch + " into " + base
-                + (conflictsResolved ? " — conflicts resolved by Claude" : "");
+        String headline = mergedHeadline(branch, base, conflictsResolved);
         String worktree = outcome.worktreeRemoved()
                 ? "worktree removed"
                 : "worktree kept — " + outcome.worktreeKeptReason().orElse("git refused to remove it");
@@ -201,6 +200,48 @@ final class MergeFinishDecision {
         };
         String session = outcome.sessionDeleted() ? "session closed" : "session left open";
         return new Next.Done(headline, String.join(" · ", worktree, branchDetail, session));
+    }
+
+    /** The one place the "this merge landed" headline is worded; shared by the two outcomes that report one. */
+    private static String mergedHeadline(String branch, String base, boolean conflictsResolved) {
+        return "✓ Merged " + branch + " into " + base
+                + (conflictsResolved ? " — conflicts resolved by Claude" : "");
+    }
+
+    /**
+     * A stop for a pre-flight call that could not be made at all -- an
+     * executor rejecting work at shutdown, say -- rather than one git answered.
+     * Nothing has been written, which is the same thing every other pre-flight
+     * refusal says.
+     */
+    static Next.Stopped forFailedInspection(String detail) {
+        return new Next.Stopped("Could not inspect the repository", detail);
+    }
+
+    /**
+     * A stop for a merge call that never reached git. The headline is
+     * deliberately the same sentence {@link MergeVerdict.Refused} produces:
+     * from the user's side "could not merge X into Y, here is why" is one
+     * statement whether git refused or the call was never made, and a second
+     * copy of that sentence in the flow class would only drift from this one.
+     */
+    static Next.Stopped forFailedMerge(String branch, String base, String detail) {
+        return new Next.Stopped("Could not merge " + branch + " into " + base, detail);
+    }
+
+    /**
+     * The merge landed but the cleanup could not be invoked ({@link
+     * WorktreeSessionCleanup} folds every git failure into an outcome, so a
+     * failure reaching the caller means the call itself never ran, and nothing
+     * was removed). Deliberately a {@link Next.Done} with the same "✓ Merged"
+     * headline as a completed cleanup: a partial or absent cleanup must never
+     * downgrade a merge that is already in the base branch to a ✗ failure --
+     * the user would go looking for a merge commit that is right there.
+     */
+    static Next.Done forFailedCleanup(String branch, String base, boolean conflictsResolved, String detail) {
+        return new Next.Done(mergedHeadline(branch, base, conflictsResolved),
+                String.join(" · ", "cleanup did not run: " + detail,
+                        "worktree, branch and session left as they are"));
     }
 
     /** The poll gave up. Says where the merge might be, and that nothing was destroyed. */

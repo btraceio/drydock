@@ -102,11 +102,19 @@ final class MergeAndFinishFlow {
         this.branch = branch;
         this.base = base;
         showBusy("Checking the main checkout…");
+        // The header's Finish ▸ becomes the flow's pill for the same reason
+        // the other hand-offs do it: the modal is dismissible, and a Finish
+        // button left looking live would swallow the click behind the
+        // controller's in-flight guard with nothing to show for it.
+        OpenSessionTab tab = openTab.apply(sessionId);
+        if (tab != null) {
+            tab.showHandoffRunning("Merging…");
+        }
         attempt(() -> worktreeService.inspectMergeTarget(repositoryRoot, branch)
                 .thenCombine(worktreeService.isWorktreeClean(worktreeRoot), PreflightData::new))
                 .whenComplete((data, ex) -> Platform.runLater(() -> {
                     if (ex != null) {
-                        stop("Could not inspect the repository", messageOf(ex));
+                        stop(MergeFinishDecision.forFailedInspection(messageOf(ex)));
                         return;
                     }
                     this.target = data.target();
@@ -128,7 +136,7 @@ final class MergeAndFinishFlow {
             case MergeFinishDecision.Next.KeepWaiting ignored -> pollAgain(0);
             case MergeFinishDecision.Next.CleanUp ignored -> runCleanup();
             case MergeFinishDecision.Next.Done done -> done(done);
-            case MergeFinishDecision.Next.Stopped stopped -> stop(stopped.headline(), stopped.detail());
+            case MergeFinishDecision.Next.Stopped stopped -> stop(stopped);
         }
     }
 
@@ -137,7 +145,7 @@ final class MergeAndFinishFlow {
         attempt(() -> worktreeService.merge(repositoryRoot, branch, target))
                 .whenComplete((verdict, ex) -> Platform.runLater(() -> {
                     if (ex != null) {
-                        stop("Could not merge " + branch + " into " + base, messageOf(ex));
+                        stop(MergeFinishDecision.forFailedMerge(branch, base, messageOf(ex)));
                         return;
                     }
                     apply(MergeFinishDecision.forVerdict(verdict, repositoryRoot.toString(), branch, base, false));
@@ -162,9 +170,7 @@ final class MergeAndFinishFlow {
 
     private void pollAgain(int attemptNumber) {
         if (attemptNumber >= POLL_MAX_ATTEMPTS) {
-            MergeFinishDecision.Next.Stopped stopped =
-                    MergeFinishDecision.forTimeout(branch, base, lastProbeDetail);
-            stop(stopped.headline(), stopped.detail());
+            stop(MergeFinishDecision.forTimeout(branch, base, lastProbeDetail));
             return;
         }
         PauseTransition wait = new PauseTransition(POLL_INTERVAL);
@@ -194,7 +200,10 @@ final class MergeAndFinishFlow {
                         sessionManager.mayDeleteBranchOf(worktreeRoot)))
                 .whenComplete((outcome, ex) -> Platform.runLater(() -> {
                     if (ex != null) {
-                        stop("Merged, but the cleanup failed", messageOf(ex));
+                        // The merge landed; only the cleanup call failed to
+                        // run, so this is a Done, not a ✗.
+                        done(MergeFinishDecision.forFailedCleanup(branch, base, conflictsHandedOff,
+                                messageOf(ex)));
                         return;
                     }
                     if (outcome.sessionDeleted()) {
@@ -207,6 +216,13 @@ final class MergeAndFinishFlow {
 
     // ---- Modal rendering ----------------------------------------------------
 
+    /**
+     * A progress render. Deliberately ignores losing the modal layer: there is
+     * nothing to tell the user yet, and announcing a stage as if it were a
+     * result -- which one shared render path did -- reported
+     * "Merge-and-finish finished" three times per flow, the first time before
+     * the merge had started.
+     */
     private void showBusy(String message) {
         ProgressIndicator spinner = new ProgressIndicator();
         spinner.setPrefSize(28, 28);
@@ -222,12 +238,32 @@ final class MergeAndFinishFlow {
     }
 
     private void done(MergeFinishDecision.Next.Done outcome) {
-        render(terminalModal(outcome.headline(), outcome.detail(), "merge-flow-headline"));
-        onFinished.run();
+        renderTerminal(terminalModal(outcome.headline(), outcome.detail(), "merge-flow-headline"),
+                outcome.headline());
+        finish();
+    }
+
+    private void stop(MergeFinishDecision.Next.Stopped stopped) {
+        stop(stopped.headline(), stopped.detail());
     }
 
     private void stop(String headline, String detail) {
-        render(terminalModal("✗ " + headline, detail, "merge-flow-headline-error"));
+        renderTerminal(terminalModal("✗ " + headline, detail, "merge-flow-headline-error"), headline);
+        finish();
+    }
+
+    /**
+     * Both terminal paths end here: restore the header control the flow took
+     * over, then release the controller's in-flight guard. On the success path
+     * the tab is already gone (the session was deleted before the outcome was
+     * rendered), which is why the restore is conditional rather than ordered
+     * around the deletion.
+     */
+    private void finish() {
+        OpenSessionTab tab = openTab.apply(sessionId);
+        if (tab != null) {
+            tab.restoreFinishButton();
+        }
         onFinished.run();
     }
 
@@ -252,45 +288,55 @@ final class MergeAndFinishFlow {
     }
 
     /**
+     * A result render: falls back to the tab header when the modal layer is
+     * no longer ours, so the outcome is not simply lost. The notice repeats
+     * the decision's own headline rather than inventing a summary -- the
+     * previous "reopen Finish ▸ for the details" was advice the user could not
+     * take, since the in-flight guard refuses Finish while the flow runs and
+     * after a success there is no session left to reopen it on.
+     */
+    private void renderTerminal(Region node, String noticeHeadline) {
+        if (render(node)) {
+            return;
+        }
+        OpenSessionTab tab = openTab.apply(sessionId);
+        if (tab != null) {
+            tab.showTransientNotice("⏺ " + noticeHeadline);
+        }
+    }
+
+    /**
      * Puts {@code node} in the shared modal layer, but only if this flow
      * still owns what is showing (or nothing is): dismissing the progress
      * modal does not cancel the work, so by the time a result arrives the
      * user may have opened an unrelated modal -- {@code ModalLayer.show}
      * would replace it and drop its {@code onClosed} on the floor.
+     *
+     * @return whether {@code node} is now showing; {@code false} means the
+     *         layer belongs to a modal the user opened themselves
      */
-    private void render(Region node) {
+    private boolean render(Region node) {
         boolean ownsLayer = ownModal != null && ownModal.getParent() != null;
         if (ownsLayer || !modalLayer.isShowingModal()) {
             ownModal = node;
             modalLayer.show(node);
-            return;
+            return true;
         }
         ownModal = null;
-        OpenSessionTab tab = openTab.apply(sessionId);
-        if (tab != null) {
-            tab.showTransientNotice("⏺ Merge-and-finish finished — reopen Finish ▸ for the details.");
-        }
+        return false;
     }
 
     /**
-     * Routes a collaborator's synchronous throw (or {@code null} return) into
-     * the {@code whenComplete} branch that already has copy for it, the same
-     * way {@link WorktreeSessionCleanup}'s namesake does. Real at shutdown:
-     * every {@link WorktreeService} call here starts with {@code
+     * Routes a collaborator's synchronous throw into the {@code whenComplete}
+     * branch that already has copy for it (see {@link AsyncCalls}). Real at
+     * shutdown: every {@link WorktreeService} call here starts with {@code
      * CompletableFuture.supplyAsync(..., executor)}, which throws {@code
      * RejectedExecutionException} once that executor is shut down -- and an
      * exception escaping {@link #start} would leave the busy modal on screen
      * with the controller's in-flight guard never cleared.
      */
     private static <T> CompletableFuture<T> attempt(Supplier<CompletableFuture<T>> call) {
-        try {
-            CompletableFuture<T> future = call.get();
-            return future == null
-                    ? CompletableFuture.failedFuture(new NullPointerException("collaborator returned null"))
-                    : future;
-        } catch (Throwable t) {
-            return CompletableFuture.failedFuture(t);
-        }
+        return AsyncCalls.attempt(call);
     }
 
     private static String messageOf(Throwable failure) {
