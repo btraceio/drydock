@@ -25,6 +25,7 @@ import app.drydock.ui.MainWorkspace;
 import app.drydock.ui.RemoteRepositoryModal;
 import app.drydock.ui.RepositorySidebar;
 import app.drydock.ui.SettingsModal;
+import app.drydock.ui.SizeSetting;
 import app.drydock.ui.model.WorkspaceViewModel;
 import app.drydock.ui.review.ReviewView;
 import javafx.application.Application;
@@ -230,51 +231,31 @@ public final class DrydockApplication extends Application {
                     }
 
                     @Override
-                    public double uiFontSize() {
-                        return appShell.themeManager().uiFontSize();
+                    public SizeSetting interfaceSize() {
+                        // Applying is live only and persisting is a plain write of
+                        // the chosen value: ThemeManager.setUiFontSize regenerates
+                        // off the FX thread on a cache miss, so its applied size
+                        // can still be one FX event behind when the persist runs
+                        // (see SizeSetting) -- which is why nothing here reads it
+                        // back. A size that fails to generate now degrades to the
+                        // unscaled stylesheet instead of failing the next launch,
+                        // so persisting the raw choice is safe.
+                        return new SizeSetting(
+                                () -> appShell.themeManager().uiFontSize(),
+                                size -> appShell.themeManager().setUiFontSize(size),
+                                repositoryManager::updateUiFontSize);
                     }
 
                     @Override
-                    public void setUiFontSize(double size) {
-                        // Live only; no persistence here. ThemeManager.setUiFontSize
-                        // generates off the FX thread on a cache miss, so this is
-                        // safe to call on every tick of the slider drag.
-                        appShell.themeManager().setUiFontSize(size);
-                    }
-
-                    @Override
-                    public void commitUiFontSize(double size) {
-                        // Persists once the drag ends (SettingsModal.sizeRow); the
-                        // live value is already applied, so there is nothing left
-                        // to re-apply here. Reads the size back from ThemeManager
-                        // rather than persisting the raw slider position: if
-                        // generation for this drag's final size failed,
-                        // ThemeManager.setUiFontSize never advances its uiFontSize
-                        // field past the last size it actually generated (see its
-                        // Javadoc), so this always persists a size the app can
-                        // start with next launch.
-                        repositoryManager.updateUiFontSize(appShell.themeManager().uiFontSize());
-                    }
-
-                    @Override
-                    public double terminalFontSize() {
-                        return repositoryManager.state().ui().terminalFontSize();
-                    }
-
-                    @Override
-                    public void setTerminalFontSize(double size) {
-                        // Live preview, not routed through repositoryManager.state()
-                        // (unlike commitTerminalFontSize below): mainWorkspace.applyTerminalTheme
-                        // reads the size back through terminalFontSizeProvider, which
-                        // would still see the OLD persisted value here.
-                        mainWorkspace.previewTerminalFontSize(size);
-                    }
-
-                    @Override
-                    public void commitTerminalFontSize(double size) {
-                        // Persist once the drag ends; the live surfaces already
-                        // show this size via setTerminalFontSize's preview above.
-                        repositoryManager.updateTerminalFontSize(size);
+                    public SizeSetting terminalSize() {
+                        // The live step bypasses repositoryManager.state() on
+                        // purpose: mainWorkspace.applyTerminalTheme reads the size
+                        // back through terminalFontSizeProvider, which would still
+                        // see the OLD persisted value mid-drag.
+                        return new SizeSetting(
+                                () -> repositoryManager.state().ui().terminalFontSize(),
+                                mainWorkspace::previewTerminalFontSize,
+                                repositoryManager::updateTerminalFontSize);
                     }
 
                     @Override

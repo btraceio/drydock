@@ -476,12 +476,12 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     }
 
     /**
-     * Live preview of a terminal font size while the settings modal's slider
-     * is being dragged: applied immediately to every open surface, bypassing
+     * Live preview of a terminal font size as the settings modal's slider
+     * moves: applied immediately to every open surface, bypassing
      * {@link #terminalFontSizeProvider} (which reads persisted state) since
-     * the caller commits that separately, once, when the drag ends -- see
-     * {@code SettingsModal.sizeRow}. Reuses {@link #applyTerminalConfig}, so
-     * a rapid sequence of previews cannot block the FX thread either.
+     * the caller persists separately -- see {@link SizeSetting}. Reuses
+     * {@link #applyTerminalConfig}, so a rapid sequence of previews cannot
+     * block the FX thread either.
      */
     public void previewTerminalFontSize(double fontSize) {
         applyTerminalConfig(themeProvider.get(), fontSize);

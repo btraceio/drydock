@@ -19,7 +19,6 @@ import java.io.File;
 import java.nio.file.Path;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
-import java.util.function.DoubleConsumer;
 
 /**
  * The Settings modal, reached from the title-bar gear or ⌘,. Four settings,
@@ -45,21 +44,11 @@ public final class SettingsModal extends VBox {
 
         void setTheme(UiTheme theme);
 
-        double uiFontSize();
+        /** The interface font size: read, applied live, and persisted (see {@link SizeSetting}). */
+        SizeSetting interfaceSize();
 
-        /** Applies the interface size live; called on every slider tick while dragging. */
-        void setUiFontSize(double size);
-
-        /** Persists the interface size; called once, when a drag ends (see {@link #sizeRow}). */
-        void commitUiFontSize(double size);
-
-        double terminalFontSize();
-
-        /** Applies the terminal size to running surfaces live; called on every slider tick while dragging. */
-        void setTerminalFontSize(double size);
-
-        /** Persists the terminal size; called once, when a drag ends (see {@link #sizeRow}). */
-        void commitTerminalFontSize(double size);
+        /** The terminal font size, with the same three parts as {@link #interfaceSize()}. */
+        SizeSetting terminalSize();
 
         CompletableFuture<Optional<Path>> loadWorktreesDirectory();
 
@@ -99,10 +88,9 @@ public final class SettingsModal extends VBox {
                 // honours fractional sizes. The terminal slider is integer-only (see sizeRow):
                 // TerminalThemes rounds to int, so a fractional readout there would lie.
                 sizeRow("Interface size", UiFontScale.MIN_FONT_SIZE, UiFontScale.MAX_FONT_SIZE,
-                        settings.uiFontSize(), true, settings::setUiFontSize, settings::commitUiFontSize),
+                        true, settings.interfaceSize()),
                 sizeRow("Terminal size", TerminalThemes.MIN_FONT_SIZE, TerminalThemes.MAX_FONT_SIZE,
-                        settings.terminalFontSize(), false, settings::setTerminalFontSize,
-                        settings::commitTerminalFontSize),
+                        false, settings.terminalSize()),
                 sectionTitle("Worktrees"),
                 worktreesRow(settings),
                 footer);
@@ -150,16 +138,14 @@ public final class SettingsModal extends VBox {
     }
 
     /**
-     * A font-size slider. The value applies live while dragging (every tick
-     * calls {@code onChanged}) so the effect is visible immediately, but
-     * {@code onCommitted} -- the persisting callback -- fires only once the
-     * drag ends: a state write per pixel would be pointless disk traffic.
-     * {@link Slider#valueChangingProperty()} is what distinguishes the two --
-     * true for the whole span of a mouse drag -- so a discrete, non-drag
-     * change (an arrow key, a click that lands directly on a value with no
-     * drag) never sees it go true and instead commits immediately on the one
-     * {@code valueProperty} tick it produces, which is correct: there is no
-     * burst to debounce.
+     * A font-size slider. Every tick applies the size live, so the effect is
+     * visible immediately, while persisting is left to {@link SizeSetting} --
+     * which needs to know whether the tick is part of a drag, since a state
+     * write per pixel would be pointless disk traffic.
+     * {@link Slider#valueChangingProperty()} is the only signal for that: it
+     * is true for the whole span of a mouse drag, and this row is where the
+     * two events (a tick, and a drag's release) are mapped onto that type's
+     * two entry points.
      *
      * @param halfStepResolution whether the slider snaps to 0.5 as well as
      *                           whole values (the interface slider does,
@@ -169,9 +155,9 @@ public final class SettingsModal extends VBox {
      *                           int, so a fractional readout there would
      *                           lie about what the terminal actually renders)
      */
-    private static Region sizeRow(String caption, double min, double max, double initial,
-                                  boolean halfStepResolution, DoubleConsumer onChanged, DoubleConsumer onCommitted) {
-        Slider slider = new Slider(min, max, Math.clamp(initial, min, max));
+    private static Region sizeRow(String caption, double min, double max,
+                                  boolean halfStepResolution, SizeSetting setting) {
+        Slider slider = new Slider(min, max, Math.clamp(setting.current(), min, max));
         slider.getStyleClass().add("settings-slider");
         slider.setMajorTickUnit(1);
         slider.setMinorTickCount(halfStepResolution ? 1 : 0);
@@ -184,14 +170,11 @@ public final class SettingsModal extends VBox {
 
         slider.valueProperty().addListener((obs, old, now) -> {
             value.setText(format(now.doubleValue()));
-            onChanged.accept(now.doubleValue());
-            if (!slider.isValueChanging()) {
-                onCommitted.accept(now.doubleValue());
-            }
+            setting.changed(now.doubleValue(), slider.isValueChanging());
         });
         slider.valueChangingProperty().addListener((obs, was, changing) -> {
             if (!changing) {
-                onCommitted.accept(slider.getValue());
+                setting.dragEnded(slider.getValue());
             }
         });
 

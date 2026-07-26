@@ -91,15 +91,12 @@ public final class ThemeManager {
      * clobber a newer one -- the same pattern {@code MainWorkspace}'s
      * {@code applyTerminalConfig} uses for the terminal config.</p>
      *
-     * <p>{@link #uiFontSize} is deliberately only assigned once the lookup
-     * actually succeeds: {@link UiFontScale#stylesheetForAsync} logs and
-     * swallows a generation failure without invoking its callback, so a
-     * request that fails simply never updates {@code uiFontSize}. This is
-     * what lets {@link #apply} treat {@code uiFontSize} as always backed by
-     * a cached stylesheet -- see its Javadoc -- and it's also why a failed
-     * size is never handed to the caller's persistence callback: callers
-     * that persist should read {@link #uiFontSize} back after the fact
-     * rather than echoing the raw requested value.</p>
+     * <p>{@link #uiFontSize} therefore lags a request by one FX event on a
+     * cache miss, and callers must not read it back to learn what the user
+     * asked for -- persistence works from the value the user chose (see
+     * {@link SizeSetting}). What it does guarantee is that every size it
+     * holds has already been resolved to a stylesheet, hence cached, which
+     * is what {@link #apply} relies on.</p>
      */
     public void setUiFontSize(double newUiFontSize) {
         double clamped = Math.clamp(newUiFontSize, UiFontScale.MIN_FONT_SIZE, UiFontScale.MAX_FONT_SIZE);
@@ -120,11 +117,12 @@ public final class ThemeManager {
 
     /**
      * Synchronous re-application, used by the constructor (before the stage
-     * is shown, where blocking is required, not merely tolerated -- see the
-     * class Javadoc) and by {@link #setTheme} (a cache hit guaranteed:
-     * {@link #uiFontSize} is only ever assigned a size once its stylesheet
-     * has actually been generated -- see {@link #setUiFontSize} -- so this
-     * never touches disk).
+     * is shown, where blocking is required, not merely tolerated: the scaled
+     * sheet has to be in place already, or the first layout would happen at
+     * the wrong size and visibly re-flow) and by {@link #setTheme} (a cache
+     * hit guaranteed: {@link #uiFontSize} only ever holds a size whose
+     * stylesheet has already been resolved -- see {@link #setUiFontSize} --
+     * so this never touches disk).
      */
     private void apply() {
         applyStylesheets(UiFontScale.stylesheetFor(uiFontSize));

@@ -78,6 +78,13 @@ final class UiFontScale {
      * application and therefore owns the range. The default size returns the
      * bundled resource untouched; other sizes are generated once and cached.
      *
+     * <p>Never throws: a generation failure is logged and resolves to the
+     * bundled unscaled sheet. {@code ThemeManager}'s constructor calls this
+     * synchronously, before the stage is shown, so any size that could fail
+     * to resolve would otherwise turn a persisted interface size into a hard
+     * launch failure -- the app must come up at the wrong font size rather
+     * than not at all.</p>
+     *
      * <p>Touches the filesystem on a cache miss, so this must only be called
      * from the FX thread when the caller already knows the size is cached or
      * default (e.g. {@code ThemeManager}'s constructor, which needs the sheet
@@ -91,7 +98,26 @@ final class UiFontScale {
         if (key == keyFor(WorkspaceUiState.DEFAULT_UI_FONT_SIZE)) {
             return baseStylesheetUrl();
         }
-        return GENERATED.computeIfAbsent(key, k -> generate(k / 2.0));
+        return GENERATED.computeIfAbsent(key, k -> generateOrBase(k / 2.0));
+    }
+
+    /**
+     * The fallback is cached alongside real results deliberately: it keeps
+     * every size resolvable from the cache once it has been asked for, so
+     * neither {@link #cachedStylesheetFor} nor an FX-thread re-application of
+     * an already-applied size can be surprised into retrying failed I/O
+     * inline. A failure that was transient therefore sticks for the rest of
+     * the process -- an acceptable trade for never blocking or throwing on
+     * the FX thread.
+     */
+    private static String generateOrBase(double fontSize) {
+        try {
+            return generate(fontSize);
+        } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, "Could not generate the scaled stylesheet for size " + fontSize
+                    + "; falling back to the unscaled stylesheet", e);
+            return baseStylesheetUrl();
+        }
     }
 
     /** Already-cached or default stylesheet for {@code fontSize}, with no filesystem access at all. */
@@ -113,10 +139,10 @@ final class UiFontScale {
      * unconditionally: a cache hit (or the default size) resolves {@code
      * onReady} synchronously with no I/O, and a cache miss generates on a
      * virtual thread and hands the result back via {@link Platform#runLater}.
-     * A generation failure is logged and {@code onReady} is simply never
-     * called, leaving whatever stylesheet is currently applied in place --
-     * a slider drag that fails to produce a new size should not pop an
-     * error dialog over what is otherwise a purely cosmetic change.
+     * {@code onReady} always runs exactly once -- {@link #stylesheetFor}
+     * degrades a generation failure to the unscaled sheet rather than
+     * throwing, so a failure shows up as an unscaled interface, never as a
+     * dropped callback or an error dialog over a purely cosmetic change.
      */
     static void stylesheetForAsync(double fontSize, Consumer<String> onReady) {
         Optional<String> cached = cachedStylesheetFor(fontSize);
@@ -125,14 +151,7 @@ final class UiFontScale {
             return;
         }
         Thread.ofVirtual().start(() -> {
-            String url;
-            try {
-                url = stylesheetFor(fontSize);
-            } catch (UncheckedIOException e) {
-                LOG.log(Level.WARNING, "Could not generate the scaled stylesheet for size "
-                        + fontSize + "; keeping the current stylesheet", e);
-                return;
-            }
+            String url = stylesheetFor(fontSize);
             Platform.runLater(() -> onReady.accept(url));
         });
     }
