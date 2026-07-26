@@ -9,6 +9,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -58,6 +59,32 @@ class McpConfigWriterTest {
 
         assertEquals(first, second);
         assertEquals(Files.readString(first), Files.readString(second));
+    }
+
+    /**
+     * The {@code mcp/} directory exists only to hold token files, so its
+     * listing is a discovery vector in its own right (the design says as much).
+     * Owner-only, not whatever the umask allowed.
+     */
+    @Test
+    void theMcpDirectoryIsOwnerOnly(@TempDir Path base) throws Exception {
+        Path config = new McpConfigWriter(base).writeFor(ManagedSessionId.newId(), "http://127.0.0.1:1/mcp", "tok");
+
+        assertEquals(PosixFilePermissions.fromString("rwx------"),
+                Files.getPosixFilePermissions(config.getParent()),
+                "the directory holding bearer tokens must not be readable by anyone else");
+    }
+
+    /** ...including one left looser by an earlier run: it is tightened, not trusted. */
+    @Test
+    void anExistingLooseMcpDirectoryIsTightened(@TempDir Path base) throws Exception {
+        Path directory = Files.createDirectory(base.resolve("mcp"),
+                PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwxr-xr-x")));
+
+        new McpConfigWriter(base).writeFor(ManagedSessionId.newId(), "http://127.0.0.1:1/mcp", "tok");
+
+        assertEquals(PosixFilePermissions.fromString("rwx------"),
+                Files.getPosixFilePermissions(directory));
     }
 
     @Test

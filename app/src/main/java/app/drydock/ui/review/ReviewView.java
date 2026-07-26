@@ -1002,21 +1002,20 @@ public final class ReviewView extends BorderPane {
         toggle.getStyleClass().add("review-thread-action");
         toggle.setFocusTraversable(false);
         toggle.setOnAction(e -> {
-            // Re-read: another writer (the MCP tool router) may have changed
-            // this thread since this card was built, and computing from the
-            // captured value would discard their change.
-            ReviewAnnotation current = annotationStore.byId(annotation.id()).orElse(null);
-            if (current == null) {
-                return;
-            }
-            boolean currentResolvable = current.status() == AnnotationStatus.OPEN
-                    || current.status() == AnnotationStatus.SENT
-                    || current.status() == AnnotationStatus.ADDRESSED;
-            ReviewAnnotation updated = current.withStatus(
-                    currentResolvable ? AnnotationStatus.RESOLVED : AnnotationStatus.OPEN);
-            annotationStore.update(updated);
-            replaceCardRow(updated);
-            updateSummary();
+            // Mutate rather than read-then-update: another writer (the MCP
+            // tool router, on its own thread) may change this thread at any
+            // moment, and a value computed outside the store's lock would
+            // discard their change.
+            annotationStore.mutate(annotation.id(), current -> {
+                boolean currentResolvable = current.status() == AnnotationStatus.OPEN
+                        || current.status() == AnnotationStatus.SENT
+                        || current.status() == AnnotationStatus.ADDRESSED;
+                return current.withStatus(
+                        currentResolvable ? AnnotationStatus.RESOLVED : AnnotationStatus.OPEN);
+            }).ifPresent(updated -> {
+                replaceCardRow(updated);
+                updateSummary();
+            });
         });
 
         Region headerSpacer = new Region();
@@ -1054,16 +1053,13 @@ public final class ReviewView extends BorderPane {
             if (message.isEmpty()) {
                 return;
             }
-            // Re-read for the same reason as the toggle above: a stale
-            // captured annotation would discard a concurrent MCP-side change.
-            ReviewAnnotation current = annotationStore.byId(annotation.id()).orElse(null);
-            if (current == null) {
-                return;
-            }
-            ReviewAnnotation updated = current.withReply(
-                    new ReviewAnnotation.Message("You", Instant.now(), message));
-            annotationStore.update(updated);
-            replaceCardRow(updated);
+            // Mutate for the same reason as the toggle above: a value derived
+            // outside the store's lock would discard a concurrent MCP-side
+            // change.
+            annotationStore.mutate(annotation.id(),
+                            current -> current.withReply(
+                                    new ReviewAnnotation.Message("You", Instant.now(), message)))
+                    .ifPresent(this::replaceCardRow);
         });
         HBox replyRow = new HBox(8, reply, replyButton);
         HBox.setHgrow(reply, Priority.ALWAYS);
@@ -1122,18 +1118,13 @@ public final class ReviewView extends BorderPane {
         // Record only the hand-off (SENT, no fabricated reply, no timer);
         // the banner's "Re-run diff" shows the real result.
         for (ReviewAnnotation annotation : open) {
-            // Re-read: promptSender.accept above is a synchronous hand-off
-            // into the live terminal, wide enough for another writer to have
-            // changed this thread since `open` was read. Computing from the
-            // captured value would discard that change (same hazard as the
+            // Mutate: promptSender.accept above is a synchronous hand-off into
+            // the live terminal, wide enough for another writer to have changed
+            // this thread since `open` was read. Deriving the new value outside
+            // the store's lock would discard that change (same hazard as the
             // toggle/reply handlers above).
-            ReviewAnnotation current = annotationStore.byId(annotation.id()).orElse(null);
-            if (current == null) {
-                continue;
-            }
-            ReviewAnnotation updated = current.withStatus(AnnotationStatus.SENT);
-            annotationStore.update(updated);
-            replaceCardRow(updated);
+            annotationStore.mutate(annotation.id(), current -> current.withStatus(AnnotationStatus.SENT))
+                    .ifPresent(this::replaceCardRow);
         }
         bannerLabel.setText(open.size() + (open.size() == 1 ? " annotation" : " annotations")
                 + " sent to Claude");

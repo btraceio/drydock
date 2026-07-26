@@ -36,11 +36,10 @@ public final class PromptSafety {
                         "prompt must not contain control characters (found one at index " + i + ")");
             }
         }
-        String trimmed = prompt.stripLeading();
-        if (trimmed.isEmpty()) {
-            throw new McpToolException("prompt must not be blank");
-        }
-        char first = trimmed.charAt(0);
+        // Non-empty by construction: isBlank() above and stripLeading() here
+        // both test Character.isWhitespace, so a fully whitespace prompt is
+        // already gone.
+        char first = prompt.stripLeading().charAt(0);
         if (first == '!') {
             throw new McpToolException(
                     "prompt must not start with '!': the claude TUI treats a leading '!' as bash mode, "

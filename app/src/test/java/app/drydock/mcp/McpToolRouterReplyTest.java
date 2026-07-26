@@ -113,7 +113,7 @@ class McpToolRouterReplyTest {
 
     @Test
     void anAlreadyResolvedThreadIsNotTouched() {
-        context.updateAnnotation(open.withStatus(AnnotationStatus.RESOLVED));
+        context.store(open.withStatus(AnnotationStatus.RESOLVED));
 
         McpToolException failure = assertThrows(McpToolException.class,
                 () -> router.call(caller, "review_reply", args("id", open.id(), "note", "done")));
@@ -125,7 +125,7 @@ class McpToolRouterReplyTest {
 
     @Test
     void aLegacyFixedThreadIsNotTouched() {
-        context.updateAnnotation(open.withStatus(AnnotationStatus.FIXED));
+        context.store(open.withStatus(AnnotationStatus.FIXED));
 
         assertThrows(McpToolException.class,
                 () -> router.call(caller, "review_reply", args("id", open.id(), "note", "done")));
@@ -144,9 +144,56 @@ class McpToolRouterReplyTest {
         assertEquals(AnnotationStatus.ADDRESSED, reloaded().status());
     }
 
+    /**
+     * The MCP-versus-FX race the atomic transform exists to close: the human
+     * clicks Resolve after the router has read the thread but before it writes.
+     * The refusal is decided inside the transform, against the stored value, so
+     * the verdict stands instead of being overwritten with ADDRESSED.
+     */
+    @Test
+    void aResolveThatLandsInsideTheWriteWindowIsNotOverwritten() {
+        context.beforeMutate = () -> context.store(reloaded()
+                .withReply(new ReviewAnnotation.Message("You", Instant.parse("2026-07-25T10:05:00Z"), "resolving"))
+                .withStatus(AnnotationStatus.RESOLVED));
+
+        McpToolException failure = assertThrows(McpToolException.class, () -> router.call(caller, "review_reply",
+                argsWithFlag("addressed", true, "id", open.id(), "note", "I fixed it")));
+
+        assertTrue(failure.getMessage().contains("RESOLVED"), failure.getMessage());
+        assertEquals(AnnotationStatus.RESOLVED, reloaded().status(),
+                "the human's verdict is final; the agent must not reopen it");
+        assertEquals(List.of("needs a null check", "resolving"), reloaded().thread().stream()
+                        .map(ReviewAnnotation.Message::text).toList(),
+                "the human's own reply must survive too");
+    }
+
+    /** ...and a benign concurrent write is not lost either: the reply lands on top of it. */
+    @Test
+    void aConcurrentHumanReplyIsKeptUnderTheAgentsNote() throws Exception {
+        context.beforeMutate = () -> context.store(reloaded().withReply(
+                new ReviewAnnotation.Message("You", Instant.parse("2026-07-25T10:05:00Z"), "one more thing")));
+
+        router.call(caller, "review_reply", args("id", open.id(), "note", "on it"));
+
+        assertEquals(List.of("needs a null check", "one more thing", "on it"),
+                reloaded().thread().stream().map(ReviewAnnotation.Message::text).toList());
+    }
+
+    /** An ended session says so, rather than the baffling "No such annotation". */
+    @Test
+    void anEndedSessionIsToldItsSessionIsGone() {
+        context.sessionRunning = false;
+
+        McpToolException failure = assertThrows(McpToolException.class,
+                () -> router.call(caller, "review_reply", args("id", open.id(), "note", "done")));
+
+        assertTrue(failure.getMessage().contains("Session has ended"), failure.getMessage());
+        assertEquals(1, reloaded().thread().size(), "nothing may be appended");
+    }
+
     @Test
     void aSentThreadCanBeAddressed() throws Exception {
-        context.updateAnnotation(open.withStatus(AnnotationStatus.SENT));
+        context.store(open.withStatus(AnnotationStatus.SENT));
 
         router.call(caller, "review_reply",
                 argsWithFlag("addressed", true, "id", open.id(), "note", "done"));

@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.UnaryOperator;
 
 /** Hand-written fake for {@link McpSessionContext}; the build has no mocking library. */
 final class FakeMcpSessionContext implements McpSessionContext {
@@ -31,9 +32,24 @@ final class FakeMcpSessionContext implements McpSessionContext {
     /** When set, {@link #createWorktree} and {@link #startSession} throw this. */
     McpToolException failure;
 
+    /** As a real session's status does; cleared to model a claude that has exited. */
+    boolean sessionRunning = true;
+
+    /**
+     * Run inside {@link #mutateAnnotation}, before the transform sees the
+     * stored value -- the test's way of landing the human's concurrent write
+     * inside the router's read-modify-write window.
+     */
+    Runnable beforeMutate = () -> { };
+
     @Override
     public Optional<Path> repositoryRoot(ManagedSessionId caller) {
         return repositoryRoot;
+    }
+
+    @Override
+    public boolean sessionRunning(ManagedSessionId caller) {
+        return sessionRunning;
     }
 
     @Override
@@ -57,8 +73,22 @@ final class FakeMcpSessionContext implements McpSessionContext {
                 .toList();
     }
 
+    /** Mirrors {@code AnnotationStore.mutate}: the transform sees the STORED value, never the caller's. */
     @Override
-    public void updateAnnotation(ReviewAnnotation annotation) {
+    public Optional<ReviewAnnotation> mutateAnnotation(String id, UnaryOperator<ReviewAnnotation> transform) {
+        beforeMutate.run();
+        for (int i = 0; i < annotations.size(); i++) {
+            if (annotations.get(i).id().equals(id)) {
+                ReviewAnnotation updated = transform.apply(annotations.get(i));
+                annotations.set(i, updated);
+                return Optional.of(updated);
+            }
+        }
+        return Optional.empty();
+    }
+
+    /** Unconditional replace, for tests setting up a starting value. */
+    void store(ReviewAnnotation annotation) {
         annotations.replaceAll(existing -> existing.id().equals(annotation.id()) ? annotation : existing);
     }
 

@@ -127,6 +127,42 @@ class McpServerTest {
         assertTrue(response.body().contains("tools"), response.body());
     }
 
+    /**
+     * The MCP spec has the server answer with the client's requested version
+     * when it supports it -- and has the client disconnect when it does not
+     * recognise what the server names. The handshake is the one part of this
+     * feature no automated test can check against a real client, so it must not
+     * also carry an avoidable inconsistency.
+     */
+    @Test
+    void initializeEchoesTheClientsRequestedProtocolVersion() throws Exception {
+        HttpResponse<String> response = post("""
+                {"jsonrpc":"2.0","id":24,"method":"initialize",
+                 "params":{"protocolVersion":"2025-06-18","capabilities":{}}}""");
+
+        assertEquals(200, response.statusCode());
+        assertTrue(response.body().contains("\"protocolVersion\": \"2025-06-18\""), response.body());
+    }
+
+    @Test
+    void initializeFallsBackWhenTheRequestedVersionIsUnknown() throws Exception {
+        HttpResponse<String> response = post("""
+                {"jsonrpc":"2.0","id":25,"method":"initialize",
+                 "params":{"protocolVersion":"1999-01-01","capabilities":{}}}""");
+
+        assertEquals(200, response.statusCode());
+        assertTrue(response.body().contains("\"protocolVersion\": \"2024-11-05\""), response.body());
+    }
+
+    /** No params at all (as the older test sends) still gets the fallback, never null. */
+    @Test
+    void initializeWithoutParamsStillNamesAVersion() throws Exception {
+        HttpResponse<String> response = post("""
+                {"jsonrpc":"2.0","id":26,"method":"initialize"}""");
+
+        assertTrue(response.body().contains("\"protocolVersion\": \"2024-11-05\""), response.body());
+    }
+
     @Test
     void initializedNotificationIsAcceptedWithoutAnError() throws Exception {
         // claude sends this immediately after initialize. Answering a
@@ -313,5 +349,22 @@ class McpServerTest {
     void closingTwiceIsHarmless() {
         server.close();
         server.close();
+    }
+
+    /**
+     * The shutdown-racing-startup case. {@code DrydockApplication} publishes
+     * this object before {@code start()} runs on a virtual thread, which is not
+     * enough on its own: a {@code close()} that wins the race finds nothing
+     * bound and no-ops, and the start then leaks a listener socket nobody will
+     * ever stop.
+     */
+    @Test
+    void aStartAfterCloseDoesNotBind() throws Exception {
+        McpServer racing = new McpServer(registry, new McpToolRouter(context, registry));
+        racing.close();
+
+        racing.start();
+
+        assertEquals(0, racing.port(), "close() must permanently prevent binding");
     }
 }

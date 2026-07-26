@@ -22,6 +22,7 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.logging.Level;
@@ -48,7 +49,29 @@ public final class McpServer implements AutoCloseable {
 
     private static final String TOKEN_HEADER = "X-Drydock-Session-Token";
     private static final String PATH = "/mcp";
-    private static final String PROTOCOL_VERSION = "2024-11-05";
+    /**
+     * Answered when the client asks for a version this server does not know.
+     * The oldest of {@link #SUPPORTED_PROTOCOL_VERSIONS}, because a client that
+     * does not recognise it is required to disconnect -- so the fallback must
+     * be the one most likely to be understood.
+     */
+    private static final String FALLBACK_PROTOCOL_VERSION = "2024-11-05";
+
+    /**
+     * Versions this server will echo back. All three describe the same wire
+     * shape as far as this server uses it: a POST of one JSON-RPC request
+     * answered with one JSON response, a tools-only capability set, and no
+     * server-initiated messages. Nothing here depends on the SSE stream,
+     * resources, prompts or session headers that differ between them, so the
+     * version is the client's to choose.
+     *
+     * <p>Echoing rather than asserting one version matters because the MCP
+     * spec makes the client disconnect when it does not recognise the version
+     * the server names -- the handshake is the one part of this feature no
+     * automated test can verify against a real client.</p>
+     */
+    private static final Set<String> SUPPORTED_PROTOCOL_VERSIONS =
+            Set.of("2024-11-05", "2025-03-26", "2025-06-18");
 
     private final McpSessionRegistry registry;
     private final McpToolRouter router;
@@ -61,18 +84,39 @@ public final class McpServer implements AutoCloseable {
     private volatile ExecutorService executor;
     private volatile int port;
 
+    /**
+     * Set by {@link #close()} before it looks at anything else, and honoured by
+     * {@link #start()} both before and after it binds. Publishing this object
+     * ahead of {@code start()} is NOT enough on its own: a {@code close()} that
+     * runs first sees a null {@link #server}, no-ops, and {@code start()} then
+     * goes on to bind a listener nobody will ever stop.
+     */
+    private volatile boolean closed;
+
     public McpServer(McpSessionRegistry registry, McpToolRouter router) {
         this.registry = registry;
         this.router = router;
     }
 
+    /** A no-op once {@link #close()} has been called; never binds after shutdown. */
     public void start() throws IOException {
-        server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
-        executor = Executors.newVirtualThreadPerTaskExecutor();
-        server.setExecutor(executor);
-        server.createContext(PATH, new McpHandler());
-        server.start();
-        port = server.getAddress().getPort();
+        if (closed) {
+            return;
+        }
+        HttpServer created = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
+        ExecutorService createdExecutor = Executors.newVirtualThreadPerTaskExecutor();
+        created.setExecutor(createdExecutor);
+        created.createContext(PATH, new McpHandler());
+        server = created;
+        executor = createdExecutor;
+        created.start();
+        port = created.getAddress().getPort();
+        if (closed) {
+            // close() ran while this method was binding: it either saw the
+            // fields (and stopped what it found) or did not, so undo it here.
+            // close() is idempotent, which makes the double-stop harmless.
+            close();
+        }
     }
 
     public int port() {
@@ -88,9 +132,14 @@ public final class McpServer implements AutoCloseable {
         return server.getAddress();
     }
 
-    /** Null-safe and idempotent: safe to call before {@link #start()} and safe to call twice. */
+    /**
+     * Null-safe and idempotent: safe to call before {@link #start()} and safe
+     * to call twice. Calling it before {@code start()} also permanently
+     * prevents that start from binding.
+     */
     @Override
     public void close() {
+        closed = true;
         if (server != null) {
             server.stop(0);
             server = null;
@@ -171,15 +220,12 @@ public final class McpServer implements AutoCloseable {
             String method = request.get("method") instanceof JsonString s ? s.value() : null;
             JsonValue params = request.get("params");
 
-            JsonValue result = dispatch(caller.get(), method, params, id);
-            if (result != null) {
-                sendJson(exchange, 200, result);
-            }
+            sendJson(exchange, 200, dispatch(caller.get(), method, params, id));
         }
 
         private JsonValue dispatch(ManagedSessionId caller, String method, JsonValue params, JsonValue id) {
             return switch (method == null ? "" : method) {
-                case "initialize" -> successResponse(id, initializeResult());
+                case "initialize" -> successResponse(id, initializeResult(params));
                 case "ping" -> successResponse(id, JsonObject.empty());
                 case "tools/list" -> successResponse(id, toolsListResult());
                 case "tools/call" -> toolsCall(caller, params, id);
@@ -211,13 +257,28 @@ public final class McpServer implements AutoCloseable {
             }
         }
 
-        private JsonValue initializeResult() {
+        private JsonValue initializeResult(JsonValue params) {
             return JsonObject.empty()
-                    .put("protocolVersion", new JsonString(PROTOCOL_VERSION))
+                    .put("protocolVersion", new JsonString(negotiatedProtocolVersion(params)))
                     .put("capabilities", JsonObject.empty().put("tools", JsonObject.empty()))
                     .put("serverInfo", JsonObject.empty()
                             .put("name", new JsonString("drydock"))
                             .put("version", new JsonString("1.0.0")));
+        }
+
+        /**
+         * The client's requested version when this server supports it,
+         * otherwise {@link #FALLBACK_PROTOCOL_VERSION}. Per the MCP spec the
+         * server echoes a version it supports and names its own preferred one
+         * when it does not -- and the client is then free to disconnect.
+         */
+        private String negotiatedProtocolVersion(JsonValue params) {
+            if (params instanceof JsonObject object
+                    && object.get("protocolVersion") instanceof JsonString requested
+                    && SUPPORTED_PROTOCOL_VERSIONS.contains(requested.value())) {
+                return requested.value();
+            }
+            return FALLBACK_PROTOCOL_VERSION;
         }
 
         private JsonValue toolsListResult() {

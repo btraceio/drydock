@@ -25,9 +25,11 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -95,7 +97,26 @@ class WorkspaceMcpSessionContextTest {
         List<Path> resolved = contextFor(repo).realWorktreesOf(caller(repo));
 
         assertTrue(resolved.contains(worktree.toRealPath()), String.valueOf(resolved));
-        assertTrue(resolved.contains(repo.toRealPath()), "the main checkout is a worktree too: " + resolved);
+    }
+
+    /**
+     * {@code git worktree list --porcelain}'s first stanza IS the main
+     * checkout, so it arrives in the same list as the real worktrees. It must
+     * not be reported: this list is {@code session_start}'s membership test,
+     * and an agent starting a session in the repository root would put a second
+     * {@code claude} in the tree the human is working in.
+     */
+    @Test
+    void realWorktreesOfExcludesTheMainCheckout(@TempDir Path repoDir, @TempDir Path worktreeParent)
+            throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/real").get();
+
+        List<Path> resolved = contextFor(repo).realWorktreesOf(caller(repo));
+
+        assertFalse(resolved.contains(repo.toRealPath()),
+                "the main checkout must not be offered as a worktree: " + resolved);
+        assertEquals(List.of(worktree.toRealPath()), resolved);
     }
 
     /** A recorded worktree whose directory is gone is no longer a member of anything. */
@@ -201,12 +222,19 @@ class WorkspaceMcpSessionContextTest {
     // ---- repositories -------------------------------------------------------
 
     /**
-     * A remote repository reports no git state and, crucially, is never
-     * probed: {@link GitStatusService} has no cache, so a status call per
-     * repository would run one {@code ssh} while the HTTP handler waits.
+     * A remote repository reports no git state, while a local one alongside it
+     * still does.
+     *
+     * <p>Named for what it actually checks: the empty fields alone do NOT prove
+     * the {@code ssh} probe was skipped, because {@code statusOf} swallows a
+     * failed probe into the same empty {@link Optional}. That the probe is
+     * skipped -- {@link GitStatusService} has no cache, so one status call per
+     * remote repository would open one {@code ssh} while the HTTP handler waits
+     * -- is enforced by the {@code isRemote()} branch in {@code repositories()}
+     * and is not what this test can distinguish.</p>
      */
     @Test
-    void remoteRepositoriesCarryNoGitStateAndAreNotProbed(@TempDir Path repoDir) throws Exception {
+    void remoteRepositoriesCarryNoGitStateWhileLocalOnesDo(@TempDir Path repoDir) throws Exception {
         Path repo = initCommittedRepo(repoDir);
         SshRemote unreachable = new SshRemote("nobody@invalid.invalid", "/srv/app");
         Repository remote = new Repository(RepositoryId.newId(), unreachable.placeholderRoot(), "remote-repo",
@@ -229,6 +257,41 @@ class WorkspaceMcpSessionContextTest {
                 .findFirst()
                 .orElseThrow();
         assertEquals(Optional.of("main"), localSummary.branch(), "a local repository still reports git state");
+    }
+
+    // ---- one deadline per tool call -----------------------------------------
+
+    /**
+     * Each local repository used to get its own 20-second {@code join} slice,
+     * so N repositories could hold the HTTP connection for 20N seconds. One
+     * deadline now bounds the whole call, as it already does in {@code
+     * MainWorkspace.findWorktreeOwner}: an expiry fails the call rather than
+     * letting the next repository start a fresh slice.
+     */
+    @Test
+    void reposListFailsOnceItsSharedDeadlineIsGone(@TempDir Path repoDir) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        WorkspaceMcpSessionContext context = contextFor(repo);
+
+        assertFalse(context.repositories(System.nanoTime() + TimeUnit.SECONDS.toNanos(20)).isEmpty(),
+                "a live deadline must still answer");
+
+        McpToolException failure = assertThrows(McpToolException.class,
+                () -> context.repositories(System.nanoTime() - 1));
+        assertTrue(failure.getMessage().contains("did not respond in time"), failure.getMessage());
+    }
+
+    @Test
+    void sessionsListFailsOnceItsSharedDeadlineIsGone(@TempDir Path repoDir) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        WorkspaceMcpSessionContext context = contextFor(repo);
+
+        assertFalse(context.sessions(System.nanoTime() + TimeUnit.SECONDS.toNanos(20)).isEmpty(),
+                "a live deadline must still answer");
+
+        McpToolException failure = assertThrows(McpToolException.class,
+                () -> context.sessions(System.nanoTime() - 1));
+        assertTrue(failure.getMessage().contains("did not respond in time"), failure.getMessage());
     }
 
     // ---- fixtures -----------------------------------------------------------

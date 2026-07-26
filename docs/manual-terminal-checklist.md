@@ -234,7 +234,14 @@ Walk this with a human at the keyboard:
     treat its absence as a failure of this step.)
 12. Close a session, then confirm its file under `<base>/mcp/` is gone and
     that a `curl` with its old token gets 401.
-13. Build the packaged app (`./gradlew :app:appImage`), launch it, and repeat
+13. Let `claude` exit **on its own** — type `exit` in the session — and **leave
+    the tab open**. Note the token from its `<base>/mcp/` file first, then
+    confirm the file disappears within a second or two (the exit watcher's
+    tick) and that a `curl` with that token gets 401 even though the terminal
+    tab is still there reading its final output. *This is a different path from
+    item 12: closing the tab revokes correctly, while a self-exit does not go
+    through the surface-close path at all, so it needs its own release.*
+14. Build the packaged app (`./gradlew :app:appImage`), launch it, and repeat
     step 1. **This is the only check that catches a missing `jdk.httpserver`
     in the jlink module list:** `:app:test` and `:app:run` both resolve
     `com.sun.net.httpserver` from the full JDK and would stay green while the

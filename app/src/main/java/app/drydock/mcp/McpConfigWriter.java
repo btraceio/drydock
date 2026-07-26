@@ -10,15 +10,18 @@ import java.io.IOException;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.FileAttribute;
+import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.stream.Stream;
 
 /**
@@ -38,7 +41,8 @@ import java.util.stream.Stream;
  * write, since setting permissions only on the final file would leave the
  * token briefly world-readable in between. The token is attribution, not
  * isolation: any process running as the same user can still read a
- * sibling session's config file.</p>
+ * sibling session's config file. The {@code mcp/} directory holding them
+ * is owner-only ({@code rwx------}) for the same reason.</p>
  *
  * <p>All methods perform filesystem I/O and must be invoked off the
  * JavaFX application thread (AGENTS.md).</p>
@@ -49,6 +53,15 @@ public final class McpConfigWriter {
 
     private static final FileAttribute<?> OWNER_ONLY =
             PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------"));
+
+    /**
+     * The {@code mcp/} directory exists solely to hold token files, so its
+     * listing is a discovery vector of its own: an owner-only directory is not
+     * traversable or listable by anyone else, whatever the umask would have
+     * allowed.
+     */
+    private static final Set<PosixFilePermission> OWNER_ONLY_DIRECTORY =
+            PosixFilePermissions.fromString("rwx------");
 
     private static final String SESSION_TOKEN_HEADER = "X-Drydock-Session-Token";
 
@@ -73,10 +86,27 @@ public final class McpConfigWriter {
      * thread (AGENTS.md).
      */
     public Path writeFor(ManagedSessionId sessionId, String endpointUrl, String token) throws IOException {
-        Files.createDirectories(mcpDirectory());
+        createMcpDirectory();
         Path target = fileFor(sessionId);
         writeAtomically(target, JsonWriter.write(configJson(endpointUrl, token)));
         return target;
+    }
+
+    /**
+     * Creates {@code <base>/mcp/} owner-only, and tightens it when it is
+     * already there: a directory left by an earlier run (or by a version that
+     * inherited the umask) must not keep looser permissions just because it
+     * exists.
+     */
+    private void createMcpDirectory() throws IOException {
+        Path directory = mcpDirectory();
+        Files.createDirectories(directory.getParent());
+        try {
+            Files.createDirectory(directory,
+                    PosixFilePermissions.asFileAttribute(OWNER_ONLY_DIRECTORY));
+        } catch (FileAlreadyExistsException existing) {
+            Files.setPosixFilePermissions(directory, OWNER_ONLY_DIRECTORY);
+        }
     }
 
     private static JsonValue configJson(String endpointUrl, String token) {

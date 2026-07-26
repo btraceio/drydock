@@ -36,7 +36,9 @@ class McpToolRouterSessionStartTest {
         context = new FakeMcpSessionContext();
         context.repositoryRoot = Optional.of(repo);
         context.worktreePath = Optional.of(repo);
-        context.worktrees.add(repo);
+        // Deliberately NOT the repository root: realWorktreesOf excludes the
+        // main checkout by contract (see McpSessionContext), and this fake
+        // stands in for what that method returns.
         context.worktrees.add(sibling);
 
         registry = new McpSessionRegistry();
@@ -79,6 +81,36 @@ class McpToolRouterSessionStartTest {
 
         assertTrue(failure.getMessage().contains(outside.toString()), failure.getMessage());
         assertTrue(context.startedSessions.isEmpty(), "no session may be started");
+    }
+
+    /**
+     * The repository's own main checkout is not a worktree session's home:
+     * starting one there would put a second {@code claude} in the tree the
+     * human is working in, unprompted, and present it as a worktree session
+     * over the main checkout -- a state no human-driven path can produce.
+     */
+    @Test
+    void refusesTheRepositorysMainCheckout() {
+        McpToolException failure = assertThrows(McpToolException.class,
+                () -> router.call(caller, "session_start", args("worktree_path", repo.toString())));
+
+        assertTrue(failure.getMessage().contains("main checkout"), failure.getMessage());
+        assertTrue(failure.getMessage().contains(repo.toString()), failure.getMessage());
+        assertTrue(context.startedSessions.isEmpty(), "no session may be started in the main checkout");
+    }
+
+    /**
+     * A path the platform cannot even parse (a NUL byte here) is a bad argument
+     * the agent can fix, not a {@code RuntimeException} for the transport's
+     * {@code -32603} catch-all to swallow.
+     */
+    @Test
+    void refusesAnUnparseablePathAsAToolErrorNotACrash() {
+        McpToolException failure = assertThrows(McpToolException.class,
+                () -> router.call(caller, "session_start", args("worktree_path", "/tmp/no\u0000pe")));
+
+        assertTrue(failure.getMessage().contains("does not exist"), failure.getMessage());
+        assertTrue(context.startedSessions.isEmpty());
     }
 
     @Test

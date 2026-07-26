@@ -32,6 +32,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
+import java.util.function.UnaryOperator;
 
 /**
  * The per-session store of Review annotations (design handoff section C):
@@ -124,7 +125,7 @@ public final class AnnotationStore implements AutoCloseable {
             try {
                 listener.accept(annotationId);
             } catch (RuntimeException e) {
-                LOG.log(Level.WARNING, "Annotation change listener failed: " + e);
+                LOG.log(Level.WARNING, "Annotation change listener failed", e);
             }
         }
     }
@@ -141,22 +142,48 @@ public final class AnnotationStore implements AutoCloseable {
         persistAsync();
     }
 
-    /** Replaces the stored annotation with the same id; a vanished id is ignored. */
-    public void update(ReviewAnnotation annotation) {
-        if (updateInternal(annotation)) {
-            fireChanged(annotation.id());
-        }
+    /**
+     * The atomic read-modify-write: re-reads the annotation with {@code id}
+     * under this store's monitor, applies {@code transform} to it, stores the
+     * result and returns it. Empty when no annotation has that id.
+     *
+     * <p>The only way to change a stored annotation, deliberately: a
+     * replace-by-id mutator alongside it would let a caller read, decide, and
+     * then write, giving the other writer -- the FX Review tab or the MCP tool
+     * router -- a window in which to land a change that the write then
+     * overwrites (AGENTS.md: "One writer for persistent state" names this
+     * read-modify-write pattern as a past data-loss bug).</p>
+     *
+     * <p>{@code transform} runs while the monitor is held, so it must be short
+     * and must not call back into this store. It may throw: an exception
+     * propagates to the caller with nothing written and no listener fired,
+     * which is how a caller refuses the mutation based on the value it was
+     * handed (see {@code McpToolRouter}'s {@code review_reply}). Listeners fire
+     * after the monitor is released, never while it is held.</p>
+     */
+    public Optional<ReviewAnnotation> mutate(String id, UnaryOperator<ReviewAnnotation> transform) {
+        Optional<ReviewAnnotation> updated = mutateInternal(id, transform);
+        updated.ifPresent(annotation -> fireChanged(annotation.id()));
+        return updated;
     }
 
-    private synchronized boolean updateInternal(ReviewAnnotation annotation) {
+    private synchronized Optional<ReviewAnnotation> mutateInternal(String id,
+                                                                   UnaryOperator<ReviewAnnotation> transform) {
+        Objects.requireNonNull(id, "id");
+        Objects.requireNonNull(transform, "transform");
         for (int i = 0; i < annotations.size(); i++) {
-            if (annotations.get(i).id().equals(annotation.id())) {
-                annotations.set(i, annotation);
+            if (annotations.get(i).id().equals(id)) {
+                ReviewAnnotation updated = Objects.requireNonNull(transform.apply(annotations.get(i)),
+                        "transform must not return null");
+                if (!updated.id().equals(id)) {
+                    throw new IllegalArgumentException("transform must not change the annotation id");
+                }
+                annotations.set(i, updated);
                 persistAsync();
-                return true;
+                return Optional.of(updated);
             }
         }
-        return false;
+        return Optional.empty();
     }
 
     public void remove(String id) {

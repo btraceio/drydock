@@ -4,6 +4,7 @@ import app.drydock.config.UserConfig;
 import app.drydock.domain.ManagedClaudeSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.Repository;
+import app.drydock.domain.SessionStatus;
 import app.drydock.git.GitBranchState;
 import app.drydock.git.GitCommandFailedException;
 import app.drydock.git.GitExecutableNotFoundException;
@@ -36,6 +37,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.BiFunction;
 import java.util.function.Supplier;
+import java.util.function.UnaryOperator;
 
 /**
  * The production {@link McpSessionContext}: the running workspace's answer to
@@ -134,6 +136,11 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
     }
 
     @Override
+    public boolean sessionRunning(ManagedSessionId caller) {
+        return sessionOf(caller).map(session -> session.status() == SessionStatus.RUNNING).orElse(false);
+    }
+
+    @Override
     public Optional<Path> worktreePath(ManagedSessionId caller) {
         return sessionOf(caller).map(ManagedClaudeSession::workingDirectory);
     }
@@ -149,7 +156,12 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
         if (repository.isEmpty()) {
             return Optional.empty();
         }
-        return statusOf(repository.get().root()).flatMap(WorkspaceMcpSessionContext::branchName);
+        try {
+            return statusOf(repository.get().root(), deadlineIn(JOIN_TIMEOUT_SECONDS))
+                    .flatMap(WorkspaceMcpSessionContext::branchName);
+        } catch (McpToolException e) {
+            return Optional.empty();
+        }
     }
 
     // ---- annotations --------------------------------------------------------
@@ -160,11 +172,12 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
     }
 
     @Override
-    public void updateAnnotation(ReviewAnnotation annotation) {
-        annotationStore.update(annotation);
+    public Optional<ReviewAnnotation> mutateAnnotation(String id, UnaryOperator<ReviewAnnotation> transform) {
+        Optional<ReviewAnnotation> updated = annotationStore.mutate(id, transform);
         // The human's Review card refreshes off the store's change listener;
         // the flush is so the note survives a crash before the next autosave.
-        annotationStore.flushPendingSaves();
+        updated.ifPresent(annotation -> annotationStore.flushPendingSaves());
+        return updated;
     }
 
     /**
@@ -218,9 +231,20 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
      * probe: {@link GitStatusService} has no cache, so one status call per
      * remote repository would run one {@code ssh} -- with its own timeout --
      * while the HTTP handler waits.</p>
+     *
+     * <p>The local repositories share ONE deadline for the whole call rather
+     * than each getting its own slice, for the same reason {@code
+     * MainWorkspace.findWorktreeOwner} does: N registered repositories would
+     * otherwise multiply one plausible per-repository timeout into a total that
+     * held the HTTP connection open for N times as long.</p>
      */
     @Override
-    public List<RepoSummary> repositories() {
+    public List<RepoSummary> repositories() throws McpToolException {
+        return repositories(deadlineIn(JOIN_TIMEOUT_SECONDS));
+    }
+
+    /** Package-private for the shared-deadline test, which needs to hand in an expired one. */
+    List<RepoSummary> repositories(long deadlineNanos) throws McpToolException {
         List<RepoSummary> summaries = new ArrayList<>();
         for (Repository repository : repositoryCatalog.get()) {
             if (repository.isRemote()) {
@@ -228,7 +252,7 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
                         Optional.empty(), Optional.empty(), Optional.empty(), true));
                 continue;
             }
-            Optional<GitStatus> status = statusOf(repository.root());
+            Optional<GitStatus> status = statusOf(repository.root(), deadlineNanos);
             summaries.add(new RepoSummary(
                     repository.displayName(),
                     repository.root(),
@@ -249,6 +273,9 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
      * and never for a remote repository, for the reason {@link
      * #repositories()} documents.</p>
      *
+     * <p>Every one of those calls draws from ONE deadline for the whole tool
+     * call, as {@link #repositories()} explains.</p>
+     *
      * <p>The lookup is keyed by REAL path on both sides. A session's stored
      * working directory is whatever path it was opened with, while {@code git
      * worktree list} reports realpaths -- and on macOS {@code /var} is a
@@ -256,7 +283,12 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
      * null branch for essentially every session.</p>
      */
     @Override
-    public List<SessionSummary> sessions() {
+    public List<SessionSummary> sessions() throws McpToolException {
+        return sessions(deadlineIn(JOIN_TIMEOUT_SECONDS));
+    }
+
+    /** Package-private for the shared-deadline test, which needs to hand in an expired one. */
+    List<SessionSummary> sessions(long deadlineNanos) throws McpToolException {
         List<Repository> repositories = repositoryCatalog.get();
         Map<Path, String> branchByWorktree = new HashMap<>();
         Set<Path> listed = new LinkedHashSet<>();
@@ -268,7 +300,7 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
                     .findFirst();
             boolean remote = repository.map(Repository::isRemote).orElse(false);
             if (!remote && repository.isPresent() && listed.add(repository.get().root())) {
-                worktreeBranches(repository.get().root(), branchByWorktree);
+                worktreeBranches(repository.get().root(), branchByWorktree, deadlineNanos);
             }
             summaries.add(new SessionSummary(
                     session.id(),
@@ -287,15 +319,23 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
      * Best-effort: a repository git cannot list simply contributes no branch
      * names. Keyed by real path, skipping entries whose directory is gone,
      * consistent with {@link #realWorktreesOf}.
+     *
+     * <p>Best-effort stops at the shared deadline, though: running out of time
+     * is not this repository's problem but the whole call's, so it propagates.
+     * Unlike {@link #realWorktreesOf}, the main checkout is kept -- a session
+     * legitimately runs in it, and its branch name is what this map is for.</p>
      */
-    private void worktreeBranches(Path repositoryRoot, Map<Path, String> into) {
+    private void worktreeBranches(Path repositoryRoot, Map<Path, String> into, long deadlineNanos)
+            throws DeadlineExceededException {
         try {
-            for (Worktree worktree : join(worktreeService.list(repositoryRoot), JOIN_TIMEOUT_SECONDS)) {
+            for (Worktree worktree : joinBy(worktreeService.list(repositoryRoot), deadlineNanos)) {
                 Optional<Path> real = realPathOf(worktree.path());
                 if (real.isPresent()) {
                     worktree.branch().ifPresent(branch -> into.put(real.get(), branch));
                 }
             }
+        } catch (DeadlineExceededException e) {
+            throw e;
         } catch (McpToolException e) {
             // Listing branch names is decoration on sessions_list; the session
             // rows themselves must still come back.
@@ -320,6 +360,14 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
      * equal -- and a symlink swapped in <em>under</em> a recorded worktree
      * path must resolve to its new target here (so the swap is visible to the
      * comparison) instead of being echoed back unresolved.</p>
+     *
+     * <p>The main checkout is dropped. {@code git worktree list --porcelain}'s
+     * first stanza IS the main checkout, so reporting it would let {@code
+     * session_start} open a second {@code claude} in the tree the human is
+     * working in -- unprompted, concurrent with the human's own session, and
+     * presented as a worktree session over the main checkout. {@link
+     * WorktreeService#remove} refuses the main checkout for the same kind of
+     * reason.</p>
      */
     @Override
     public List<Path> realWorktreesOf(ManagedSessionId caller) throws McpToolException {
@@ -327,6 +375,9 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
         List<Worktree> worktrees = join(worktreeService.list(repository.root()), JOIN_TIMEOUT_SECONDS);
         List<Path> real = new ArrayList<>();
         for (Worktree worktree : worktrees) {
+            if (worktree.mainCheckout()) {
+                continue;
+            }
             // A pruned or deleted worktree directory is not a member of
             // anything, so it must not appear in the membership test.
             realPathOf(worktree.path()).ifPresent(real::add);
@@ -370,30 +421,66 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
                 : Optional.empty();
     }
 
-    /** Git status for a LOCAL root, or empty when git could not be asked in time. */
-    private Optional<GitStatus> statusOf(Path root) {
+    /**
+     * Git status for a LOCAL root: empty when git itself could not answer,
+     * because one unreadable repository must not fail a whole {@code
+     * repos_list}. An expired shared deadline is not that case and propagates.
+     */
+    private Optional<GitStatus> statusOf(Path root, long deadlineNanos) throws DeadlineExceededException {
         try {
-            return Optional.of(join(gitStatusService.getStatus(root), JOIN_TIMEOUT_SECONDS));
+            return Optional.of(joinBy(gitStatusService.getStatus(root), deadlineNanos));
+        } catch (DeadlineExceededException e) {
+            throw e;
         } catch (McpToolException e) {
             return Optional.empty();
         }
     }
 
+    /** A deadline {@code seconds} from now, as a {@link System#nanoTime} value. */
+    private static long deadlineIn(long seconds) {
+        return System.nanoTime() + TimeUnit.SECONDS.toNanos(seconds);
+    }
+
     /**
-     * Awaits {@code future} with a hard bound, translating what comes back
-     * into a message the agent can act on. Never unbounded: a wedged FX thread
-     * or a hung git must fail the call, not hold the HTTP connection.
+     * Awaits {@code future} with a hard bound of its own. For a single wait;
+     * anything that waits more than once per tool call shares one deadline via
+     * {@link #joinBy} instead.
      */
     private static <T> T join(CompletableFuture<T> future, long timeoutSeconds) throws McpToolException {
+        return joinBy(future, deadlineIn(timeoutSeconds));
+    }
+
+    /**
+     * Awaits {@code future} within whatever is left of {@code deadlineNanos},
+     * translating what comes back into a message the agent can act on. Never
+     * unbounded: a wedged FX thread or a hung git must fail the call, not hold
+     * the HTTP connection.
+     *
+     * <p>Running out of the shared deadline is reported as its own exception
+     * type, so a caller that swallows a per-repository failure can still let
+     * the expiry fail the whole call.</p>
+     */
+    private static <T> T joinBy(CompletableFuture<T> future, long deadlineNanos) throws McpToolException {
+        long remainingNanos = deadlineNanos - System.nanoTime();
+        if (remainingNanos <= 0) {
+            throw new DeadlineExceededException();
+        }
         try {
-            return future.get(timeoutSeconds, TimeUnit.SECONDS);
+            return future.get(remainingNanos, TimeUnit.NANOSECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new McpToolException("Interrupted while waiting for Drydock.");
         } catch (TimeoutException e) {
-            throw new McpToolException("Drydock did not respond in time; the app may be busy.");
+            throw new DeadlineExceededException();
         } catch (ExecutionException e) {
             throw translate(e.getCause() == null ? e : e.getCause());
+        }
+    }
+
+    /** The shared deadline of one tool call ran out; the call fails rather than continuing. */
+    private static final class DeadlineExceededException extends McpToolException {
+        DeadlineExceededException() {
+            super("Drydock did not respond in time; the app may be busy.");
         }
     }
 

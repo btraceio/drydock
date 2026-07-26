@@ -14,12 +14,14 @@ import app.drydock.state.json.JsonValue.JsonObject;
 import app.drydock.state.json.JsonValue.JsonString;
 
 import java.io.IOException;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.stream.Stream;
 
 /**
  * Dispatches MCP tool calls to {@link McpSessionContext}. Owns no domain
@@ -57,20 +59,23 @@ public final class McpToolRouter {
                                 .put("id", schemaString("Id of the annotation to reply to."))
                                 .put("note", schemaString("Reply text to append to the thread."))
                                 .put("addressed", schemaBoolean("Whether to mark the annotation ADDRESSED. "
-                                        + "Defaults to false."))),
+                                        + "Defaults to false.")),
+                        "id", "note"),
                 descriptor("worktree_create",
                         "Creates a new worktree for a branch in the caller's repository.",
                         JsonObject.empty()
                                 .put("branch", schemaString("Branch name for the new worktree."))
                                 .put("start_point", schemaString("Optional start point (commit-ish) "
-                                        + "for the new branch."))),
+                                        + "for the new branch.")),
+                        "branch"),
                 descriptor("session_start",
                         "Starts a new managed session in a worktree of the caller's repository. The "
                                 + "started session may not itself start further sessions.",
                         JsonObject.empty()
                                 .put("worktree_path", schemaString("Path of the worktree to open the session in; "
                                         + "must be a worktree of the caller's repository."))
-                                .put("prompt", schemaString("Optional prompt to seed the new session with."))),
+                                .put("prompt", schemaString("Optional prompt to seed the new session with.")),
+                        "worktree_path"),
                 descriptor("repos_list",
                         "Lists every repository registered in Drydock, with git state for local repositories.",
                         JsonObject.empty()),
@@ -169,28 +174,66 @@ public final class McpToolRouter {
     // ---- review_reply ---------------------------------------------------
 
     private JsonValue reviewReply(ManagedSessionId caller, JsonValue arguments) throws McpToolException {
+        requireLiveSession(caller);
         JsonObject args = asObject(arguments);
         String id = requiredStringArg(args, "id");
         String note = requiredStringArg(args, "note");
         boolean addressed = optionalBooleanArg(args, "addressed", false);
 
-        ReviewAnnotation annotation = context.annotations(caller).stream()
+        // Ownership only. Which session owns an annotation cannot change, so
+        // unlike the status this read cannot go stale; the store's own
+        // by-id lookup below is what decides on current values.
+        context.annotations(caller).stream()
                 .filter(candidate -> candidate.id().equals(id))
                 .findFirst()
                 .orElseThrow(() -> new McpToolException("No such annotation '" + id + "'."));
 
-        if (annotation.status() == AnnotationStatus.RESOLVED || annotation.status() == AnnotationStatus.FIXED) {
-            throw new McpToolException("Annotation '" + id + "' is already " + annotation.status()
-                    + "; the human's verdict is final.");
+        ReviewAnnotation.Message reply = new ReviewAnnotation.Message("Claude", Instant.now(), note);
+        Optional<ReviewAnnotation> result;
+        try {
+            result = context.mutateAnnotation(id, current -> {
+                // Checked INSIDE the transform, against the stored value: the
+                // human may have clicked Resolve between the ownership read
+                // above and this write, and a refusal decided outside would
+                // then overwrite their final verdict (and any note they added
+                // with it).
+                if (current.status() == AnnotationStatus.RESOLVED
+                        || current.status() == AnnotationStatus.FIXED) {
+                    throw new Refusal(new McpToolException("Annotation '" + id + "' is already "
+                            + current.status() + "; the human's verdict is final."));
+                }
+                ReviewAnnotation replied = current.withReply(reply);
+                return addressed ? replied.withStatus(AnnotationStatus.ADDRESSED) : replied;
+            });
+        } catch (Refusal refusal) {
+            throw refusal.toolException();
         }
 
-        ReviewAnnotation replied = annotation.withReply(new ReviewAnnotation.Message("Claude", Instant.now(), note));
-        ReviewAnnotation updated = addressed ? replied.withStatus(AnnotationStatus.ADDRESSED) : replied;
-        context.updateAnnotation(updated);
-
+        ReviewAnnotation updated = result.orElseThrow(() ->
+                new McpToolException("No such annotation '" + id + "'."));
         return JsonObject.empty()
                 .put("id", new JsonString(updated.id()))
                 .put("status", new JsonString(updated.status().name()));
+    }
+
+    /**
+     * Carries an {@link McpToolException} out of an annotation transform, which
+     * cannot declare a checked exception. Never escapes {@link #reviewReply},
+     * which unwraps it immediately -- the alternative was widening the store's
+     * transform type just so one caller could refuse.
+     */
+    private static final class Refusal extends RuntimeException {
+
+        private final McpToolException toolException;
+
+        Refusal(McpToolException toolException) {
+            super(toolException.getMessage(), toolException);
+            this.toolException = toolException;
+        }
+
+        McpToolException toolException() {
+            return toolException;
+        }
     }
 
     // ---- worktree_create --------------------------------------------------
@@ -248,13 +291,16 @@ public final class McpToolRouter {
         Path resolved;
         try {
             resolved = Path.of(rawPath).toAbsolutePath().toRealPath();
-        } catch (IOException e) {
+        } catch (IOException | InvalidPathException e) {
+            // InvalidPathException too: a path argument with a NUL byte (or
+            // anything else the platform cannot parse) is a bad argument the
+            // agent can fix, not an internal error for the -32603 catch-all.
             throw new McpToolException("Worktree path '" + rawPath + "' does not exist.");
         }
 
         List<Path> worktrees = context.realWorktreesOf(caller);
         if (!worktrees.contains(resolved)) {
-            throw new McpToolException("'" + resolved + "' is not a worktree of this session's repository.");
+            throw new McpToolException(notAWorktreeMessage(caller, resolved));
         }
 
         try {
@@ -274,6 +320,32 @@ public final class McpToolRouter {
         return JsonObject.empty()
                 .put("session_id", new JsonString(started.toString()))
                 .put("worktree_path", new JsonString(resolved.toString()));
+    }
+
+    /**
+     * The repository's own main checkout is not among {@code realWorktreesOf}
+     * (see its contract), so it lands here like any other non-member. It gets
+     * its own sentence because "not a worktree" is baffling for the path the
+     * caller's own session is running in: what is refused is starting a second
+     * {@code claude} in the tree the human is working in.
+     */
+    private String notAWorktreeMessage(ManagedSessionId caller, Path resolved) {
+        boolean mainCheckout = context.repositoryRoot(caller)
+                .map(root -> realPathOrSelf(root).equals(resolved))
+                .orElse(false);
+        if (mainCheckout) {
+            return "'" + resolved + "' is this repository's main checkout, not one of its worktrees; "
+                    + "create a worktree with worktree_create and start the session there.";
+        }
+        return "'" + resolved + "' is not a worktree of this session's repository.";
+    }
+
+    private static Path realPathOrSelf(Path path) {
+        try {
+            return path.toRealPath();
+        } catch (IOException e) {
+            return path;
+        }
     }
 
     // ---- repos_list -------------------------------------------------------
@@ -317,9 +389,19 @@ public final class McpToolRouter {
 
     // ---- shared helpers -----------------------------------------------------
 
+    /**
+     * Every tool starts here. A token is revoked as its session ends, so this
+     * is defence in depth for the window before the exit watcher notices: a
+     * session whose {@code claude} has already exited keeps its tab open (so
+     * the human can read the final output) and must not still be able to spend
+     * budget, create worktrees or start sessions.
+     */
     private void requireLiveSession(ManagedSessionId caller) throws McpToolException {
         if (context.repositoryRoot(caller).isEmpty()) {
             throw new McpToolException("Session has ended; its repository is no longer available.");
+        }
+        if (!context.sessionRunning(caller)) {
+            throw new McpToolException("Session has ended; its claude process is no longer running.");
         }
     }
 
@@ -384,10 +466,23 @@ public final class McpToolRouter {
         return value.<JsonValue>map(JsonNumber::of).orElse(JsonNull.INSTANCE);
     }
 
-    private static JsonValue descriptor(String name, String description, JsonObject properties) {
+    /**
+     * @param required names of the properties the tool cannot run without.
+     *                 Runtime validation rejects a missing one either way, but
+     *                 a schema that omits {@code required} never tells the
+     *                 model what it must send -- and a tool whose value is
+     *                 being called correctly first time cannot afford that.
+     */
+    private static JsonValue descriptor(String name, String description, JsonObject properties,
+                                        String... required) {
         JsonObject schema = JsonObject.empty()
                 .put("type", new JsonString("object"))
                 .put("properties", properties);
+        if (required.length > 0) {
+            schema = schema.put("required", new JsonArray(Stream.of(required)
+                    .map(argument -> (JsonValue) new JsonString(argument))
+                    .toList()));
+        }
         return JsonObject.empty()
                 .put("name", new JsonString(name))
                 .put("description", new JsonString(description))

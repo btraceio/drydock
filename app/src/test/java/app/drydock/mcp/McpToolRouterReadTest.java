@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static app.drydock.mcp.JsonPeek.array;
@@ -64,6 +65,58 @@ class McpToolRouterReadTest {
                     "missing inputSchema on " + str(descriptor, "name"));
             assertTrue(str(descriptor, "description").length() > 0,
                     "missing description on " + str(descriptor, "name"));
+        }
+    }
+
+    /**
+     * Runtime validation rejects a missing argument either way, but a schema
+     * without {@code required} never tells the model what it must send -- and a
+     * tool whose whole value is being called correctly first time cannot afford
+     * to leave that unsaid.
+     */
+    @Test
+    void toolDescriptorsDeclareTheirRequiredArguments() {
+        Map<String, List<String>> expected = Map.of(
+                "review_comments", List.of(),
+                "review_reply", List.of("id", "note"),
+                "worktree_create", List.of("branch"),
+                "session_start", List.of("worktree_path"),
+                "repos_list", List.of(),
+                "sessions_list", List.of());
+
+        for (JsonValue descriptor : router.toolDescriptors()) {
+            String name = str(descriptor, "name");
+            JsonValue schema = JsonPeek.field(descriptor, "inputSchema");
+            List<String> required = JsonPeek.field(schema, "required") == null
+                    ? List.of()
+                    : array(schema, "required").stream()
+                            .map(value -> ((JsonValue.JsonString) value).value())
+                            .toList();
+
+            assertEquals(expected.get(name), required, "wrong required arguments on " + name);
+            for (String argument : required) {
+                assertTrue(JsonPeek.field(JsonPeek.field(schema, "properties"), argument) != null,
+                        name + " declares '" + argument + "' required but does not describe it");
+            }
+        }
+    }
+
+    /**
+     * A session whose {@code claude} has exited keeps its tab (so the human can
+     * read the final output), so its token outlives the process until the exit
+     * watcher notices. No tool may act in that window -- least of all the ones
+     * that spend money.
+     */
+    @Test
+    void everyToolRefusesASessionWhoseClaudeHasExited() {
+        context.sessionRunning = false;
+
+        for (String tool : List.of("review_comments", "review_reply", "worktree_create",
+                "session_start", "repos_list", "sessions_list")) {
+            McpToolException failure = assertThrows(McpToolException.class,
+                    () -> router.call(caller, tool, noArgs()), tool + " must be refused");
+            assertTrue(failure.getMessage().contains("Session has ended"),
+                    tool + ": " + failure.getMessage());
         }
     }
 

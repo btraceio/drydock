@@ -909,8 +909,10 @@ public final class DrydockApplication extends Application {
                 UserConfig::load,
                 (worktree, prompt) -> mainWorkspace.startAgentSession(worktree, prompt));
         McpServer server = new McpServer(registry, new McpToolRouter(context, registry));
-        // Published before start() so a shutdown racing startup still closes
-        // it; McpServer.close() is null-safe and idempotent.
+        // Published before start() so a shutdown racing startup still reaches
+        // it. Publication alone would not be enough -- a close() that wins the
+        // race would find nothing bound yet and no-op -- which is why
+        // McpServer.close() also latches a flag that start() honours.
         mcpServer = server;
 
         Thread.ofVirtual().name("drydock-mcp-start").start(() -> {
