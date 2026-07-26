@@ -465,11 +465,13 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
     /**
      * Re-applies the terminal config to every open terminal (called on the FX
-     * thread by the theme toggle, and by the settings modal once a font-size
-     * drag commits). ghostty re-reads the whole config file, so theme and font
-     * size travel together over this one path -- which is exactly why the size
-     * lives in the config rather than in the per-surface struct, where
-     * {@code ghostty_surface_update_config} would discard it.
+     * thread by the theme toggle). ghostty re-reads the whole config file, so
+     * theme and font size travel together over this one path -- which is
+     * exactly why the size lives in the config rather than in the per-surface
+     * struct, where {@code ghostty_surface_update_config} would discard it.
+     * The terminal font size for this call comes from {@link
+     * #terminalFontSizeProvider}, whereas live preview uses {@link
+     * #previewTerminalFontSize} to bypass persisted state during a slider drag.
      */
     public void applyTerminalTheme(UiTheme theme) {
         applyTerminalConfig(theme, terminalFontSizeProvider.getAsDouble());

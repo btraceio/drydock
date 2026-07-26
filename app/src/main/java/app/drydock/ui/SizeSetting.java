@@ -12,7 +12,7 @@ import java.util.function.DoubleSupplier;
  * toolkit (see {@code SizeSettingTest}).
  *
  * <p>{@link #persist} is handed the value the user chose, never {@link
- * #appliedSize}. The distinction is the whole point of this type: applying a
+ * #currentSize}. The distinction is the whole point of this type: applying a
  * size can complete asynchronously (a first visit to a size regenerates the
  * stylesheet or the terminal config off-thread), while a commit can land in
  * the very same FX event as the apply that triggered it -- an arrow key or a
@@ -23,19 +23,22 @@ import java.util.function.DoubleSupplier;
  * what the slider shows and what gets stored are the same number by
  * construction.</p>
  *
- * @param appliedSize the currently applied size, read once when the modal
- *                    builds the row; not consulted afterwards
+ * @param currentSize the size the slider should show when the modal opens.
+ *                    For interface size, this reads the theme manager's
+ *                    applied size; for terminal size, it reads persisted state.
+ *                    Read once when the modal builds the row; not consulted
+ *                    afterwards
  * @param applyLive   applies a size to the live UI, possibly completing
  *                    asynchronously; called on every slider tick, so it must
  *                    not block the FX thread
  * @param persist     writes a size to persistent state; called once per
  *                    discrete change or per finished drag, never per tick
  */
-public record SizeSetting(DoubleSupplier appliedSize, DoubleConsumer applyLive, DoubleConsumer persist) {
+public record SizeSetting(DoubleSupplier currentSize, DoubleConsumer applyLive, DoubleConsumer persist) {
 
     /** The size to show when the modal opens. */
     public double current() {
-        return appliedSize.getAsDouble();
+        return currentSize.getAsDouble();
     }
 
     /**

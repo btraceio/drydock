@@ -78,12 +78,13 @@ final class UiFontScale {
      * application and therefore owns the range. The default size returns the
      * bundled resource untouched; other sizes are generated once and cached.
      *
-     * <p>Never throws: a generation failure is logged and resolves to the
-     * bundled unscaled sheet. {@code ThemeManager}'s constructor calls this
-     * synchronously, before the stage is shown, so any size that could fail
-     * to resolve would otherwise turn a persisted interface size into a hard
-     * launch failure -- the app must come up at the wrong font size rather
-     * than not at all.</p>
+     * <p>Generation failures degrade to the bundled unscaled sheet: failures
+     * are logged, and the fallback is cached so no persisted interface size
+     * can cause a launch failure. The unhandled exception case is a missing
+     * bundled resource (a broken build), which surfaces at startup in any
+     * case. {@code ThemeManager}'s constructor calls this synchronously, so
+     * any size that could fail to resolve is resolved here rather than
+     * blocking subsequent launches.</p>
      *
      * <p>Touches the filesystem on a cache miss, so this must only be called
      * from the FX thread when the caller already knows the size is cached or
@@ -139,10 +140,12 @@ final class UiFontScale {
      * unconditionally: a cache hit (or the default size) resolves {@code
      * onReady} synchronously with no I/O, and a cache miss generates on a
      * virtual thread and hands the result back via {@link Platform#runLater}.
-     * {@code onReady} always runs exactly once -- {@link #stylesheetFor}
-     * degrades a generation failure to the unscaled sheet rather than
-     * throwing, so a failure shows up as an unscaled interface, never as a
-     * dropped callback or an error dialog over a purely cosmetic change.
+     * {@link #stylesheetFor} degrades a generation failure to the unscaled
+     * sheet rather than throwing, so a failure shows up as an unscaled
+     * interface, never as an error dialog over a purely cosmetic change. The
+     * unhandled case is a missing bundled resource (a broken build), which
+     * fails at startup in any case, so {@code onReady} receives a valid
+     * stylesheet in all normal scenarios.
      */
     static void stylesheetForAsync(double fontSize, Consumer<String> onReady) {
         Optional<String> cached = cachedStylesheetFor(fontSize);
