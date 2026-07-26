@@ -1,0 +1,59 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # A newer push to the same branch or PR makes the in-flight run pointless.
+  # The main branch is excluded so every merged commit keeps a result.
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  test:
+    name: app:test
+    # macOS because the product is macOS-only, and because the git-backed
+    # tests exercise the same `git` this app spawns at runtime. The suite
+    # itself needs no native libraries: libghostty is only wired into the
+    # `run` and packaging tasks, never into `test`.
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # No `submodules: recursive` on purpose: third_party/ghostty is read
+          # only by buildGhosttyNative, a lazily registered task that :app:test
+          # never realises. Verified by configuring the build against an empty
+          # submodule directory. Skipping it keeps every run cheap; add it back
+          # if a future test task needs the natives.
+          submodules: false
+
+      - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: 26
+          cache: gradle
+
+      # Deliberately no `git config --global user.*` here. The fixtures set a
+      # repo-local identity themselves, which is what makes them self-contained;
+      # papering over it globally would hide the next fixture that forgets, and
+      # that failure is far easier to diagnose here than on a contributor's
+      # machine that happens to have one configured.
+      - name: Test
+        run: ./gradlew --no-daemon :app:test
+
+      - name: Upload test results
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: test-results
+          path: |
+            app/build/reports/tests/test
+            app/build/test-results/test
+          retention-days: 7
