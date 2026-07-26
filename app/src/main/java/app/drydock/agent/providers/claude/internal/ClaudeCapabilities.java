@@ -19,6 +19,7 @@ public record ClaudeCapabilities(
         boolean supportsForkSession,
         boolean supportsSessionId,
         boolean supportsSettings,
+        boolean supportsMcpConfig,
         String version
 ) {
 

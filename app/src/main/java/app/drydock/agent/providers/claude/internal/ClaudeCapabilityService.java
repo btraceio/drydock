@@ -38,6 +38,9 @@ public final class ClaudeCapabilityService implements AutoCloseable {
     private static final Pattern FORK_SESSION_FLAG = Pattern.compile("--fork-session\\b");
     private static final Pattern SESSION_ID_FLAG = Pattern.compile("--session-id\\b");
     private static final Pattern SETTINGS_FLAG = Pattern.compile("--settings\\b");
+    // Not "--mcp-config\\b": '-' is a non-word character, so \b would also
+    // match "--mcp-config-verbose". Require a non-flag character after it.
+    private static final Pattern MCP_CONFIG_FLAG = Pattern.compile("--mcp-config(?![\\w-])");
 
     private final ClaudeExecutableLocator locator;
     private final ExecutorService executor;
@@ -94,9 +97,15 @@ public final class ClaudeCapabilityService implements AutoCloseable {
         boolean supportsForkSession = FORK_SESSION_FLAG.matcher(help).find();
         boolean supportsSessionId = SESSION_ID_FLAG.matcher(help).find();
         boolean supportsSettings = SETTINGS_FLAG.matcher(help).find();
+        boolean supportsMcpConfig = helpMentionsMcpConfig(help);
 
         return new ClaudeCapabilities(supportsName, supportsResume, supportsForkSession, supportsSessionId,
-                supportsSettings, version);
+                supportsSettings, supportsMcpConfig, version);
+    }
+
+    /** Package-private for tests: conservative presence check for {@code --mcp-config}. */
+    static boolean helpMentionsMcpConfig(String helpOutput) {
+        return MCP_CONFIG_FLAG.matcher(helpOutput).find();
     }
 
     private ProcessResult runAndRequireSuccess(Path claude, String arg) {
