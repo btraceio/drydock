@@ -13,6 +13,7 @@ import app.drydock.state.json.JsonValue.JsonNumber;
 import app.drydock.state.json.JsonValue.JsonObject;
 import app.drydock.state.json.JsonValue.JsonString;
 
+import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
@@ -25,9 +26,6 @@ import java.util.logging.Logger;
  * logic itself: every tool resolves the caller's repository via the context
  * first, then adapts the context's answer into {@link JsonValue}.
  *
- * <p>{@code review_reply}, {@code worktree_create}, and {@code session_start}
- * are declared here with real descriptors but throw {@link McpToolException}
- * until Tasks 7-9 implement them.</p>
  */
 public final class McpToolRouter {
 
@@ -67,10 +65,12 @@ public final class McpToolRouter {
                                 .put("start_point", schemaString("Optional start point (commit-ish) "
                                         + "for the new branch."))),
                 descriptor("session_start",
-                        "Starts a new managed session in a worktree.",
+                        "Starts a new managed session in a worktree of the caller's repository. The "
+                                + "started session may not itself start further sessions.",
                         JsonObject.empty()
-                                .put("worktree", schemaString("Path of the worktree to open the session in."))
-                                .put("initial_prompt", schemaString("Optional prompt to seed the new session with."))),
+                                .put("worktree_path", schemaString("Path of the worktree to open the session in; "
+                                        + "must be a worktree of the caller's repository."))
+                                .put("prompt", schemaString("Optional prompt to seed the new session with."))),
                 descriptor("repos_list",
                         "Lists every repository registered in Drydock, with git state for local repositories.",
                         JsonObject.empty()),
@@ -85,7 +85,7 @@ public final class McpToolRouter {
             case "review_comments" -> reviewComments(caller, arguments);
             case "review_reply" -> reviewReply(caller, arguments);
             case "worktree_create" -> worktreeCreate(caller, arguments);
-            case "session_start" -> throw new McpToolException("not implemented yet");
+            case "session_start" -> sessionStart(caller, arguments);
             case "repos_list" -> reposList(caller);
             case "sessions_list" -> sessionsList(caller);
             default -> throw new McpToolException("Unknown tool: " + tool);
@@ -226,6 +226,54 @@ public final class McpToolRouter {
         return JsonObject.empty()
                 .put("path", new JsonString(path.toString()))
                 .put("branch", new JsonString(branch));
+    }
+
+    // ---- session_start ------------------------------------------------------
+
+    private JsonValue sessionStart(ManagedSessionId caller, JsonValue arguments) throws McpToolException {
+        requireLiveSession(caller);
+
+        if (!registry.maySpawn(caller)) {
+            throw new McpToolException("This session was started by an agent and may not create worktrees or "
+                    + "sessions; the human can do this from the UI.");
+        }
+
+        JsonObject args = asObject(arguments);
+        String rawPath = requiredStringArg(args, "worktree_path");
+        Optional<String> prompt = optionalStringArg(args, "prompt");
+        if (prompt.isPresent()) {
+            PromptSafety.validate(prompt.get());
+        }
+
+        Path resolved;
+        try {
+            resolved = Path.of(rawPath).toAbsolutePath().toRealPath();
+        } catch (IOException e) {
+            throw new McpToolException("Worktree path '" + rawPath + "' does not exist.");
+        }
+
+        List<Path> worktrees = context.realWorktreesOf(caller);
+        if (!worktrees.contains(resolved)) {
+            throw new McpToolException("'" + resolved + "' is not a worktree of this session's repository.");
+        }
+
+        try {
+            registry.chargeSession(caller);
+        } catch (McpBudgetExhaustedException e) {
+            throw new McpToolException(e.getMessage());
+        }
+
+        ManagedSessionId started;
+        try {
+            started = context.startSession(resolved, prompt);
+        } catch (McpToolException e) {
+            registry.refundSession(caller);
+            throw e;
+        }
+
+        return JsonObject.empty()
+                .put("session_id", new JsonString(started.toString()))
+                .put("worktree_path", new JsonString(resolved.toString()));
     }
 
     // ---- repos_list -------------------------------------------------------
