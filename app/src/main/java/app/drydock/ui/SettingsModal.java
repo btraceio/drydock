@@ -57,6 +57,16 @@ public final class SettingsModal extends VBox {
 
     private static final double MODAL_WIDTH = 520;
 
+    /**
+     * Flushes a pending worktrees-directory edit, wired by {@link
+     * #worktreesRow} and invoked by {@code ModalLayer}'s {@code onClosed}
+     * callback (see {@link #flushPendingEdit}) so a typed value is
+     * committed no matter which of Done/×/Esc/backdrop-click closes the
+     * modal -- only Done and × happen to move focus off the field first.
+     * A no-op until {@link #worktreesRow} runs.
+     */
+    private Runnable pendingWorktreesFlush = () -> { };
+
     public SettingsModal(Settings settings, Runnable onClose) {
         getStyleClass().add("modal");
         setMaxWidth(MODAL_WIDTH);
@@ -94,6 +104,19 @@ public final class SettingsModal extends VBox {
                 sectionTitle("Worktrees"),
                 worktreesRow(settings),
                 footer);
+    }
+
+    /**
+     * Commits a pending worktrees-directory edit, if any. Meant to be
+     * passed as {@code ModalLayer}'s {@code onClosed} callback: Esc and a
+     * backdrop click hide the modal without ever moving focus off the text
+     * field, so the field's own focus-lost commit never fires and a typed
+     * path would otherwise be silently discarded. Idempotent -- see
+     * {@link #worktreesRow}'s {@code commit} -- so calling this after Done
+     * or × (which already committed via focus loss) is harmless.
+     */
+    public void flushPendingEdit() {
+        pendingWorktreesFlush.run();
     }
 
     private static Label sectionTitle(String text) {
@@ -201,6 +224,22 @@ public final class SettingsModal extends VBox {
         Label hint = new Label("New worktrees are created here.");
         hint.getStyleClass().add("settings-hint");
 
+        // The text last committed (or loaded), so `commit` below can tell a
+        // real edit from a no-op close and never fire a redundant save --
+        // and so a `commit` re-entered mid-save (see `committing`) has
+        // something stable to compare against. Starts at "" to match the
+        // field's initial (disabled, empty) text, so a close raced against
+        // the load below commits nothing rather than saving an empty
+        // directory over whatever is actually on disk.
+        String[] lastCommitted = {""};
+        // Re-entrancy guard: `commit` disables the field while it is the
+        // focus owner, which JavaFX resolves by moving focus off it --
+        // synchronously re-entering `commit` via the focusedProperty
+        // listener below, before the outer call has even reached
+        // saveWorktreesDirectory. Without this, one keystroke's Enter can
+        // fire two overlapping saves.
+        boolean[] committing = {false};
+
         // Load off the FX thread (UserConfig reads the file); the controls
         // stay disabled with a "Loading…" prompt until it lands, so the row
         // never shows a stale or empty value as if it were the real one.
@@ -209,7 +248,9 @@ public final class SettingsModal extends VBox {
             browse.setDisable(false);
             field.setPromptText(System.getProperty("user.home") + "/dev/wt");
             if (failure == null) {
-                directory.ifPresent(dir -> field.setText(dir.toString()));
+                String text = directory.map(Path::toString).orElse("");
+                field.setText(text);
+                lastCommitted[0] = text;
             } else {
                 UiErrors.show("Could not read the settings file", failure);
             }
@@ -217,13 +258,21 @@ public final class SettingsModal extends VBox {
 
         Runnable commit = () -> {
             String text = field.getText() == null ? "" : field.getText().strip();
+            if (committing[0] || text.equals(lastCommitted[0])) {
+                return;
+            }
+            committing[0] = true;
+            lastCommitted[0] = text;
             Optional<Path> directory = text.isEmpty() ? Optional.empty() : Optional.of(Path.of(text));
             field.setDisable(true);
             browse.setDisable(true);
             settings.saveWorktreesDirectory(directory).whenComplete((ignored, failure) ->
                     Platform.runLater(() -> {
-                        // Every path re-enables: success, failure, and the
-                        // early return inside saveWorktreesDirectory.
+                        // saveWorktreesDirectory is a one-line delegation to
+                        // UserConfig.saveAsync: success and failure are its
+                        // only two completions, so both are handled here
+                        // together, unconditionally re-enabling the row.
+                        committing[0] = false;
                         field.setDisable(false);
                         browse.setDisable(false);
                         if (failure != null) {
@@ -231,6 +280,7 @@ public final class SettingsModal extends VBox {
                         }
                     }));
         };
+        pendingWorktreesFlush = commit;
 
         field.setOnAction(e -> commit.run());
         field.focusedProperty().addListener((obs, had, has) -> {

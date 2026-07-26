@@ -59,10 +59,17 @@ public record UserConfig(Optional<Path> worktreesDirectory) {
      * "file loading" must never block the JavaFX application thread) --
      * {@link #load()} does a synchronous stat + read, so callers on the FX
      * thread (e.g. the create-worktree modal) must use this instead.
+     *
+     * <p>Routed through {@link #SAVE_EXECUTOR} rather than an independent
+     * virtual thread so a load is FIFO-ordered against every {@link
+     * #saveAsync} queued before it: an unordered read could otherwise land
+     * before a just-committed save's write and hand back the stale value
+     * (e.g. close-then-reopen the settings modal right after editing the
+     * worktrees directory).</p>
      */
     public static CompletableFuture<UserConfig> loadAsync() {
         CompletableFuture<UserConfig> future = new CompletableFuture<>();
-        Thread.ofVirtual().start(() -> {
+        SAVE_EXECUTOR.execute(() -> {
             try {
                 future.complete(load());
             } catch (Throwable t) {

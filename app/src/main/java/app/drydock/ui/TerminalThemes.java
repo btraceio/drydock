@@ -55,9 +55,19 @@ final class TerminalThemes {
      * of application, and therefore the owner of the range (the codec
      * deliberately stores whatever it was given).
      *
-     * <p>Touches the filesystem on a cache miss, so an FX-thread caller that
-     * cannot guarantee the pair is already cached (a live slider drag, in
-     * particular) must go through {@link #configFileForAsync} instead.</p>
+     * <p>Touches the filesystem on a cache miss. Safe to call on the FX
+     * thread only when the caller is <b>warmed-by-construction</b>: {@code
+     * MainWorkspace.createOpenSessionTab} calls this synchronously for the
+     * current (theme, terminal font size) pair, which {@code
+     * DrydockApplication} warms once at startup and {@code MainWorkspace}
+     * re-warms (through {@link #configFileForAsync}) on every theme toggle
+     * and terminal-size change, so a session-open call is a cache hit in
+     * the common case. That is not a guarantee, only the common case: a
+     * session opened fast enough to outrun a just-issued warm still falls
+     * back to doing the extraction inline, on the FX thread. A caller that
+     * cannot make the warmed-by-construction argument (a live slider drag,
+     * in particular) must go through {@link #configFileForAsync}
+     * instead.</p>
      */
     static synchronized Path configFileFor(UiTheme theme, double fontSize) {
         int rounded = roundedFontSize(fontSize);

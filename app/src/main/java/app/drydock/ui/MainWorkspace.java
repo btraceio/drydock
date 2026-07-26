@@ -1345,6 +1345,16 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         // The wakeup coalescer already delivers on the FX thread with at most
         // one pending runnable; a second Platform.runLater here would defeat
         // that coalescing.
+        //
+        // configFileFor is called synchronously here (current theme, current
+        // size) rather than through configFileForAsync: this call site is
+        // warmed-by-construction -- see that method's Javadoc -- because
+        // DrydockApplication warms this exact pair at startup and every
+        // theme/size change re-warms it, so a filesystem touch here is the
+        // rare exception, not the rule. Restructuring TerminalRuntime
+        // creation to await the async variant would ripple into
+        // OpenSessionTab/SessionManager for a hit that already almost never
+        // happens.
         TerminalRuntime app = TerminalFactory.createRuntime(() -> {
             if (holder[0] != null) {
                 holder[0].tickAndDraw();
@@ -1373,6 +1383,8 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             openTab.setShellWorkingDirectory(System.getProperty("user.home"));
         });
         openTab.setShellTerminalProvider(onWakeup -> {
+            // Synchronous and warmed-by-construction for the same reason as
+            // the Claude runtime above.
             TerminalRuntime shellRuntime = TerminalFactory.createRuntime(onWakeup,
                     Optional.of(TerminalThemes.configFileFor(themeProvider.get(), terminalFontSizeProvider.getAsDouble())));
             TerminalHostView shellHost;

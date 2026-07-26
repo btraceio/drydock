@@ -176,6 +176,27 @@ class UserConfigTest {
 
     @Test
     @ResourceLock(Resources.SYSTEM_PROPERTIES)
+    void loadAsyncObservesAPreviouslyQueuedSave(@TempDir Path tempDir) throws Exception {
+        // loadAsync must be ordered against SAVE_EXECUTOR, not race it on an
+        // independent thread: commit an edit, then immediately reload (as
+        // closing and reopening the settings modal does) and confirm the
+        // load never observes the pre-save value.
+        String originalUserHome = System.getProperty("user.home");
+        System.setProperty("user.home", tempDir.toString());
+        try {
+            UserConfig.saveAsync(new UserConfig(Optional.of(Path.of("/tmp/worktrees-fresh"))));
+
+            UserConfig loaded = UserConfig.loadAsync().get();
+
+            assertEquals(Optional.of(Path.of("/tmp/worktrees-fresh")), loaded.worktreesDirectory());
+        } finally {
+            UserConfig.flushPendingSaves();
+            System.setProperty("user.home", originalUserHome);
+        }
+    }
+
+    @Test
+    @ResourceLock(Resources.SYSTEM_PROPERTIES)
     void flushPendingSavesWaitsForEveryQueuedSaveBeforeReturning(@TempDir Path tempDir) throws Exception {
         String originalUserHome = System.getProperty("user.home");
         System.setProperty("user.home", tempDir.toString());

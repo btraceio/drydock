@@ -215,59 +215,76 @@ public final class DrydockApplication extends Application {
         mainWorkspace.setThemeProvider(() -> appShell.themeManager().theme());
         mainWorkspace.setTerminalFontSizeProvider(
                 () -> repositoryManager.state().ui().terminalFontSize());
+        // Warms the ghostty config cache for the pair the FIRST opened
+        // session will need, off the FX thread: MainWorkspace.
+        // createOpenSessionTab reads TerminalThemes.configFileFor
+        // synchronously, which is only cheap once this (theme, size) pair
+        // is cached (see that method's Javadoc). Reuses applyTerminalTheme
+        // rather than a bespoke warm call -- there are no open tabs yet, so
+        // its "apply to every open terminal" step is a no-op, and every
+        // later theme toggle or terminal-size change re-warms the same way
+        // through that same method.
+        mainWorkspace.applyTerminalTheme(appShell.themeManager().theme());
 
-        appShell.setOnShowSettings(() -> appShell.modalLayer().show(
-                new SettingsModal(new SettingsModal.Settings() {
-                    @Override
-                    public UiTheme theme() {
-                        return appShell.themeManager().theme();
-                    }
+        appShell.setOnShowSettings(() -> {
+            SettingsModal settingsModal = new SettingsModal(new SettingsModal.Settings() {
+                @Override
+                public UiTheme theme() {
+                    return appShell.themeManager().theme();
+                }
 
-                    @Override
-                    public void setTheme(UiTheme theme) {
-                        // Persists and re-themes terminals via AppShell's own
-                        // onThemeChanged callback; no duplicate write here.
-                        appShell.themeManager().setTheme(theme);
-                    }
+                @Override
+                public void setTheme(UiTheme theme) {
+                    // Persists and re-themes terminals via AppShell's own
+                    // onThemeChanged callback; no duplicate write here.
+                    appShell.themeManager().setTheme(theme);
+                }
 
-                    @Override
-                    public SizeSetting interfaceSize() {
-                        // Applying is live only and persisting is a plain write of
-                        // the chosen value: ThemeManager.setUiFontSize regenerates
-                        // off the FX thread on a cache miss, so its applied size
-                        // can still be one FX event behind when the persist runs
-                        // (see SizeSetting) -- which is why nothing here reads it
-                        // back. A size that fails to generate now degrades to the
-                        // unscaled stylesheet instead of failing the next launch,
-                        // so persisting the raw choice is safe.
-                        return new SizeSetting(
-                                () -> appShell.themeManager().uiFontSize(),
-                                size -> appShell.themeManager().setUiFontSize(size),
-                                repositoryManager::updateUiFontSize);
-                    }
+                @Override
+                public SizeSetting interfaceSize() {
+                    // Applying is live only and persisting is a plain write of
+                    // the chosen value: ThemeManager.setUiFontSize regenerates
+                    // off the FX thread on a cache miss, so its applied size
+                    // can still be one FX event behind when the persist runs
+                    // (see SizeSetting) -- which is why nothing here reads it
+                    // back. A size that fails to generate now degrades to the
+                    // unscaled stylesheet instead of failing the next launch,
+                    // so persisting the raw choice is safe.
+                    return new SizeSetting(
+                            () -> appShell.themeManager().uiFontSize(),
+                            size -> appShell.themeManager().setUiFontSize(size),
+                            repositoryManager::updateUiFontSize);
+                }
 
-                    @Override
-                    public SizeSetting terminalSize() {
-                        // The live step bypasses repositoryManager.state() on
-                        // purpose: mainWorkspace.applyTerminalTheme reads the size
-                        // back through terminalFontSizeProvider, which would still
-                        // see the OLD persisted value mid-drag.
-                        return new SizeSetting(
-                                () -> repositoryManager.state().ui().terminalFontSize(),
-                                mainWorkspace::previewTerminalFontSize,
-                                repositoryManager::updateTerminalFontSize);
-                    }
+                @Override
+                public SizeSetting terminalSize() {
+                    // The live step bypasses repositoryManager.state() on
+                    // purpose: mainWorkspace.applyTerminalTheme reads the size
+                    // back through terminalFontSizeProvider, which would still
+                    // see the OLD persisted value mid-drag.
+                    return new SizeSetting(
+                            () -> repositoryManager.state().ui().terminalFontSize(),
+                            mainWorkspace::previewTerminalFontSize,
+                            repositoryManager::updateTerminalFontSize);
+                }
 
-                    @Override
-                    public CompletableFuture<Optional<Path>> loadWorktreesDirectory() {
-                        return UserConfig.loadAsync().thenApply(UserConfig::worktreesDirectory);
-                    }
+                @Override
+                public CompletableFuture<Optional<Path>> loadWorktreesDirectory() {
+                    return UserConfig.loadAsync().thenApply(UserConfig::worktreesDirectory);
+                }
 
-                    @Override
-                    public CompletableFuture<Void> saveWorktreesDirectory(Optional<Path> directory) {
-                        return UserConfig.saveAsync(new UserConfig(directory));
-                    }
-                }, appShell.modalLayer()::close)));
+                @Override
+                public CompletableFuture<Void> saveWorktreesDirectory(Optional<Path> directory) {
+                    return UserConfig.saveAsync(new UserConfig(directory));
+                }
+            }, appShell.modalLayer()::close);
+            // onClosed, not just the Done/× onClose above: Esc and a
+            // backdrop click hide the modal without moving focus off the
+            // worktrees field, so its focus-lost commit never fires --
+            // flushPendingEdit is the one seam every close path runs
+            // through (see ModalLayer.close's onClosed callback).
+            appShell.modalLayer().show(settingsModal, settingsModal::flushPendingEdit);
+        });
 
         mainWorkspace.setModalLayer(appShell.modalLayer());
         mainWorkspace.setOnToggleSidebar(appShell::toggleSidebar);
