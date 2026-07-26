@@ -2470,6 +2470,7 @@ git commit -m "feat(mcp): session_start with realpath membership and prompt safe
   - `McpServer(McpSessionRegistry registry, McpToolRouter router)`
   - `void start() throws IOException` — binds `127.0.0.1:0`
   - `int port()`, `String endpointUrl()`
+  - `InetSocketAddress boundAddress()` — the socket's actual bound address, so a test can assert loopback rather than trusting a string built from a literal
   - `void close()` (implements `AutoCloseable`)
 
 **Protocol.** JSON-RPC 2.0 over `POST /mcp`. Requests (with an `id`): `initialize`, `ping`, `tools/list`, `tools/call`; anything else `-32601`. Notifications (no `id`) are accepted and answered `204` with no body — `claude` sends `notifications/initialized` right after `initialize`, and replying with an error object to a notification risks the handshake never completing, which would leave every unit test green and the feature inert.
@@ -2550,8 +2551,7 @@ class McpServerTest {
         }
     }
 
-    private HttpResponse<String> post(String body, String presentedToken, String origin, String host)
-            throws Exception {
+    private HttpResponse<String> post(String body, String presentedToken, String origin) throws Exception {
         HttpRequest.Builder request = HttpRequest.newBuilder(URI.create(server.endpointUrl()))
                 .timeout(Duration.ofSeconds(5))
                 .header("Content-Type", "application/json")
@@ -2562,20 +2562,57 @@ class McpServerTest {
         if (origin != null) {
             request.header("Origin", origin);
         }
-        if (host != null) {
-            request.header("X-Forwarded-Host", host);
-        }
         return client.send(request.build(), HttpResponse.BodyHandlers.ofString());
     }
 
     private HttpResponse<String> post(String body) throws Exception {
-        return post(body, token, null, null);
+        return post(body, token, null);
+    }
+
+    /**
+     * Sends a handcrafted request over a raw socket, because {@code HttpClient}
+     * refuses to set {@code Host} -- it is a restricted header. Returns the
+     * whole response, status line included.
+     */
+    private String rawPost(String hostHeader, String tokenHeader, String body) throws Exception {
+        try (Socket socket = new Socket(InetAddress.getLoopbackAddress(), server.port())) {
+            String request = "POST /mcp HTTP/1.1\r\n"
+                    + "Host: " + hostHeader + "\r\n"
+                    + (tokenHeader == null ? "" : TOKEN_HEADER + ": " + tokenHeader + "\r\n")
+                    + "Content-Type: application/json\r\n"
+                    + "Content-Length: " + body.getBytes(StandardCharsets.UTF_8).length + "\r\n"
+                    + "Connection: close\r\n\r\n"
+                    + body;
+            socket.getOutputStream().write(request.getBytes(StandardCharsets.UTF_8));
+            socket.getOutputStream().flush();
+            return new String(socket.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        }
     }
 
     @Test
-    void bindsOnLoopbackOnly() {
-        assertTrue(server.endpointUrl().startsWith("http://127.0.0.1:"), server.endpointUrl());
+    void bindsOnLoopbackOnly() throws Exception {
+        // Asserting on endpointUrl() would prove nothing: that string is built
+        // from a literal, so it reads "127.0.0.1" even if start() bound
+        // 0.0.0.0. Ask the socket what it is actually bound to.
+        assertTrue(server.boundAddress().getAddress().isLoopbackAddress(),
+                "must not be reachable off-host: " + server.boundAddress());
         assertTrue(server.port() > 0);
+    }
+
+    @Test
+    void aForeignHostHeaderIsRejected() throws Exception {
+        String response = rawPost("evil.example.com:" + server.port(), token, """
+                {"jsonrpc":"2.0","id":20,"method":"tools/list","params":{}}""");
+
+        assertTrue(response.startsWith("HTTP/1.1 403"), response);
+    }
+
+    @Test
+    void aLoopbackHostHeaderIsAccepted() throws Exception {
+        String response = rawPost("127.0.0.1:" + server.port(), token, """
+                {"jsonrpc":"2.0","id":21,"method":"tools/list","params":{}}""");
+
+        assertTrue(response.startsWith("HTTP/1.1 200"), response);
     }
 
     @Test
@@ -2740,8 +2777,36 @@ class McpServerTest {
     }
 
     @Test
-    void neitherPortNorTokenIsEverLogged() {
+    void aToolCallWithNoNameIsAnActionableToolErrorNotAnInternalError() throws Exception {
+        // The router's dispatch is a String switch, which NPEs on a null
+        // selector. Left to reach it, a missing "name" surfaces as -32603 with a
+        // stack trace in the log -- the catch-all is a last resort, not the
+        // handler for a predictable bad argument.
+        HttpResponse<String> response = post("""
+                {"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"arguments":{}}}""");
+
+        assertEquals(200, response.statusCode());
+        assertFalse(response.body().contains("-32603"), response.body());
+        assertTrue(response.body().contains("\"isError\": true"), response.body());
+    }
+
+    @Test
+    void aToolCallWithANonStringNameIsAlsoAToolError() throws Exception {
+        HttpResponse<String> response = post("""
+                {"jsonrpc":"2.0","id":23,"method":"tools/call","params":{"name":7,"arguments":{}}}""");
+
+        assertEquals(200, response.statusCode());
+        assertFalse(response.body().contains("-32603"), response.body());
+        assertTrue(response.body().contains("\"isError\": true"), response.body());
+    }
+
+    @Test
+    void neitherPortNorTokenAppearsInToString() {
+        // The port half matters: toString() is the one place a debug log would
+        // most plausibly leak it.
         assertFalse(server.toString().contains(token), "token must not appear in toString()");
+        assertFalse(server.toString().contains(String.valueOf(server.port())),
+                "port must not appear in toString(): " + server.toString());
     }
 
     @Test
@@ -2752,7 +2817,9 @@ class McpServerTest {
 }
 ```
 
-The `Host` header cannot be set through `HttpClient` (it is restricted), which is why the test uses `X-Forwarded-Host` as a stand-in and does not assert on `Host` directly. Implement the real `Host` check anyway, and note in the code comment that it is covered by the manual checklist rather than by this test.
+Add these imports for the raw-socket helper: `java.net.Socket`, `java.net.InetAddress`, `java.nio.charset.StandardCharsets`.
+
+**On the `Host` check:** `HttpClient` refuses to set `Host` — it is a restricted header — so the two `Host` tests drive a raw `Socket` with a handcrafted request instead. That is why `rawPost` exists. Do **not** substitute a different header name and assert on that: the implementation reads `Host`, so a stand-in header would verify nothing.
 
 - [ ] **Step 3: Run test to verify it fails**
 
@@ -2770,14 +2837,15 @@ Create `app/src/main/java/app/drydock/mcp/McpServer.java`, using `com.sun.net.ht
 - Parse with `JsonParser.parse` (static; throws the unchecked `JsonParseException`). A parse failure returns JSON-RPC `-32700`. Wrap the whole handler body in `try/catch (Exception)` that logs and returns `-32603`, so one bad request cannot kill the server.
 - **Notification first:** if the parsed object has no `id`, return 204 with no body regardless of `method`.
 - Dispatch `initialize`, `ping`, `tools/list`, `tools/call`; anything else `-32601`.
-- For `tools/call`, catch `McpToolException` and return a 200 JSON-RPC *result* with `isError: true` and the message as text content.
+- For `tools/call`, read `name` from `params`. **If it is absent or not a string, return an `isError: true` result saying the tool name is missing** — do not pass `null` to the router, whose dispatch is a `String` switch and would throw `NullPointerException` on a null selector, degrading a predictable bad argument into a `-32603`. An absent `arguments` is fine to pass through: the router treats it as an empty object.
+- Catch `McpToolException` and return a 200 JSON-RPC *result* with `isError: true` and the message as text content.
 - `close()`: `server.stop(0)` and shut down the executor, null-safe and idempotent.
-- `toString()` reports class name and port only.
+- `toString()` reports the class name **only** — not the port. The "never log the port" constraint outranks convenience here, and a test asserts the port is absent.
 
 - [ ] **Step 5: Run test to verify it passes**
 
 Run: `./gradlew :app:test --tests 'app.drydock.mcp.McpServerTest'`
-Expected: PASS (19 tests)
+Expected: PASS (23 tests)
 
 - [ ] **Step 6: Verify the packaged runtime carries the module**
 
