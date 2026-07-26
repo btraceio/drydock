@@ -95,10 +95,19 @@ and read a *sibling* session's token, then call tools scoped to that
 sibling's repository. The launch command is a shell string containing the
 config path, so `ps` reveals the directory even without guessing.
 
-This is accepted rather than fixed, because the escalation is negligible: an
-agent with Bash can already `cd` to any repository on the machine and run
-git directly. Confining the token to its process would need peer-credential
-checks on the socket (`LOCAL_PEERPID`), which is not reachable from the JDK.
+This is accepted rather than fixed, because the escalation is small: an agent
+with Bash can already `cd` to any repository on the machine and run git
+directly. Confining the token to its process would need peer-credential checks
+on the socket (`LOCAL_PEERPID`), which is not reachable from the JDK.
+
+But it is not *nothing*, and an earlier draft's "negligible" overstated the
+case. A sibling's token grants three things a plain shell does not: the ability
+to **write into the human's review annotations attributed as `"Claude"`** — and
+have that appear live in the human's open Review tab — the ability to **spend
+another session's worktree and session budget**, and the ability to **open real
+Drydock tabs** that the human will attribute to the session they were talking
+to. That is acting *as the app*, not merely acting on files. Still a small
+escalation against an attacker who already runs as the user, but say what it is.
 
 So the token's job is **attribution, not isolation**: it tells the server
 which session a call came from, so tools resolve to the right repository and
@@ -303,7 +312,12 @@ model-generated rather than human-typed in a modal:
   on stderr, so the tool would report success. That is lost work, not
   clutter, and it is why "create-only is non-destructive" was wrong.
 - A name starting with `refs/` is refused.
-- The name is pre-validated with `git check-ref-format --branch`.
+- The name is validated against git's refname rules. Those rules are
+  **reimplemented in Java**, not delegated to `git check-ref-format --branch`:
+  this runs on every tool call, and spawning a process to validate a string is
+  not what `ProcessRunner` is for. A future reader needs to know it is a
+  reimplementation — if git's rules change, this code does not follow
+  automatically.
 
 ### `session_start(worktree_path, prompt?)`
 
