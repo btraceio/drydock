@@ -207,25 +207,20 @@ final class MergeAndFinishFlow {
      * <p>The verdict that got us here proves a merge commit of the tip
      * recorded at pre-flight is on the base branch -- it says nothing about
      * where the branch points now, and on the hand-off path minutes have
-     * passed with the session's Claude sitting in the worktree. So the tip is
-     * re-read here, on the FX-free side of the fence, and {@link
-     * MergeFinishDecision#forBranchDelete} turns any movement (or a re-read
-     * that failed) into a refusal to run {@code git branch -D}. Removing the
-     * worktree stays safe either way: the commits are on the branch, which
+     * passed with the session's Claude sitting in the worktree. {@link
+     * BranchDeleteGate} re-reads the tip and turns any movement (or a re-read
+     * that failed) into a refusal to run {@code git branch -D}; it lives
+     * outside this class so that "the second tip is actually read again" is
+     * pinned by a test rather than by this comment. Removing the worktree
+     * stays safe either way: the commits are on the branch, which
      * survives.</p>
      */
     private void runCleanup() {
         showBusy("Removing worktree…");
-        boolean branchIsOurs = sessionManager.mayDeleteBranchOf(worktreeRoot);
-        Optional<String> recordedTip = target.branchTipOid();
-        attempt(() -> worktreeService.inspectMergeTarget(repositoryRoot, branch))
-                // A re-inspection that failed becomes an unknown tip, not the
-                // recorded one: forBranchDelete treats "we could not ask" as
-                // drift, so an unreadable repository keeps the branch instead
-                // of deleting it on an assumption.
-                .handle((fresh, ex) -> ex == null ? fresh.branchTipOid() : Optional.<String>empty())
-                .thenCompose(currentTip -> attempt(() -> cleanup.run(sessionId, repositoryRoot, worktreeRoot, branch,
-                        MergeFinishDecision.forBranchDelete(branchIsOurs, recordedTip, currentTip))))
+        BranchDeleteGate.plan(sessionManager.mayDeleteBranchOf(worktreeRoot), target.branchTipOid(),
+                        () -> worktreeService.inspectMergeTarget(repositoryRoot, branch))
+                .thenCompose(plan -> attempt(() ->
+                        cleanup.run(sessionId, repositoryRoot, worktreeRoot, branch, plan)))
                 .whenComplete((outcome, ex) -> Platform.runLater(() -> {
                     if (ex != null) {
                         // The merge landed; only the cleanup call failed to

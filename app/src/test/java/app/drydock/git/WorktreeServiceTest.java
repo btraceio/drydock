@@ -789,12 +789,26 @@ class WorktreeServiceTest {
         runGit(checkout, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", message);
     }
 
+    /**
+     * A repository with one commit and, importantly, an identity of its own.
+     *
+     * <p>The fixture's own commits pass {@code -c user.name}/{@code -c
+     * user.email}, but the code under test does not: {@code
+     * WorktreeService.merge} spawns {@code git merge --no-ff}, which writes a
+     * merge commit. On a machine with no ambient identity -- a CI runner, or a
+     * developer with {@code user.useConfigOnly} -- that exits 128 before
+     * touching the repository, and the merge tests fail with a message
+     * pointing nowhere near the cause. Setting it repo-locally here makes
+     * every test self-contained instead of quietly host-dependent.</p>
+     */
     private static Path initCommittedRepo(Path parent) throws IOException, InterruptedException {
         Path repo = Files.createDirectories(parent.resolve("repo"));
         runGit(repo, "init", "-b", "main");
+        runGit(repo, "config", "user.name", "Test");
+        runGit(repo, "config", "user.email", "test@example.com");
         Files.writeString(repo.resolve("README.md"), "hello\n");
         runGit(repo, "add", "README.md");
-        runGit(repo, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "initial commit");
+        runGit(repo, "commit", "-m", "initial commit");
         return repo;
     }
 

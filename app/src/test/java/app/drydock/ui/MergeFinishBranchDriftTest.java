@@ -107,12 +107,15 @@ class MergeFinishBranchDriftTest {
         return exitCode == 0;
     }
 
+    /** Repo-local identity so {@code WorktreeService.merge}'s own commit works on a host without one. */
     private static Path initCommittedRepo(Path parent) throws IOException, InterruptedException {
         Path repo = Files.createDirectories(parent.resolve("repo"));
         runGit(repo, "init", "-b", "main");
+        runGit(repo, "config", "user.name", "Test");
+        runGit(repo, "config", "user.email", "test@example.com");
         Files.writeString(repo.resolve("README.md"), "hello\n");
         runGit(repo, "add", "README.md");
-        runGit(repo, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "initial commit");
+        runGit(repo, "commit", "-m", "initial commit");
         return repo;
     }
 
