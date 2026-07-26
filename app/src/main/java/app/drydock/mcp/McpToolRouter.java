@@ -13,6 +13,7 @@ import app.drydock.state.json.JsonValue.JsonNumber;
 import app.drydock.state.json.JsonValue.JsonObject;
 import app.drydock.state.json.JsonValue.JsonString;
 
+import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -83,7 +84,7 @@ public final class McpToolRouter {
         return switch (tool) {
             case "review_comments" -> reviewComments(caller, arguments);
             case "review_reply" -> reviewReply(caller, arguments);
-            case "worktree_create" -> throw new McpToolException("not implemented yet");
+            case "worktree_create" -> worktreeCreate(caller, arguments);
             case "session_start" -> throw new McpToolException("not implemented yet");
             case "repos_list" -> reposList(caller);
             case "sessions_list" -> sessionsList(caller);
@@ -190,6 +191,41 @@ public final class McpToolRouter {
         return JsonObject.empty()
                 .put("id", new JsonString(updated.id()))
                 .put("status", new JsonString(updated.status().name()));
+    }
+
+    // ---- worktree_create --------------------------------------------------
+
+    private JsonValue worktreeCreate(ManagedSessionId caller, JsonValue arguments) throws McpToolException {
+        requireLiveSession(caller);
+
+        if (!registry.maySpawn(caller)) {
+            throw new McpToolException("This session was started by an agent and may not create worktrees or "
+                    + "sessions; the human can do this from the UI.");
+        }
+
+        JsonObject args = asObject(arguments);
+        String branch = requiredStringArg(args, "branch");
+        Optional<String> startPoint = optionalStringArg(args, "start_point");
+
+        BranchNames.validate(branch, context.remoteNames(caller));
+
+        try {
+            registry.chargeWorktree(caller);
+        } catch (McpBudgetExhaustedException e) {
+            throw new McpToolException(e.getMessage());
+        }
+
+        Path path;
+        try {
+            path = context.createWorktree(caller, branch, startPoint);
+        } catch (McpToolException e) {
+            registry.refundWorktree(caller);
+            throw e;
+        }
+
+        return JsonObject.empty()
+                .put("path", new JsonString(path.toString()))
+                .put("branch", new JsonString(branch));
     }
 
     // ---- repos_list -------------------------------------------------------
