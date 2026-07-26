@@ -17,6 +17,11 @@ import app.drydock.git.GitStatusService;
 import app.drydock.git.WorktreeService;
 import app.drydock.github.GitHubService;
 import app.drydock.launcher.DockIcon;
+import app.drydock.mcp.McpConfigWriter;
+import app.drydock.mcp.McpServer;
+import app.drydock.mcp.McpSessionRegistry;
+import app.drydock.mcp.McpToolRouter;
+import app.drydock.mcp.WorkspaceMcpSessionContext;
 import app.drydock.review.AnnotationStore;
 import app.drydock.search.SessionSearchService;
 import app.drydock.state.JsonApplicationStateRepository;
@@ -120,6 +125,7 @@ public final class DrydockApplication extends Application {
     private AppShell appShell;
     private GitHubService gitHubService;
     private AnnotationStore annotationStore;
+    private McpServer mcpServer;
 
     private boolean shutdownConfirmed;
 
@@ -199,6 +205,7 @@ public final class DrydockApplication extends Application {
                         mainWorkspace, viewModel);
 
         installSessionActivityHooks(activityDir);
+        startMcpServer(stateDir);
 
         appShell = new AppShell(primaryStage, WINDOW_TITLE, sidebar, mainWorkspace,
                 repositoryManager.state().ui().sidebarWidth(),
@@ -802,6 +809,11 @@ public final class DrydockApplication extends Application {
         if (annotationStore != null) {
             closeQuietly("AnnotationStore", annotationStore::close);
         }
+        // Before SessionManager: once the listener socket is gone no further
+        // tool call can arrive mid-teardown and touch a half-closed service.
+        if (mcpServer != null) {
+            closeQuietly("McpServer", mcpServer::close);
+        }
         if (sessionManager != null) {
             closeQuietly("SessionManager", sessionManager::close);
         }
@@ -866,6 +878,57 @@ public final class DrydockApplication extends Application {
                     LOG.log(Level.WARNING, "Session activity hooks unavailable; sessions will run without them", ex);
                     return null;
                 });
+    }
+
+    /**
+     * Brings up the localhost MCP server and points subsequently launched
+     * sessions at a per-session {@code --mcp-config} file, so the sessions
+     * Drydock hosts can call back into it (see {@code app.drydock.mcp}).
+     *
+     * <p>Runs off the FX thread: {@link McpConfigWriter#purgeStale()} and
+     * {@link McpServer#start()} both do I/O. A failure is logged and swallowed
+     * -- exactly like {@link #installSessionActivityHooks} -- because a
+     * session without Drydock tools is strictly better than one that will not
+     * launch. {@link SessionManager#useMcpConfig} is called inside {@link
+     * Platform#runLater} for the same reason the hook install's
+     * {@code useActivitySettings} is.</p>
+     *
+     * <p>Never logs the port or a token: the endpoint URL carries the port,
+     * and the per-session token is written only into its owner-readable
+     * config file.</p>
+     */
+    private void startMcpServer(Path stateDirectory) {
+        McpSessionRegistry registry = new McpSessionRegistry();
+        McpConfigWriter configWriter = new McpConfigWriter(stateDirectory);
+        WorkspaceMcpSessionContext context = new WorkspaceMcpSessionContext(
+                sessionManager::sessions,
+                repositoryManager::repositories,
+                annotationStore,
+                gitStatusService,
+                worktreeService,
+                UserConfig::load,
+                (worktree, prompt) -> mainWorkspace.startAgentSession(worktree, prompt));
+        McpServer server = new McpServer(registry, new McpToolRouter(context, registry));
+        // Published before start() so a shutdown racing startup still closes
+        // it; McpServer.close() is null-safe and idempotent.
+        mcpServer = server;
+
+        Thread.ofVirtual().name("drydock-mcp-start").start(() -> {
+            try {
+                // Every config file left by a previous run is stale by
+                // definition: no terminal process survives a restart.
+                configWriter.purgeStale();
+                server.start();
+            } catch (IOException | RuntimeException e) {
+                LOG.log(Level.WARNING, "MCP server unavailable; sessions will run without Drydock tools", e);
+                server.close();
+                return;
+            }
+            Platform.runLater(() -> {
+                sessionManager.useMcpConfig(configWriter, registry, server.endpointUrl());
+                LOG.log(Level.INFO, "MCP server started on loopback");
+            });
+        });
     }
 
     /**

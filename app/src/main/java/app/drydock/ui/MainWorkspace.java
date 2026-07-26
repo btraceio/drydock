@@ -23,6 +23,8 @@ import app.drydock.git.GitBranchState;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.GitTarget;
 import app.drydock.git.WorktreeService;
+import app.drydock.mcp.McpSessionRegistry.Spawn;
+import app.drydock.mcp.WorkspaceMcpSessionContext;
 import app.drydock.process.SshCommandBuilder;
 import app.drydock.review.AnnotationStore;
 import app.drydock.search.SessionSearchService;
@@ -64,6 +66,7 @@ import javafx.util.Duration;
 import org.fxmisc.richtext.GenericStyledArea;
 
 import java.io.File;
+import java.io.IOException;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.Path;
@@ -76,6 +79,9 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.DoubleSupplier;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
@@ -103,6 +109,22 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
     /** Tab strip height (handoff section 4); the picker overlay starts below it while tabs exist. */
     private static final double TAB_STRIP_HEIGHT = 50;
+
+    /**
+     * ONE total deadline for everything {@link #startAgentSession} does --
+     * every candidate's {@code git worktree list} plus the FX hop that opens
+     * the tab -- not a per-candidate one.
+     *
+     * <p>Derived from (never merely "smaller than")
+     * {@link WorkspaceMcpSessionContext#START_SESSION_TIMEOUT_SECONDS}, the
+     * bound the waiting MCP call uses, so the two can never disagree. A
+     * per-candidate bound could: with enough registered repositories the sum
+     * exceeded the outer bound, the MCP call timed out, {@code McpToolRouter}
+     * refunded the session charge -- and then the tab opened anyway, letting an
+     * agent exceed the 4-session limit that bounds real spend.</p>
+     */
+    private static final long AGENT_SESSION_BUDGET_SECONDS =
+            WorkspaceMcpSessionContext.START_SESSION_TIMEOUT_SECONDS / 2;
 
     private final SessionManager sessionManager;
     private final AgentRegistry agentRegistry;
@@ -157,15 +179,6 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * later (see {@code attachOpenedSession}).
      */
     private final Map<OpenSessionTab, SessionExplorerView> openExplorers = new LinkedHashMap<>();
-
-    /**
-     * Every Review view built by {@link #createOpenSessionTab}'s factory,
-     * keyed by the tab that owns it, so {@link #removeTab} can unsubscribe
-     * it from {@link AnnotationStore}'s change notifications (lifecycle
-     * symmetry: a discarded view must stop receiving events). Mirrors
-     * {@link #openExplorers}.
-     */
-    private final Map<OpenSessionTab, ReviewView> openReviews = new LinkedHashMap<>();
 
     /** Sessions whose self-exit has already been recorded, so the watcher fires once per exit. */
     private final Set<ManagedSessionId> exitRecorded = new HashSet<>();
@@ -747,6 +760,20 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      */
     public void openNewWorktreeSession(Repository repository, String branch, Path worktreeRoot,
                                        Optional<String> task, boolean branchCreatedHere, AgentKind agent) {
+        openWorktreeSession(repository, branch, worktreeRoot, task, branchCreatedHere, agent, Spawn.ALLOWED);
+    }
+
+    /**
+     * Shared body of {@link #openNewWorktreeSession} and {@link
+     * #startAgentSession}, returning the prepared session's id so an MCP
+     * caller can be told which session it started.
+     *
+     * @param spawn whether the new session may itself create worktrees and
+     *              start sessions through MCP
+     */
+    private ManagedSessionId openWorktreeSession(Repository repository, String branch, Path worktreeRoot,
+                                                 Optional<String> task, boolean branchCreatedHere, AgentKind agent,
+                                                 Spawn spawn) {
         // Keyed under the real session id for the same launch-race reason
         // as openNewSession.
         ManagedAgentSession prepared =
@@ -755,13 +782,143 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 Optional.of(repository), worktreeRoot);
 
         double scale = stage.getOutputScaleX();
-        sessionManager.launchSession(prepared, placeholderTab.app(), placeholderTab.host(), scale)
+        sessionManager.launchSession(prepared, placeholderTab.app(), placeholderTab.host(), scale, spawn)
                 .whenComplete((result, ex) -> Platform.runLater(() -> {
                     handleOpenResult(placeholderTab, result, ex);
                     if (ex == null && result instanceof SessionOpenResult.Opened && task.isPresent()) {
                         sendTaskWhenReady(placeholderTab, task.get());
                     }
                 }));
+        return prepared.id();
+    }
+
+    /**
+     * MCP {@code session_start}: opens a session in {@code worktree} on behalf
+     * of a running agent (see {@code app.drydock.mcp.McpToolRouter}). The new
+     * session is launched with {@link Spawn#FORBIDDEN}, so it cannot create
+     * worktrees or start further sessions -- agent-driven fan-out is depth 1,
+     * because one instruction must not be able to become a dozen paid agent
+     * processes with no MCP way to remove them.
+     *
+     * <p>Always {@link AgentKind#CLAUDE}: the MCP tool surface carries no agent
+     * choice, and Claude is the integration that can actually consume the
+     * per-session MCP config (see {@code AgentProvider.supportsMcpConfig}).</p>
+     *
+     * <p>Callable from any thread, unlike the rest of this class: its caller
+     * is an MCP request thread. Which repository owns {@code worktree} is a
+     * {@code git worktree list} question, so that lookup runs off the FX
+     * thread and only the tab-opening hops onto it.</p>
+     *
+     * <p>The returned future completes with the new session's id as soon as
+     * its metadata is minted -- before the agent process is up -- and
+     * completes exceptionally when {@code worktree} belongs to no registered
+     * (local) repository, or when {@link #AGENT_SESSION_BUDGET_SECONDS} runs
+     * out. Everything below that point shares that ONE deadline, including the
+     * FX hop: a tab must never open after the waiting MCP call has already
+     * given up on it and refunded the session charge.</p>
+     */
+    public CompletableFuture<ManagedSessionId> startAgentSession(Path worktree, Optional<String> prompt) {
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(AGENT_SESSION_BUDGET_SECONDS);
+        List<Repository> candidates = repositoryManager.repositories().stream()
+                .filter(repository -> !repository.isRemote())
+                .toList();
+        return findWorktreeOwner(candidates, worktree, deadlineNanos).thenCompose(owner -> {
+            CompletableFuture<ManagedSessionId> opened = new CompletableFuture<>();
+            Platform.runLater(() -> {
+                // Re-checked ON the FX thread, immediately before the tab is
+                // created: a runLater queued behind a busy FX thread must
+                // refuse to open rather than create a session nobody is
+                // waiting for any more. Cheap enough that the gap between this
+                // check and the completion below is microseconds against the
+                // outer bound's remaining half.
+                if (expired(deadlineNanos)) {
+                    opened.completeExceptionally(new IllegalStateException(
+                            "Drydock was too busy to open the session in time."));
+                    return;
+                }
+                try {
+                    // branchCreatedHere=false: this path did not mint the
+                    // branch, so removing the worktree must never force-delete it.
+                    opened.complete(openWorktreeSession(owner.repository(), owner.branch(), owner.path(),
+                            prompt, false, AgentKind.CLAUDE, Spawn.FORBIDDEN));
+                } catch (RuntimeException e) {
+                    opened.completeExceptionally(e);
+                }
+            });
+            return opened;
+        });
+    }
+
+    /** A worktree matched to the repository that owns it, plus its branch (for the tab title). */
+    private record WorktreeOwner(Repository repository, String branch, Path path) { }
+
+    private static boolean expired(long deadlineNanos) {
+        return System.nanoTime() - deadlineNanos >= 0;
+    }
+
+    /**
+     * Finds which registered local repository owns {@code worktree}, by real
+     * path. Runs on a virtual thread: it spawns {@code git worktree list} per
+     * candidate repository (stopping at the first match) and resolves
+     * symlinks, neither of which may happen on the FX thread.
+     *
+     * <p>Every candidate's wait is drawn from the SHARED {@code deadlineNanos}
+     * rather than getting its own bound, and an expiry fails the whole lookup
+     * instead of moving on to the next candidate. Otherwise N registered
+     * repositories multiplied one plausible per-repository timeout into a total
+     * that outlived the MCP call waiting on the result.</p>
+     */
+    private CompletableFuture<WorktreeOwner> findWorktreeOwner(List<Repository> candidates, Path worktree,
+                                                              long deadlineNanos) {
+        CompletableFuture<WorktreeOwner> result = new CompletableFuture<>();
+        Thread.ofVirtual().name("drydock-worktree-owner").start(() -> {
+            Path target;
+            try {
+                target = worktree.toAbsolutePath().toRealPath();
+            } catch (IOException e) {
+                result.completeExceptionally(new IllegalArgumentException(worktree + " does not exist."));
+                return;
+            }
+            for (Repository repository : candidates) {
+                long remainingNanos = deadlineNanos - System.nanoTime();
+                if (remainingNanos <= 0) {
+                    result.completeExceptionally(new IllegalStateException(
+                            "Timed out looking for the repository that owns " + target + "."));
+                    return;
+                }
+                try {
+                    for (WorktreeService.Worktree candidate
+                            : worktreeService.list(repository.root()).get(remainingNanos, TimeUnit.NANOSECONDS)) {
+                        Path real;
+                        try {
+                            real = candidate.path().toRealPath();
+                        } catch (IOException gone) {
+                            continue;
+                        }
+                        if (real.equals(target)) {
+                            result.complete(new WorktreeOwner(repository,
+                                    candidate.branch().orElseGet(() -> String.valueOf(target.getFileName())),
+                                    target));
+                            return;
+                        }
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                } catch (TimeoutException e) {
+                    // The SHARED deadline is gone, not just this candidate's
+                    // slice of it: stopping here is the whole point.
+                    result.completeExceptionally(new IllegalStateException(
+                            "Timed out looking for the repository that owns " + target + "."));
+                    return;
+                } catch (ExecutionException e) {
+                    LOG.log(Level.DEBUG, () -> "Could not list worktrees of " + repository.root() + ": " + e);
+                }
+            }
+            result.completeExceptionally(new IllegalArgumentException(
+                    target + " does not belong to a repository registered in Drydock."));
+        });
+        return result;
     }
 
     /**
@@ -1305,10 +1462,6 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         if (explorer != null) {
             explorer.dispose();
         }
-        ReviewView review = openReviews.remove(openTab);
-        if (review != null) {
-            review.dispose();
-        }
         // Must run before removing the tab's node from the TabPane below:
         // that removal synchronously fires JavaFX property-invalidation
         // listeners (e.g. the placeholder's localToSceneTransformProperty)
@@ -1447,23 +1600,19 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             // openTab.sessionId() rather than the constructor parameter: the
             // factory runs lazily (first Review open), by which time a created
             // session's tab has adopted the real id -- annotations must key on it.
-            repository.ifPresent(repo -> openTab.setReviewFactory(() -> {
-                ReviewView review = new ReviewView(
-                        openTab.sessionId(), searchRoot, repo.root(), diffService, changedLineService,
-                        gitStatusService, annotationStore, openTab::sendPrompt, new ReviewView.ExplorerBridge() {
-                            @Override
-                            public void openFileAtLine(Path relativeFile, int line) {
-                                openTab.openExplorerAt(relativeFile, line);
-                            }
+            repository.ifPresent(repo -> openTab.setReviewFactory(() -> new ReviewView(
+                    openTab.sessionId(), searchRoot, repo.root(), diffService, changedLineService, gitStatusService,
+                    annotationStore, openTab::sendPrompt, new ReviewView.ExplorerBridge() {
+                        @Override
+                        public void openFileAtLine(Path relativeFile, int line) {
+                            openTab.openExplorerAt(relativeFile, line);
+                        }
 
-                            @Override
-                            public void searchText(String token) {
-                                openTab.searchInExplorer(token);
-                            }
-                        });
-                openReviews.put(openTab, review);
-                return review;
-            }));
+                        @Override
+                        public void searchText(String token) {
+                            openTab.searchInExplorer(token);
+                        }
+                    })));
 
             // Branch of the session's own checkout: for a worktree session the
             // search root IS the worktree, so its branch (not the main

@@ -19,6 +19,12 @@ activity, Git status, and your changes without leaving the app.
   terminal tabs, one per session, with session activity surfaced in the UI.
 - **Git & GitHub awareness** — repository status, review, and search surfaces
   built around the repos you register.
+- **MCP tools for your sessions** — sessions Drydock starts can call back into
+  the app: read the review comments you left on a diff and reply to them,
+  create worktrees and open sessions in them (bounded, and a session an agent
+  started cannot spawn further ones), and list your registered repositories
+  and running sessions. Local sessions only; remote SSH sessions do not get
+  these tools.
 - **Persistent state** — registered repositories and window layout persist
   across restarts.
 - **Remote repositories over SSH** — register a repo on a remote host via
