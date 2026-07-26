@@ -23,7 +23,11 @@ import java.util.Optional;
  * {@code gh pr create} needs the user's own gh auth:
  *
  * <ul>
- *   <li>{@code NONE}: Merge into base · Create pull request · Delete;</li>
+ *   <li>{@code NONE}: Merge into base -- which merges AND finishes the
+ *       worktree (see {@code MergeAndFinishFlow}), so its caption says so,
+ *       and which is shown disabled with the reason while the worktree is
+ *       unclean, since the cleanup would discard those changes ·
+ *       Create pull request · Delete;</li>
  *   <li>{@code OPEN}: no merge/PR -- "Waiting on PR #n" + View PR + Delete;</li>
  *   <li>{@code MERGED}: Delete only.</li>
  * </ul>
@@ -34,7 +38,7 @@ final class FinishWorktreePanel extends VBox {
     record Context(String branch, String base, Path worktreeRoot, PrState prState,
                    Optional<Integer> prNumber, Optional<String> prUrl,
                    Optional<GitChangeSummary> changeSummary, boolean dirty,
-                   boolean branchWillBeDeleted) {
+                   boolean branchWillBeDeleted, boolean worktreeClean) {
 
         /**
          * The destructive action's label and caption. A branch drydock did not
@@ -44,6 +48,20 @@ final class FinishWorktreePanel extends VBox {
          */
         String deleteTitle() {
             return branchWillBeDeleted ? "Delete worktree & branch" : "Delete worktree";
+        }
+
+        /**
+         * The merge action's caption. States the whole outcome up front --
+         * this is the one place the user is told that a merge also deletes
+         * things.
+         */
+        String mergeCaption() {
+            if (!worktreeClean) {
+                return "Commit or discard the worktree's changes first";
+            }
+            return "Runs git merge --no-ff, then removes the worktree, "
+                    + (branchWillBeDeleted ? "deletes " + branch + " " : "keeps " + branch + " ")
+                    + "and closes this session";
         }
 
         String deleteCaption() {
@@ -86,9 +104,10 @@ final class FinishWorktreePanel extends VBox {
 
         switch (context.prState()) {
             case NONE -> {
-                getChildren().add(action("Merge into " + context.base(),
-                        "Runs git merge --no-ff directly — stops on conflicts for you to resolve",
-                        "finish-action-accent", () -> runAndClose(actions::mergeIntoBase, onClose)));
+                getChildren().add(context.worktreeClean()
+                        ? action("Merge into " + context.base(), context.mergeCaption(),
+                                "finish-action-accent", () -> runAndClose(actions::mergeIntoBase, onClose))
+                        : disabledAction("Merge into " + context.base(), context.mergeCaption()));
                 getChildren().add(action("Create pull request",
                         "Hand off to Claude — push branch & open a PR", "finish-action",
                         () -> runAndClose(actions::createPullRequest, onClose)));
@@ -165,6 +184,21 @@ final class FinishWorktreePanel extends VBox {
             }
         });
         return summaryBox;
+    }
+
+    /**
+     * A non-clickable action box. Used for a merge that cannot run yet: the
+     * reason belongs where the action is, not behind a click that fails.
+     */
+    private static Region disabledAction(String titleText, String captionText) {
+        Label title = new Label(titleText);
+        title.getStyleClass().add("finish-action-title");
+        Label caption = new Label(captionText);
+        caption.getStyleClass().add("finish-action-caption");
+        caption.setWrapText(true);
+        VBox box = new VBox(2, title, caption);
+        box.getStyleClass().addAll("finish-action-box", "finish-action-disabled");
+        return box;
     }
 
     private static Region action(String titleText, String captionText, String styleClass, Runnable onAction) {

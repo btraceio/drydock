@@ -1519,6 +1519,27 @@
 .finish-action-destructive:hover {
     -fx-background-color: -drydock-error-soft;
 }
+.finish-action-disabled {
+    -fx-opacity: 0.45;
+    -fx-cursor: default;
+}
+.finish-action-disabled:hover {
+    -fx-background-color: transparent;
+}
+.merge-flow-headline {
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 14px;
+    -fx-font-weight: 600;
+}
+.merge-flow-headline-error {
+    -fx-text-fill: -drydock-error;
+    -fx-font-size: 14px;
+    -fx-font-weight: 600;
+}
+.merge-flow-detail {
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 12px;
+}
 .finish-action-title {
     -fx-text-fill: -drydock-text;
     -fx-font-size: 13px;

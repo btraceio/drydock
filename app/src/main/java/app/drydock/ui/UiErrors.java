@@ -2,6 +2,7 @@ package app.drydock.ui;
 
 import app.drydock.app.DuplicateRepositoryException;
 import app.drydock.git.GitCommandFailedException;
+import app.drydock.git.GitCommandInterruptedException;
 import app.drydock.git.GitExecutableNotFoundException;
 import app.drydock.git.NotAGitRepositoryException;
 import javafx.scene.control.Alert;
@@ -40,6 +41,12 @@ public final class UiErrors {
         } else if (cause instanceof NotAGitRepositoryException e) {
             header = "Not a Git repository";
             body = e.getMessage();
+        } else if (cause instanceof GitCommandInterruptedException e) {
+            // Distinct from a failure/timeout: nothing is wrong with the
+            // repository, the wait was cut short (cancellation, shutdown), and
+            // the generic branch would title that "GitCommandInterruptedException".
+            header = "Git command interrupted";
+            body = "Command: " + String.join(" ", e.command());
         } else if (cause instanceof GitCommandFailedException e) {
             header = "Git command failed (exit " + e.exitCode() + ")";
             body = "Command: " + String.join(" ", e.command())
@@ -58,6 +65,22 @@ public final class UiErrors {
             body = String.valueOf(cause.getMessage());
         }
 
+        alert(title, header, body);
+    }
+
+    /**
+     * The no-exception form: the failure is already a sentence, because the
+     * step that failed reported it instead of throwing (see {@code
+     * WorktreeSessionCleanup}). Wrapping such a reason in an
+     * {@code IllegalStateException} just to reuse the {@link Throwable} form
+     * would put "IllegalStateException" in the header, exactly where the user
+     * needs the reason.
+     */
+    static void show(String title, String header, String detail) {
+        alert(title, header, detail);
+    }
+
+    private static void alert(String title, String header, String body) {
         Alert alert = new Alert(Alert.AlertType.ERROR);
         alert.setTitle(title);
         alert.setHeaderText(header);

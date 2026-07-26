@@ -24,8 +24,10 @@ import java.io.IOException;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.Path;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -36,12 +38,16 @@ import java.util.function.Supplier;
  * from {@code MainWorkspace} (see docs/plans/workspace-split-design.md):
  * the worktree session header (context line, ↑ahead/dirty/PR chips), the
  * state-aware Finish panel with its pre-panel inspection and PR-state
- * reconciliation, and the three finish actions. Merge and delete run
- * directly via {@link WorktreeService} -- trivial, deterministic git
- * operations that don't need an agent in the loop; only "create PR" is
- * still handed off to the Claude session in the terminal, with a
- * {@code PauseTransition}-based confirmation poll since {@code gh pr
- * create} needs the user's own gh auth.
+ * reconciliation, and the three finish actions.
+ *
+ * <p>Merge is merge-and-finish: it merges the branch and then closes the
+ * work out (worktree, branch, session, tab, sidebar row), and it lives in
+ * {@link MergeAndFinishFlow} -- Claude is only involved when the merge stops
+ * on conflicts. Delete shares that flow's destructive tail through {@link
+ * WorktreeSessionCleanup}. Only "create PR" is still a blind hand-off to the
+ * Claude session in the terminal, with a {@code PauseTransition}-based
+ * confirmation poll since {@code gh pr create} needs the user's own gh
+ * auth.</p>
  *
  * <p>Collaborators are injected: the services doing the actual git/gh
  * work, the modal layer the panels show through, and callbacks into the
@@ -73,6 +79,10 @@ final class WorktreeLifecycleController {
     private final Runnable onSessionsChanged;
     /** Invoked after a deleted worktree's session row is removed (delegates to {@code MainWorkspace.noteSessionDeleted}). */
     private final Consumer<ManagedSessionId> onSessionDeleted;
+    /** The one "this worktree session is finished" sequence, shared by Delete and merge-and-finish. */
+    private final WorktreeSessionCleanup cleanup;
+    /** Sessions with a merge-and-finish flow running; a second Finish must not start another. */
+    private final Set<ManagedSessionId> mergeInFlight = new HashSet<>();
 
     /** The app shell's modal layer; wired late by DrydockApplication via {@code MainWorkspace.setModalLayer}. */
     private ModalLayer modalLayer;
@@ -90,6 +100,7 @@ final class WorktreeLifecycleController {
         this.repositoryFor = repositoryFor;
         this.onSessionsChanged = onSessionsChanged;
         this.onSessionDeleted = onSessionDeleted;
+        this.cleanup = new WorktreeSessionCleanup(worktreeService::remove, sessionManager::deleteSession);
     }
 
     void setModalLayer(ModalLayer modalLayer) {
@@ -158,6 +169,11 @@ final class WorktreeLifecycleController {
         if (session == null || modalLayer == null) {
             return;
         }
+        if (mergeInFlight.contains(sessionId)) {
+            // A merge-and-finish is running and owns the modal layer; its own
+            // progress/result modal is what the user should be looking at.
+            return;
+        }
         // The pre-panel inspection (git status + change summary + gh pr
         // view) can take seconds; show a busy modal IMMEDIATELY so the
         // Finish click visibly did something, then swap in the real panel.
@@ -170,12 +186,26 @@ final class WorktreeLifecycleController {
                         : CompletableFuture.completedFuture(Optional.empty());
 
         record StatusAndSummary(GitStatus status, GitChangeSummary summary) { }
-        record Inspection(GitStatus status, GitChangeSummary summary, Optional<GhCliService.PrInfo> prInfo) { }
+        record PrAndClean(Optional<GhCliService.PrInfo> prInfo, boolean worktreeClean) { }
+        record Inspection(GitStatus status, GitChangeSummary summary, Optional<GhCliService.PrInfo> prInfo,
+                          boolean worktreeClean) { }
+        // The merge gate is WorktreeService.isWorktreeClean, not
+        // GitStatus.dirty(): only the former ignores dirty submodules, and
+        // gating on dirty() would disable merge forever in any repository
+        // with a build-patched submodule (Drydock's own included). A failed
+        // probe defaults to "clean" -- the flow's own pre-flight asks again
+        // authoritatively and refuses with a reason, whereas defaulting to
+        // "unclean" would grey the action out and blame the user's changes
+        // for a git failure that had nothing to do with them.
+        CompletableFuture<Boolean> cleanProbe = worktreeService.isWorktreeClean(worktreeRoot)
+                .exceptionally(ex -> true);
         gitStatusService.getStatus(worktreeRoot)
                 .thenCombine(gitStatusService.getChangeSummary(worktreeRoot, base)
                                 .exceptionally(ex -> new GitChangeSummary(0, List.of())),
                         StatusAndSummary::new)
-                .thenCombine(prRefresh, (pair, prInfo) -> new Inspection(pair.status(), pair.summary(), prInfo))
+                .thenCombine(prRefresh.thenCombine(cleanProbe, PrAndClean::new),
+                        (pair, extra) -> new Inspection(pair.status(), pair.summary(), extra.prInfo(),
+                                extra.worktreeClean()))
                 .whenComplete((data, ex) -> Platform.runLater(() -> {
                     if (busy.getParent() == null) {
                         return; // the user dismissed the busy modal; don't pop the panel open later
@@ -221,11 +251,11 @@ final class WorktreeLifecycleController {
                     FinishWorktreePanel.Context context = new FinishWorktreePanel.Context(
                             branch, base, worktreeRoot, current.prState(), current.prNumber(),
                             prInfo.flatMap(GhCliService.PrInfo::url), Optional.of(summary), status.dirty(),
-                            sessionManager.mayDeleteBranchOf(worktreeRoot));
+                            sessionManager.mayDeleteBranchOf(worktreeRoot), data.worktreeClean());
                     FinishWorktreePanel panel = new FinishWorktreePanel(context, new FinishWorktreePanel.Actions() {
                         @Override
                         public void mergeIntoBase() {
-                            handoffMerge(sessionId, worktreeRoot, branch, base);
+                            startMergeAndFinish(sessionId, worktreeRoot, branch, base);
                         }
 
                         @Override
@@ -263,13 +293,34 @@ final class WorktreeLifecycleController {
 
     // ---- Merge/delete run directly; only PR creation is a Claude hand-off ----
 
-    private void handoffMerge(ManagedSessionId sessionId, Path worktreeRoot, String branch, String base) {
-        OpenSessionTab tab = openTab.apply(sessionId);
-        if (tab == null) {
+    /**
+     * Starts the merge-and-finish flow, at most one per session: the Finish
+     * panel closes before its action runs and the flow's modal is
+     * dismissible without cancelling the work, so a second click would
+     * otherwise run a second cleanup over an already-deleted worktree and
+     * report an error after the first flow reported success.
+     *
+     * <p>{@code base} reaches here from {@code branchNameOf(GitStatus)}, i.e.
+     * {@code GitBranchState.OnBranch.name()} -- a SHORT branch name, which is
+     * what {@link MergeFinishDecision#forPreflight} compares against {@code
+     * git symbolic-ref --short}. A blank {@code branch} is refused outright
+     * rather than passed on: the flow's terminal copy interpolates it
+     * unguarded, so it would render "branch  kept (already existed)" about a
+     * branch nobody named.</p>
+     */
+    private void startMergeAndFinish(ManagedSessionId sessionId, Path worktreeRoot, String branch, String base) {
+        if (branch == null || branch.isBlank() || base == null || base.isBlank()) {
+            LOG.log(Level.WARNING, "Refusing merge-and-finish for session " + sessionId
+                    + ": branch=" + branch + " base=" + base);
             return;
         }
-        tab.restoreFinishButton();
-        tab.showTransientNotice("⏺ Merge is being rebuilt — see Task 6 of the merge-and-finish plan.");
+        Repository repository = sessionById(sessionId).flatMap(repositoryFor).orElse(null);
+        if (repository == null || modalLayer == null || !mergeInFlight.add(sessionId)) {
+            return;
+        }
+        new MergeAndFinishFlow(worktreeService, sessionManager, modalLayer, cleanup, openTab,
+                onSessionsChanged, onSessionDeleted, () -> mergeInFlight.remove(sessionId))
+                .start(sessionId, repository.root(), worktreeRoot, branch, base);
     }
 
     private void handoffCreatePr(ManagedSessionId sessionId, Path worktreeRoot, String branch) {
@@ -316,29 +367,36 @@ final class WorktreeLifecycleController {
             return;
         }
         tab.showHandoffRunning("Removing worktree…");
-        // A branch drydock did not create (an existing branch checked out
-        // into this worktree) outlives the worktree: only the worktree goes.
-        Optional<String> branchToDelete = sessionManager.mayDeleteBranchOf(worktreeRoot)
-                ? Optional.of(branch)
-                : Optional.empty();
-        worktreeService.remove(repository.root(), worktreeRoot, branchToDelete)
-                .whenComplete((v, ex) -> Platform.runLater(() -> {
-                    if (openTab.apply(sessionId) == null) {
-                        return;
-                    }
+        // The same destructive sequence merge-and-finish runs (which also
+        // decides whether the branch is ours to delete): a worktree that
+        // survived keeps its session open, and a deleteSession that failed is
+        // reported instead of being assumed to have worked.
+        cleanup.run(sessionId, repository.root(), worktreeRoot, branch,
+                        sessionManager.mayDeleteBranchOf(worktreeRoot))
+                .whenComplete((outcome, ex) -> Platform.runLater(() -> {
                     if (ex != null) {
                         tab.restoreFinishButton();
                         UiErrors.show("Could not remove the worktree", ex);
                         return;
                     }
+                    if (!outcome.worktreeRemoved()) {
+                        tab.restoreFinishButton();
+                        UiErrors.show("Could not remove the worktree", "The worktree was kept",
+                                outcome.worktreeKeptReason().orElse("git refused to remove it"));
+                        return;
+                    }
                     tab.showHandoffDone("Removed");
-                    PauseTransition removeRow = new PauseTransition(Duration.seconds(1.2));
-                    removeRow.setOnFinished(e -> sessionManager.deleteSession(sessionId)
-                            .whenComplete((v2, ex2) -> Platform.runLater(() -> {
-                                onSessionDeleted.accept(sessionId);
-                                onSessionsChanged.run();
-                            })));
-                    removeRow.play();
+                    if (outcome.sessionDeleted()) {
+                        onSessionDeleted.accept(sessionId);
+                    } else {
+                        // The worktree is gone but the session outlived it
+                        // (WorktreeSessionCleanup logged why). Saying so beats
+                        // a "✓ Removed" pill over a row that never disappears.
+                        tab.restoreFinishButton();
+                        tab.showTransientNotice(
+                                "⏺ Worktree removed, but the session stayed open — close its tab manually.");
+                    }
+                    onSessionsChanged.run();
                 }));
     }
 
@@ -349,13 +407,6 @@ final class WorktreeLifecycleController {
             tab.updatePrChip(state, number);
         }
         onSessionsChanged.run();
-    }
-
-    private void refreshWorktreeChipsLater(ManagedSessionId sessionId, Path worktreeRoot, String base) {
-        OpenSessionTab tab = openTab.apply(sessionId);
-        if (tab != null) {
-            refreshWorktreeChips(tab, sessionId, worktreeRoot, base);
-        }
     }
 
     /** Leaves the ✓ pill visible briefly, then restores the Finish ▸ button. */
