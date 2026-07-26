@@ -376,12 +376,14 @@ final class WorktreeLifecycleController {
             return;
         }
         tab.showHandoffRunning("Removing worktree…");
-        // The same destructive sequence merge-and-finish runs (which also
-        // decides whether the branch is ours to delete): a worktree that
+        // The same destructive sequence merge-and-finish runs: a worktree that
         // survived keeps its session open, and a deleteSession that failed is
-        // reported instead of being assumed to have worked.
+        // reported instead of being assumed to have worked. The branch plan is
+        // forRequestedDelete, not the merge flow's forBranchDelete -- this
+        // delete is what the user asked for outright, so a branch tip that
+        // moved is not a reason to refuse it.
         cleanup.run(sessionId, repository.root(), worktreeRoot, branch,
-                        sessionManager.mayDeleteBranchOf(worktreeRoot))
+                        MergeFinishDecision.forRequestedDelete(sessionManager.mayDeleteBranchOf(worktreeRoot)))
                 .whenComplete((outcome, ex) -> Platform.runLater(() -> {
                     // Re-resolve rather than reuse the captured tab: ⌘W during
                     // `git worktree remove` disposes it, and header updates on a

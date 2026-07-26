@@ -59,6 +59,13 @@ final class MergeFinishDecision {
             // tried" -- pairing it with a removed worktree would be a contradiction Task 5
             // could otherwise construct by accident, and forCleanup would render it as a
             // bare "kept" with no reason for the user to act on.
+            //
+            // KEPT_MOVED deliberately gets no equivalent rule: unlike NOT_ATTEMPTED it
+            // makes no claim about the worktree at all -- it is decided BEFORE the
+            // destructive step, from the branch tip alone -- so it is honest with the
+            // worktree removed ("worktree removed · branch feat/x kept — it moved since
+            // the merge") and equally honest if the removal then failed. A rule here would
+            // reject a state that is true.
             if (worktreeRemoved && branch == BranchResult.NOT_ATTEMPTED) {
                 throw new IllegalArgumentException(
                         "a removed worktree cannot have NOT_ATTEMPTED as its branch result");
@@ -67,7 +74,63 @@ final class MergeFinishDecision {
     }
 
     /** The fate of the branch. {@code NOT_ATTEMPTED}: the worktree survived, so nothing was tried. */
-    enum BranchResult { DELETED, KEPT_NOT_OURS, DELETE_FAILED, NOT_ATTEMPTED }
+    enum BranchResult { DELETED, KEPT_NOT_OURS, KEPT_MOVED, DELETE_FAILED, NOT_ATTEMPTED }
+
+    /**
+     * What the destructive step is allowed to do with the branch, decided
+     * here and passed into the cleanup rather than re-derived there.
+     *
+     * <p>{@code KEEP_MOVED} is the arm that prevents lost commits: see
+     * {@link #forBranchDelete}.</p>
+     */
+    enum BranchDeletePlan { DELETE, KEEP_NOT_OURS, KEEP_MOVED }
+
+    /**
+     * Whether {@code git branch -D} may run, asked again immediately before
+     * the destructive step instead of being inherited from the pre-flight.
+     *
+     * <p>The failure this prevents is silent commit loss. The merge oracle
+     * proves that a merge commit of the tip <em>recorded at pre-flight</em>
+     * sits on the base branch; it says nothing about where
+     * {@code refs/heads/<branch>} points now. On the conflict hand-off path
+     * minutes elapse between the two, and the session's Claude runs with the
+     * worktree as its cwd -- so the user, or that agent, can land a commit on
+     * the branch in the meantime. {@code git branch -D} never refuses, and it
+     * drops the branch's reflog, so such a commit would be recoverable only
+     * through {@code git fsck --lost-found} while the modal claimed the merge
+     * had taken everything.</p>
+     *
+     * @param branchIsOurs whether drydock created the branch (a branch that
+     *                     already existed outlives its worktree either way)
+     * @param recordedTip  the tip the oracle proved merged
+     * @param currentTip   the tip as re-read at the destructive step, or
+     *                     empty when the re-read itself failed -- which is
+     *                     deliberately treated as drift rather than as "no
+     *                     drift": an unanswered question about a destructive
+     *                     step is a refusal, and keeping a branch costs the
+     *                     user one {@code git branch -d}, while deleting the
+     *                     wrong one costs them a commit
+     */
+    static BranchDeletePlan forBranchDelete(boolean branchIsOurs, Optional<String> recordedTip,
+                                            Optional<String> currentTip) {
+        if (!branchIsOurs) {
+            return BranchDeletePlan.KEEP_NOT_OURS;
+        }
+        if (currentTip.isEmpty() || !currentTip.equals(recordedTip)) {
+            return BranchDeletePlan.KEEP_MOVED;
+        }
+        return BranchDeletePlan.DELETE;
+    }
+
+    /**
+     * The plan for the Finish panel's own Delete, which the user asked for
+     * outright: there is no merge oracle to invalidate and no promise that
+     * the branch's commits are anywhere else, so a moved tip is not a reason
+     * to refuse what was requested.
+     */
+    static BranchDeletePlan forRequestedDelete(boolean branchIsOurs) {
+        return branchIsOurs ? BranchDeletePlan.DELETE : BranchDeletePlan.KEEP_NOT_OURS;
+    }
 
     /**
      * Whether to merge at all. Every refusal here happens before anything is
@@ -195,6 +258,10 @@ final class MergeFinishDecision {
         String branchDetail = switch (outcome.branch()) {
             case DELETED -> "branch " + branch + " deleted";
             case KEPT_NOT_OURS -> "branch " + branch + " kept (already existed)";
+            // Not folded into KEPT_NOT_OURS: "(already existed)" would be a false
+            // reason, and this line is the only place the user is told that a commit
+            // they (or the agent) made during the hand-off is NOT in the base branch.
+            case KEPT_MOVED -> "branch " + branch + " kept — it moved since the merge";
             case DELETE_FAILED -> "branch " + branch + " kept (could not delete)";
             case NOT_ATTEMPTED -> "branch " + branch + " kept";
         };

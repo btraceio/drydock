@@ -59,21 +59,32 @@ final class WorktreeSessionCleanup {
     /**
      * Runs the sequence and reports what each step managed to do.
      *
-     * @param mayDeleteBranch whether the branch is ours to delete (a branch
-     *                        drydock did not create outlives the worktree)
+     * @param plan what the caller has decided may happen to the branch --
+     *             {@link MergeFinishDecision#forBranchDelete} for the merge
+     *             flow (which refuses a branch whose tip moved since the
+     *             merge it verified), {@link
+     *             MergeFinishDecision#forRequestedDelete} for a delete the
+     *             user asked for outright. Deliberately not a boolean: the
+     *             two "keep" reasons get different copy, and one of them is
+     *             the only warning the user gets that a commit is not in the
+     *             base branch.
      */
     CompletableFuture<MergeFinishDecision.CleanupOutcome> run(ManagedSessionId sessionId, Path repositoryRoot,
                                                               Path worktreeRoot, String branch,
-                                                              boolean mayDeleteBranch) {
+                                                              MergeFinishDecision.BranchDeletePlan plan) {
         // A blank branch name is never ours to pass to `git branch -D`
         // (WorktreeService.removeBlocking silently skips it), so treating it
         // as deletable here would report BranchResult.DELETED for a branch
         // nothing actually touched -- "branch  deleted" (double space) in
         // MergeFinishDecision.forCleanup.
-        boolean deleteBranch = mayDeleteBranch && !branch.isBlank();
+        MergeFinishDecision.BranchDeletePlan effective =
+                plan == MergeFinishDecision.BranchDeletePlan.DELETE && branch.isBlank()
+                        ? MergeFinishDecision.BranchDeletePlan.KEEP_NOT_OURS
+                        : plan;
+        boolean deleteBranch = effective == MergeFinishDecision.BranchDeletePlan.DELETE;
         Optional<String> branchToDelete = deleteBranch ? Optional.of(branch) : Optional.empty();
         return attempt(() -> removal.remove(repositoryRoot, worktreeRoot, branchToDelete))
-                .handle((ignored, failure) -> classify(failure, deleteBranch))
+                .handle((ignored, failure) -> classify(failure, effective))
                 .thenCompose(partial -> partial.worktreeRemoved()
                         ? closeSession(sessionId, partial)
                         : CompletableFuture.completedFuture(partial));
@@ -110,12 +121,15 @@ final class WorktreeSessionCleanup {
      * {@code worktreeRemoved} first, or worse, misread as the reason the
      * worktree was kept.
      */
-    private static MergeFinishDecision.CleanupOutcome classify(Throwable failure, boolean mayDeleteBranch) {
+    private static MergeFinishDecision.CleanupOutcome classify(
+            Throwable failure, MergeFinishDecision.BranchDeletePlan plan) {
         if (failure == null) {
-            return new MergeFinishDecision.CleanupOutcome(true,
-                    mayDeleteBranch ? MergeFinishDecision.BranchResult.DELETED
-                            : MergeFinishDecision.BranchResult.KEPT_NOT_OURS,
-                    false, Optional.empty());
+            MergeFinishDecision.BranchResult branch = switch (plan) {
+                case DELETE -> MergeFinishDecision.BranchResult.DELETED;
+                case KEEP_NOT_OURS -> MergeFinishDecision.BranchResult.KEPT_NOT_OURS;
+                case KEEP_MOVED -> MergeFinishDecision.BranchResult.KEPT_MOVED;
+            };
+            return new MergeFinishDecision.CleanupOutcome(true, branch, false, Optional.empty());
         }
         Throwable cause = UiErrors.unwrap(failure);
         if (cause instanceof BranchNotDeletedException) {

@@ -247,6 +247,54 @@ class MergeFinishDecisionTest {
     }
 
     @Test
+    void aBranchWhoseTipMovedSinceTheMergeIsKeptAndSaysSo() {
+        // The critical arm: the oracle proved a merge of TIP, but the branch now
+        // points at something else, so `git branch -D` must not run -- and the copy
+        // must not borrow KEPT_NOT_OURS's "(already existed)", which would be false.
+        assertEquals(MergeFinishDecision.BranchDeletePlan.KEEP_MOVED,
+                MergeFinishDecision.forBranchDelete(true, Optional.of(TIP), Optional.of(OID)));
+
+        assertEquals("worktree removed · branch feat/x kept — it moved since the merge · session closed",
+                MergeFinishDecision.forCleanup(new MergeFinishDecision.CleanupOutcome(
+                        true, MergeFinishDecision.BranchResult.KEPT_MOVED, true, Optional.empty()),
+                        "feat/x", "main", false).detail());
+    }
+
+    @Test
+    void anUnchangedTipOnAnOwnedBranchStillDeletes() {
+        assertEquals(MergeFinishDecision.BranchDeletePlan.DELETE,
+                MergeFinishDecision.forBranchDelete(true, Optional.of(TIP), Optional.of(TIP)));
+    }
+
+    @Test
+    void aTipThatCouldNotBeReReadIsTreatedAsDriftNotAsNoDrift() {
+        // "We could not ask" must never mean "nothing moved": the whole point of the
+        // re-read is that the answer gates an irreversible `git branch -D`.
+        assertEquals(MergeFinishDecision.BranchDeletePlan.KEEP_MOVED,
+                MergeFinishDecision.forBranchDelete(true, Optional.of(TIP), Optional.empty()));
+    }
+
+    @Test
+    void aBranchWeDoNotOwnIsKeptWhateverItsTipDoes() {
+        // Ownership is checked first: "(already existed)" is the true reason, and the
+        // drift is irrelevant when no delete was ever going to be attempted.
+        assertEquals(MergeFinishDecision.BranchDeletePlan.KEEP_NOT_OURS,
+                MergeFinishDecision.forBranchDelete(false, Optional.of(TIP), Optional.of(OID)));
+        assertEquals(MergeFinishDecision.BranchDeletePlan.KEEP_NOT_OURS,
+                MergeFinishDecision.forBranchDelete(false, Optional.of(TIP), Optional.of(TIP)));
+    }
+
+    @Test
+    void aDeleteTheUserAskedForOutrightIgnoresTipMovement() {
+        // The Finish panel's Delete promises "deletes feat/x directly"; there is no
+        // merge oracle behind it to invalidate.
+        assertEquals(MergeFinishDecision.BranchDeletePlan.DELETE,
+                MergeFinishDecision.forRequestedDelete(true));
+        assertEquals(MergeFinishDecision.BranchDeletePlan.KEEP_NOT_OURS,
+                MergeFinishDecision.forRequestedDelete(false));
+    }
+
+    @Test
     void aTimeoutDeletesNothingAndSaysWhereToLook() {
         MergeFinishDecision.Next.Stopped stopped =
                 MergeFinishDecision.forTimeout("feat/x", "main", Optional.of("HEAD moved"));

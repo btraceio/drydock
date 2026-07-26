@@ -194,10 +194,31 @@ final class MergeAndFinishFlow {
         wait.play();
     }
 
+    /**
+     * The destructive step, gated on one last look at the branch.
+     *
+     * <p>The verdict that got us here proves a merge commit of the tip
+     * recorded at pre-flight is on the base branch -- it says nothing about
+     * where the branch points now, and on the hand-off path minutes have
+     * passed with the session's Claude sitting in the worktree. So the tip is
+     * re-read here, on the FX-free side of the fence, and {@link
+     * MergeFinishDecision#forBranchDelete} turns any movement (or a re-read
+     * that failed) into a refusal to run {@code git branch -D}. Removing the
+     * worktree stays safe either way: the commits are on the branch, which
+     * survives.</p>
+     */
     private void runCleanup() {
         showBusy("Removing worktree…");
-        attempt(() -> cleanup.run(sessionId, repositoryRoot, worktreeRoot, branch,
-                        sessionManager.mayDeleteBranchOf(worktreeRoot)))
+        boolean branchIsOurs = sessionManager.mayDeleteBranchOf(worktreeRoot);
+        Optional<String> recordedTip = target.branchTipOid();
+        attempt(() -> worktreeService.inspectMergeTarget(repositoryRoot, branch))
+                // A re-inspection that failed becomes an unknown tip, not the
+                // recorded one: forBranchDelete treats "we could not ask" as
+                // drift, so an unreadable repository keeps the branch instead
+                // of deleting it on an assumption.
+                .handle((fresh, ex) -> ex == null ? fresh.branchTipOid() : Optional.<String>empty())
+                .thenCompose(currentTip -> attempt(() -> cleanup.run(sessionId, repositoryRoot, worktreeRoot, branch,
+                        MergeFinishDecision.forBranchDelete(branchIsOurs, recordedTip, currentTip))))
                 .whenComplete((outcome, ex) -> Platform.runLater(() -> {
                     if (ex != null) {
                         // The merge landed; only the cleanup call failed to

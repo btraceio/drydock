@@ -28,6 +28,12 @@ class WorktreeSessionCleanupTest {
 
     private static final Path REPO = Path.of("/repo");
     private static final Path WORKTREE = Path.of("/repo/../wt-x");
+    private static final MergeFinishDecision.BranchDeletePlan DELETE_BRANCH =
+            MergeFinishDecision.BranchDeletePlan.DELETE;
+    private static final MergeFinishDecision.BranchDeletePlan KEEP_NOT_OURS_PLAN =
+            MergeFinishDecision.BranchDeletePlan.KEEP_NOT_OURS;
+    private static final MergeFinishDecision.BranchDeletePlan KEEP_MOVED_PLAN =
+            MergeFinishDecision.BranchDeletePlan.KEEP_MOVED;
     private final ManagedSessionId sessionId = ManagedSessionId.newId();
     private final List<ManagedSessionId> deleted = new ArrayList<>();
 
@@ -47,7 +53,7 @@ class WorktreeSessionCleanupTest {
         });
 
         MergeFinishDecision.CleanupOutcome outcome =
-                subject.run(sessionId, REPO, WORKTREE, "feat/x", true).get();
+                subject.run(sessionId, REPO, WORKTREE, "feat/x", DELETE_BRANCH).get();
 
         assertEquals(List.of(Optional.of("feat/x")), requested);
         assertTrue(outcome.worktreeRemoved());
@@ -65,7 +71,7 @@ class WorktreeSessionCleanupTest {
         });
 
         MergeFinishDecision.CleanupOutcome outcome =
-                subject.run(sessionId, REPO, WORKTREE, "feat/x", false).get();
+                subject.run(sessionId, REPO, WORKTREE, "feat/x", KEEP_NOT_OURS_PLAN).get();
 
         assertEquals(List.of(Optional.<String>empty()), requested);
         assertEquals(MergeFinishDecision.BranchResult.KEPT_NOT_OURS, outcome.branch());
@@ -78,7 +84,7 @@ class WorktreeSessionCleanupTest {
                 CompletableFuture.failedFuture(new BranchNotDeletedException("feat/x", 1, "checked out")));
 
         MergeFinishDecision.CleanupOutcome outcome =
-                subject.run(sessionId, REPO, WORKTREE, "feat/x", true).get();
+                subject.run(sessionId, REPO, WORKTREE, "feat/x", DELETE_BRANCH).get();
 
         assertTrue(outcome.worktreeRemoved());
         assertEquals(MergeFinishDecision.BranchResult.DELETE_FAILED, outcome.branch());
@@ -92,7 +98,7 @@ class WorktreeSessionCleanupTest {
                 CompletableFuture.failedFuture(new WorktreeNotCleanException(WORKTREE)));
 
         MergeFinishDecision.CleanupOutcome outcome =
-                subject.run(sessionId, REPO, WORKTREE, "feat/x", true).get();
+                subject.run(sessionId, REPO, WORKTREE, "feat/x", DELETE_BRANCH).get();
 
         assertFalse(outcome.worktreeRemoved());
         assertEquals(MergeFinishDecision.BranchResult.NOT_ATTEMPTED, outcome.branch());
@@ -108,7 +114,7 @@ class WorktreeSessionCleanupTest {
                 id -> CompletableFuture.failedFuture(new IllegalStateException("state file locked")));
 
         MergeFinishDecision.CleanupOutcome outcome =
-                subject.run(sessionId, REPO, WORKTREE, "feat/x", true).get();
+                subject.run(sessionId, REPO, WORKTREE, "feat/x", DELETE_BRANCH).get();
 
         // The worktree and branch are gone -- this is a genuine partial
         // success, not a reason to retry the destructive half -- but
@@ -126,12 +132,32 @@ class WorktreeSessionCleanupTest {
                 CompletableFuture.failedFuture(new WorktreeLockedException(WORKTREE, Optional.of("initializing"))));
 
         MergeFinishDecision.CleanupOutcome outcome =
-                subject.run(sessionId, REPO, WORKTREE, "feat/x", true).get();
+                subject.run(sessionId, REPO, WORKTREE, "feat/x", DELETE_BRANCH).get();
 
         assertFalse(outcome.worktreeRemoved());
         assertEquals(MergeFinishDecision.BranchResult.NOT_ATTEMPTED, outcome.branch());
         assertFalse(outcome.sessionDeleted());
         assertEquals("it is locked (initializing)", outcome.worktreeKeptReason().orElseThrow());
+    }
+
+    @Test
+    void aBranchWhoseTipMovedIsNeverPassedToGitAndIsReportedAsMoved() throws Exception {
+        // The data-loss guard, at the layer that actually calls git: KEEP_MOVED must
+        // reach `git branch -D` as Optional.empty(), so the branch (and the commit
+        // that moved it) survives the worktree removal.
+        List<Optional<String>> requested = new ArrayList<>();
+        WorktreeSessionCleanup subject = cleanup((repo, worktree, branch) -> {
+            requested.add(branch);
+            return CompletableFuture.completedFuture(null);
+        });
+
+        MergeFinishDecision.CleanupOutcome outcome =
+                subject.run(sessionId, REPO, WORKTREE, "feat/x", KEEP_MOVED_PLAN).get();
+
+        assertEquals(List.of(Optional.<String>empty()), requested);
+        assertTrue(outcome.worktreeRemoved());
+        assertEquals(MergeFinishDecision.BranchResult.KEPT_MOVED, outcome.branch());
+        assertTrue(outcome.sessionDeleted());
     }
 
     @Test
@@ -143,7 +169,7 @@ class WorktreeSessionCleanupTest {
         });
 
         MergeFinishDecision.CleanupOutcome outcome =
-                subject.run(sessionId, REPO, WORKTREE, "", true).get();
+                subject.run(sessionId, REPO, WORKTREE, "", DELETE_BRANCH).get();
 
         assertEquals(List.of(Optional.<String>empty()), requested);
         assertEquals(MergeFinishDecision.BranchResult.KEPT_NOT_OURS, outcome.branch());
@@ -157,7 +183,7 @@ class WorktreeSessionCleanupTest {
         });
 
         MergeFinishDecision.CleanupOutcome outcome =
-                subject.run(sessionId, REPO, WORKTREE, "feat/x", true).get();
+                subject.run(sessionId, REPO, WORKTREE, "feat/x", DELETE_BRANCH).get();
 
         assertFalse(outcome.worktreeRemoved());
         assertEquals(MergeFinishDecision.BranchResult.NOT_ATTEMPTED, outcome.branch());
@@ -174,7 +200,7 @@ class WorktreeSessionCleanupTest {
                 });
 
         MergeFinishDecision.CleanupOutcome outcome =
-                subject.run(sessionId, REPO, WORKTREE, "feat/x", true).get();
+                subject.run(sessionId, REPO, WORKTREE, "feat/x", DELETE_BRANCH).get();
 
         assertTrue(outcome.worktreeRemoved());
         assertFalse(outcome.sessionDeleted());
