@@ -20,6 +20,8 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -141,10 +143,19 @@ class WorkspaceMcpSessionContextTest {
         assertTrue(context.excerpt(caller(repo), "lines.txt", 0, 2).isEmpty());
     }
 
-    /** The excerpt is a review aid, not a file-read tool: it never leaves the caller's worktree. */
+    /**
+     * The excerpt is a review aid, not a file-read tool: it never leaves the
+     * caller's worktree.
+     *
+     * <p>The {@code ../} case writes its bait at {@code repoDir.getParent()},
+     * i.e. exactly where {@code "../secret.txt"} resolves to. Without that the
+     * assertion would pass on the file simply not existing, and would keep
+     * passing with the containment check deleted.</p>
+     */
     @Test
     void excerptRefusesAPathThatEscapesTheWorktree(@TempDir Path repoDir, @TempDir Path outside) throws Exception {
         Path repo = initCommittedRepo(repoDir);
+        Files.writeString(repoDir.getParent().resolve("secret.txt"), "climbed out\n");
         Files.writeString(outside.resolve("secret.txt"), "top secret\n");
         WorkspaceMcpSessionContext context = contextFor(repo);
 
@@ -161,6 +172,30 @@ class WorkspaceMcpSessionContextTest {
         Files.createSymbolicLink(repo.resolve("link.txt"), secret);
 
         assertTrue(contextFor(repo).excerpt(caller(repo), "link.txt", 1, 0).isEmpty());
+    }
+
+    // ---- sessions_list ------------------------------------------------------
+
+    /**
+     * A session's stored working directory is whatever path it was opened with,
+     * while {@code git worktree list} reports realpaths. On macOS {@code /var}
+     * is a symlink to {@code /private/var}, so keying the branch lookup
+     * lexically reported a null branch for essentially every session.
+     */
+    @Test
+    void sessionsListResolvesTheWorkingDirectoryBeforeMatchingItsBranch(@TempDir Path repoDir,
+                                                                        @TempDir Path worktreeParent)
+            throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/named").get();
+        // Deliberately the UNRESOLVED path, exactly as a real session records it.
+        session = sessionIn(localRepository(repo), worktree);
+
+        List<McpSessionContext.SessionSummary> summaries = contextFor(repo).sessions();
+
+        assertEquals(1, summaries.size());
+        assertEquals(Optional.of("feat/named"), summaries.get(0).branch(),
+                "the branch must be found through the symlinked working directory");
     }
 
     // ---- repositories -------------------------------------------------------
@@ -212,12 +247,16 @@ class WorkspaceMcpSessionContextTest {
     private ManagedSessionId caller(Path root) throws IOException {
         localRepository(root);
         if (session == null) {
-            Instant now = Instant.now();
-            session = new ManagedClaudeSession(ManagedSessionId.newId(), repository.id(), "example session",
-                    Optional.empty(), Optional.empty(), root.toRealPath(), Optional.empty(),
-                    SessionStatus.RUNNING, now, now, Optional.empty(), PrState.NONE, Optional.empty(), true);
+            session = sessionIn(repository, root.toRealPath());
         }
         return session.id();
+    }
+
+    private static ManagedClaudeSession sessionIn(Repository owner, Path workingDirectory) {
+        Instant now = Instant.now();
+        return new ManagedClaudeSession(ManagedSessionId.newId(), owner.id(), "example session",
+                Optional.empty(), Optional.empty(), workingDirectory, Optional.empty(),
+                SessionStatus.RUNNING, now, now, Optional.empty(), PrState.NONE, Optional.empty(), true);
     }
 
     private WorkspaceMcpSessionContext contextFor(Path root) throws IOException {
@@ -251,7 +290,7 @@ class WorkspaceMcpSessionContextTest {
     }
 
     private static void runGit(Path workingDirectory, String... arguments) throws Exception {
-        List<String> command = new java.util.ArrayList<>(List.of("git"));
+        List<String> command = new ArrayList<>(List.of("git"));
         command.addAll(List.of(arguments));
         Process process = new ProcessBuilder(command)
                 .directory(workingDirectory.toFile())
@@ -265,7 +304,7 @@ class WorkspaceMcpSessionContextTest {
 
     private static void deleteRecursively(Path root) throws IOException {
         try (var paths = Files.walk(root)) {
-            for (Path path : paths.sorted(java.util.Comparator.reverseOrder()).toList()) {
+            for (Path path : paths.sorted(Comparator.reverseOrder()).toList()) {
                 Files.deleteIfExists(path);
             }
         }

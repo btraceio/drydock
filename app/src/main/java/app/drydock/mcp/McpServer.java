@@ -53,9 +53,13 @@ public final class McpServer implements AutoCloseable {
     private final McpSessionRegistry registry;
     private final McpToolRouter router;
 
-    private HttpServer server;
-    private ExecutorService executor;
-    private int port;
+    // Volatile: {@link #start()} runs on a startup virtual thread while
+    // {@link #close()} is called from the JavaFX shutdown path, so a
+    // non-volatile field would let a stop() racing startup read a stale null
+    // and leak the bound listener socket.
+    private volatile HttpServer server;
+    private volatile ExecutorService executor;
+    private volatile int port;
 
     public McpServer(McpSessionRegistry registry, McpToolRouter router) {
         this.registry = registry;

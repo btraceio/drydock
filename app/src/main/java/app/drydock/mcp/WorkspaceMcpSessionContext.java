@@ -61,8 +61,18 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
      */
     private static final long JOIN_TIMEOUT_SECONDS = 20;
 
-    /** Opening a tab needs the FX thread; that hop is normally instant. */
-    private static final long START_SESSION_TIMEOUT_SECONDS = 30;
+    /**
+     * Bound on {@link #startSession}: resolving which repository owns the
+     * worktree, then the FX-thread hop that opens the tab.
+     *
+     * <p>Public because the whole budget of the work behind {@code
+     * startSession} must be provably SMALLER than this. If it were not, this
+     * wait could time out -- making {@link McpToolRouter} refund the session
+     * charge -- while the tab went on to open anyway, letting an agent exceed
+     * the session limit that bounds real spend. The workspace derives its own
+     * deadline from this constant rather than restating a number.</p>
+     */
+    public static final long START_SESSION_TIMEOUT_SECONDS = 30;
 
     /** Excerpts come from source files; anything this large is not one. */
     private static final long MAX_EXCERPT_FILE_BYTES = 4L * 1024 * 1024;
@@ -238,6 +248,12 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
      * repository that actually has sessions, not one git call per session --
      * and never for a remote repository, for the reason {@link
      * #repositories()} documents.</p>
+     *
+     * <p>The lookup is keyed by REAL path on both sides. A session's stored
+     * working directory is whatever path it was opened with, while {@code git
+     * worktree list} reports realpaths -- and on macOS {@code /var} is a
+     * symlink to {@code /private/var}, so a lexical comparison would report a
+     * null branch for essentially every session.</p>
      */
     @Override
     public List<SessionSummary> sessions() {
@@ -259,7 +275,7 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
                     session.displayName(),
                     repository.map(Repository::displayName).orElse("(unregistered)"),
                     remote ? Optional.empty()
-                            : Optional.ofNullable(branchByWorktree.get(session.workingDirectory())),
+                            : realPathOf(session.workingDirectory()).map(branchByWorktree::get),
                     session.workingDirectory(),
                     session.status().name(),
                     remote));
@@ -267,11 +283,18 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
         return List.copyOf(summaries);
     }
 
-    /** Best-effort: a repository git cannot list simply contributes no branch names. */
+    /**
+     * Best-effort: a repository git cannot list simply contributes no branch
+     * names. Keyed by real path, skipping entries whose directory is gone,
+     * consistent with {@link #realWorktreesOf}.
+     */
     private void worktreeBranches(Path repositoryRoot, Map<Path, String> into) {
         try {
             for (Worktree worktree : join(worktreeService.list(repositoryRoot), JOIN_TIMEOUT_SECONDS)) {
-                worktree.branch().ifPresent(branch -> into.put(worktree.path(), branch));
+                Optional<Path> real = realPathOf(worktree.path());
+                if (real.isPresent()) {
+                    worktree.branch().ifPresent(branch -> into.put(real.get(), branch));
+                }
             }
         } catch (McpToolException e) {
             // Listing branch names is decoration on sessions_list; the session
@@ -304,12 +327,9 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
         List<Worktree> worktrees = join(worktreeService.list(repository.root()), JOIN_TIMEOUT_SECONDS);
         List<Path> real = new ArrayList<>();
         for (Worktree worktree : worktrees) {
-            try {
-                real.add(worktree.path().toRealPath());
-            } catch (IOException e) {
-                // A pruned or deleted worktree directory: not a member of
-                // anything, so it must not appear in the membership test.
-            }
+            // A pruned or deleted worktree directory is not a member of
+            // anything, so it must not appear in the membership test.
+            realPathOf(worktree.path()).ifPresent(real::add);
         }
         return List.copyOf(real);
     }
@@ -334,6 +354,15 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
     }
 
     // ---- shared helpers -----------------------------------------------------
+
+    /** Empty when the path no longer exists -- never a fabricated lexical path. */
+    private static Optional<Path> realPathOf(Path path) {
+        try {
+            return Optional.of(path.toRealPath());
+        } catch (IOException e) {
+            return Optional.empty();
+        }
+    }
 
     private static Optional<String> branchName(GitStatus status) {
         return status.branch() instanceof GitBranchState.OnBranch onBranch
