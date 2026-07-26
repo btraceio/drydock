@@ -25,6 +25,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -49,6 +50,10 @@ public final class McpServer implements AutoCloseable {
 
     private static final String TOKEN_HEADER = "X-Drydock-Session-Token";
     private static final String PATH = "/mcp";
+
+    /** Bounded drain for in-flight handlers on close; matches SessionManager's own close budget. */
+    private static final long CLOSE_AWAIT_TERMINATION_SECONDS = 2;
+
     /**
      * Answered when the client asks for a version this server does not know.
      * The oldest of {@link #SUPPORTED_PROTOCOL_VERSIONS}, because a client that
@@ -136,6 +141,14 @@ public final class McpServer implements AutoCloseable {
      * Null-safe and idempotent: safe to call before {@link #start()} and safe
      * to call twice. Calling it before {@code start()} also permanently
      * prevents that start from binding.
+     *
+     * <p>Drains in-flight handlers before returning. {@code stop(0)} closes the
+     * listener but does not wait for exchanges already being handled, and
+     * {@code shutdownNow()} only <em>attempts</em> interruption -- so without a
+     * bounded await, a handler blocked in {@code WorkspaceMcpSessionContext}'s
+     * {@code join} could still be touching {@code SessionManager} while
+     * {@code DrydockApplication.stop()} closes it on the next line. Mirrors
+     * {@code SessionManager.close}'s bounded-drain pattern.</p>
      */
     @Override
     public void close() {
@@ -145,7 +158,17 @@ public final class McpServer implements AutoCloseable {
             server = null;
         }
         if (executor != null) {
-            executor.shutdownNow();
+            executor.shutdown();
+            try {
+                if (!executor.awaitTermination(CLOSE_AWAIT_TERMINATION_SECONDS, TimeUnit.SECONDS)) {
+                    LOG.log(Level.WARNING, "MCP request handlers did not drain within "
+                            + CLOSE_AWAIT_TERMINATION_SECONDS + "s; forcing shutdown");
+                    executor.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                executor.shutdownNow();
+            }
             executor = null;
         }
     }

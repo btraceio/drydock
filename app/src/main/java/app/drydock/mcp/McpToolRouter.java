@@ -24,10 +24,26 @@ import java.util.logging.Logger;
 import java.util.stream.Stream;
 
 /**
- * Dispatches MCP tool calls to {@link McpSessionContext}. Owns no domain
- * logic itself: every tool resolves the caller's repository via the context
- * first, then adapts the context's answer into {@link JsonValue}.
+ * Dispatches MCP tool calls to {@link McpSessionContext} and adapts the
+ * answers into {@link JsonValue}.
  *
+ * <p>It owns no domain <em>resolution</em>: it never derives a path, names a
+ * repository, or decides what a worktree or an annotation is -- every tool
+ * resolves the caller's repository through the context first, and anything the
+ * context can answer, the context answers. That boundary is load-bearing, and
+ * has been enforced against this class before: an earlier revision filtered
+ * annotations by session id here, duplicating a contract {@code
+ * McpSessionContext.annotations(caller)} already guarantees, and the fix was to
+ * make the context honour its contract rather than to re-check it here.</p>
+ *
+ * <p>It <em>does</em> enforce cross-cutting policy at the boundary, which is
+ * deliberate and is not domain resolution: the spawn grant and creation budget
+ * ({@link McpSessionRegistry}), and argument validation that must happen before
+ * anything downstream runs ({@link BranchNames}, {@link PromptSafety}). These
+ * live here because they gate the call itself -- a refused branch name must
+ * never reach git, and a forbidden session must learn nothing from probing
+ * arguments -- so pushing them into the context would mean every
+ * implementation had to repeat them.</p>
  */
 public final class McpToolRouter {
 

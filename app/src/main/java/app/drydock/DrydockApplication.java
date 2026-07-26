@@ -806,13 +806,19 @@ public final class DrydockApplication extends Application {
         if (gitHubService != null) {
             closeQuietly("GitHubService", gitHubService::close);
         }
-        if (annotationStore != null) {
-            closeQuietly("AnnotationStore", annotationStore::close);
-        }
-        // Before SessionManager: once the listener socket is gone no further
-        // tool call can arrive mid-teardown and touch a half-closed service.
+        // Before EVERY service a tool call can reach -- AnnotationStore and
+        // SessionManager both are -- because once the listener socket is gone
+        // and the in-flight handlers have drained, no tool call can arrive
+        // mid-teardown and touch a half-closed service. Closing
+        // AnnotationStore first (as an earlier revision did) let an in-flight
+        // review_reply reach AnnotationStore.persistAsync after its save
+        // executor had shut down, surfacing to the agent as a bare
+        // RejectedExecutionException wrapped in "Internal error".
         if (mcpServer != null) {
             closeQuietly("McpServer", mcpServer::close);
+        }
+        if (annotationStore != null) {
+            closeQuietly("AnnotationStore", annotationStore::close);
         }
         if (sessionManager != null) {
             closeQuietly("SessionManager", sessionManager::close);
