@@ -499,3 +499,52 @@ correctness, and design. Findings and resolutions:
 Rejected: rebuilding the review loop on a `UserPromptSubmit` hook instead of
 MCP. A hook can inject annotations as context but cannot write back, and the
 Send button already handles discovery.
+
+## What the final whole-branch review changed
+
+Each of the twelve tasks passed its own scoped review. A final review of the
+whole branch then found three defects that no task-scoped reviewer could see,
+because each lived in the seam between two tasks:
+
+| Finding | Resolution |
+|---|---|
+| **A self-exiting session kept a live token and its config file forever.** `markSessionExited` is a fourth session-ending path; only three called `releaseMcpConfig`. The surface is deliberately left open after a self-exit, so `onSurfaceClosed` never ran — and `requireLiveSession` checked only that the repository resolved, so an `EXITED` session's token still authorised the whole tool surface | Release on the self-exit path; `requireLiveSession` now requires `RUNNING`; manual checklist step added |
+| **`review_reply` could silently discard the human's `RESOLVED`.** An unsynchronised read-modify-write against a snapshot. Task 2 closed this hazard for FX↔FX writes; nobody closed MCP↔FX, because Task 2 and Task 7 were different diffs | `AnnotationStore.mutate(id, transform)` applies the transform under the monitor and fires listeners after releasing it; the refusal moved inside the transform; `AnnotationStore.update` deleted, since leaving an unconditional replace-by-id mutator is the footgun the fix removes |
+| **`session_start` accepted the repository's main checkout**, because `realWorktreesOf` dropped `Worktree.mainCheckout()`. An agent could start a second `claude` in the tree the human was working in, recorded as a worktree session over the main checkout — a state no human-driven path produces | Main checkout excluded from `realWorktreesOf`, refused with its own message |
+| `repos_list`/`sessions_list` bounded 20 s *per repository*, so N repos could hold the HTTP connection for 20N seconds — the design solved the ssh half of this and left the local-git half | One deadline per call, using the idiom the `startAgentSession` fix already introduced |
+| `initialize` hardcoded `protocolVersion` and ignored `params` | Echoes a supported version, falls back otherwise |
+| Tool descriptors declared no `required` properties, so the model was never told which arguments are mandatory | `required` arrays added |
+
+## Follow-up work, deliberately not done here
+
+1. **Pass `caller` to `McpSessionContext.startSession`.** Without it,
+   `MainWorkspace.startAgentSession` scans *every* registered local repository
+   to find the worktree's owner, re-deriving what the router validated moments
+   earlier — and that scan is broader than the check it duplicates, so
+   `McpToolRouter.sessionStart`'s membership test is the only thing keeping an
+   agent in repo A out of repo B. It also forced a shared-deadline mechanism to
+   keep the scan inside the outer timeout, so a *spend* bound now rests on an
+   argument verified by hand-tracing rather than by a test. Adding the parameter
+   deletes the scan and the deadline plumbing together.
+2. **Persist an `agentStarted` flag on `ManagedClaudeSession`.** Depth 1 is a
+   property of the *launch*, not the session: `McpSessionRegistry.mint`
+   overwrites the grant, so a human resuming — or starting a fresh conversation
+   in a still-open agent-started tab — restores spawn rights. Practically bounded
+   (no MCP tool reaches those paths, a human click is required, and budget
+   charges survive `revoke`), but the mechanism is weaker than the name suggests.
+   A cheaper partial fix: have `mint` refuse to *upgrade* an existing grant.
+3. **The remote-session banner**, per the Known gap under Scope.
+4. **A headless seam for `startAgentSession`'s deadline** and for "remote
+   repositories are not probed" — both properties are currently real in the code
+   but asserted by tests that cannot fail on them.
+
+### Known residuals, accepted
+
+- A tool call arriving in the millisecond window between a session's token being
+  minted and its status reaching `RUNNING` is refused with "session has ended",
+  which is misleading. A retry succeeds.
+- `close()` racing `start()` in one narrow interleaving can restart an already
+  stopped `HttpServer`, logging a shutdown warning. No socket leaks.
+- JSON-RPC batch bodies are answered `-32700`. Batching was removed in protocol
+  version `2025-06-18`, so this is least problematic under the newest version
+  the server advertises.
