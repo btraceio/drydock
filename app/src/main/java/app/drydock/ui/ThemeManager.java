@@ -40,6 +40,8 @@ public final class ThemeManager {
     private final Consumer<UiTheme> onThemeChanged;
     private UiTheme theme;
     private double uiFontSize;
+    private double pendingUiFontSize;
+    private String appliedStylesheetUrl;
 
     public ThemeManager(Scene scene, UiTheme initialTheme, double initialUiFontSize,
                         Consumer<UiTheme> onThemeChanged) {
@@ -47,6 +49,7 @@ public final class ThemeManager {
         this.onThemeChanged = onThemeChanged;
         this.theme = initialTheme;
         this.uiFontSize = Math.clamp(initialUiFontSize, UiFontScale.MIN_FONT_SIZE, UiFontScale.MAX_FONT_SIZE);
+        this.pendingUiFontSize = this.uiFontSize;
         loadBundledFonts();
         apply();
     }
@@ -82,19 +85,35 @@ public final class ThemeManager {
      * <p>Called on every tick of the settings modal's slider while the user
      * drags, so it must never block the FX thread: the lookup goes through
      * {@link UiFontScale#stylesheetForAsync}, which resolves synchronously
-     * on a cache hit and off-thread on a miss. {@code uiFontSize} is
-     * re-checked when the async result lands so a stale callback from a
-     * superseded drag position can never clobber a newer one.</p>
+     * on a cache hit and off-thread on a miss. {@code pendingUiFontSize}
+     * records the latest request and is re-checked when the async result
+     * lands, so a stale callback from a superseded drag position can never
+     * clobber a newer one -- the same pattern {@code MainWorkspace}'s
+     * {@code applyTerminalConfig} uses for the terminal config.</p>
+     *
+     * <p>{@link #uiFontSize} is deliberately only assigned once the lookup
+     * actually succeeds: {@link UiFontScale#stylesheetForAsync} logs and
+     * swallows a generation failure without invoking its callback, so a
+     * request that fails simply never updates {@code uiFontSize}. This is
+     * what lets {@link #apply} treat {@code uiFontSize} as always backed by
+     * a cached stylesheet -- see its Javadoc -- and it's also why a failed
+     * size is never handed to the caller's persistence callback: callers
+     * that persist should read {@link #uiFontSize} back after the fact
+     * rather than echoing the raw requested value.</p>
      */
     public void setUiFontSize(double newUiFontSize) {
         double clamped = Math.clamp(newUiFontSize, UiFontScale.MIN_FONT_SIZE, UiFontScale.MAX_FONT_SIZE);
-        if (clamped == uiFontSize) {
+        if (clamped == pendingUiFontSize) {
             return;
         }
-        uiFontSize = clamped;
+        pendingUiFontSize = clamped;
         UiFontScale.stylesheetForAsync(clamped, url -> {
-            if (clamped == uiFontSize) {
-                scene.getStylesheets().setAll(url, resource(theme.stylesheet()));
+            if (clamped != pendingUiFontSize) {
+                return;
+            }
+            uiFontSize = clamped;
+            if (!url.equals(appliedStylesheetUrl)) {
+                applyStylesheets(url);
             }
         });
     }
@@ -102,14 +121,29 @@ public final class ThemeManager {
     /**
      * Synchronous re-application, used by the constructor (before the stage
      * is shown, where blocking is required, not merely tolerated -- see the
-     * class Javadoc) and by {@link #setTheme} (a cache hit guaranteed: the
-     * current {@link #uiFontSize}'s stylesheet was already generated to
-     * reach this state, so this never touches disk).
+     * class Javadoc) and by {@link #setTheme} (a cache hit guaranteed:
+     * {@link #uiFontSize} is only ever assigned a size once its stylesheet
+     * has actually been generated -- see {@link #setUiFontSize} -- so this
+     * never touches disk).
      */
     private void apply() {
-        scene.getStylesheets().setAll(
-                UiFontScale.stylesheetFor(uiFontSize),
-                resource(theme.stylesheet()));
+        applyStylesheets(UiFontScale.stylesheetFor(uiFontSize));
+    }
+
+    /**
+     * Swaps in {@code fontSheetUrl} plus the current theme's token sheet,
+     * unconditionally -- {@link #setTheme} relies on that to always pick up
+     * the new theme resource, even when the font stylesheet URL is
+     * unchanged. {@link #setUiFontSize} carries its own "unchanged since
+     * last application" check before calling this (see its callback), since
+     * a slider drag re-running a full-scene CSS reapply on essentially
+     * every tick -- even though most ticks resolve to the same
+     * 0.5px-quantised stylesheet, see {@link UiFontScale#stylesheetFor} --
+     * would otherwise be wasted work.
+     */
+    private void applyStylesheets(String fontSheetUrl) {
+        appliedStylesheetUrl = fontSheetUrl;
+        scene.getStylesheets().setAll(fontSheetUrl, resource(theme.stylesheet()));
     }
 
     private static String resource(String name) {

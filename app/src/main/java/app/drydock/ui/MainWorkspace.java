@@ -203,6 +203,15 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     private DoubleSupplier terminalFontSizeProvider = () -> WorkspaceUiState.DEFAULT_TERMINAL_FONT_SIZE;
 
     /**
+     * The most recently requested (theme, fontSize) pair passed to {@link
+     * #applyTerminalConfig}, read back inside its callback to drop a
+     * superseded result -- see that method's Javadoc. FX-thread-only, like
+     * the rest of this class.
+     */
+    private UiTheme pendingTerminalTheme;
+    private double pendingTerminalFontSize = Double.NaN;
+
+    /**
      * True while a modal is showing. The ghostty terminal is a NATIVE view
      * stacked above the whole JavaFX scene, so it would paint over any
      * in-scene modal; while obscured, every tab's native view stays hidden
@@ -486,9 +495,26 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * of a slider drag; {@code openTabs} is read again inside the callback
      * rather than captured up front, so a tab opened or closed while
      * extraction is in flight is still handled correctly.
+     *
+     * <p>{@code (theme, fontSize)} is recorded as the pending request before
+     * the lookup starts, and re-checked when the result lands, exactly as
+     * {@link ThemeManager#setUiFontSize} does for the interface stylesheet:
+     * {@code configFileForAsync}'s cache misses each spawn their own virtual
+     * thread, and the monitor inside {@link TerminalThemes#configFileFor} is
+     * released before {@code Platform.runLater} is even called, so nothing
+     * orders the callbacks -- a drag from size 10 to 18 can have the size-14
+     * result land after the size-15 one. Dropping any callback that is no
+     * longer the latest request keeps the terminals in sync with the
+     * slider. A theme toggle always becomes the latest request (it is
+     * always the most recent call), so it always applies.</p>
      */
     private void applyTerminalConfig(UiTheme theme, double fontSize) {
+        pendingTerminalTheme = theme;
+        pendingTerminalFontSize = fontSize;
         TerminalThemes.configFileForAsync(theme, fontSize, configFile -> {
+            if (theme != pendingTerminalTheme || fontSize != pendingTerminalFontSize) {
+                return;
+            }
             for (OpenSessionTab open : openTabs.values()) {
                 open.applyTerminalTheme(configFile);
             }

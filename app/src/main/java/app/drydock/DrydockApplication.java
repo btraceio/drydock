@@ -246,8 +246,14 @@ public final class DrydockApplication extends Application {
                     public void commitUiFontSize(double size) {
                         // Persists once the drag ends (SettingsModal.sizeRow); the
                         // live value is already applied, so there is nothing left
-                        // to re-apply here.
-                        repositoryManager.updateUiFontSize(size);
+                        // to re-apply here. Reads the size back from ThemeManager
+                        // rather than persisting the raw slider position: if
+                        // generation for this drag's final size failed,
+                        // ThemeManager.setUiFontSize never advances its uiFontSize
+                        // field past the last size it actually generated (see its
+                        // Javadoc), so this always persists a size the app can
+                        // start with next launch.
+                        repositoryManager.updateUiFontSize(appShell.themeManager().uiFontSize());
                     }
 
                     @Override
