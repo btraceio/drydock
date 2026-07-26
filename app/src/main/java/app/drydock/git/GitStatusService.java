@@ -201,11 +201,14 @@ public final class GitStatusService implements AutoCloseable {
      * Creates a new git worktree at {@code worktreeDirectory} with a new
      * branch {@code branch}, forked from the repository's current HEAD
      * ({@code git worktree add <dir> -b <branch>}), on this service's
-     * background executor. Merge and delete
-     * ({@link WorktreeService#merge}, {@link WorktreeService#remove})
-     * also run directly; only PR creation is handed off to the Claude
-     * session in the terminal, since {@code gh pr create} needs the user's
-     * own gh auth.
+     * background executor. The counterparts that end a worktree's life are
+     * {@link WorktreeService#merge} -- which the UI runs as merge-and-finish,
+     * handing conflicts off to the session's Claude and then polling until the
+     * merge is confirmed -- and {@link WorktreeService#remove}, the destructive
+     * worktree + branch step both that flow and the Finish panel's Delete
+     * report step by step. Only PR creation is a blind hand-off to the Claude
+     * session in the terminal, since {@code gh pr create} needs the user's own
+     * gh auth.
      */
     public CompletableFuture<Path> createWorktree(Path repositoryRoot, Path worktreeDirectory, String branch) {
         return createWorktree(repositoryRoot, worktreeDirectory, branch, Optional.empty());

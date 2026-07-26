@@ -39,10 +39,26 @@ final class MergeFinishDecision {
         record CleanUp() implements Next { }
 
         /** Terminal success. {@code detail} reports every cleanup step. */
-        record Done(String headline, String detail) implements Next { }
+        record Done(String headline, String detail) implements Next {
+
+            /** The dismiss button's label: the work is finished, so "Done". */
+            String buttonLabel() {
+                return "Done";
+            }
+        }
 
         /** Terminal stop. Nothing destructive has run. */
-        record Stopped(String headline, String detail) implements Next { }
+        record Stopped(String headline, String detail) implements Next {
+
+            /**
+             * The dismiss button's label. "Close", never "Done": under
+             * "✗ The merge was abandoned" a Done button reads as if the flow
+             * had accomplished what it set out to do.
+             */
+            String buttonLabel() {
+                return "Close";
+            }
+        }
     }
 
     /**
@@ -276,6 +292,32 @@ final class MergeFinishDecision {
     }
 
     /**
+     * A refusal for a header label that is not a branch name at all. The tab
+     * header renders a detached HEAD as the literal {@code "(detached)"}, and
+     * that string reaches the flow as a branch or base name -- where it would
+     * come back out as "Check out (detached) in the main checkout" or "Branch
+     * (detached) no longer exists". Caught before the flow starts, so nothing
+     * is merged and nothing is deleted.
+     *
+     * <p>The real fix is an {@code Optional<String>} threaded through the
+     * header instead of a display string; this is the honest refusal until
+     * then (noted as a follow-up in the final-fix report).</p>
+     *
+     * @param worktreeDetached whether it is the worktree's own HEAD that is
+     *                         detached rather than the main checkout's
+     */
+    static Next.Stopped forDetachedHeadLabel(boolean worktreeDetached) {
+        if (worktreeDetached) {
+            return new Next.Stopped("This worktree is not on a branch",
+                    "Its HEAD is detached, so there is no branch to merge. Check out a branch in the worktree,"
+                            + " then finish again. Nothing was merged.");
+        }
+        return new Next.Stopped("The main checkout is not on a branch",
+                "Its HEAD is detached, so there is nowhere to merge into. Check out the base branch in the main"
+                        + " checkout, then finish again. Nothing was merged.");
+    }
+
+    /**
      * A stop for a pre-flight call that could not be made at all -- an
      * executor rejecting work at shutdown, say -- rather than one git answered.
      * Nothing has been written, which is the same thing every other pre-flight
@@ -309,6 +351,19 @@ final class MergeFinishDecision {
         return new Next.Done(mergedHeadline(branch, base, conflictsResolved),
                 String.join(" · ", "cleanup did not run: " + detail,
                         "worktree, branch and session left as they are"));
+    }
+
+    /**
+     * A stop for conflicts that cannot be handed off: the session's terminal
+     * is closed, so there is no agent to ask and only the user can finish the
+     * merge. Worded here rather than in the flow because it is the one thing
+     * the user is told about a merge left open in their main checkout -- it has
+     * to name the checkout, and it has to say that nothing was deleted.
+     */
+    static Next.Stopped forHandOffWithoutATerminal(String branch, String base, String mainCheckout) {
+        return new Next.Stopped("Conflicts need resolving",
+                "The merge of " + branch + " into " + base + " is open in the main checkout at " + mainCheckout
+                        + ", but this session's terminal is closed. Resolve it there. Nothing was deleted.");
     }
 
     /** The poll gave up. Says where the merge might be, and that nothing was destroyed. */

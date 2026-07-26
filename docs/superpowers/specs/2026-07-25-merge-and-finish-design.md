@@ -48,7 +48,7 @@ States, each rendered in the flow's own modal:
 PREFLIGHT   "Checking the main checkout …"
 MERGING     "Merging feat/x into main …"
 CONFLICT    "Conflicts — Claude is resolving them in the main checkout …"
-CLEANING    "Removing worktree …" / "Closing session …"
+CLEANING    "Removing worktree …"
 DONE        "✓ Merged feat/x into main"  + per-step detail  [ Done ]
 STOPPED     "✗ <what went wrong>"        + what was left alone  [ Close ]
 ```
@@ -56,6 +56,20 @@ STOPPED     "✗ <what went wrong>"        + what was left alone  [ Close ]
 `MERGING` → `CLEANING` is the happy path. `CONFLICT` re-enters `CLEANING`
 when the poll confirms the merge. Every path terminates in `DONE` or
 `STOPPED`; there is no path that leaves the modal showing a spinner.
+
+`CLEANING` shows one caption, not two. The cleanup is a single future
+(`WorktreeSessionCleanup.run`) whose worktree → branch → session steps are
+reported afterwards, per step, in `DONE`'s detail line; observing the
+session-step boundary live would mean pushing a progress callback into the
+app's most destructive sequence — a class deliberately free of UI concerns —
+to flash a caption for the fraction of a second `deleteSession` takes. The
+earlier "Closing session …" state was dropped for that reason (final review,
+item 7).
+
+Dismissing a `CLEANING`/`MERGING` modal with Esc does not cancel the work and
+does not bring the modal back at the next stage: the flow remembers the
+dismissal and only the terminal `DONE`/`STOPPED` render may re-show, because
+an outcome must not be lost.
 
 ### Pre-flight
 
@@ -159,11 +173,26 @@ non-zero `rev-parse`) is a distinct outcome, never folded into
 reported in the timeout message.
 
 Ancestry (`merge-base --is-ancestor`) is deliberately *not* the oracle.
-`git merge -s ours`, `-X ours`, a `reset --hard`, or a bare `git checkout
-feat` in the main checkout all make ancestry true while the merge either
-contains none of the work or never happened — and in the hand-off path an
-agent can reach every one of those states. The parent-set check cannot be
-satisfied without a real merge commit of the recorded tip.
+A `reset --hard` or a bare `git checkout feat` in the main checkout makes
+ancestry true while no merge ever happened — and in the hand-off path an agent
+can reach either state. The parent-set check cannot be satisfied without a
+real merge commit of the recorded tip.
+
+Two limitations of the parent-set check, recorded rather than papered over:
+
+- `git merge -s ours` / `-X ours` is **accepted**. It creates a genuine merge
+  commit of the recorded tip, so the parent-set check passes while the base
+  tree contains none of the branch's work and the modal still says "✓ Merged".
+  This is deliberate and it is safe in the only sense that matters here —
+  nothing is lost, because the recorded tip stays reachable from the base
+  branch — but it is not the same as "the work landed". Pinned by
+  `verifyMergeAcceptsStrategyOursBecauseItIsStillARealMergeCommit`.
+- The check is about the tip **recorded at pre-flight**. It says nothing about
+  where the branch points minutes later, when the destructive step runs, so
+  the branch tip is re-read immediately before `git branch -D` and any
+  movement (or a re-read that failed) refuses the delete and reports "branch
+  feat/x kept — it moved since the merge". See `MergeFinishDecision`
+  `forBranchDelete` (final review, item 1).
 
 `Merged` and `AlreadyMerged` proceed to cleanup. `Conflicted` enters the
 hand-off. `Refused` and `Indeterminate` end in `STOPPED` with git's own
@@ -238,8 +267,14 @@ lambda body inside `handoffDelete`, gated on the tab still being open and
 ignoring `deleteSession`'s failure — so "session closed" can be reported when
 it was not. Duplicating the app's most destructive sequence into a second
 implementation is what this extraction avoids; `handoffDelete` is refactored
-onto it, keeping its own pill and its 1.2s presentation delay at the call
-site.
+onto it.
+
+`handoffDelete` deliberately does **not** keep its old "✓ Removed" pill or its
+1.2s presentation delay (an earlier draft of this spec said it would). With the
+removal now confirmed synchronously, the pill would be negated in the same FX
+pulse — by the tab disappearing, or by the Finish button being restored when
+the session survived — so the tab disappearing is the feedback. The code says
+so at the call site; do not "restore" either of them.
 
 Branch-delete failure must be distinguishable from worktree-removal failure.
 `WorktreeService.remove` throws one `GitCommandFailedException` for either
@@ -312,9 +347,11 @@ partial; the modal says what happened per step.
    in-progress operation; `merge` returns `Merged` with the right parents on
    a clean merge, `AlreadyMerged` when up to date, `Conflicted` with the
    unmerged paths on conflict, `Refused` for a `pre-merge-commit` veto;
-   `verifyMerge` returns `Indeterminate` after `merge -s ours`, after a bare
-   `checkout <branch>`, and after the base branch is switched, and
-   `NotMerged` after `merge --abort`; `isWorktreeClean` ignores a dirty
+   `verifyMerge` returns `Merged` after a conflict resolved and committed by
+   hand (the hand-off's success path), `Merged` after `merge -s ours` (a real
+   merge commit of the recorded tip — see the accepted limitation above),
+   `Indeterminate` after a `reset --hard` and after the base branch is
+   switched, and `NotMerged` after `merge --abort`; `isWorktreeClean` ignores a dirty
    submodule but
    reports a submodule commit bump; `remove` throws
    `BranchNotDeletedException` when only the branch deletion fails.

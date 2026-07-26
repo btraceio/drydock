@@ -127,7 +127,7 @@ class WorktreeSessionCleanupTest {
     }
 
     @Test
-    void aLockedWorktreeIsReportedWithItsReasonAndTheForceEscapeHatch() throws Exception {
+    void aLockedWorktreeIsReportedWithGitsOwnLockReason() throws Exception {
         WorktreeSessionCleanup subject = cleanup((repo, worktree, branch) ->
                 CompletableFuture.failedFuture(new WorktreeLockedException(WORKTREE, Optional.of("initializing"))));
 

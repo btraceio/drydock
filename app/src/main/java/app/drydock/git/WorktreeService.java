@@ -336,12 +336,29 @@ public final class WorktreeService implements AutoCloseable {
      * matters here: gating the merge on {@code GitStatus.dirty()} instead
      * would leave the action permanently disabled in any repository with a
      * build-patched submodule, Drydock's own included.
+     *
+     * <p>Unlike the internal {@link #isClean(Path, Path)} that {@link
+     * #remove} uses -- where a failed probe legitimately means "do not claim
+     * this is clean" -- a non-zero {@code git status} here completes the
+     * future exceptionally with {@link GitCommandFailedException}. Answering
+     * {@code false} for a git failure (a worktree directory removed outside
+     * the app, a corrupt index) would grey out Merge with "Commit or discard
+     * the worktree's changes first" about changes that do not exist, and
+     * would defeat the caller's deliberate {@code exceptionally(ex -> true)},
+     * whose entire purpose is not to blame the user's changes for a git
+     * failure that had nothing to do with them.</p>
      */
     public CompletableFuture<Boolean> isWorktreeClean(Path worktree) {
         return CompletableFuture.supplyAsync(() -> {
             Path git = locator.locate()
                     .orElseThrow(() -> new GitExecutableNotFoundException(locator.describeSearched()));
-            return isClean(git, worktree);
+            List<String> command = statusCommand(git, worktree);
+            ProcessResult result = run(command);
+            if (result.exitCode() != 0) {
+                throw new GitCommandFailedException(command, result.exitCode(),
+                        ProcessRunner.excerpt(result.stderr()));
+            }
+            return result.stdout().isBlank();
         }, executor);
     }
 
@@ -644,11 +661,15 @@ public final class WorktreeService implements AutoCloseable {
      * {@code =all} would hide that bump and force it away.</p>
      */
     private static boolean isClean(Path git, Path worktree) {
-        List<String> command = List.of(
+        ProcessResult result = run(statusCommand(git, worktree));
+        return result.exitCode() == 0 && result.stdout().isBlank();
+    }
+
+    /** The one cleanliness probe, shared so the public and internal forms can never diverge. */
+    private static List<String> statusCommand(Path git, Path worktree) {
+        return List.of(
                 git.toString(), "-C", worktree.toString(),
                 "status", "--porcelain", "--ignore-submodules=dirty");
-        ProcessResult result = run(command);
-        return result.exitCode() == 0 && result.stdout().isBlank();
     }
 
     private static boolean samePath(Path a, Path b) {

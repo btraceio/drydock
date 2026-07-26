@@ -144,37 +144,64 @@ class WorktreeServiceTest {
         Path repo = initCommittedRepo(repoDir);
         Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/slow-delete").get();
         Path fakeGit = worktreeParent.resolve("fake-git.sh");
+        // The marker is the stage signal the test waits on: it is written by
+        // the branch -D invocation only, immediately before it blocks.
+        Path branchDeleteStarted = worktreeParent.resolve("branch-delete-started");
         Files.writeString(fakeGit, """
                 #!/bin/sh
                 prev=""
                 for arg in "$@"; do
                   if [ "$prev" = "branch" ] && [ "$arg" = "-D" ]; then
+                    : > "%s"
                     sleep 30
                   fi
                   prev="$arg"
                 done
                 exec git "$@"
-                """);
+                """.formatted(branchDeleteStarted));
         fakeGit.toFile().setExecutable(true);
-        WorktreeService slowBranchDelete = new WorktreeService(new GitExecutableLocator(fakeGit));
 
         java.util.concurrent.atomic.AtomicReference<Throwable> thrown = new java.util.concurrent.atomic.AtomicReference<>();
-        Thread worker = new Thread(() -> {
-            try {
-                slowBranchDelete.removeBlocking(repo, worktree, Optional.of("feat/slow-delete"), false);
-            } catch (Throwable t) {
-                thrown.set(t);
+        java.util.concurrent.atomic.AtomicBoolean stillInterrupted = new java.util.concurrent.atomic.AtomicBoolean();
+        try (WorktreeService slowBranchDelete = new WorktreeService(new GitExecutableLocator(fakeGit))) {
+            Thread worker = new Thread(() -> {
+                try {
+                    slowBranchDelete.removeBlocking(repo, worktree, Optional.of("feat/slow-delete"), false);
+                } catch (Throwable t) {
+                    thrown.set(t);
+                    // Read inside the worker: a terminated thread always reports
+                    // isInterrupted() == false, so the flag run() restores can
+                    // only be observed from here.
+                    stillInterrupted.set(Thread.currentThread().isInterrupted());
+                }
+            });
+            worker.start();
+            // Poll for the stage boundary instead of sleeping a fixed interval.
+            // A fixed Thread.sleep orders the interrupt by hope: on a loaded
+            // machine `git worktree remove` can outrun it (or not finish within
+            // it), the interrupt lands in the wrong stage, and the failure
+            // surfaces as an assertion about Files.exists that points nowhere
+            // near the cause -- in the one test file guarding the destructive
+            // path. Waiting for the branch -D marker makes the ordering a fact.
+            long deadline = System.nanoTime() + java.time.Duration.ofSeconds(60).toNanos();
+            while (!Files.exists(branchDeleteStarted) && System.nanoTime() < deadline) {
+                Thread.sleep(20);
             }
-        });
-        worker.start();
-        Thread.sleep(1000); // let the worktree remove finish and the branch-delete sleep start
-        worker.interrupt();
-        worker.join(java.time.Duration.ofSeconds(10).toMillis());
+            assertTrue(Files.exists(branchDeleteStarted), "the branch-delete stage should have been reached");
+            assertFalse(Files.exists(worktree),
+                    "the worktree half must have succeeded before the interrupt is delivered");
+            worker.interrupt();
+            worker.join(java.time.Duration.ofSeconds(10).toMillis());
 
-        assertFalse(worker.isAlive(), "the worker thread should have unblocked on the interrupt");
-        assertFalse(Files.exists(worktree), "the worktree half must have already succeeded");
+            assertFalse(worker.isAlive(), "the worker thread should have unblocked on the interrupt");
+        }
+
         BranchNotDeletedException failure = assertInstanceOf(BranchNotDeletedException.class, thrown.get());
         assertInstanceOf(GitCommandInterruptedException.class, failure.getCause());
+        // run() restores the flag rather than clearing it, so the frame that
+        // wants to act on the cancellation still sees it. Pinned here rather
+        // than left to inspection.
+        assertTrue(stillInterrupted.get(), "the interrupt flag must survive the BranchNotDeletedException wrap");
     }
 
     @Test
@@ -472,6 +499,37 @@ class WorktreeServiceTest {
     }
 
     /**
+     * The conflict hand-off's <em>success</em> path, which nothing else here
+     * covers: it is the only path where the merge commit is produced by
+     * {@code git commit} rather than by {@code git merge}, and the only one
+     * that ends in a branch deletion after an agent has been editing the
+     * repository. The fixture does exactly what the hand-off prompt asks for
+     * -- edit the conflicted file, {@code add}, {@code commit --no-edit} --
+     * and the oracle must recognise the result, parents and all; if it did
+     * not, every resolved conflict would time out at five minutes.
+     */
+    @Test
+    void verifyMergeConfirmsAConflictResolvedAndCommittedByHand(@TempDir Path repoDir,
+            @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        conflictingBranch(repo, worktreeParent, "feat/resolved");
+        WorktreeService.MergeTarget target = service.inspectMergeTarget(repo, "feat/resolved").get();
+        assertInstanceOf(WorktreeService.MergeVerdict.Conflicted.class,
+                service.merge(repo, "feat/resolved", target).get());
+
+        Files.writeString(repo.resolve("README.md"), "both versions, reconciled\n");
+        runGit(repo, "add", "README.md");
+        runGit(repo, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--no-edit");
+
+        WorktreeService.MergeVerdict.Merged merged = assertInstanceOf(
+                WorktreeService.MergeVerdict.Merged.class, service.verifyMerge(repo, target).get());
+        assertEquals(runGitCapture(repo, "rev-parse", "HEAD").strip(), merged.mergeCommitOid());
+        String parents = runGitCapture(repo, "rev-list", "--parents", "-n", "1", "HEAD").strip();
+        assertTrue(parents.contains(target.baseHeadOid()), parents);
+        assertTrue(parents.contains(target.branchTipOid().orElseThrow()), parents);
+    }
+
+    /**
      * Documents the honest boundary of the oracle: {@code Merged} proves a
      * merge commit <em>of the recorded tip</em> exists on the base branch,
      * not that its content landed in the tree. That is safe only because the
@@ -694,6 +752,22 @@ class WorktreeServiceTest {
         Files.writeString(worktree.resolve("scratch.txt"), "untracked\n");
 
         assertFalse(service.isWorktreeClean(worktree).get());
+    }
+
+    /**
+     * A git failure is not "the worktree has uncommitted changes". The Finish
+     * panel defaults a failed probe to clean on purpose, so that a worktree
+     * whose directory vanished outside drydock is not accused of holding
+     * changes that no longer exist -- which only works if the failure arrives
+     * as an exception instead of as {@code false}.
+     */
+    @Test
+    void isWorktreeCleanFailsLoudlyWhenGitCannotAnswer(@TempDir Path worktreeParent) {
+        Path missing = worktreeParent.resolve("never-created");
+
+        CompletionException completion = assertThrows(CompletionException.class,
+                () -> service.isWorktreeClean(missing).join());
+        assertInstanceOf(GitCommandFailedException.class, completion.getCause());
     }
 
     private static void deleteRecursively(Path root) throws IOException {

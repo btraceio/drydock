@@ -149,11 +149,13 @@ final class WorktreeSessionCleanup {
             reason = "it has uncommitted changes";
         } else if (cause instanceof WorktreeLockedException locked) {
             // Lower-case fragment, consistent with "it has uncommitted
-            // changes", and names the confirmed-override escape hatch
-            // (WorktreeService.removeForced, which RepositorySidebar already
-            // offers) rather than the raw exception message -- a capitalised
-            // sentence restating a path the panel already shows, with no
-            // hint that a retry exists.
+            // changes", carrying git's own lock reason rather than the raw
+            // exception message -- a capitalised sentence restating a path the
+            // panel already shows. It deliberately names no escape hatch:
+            // WorktreeService.removeForced is offered only by the sidebar's 🗑
+            // on an *unopened* worktree row, and a worktree that survived this
+            // cleanup still has its session, so pointing the user at a
+            // confirmed-override retry would be advice they cannot take.
             reason = "it is locked" + locked.lockReason().map(r -> " (" + r + ")").orElse("");
         } else {
             reason = Optional.ofNullable(cause.getMessage()).orElse(cause.getClass().getSimpleName());

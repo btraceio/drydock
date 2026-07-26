@@ -16,11 +16,15 @@ import java.util.Optional;
 
 /**
  * The state-aware Finish panel (worktree handoff, section B): change
- * summary + actions chosen by the session's {@link PrState}. Merge and
- * delete close the panel and run directly (plain {@code git merge} /
- * {@code git worktree remove} + {@code git branch -D}); only "create pull
- * request" hands off to Claude in the session's terminal, since
- * {@code gh pr create} needs the user's own gh auth:
+ * summary + actions chosen by the session's {@link PrState}. Every action
+ * closes the panel and then reports for itself. Merge is merge-and-finish
+ * ({@code MergeAndFinishFlow}): it merges, reports each cleanup step in a
+ * modal the user dismisses, and involves Claude only when the merge stops on
+ * conflicts, in which case it hands the conflicts off and polls. Delete is
+ * the same destructive sequence without the merge, also reported per step
+ * ({@code WorktreeSessionCleanup}). Only "create pull request" is a blind
+ * hand-off to Claude in the session's terminal, since {@code gh pr create}
+ * needs the user's own gh auth:
  *
  * <ul>
  *   <li>{@code NONE}: Merge into base -- which merges AND finishes the
@@ -34,7 +38,24 @@ import java.util.Optional;
  */
 final class FinishWorktreePanel extends VBox {
 
-    /** What the panel needs to know; assembled by MainWorkspace before showing. */
+    /**
+     * What the panel needs to know; assembled by MainWorkspace before showing.
+     *
+     * <p>{@code dirty} and {@code worktreeClean} are NOT negations of each
+     * other and neither can be derived from the other -- in this repository
+     * {@code dirty=true, worktreeClean=true} is the normal state, and
+     * collapsing them re-introduces a permanently-disabled Merge.</p>
+     *
+     * @param dirty         from {@code GitStatus.dirty()}, submodules
+     *                      <em>included</em>: presentation only, for the
+     *                      summary headline's "· uncommitted changes"
+     * @param worktreeClean from {@code WorktreeService.isWorktreeClean},
+     *                      which ignores dirty submodule <em>content</em>:
+     *                      the gate on the merge action, because the build
+     *                      patches Drydock's own vendored ghostty on every
+     *                      run and gating on {@code dirty()} would grey out
+     *                      Merge forever in any such repository
+     */
     record Context(String branch, String base, Path worktreeRoot, PrState prState,
                    Optional<Integer> prNumber, Optional<String> prUrl,
                    Optional<GitChangeSummary> changeSummary, boolean dirty,

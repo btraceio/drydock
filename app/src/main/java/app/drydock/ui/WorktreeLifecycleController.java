@@ -64,6 +64,12 @@ final class WorktreeLifecycleController {
     /** Handoff polling caps: every 4s, up to 5 minutes; on timeout the Finish button quietly returns. */
     private static final Duration HANDOFF_POLL_INTERVAL = Duration.seconds(4);
     private static final int HANDOFF_POLL_MAX_ATTEMPTS = 75;
+    /**
+     * What {@link #branchNameOf} puts where a branch name goes when HEAD is
+     * detached. A label, not a branch name -- {@link #startMergeAndFinish}
+     * refuses it rather than let it reach git or user copy.
+     */
+    private static final String DETACHED_LABEL = "(detached)";
 
     private final SessionManager sessionManager;
     private final GitStatusService gitStatusService;
@@ -153,7 +159,7 @@ final class WorktreeLifecycleController {
     }
 
     private static String branchNameOf(GitStatus status) {
-        return status.branch() instanceof GitBranchState.OnBranch onBranch ? onBranch.name() : "(detached)";
+        return status.branch() instanceof GitBranchState.OnBranch onBranch ? onBranch.name() : DETACHED_LABEL;
     }
 
     /**
@@ -172,7 +178,15 @@ final class WorktreeLifecycleController {
         }
         if (mergeInFlight.contains(sessionId)) {
             // A merge-and-finish is running and owns the modal layer; its own
-            // progress/result modal is what the user should be looking at.
+            // progress/result modal is what the user should be looking at. The
+            // click still has to do something visible (AGENTS.md): ⌘W'ing the
+            // tab mid-flow and reopening the session from the sidebar builds a
+            // fresh header with a live Finish ▸, whose click would otherwise
+            // land here and vanish. The flow's own finish() restores the button.
+            OpenSessionTab running = openTab.apply(sessionId);
+            if (running != null) {
+                running.showHandoffRunning("Merging…");
+            }
             return;
         }
         // The pre-panel inspection (git status + change summary + gh pr
@@ -300,7 +314,7 @@ final class WorktreeLifecycleController {
         return box;
     }
 
-    // ---- Merge/delete run directly; only PR creation is a Claude hand-off ----
+    // ---- The three finish actions: merge-and-finish, PR hand-off, delete ----
 
     /**
      * Starts the merge-and-finish flow, at most one per session: the Finish
@@ -315,12 +329,25 @@ final class WorktreeLifecycleController {
      * git symbolic-ref --short}. A blank {@code branch} is refused outright
      * rather than passed on: the flow's terminal copy interpolates it
      * unguarded, so it would render "branch  kept (already existed)" about a
-     * branch nobody named.</p>
+     * branch nobody named. {@link #DETACHED_LABEL} is refused for the same
+     * reason, with copy of its own.</p>
      */
     private void startMergeAndFinish(ManagedSessionId sessionId, Path worktreeRoot, String branch, String base) {
         if (branch == null || branch.isBlank() || base == null || base.isBlank()) {
             LOG.log(Level.WARNING, "Refusing merge-and-finish for session " + sessionId
                     + ": branch=" + branch + " base=" + base);
+            return;
+        }
+        // The same guard for the other non-branch a header label can be: the
+        // DETACHED_LABEL sentinel would otherwise be interpolated as if it were
+        // a branch, producing "Check out (detached) in the main checkout" or
+        // "Branch (detached) no longer exists". Reported rather than silently
+        // dropped -- the Finish panel has already closed, so a bare return
+        // would leave the click having done nothing at all.
+        if (branch.equals(DETACHED_LABEL) || base.equals(DETACHED_LABEL)) {
+            MergeFinishDecision.Next.Stopped refusal =
+                    MergeFinishDecision.forDetachedHeadLabel(branch.equals(DETACHED_LABEL));
+            UiErrors.show("Cannot merge", refusal.headline(), refusal.detail());
             return;
         }
         Repository repository = sessionById(sessionId).flatMap(repositoryFor).orElse(null);

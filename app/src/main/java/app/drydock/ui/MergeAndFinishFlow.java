@@ -70,6 +70,15 @@ final class MergeAndFinishFlow {
     private Optional<String> lastProbeDetail = Optional.empty();
     /** The node this flow currently owns in the shared modal layer. */
     private Region ownModal;
+    /**
+     * Whether the user has dismissed a modal of ours. Esc must not read as
+     * broken: {@code ModalLayer.close()} empties the layer, so without this
+     * both ownership tests below pass again and the next stage pops the
+     * progress modal straight back up ("Merging …", then "Removing
+     * worktree…"). Only the terminal render may re-show after a dismissal --
+     * that one the spec asks for, because the outcome must not be lost.
+     */
+    private boolean dismissedByUser;
 
     MergeAndFinishFlow(WorktreeService worktreeService, SessionManager sessionManager, ModalLayer modalLayer,
                        WorktreeSessionCleanup cleanup, Function<ManagedSessionId, OpenSessionTab> openTab,
@@ -159,9 +168,7 @@ final class MergeAndFinishFlow {
         if (tab == null) {
             // No terminal to hand off to: the merge is open in the main
             // checkout and only the user can finish it.
-            stop("Conflicts need resolving", "The merge of " + branch + " into " + base
-                    + " is open in the main checkout at " + repositoryRoot
-                    + ", but this session's terminal is closed. Resolve it there. Nothing was deleted.");
+            stop(MergeFinishDecision.forHandOffWithoutATerminal(branch, base, repositoryRoot.toString()));
             return;
         }
         tab.sendPrompt(handOff.prompt());
@@ -238,11 +245,11 @@ final class MergeAndFinishFlow {
     // ---- Modal rendering ----------------------------------------------------
 
     /**
-     * A progress render. Deliberately ignores losing the modal layer: there is
-     * nothing to tell the user yet, and announcing a stage as if it were a
-     * result -- which one shared render path did -- reported
-     * "Merge-and-finish finished" three times per flow, the first time before
-     * the merge had started.
+     * A progress render. Deliberately ignores losing the modal layer -- and,
+     * via {@link #render}, a dismissal: there is nothing to tell the user yet,
+     * and announcing a stage as if it were a result -- which one shared render
+     * path did -- reported "Merge-and-finish finished" three times per flow,
+     * the first time before the merge had started.
      */
     private void showBusy(String message) {
         ProgressIndicator spinner = new ProgressIndicator();
@@ -255,21 +262,18 @@ final class MergeAndFinishFlow {
         box.getStyleClass().add("modal");
         box.setMaxWidth(360);
         box.setMaxHeight(Region.USE_PREF_SIZE);
-        render(box);
+        render(box, false);
     }
 
     private void done(MergeFinishDecision.Next.Done outcome) {
-        renderTerminal(terminalModal(outcome.headline(), outcome.detail(), "merge-flow-headline"),
-                outcome.headline());
+        renderTerminal(terminalModal(outcome.headline(), outcome.detail(), "merge-flow-headline",
+                outcome.buttonLabel()), outcome.headline());
         finish();
     }
 
     private void stop(MergeFinishDecision.Next.Stopped stopped) {
-        stop(stopped.headline(), stopped.detail());
-    }
-
-    private void stop(String headline, String detail) {
-        renderTerminal(terminalModal("✗ " + headline, detail, "merge-flow-headline-error"), headline);
+        renderTerminal(terminalModal("✗ " + stopped.headline(), stopped.detail(), "merge-flow-headline-error",
+                stopped.buttonLabel()), stopped.headline());
         finish();
     }
 
@@ -288,14 +292,16 @@ final class MergeAndFinishFlow {
         onFinished.run();
     }
 
-    private Region terminalModal(String headlineText, String detailText, String headlineStyleClass) {
+    /** {@code buttonLabel} comes from the decision, never from the record type: see {@code Next.Stopped}. */
+    private Region terminalModal(String headlineText, String detailText, String headlineStyleClass,
+                                 String buttonLabel) {
         Label headline = new Label(headlineText);
         headline.getStyleClass().add(headlineStyleClass);
         headline.setWrapText(true);
         Label detail = new Label(detailText);
         detail.getStyleClass().add("merge-flow-detail");
         detail.setWrapText(true);
-        Button done = new Button("Done");
+        Button done = new Button(buttonLabel);
         done.getStyleClass().add("worktree-create-button");
         done.setDefaultButton(true);
         done.setOnAction(e -> modalLayer.close());
@@ -317,7 +323,7 @@ final class MergeAndFinishFlow {
      * after a success there is no session left to reopen it on.
      */
     private void renderTerminal(Region node, String noticeHeadline) {
-        if (render(node)) {
+        if (render(node, true)) {
             return;
         }
         OpenSessionTab tab = openTab.apply(sessionId);
@@ -328,15 +334,31 @@ final class MergeAndFinishFlow {
 
     /**
      * Puts {@code node} in the shared modal layer, but only if this flow
-     * still owns what is showing (or nothing is): dismissing the progress
-     * modal does not cancel the work, so by the time a result arrives the
-     * user may have opened an unrelated modal -- {@code ModalLayer.show}
-     * would replace it and drop its {@code onClosed} on the floor.
+     * still owns what is showing (or nothing is) and the user has not
+     * dismissed us: dismissing the progress modal does not cancel the work, so
+     * by the time a result arrives the user may have opened an unrelated modal
+     * -- {@code ModalLayer.show} would replace it and drop its {@code
+     * onClosed} on the floor -- or may simply want the terminals back, in
+     * which case only the outcome earns a second modal.
      *
+     * @param terminal whether this is the outcome render, the only one allowed
+     *                 to re-show after a dismissal
      * @return whether {@code node} is now showing; {@code false} means the
-     *         layer belongs to a modal the user opened themselves
+     *         layer belongs to a modal the user opened themselves, or they
+     *         dismissed ours and this was only a progress update
      */
-    private boolean render(Region node) {
+    private boolean render(Region node, boolean terminal) {
+        if (ownModal != null && ownModal.getParent() == null && !modalLayer.isShowingModal()) {
+            // We owned the layer, our node is detached, and nothing took its
+            // place: the user closed it (Esc or the button). Remembered,
+            // because close() empties the layer and the emptiness alone is
+            // indistinguishable from "no modal has been shown yet".
+            dismissedByUser = true;
+            ownModal = null;
+        }
+        if (dismissedByUser && !terminal) {
+            return false;
+        }
         boolean ownsLayer = ownModal != null && ownModal.getParent() != null;
         if (ownsLayer || !modalLayer.isShowingModal()) {
             ownModal = node;

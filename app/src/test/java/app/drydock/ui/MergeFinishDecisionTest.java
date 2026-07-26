@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -313,6 +314,43 @@ class MergeFinishDecisionTest {
         assertEquals("The merge of feat/x into main may still be open in the main checkout"
                         + " — check the terminal. Nothing was deleted.",
                 stopped.detail());
+    }
+
+    @Test
+    void conflictsWithNoTerminalToHandThemToStopWithoutDeletingAnything() {
+        // The one piece of copy in this flow no test used to cover.
+        MergeFinishDecision.Next.Stopped stopped =
+                MergeFinishDecision.forHandOffWithoutATerminal("feat/x", "main", "/repo");
+
+        assertEquals("Conflicts need resolving", stopped.headline());
+        assertEquals("The merge of feat/x into main is open in the main checkout at /repo,"
+                        + " but this session's terminal is closed. Resolve it there. Nothing was deleted.",
+                stopped.detail());
+    }
+
+    @Test
+    void aDetachedHeadLabelIsRefusedWithoutQuotingTheSentinelBackAtTheUser() {
+        MergeFinishDecision.Next.Stopped worktree = MergeFinishDecision.forDetachedHeadLabel(true);
+        assertEquals("This worktree is not on a branch", worktree.headline());
+        assertEquals("Its HEAD is detached, so there is no branch to merge. Check out a branch in the worktree,"
+                + " then finish again. Nothing was merged.", worktree.detail());
+
+        MergeFinishDecision.Next.Stopped mainCheckout = MergeFinishDecision.forDetachedHeadLabel(false);
+        assertEquals("The main checkout is not on a branch", mainCheckout.headline());
+        assertEquals("Its HEAD is detached, so there is nowhere to merge into. Check out the base branch in the"
+                + " main checkout, then finish again. Nothing was merged.", mainCheckout.detail());
+
+        assertFalse(worktree.detail().contains("(detached)"));
+        assertFalse(mainCheckout.detail().contains("(detached)"));
+    }
+
+    @Test
+    void aStopIsDismissedWithCloseAndASuccessWithDone() {
+        // "Done" under "✗ The merge was abandoned" would read as if the flow had
+        // accomplished what it set out to do.
+        assertEquals("Close", MergeFinishDecision.forTimeout("feat/x", "main", Optional.empty()).buttonLabel());
+        assertEquals("Done",
+                MergeFinishDecision.forFailedCleanup("feat/x", "main", false, "executor shut down").buttonLabel());
     }
 
     @Test
