@@ -105,7 +105,8 @@ final class OpenSessionTab {
     private final BorderPane content = new BorderPane();
 
     // -- Bottom Terminal/Explorer/Review sub-tab bar (handoff "Session Explorer" / "Diff Review") --
-    private final ToggleButton claudeSubTabButton = new ToggleButton("✳  Claude");
+    /** Text set in the constructor: it names THIS session's agent (Claude, Codex, …). */
+    private final ToggleButton claudeSubTabButton = new ToggleButton();
     private final ToggleButton terminalSubTabButton = new ToggleButton("❯_  Terminal");
     private final ToggleButton explorerSubTabButton = new ToggleButton("▤  Explorer");
     private final ToggleButton reviewSubTabButton = new ToggleButton("◨  Review");
@@ -176,6 +177,9 @@ final class OpenSessionTab {
 
     private String displayName;
 
+    /** Display name of this session's agent; fixed at creation (a session never changes agent). */
+    private final String agentName;
+
     /**
      * Whether this tab's repository lives on a remote host (spec: SSH remote
      * repositories) -- derived once from the constructor's {@code
@@ -185,10 +189,16 @@ final class OpenSessionTab {
      */
     private final boolean isRemote;
 
-    OpenSessionTab(ManagedSessionId sessionId, String displayName, Optional<Repository> repository,
+    /**
+     * @param agentName display name of the agent this session runs (see
+     *                  {@link AgentLabels}); it labels the agent sub-tab, which
+     *                  must never claim "Claude" for a Codex or Pi session.
+     */
+    OpenSessionTab(ManagedSessionId sessionId, String displayName, String agentName, Optional<Repository> repository,
                    Stage stage, TerminalRuntime app, TerminalHostView host) {
         this.sessionId = sessionId;
         this.displayName = displayName;
+        this.agentName = agentName;
         this.stage = stage;
         this.isRemote = repository.map(Repository::isRemote).orElse(false);
         this.bridge = new TerminalBridge(app, host, placeholder, stage::getOutputScaleX,
@@ -278,7 +288,8 @@ final class OpenSessionTab {
     private Region buildSubTabBar() {
         claudeSubTabButton.getStyleClass().add("session-subtab");
         claudeSubTabButton.setFocusTraversable(false);
-        claudeSubTabButton.setTooltip(new Tooltip("Claude (⌘1)"));
+        claudeSubTabButton.setText(AgentLabels.subTabLabel(agentName));
+        claudeSubTabButton.setTooltip(new Tooltip(AgentLabels.subTabTooltip(agentName)));
         claudeSubTabButton.setSelected(true);
         claudeSubTabButton.setOnAction(e -> showSubTab(SubTab.CLAUDE));
 
