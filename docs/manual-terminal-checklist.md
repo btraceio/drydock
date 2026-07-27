@@ -190,7 +190,7 @@ above), every step here needs a real `claude` binary and a real Claude
 account: the tools are only reachable from inside a live session, and the
 MCP handshake happens between `claude` and the app over loopback HTTP. The
 automated suite covers the pieces either side of that boundary — the
-`--mcp-config` flag assembly (`SessionManagerMcpFlagTest`), the tool
+`--mcp-config` flag assembly (`ClaudeAgentProviderMcpFlagTest`), the tool
 router and its refusals (`McpToolRouter*Test`), the transport
 (`McpServerTest`), the token registry (`McpSessionRegistryTest`), the
 config file (`McpConfigWriterTest`) and the context's path handling
