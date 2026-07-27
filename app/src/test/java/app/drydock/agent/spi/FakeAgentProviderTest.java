@@ -31,6 +31,7 @@ class FakeAgentProviderTest {
         @Override public String describeSearched() { return "PATH"; }
         @Override public AgentCapabilities probeCapabilities() { return new AgentCapabilities(true, true, "1.0"); }
         @Override public boolean supportsRemote() { return true; }
+        @Override public boolean supportsMcpConfig() { return false; }
         @Override public LaunchPlan buildCreateCommand(CreateContext c) { return LaunchPlan.of("fake " + c.sessionId(), true); }
         @Override public LaunchPlan buildResumeCommand(ResumeContext r) { return LaunchPlan.of("fake --resume", false); }
         @Override public SessionIdStrategy idStrategy() { return SessionIdStrategy.PRESET; }
@@ -47,7 +48,7 @@ class FakeAgentProviderTest {
             java.util.concurrent.ForkJoinPool.commonPool()));
         assertTrue(provider.initialized);
         assertEquals("fake abc", provider.buildCreateCommand(
-                new CreateContext("Session 1", "abc", Path.of("/tmp"), Optional.empty())).command());
+                new CreateContext("Session 1", "abc", Path.of("/tmp"), Optional.empty(), Optional.empty())).command());
         assertTrue(provider.conversations().isEmpty());
     }
 }

@@ -36,6 +36,7 @@ class AgentRegistryTest {
         @Override public String describeSearched() { return "PATH"; }
         @Override public AgentCapabilities probeCapabilities() { return new AgentCapabilities(remoteCapable, true, "1"); }
         @Override public boolean supportsRemote() { return remoteCapable; }
+        @Override public boolean supportsMcpConfig() { return false; }
         @Override public LaunchPlan buildCreateCommand(CreateContext c) { return LaunchPlan.of("x", false); }
         @Override public LaunchPlan buildResumeCommand(ResumeContext r) { return LaunchPlan.of("x", false); }
         @Override public SessionIdStrategy idStrategy() { return SessionIdStrategy.PRESET; }
@@ -124,14 +125,14 @@ class AgentRegistryTest {
     @Test
     void previewCreateCommandReturnsTheProvidersBuiltCommand() {
         AgentRegistry registry = new AgentRegistry(List.of(new StubProvider(AgentKind.CLAUDE, true)), ctx());
-        CreateContext createContext = new CreateContext("name", "id", Path.of("/tmp"), Optional.empty());
+        CreateContext createContext = new CreateContext("name", "id", Path.of("/tmp"), Optional.empty(), Optional.empty());
         assertEquals("x", registry.previewCreateCommand(AgentKind.CLAUDE, createContext));
     }
 
     @Test
     void previewCreateCommandReportsNoProviderForAnUnregisteredKind() {
         AgentRegistry registry = new AgentRegistry(List.of(new StubProvider(AgentKind.CLAUDE, true)), ctx());
-        CreateContext createContext = new CreateContext("name", "id", Path.of("/tmp"), Optional.empty());
+        CreateContext createContext = new CreateContext("name", "id", Path.of("/tmp"), Optional.empty(), Optional.empty());
         assertEquals("(no provider for " + AgentKind.CODEX.persistedName() + ")",
                 registry.previewCreateCommand(AgentKind.CODEX, createContext));
     }

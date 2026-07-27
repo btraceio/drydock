@@ -46,7 +46,7 @@ class ClaudeAgentProviderTest {
     void createWithConservativeCapsIsBarClaude() {
         // With no executable, caps detect conservatively (no -n/--session-id/--settings).
         LaunchPlan plan = newProviderNoExecutable().buildCreateCommand(
-                new CreateContext("Session 1", "uuid-1", Path.of("/tmp"), Optional.empty()));
+                new CreateContext("Session 1", "uuid-1", Path.of("/tmp"), Optional.empty(), Optional.empty()));
         assertEquals(ENV + "claude", plan.command());
         assertFalse(plan.sessionIdUsed());
         assertTrue(plan.supported());
@@ -55,21 +55,21 @@ class ClaudeAgentProviderTest {
     @Test
     void resumePrefersSessionId() {
         LaunchPlan plan = newProviderNoExecutable().buildResumeCommand(
-                new ResumeContext(Optional.of("abc-123"), Optional.of("name"), Path.of("/tmp"), Optional.empty()));
+                new ResumeContext(Optional.of("abc-123"), Optional.of("name"), Path.of("/tmp"), Optional.empty(), Optional.empty()));
         assertEquals(ENV + "claude --resume 'abc-123'", plan.command());
     }
 
     @Test
     void resumeFallsBackToName() {
         LaunchPlan plan = newProviderNoExecutable().buildResumeCommand(
-                new ResumeContext(Optional.empty(), Optional.of("my-name"), Path.of("/tmp"), Optional.empty()));
+                new ResumeContext(Optional.empty(), Optional.of("my-name"), Path.of("/tmp"), Optional.empty(), Optional.empty()));
         assertEquals(ENV + "claude --resume 'my-name'", plan.command());
     }
 
     @Test
     void resumeFallsBackToBare() {
         LaunchPlan plan = newProviderNoExecutable().buildResumeCommand(
-                new ResumeContext(Optional.empty(), Optional.empty(), Path.of("/tmp"), Optional.empty()));
+                new ResumeContext(Optional.empty(), Optional.empty(), Path.of("/tmp"), Optional.empty(), Optional.empty()));
         assertEquals(ENV + "claude --resume", plan.command());
     }
 

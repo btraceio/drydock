@@ -47,6 +47,20 @@ public interface AgentProvider {
      */
     boolean supportsRemote();
 
+    /**
+     * Whether this integration knows what to do with a per-session MCP config
+     * file (Claude's {@code --mcp-config}). A static fact about the integration,
+     * like {@link #supportsRemote()}, so implementations MUST make this CHEAP and
+     * non-blocking: no process spawns, no I/O. Safe on the JavaFX thread.
+     *
+     * <p>Distinct from any probed CLI flag: this says the integration can consume
+     * such a file at all, not that the installed binary accepts the option. The
+     * binary check stays provider-internal (Claude's {@code
+     * ClaudeCapabilities.supportsMcpConfig}), per this interface's rule that
+     * provider-internal flag detail is not exposed here.</p>
+     */
+    boolean supportsMcpConfig();
+
     LaunchPlan buildCreateCommand(CreateContext c);
 
     LaunchPlan buildResumeCommand(ResumeContext r);

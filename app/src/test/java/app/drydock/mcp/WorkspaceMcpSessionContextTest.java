@@ -1,7 +1,8 @@
 package app.drydock.mcp;
 
+import app.drydock.agent.api.AgentKind;
 import app.drydock.config.UserConfig;
-import app.drydock.domain.ManagedClaudeSession;
+import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.PrState;
 import app.drydock.domain.Repository;
@@ -297,7 +298,7 @@ class WorkspaceMcpSessionContextTest {
     // ---- fixtures -----------------------------------------------------------
 
     private Repository repository;
-    private ManagedClaudeSession session;
+    private ManagedAgentSession session;
 
     private Repository localRepository(Path root) throws IOException {
         if (repository == null) {
@@ -315,9 +316,9 @@ class WorkspaceMcpSessionContextTest {
         return session.id();
     }
 
-    private static ManagedClaudeSession sessionIn(Repository owner, Path workingDirectory) {
+    private static ManagedAgentSession sessionIn(Repository owner, Path workingDirectory) {
         Instant now = Instant.now();
-        return new ManagedClaudeSession(ManagedSessionId.newId(), owner.id(), "example session",
+        return new ManagedAgentSession(ManagedSessionId.newId(), owner.id(), AgentKind.CLAUDE, "example session",
                 Optional.empty(), Optional.empty(), workingDirectory, Optional.empty(),
                 SessionStatus.RUNNING, now, now, Optional.empty(), PrState.NONE, Optional.empty(), true);
     }

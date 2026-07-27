@@ -1,7 +1,7 @@
 package app.drydock.mcp;
 
 import app.drydock.config.UserConfig;
-import app.drydock.domain.ManagedClaudeSession;
+import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.Repository;
 import app.drydock.domain.SessionStatus;
@@ -79,7 +79,7 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
     /** Excerpts come from source files; anything this large is not one. */
     private static final long MAX_EXCERPT_FILE_BYTES = 4L * 1024 * 1024;
 
-    private final Supplier<List<ManagedClaudeSession>> sessionCatalog;
+    private final Supplier<List<ManagedAgentSession>> sessionCatalog;
     private final Supplier<List<Repository>> repositoryCatalog;
     private final AnnotationStore annotationStore;
     private final GitStatusService gitStatusService;
@@ -94,7 +94,7 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
      *                         reads a file, and the user may edit it while the app runs
      * @param sessionStarter   bound to {@code MainWorkspace.startAgentSession}
      */
-    public WorkspaceMcpSessionContext(Supplier<List<ManagedClaudeSession>> sessionCatalog,
+    public WorkspaceMcpSessionContext(Supplier<List<ManagedAgentSession>> sessionCatalog,
                                       Supplier<List<Repository>> repositoryCatalog,
                                       AnnotationStore annotationStore,
                                       GitStatusService gitStatusService,
@@ -113,7 +113,7 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
 
     // ---- caller lookup ------------------------------------------------------
 
-    private Optional<ManagedClaudeSession> sessionOf(ManagedSessionId caller) {
+    private Optional<ManagedAgentSession> sessionOf(ManagedSessionId caller) {
         return sessionCatalog.get().stream()
                 .filter(session -> session.id().equals(caller))
                 .findFirst();
@@ -142,7 +142,7 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
 
     @Override
     public Optional<Path> worktreePath(ManagedSessionId caller) {
-        return sessionOf(caller).map(ManagedClaudeSession::workingDirectory);
+        return sessionOf(caller).map(ManagedAgentSession::workingDirectory);
     }
 
     /**
@@ -294,7 +294,7 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
         Set<Path> listed = new LinkedHashSet<>();
 
         List<SessionSummary> summaries = new ArrayList<>();
-        for (ManagedClaudeSession session : sessionCatalog.get()) {
+        for (ManagedAgentSession session : sessionCatalog.get()) {
             Optional<Repository> repository = repositories.stream()
                     .filter(candidate -> candidate.id().equals(session.repositoryId()))
                     .findFirst();

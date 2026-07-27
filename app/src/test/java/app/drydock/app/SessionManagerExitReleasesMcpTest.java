@@ -1,9 +1,11 @@
 package app.drydock.app;
 
-import app.drydock.claude.ClaudeCapabilityService;
-import app.drydock.claude.ClaudeExecutableLocator;
+import app.drydock.agent.api.AgentContext;
+import app.drydock.agent.api.AgentRegistry;
+import app.drydock.agent.providers.claude.ClaudeAgentProvider;
+import app.drydock.agent.providers.claude.internal.ClaudeExecutableLocator;
 import app.drydock.domain.ApplicationState;
-import app.drydock.domain.ManagedClaudeSession;
+import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.SessionStatus;
 import app.drydock.mcp.McpConfigWriter;
 import app.drydock.mcp.McpSessionRegistry;
@@ -60,7 +62,7 @@ class SessionManagerExitReleasesMcpTest {
 
     @Test
     void aSelfExitedSessionLosesItsTokenAndItsConfigFile() throws Exception {
-        ManagedClaudeSession session = SessionManagerTest.newSessionFixture();
+        ManagedAgentSession session = SessionManagerTest.newSessionFixture();
         SessionManager manager = managerWithRunning(session);
         String token = registry.mint(session.id(), Spawn.ALLOWED);
         Path config = configWriter.writeFor(session.id(), ENDPOINT, token);
@@ -68,7 +70,7 @@ class SessionManagerExitReleasesMcpTest {
         assertTrue(Files.exists(config));
         assertTrue(registry.resolve(token).isPresent());
 
-        Optional<ManagedClaudeSession> exited = manager.markSessionExited(session.id());
+        Optional<ManagedAgentSession> exited = manager.markSessionExited(session.id());
 
         assertTrue(exited.isPresent(), "the fixture must actually have been RUNNING");
         awaitDeleted(config);
@@ -83,7 +85,7 @@ class SessionManagerExitReleasesMcpTest {
      */
     @Test
     void aSessionThatWasNotRunningReleasesNothing() throws Exception {
-        ManagedClaudeSession session = SessionManagerTest.newSessionFixture()
+        ManagedAgentSession session = SessionManagerTest.newSessionFixture()
                 .withStatus(SessionStatus.EXITED);
         SessionManager manager = managerFor(session);
         String token = registry.mint(session.id(), Spawn.ALLOWED);
@@ -102,16 +104,22 @@ class SessionManagerExitReleasesMcpTest {
     /** MCP not wired up at all: the exit path must still work. */
     @Test
     void anExitWithoutMcpWiringIsHarmless() {
-        ManagedClaudeSession session = SessionManagerTest.newSessionFixture();
+        ManagedAgentSession session = SessionManagerTest.newSessionFixture();
         SessionManager manager = managerWithRunning(session);
 
         assertTrue(manager.markSessionExited(session.id()).isPresent());
     }
 
-    private SessionManager managerFor(ManagedClaudeSession session) {
-        ClaudeCapabilityService capabilityService =
-                new ClaudeCapabilityService(new ClaudeExecutableLocator(Path.of("/nonexistent/claude")));
-        return new SessionManager(new StateRepository(List.of(session)), capabilityService, backgroundExecutor);
+    private SessionManager managerFor(ManagedAgentSession session) {
+        return new SessionManager(new StateRepository(List.of(session)), newRegistry(), backgroundExecutor);
+    }
+
+    /** A registry whose one provider can never find its executable, so nothing spawns. */
+    private AgentRegistry newRegistry() {
+        AgentContext ctx = new AgentContext(Path.of("/tmp/drydock-test"), Path.of("/tmp/drydock-test/activity"),
+                backgroundExecutor);
+        return new AgentRegistry(
+                List.of(new ClaudeAgentProvider(new ClaudeExecutableLocator(Path.of("/nonexistent/claude")))), ctx);
     }
 
     /**
@@ -120,11 +128,9 @@ class SessionManagerExitReleasesMcpTest {
      * terminal process survives a restart. The status is therefore set through
      * the store afterwards, exactly as a real launch does.
      */
-    private SessionManager managerWithRunning(ManagedClaudeSession session) {
+    private SessionManager managerWithRunning(ManagedAgentSession session) {
         StateRepository stateRepository = new StateRepository(List.of(session));
-        ClaudeCapabilityService capabilityService =
-                new ClaudeCapabilityService(new ClaudeExecutableLocator(Path.of("/nonexistent/claude")));
-        SessionManager manager = new SessionManager(stateRepository, capabilityService, backgroundExecutor);
+        SessionManager manager = new SessionManager(stateRepository, newRegistry(), backgroundExecutor);
         ApplicationStateStore.forRepository(stateRepository).update(state -> state.withSessions(
                 state.sessions().stream()
                         .map(candidate -> candidate.id().equals(session.id())
@@ -147,7 +153,7 @@ class SessionManagerExitReleasesMcpTest {
 
         private volatile ApplicationState state;
 
-        StateRepository(List<ManagedClaudeSession> sessions) {
+        StateRepository(List<ManagedAgentSession> sessions) {
             this.state = ApplicationState.empty().withSessions(sessions);
         }
 

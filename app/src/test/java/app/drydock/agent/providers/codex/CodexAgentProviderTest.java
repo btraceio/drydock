@@ -37,7 +37,7 @@ class CodexAgentProviderTest {
     @Test
     void createCarriesNoIdAndNoSettings() {
         LaunchPlan plan = provider().buildCreateCommand(
-                new CreateContext("Session 1", "ignored-uuid", Path.of("/repo"), Optional.empty()));
+                new CreateContext("Session 1", "ignored-uuid", Path.of("/repo"), Optional.empty(), Optional.empty()));
         assertTrue(plan.supported());
         assertFalse(plan.sessionIdUsed());
         assertTrue(plan.command().endsWith("codex"));   // env-scrub prefix (if any) + "codex"; no id, no --settings
@@ -46,14 +46,14 @@ class CodexAgentProviderTest {
     @Test
     void resumeByIdWhenKnown() {
         LaunchPlan plan = provider().buildResumeCommand(
-                new ResumeContext(Optional.of("019f9072-abc"), Optional.empty(), Path.of("/repo"), Optional.empty()));
+                new ResumeContext(Optional.of("019f9072-abc"), Optional.empty(), Path.of("/repo"), Optional.empty(), Optional.empty()));
         assertTrue(plan.command().endsWith("codex resume '019f9072-abc'"));
     }
 
     @Test
     void resumeUsesPickerWhenIdUnknown() {
         LaunchPlan plan = provider().buildResumeCommand(
-                new ResumeContext(Optional.empty(), Optional.empty(), Path.of("/repo"), Optional.empty()));
+                new ResumeContext(Optional.empty(), Optional.empty(), Path.of("/repo"), Optional.empty(), Optional.empty()));
         assertTrue(plan.command().endsWith("codex resume"));   // picker; never --last
     }
 
@@ -61,7 +61,7 @@ class CodexAgentProviderTest {
     void remoteIsUnsupported() {
         // A remote CreateContext yields an unsupported plan (Codex declines remote).
         LaunchPlan plan = provider().buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
-                Optional.of(new SshRemote("host", "/remote/path"))));
+                Optional.of(new SshRemote("host", "/remote/path")), Optional.empty()));
         assertFalse(plan.supported());
         assertFalse(provider().probeCapabilities().supportsRemote());
     }

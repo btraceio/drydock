@@ -82,6 +82,12 @@ public final class PiAgentProvider implements AgentProvider {
         return false;
     }
 
+    /** No {@code --mcp-config} equivalent: Drydock's per-session MCP file is Claude-specific. */
+    @Override
+    public boolean supportsMcpConfig() {
+        return false;
+    }
+
     @Override
     public LaunchPlan buildCreateCommand(CreateContext c) {
         if (c.remote().isPresent()) {
