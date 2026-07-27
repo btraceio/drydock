@@ -17,6 +17,7 @@
 // already does.
 
 import drydock.tasks.AppBundleTask
+import drydock.tasks.DmgTask
 import drydock.tasks.DownloadCrossJmodsTask
 import drydock.tasks.RuntimeImageTask
 import org.gradle.api.attributes.Category
@@ -66,6 +67,20 @@ tasks.register<AppBundleTask>("appImage") {
     infoPlist.set(packagingDir.file("Info.plist"))
     distTrampoline.set(packagingDir.file("dist-trampoline.sh"))
     distDir.set(rootProject.layout.buildDirectory.dir("dist"))
+}
+
+tasks.register<DmgTask>("dmg") {
+    group = "distribution"
+    description = "Stage 4: distributable disk image at build/dist/Drydock.dmg (wraps the .app bundle)."
+
+    // flatMap on appImage's output carries the task dependency, so
+    // `./gradlew dmg` builds the .app first and wraps it in one step.
+    // Points at the bundle rather than the dist root it sits in -- the .dmg
+    // is written into that same root, and depending on the root would make
+    // this task dirty its own input (see DmgTask.appBundle).
+    appBundle.set(tasks.named<AppBundleTask>("appImage").flatMap { it.distDir.dir("Drydock.app") })
+    volumeName.set("Drydock")
+    dmgFile.set(rootProject.layout.buildDirectory.file("dist/Drydock.dmg"))
 }
 
 // Cross-arch jlink runtime images: see docs/superpowers/specs/

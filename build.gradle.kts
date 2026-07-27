@@ -46,12 +46,13 @@ tasks.register("runtimeImageAllArches") {
 }
 
 // Plan section 6.3 also lists appImage / macApp / dmg as required
-// top-level command aliases. appImage/macApp are now real (Stage 3, plan
+// top-level command aliases. appImage/macApp are real (Stage 3, plan
 // section 23.4): a self-contained ad-hoc-signed .app bundle assembled by
-// :app:appImage at build/dist/Drydock.app. dmg (Stage 4)
-// and Developer ID signing/notarization (Stages 5-6) remain explicit
-// no-ops that fail with a clear message -- see docs/runtime-image.md
-// "Packaging implications".
+// :app:appImage at build/dist/Drydock.app. dmg (Stage 4) is now real too:
+// :app:dmg wraps that .app into build/dist/Drydock.dmg (and depends on
+// appImage, so `./gradlew dmg` builds the bundle first, in one step).
+// Only Developer ID signing/notarization (Stages 5-6) remain out of scope
+// -- see docs/runtime-image.md "Packaging implications".
 listOf("appImage", "macApp").forEach { name ->
     tasks.register(name) {
         group = "distribution"
@@ -59,20 +60,10 @@ listOf("appImage", "macApp").forEach { name ->
         dependsOn(":app:appImage")
     }
 }
-listOf(
-    "dmg" to "Stage 4 (plan section 23.4): produce a local .dmg from the .app bundle."
-).forEach { (name, futureWork) ->
-    tasks.register(name) {
-        group = "distribution"
-        description = "Not yet implemented -- $futureWork"
-        doLast {
-            throw GradleException(
-                "'$name' is not implemented yet. $futureWork Currently only " +
-                    "'./gradlew runtimeImage' (the raw jlink image, plan section 23.4 Stage 2) " +
-                    "exists -- see docs/runtime-image.md."
-            )
-        }
-    }
+tasks.register("dmg") {
+    group = "distribution"
+    description = "Alias for :app:dmg (Stage 4: distributable .dmg wrapping the .app bundle)."
+    dependsOn(":app:dmg")
 }
 
 tasks.register<Exec>("verifyEnvironment") {

@@ -25,11 +25,12 @@ export JAVA_HOME=~/.sdkman/candidates/java/23.0.1-tem   # Gradle itself; see "JD
 build/image/bin/drydock
 ```
 
-`./gradlew appImage`, `./gradlew macApp`, and `./gradlew dmg` are also
-registered (plan section 6.3 requires the aliases to exist) but are
-deliberate no-ops that fail with an explicit "not implemented yet, see
-plan section 23.4 Stage N" message — see "Packaging implications" below for
-why these are correctly out of scope for this phase.
+`./gradlew appImage`/`macApp` (Stage 3) build a self-contained
+`build/dist/Drydock.app`, and `./gradlew dmg` (Stage 4) wraps that bundle
+into a distributable `build/dist/Drydock.dmg` in one step (it depends on
+`appImage`). All three ad-hoc sign the payload — enough for local
+execution on Apple Silicon; only Developer ID signing/notarization
+(Stages 5-6) remain out of scope. See "Packaging implications" below.
 
 ### JDK version note (unchanged from Task 4/7)
 
@@ -199,27 +200,33 @@ arch-branching code exists anywhere; this was a one-line semantic
 adjustment to an override property with no prior callers (verified via
 `grep` before changing it), not a new decision point.
 
-## Packaging implications (plan section 23.3/23.4, out of scope for Task 8)
+## Packaging implications (plan section 23.3/23.4)
 
-Stage 2 (raw jlink image, this task) is done. Stages 3-6 —
-`.app` bundling (`Info.plist`, `Contents/MacOS`, `Contents/Frameworks`),
-`.dmg` production, ad hoc signing, and Developer ID signing/notarization —
-are explicitly **not** implemented, per plan section 3 ("Initial Scope")
-and section 28 Task 8's own "do not implement project management until
-this report is complete." `./gradlew appImage`/`macApp`/`dmg` exist (plan
-section 6.3 requires the aliases) but fail immediately with a message
-naming the plan section/stage they correspond to, rather than doing
-nothing silently or half-implementing signing without being asked.
+Stage 2 (raw jlink image, Task 8) is done. Stages 3-4 are now done too:
+`.app` bundling (`Info.plist`, `Contents/MacOS`, the jlink image under
+`Contents`) plus ad hoc signing via `:app:appImage`, and `.dmg` production
+via `:app:dmg`. Stages 5-6 — Developer ID signing and notarization — are
+still explicitly **not** implemented, per plan section 3 ("Initial Scope"):
+half-implementing signing without being asked is worse than leaving it out.
 
-One thing worth flagging now for whoever picks up Stage 3: the nested
-`.dylib`s will need per-architecture code signing *before* the outer `.app`
-is signed (plan section 23.4, "All nested native libraries and executables
-must be signed in the correct order"), and `@rpath`/`@loader_path`-relative
-library IDs (not `DYLD_LIBRARY_PATH`) will be needed for the `.app` layout
-— this project's current native loading (`SymbolLookup.libraryLookup` with
-an absolute path resolved in Java) does not depend on either of those and
-will keep working unmodified either way, since it never consults the
-dylib's own install name or `DYLD_LIBRARY_PATH`.
+The practical consequence of stopping at ad hoc: the `.app` runs locally
+(ad hoc signing is all Apple Silicon requires to *execute* code), but a
+`.dmg` copied to another machine still trips Gatekeeper's
+unidentified-developer prompt. It is a developer/CI artifact, not something
+to hand to an end user yet.
+
+Still open for whoever picks up Stages 5-6: `AppBundleTask` currently signs
+with `codesign --force --deep --sign -`, and `--deep` is exactly what Apple
+tells you *not* to use for real distribution — Developer ID signing must
+sign each nested `.dylib`/executable individually, inside-out, before the
+outer `.app` (plan section 23.4, "All nested native libraries and
+executables must be signed in the correct order"). Hardened runtime and a
+notarization round-trip come with that. `@rpath`/`@loader_path`-relative
+library IDs (not `DYLD_LIBRARY_PATH`) may also be wanted then; this
+project's native loading (`SymbolLookup.libraryLookup` with an absolute
+path resolved in Java) does not depend on either and keeps working
+unmodified either way, since it never consults the dylib's own install
+name or `DYLD_LIBRARY_PATH`.
 
 ## Why the terminal spike, not `app.drydock.Main`, is the default launch target
 

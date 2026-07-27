@@ -190,9 +190,11 @@ Full detail in `docs/runtime-image.md`. Summary:
 - The first self-contained `jlink` runtime image (`./gradlew runtimeImage`
   -> `build/image/`) builds and runs the Gate 0C terminal spike end to end
   with `JAVA_HOME` unset, no Gradle, and copied outside the source tree —
-  verified on this Intel Mac. `appImage`/`macApp`/`dmg` (plan section 6.3)
-  are registered as explicit not-yet-implemented no-ops (plan section 23.4
-  Stages 3-6 are out of scope for this phase).
+  verified on this Intel Mac. `appImage`/`macApp` (plan section 6.3) build
+  an ad-hoc-signed `build/dist/Drydock.app` from that image (Stage 3), and
+  `dmg` wraps the bundle into `build/dist/Drydock.dmg` (Stage 4). Developer
+  ID signing/notarization (Stages 5-6) remain out of scope, so the `.dmg`
+  is a developer/CI artifact that still trips Gatekeeper elsewhere.
 - **Real, packaging-only defect found and fixed:** `JavaFxNativeView`'s
   reflective use of `com.sun.glass.ui.Window`/`View` (see above) throws
   `IllegalAccessError` inside the jlink image, even though it works
