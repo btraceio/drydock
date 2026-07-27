@@ -229,7 +229,9 @@ abstract class RuntimeImageTask @Inject constructor(
                 "--add-modules",
                 // java.net.http: GitHubService's search client (Clone-from-GitHub modal).
                 // jdk.httpserver: McpServer's localhost MCP endpoint.
-                "java.base,java.desktop,java.net.http,java.xml,jdk.httpserver,jdk.jfr,jdk.unsupported," +
+                // java.logging: McpServer/McpToolRouter use java.util.logging directly
+                // (the rest of the app uses java.lang.System.Logger, which needs no module).
+                "java.base,java.logging,java.desktop,java.net.http,java.xml,jdk.httpserver,jdk.jfr,jdk.unsupported," +
                     "javafx.base,javafx.controls,javafx.graphics",
                 "--output", runtimeOut.absolutePath,
                 "--no-header-files",

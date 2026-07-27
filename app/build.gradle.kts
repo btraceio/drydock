@@ -97,6 +97,25 @@ dependencies {
 
 tasks.test {
     useJUnitPlatform()
+
+    // Inputs for RuntimeImageModuleListTest: the packaged app jar, its runtime
+    // classpath, and the convention-plugin source that declares the jlink
+    // --add-modules list. The test runs jdeps against the jar the packaging
+    // actually consumes and fails if the declared list stops covering it (a
+    // missing java.logging once shipped a .dmg that crashed at launch).
+    val appJarProvider = tasks.named<Jar>("jar").flatMap { it.archiveFile }
+    val runtimeClasspath = configurations.named("runtimeClasspath")
+    val moduleListSource = rootProject.layout.projectDirectory.file(
+        "buildSrc/src/main/kotlin/drydock/tasks/RuntimeImageTask.kt"
+    )
+    dependsOn(appJarProvider)
+    inputs.file(appJarProvider).withPathSensitivity(PathSensitivity.RELATIVE)
+    inputs.file(moduleListSource).withPathSensitivity(PathSensitivity.RELATIVE)
+    doFirst {
+        systemProperty("drydock.test.appJar", appJarProvider.get().asFile.absolutePath)
+        systemProperty("drydock.test.runtimeClasspath", runtimeClasspath.get().asPath)
+        systemProperty("drydock.test.moduleListSource", moduleListSource.asFile.absolutePath)
+    }
 }
 
 // Thin, publishable jar for the jbang launcher: the app's own classes and
