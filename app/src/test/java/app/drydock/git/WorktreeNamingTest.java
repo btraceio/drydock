@@ -1,4 +1,4 @@
-package app.drydock.ui;
+package app.drydock.git;
 
 import org.junit.jupiter.api.Test;
 

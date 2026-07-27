@@ -87,6 +87,11 @@ public final class ClaudeAgentProvider implements AgentProvider {
     }
 
     @Override
+    public boolean supportsMcpConfig() {
+        return true;
+    }
+
+    @Override
     public LaunchPlan buildCreateCommand(CreateContext c) {
         if (c.remote().isPresent()) {
             return LaunchPlan.of(SshCommandBuilder.interactiveSessionCommand(c.remote().get(), "exec claude"), false);
@@ -102,6 +107,7 @@ public final class ClaudeAgentProvider implements AgentProvider {
             sessionIdUsed = true;
         }
         command.append(activitySettingsFlag(caps));
+        command.append(mcpConfigFlag(caps, c.mcpConfig()));
         return LaunchPlan.of(command.toString(), sessionIdUsed);
     }
 
@@ -116,7 +122,8 @@ public final class ClaudeAgentProvider implements AgentProvider {
             }
             return LaunchPlan.of(SshCommandBuilder.interactiveSessionCommand(r.remote().get(), exec), false);
         }
-        String suffix = activitySettingsFlag(detectCaps());
+        ClaudeCapabilities caps = detectCaps();
+        String suffix = activitySettingsFlag(caps) + mcpConfigFlag(caps, r.mcpConfig());
         if (r.agentSessionId().isPresent()) {
             return LaunchPlan.of(ENV_CLEANUP_PREFIX + "claude --resume " + AgentCommands.shellQuote(r.agentSessionId().get()) + suffix, false);
         }
@@ -152,7 +159,7 @@ public final class ClaudeAgentProvider implements AgentProvider {
             return capabilityService.detectCapabilitiesBlocking();
         } catch (RuntimeException e) {
             // Fail conservatively: no name/session-id/settings support (matches NO_CAPABILITIES semantics).
-            return new ClaudeCapabilities(false, true, false, false, false, "unknown");
+            return new ClaudeCapabilities(false, true, false, false, false, false, "unknown");
         }
     }
 
@@ -162,6 +169,28 @@ public final class ClaudeAgentProvider implements AgentProvider {
             return "";
         }
         return " --settings " + AgentCommands.shellQuote(settings.get().toString());
+    }
+
+    /**
+     * Adds {@code --mcp-config <file>} so the session can call back into this
+     * app (see {@code app.drydock.mcp.McpServer}). Empty whenever the installed
+     * {@code claude} does not advertise the flag, or no per-session config file
+     * was minted for this launch -- a session without Drydock tools is strictly
+     * better than one that fails to launch.
+     *
+     * <p>No {@code --strict-mcp-config}: that would suppress the user's own MCP
+     * servers, and Drydock's tools are an addition to their setup, not a
+     * replacement.</p>
+     *
+     * <p>Only reached after each builder's remote early-return: {@code claude}
+     * runs on the remote host and cannot reach this machine's loopback
+     * address, so a remote session never receives a local config path.</p>
+     */
+    private static String mcpConfigFlag(ClaudeCapabilities caps, Optional<Path> mcpConfig) {
+        if (!caps.supportsMcpConfig() || mcpConfig.isEmpty()) {
+            return "";
+        }
+        return " --mcp-config " + AgentCommands.shellQuote(mcpConfig.get().toString());
     }
 
 }

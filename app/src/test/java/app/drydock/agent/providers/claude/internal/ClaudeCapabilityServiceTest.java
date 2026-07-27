@@ -114,4 +114,28 @@ class ClaudeCapabilityServiceTest {
         assertTrue(failure.stderrExcerpt().contains("boom"));
         assertEquals(stub, failure.executable());
     }
+
+    @Test
+    void detectsMcpConfigFlagFromHelpText() {
+        String help = """
+                  --settings <file-or-json>   Path to a settings JSON file
+                  --mcp-config <configs...>   Load MCP servers from JSON files
+                """;
+
+        assertTrue(ClaudeCapabilityService.helpMentionsMcpConfig(help));
+    }
+
+    @Test
+    void absentMcpConfigFlagIsReportedConservativelyAsUnsupported() {
+        String help = """
+                  --settings <file-or-json>   Path to a settings JSON file
+                """;
+
+        assertFalse(ClaudeCapabilityService.helpMentionsMcpConfig(help));
+    }
+
+    @Test
+    void aSimilarlyNamedFlagDoesNotCountAsMcpConfig() {
+        assertFalse(ClaudeCapabilityService.helpMentionsMcpConfig("  --mcp-config-verbose <x>"));
+    }
 }

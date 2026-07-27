@@ -162,7 +162,10 @@ final class StartSessionModal extends VBox {
 
     private String buildPreviewText(AgentKind kind) {
         try {
-            CreateContext ctx = new CreateContext(branch, UUID.randomUUID().toString(), worktreePath, remote);
+            // No MCP config: this is a preview, so it must not mint a token or
+            // write a per-session file the real launch would then replace.
+            CreateContext ctx = new CreateContext(branch, UUID.randomUUID().toString(), worktreePath, remote,
+                    Optional.empty());
             String command = registry.previewCreateCommand(kind, ctx);
             return command.startsWith("(") ? command : "$ " + command;
         } catch (RuntimeException e) {

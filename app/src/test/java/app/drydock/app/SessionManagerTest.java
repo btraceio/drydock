@@ -92,7 +92,16 @@ class SessionManagerTest {
         return new SessionManager(stateRepository, registry, backgroundExecutor);
     }
 
-    private ManagedAgentSession sessionWith(Path workingDirectory, Optional<String> agentSessionId,
+    /**
+     * A minimal INACTIVE session, shared with {@link
+     * SessionManagerExitReleasesMcpTest} (same package) so the MCP-lifecycle
+     * tests do not restate this 15-component record.
+     */
+    static ManagedAgentSession newSessionFixture() {
+        return sessionWith(Path.of("/tmp"), Optional.empty(), Optional.empty());
+    }
+
+    private static ManagedAgentSession sessionWith(Path workingDirectory, Optional<String> agentSessionId,
                                               Optional<String> agentSessionName) {
         Instant now = Instant.now();
         return new ManagedAgentSession(

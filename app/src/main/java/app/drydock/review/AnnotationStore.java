@@ -22,13 +22,17 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
+import java.util.function.UnaryOperator;
 
 /**
  * The per-session store of Review annotations (design handoff section C):
@@ -64,6 +68,18 @@ public final class AnnotationStore implements AutoCloseable {
      */
     private final AtomicReference<List<ReviewAnnotation>> pendingSnapshot = new AtomicReference<>();
 
+    /**
+     * Change listeners, notified after every mutation with the affected
+     * annotation's id (or {@code null} for a bulk change).
+     *
+     * <p>Exists because this store now has more than one writer: the Review
+     * tab on the FX thread, and the MCP tool router on its own executor. A
+     * view that caches annotation values must be told to re-read them, or a
+     * later read-modify-write from the stale value silently discards the
+     * other writer's change (AGENTS.md, "One writer for persistent state").</p>
+     */
+    private final List<Consumer<String>> changeListeners = new CopyOnWriteArrayList<>();
+
     public AnnotationStore(Path file) {
         this.file = file.toAbsolutePath().normalize();
         loadFromDisk();
@@ -90,35 +106,113 @@ public final class AnnotationStore implements AutoCloseable {
         return annotations.stream().filter(a -> a.id().equals(id)).findFirst();
     }
 
-    // ---- mutations (each persists asynchronously) ----
+    // ---- change notification ----
 
-    public synchronized void add(ReviewAnnotation annotation) {
-        annotations.add(annotation);
-        persistAsync();
+    /** Registers a listener; returns a handle that unregisters it. */
+    public Runnable addChangeListener(Consumer<String> listener) {
+        Objects.requireNonNull(listener, "listener");
+        changeListeners.add(listener);
+        return () -> changeListeners.remove(listener);
     }
 
-    /** Replaces the stored annotation with the same id; a vanished id is ignored. */
-    public synchronized void update(ReviewAnnotation annotation) {
-        for (int i = 0; i < annotations.size(); i++) {
-            if (annotations.get(i).id().equals(annotation.id())) {
-                annotations.set(i, annotation);
-                persistAsync();
-                return;
+    /**
+     * Fires listeners outside this object's monitor. A listener that throws is
+     * logged and skipped: notification is cosmetic next to the write that just
+     * succeeded, and one bad subscriber must not fail the others.
+     */
+    private void fireChanged(String annotationId) {
+        for (Consumer<String> listener : changeListeners) {
+            try {
+                listener.accept(annotationId);
+            } catch (RuntimeException e) {
+                LOG.log(Level.WARNING, "Annotation change listener failed", e);
             }
         }
     }
 
-    public synchronized void remove(String id) {
-        if (annotations.removeIf(a -> a.id().equals(id))) {
-            persistAsync();
+    // ---- mutations (each persists asynchronously) ----
+
+    public void add(ReviewAnnotation annotation) {
+        addInternal(annotation);
+        fireChanged(annotation.id());
+    }
+
+    private synchronized void addInternal(ReviewAnnotation annotation) {
+        annotations.add(annotation);
+        persistAsync();
+    }
+
+    /**
+     * The atomic read-modify-write: re-reads the annotation with {@code id}
+     * under this store's monitor, applies {@code transform} to it, stores the
+     * result and returns it. Empty when no annotation has that id.
+     *
+     * <p>The only way to change a stored annotation, deliberately: a
+     * replace-by-id mutator alongside it would let a caller read, decide, and
+     * then write, giving the other writer -- the FX Review tab or the MCP tool
+     * router -- a window in which to land a change that the write then
+     * overwrites (AGENTS.md: "One writer for persistent state" names this
+     * read-modify-write pattern as a past data-loss bug).</p>
+     *
+     * <p>{@code transform} runs while the monitor is held, so it must be short
+     * and must not call back into this store. It may throw: an exception
+     * propagates to the caller with nothing written and no listener fired,
+     * which is how a caller refuses the mutation based on the value it was
+     * handed (see {@code McpToolRouter}'s {@code review_reply}). Listeners fire
+     * after the monitor is released, never while it is held.</p>
+     */
+    public Optional<ReviewAnnotation> mutate(String id, UnaryOperator<ReviewAnnotation> transform) {
+        Optional<ReviewAnnotation> updated = mutateInternal(id, transform);
+        updated.ifPresent(annotation -> fireChanged(annotation.id()));
+        return updated;
+    }
+
+    private synchronized Optional<ReviewAnnotation> mutateInternal(String id,
+                                                                   UnaryOperator<ReviewAnnotation> transform) {
+        Objects.requireNonNull(id, "id");
+        Objects.requireNonNull(transform, "transform");
+        for (int i = 0; i < annotations.size(); i++) {
+            if (annotations.get(i).id().equals(id)) {
+                ReviewAnnotation updated = Objects.requireNonNull(transform.apply(annotations.get(i)),
+                        "transform must not return null");
+                if (!updated.id().equals(id)) {
+                    throw new IllegalArgumentException("transform must not change the annotation id");
+                }
+                annotations.set(i, updated);
+                persistAsync();
+                return Optional.of(updated);
+            }
+        }
+        return Optional.empty();
+    }
+
+    public void remove(String id) {
+        if (removeInternal(id)) {
+            fireChanged(id);
         }
     }
 
+    private synchronized boolean removeInternal(String id) {
+        if (annotations.removeIf(a -> a.id().equals(id))) {
+            persistAsync();
+            return true;
+        }
+        return false;
+    }
+
     /** Drops every annotation of a deleted session. */
-    public synchronized void removeSession(ManagedSessionId sessionId) {
+    public void removeSession(ManagedSessionId sessionId) {
+        if (removeSessionInternal(sessionId)) {
+            fireChanged(null);
+        }
+    }
+
+    private synchronized boolean removeSessionInternal(ManagedSessionId sessionId) {
         if (annotations.removeIf(a -> a.sessionId().equals(sessionId))) {
             persistAsync();
+            return true;
         }
+        return false;
     }
 
     // ---- persistence ----

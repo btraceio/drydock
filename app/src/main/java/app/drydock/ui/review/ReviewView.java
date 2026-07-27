@@ -158,6 +158,9 @@ public final class ReviewView extends BorderPane {
     /** View-owned annotation-card nodes by annotation id, so reply drafts survive cell recycling. */
     private final Map<String, Node> cardNodes = new HashMap<>();
 
+    /** Unsubscribes {@link #onAnnotationChanged} from {@link #annotationStore}; run by {@link #dispose()}. */
+    private final Runnable annotationChangesUnsubscribe;
+
     public ReviewView(ManagedSessionId sessionId, Path checkoutRoot, Path repositoryRoot,
                       DiffService diffService, ChangedLineService changedLineService,
                       GitStatusService gitStatusService, AnnotationStore annotationStore,
@@ -169,6 +172,10 @@ public final class ReviewView extends BorderPane {
         this.annotationStore = annotationStore;
         this.promptSender = promptSender;
         this.explorerBridge = explorerBridge;
+        // The store now has more than one writer (the MCP tool router runs
+        // on its own executor), so this view must be told to re-read a card
+        // it already built rather than trust the value it was built from.
+        this.annotationChangesUnsubscribe = annotationStore.addChangeListener(this::onAnnotationChanged);
 
         getStyleClass().add("review-root");
 
@@ -848,6 +855,131 @@ public final class ReviewView extends BorderPane {
         return cardNodes.computeIfAbsent(annotation.id(), id -> buildAnnotationCard(annotation));
     }
 
+    /**
+     * Reacts to a change made by another writer (the MCP tool router runs on
+     * its own executor, so this notification can arrive off the FX thread --
+     * hence {@link Platform#runLater}).
+     *
+     * <p>{@link #annotationStore} is one instance shared by every open
+     * session tab (see {@code MainWorkspace}), so most notifications are not
+     * about this view at all -- e.g. deleting session A fires a bulk ({@code
+     * null}) change that every open tab's {@link ReviewView} receives,
+     * including session B's, which must not lose an in-progress reply draft
+     * or jump its scroll position over data that never belonged to it. Row
+     * work ({@link #cardNodes} eviction, {@link #replaceCardRow}, {@link
+     * #renderSelectedFile()}) only happens when this view actually has
+     * something rendered that the change could have touched; {@link
+     * #updateSummary()} is cheap and always safe to re-run since it simply
+     * recomputes counts from the (session, scope)-filtered truth.</p>
+     */
+    private void onAnnotationChanged(String annotationId) {
+        Platform.runLater(() -> {
+            if (annotationId == null) {
+                if (bulkChangeAffectsRenderedCards()) {
+                    renderSelectedFile();
+                }
+            } else {
+                onSingleAnnotationChanged(annotationId);
+            }
+            updateSummary();
+        });
+    }
+
+    /** How {@link #onSingleAnnotationChanged} must react to a single-annotation notification. */
+    enum ChangeRoute {
+        /** Not this view's data (another session/scope), or nothing on screen to touch. */
+        IGNORE,
+        /** The card is already rendered; swap its row in place. */
+        REPLACE_ROW,
+        /** Relevant to the file on screen but not (or no longer) rendered; rebuild the file's rows. */
+        REBUILD_FILE
+    }
+
+    /**
+     * Pure routing decision for a single-annotation change notification --
+     * no FX or store access, so it is unit-testable without a live FX
+     * Application Thread (see {@code ReviewViewChangeRoutingTest}).
+     *
+     * @param current the annotation's current value, or {@code null} if it no longer exists (removed)
+     */
+    static ChangeRoute routeSingleAnnotationChange(ManagedSessionId viewSessionId, DiffScope viewScope,
+            String selectedFilePath, boolean rendered, ReviewAnnotation current) {
+        if (current == null) {
+            // Removed: only a problem if this view was showing its card.
+            return rendered ? ChangeRoute.REBUILD_FILE : ChangeRoute.IGNORE;
+        }
+        if (!current.sessionId().equals(viewSessionId) || current.scope() != viewScope) {
+            return ChangeRoute.IGNORE; // another session's or scope's annotation.
+        }
+        if (rendered) {
+            return ChangeRoute.REPLACE_ROW;
+        }
+        if (selectedFilePath != null && current.file().equals(selectedFilePath)) {
+            // Newly relevant to the file on screen (e.g. an add by another
+            // writer): REPLACE_ROW can only swap a row that already exists,
+            // so making the card appear needs a full rebuild.
+            return ChangeRoute.REBUILD_FILE;
+        }
+        return ChangeRoute.IGNORE; // relevant to this session/scope, but a different file.
+    }
+
+    /** Reacts to a change to one annotation, filtered to what this view actually has at stake. */
+    private void onSingleAnnotationChanged(String annotationId) {
+        boolean rendered = isCardRendered(annotationId);
+        ReviewAnnotation current = annotationStore.byId(annotationId).orElse(null);
+        String selectedFilePath = selectedFile == null ? null : selectedFile.path();
+        switch (routeSingleAnnotationChange(sessionId, scope, selectedFilePath, rendered, current)) {
+            case IGNORE -> { }
+            case REPLACE_ROW -> {
+                cardNodes.remove(annotationId);
+                replaceCardRow(current);
+            }
+            case REBUILD_FILE -> {
+                cardNodes.remove(annotationId);
+                renderSelectedFile();
+            }
+        }
+    }
+
+    /** True if {@link #diffRows} currently holds a card for {@code annotationId}. */
+    private boolean isCardRendered(String annotationId) {
+        for (ReviewRow row : diffRows) {
+            if (row instanceof ReviewRow.AnnotationCard card && card.annotation().id().equals(annotationId)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * True if a bulk ({@code null}-id) change could have affected a card
+     * this view is currently showing -- i.e. one of its rendered
+     * annotations no longer exists. {@code removeSession} is the only
+     * source of a bulk change, and it always removes a whole session's
+     * annotations in one shot, so this is the only way it can reach a card
+     * on screen; a bulk change to some other session's data leaves every
+     * id this view has rendered still resolvable.
+     */
+    private boolean bulkChangeAffectsRenderedCards() {
+        for (ReviewRow row : diffRows) {
+            if (row instanceof ReviewRow.AnnotationCard card
+                    && annotationStore.byId(card.annotation().id()).isEmpty()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Unsubscribes from {@link #annotationStore}'s change notifications.
+     * Must be called when this view's session tab is discarded (lifecycle
+     * symmetry -- see {@code MainWorkspace#removeTab}), or a closed view
+     * keeps receiving events for the life of the process.
+     */
+    public void dispose() {
+        annotationChangesUnsubscribe.run();
+    }
+
     private Node buildAnnotationCard(ReviewAnnotation annotation) {
         Label rangeChip = new Label(annotation.startKey().equals(annotation.endKey())
                 ? keyLabel(annotation.startKey())
@@ -858,20 +990,32 @@ public final class ReviewView extends BorderPane {
         status.getStyleClass().addAll("review-status-pill", switch (annotation.status()) {
             case OPEN -> "status-open";
             case SENT -> "status-sent";
+            case ADDRESSED -> "status-addressed";
             case RESOLVED -> "status-resolved";
             case FIXED -> "status-fixed";
         });
 
-        Button toggle = new Button(annotation.status() == AnnotationStatus.OPEN ? "Resolve" : "Reopen");
+        boolean resolvable = annotation.status() == AnnotationStatus.OPEN
+                || annotation.status() == AnnotationStatus.SENT
+                || annotation.status() == AnnotationStatus.ADDRESSED;
+        Button toggle = new Button(resolvable ? "Resolve" : "Reopen");
         toggle.getStyleClass().add("review-thread-action");
         toggle.setFocusTraversable(false);
         toggle.setOnAction(e -> {
-            ReviewAnnotation updated = annotation.withStatus(annotation.status() == AnnotationStatus.OPEN
-                    ? AnnotationStatus.RESOLVED
-                    : AnnotationStatus.OPEN);
-            annotationStore.update(updated);
-            replaceCardRow(updated);
-            updateSummary();
+            // Mutate rather than read-then-update: another writer (the MCP
+            // tool router, on its own thread) may change this thread at any
+            // moment, and a value computed outside the store's lock would
+            // discard their change.
+            annotationStore.mutate(annotation.id(), current -> {
+                boolean currentResolvable = current.status() == AnnotationStatus.OPEN
+                        || current.status() == AnnotationStatus.SENT
+                        || current.status() == AnnotationStatus.ADDRESSED;
+                return current.withStatus(
+                        currentResolvable ? AnnotationStatus.RESOLVED : AnnotationStatus.OPEN);
+            }).ifPresent(updated -> {
+                replaceCardRow(updated);
+                updateSummary();
+            });
         });
 
         Region headerSpacer = new Region();
@@ -880,8 +1024,11 @@ public final class ReviewView extends BorderPane {
         header.setAlignment(Pos.CENTER_LEFT);
 
         VBox card = new VBox(8, header);
-        card.getStyleClass().addAll("review-thread-card",
-                annotation.status() == AnnotationStatus.FIXED ? "thread-fixed" : "thread-normal");
+        card.getStyleClass().addAll("review-thread-card", switch (annotation.status()) {
+            case FIXED -> "thread-fixed";
+            case ADDRESSED -> "thread-addressed";
+            case OPEN, SENT, RESOLVED -> "thread-normal";
+        });
 
         for (ReviewAnnotation.Message message : annotation.thread()) {
             Label author = new Label(message.author());
@@ -906,10 +1053,13 @@ public final class ReviewView extends BorderPane {
             if (message.isEmpty()) {
                 return;
             }
-            ReviewAnnotation updated = annotation.withReply(
-                    new ReviewAnnotation.Message("You", Instant.now(), message));
-            annotationStore.update(updated);
-            replaceCardRow(updated);
+            // Mutate for the same reason as the toggle above: a value derived
+            // outside the store's lock would discard a concurrent MCP-side
+            // change.
+            annotationStore.mutate(annotation.id(),
+                            current -> current.withReply(
+                                    new ReviewAnnotation.Message("You", Instant.now(), message)))
+                    .ifPresent(this::replaceCardRow);
         });
         HBox replyRow = new HBox(8, reply, replyButton);
         HBox.setHgrow(reply, Priority.ALWAYS);
@@ -928,8 +1078,10 @@ public final class ReviewView extends BorderPane {
         List<ReviewAnnotation> annotations = annotationStore.forScope(sessionId, scope);
         long open = annotations.stream().filter(a -> a.status() == AnnotationStatus.OPEN).count();
         long sent = annotations.stream().filter(a -> a.status() == AnnotationStatus.SENT).count();
+        long addressed = annotations.stream().filter(a -> a.status() == AnnotationStatus.ADDRESSED).count();
         summaryLabel.setText(open + " open · " + annotations.size()
-                + (annotations.size() == 1 ? " annotation" : " annotations") + " · " + sent + " sent");
+                + (annotations.size() == 1 ? " annotation" : " annotations")
+                + " · " + sent + " sent" + (addressed > 0 ? " · " + addressed + " addressed" : ""));
         sendButton.setDisable(open == 0);
     }
 
@@ -966,9 +1118,13 @@ public final class ReviewView extends BorderPane {
         // Record only the hand-off (SENT, no fabricated reply, no timer);
         // the banner's "Re-run diff" shows the real result.
         for (ReviewAnnotation annotation : open) {
-            ReviewAnnotation updated = annotation.withStatus(AnnotationStatus.SENT);
-            annotationStore.update(updated);
-            replaceCardRow(updated);
+            // Mutate: promptSender.accept above is a synchronous hand-off into
+            // the live terminal, wide enough for another writer to have changed
+            // this thread since `open` was read. Deriving the new value outside
+            // the store's lock would discard that change (same hazard as the
+            // toggle/reply handlers above).
+            annotationStore.mutate(annotation.id(), current -> current.withStatus(AnnotationStatus.SENT))
+                    .ifPresent(this::replaceCardRow);
         }
         bannerLabel.setText(open.size() + (open.size() == 1 ? " annotation" : " annotations")
                 + " sent to Claude");

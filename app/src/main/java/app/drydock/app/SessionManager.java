@@ -17,6 +17,9 @@ import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SshRemote;
+import app.drydock.mcp.McpConfigWriter;
+import app.drydock.mcp.McpSessionRegistry;
+import app.drydock.mcp.McpSessionRegistry.Spawn;
 import app.drydock.state.ApplicationStateRepository;
 import app.drydock.terminal.api.TerminalHostView;
 import app.drydock.terminal.api.TerminalRuntime;
@@ -24,6 +27,7 @@ import app.drydock.terminal.api.TerminalSpec;
 import app.drydock.terminal.api.TerminalSurface;
 import javafx.application.Platform;
 
+import java.io.IOException;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.Files;
@@ -40,6 +44,7 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.UnaryOperator;
@@ -99,6 +104,17 @@ public final class SessionManager implements AutoCloseable {
     private final ExecutorService backgroundExecutor;
     private final boolean ownsExecutor;
 
+    /**
+     * Set once at startup when the MCP server started; empty when it did not
+     * (or has not yet). Volatile because launches run on the background
+     * executor while startup completes on another thread; a launch that races
+     * startup simply omits the flag, which is the intended degradation.
+     */
+    private volatile Optional<McpWiring> mcpWiring = Optional.empty();
+
+    /** The three things needed to mint a per-session {@code --mcp-config} file. */
+    private record McpWiring(McpConfigWriter writer, McpSessionRegistry registry, String endpointUrl) { }
+
     private final ActiveSessionRegistry activeRegistry = new ActiveSessionRegistry();
     private final Map<ManagedSessionId, TerminalSurface> activeSurfaces = new ConcurrentHashMap<>();
 
@@ -148,6 +164,88 @@ public final class SessionManager implements AutoCloseable {
     }
 
     /**
+     * Enables per-session MCP config injection, so launched sessions can call
+     * back into this app (see {@code app.drydock.mcp.McpServer}). Empty until
+     * called, so a failed MCP startup degrades to sessions without Drydock
+     * tools rather than sessions that fail to launch.
+     */
+    public void useMcpConfig(McpConfigWriter writer, McpSessionRegistry registry, String endpointUrl) {
+        this.mcpWiring = Optional.of(new McpWiring(writer, registry, endpointUrl));
+    }
+
+    /**
+     * Mints this session's token and writes its MCP config file. Returns empty
+     * when MCP is not wired up, the session's provider cannot consume such a
+     * file, or the write failed: a session without Drydock tools is strictly
+     * better than one that fails to launch. Performs file I/O -- background
+     * executor only.
+     *
+     * <p>The support check lives HERE rather than only inside the provider's
+     * own flag builder: this method's result is an eagerly evaluated argument
+     * to {@link CreateContext}/{@link ResumeContext}, so a check made
+     * downstream would still have minted a token and written a file that the
+     * builder then discards. {@link AgentProvider#supportsMcpConfig()} is the
+     * gate because the narrower "does the installed binary advertise the
+     * flag" question is provider-internal (Claude's {@code
+     * ClaudeCapabilities.supportsMcpConfig}).</p>
+     *
+     * @param spawn whether this session may create worktrees and start further
+     *              sessions. {@link Spawn#FORBIDDEN} for a session an agent
+     *              started, which is what makes fan-out depth 1.
+     */
+    private Optional<Path> mcpConfigFor(AgentProvider provider, ManagedSessionId sessionId, Spawn spawn) {
+        Optional<McpWiring> wiring = mcpWiring;
+        if (wiring.isEmpty() || !provider.supportsMcpConfig()) {
+            return Optional.empty();
+        }
+        McpWiring mcp = wiring.get();
+        try {
+            String token = mcp.registry().mint(sessionId, spawn);
+            return Optional.of(mcp.writer().writeFor(sessionId, mcp.endpointUrl(), token));
+        } catch (IOException e) {
+            // Never log the token or the endpoint URL (it carries the port).
+            LOG.log(Level.WARNING, "Could not write MCP config for session " + sessionId
+                    + "; launching without Drydock tools: " + e.getMessage());
+            mcp.registry().revoke(sessionId);
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * Drops a finished session's token and its config file, so a stale token
+     * cannot be replayed and no file lingers under {@code <base>/mcp/}.
+     * Budget charges deliberately survive (see {@link
+     * McpSessionRegistry#revoke}). Performs file I/O -- background executor
+     * only.
+     */
+    private void releaseMcpConfig(ManagedSessionId sessionId) {
+        mcpWiring.ifPresent(mcp -> {
+            mcp.registry().revoke(sessionId);
+            mcp.writer().delete(sessionId);
+        });
+    }
+
+    /**
+     * Hands {@link #releaseMcpConfig} to the background executor: both callers
+     * run on the FX thread (the exit watcher's tick, {@code
+     * closeGracefully}'s callback) and the config-file delete is I/O
+     * (AGENTS.md).
+     */
+    private void releaseMcpConfigAsync(ManagedSessionId sessionId) {
+        if (mcpWiring.isEmpty()) {
+            return;
+        }
+        try {
+            backgroundExecutor.execute(() -> releaseMcpConfig(sessionId));
+        } catch (RejectedExecutionException e) {
+            // Shutdown already drained the executor. The next startup's
+            // purgeStale() removes the file, and the token dies with the
+            // process, so there is nothing left to leak.
+            LOG.log(Level.DEBUG, "Skipping MCP config cleanup for " + sessionId + " during shutdown");
+        }
+    }
+
+    /**
      * Lets a diagnostic override win over a provider-built command, keyed by
      * agent kind first (so multiple agent kinds can be overridden
      * independently) and falling back to the un-keyed property for backward
@@ -156,6 +254,16 @@ public final class SessionManager implements AutoCloseable {
     private static String diagOverride(AgentKind kind, String built) {
         return System.getProperty("app.drydock.diag.command." + kind.persistedName(),
                 System.getProperty("app.drydock.diag.command", built));
+    }
+
+    /**
+     * Whether a diagnostic override will replace this kind's built command.
+     * Read BEFORE minting an MCP config: computing one for a launch whose
+     * command is about to be discarded would mint a token and write a file
+     * nothing ever consumes.
+     */
+    private static boolean hasDiagOverride(AgentKind kind) {
+        return diagOverride(kind, null) != null;
     }
 
     /**
@@ -206,15 +314,32 @@ public final class SessionManager implements AutoCloseable {
         return newSessionMetadata(repository, displayName, agentKind, Optional.of(worktreeRoot), branchCreatedHere);
     }
 
-    /** Launches a session minted by {@link #prepareSession}/{@link #prepareWorktreeSession}. */
+    /**
+     * Launches a session minted by {@link #prepareSession}/{@link
+     * #prepareWorktreeSession}, on behalf of the human: it may use the Drydock
+     * MCP tools to create worktrees and start further sessions.
+     */
     public CompletableFuture<SessionOpenResult> launchSession(ManagedAgentSession prepared, TerminalRuntime app,
                                                               TerminalHostView host, double scaleFactor) {
-        return launchNewSession(prepared, prepared.displayName(), app, host, scaleFactor);
+        return launchSession(prepared, app, host, scaleFactor, Spawn.ALLOWED);
+    }
+
+    /**
+     * As {@link #launchSession(ManagedAgentSession, TerminalRuntime,
+     * TerminalHostView, double)}, stating whether the new session may itself
+     * spawn worktrees and sessions through MCP. {@link Spawn#FORBIDDEN} is
+     * what keeps agent-driven fan-out at depth 1: without it, one instruction
+     * could turn into a dozen agent processes.
+     */
+    public CompletableFuture<SessionOpenResult> launchSession(ManagedAgentSession prepared, TerminalRuntime app,
+                                                              TerminalHostView host, double scaleFactor,
+                                                              Spawn spawn) {
+        return launchNewSession(prepared, prepared.displayName(), app, host, scaleFactor, spawn);
     }
 
     private CompletableFuture<SessionOpenResult> launchNewSession(ManagedAgentSession initial, String displayName,
                                                                   TerminalRuntime app, TerminalHostView host,
-                                                                  double scaleFactor) {
+                                                                  double scaleFactor, Spawn spawn) {
         AgentKind kind = initial.agentKind();
         AgentProvider provider = registry.provider(kind)
                 .orElseThrow(() -> new IllegalStateException("No provider for " + kind));
@@ -257,7 +382,8 @@ public final class SessionManager implements AutoCloseable {
                     launchedAtRef.set(Instant.now());
                 }, backgroundExecutor)
                 .thenCompose(ignored -> buildAndLaunchCreate(provider, displayName, sessionId,
-                        initial.workingDirectory(), remote, app, host, scaleFactor, workingDir))
+                        initial.workingDirectory(), remote, app, host, scaleFactor, workingDir,
+                        initial.id(), spawn))
                 .handleAsync((launch, ex) -> finalizeCreate(initial, sessionId, launch, ex), backgroundExecutor);
 
         if (discovery.isPresent()) {
@@ -295,14 +421,25 @@ public final class SessionManager implements AutoCloseable {
      * {@link TerminalSurface} on the FX thread. Shared by {@link
      * #launchNewSession} and {@link #startFreshConversation}, the two paths
      * that mint a brand-new agent conversation.
+     *
+     * <p>The per-session MCP config is minted inside this method's async stage
+     * -- writing it is file I/O, and it must never happen on the (FX) caller
+     * thread. A remote launch mints nothing at all: {@code claude} would run on
+     * the remote host and could not reach this machine's loopback address, so
+     * the file would only be a live bearer token sitting unused on disk.</p>
      */
     private CompletableFuture<CreateLaunch> buildAndLaunchCreate(AgentProvider provider, String displayName,
                                                                   String sessionId, Path targetWorkingDirectory,
                                                                   Optional<SshRemote> remote, TerminalRuntime app,
                                                                   TerminalHostView host, double scaleFactor,
-                                                                  String surfaceWorkingDirectory) {
+                                                                  String surfaceWorkingDirectory,
+                                                                  ManagedSessionId managedSessionId, Spawn spawn) {
         return CompletableFuture.supplyAsync(() -> {
-                    CreateContext ctx = new CreateContext(displayName, sessionId, targetWorkingDirectory, remote);
+                    Optional<Path> mcpConfig = remote.isPresent() || hasDiagOverride(provider.kind())
+                            ? Optional.empty()
+                            : mcpConfigFor(provider, managedSessionId, spawn);
+                    CreateContext ctx = new CreateContext(displayName, sessionId, targetWorkingDirectory, remote,
+                            mcpConfig);
                     LaunchPlan plan = provider.buildCreateCommand(ctx);
                     if (!plan.supported()) {
                         throw new IllegalStateException(
@@ -329,6 +466,11 @@ public final class SessionManager implements AutoCloseable {
         if (ex != null) {
             Throwable cause = unwrap(ex);
             LOG.log(Level.WARNING, () -> "Failed to start session " + initial.id() + ": " + cause.getMessage());
+            // A launch that never got a surface never reaches onSurfaceClosed,
+            // so its token and config file would otherwise live as long as the
+            // app. Already on the background executor (handleAsync), so the
+            // file delete needs no further hop.
+            releaseMcpConfig(initial.id());
             try {
                 persistUpdatedSession(initial.withStatus(SessionStatus.FAILED));
             } catch (RuntimeException persistFailure) {
@@ -402,8 +544,17 @@ public final class SessionManager implements AutoCloseable {
                     // conservative fallback rather than sinking the resume
                     // (see ClaudeAgentProvider.detectCaps).
                     return CompletableFuture.supplyAsync(() -> {
+                                // Spawn.ALLOWED: a resume is the human
+                                // reopening a session from the UI. A known
+                                // limitation: depth 1 is a property of the
+                                // LAUNCH, not of the session, so a session an
+                                // agent started regains spawn rights if the
+                                // human later resumes it themselves.
+                                Optional<Path> mcpConfig = remote.isPresent()
+                                        ? Optional.empty()
+                                        : mcpConfigFor(provider, session.id(), Spawn.ALLOWED);
                                 ResumeContext ctx = new ResumeContext(session.agentSessionId(),
-                                        session.agentSessionName(), session.workingDirectory(), remote);
+                                        session.agentSessionName(), session.workingDirectory(), remote, mcpConfig);
                                 return provider.buildResumeCommand(ctx).command();
                             }, backgroundExecutor)
                             .thenCompose(command -> createSurfaceOnFxThread(app, host, scaleFactor, command,
@@ -523,8 +674,11 @@ public final class SessionManager implements AutoCloseable {
                     String workingDir = remote.isPresent()
                             ? System.getProperty("user.home")
                             : cleared.workingDirectory().toString();
+                    // Spawn.ALLOWED for the same reason as the resume path: a
+                    // fresh start is the human's own action, taken from the UI.
                     return buildAndLaunchCreate(provider, cleared.displayName(), freshSessionId,
-                            cleared.workingDirectory(), remote, app, host, scaleFactor, workingDir)
+                            cleared.workingDirectory(), remote, app, host, scaleFactor, workingDir,
+                            cleared.id(), Spawn.ALLOWED)
                             .handleAsync((launch, ex) -> finalizeCreate(cleared, freshSessionId, launch, ex),
                                     backgroundExecutor);
                 });
@@ -588,9 +742,14 @@ public final class SessionManager implements AutoCloseable {
         // (closeGracefully's callback); the metadata removal must not run
         // there.
         return closeSession(sessionId).thenRunAsync(
-                () -> stateStore.update(state -> state.withSessions(state.sessions().stream()
-                        .filter(session -> !session.id().equals(sessionId))
-                        .toList())),
+                () -> {
+                    // Also covers a session that had no active surface, and so
+                    // never went through onSurfaceClosed.
+                    releaseMcpConfig(sessionId);
+                    stateStore.update(state -> state.withSessions(state.sessions().stream()
+                            .filter(session -> !session.id().equals(sessionId))
+                            .toList()));
+                },
                 backgroundExecutor);
     }
 
@@ -635,6 +794,14 @@ public final class SessionManager implements AutoCloseable {
      * updated (idempotent; racing with {@link #closeSession}'s own EXITED
      * update is harmless).
      *
+     * <p>This is a session-ending path in its own right, and the most common
+     * one: the user types {@code exit}, or the agent finishes. Because the
+     * surface deliberately stays open, {@link #onSurfaceClosed} does not run,
+     * so the MCP token and its config file are released HERE -- otherwise the
+     * file under {@code <base>/mcp/} would keep a live bearer token on disk for
+     * as long as the tab stayed open. Guarded by the {@code Optional} result,
+     * which makes it happen exactly once.</p>
+     *
      * @return the updated session, or empty if the session no longer exists
      *         or was not RUNNING
      */
@@ -652,11 +819,14 @@ public final class SessionManager implements AutoCloseable {
             result[0] = updated;
             return withReplacedSession(state, updated);
         });
-        return Optional.ofNullable(result[0]);
+        Optional<ManagedAgentSession> exited = Optional.ofNullable(result[0]);
+        exited.ifPresent(session -> releaseMcpConfigAsync(session.id()));
+        return exited;
     }
 
     private void onSurfaceClosed(ManagedSessionId sessionId, TerminalSurface surface) {
         activeSurfaces.remove(sessionId, surface);
+        releaseMcpConfigAsync(sessionId);
         findSession(sessionId).ifPresent(session -> {
             session.agentSessionId().ifPresent(activeRegistry::release);
             persistUpdatedSession(session.withStatus(SessionStatus.EXITED));

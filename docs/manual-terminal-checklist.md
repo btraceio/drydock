@@ -183,3 +183,66 @@ shell enables bracketed paste -- ordinary typed characters must go through
 3. Fixed-height controls (filter field 32px, icon buttons 30px, title bar
    44px) do not grow; confirm their text still fits at 16.
 4. Quit and relaunch. The size is restored with no visible re-layout flash.
+## MCP server (spec 2026-07-25)
+
+**Status: NOT YET RUN — UNVERIFIABLE HEADLESSLY.** Like Gate 0E (item 2
+above), every step here needs a real `claude` binary and a real Claude
+account: the tools are only reachable from inside a live session, and the
+MCP handshake happens between `claude` and the app over loopback HTTP. The
+automated suite covers the pieces either side of that boundary — the
+`--mcp-config` flag assembly (`ClaudeAgentProviderMcpFlagTest`), the tool
+router and its refusals (`McpToolRouter*Test`), the transport
+(`McpServerTest`), the token registry (`McpSessionRegistryTest`), the
+config file (`McpConfigWriterTest`) and the context's path handling
+(`WorkspaceMcpSessionContextTest`) — but nothing in it proves a real
+`claude` ever connects.
+
+Walk this with a human at the keyboard:
+
+1. Start a session in a local repository. Run `/mcp` and confirm a `drydock`
+   server appears **connected**, listing six tools. *A protocol-level
+   handshake failure would leave every unit test green and the feature
+   inert, so this is the gate that matters most.*
+2. Ask the session to call `repos_list`. Confirm it names your registered
+   repositories and branches, and that a registered **remote** repository
+   appears without dirty/ahead/behind.
+3. In the Review view, leave an annotation on a changed line. Ask the session
+   to read the review comments and address them. Confirm it reports the
+   annotation text **and the excerpt**, and that the thread flips to
+   "addressed" with a `Claude`-authored note.
+4. **With the Review tab still open**, confirm the card updates live — the
+   annotation-store change listener — and that clicking Resolve afterwards
+   keeps the agent's note.
+5. Confirm the summary line counts the addressed thread, and that the
+   thread's button reads "Resolve", not "Reopen".
+6. Ask the session to create a worktree and start a session in it. Confirm a
+   new sidebar entry and terminal tab appear.
+7. In that **new** session, run `/mcp`, then ask it to create a worktree.
+   Confirm it is refused as an agent-started session — fan-out is depth 1.
+8. Ask the original session to create five worktrees. Confirm the fifth is
+   refused, naming the limit.
+9. Ask a session to call `worktree_create` with branch `origin/main`. Confirm
+   it is refused before git runs.
+10. Ask a session to call `session_start` with a path outside the repository
+    (e.g. `/tmp`). Confirm it is refused, naming the path.
+11. Start a **remote SSH** session. Run `/mcp` and confirm no `drydock` server
+    is listed. (An earlier draft of this checklist also asked you to confirm a
+    banner saying Drydock tools are unavailable for remote sessions. No such
+    banner exists — nothing in the implementation builds one, and the claim was
+    withdrawn from the design; see the "Known gap" note under Scope in
+    `docs/superpowers/specs/2026-07-25-drydock-mcp-server-design.md`. Do not
+    treat its absence as a failure of this step.)
+12. Close a session, then confirm its file under `<base>/mcp/` is gone and
+    that a `curl` with its old token gets 401.
+13. Let `claude` exit **on its own** — type `exit` in the session — and **leave
+    the tab open**. Note the token from its `<base>/mcp/` file first, then
+    confirm the file disappears within a second or two (the exit watcher's
+    tick) and that a `curl` with that token gets 401 even though the terminal
+    tab is still there reading its final output. *This is a different path from
+    item 12: closing the tab revokes correctly, while a self-exit does not go
+    through the surface-close path at all, so it needs its own release.*
+14. Build the packaged app (`./gradlew :app:appImage`), launch it, and repeat
+    step 1. **This is the only check that catches a missing `jdk.httpserver`
+    in the jlink module list:** `:app:test` and `:app:run` both resolve
+    `com.sun.net.httpserver` from the full JDK and would stay green while the
+    shipped app failed to serve a single request.

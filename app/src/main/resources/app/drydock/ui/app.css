@@ -1895,6 +1895,9 @@
 .review-thread-card.thread-fixed {
     -fx-border-color: -drydock-running;
 }
+.review-thread-card.thread-addressed {
+    -fx-border-color: -drydock-dirty;
+}
 .review-status-pill {
     -fx-background-radius: 100px;
     -fx-font-size: 9.5px;
@@ -1907,6 +1910,10 @@
 .status-sent {
     -fx-background-color: -drydock-running-soft;
     -fx-text-fill: -drydock-running;
+}
+.status-addressed {
+    -fx-background-color: -drydock-dirty-soft;
+    -fx-text-fill: -drydock-dirty;
 }
 .status-resolved {
     -fx-background-color: -drydock-active-bg;

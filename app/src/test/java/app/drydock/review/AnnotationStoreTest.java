@@ -8,9 +8,16 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class AnnotationStoreTest {
@@ -50,13 +57,13 @@ class AnnotationStoreTest {
     }
 
     @Test
-    void updateReplacesById(@TempDir Path dir) {
+    void mutateReplacesById(@TempDir Path dir) {
         AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"));
         ManagedSessionId sessionId = ManagedSessionId.newId();
         ReviewAnnotation annotation = sample(sessionId);
         store.add(annotation);
 
-        store.update(annotation.withStatus(AnnotationStatus.RESOLVED));
+        store.mutate(annotation.id(), current -> current.withStatus(AnnotationStatus.RESOLVED));
 
         assertEquals(AnnotationStatus.RESOLVED, store.forSession(sessionId).get(0).status());
         store.flushPendingSaves();
@@ -116,6 +123,270 @@ class AnnotationStoreTest {
         AnnotationStore store = new AnnotationStore(file);
 
         assertTrue(store.forSession(ManagedSessionId.newId()).isEmpty());
+    }
+
+    /**
+     * Documents the store-level contract {@code ReviewView.sendToClaude()}
+     * relies on for its fix: a caller that lists annotations, then hands off
+     * to something that can take a while (there: a synchronous post into the
+     * live terminal), must re-read by id via {@link AnnotationStore#byId}
+     * before writing a status change -- not compute it from the list entry
+     * it captured before the hand-off. This proves the store returns the
+     * up-to-date value (with the concurrent reply) when read that way, so a
+     * write built from it does not clobber the other writer's change.
+     */
+    @Test
+    void byIdReflectsAConcurrentUpdateMadeAfterAnEarlierListRead(@TempDir Path dir) {
+        AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"));
+        ReviewAnnotation annotation = sample(ManagedSessionId.newId());
+        store.add(annotation);
+
+        // Simulate the caller's initial list read (e.g. sendToClaude's
+        // `forScope` snapshot) capturing the pre-reply value...
+        ReviewAnnotation captured = store.forSession(annotation.sessionId()).get(0);
+
+        // ...while another writer appends a reply during the hand-off window.
+        store.mutate(annotation.id(), current -> current.withReply(
+                new ReviewAnnotation.Message("Claude", AT.plusSeconds(5), "already on it")));
+
+        // A write computed from the freshly re-read value keeps the reply;
+        // one computed from `captured` would silently drop it.
+        ReviewAnnotation fresh = store.byId(annotation.id()).orElseThrow();
+        assertEquals(2, fresh.thread().size());
+        ReviewAnnotation correctlyComputed = fresh.withStatus(AnnotationStatus.SENT);
+        assertEquals(2, correctlyComputed.thread().size(), "re-reading before writing preserves the concurrent reply");
+
+        ReviewAnnotation staleComputed = captured.withStatus(AnnotationStatus.SENT);
+        assertEquals(1, staleComputed.thread().size(),
+                "computing from the captured value would have discarded the concurrent reply");
+        store.flushPendingSaves();
+    }
+
+    @Test
+    void changeListenerFiresOnAddMutateAndRemove(@TempDir Path dir) throws Exception {
+        try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
+            List<String> events = new ArrayList<>();
+            store.addChangeListener(events::add);
+
+            ReviewAnnotation annotation = ReviewAnnotation.create(ManagedSessionId.newId(), DiffScope.BASE,
+                    "src/Main.java", "n1", "n1",
+                    new ReviewAnnotation.Message("You", Instant.EPOCH, "look here"));
+
+            store.add(annotation);
+            store.mutate(annotation.id(), current -> current.withStatus(AnnotationStatus.SENT));
+            store.remove(annotation.id());
+
+            assertEquals(List.of(annotation.id(), annotation.id(), annotation.id()), events);
+        }
+    }
+
+    @Test
+    void removingASessionFiresOneBulkChange(@TempDir Path dir) throws Exception {
+        try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
+            ManagedSessionId session = ManagedSessionId.newId();
+            store.add(ReviewAnnotation.create(session, DiffScope.BASE, "a.java", "n1", "n1",
+                    new ReviewAnnotation.Message("You", Instant.EPOCH, "one")));
+            store.add(ReviewAnnotation.create(session, DiffScope.BASE, "b.java", "n2", "n2",
+                    new ReviewAnnotation.Message("You", Instant.EPOCH, "two")));
+
+            List<String> events = new ArrayList<>();
+            store.addChangeListener(events::add);
+            store.removeSession(session);
+
+            assertEquals(1, events.size());
+            assertNull(events.get(0), "a bulk change reports a null id");
+        }
+    }
+
+    @Test
+    void unsubscribingStopsDelivery(@TempDir Path dir) throws Exception {
+        try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
+            List<String> events = new ArrayList<>();
+            Runnable unsubscribe = store.addChangeListener(events::add);
+            unsubscribe.run();
+
+            store.add(ReviewAnnotation.create(ManagedSessionId.newId(), DiffScope.BASE, "a.java", "n1", "n1",
+                    new ReviewAnnotation.Message("You", Instant.EPOCH, "one")));
+
+            assertTrue(events.isEmpty());
+        }
+    }
+
+    @Test
+    void aThrowingListenerDoesNotBreakTheWrite(@TempDir Path dir) throws Exception {
+        try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
+            store.addChangeListener(id -> {
+                throw new IllegalStateException("listener blew up");
+            });
+
+            ReviewAnnotation annotation = ReviewAnnotation.create(ManagedSessionId.newId(), DiffScope.BASE,
+                    "a.java", "n1", "n1", new ReviewAnnotation.Message("You", Instant.EPOCH, "one"));
+            store.add(annotation);
+
+            assertTrue(store.byId(annotation.id()).isPresent(), "the write must survive a bad listener");
+        }
+    }
+
+    // ---- mutate: the atomic read-modify-write --------------------------------
+
+    @Test
+    void mutateAppliesTheTransformToTheStoredValue(@TempDir Path dir) throws Exception {
+        try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
+            ReviewAnnotation annotation = sample(ManagedSessionId.newId());
+            store.add(annotation);
+
+            Optional<ReviewAnnotation> updated =
+                    store.mutate(annotation.id(), current -> current.withStatus(AnnotationStatus.RESOLVED));
+
+            assertEquals(AnnotationStatus.RESOLVED, updated.orElseThrow().status());
+            assertEquals(AnnotationStatus.RESOLVED, store.byId(annotation.id()).orElseThrow().status());
+        }
+    }
+
+    @Test
+    void mutateIsEmptyAndCallsNothingForAnUnknownId(@TempDir Path dir) throws Exception {
+        try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
+            List<String> applied = new ArrayList<>();
+
+            Optional<ReviewAnnotation> updated = store.mutate("no-such-id", current -> {
+                applied.add(current.id());
+                return current;
+            });
+
+            assertTrue(updated.isEmpty());
+            assertTrue(applied.isEmpty(), "the transform must not run for an id that is not stored");
+        }
+    }
+
+    @Test
+    void mutateNotifiesListeners(@TempDir Path dir) throws Exception {
+        try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
+            ReviewAnnotation annotation = sample(ManagedSessionId.newId());
+            store.add(annotation);
+            List<String> events = new ArrayList<>();
+            store.addChangeListener(events::add);
+
+            store.mutate(annotation.id(), current -> current.withStatus(AnnotationStatus.SENT));
+
+            assertEquals(List.of(annotation.id()), events);
+        }
+    }
+
+    /**
+     * A transform that refuses by throwing leaves the store untouched and fires
+     * nothing: that is how {@code McpToolRouter.review_reply} declines a thread
+     * the human has already resolved, deciding against the stored value while
+     * holding the lock that makes the decision meaningful.
+     */
+    @Test
+    void aThrowingTransformWritesNothingAndNotifiesNobody(@TempDir Path dir) throws Exception {
+        try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
+            ReviewAnnotation annotation = sample(ManagedSessionId.newId());
+            store.add(annotation);
+            List<String> events = new ArrayList<>();
+            store.addChangeListener(events::add);
+
+            assertThrows(IllegalStateException.class, () -> store.mutate(annotation.id(), current -> {
+                throw new IllegalStateException("refused");
+            }));
+
+            assertEquals(annotation, store.byId(annotation.id()).orElseThrow());
+            assertTrue(events.isEmpty());
+        }
+    }
+
+    /**
+     * The two-thread case the whole method exists for: while one thread is
+     * inside its transform, a second thread mutates the same annotation. Both
+     * replies must survive.
+     *
+     * <p>A read-then-write pair loses one of them -- the slow thread
+     * writes a value derived from what it read before the other thread's write
+     * landed. This is the FX-tab-versus-MCP-router race, with the latch
+     * standing in for the arbitrary scheduling that makes it rare in the
+     * field and impossible to reproduce by hand.</p>
+     */
+    @Test
+    void aConcurrentMutationIsNotLostWhileATransformIsRunning(@TempDir Path dir) throws Exception {
+        try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
+            ReviewAnnotation annotation = sample(ManagedSessionId.newId());
+            store.add(annotation);
+            CountDownLatch inTransform = new CountDownLatch(1);
+            CountDownLatch release = new CountDownLatch(1);
+
+            Thread slow = new Thread(() -> store.mutate(annotation.id(), current -> {
+                inTransform.countDown();
+                awaitOrFail(release);
+                return current.withReply(new ReviewAnnotation.Message("You", AT, "slow"));
+            }));
+            slow.start();
+            assertTrue(inTransform.await(5, TimeUnit.SECONDS), "the first transform never started");
+
+            Thread other = new Thread(() -> store.mutate(annotation.id(),
+                    current -> current.withReply(new ReviewAnnotation.Message("Claude", AT, "fast"))));
+            other.start();
+            // Long enough that a store applying transforms outside its lock
+            // would have let this write land and then be overwritten.
+            Thread.sleep(200);
+            release.countDown();
+            slow.join(5_000);
+            other.join(5_000);
+
+            List<String> texts = store.byId(annotation.id()).orElseThrow().thread().stream()
+                    .map(ReviewAnnotation.Message::text)
+                    .toList();
+            assertTrue(texts.contains("slow") && texts.contains("fast"),
+                    "neither concurrent reply may be lost: " + texts);
+        }
+    }
+
+    /**
+     * Listeners fire outside the monitor, so a listener that blocks -- an FX
+     * tab rebuilding its cards, say -- must not stop another thread from
+     * mutating, and must not cost that mutation.
+     */
+    @Test
+    void aBlockingListenerNeitherDeadlocksNorLosesTheNextMutation(@TempDir Path dir) throws Exception {
+        try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
+            ReviewAnnotation annotation = sample(ManagedSessionId.newId());
+            store.add(annotation);
+            CountDownLatch inListener = new CountDownLatch(1);
+            CountDownLatch release = new CountDownLatch(1);
+            store.addChangeListener(id -> {
+                if (inListener.getCount() > 0) {
+                    inListener.countDown();
+                    awaitOrFail(release);
+                }
+            });
+
+            Thread first = new Thread(() -> store.mutate(annotation.id(),
+                    current -> current.withReply(new ReviewAnnotation.Message("You", AT, "first"))));
+            first.start();
+            assertTrue(inListener.await(5, TimeUnit.SECONDS), "the listener never ran");
+
+            Thread second = new Thread(() -> store.mutate(annotation.id(),
+                    current -> current.withReply(new ReviewAnnotation.Message("Claude", AT, "second"))));
+            second.start();
+            second.join(5_000);
+            assertFalse(second.isAlive(), "a blocked listener must not hold the store's monitor");
+
+            release.countDown();
+            first.join(5_000);
+
+            List<String> texts = store.byId(annotation.id()).orElseThrow().thread().stream()
+                    .map(ReviewAnnotation.Message::text)
+                    .toList();
+            assertTrue(texts.contains("first") && texts.contains("second"), String.valueOf(texts));
+        }
+    }
+
+    private static void awaitOrFail(CountDownLatch latch) {
+        try {
+            assertTrue(latch.await(10, TimeUnit.SECONDS), "latch never released");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(e);
+        }
     }
 
     private static void waitForFile(Path file) throws InterruptedException {
