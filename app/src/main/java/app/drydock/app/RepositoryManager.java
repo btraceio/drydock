@@ -190,6 +190,20 @@ public final class RepositoryManager {
         stateStore.update(state -> state.withUi(state.ui().withTheme(theme)));
     }
 
+    /**
+     * Persists the interface font size immediately, like the theme: a
+     * discrete user action in the settings modal, cheap to save, and losing
+     * it to a crash would be a visible regression on the next launch.
+     */
+    public void updateUiFontSize(double uiFontSize) {
+        stateStore.update(state -> state.withUi(state.ui().withUiFontSize(uiFontSize)));
+    }
+
+    /** Persists the terminal font size immediately, for the same reason as {@link #updateUiFontSize}. */
+    public void updateTerminalFontSize(double terminalFontSize) {
+        stateStore.update(state -> state.withUi(state.ui().withTerminalFontSize(terminalFontSize)));
+    }
+
     private static String defaultDisplayName(Path root) {
         Path fileName = root.getFileName();
         return fileName == null ? root.toString() : fileName.toString();

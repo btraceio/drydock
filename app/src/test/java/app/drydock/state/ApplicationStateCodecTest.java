@@ -13,6 +13,7 @@ import app.drydock.domain.SshRemote;
 import app.drydock.domain.WorkspaceUiState;
 import app.drydock.state.json.JsonParser;
 import app.drydock.state.json.JsonValue;
+import app.drydock.state.json.JsonWriter;
 import app.drydock.state.json.JsonValue.JsonArray;
 import app.drydock.state.json.JsonValue.JsonObject;
 import app.drydock.state.json.JsonValue.JsonString;
@@ -350,5 +351,67 @@ class ApplicationStateCodecTest {
 
         assertThrows(StateDecodeException.class,
                 () -> ApplicationStateCodec.fromJson(JsonParser.parse(sessionDocument(session))));
+    }
+
+    @Test
+    void fontSizesRoundTrip() {
+        ApplicationState state = new ApplicationState(List.of(), List.of(),
+                WorkspaceUiState.empty().withUiFontSize(15).withTerminalFontSize(11));
+
+        ApplicationState decoded = ApplicationStateCodec.fromJson(
+                JsonParser.parse(JsonWriter.write(ApplicationStateCodec.toJson(state))));
+
+        assertEquals(15, decoded.ui().uiFontSize());
+        assertEquals(11, decoded.ui().terminalFontSize());
+    }
+
+    @Test
+    void absentFontSizesDecodeToTheDefaults() {
+        // A state file written before this feature existed: the ui object
+        // has no font-size members at all.
+        JsonValue json = JsonParser.parse("""
+                {"schemaVersion":%d,"repositories":[],"sessions":[],
+                 "ui":{"selectedRepositoryId":null,"sidebarWidth":288.0,
+                       "expandedRepositoryIds":[],"theme":"DARK"}}
+                """.formatted(ApplicationStateCodec.SCHEMA_VERSION));
+
+        WorkspaceUiState ui = ApplicationStateCodec.fromJson(json).ui();
+
+        assertEquals(13.0, ui.uiFontSize());
+        assertEquals(13.0, ui.terminalFontSize());
+    }
+
+    @Test
+    void malformedFontSizesDecodeToTheDefaultsWithoutFailingTheWholeState() {
+        JsonValue json = JsonParser.parse("""
+                {"schemaVersion":%d,"repositories":[],"sessions":[],
+                 "ui":{"selectedRepositoryId":null,"sidebarWidth":288.0,
+                       "expandedRepositoryIds":[],"theme":"DARK",
+                       "uiFontSize":"enormous","terminalFontSize":null}}
+                """.formatted(ApplicationStateCodec.SCHEMA_VERSION));
+
+        WorkspaceUiState ui = ApplicationStateCodec.fromJson(json).ui();
+
+        assertEquals(13.0, ui.uiFontSize());
+        assertEquals(13.0, ui.terminalFontSize());
+    }
+
+    @Test
+    void outOfRangeFontSizeSurvivesTheDecodeUnchanged() {
+        // The codec does not clamp -- range ownership belongs to the point
+        // of application (ThemeManager / TerminalThemes), exactly like
+        // sidebarWidth, which the SplitPane clamps at use. A hand-edited
+        // value is honoured as far as it can be, never silently rewritten.
+        JsonValue json = JsonParser.parse("""
+                {"schemaVersion":%d,"repositories":[],"sessions":[],
+                 "ui":{"selectedRepositoryId":null,"sidebarWidth":288.0,
+                       "expandedRepositoryIds":[],"theme":"DARK",
+                       "uiFontSize":900.0,"terminalFontSize":0.0}}
+                """.formatted(ApplicationStateCodec.SCHEMA_VERSION));
+
+        WorkspaceUiState ui = ApplicationStateCodec.fromJson(json).ui();
+
+        assertEquals(900.0, ui.uiFontSize());
+        assertEquals(0.0, ui.terminalFontSize());
     }
 }

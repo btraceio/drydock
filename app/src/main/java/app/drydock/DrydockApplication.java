@@ -6,7 +6,10 @@ import app.drydock.agent.api.AgentRegistry;
 import app.drydock.app.RepositoryManager;
 import app.drydock.app.SessionManager;
 import app.drydock.activity.SessionActivityWatcher;
+import app.drydock.config.UserConfig;
 import app.drydock.domain.Repository;
+import app.drydock.domain.UiTheme;
+import app.drydock.domain.WorkspaceUiState;
 import app.drydock.git.ChangedLineService;
 import app.drydock.git.DiffService;
 import app.drydock.git.GhCliService;
@@ -22,6 +25,8 @@ import app.drydock.ui.GitHubCloneModal;
 import app.drydock.ui.MainWorkspace;
 import app.drydock.ui.RemoteRepositoryModal;
 import app.drydock.ui.RepositorySidebar;
+import app.drydock.ui.SettingsModal;
+import app.drydock.ui.SizeSetting;
 import app.drydock.ui.model.WorkspaceViewModel;
 import app.drydock.ui.review.ReviewView;
 import javafx.application.Application;
@@ -199,6 +204,7 @@ public final class DrydockApplication extends Application {
         appShell = new AppShell(primaryStage, WINDOW_TITLE, sidebar, mainWorkspace,
                 repositoryManager.state().ui().sidebarWidth(),
                 repositoryManager.state().ui().theme(),
+                repositoryManager.state().ui().uiFontSize(),
                 theme -> {
                     repositoryManager.updateTheme(theme);
                     // Terminals follow the app theme: re-theme every live
@@ -208,6 +214,79 @@ public final class DrydockApplication extends Application {
                 DEFAULT_SCENE_WIDTH, DEFAULT_SCENE_HEIGHT);
 
         mainWorkspace.setThemeProvider(() -> appShell.themeManager().theme());
+        mainWorkspace.setTerminalFontSizeProvider(
+                () -> repositoryManager.state().ui().terminalFontSize());
+        // Warms the ghostty config cache for the pair the FIRST opened
+        // session will need, off the FX thread: MainWorkspace.
+        // createOpenSessionTab reads TerminalThemes.configFileFor
+        // synchronously, which is only cheap once this (theme, size) pair
+        // is cached (see that method's Javadoc). Reuses applyTerminalTheme
+        // rather than a bespoke warm call -- there are no open tabs yet, so
+        // its "apply to every open terminal" step is a no-op, and every
+        // later theme toggle or terminal-size change re-warms the same way
+        // through that same method.
+        mainWorkspace.applyTerminalTheme(appShell.themeManager().theme());
+
+        appShell.setOnShowSettings(() -> {
+            SettingsModal settingsModal = new SettingsModal(new SettingsModal.Settings() {
+                @Override
+                public UiTheme theme() {
+                    return appShell.themeManager().theme();
+                }
+
+                @Override
+                public void setTheme(UiTheme theme) {
+                    // Persists and re-themes terminals via AppShell's own
+                    // onThemeChanged callback; no duplicate write here.
+                    appShell.themeManager().setTheme(theme);
+                }
+
+                @Override
+                public SizeSetting interfaceSize() {
+                    // Applying is live only and persisting is a plain write of
+                    // the chosen value: ThemeManager.setUiFontSize regenerates
+                    // off the FX thread on a cache miss, so its applied size
+                    // can still be one FX event behind when the persist runs
+                    // (see SizeSetting) -- which is why nothing here reads it
+                    // back. A size that fails to generate now degrades to the
+                    // unscaled stylesheet instead of failing the next launch,
+                    // so persisting the raw choice is safe.
+                    return new SizeSetting(
+                            () -> appShell.themeManager().uiFontSize(),
+                            size -> appShell.themeManager().setUiFontSize(size),
+                            repositoryManager::updateUiFontSize);
+                }
+
+                @Override
+                public SizeSetting terminalSize() {
+                    // The live step bypasses repositoryManager.state() on
+                    // purpose: mainWorkspace.applyTerminalTheme reads the size
+                    // back through terminalFontSizeProvider, which would still
+                    // see the OLD persisted value mid-drag.
+                    return new SizeSetting(
+                            () -> repositoryManager.state().ui().terminalFontSize(),
+                            mainWorkspace::previewTerminalFontSize,
+                            repositoryManager::updateTerminalFontSize);
+                }
+
+                @Override
+                public CompletableFuture<Optional<Path>> loadWorktreesDirectory() {
+                    return UserConfig.loadAsync().thenApply(UserConfig::worktreesDirectory);
+                }
+
+                @Override
+                public CompletableFuture<Void> saveWorktreesDirectory(Optional<Path> directory) {
+                    return UserConfig.saveAsync(new UserConfig(directory));
+                }
+            }, appShell.modalLayer()::close);
+            // onClosed, not just the Done/× onClose above: Esc and a
+            // backdrop click hide the modal without moving focus off the
+            // worktrees field, so its focus-lost commit never fires --
+            // flushPendingEdit is the one seam every close path runs
+            // through (see ModalLayer.close's onClosed callback).
+            appShell.modalLayer().show(settingsModal, settingsModal::flushPendingEdit);
+        });
+
         mainWorkspace.setModalLayer(appShell.modalLayer());
         mainWorkspace.setOnToggleSidebar(appShell::toggleSidebar);
         // The native ghostty view paints over in-scene modals; hide it while
@@ -443,6 +522,48 @@ public final class DrydockApplication extends Application {
             reviewOpener.start();
         }
 
+        // Diagnostic hook for the Settings modal's visual and behavioural
+        // pass. The modal is the one part of the settings feature no unit
+        // test can reach (there is no JavaFX toolkit harness here), and its
+        // riskiest paths -- "does Esc lose a typed directory", "is the
+        // radio legible in both themes" -- are only observable in a running
+        // app, so they get a driver rather than an unverified claim.
+        //
+        // Value is a comma-separated "<atSeconds>:<verb>[:<arg>]" script,
+        // same shape as diag.explorerScript. Verbs:
+        //   open            show the Settings modal (as the gear button does)
+        //   theme:DARK      set the theme absolutely
+        //   uisize:15       drag the interface-size slider to 15
+        //   tsize:18        drag the terminal-size slider to 18
+        //   dirtext:/p      type into the worktrees-directory field
+        //   esc             close via the SAME path the Esc key filter uses
+        //   shot:/tmp/a.png snapshot the scene
+        //   dump            print the persisted sizes and the on-disk config
+        // Inert unless -Dapp.drydock.diag.settingsScript is set.
+        String settingsScript = System.getProperty("app.drydock.diag.settingsScript");
+        if (settingsScript != null) {
+            Thread driver = new Thread(() -> {
+                long start = System.nanoTime();
+                for (String step : settingsScript.split(",")) {
+                    String[] parts = step.split(":", 3);
+                    long atMillis = (long) (Double.parseDouble(parts[0].strip()) * 1000);
+                    long elapsed = (System.nanoTime() - start) / 1_000_000;
+                    if (elapsed < atMillis) {
+                        try {
+                            Thread.sleep(atMillis - elapsed);
+                        } catch (InterruptedException e) {
+                            return;
+                        }
+                    }
+                    String verb = parts[1].strip();
+                    String arg = parts.length > 2 ? parts[2] : "";
+                    Platform.runLater(() -> diagSettingsStep(primaryStage, verb, arg));
+                }
+            });
+            driver.setDaemon(true);
+            driver.start();
+        }
+
         // Diagnostic hook: sends 10 synthetic scroll-up events through the
         // selected tab's scroll path (verifies the Java ->
         // ghostty_surface_mouse_scroll pipeline without real NSEvents).
@@ -544,7 +665,14 @@ public final class DrydockApplication extends Application {
                 return;
             }
             if (cmd && event.isShiftDown() && event.getCode() == KeyCode.L) {
-                appShell.toggleTheme();
+                // Gated like ⌘, below: the settings modal's theme radio reads
+                // the theme once at construction and has no listener on the
+                // manager, so a toggle underneath it would desync the radio
+                // from reality with no way for the user to click it back
+                // (SettingsModal's class Javadoc).
+                if (!appShell.modalLayer().isShowingModal()) {
+                    appShell.toggleTheme();
+                }
                 event.consume();
             } else if (cmd && event.getCode() == KeyCode.OPEN_BRACKET) {
                 mainWorkspace.selectPreviousSessionTab();
@@ -583,6 +711,15 @@ public final class DrydockApplication extends Application {
                 mainWorkspace.activeSessionId().flatMap(id -> sessionManager.sessions().stream()
                                 .filter(s -> s.id().equals(id)).findFirst())
                         .ifPresent(mainWorkspace::promptRenameSession);
+                event.consume();
+            } else if (cmd && event.getCode() == KeyCode.COMMA) {
+                // Inert while another modal is up: ⌘, must never replace an
+                // in-progress Start-session or New-worktree modal underneath
+                // the user. (The gear button is unreachable then anyway --
+                // the backdrop covers the title bar.)
+                if (!appShell.modalLayer().isShowingModal()) {
+                    appShell.showSettings();
+                }
                 event.consume();
             } else if (!inTextInput && !cmd && event.isShiftDown()
                     && event.getCode() == KeyCode.SLASH) {
@@ -659,6 +796,7 @@ public final class DrydockApplication extends Application {
                 closeQuietly("sidebar-width persistence", () -> repositoryManager.updateSidebarWidth(sidebarWidth));
             }
         }
+        closeQuietly("UserConfig saves", UserConfig::flushPendingSaves);
         if (gitHubService != null) {
             closeQuietly("GitHubService", gitHubService::close);
         }
@@ -756,6 +894,107 @@ public final class DrydockApplication extends Application {
         } catch (RuntimeException e) {
             LOG.log(Level.WARNING, "Shutdown step failed: " + what, e);
         }
+    }
+
+    /**
+     * Diagnostic-only: one step of {@code app.drydock.diag.settingsScript}.
+     * Drives the Settings modal through the same entry points the UI uses --
+     * {@code showSettings} is what the gear button calls, and {@code esc}
+     * goes through {@code ModalLayer.close()} exactly as the scene's Esc
+     * filter does -- so what this exercises is the real path, not a
+     * test-only shortcut past it.
+     */
+    private void diagSettingsStep(Stage stage, String verb, String arg) {
+        try {
+            switch (verb) {
+                case "open" -> {
+                    appShell.showSettings();
+                    System.out.println("[diag] settings opened");
+                }
+                case "theme" -> {
+                    appShell.themeManager().setTheme(UiTheme.valueOf(arg.strip()));
+                    System.out.println("[diag] theme set to " + arg.strip());
+                }
+                case "uisize" -> {
+                    double size = Double.parseDouble(arg.strip());
+                    appShell.themeManager().setUiFontSize(size);
+                    repositoryManager.updateUiFontSize(size);
+                    System.out.println("[diag] interface size set to " + size);
+                }
+                case "tsize" -> {
+                    double size = Double.parseDouble(arg.strip());
+                    repositoryManager.updateTerminalFontSize(size);
+                    mainWorkspace.applyTerminalTheme(appShell.themeManager().theme());
+                    System.out.println("[diag] terminal size set to " + size);
+                }
+                case "dirtext" -> {
+                    TextInputControl field = diagSettingsDirectoryField();
+                    if (field == null) {
+                        System.out.println("[diag] dirtext: no directory field found (is the modal open?)");
+                    } else {
+                        field.setText(arg);
+                        System.out.println("[diag] dirtext typed: " + arg);
+                    }
+                }
+                case "esc" -> {
+                    appShell.modalLayer().close();
+                    System.out.println("[diag] modal closed via the Esc path");
+                }
+                case "type" -> {
+                    // Types into the focused terminal and presses Return.
+                    // Used to prove the terminal font size took effect
+                    // WITHOUT pixels: the ghostty surface is a native view
+                    // stacked above the JavaFX scene, so a scene snapshot
+                    // cannot see it, but `stty size` reports the cell grid,
+                    // which must change when the cell size does.
+                    arg.codePoints().forEach(cp -> {
+                        String ch = new String(Character.toChars(cp));
+                        mainWorkspace.diagPressKey(0, ch, ch);
+                    });
+                    mainWorkspace.diagPressKey(36, "\r", "\r");
+                    System.out.println("[diag] typed: " + arg);
+                }
+                case "view" -> {
+                    // The terminal sub-tab runs a plain login shell, so a
+                    // font-size check does not depend on `claude` being
+                    // installed or authenticated.
+                    if ("terminal".equals(arg.strip())) {
+                        mainWorkspace.showTerminalSubTab();
+                    } else {
+                        mainWorkspace.showClaudeSubTab();
+                    }
+                    System.out.println("[diag] view -> " + arg.strip());
+                }
+                case "shot" -> diagSnapshot(stage, Path.of(arg));
+                case "dump" -> {
+                    WorkspaceUiState ui = repositoryManager.state().ui();
+                    System.out.println("[diag] persisted uiFontSize=" + ui.uiFontSize()
+                            + " terminalFontSize=" + ui.terminalFontSize()
+                            + " theme=" + ui.theme());
+                    Path configFile = UserConfig.defaultConfigFile();
+                    System.out.println("[diag] config " + configFile + " -> "
+                            + (Files.exists(configFile)
+                            ? Files.readString(configFile).replace('\n', ' ')
+                            : "(absent)"));
+                }
+                default -> System.out.println("[diag] unknown settings verb " + verb);
+            }
+        } catch (IOException | RuntimeException e) {
+            System.out.println("[diag] settings step '" + verb + "' failed: " + e);
+        }
+    }
+
+    /**
+     * The Settings modal's worktrees-directory field, or {@code null} when the
+     * modal is not showing. Located by type: it is the modal's only text input.
+     */
+    private TextInputControl diagSettingsDirectoryField() {
+        for (javafx.scene.Node node : appShell.modalLayer().lookupAll(".text-field")) {
+            if (node instanceof TextInputControl field) {
+                return field;
+            }
+        }
+        return null;
     }
 
     /**

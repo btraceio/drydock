@@ -4,6 +4,7 @@ import app.drydock.domain.ApplicationState;
 import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SshRemote;
+import app.drydock.domain.UiTheme;
 import app.drydock.git.GitExecutableLocator;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.NotAGitRepositoryException;
@@ -162,6 +163,26 @@ class RepositoryManagerTest {
         flushState();
         assertEquals(1, manager.repositories().size());
         assertEquals(savesBefore, stateRepository.saveCount(), "an unknown id must not trigger a redundant save");
+    }
+
+    @Test
+    void updateUiFontSizePersistsWithoutDisturbingTheTheme() {
+        manager.updateTheme(UiTheme.LIGHT);
+
+        manager.updateUiFontSize(15.0);
+
+        assertEquals(15.0, manager.state().ui().uiFontSize());
+        assertEquals(UiTheme.LIGHT, manager.state().ui().theme());
+    }
+
+    @Test
+    void updateTerminalFontSizePersistsWithoutDisturbingTheInterfaceSize() {
+        manager.updateUiFontSize(15.0);
+
+        manager.updateTerminalFontSize(11.0);
+
+        assertEquals(11.0, manager.state().ui().terminalFontSize());
+        assertEquals(15.0, manager.state().ui().uiFontSize());
     }
 
     private static final class InMemoryStateRepository implements ApplicationStateRepository {

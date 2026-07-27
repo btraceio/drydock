@@ -84,3 +84,102 @@ Javadoc for a second, related finding (`ghostty_surface_text` is
 paste-only semantics, and gets wrapped in bracketed-paste markers once the
 shell enables bracketed paste -- ordinary typed characters must go through
 `ghostty_surface_key`/`sendCharKey` instead).
+
+## Settings — opening and closing the modal
+
+1. Look at the title bar. The gear button renders between the `?` shortcuts
+   button and the theme toggle — if it is missing or in the wrong slot, the
+   layout wiring in `TitleBar`/`AppShell` has regressed.
+2. Click the gear button. Settings opens — this is the only way to reach it
+   without the keyboard, so it must work on its own, not just as a backup
+   for ⌘,.
+3. Close it, then press ⌘, instead. Settings opens the same way — both
+   entry points must land on the same modal, not two different ones.
+4. With Settings open, press ⌘, again. Nothing stacks and nothing flickers;
+   a second modal on top of the first would mean the ⌘, handler stopped
+   checking `modalLayer().isShowingModal()` before opening.
+5. Close Settings, open New worktree, then press ⌘,. New worktree is left
+   untouched and Settings does not appear over it — ⌘, must stay inert
+   while any other modal owns the screen, or it could silently replace a
+   form the user is mid-way through filling in.
+6. Open Settings again and press Esc. It closes — Esc must reach the modal
+   layer's generic close handling, not just the terminal.
+7. Reopen it and click the × in the header. It closes.
+8. Reopen it and click **Done**. It closes. All three (Esc, ×, Done) are
+   equivalent exits — there is no OK/Cancel distinction to get wrong.
+9. Press `?` to open the shortcuts overlay and find the **Settings** row —
+   it must read `⌘,`, confirming the shortcut is documented where a user
+   would actually look for it.
+
+## Settings — unchanged at the default size
+
+1. Quit and relaunch with no settings changed (interface size at its 13.0
+   default). Compare the app's overall look to before this feature existed
+   — every row, button, and font should look exactly the same. The interface
+   slider's default position deliberately returns the bundled, unscaled
+   stylesheet with no generated copy in play, so this is the one setting
+   combination most likely to silently break something structural if it
+   didn't.
+
+## Settings — legibility in both themes
+
+1. Open Settings in Dark. Read the **Dark**/**Light** radio captions and
+   drag both sliders. The captions must be clearly readable text (not
+   near-black on the dark background) and the slider tracks/thumbs must be
+   visibly distinct from the modal's backdrop — stock JavaFX controls
+   default to a light-mode look that app.css does not otherwise override,
+   so this is the one place in the app that regresses if that gap is ever
+   reopened.
+2. Toggle to Light (closing Settings first, since the theme cannot change
+   while it's open — see the next item) and reopen Settings. Repeat the
+   same check: captions and slider tracks must be legible against the
+   light backdrop too.
+3. With Settings open in either theme, press ⌘⇧L. Nothing happens — the
+   theme is locked while the modal is showing, specifically so the radio
+   (which reads the theme once, at construction) can never drift from
+   reality with no way to click it back.
+
+## Settings — worktrees directory round trip
+
+1. Open Settings. The **Directory** field starts disabled showing
+   "Loading…", then resolves to either empty (no directory configured yet)
+   or the previously saved path — never left stuck at "Loading…", which
+   would mean `UserConfig.loadAsync`'s future never completed.
+2. Click **Browse…** and pick a directory. The field fills in with the
+   chosen absolute path and both the field and the button briefly disable
+   while the save is in flight, then re-enable.
+3. Close Settings, then open **New worktree** for any repository. The
+   proposed worktree path is nested under the directory chosen in step 2,
+   not the old `~/dev/wt` default — proving `WorktreeNaming` actually reads
+   the saved value back, not just that Settings wrote something.
+4. Quit the app (or just inspect the file) and check
+   `~/.drydock/config.json`. It contains a `worktreesDirectory` key with
+   the chosen path — this setting has no automated coverage at all, so this
+   manual step is the only check that the full write-then-read path works
+   end to end.
+
+## Settings — terminal font size
+
+1. Open a Claude session so a ghostty surface is live.
+2. Open Settings (⌘,) and drag **Terminal size**. It snaps to whole pixels
+   only (no ".5" readout) — `TerminalThemes` rounds to an int internally, so
+   a half-pixel readout would show a number the terminal cannot actually
+   render. Drag it to 18.
+3. The running terminal's text grows immediately — not only new sessions.
+4. Toggle the theme (⌘⇧L). The terminal re-themes and **keeps** size 18.
+   (A regression here means the size went back to a per-surface override,
+   which `ghostty_surface_update_config` discards.)
+5. Quit and relaunch. The terminal opens at 18.
+
+## Settings — interface font size
+
+1. Open Settings and sweep **Interface size** across 11 → 16.
+2. At both extremes check for clipping in: the title bar and traffic
+   lights, the sidebar filter field, the icon buttons, a combo-box popup
+   (New worktree ▸ Fork from), a right-click context menu, and a tooltip.
+   The popups and menus must scale with everything else — they are separate
+   scene graphs, and an implementation that only styled the main scene would
+   leave them at 13px.
+3. Fixed-height controls (filter field 32px, icon buttons 30px, title bar
+   44px) do not grow; confirm their text still fits at 16.
+4. Quit and relaunch. The size is restored with no visible re-layout flash.

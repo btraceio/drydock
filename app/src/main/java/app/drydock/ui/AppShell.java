@@ -42,13 +42,15 @@ public final class AppShell {
     private boolean sidebarCollapsed;
     private double savedSidebarWidth = -1;
 
+    private Runnable onShowSettings = () -> { };
+
     private final BorderPane shell = new BorderPane();
     /** Slim strip shown in the sidebar's place while collapsed: an expand button + the ⌘0 hint. */
     private final Region collapsedRail = buildCollapsedRail();
 
     public AppShell(Stage stage, String title, Region sidebar, Region mainPane,
-                    double initialSidebarWidth, UiTheme initialTheme, Consumer<UiTheme> onThemeChanged,
-                    double sceneWidth, double sceneHeight) {
+                    double initialSidebarWidth, UiTheme initialTheme, double initialUiFontSize,
+                    Consumer<UiTheme> onThemeChanged, double sceneWidth, double sceneHeight) {
         this.sidebar = sidebar;
 
         sidebar.setMinWidth(SIDEBAR_MIN);
@@ -58,6 +60,7 @@ public final class AppShell {
 
         titleBar = new TitleBar(stage, title,
                 () -> showShortcutsOverlay(),
+                this::showSettings,
                 () -> toggleTheme(),
                 () -> toggleSidebar());
 
@@ -67,7 +70,7 @@ public final class AppShell {
         StackPane root = new StackPane(shell, modalLayer);
 
         scene = new Scene(root, sceneWidth, sceneHeight);
-        themeManager = new ThemeManager(scene, initialTheme, theme -> {
+        themeManager = new ThemeManager(scene, initialTheme, initialUiFontSize, theme -> {
             titleBar.showThemeGlyphFor(theme);
             onThemeChanged.accept(theme);
         });
@@ -146,5 +149,14 @@ public final class AppShell {
 
     public void showShortcutsOverlay() {
         modalLayer.show(ShortcutsOverlay.create(modalLayer::close));
+    }
+
+    /** Wires the gear button and ⌘, to the settings modal (supplied by the application). */
+    public void setOnShowSettings(Runnable onShowSettings) {
+        this.onShowSettings = onShowSettings == null ? () -> { } : onShowSettings;
+    }
+
+    public void showSettings() {
+        onShowSettings.run();
     }
 }

@@ -59,7 +59,8 @@ class JsonApplicationStateRepositoryTest {
         Path repoRoot = Files.createDirectory(tempDir.resolve("repo-root"));
         Repository repo = sampleRepository(repoRoot);
         WorkspaceUiState ui = new WorkspaceUiState(
-                Optional.of(repo.id()), 321.0, Set.of(repo.id()), app.drydock.domain.UiTheme.LIGHT);
+                Optional.of(repo.id()), 321.0, Set.of(repo.id()), app.drydock.domain.UiTheme.LIGHT,
+                WorkspaceUiState.DEFAULT_UI_FONT_SIZE, WorkspaceUiState.DEFAULT_TERMINAL_FONT_SIZE);
         ApplicationState state = new ApplicationState(List.of(repo), List.of(), ui);
 
         JsonApplicationStateRepository repository = new JsonApplicationStateRepository(stateFile());

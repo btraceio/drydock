@@ -15,6 +15,7 @@ import app.drydock.domain.SessionActivity;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SshRemote;
 import app.drydock.domain.UiTheme;
+import app.drydock.domain.WorkspaceUiState;
 import app.drydock.git.ChangedLineService;
 import app.drydock.git.DiffService;
 import app.drydock.git.GhCliService;
@@ -75,6 +76,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.DoubleSupplier;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
@@ -196,6 +198,18 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
     /** Current UI theme, for terminal config selection; wired by DrydockApplication once the shell exists. */
     private Supplier<UiTheme> themeProvider = () -> UiTheme.DARK;
+
+    /** Where new and re-themed terminals read the persisted font size from. */
+    private DoubleSupplier terminalFontSizeProvider = () -> WorkspaceUiState.DEFAULT_TERMINAL_FONT_SIZE;
+
+    /**
+     * The most recently requested (theme, fontSize) pair passed to {@link
+     * #applyTerminalConfig}, read back inside its callback to drop a
+     * superseded result -- see that method's Javadoc. FX-thread-only, like
+     * the rest of this class.
+     */
+    private UiTheme pendingTerminalTheme;
+    private double pendingTerminalFontSize = Double.NaN;
 
     /**
      * True while a modal is showing. The ghostty terminal is a NATIVE view
@@ -443,12 +457,70 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         this.themeProvider = provider == null ? () -> UiTheme.DARK : provider;
     }
 
-    /** Re-themes every open terminal to {@code theme} (called on the FX thread by the theme toggle). */
+    /** Wires where terminals read the configured font size from (settings modal). */
+    public void setTerminalFontSizeProvider(DoubleSupplier provider) {
+        this.terminalFontSizeProvider =
+                provider == null ? () -> WorkspaceUiState.DEFAULT_TERMINAL_FONT_SIZE : provider;
+    }
+
+    /**
+     * Re-applies the terminal config to every open terminal (called on the FX
+     * thread by the theme toggle). ghostty re-reads the whole config file, so
+     * theme and font size travel together over this one path -- which is
+     * exactly why the size lives in the config rather than in the per-surface
+     * struct, where {@code ghostty_surface_update_config} would discard it.
+     * The terminal font size for this call comes from {@link
+     * #terminalFontSizeProvider}, whereas live preview uses {@link
+     * #previewTerminalFontSize} to bypass persisted state during a slider drag.
+     */
     public void applyTerminalTheme(UiTheme theme) {
-        Path configFile = TerminalThemes.configFileFor(theme);
-        for (OpenSessionTab open : openTabs.values()) {
-            open.applyTerminalTheme(configFile);
-        }
+        applyTerminalConfig(theme, terminalFontSizeProvider.getAsDouble());
+    }
+
+    /**
+     * Live preview of a terminal font size as the settings modal's slider
+     * moves: applied immediately to every open surface, bypassing
+     * {@link #terminalFontSizeProvider} (which reads persisted state) since
+     * the caller persists separately -- see {@link SizeSetting}. Reuses
+     * {@link #applyTerminalConfig}, so a rapid sequence of previews cannot
+     * block the FX thread either.
+     */
+    public void previewTerminalFontSize(double fontSize) {
+        applyTerminalConfig(themeProvider.get(), fontSize);
+    }
+
+    /**
+     * Extracts (or looks up) the config for {@code (theme, fontSize)} and
+     * applies it to every open terminal. Extraction happens off the FX
+     * thread on a cache miss (see {@link TerminalThemes#configFileForAsync}),
+     * which matters here because both callers above can fire on every tick
+     * of a slider drag; {@code openTabs} is read again inside the callback
+     * rather than captured up front, so a tab opened or closed while
+     * extraction is in flight is still handled correctly.
+     *
+     * <p>{@code (theme, fontSize)} is recorded as the pending request before
+     * the lookup starts, and re-checked when the result lands, exactly as
+     * {@link ThemeManager#setUiFontSize} does for the interface stylesheet:
+     * {@code configFileForAsync}'s cache misses each spawn their own virtual
+     * thread, and the monitor inside {@link TerminalThemes#configFileFor} is
+     * released before {@code Platform.runLater} is even called, so nothing
+     * orders the callbacks -- a drag from size 10 to 18 can have the size-14
+     * result land after the size-15 one. Dropping any callback that is no
+     * longer the latest request keeps the terminals in sync with the
+     * slider. A theme toggle always becomes the latest request (it is
+     * always the most recent call), so it always applies.</p>
+     */
+    private void applyTerminalConfig(UiTheme theme, double fontSize) {
+        pendingTerminalTheme = theme;
+        pendingTerminalFontSize = fontSize;
+        TerminalThemes.configFileForAsync(theme, fontSize, configFile -> {
+            if (theme != pendingTerminalTheme || fontSize != pendingTerminalFontSize) {
+                return;
+            }
+            for (OpenSessionTab open : openTabs.values()) {
+                open.applyTerminalTheme(configFile);
+            }
+        });
     }
 
     public boolean hasOpenSessions() {
@@ -1273,11 +1345,21 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         // The wakeup coalescer already delivers on the FX thread with at most
         // one pending runnable; a second Platform.runLater here would defeat
         // that coalescing.
+        //
+        // configFileFor is called synchronously here (current theme, current
+        // size) rather than through configFileForAsync: this call site is
+        // warmed-by-construction -- see that method's Javadoc -- because
+        // DrydockApplication warms this exact pair at startup and every
+        // theme/size change re-warms it, so a filesystem touch here is the
+        // rare exception, not the rule. Restructuring TerminalRuntime
+        // creation to await the async variant would ripple into
+        // OpenSessionTab/SessionManager for a hit that already almost never
+        // happens.
         TerminalRuntime app = TerminalFactory.createRuntime(() -> {
             if (holder[0] != null) {
                 holder[0].tickAndDraw();
             }
-        }, Optional.of(TerminalThemes.configFileFor(themeProvider.get())));
+        }, Optional.of(TerminalThemes.configFileFor(themeProvider.get(), terminalFontSizeProvider.getAsDouble())));
         TerminalHostView host;
         try {
             host = TerminalFactory.createHostForCurrentWindow();
@@ -1301,8 +1383,10 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             openTab.setShellWorkingDirectory(System.getProperty("user.home"));
         });
         openTab.setShellTerminalProvider(onWakeup -> {
+            // Synchronous and warmed-by-construction for the same reason as
+            // the Claude runtime above.
             TerminalRuntime shellRuntime = TerminalFactory.createRuntime(onWakeup,
-                    Optional.of(TerminalThemes.configFileFor(themeProvider.get())));
+                    Optional.of(TerminalThemes.configFileFor(themeProvider.get(), terminalFontSizeProvider.getAsDouble())));
             TerminalHostView shellHost;
             try {
                 shellHost = TerminalFactory.createHostForCurrentWindow();
