@@ -48,6 +48,70 @@ class ReviewScopeRegistryTest {
         assertEquals(1, registry.scopes().size());
     }
 
+    /**
+     * The regression test for a silent data-loss bug: base and head used to
+     * be part of scope identity, so anything that moved them -- checking out
+     * a pull request, or a plain `git switch` in the main checkout --
+     * re-derived every worktree's handle. Findings and verdicts are keyed by
+     * (scopeId, …), so they vanished from the UI while sitting untouched in
+     * the store under the old handle, with nothing on screen to say so.
+     */
+    @Test
+    void aScopeKeepsItsHandleWhenTheBaseBranchMoves() {
+        ReviewScope before = registry.mint(ReviewScopeRegistry.spec(ReviewScope.Kind.WORKTREE,
+                Path.of("/repo"), Optional.of(Path.of("/wt/feat")), "master", "feat",
+                Optional.empty(), Optional.empty()));
+
+        ReviewScope after = registry.mint(ReviewScopeRegistry.spec(ReviewScope.Kind.WORKTREE,
+                Path.of("/repo"), Optional.of(Path.of("/wt/feat")), "pr-412", "feat",
+                Optional.empty(), Optional.empty()));
+
+        assertEquals(before.id(), after.id(),
+                "a moved base must not orphan the worktree's findings");
+        assertEquals("pr-412", registry.byId(after.id()).orElseThrow().base(),
+                "the new base is still stored; only the identity ignores it");
+    }
+
+    /** A commit inside the worktree moves its head; that is not a different review. */
+    @Test
+    void aScopeKeepsItsHandleWhenTheHeadMoves() {
+        ReviewScope before = registry.mint(ReviewScopeRegistry.spec(ReviewScope.Kind.WORKTREE,
+                Path.of("/repo"), Optional.of(Path.of("/wt/feat")), "master", "feat",
+                Optional.empty(), Optional.empty()));
+
+        ReviewScope after = registry.mint(ReviewScopeRegistry.spec(ReviewScope.Kind.WORKTREE,
+                Path.of("/repo"), Optional.of(Path.of("/wt/feat")), "master", "feat/renamed",
+                Optional.empty(), Optional.empty()));
+
+        assertEquals(before.id(), after.id());
+    }
+
+    /** Two worktrees are two reviews, however alike their branches look. */
+    @Test
+    void differentWorktreesStillGetDifferentHandles() {
+        ReviewScope a = registry.mint(ReviewScopeRegistry.spec(ReviewScope.Kind.WORKTREE,
+                Path.of("/repo"), Optional.of(Path.of("/wt/a")), "master", "same",
+                Optional.empty(), Optional.empty()));
+        ReviewScope b = registry.mint(ReviewScopeRegistry.spec(ReviewScope.Kind.WORKTREE,
+                Path.of("/repo"), Optional.of(Path.of("/wt/b")), "master", "same",
+                Optional.empty(), Optional.empty()));
+
+        assertNotEquals(a.id(), b.id());
+    }
+
+    /** Two pull requests are two reviews even before either is checked out. */
+    @Test
+    void differentPullRequestsGetDifferentHandles() {
+        ReviewScope a = registry.mint(ReviewScopeRegistry.spec(ReviewScope.Kind.PR,
+                Path.of("/repo"), Optional.empty(), "main", "feat",
+                Optional.of(new ReviewScope.PullRequestRef(412, Optional.empty())), Optional.empty()));
+        ReviewScope b = registry.mint(ReviewScopeRegistry.spec(ReviewScope.Kind.PR,
+                Path.of("/repo"), Optional.empty(), "main", "feat",
+                Optional.of(new ReviewScope.PullRequestRef(418, Optional.empty())), Optional.empty()));
+
+        assertNotEquals(a.id(), b.id());
+    }
+
     @Test
     void differentIdentitiesGetDifferentHandles() {
         ReviewScope a = registry.mint(worktreeSpec("feat/a", Optional.empty()));

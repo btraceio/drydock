@@ -27,7 +27,7 @@ session's checkout.
 
 | Piece | Class | Notes |
 |---|---|---|
-| Scope handles | `app.drydock.review.ReviewScope` / `ReviewScopeRegistry` | Opaque `rs_…` handles derived by HMAC from the scope's identity (kind + repo + worktree + base + head + PR) and a per-profile secret persisted in the annotation store. Deterministic, so a handle survives a restart and persisted findings stay addressable; keyed rather than path-derived, so the handle leaks no repository paths. Grants let a human hand one session's agent another worktree's scope. |
+| Scope handles | `app.drydock.review.ReviewScope` / `ReviewScopeRegistry` | Opaque `rs_…` handles derived by HMAC from the scope's identity — **a place, plus which PR it is**: kind + repo + worktree + PR number, and deliberately *not* base or head — and a per-profile secret persisted in the annotation store. Deterministic, so a handle survives a restart and persisted findings stay addressable; keyed rather than path-derived, so the handle leaks no repository paths. Grants let a human hand one session's agent another worktree's scope. |
 | Queue assembly | `ReviewQueueService` | `WorktreeService.list` + `GitStatusService` + `gh pr list --search "review-requested:@me"`, grouped MINE / AGENTS / REQUESTED / STACK. A repository whose git fails, or a missing `gh`, contributes nothing and is logged — the rest of the queue still assembles. |
 | `gh` review requests | `GhCliService.listReviewRequests` | Read-only, per repository, bounded; a malformed row is skipped rather than emptying the group. |
 | Destination view | `app.drydock.ui.review.ReviewDestinationView` | 36px title bar, queue rail, two-row item header (what is being reviewed; its session binding), and a body supplied by its `Host`. |
@@ -79,6 +79,20 @@ need a look before the next milestone builds on them.
   names because the meanings are unrelated: a MED-risk intent is not a dirty
   worktree, and collapsing them would make a future palette change to one
   silently move the other.
+- **Scope identity excludes base and head.** They are properties of a
+  review, not what makes it that review, and both move for reasons unrelated
+  to it. Including them was a silent data-loss bug: findings and verdicts are
+  keyed `(scopeId, …)`, so anything that moved the base — checking out a PR,
+  or a plain `git switch` in the main checkout — re-derived every worktree's
+  handle and made that worktree's review vanish from the UI while sitting
+  untouched in the store under the old handle. Two regression tests pin it,
+  one at the registry and one end-to-end against a real repository.
+- **The base is the repository's default branch, not the current one.**
+  `GitStatusService.defaultBranch` resolves `origin/HEAD`, then the
+  conventional names, and only then falls back to whatever is checked out.
+  Deriving it from the main checkout's current branch made every queue item's
+  diff follow the user's branch switches, leaving line-key-anchored findings
+  pointed at unrelated code with nothing on screen to say so.
 - **Scope handles are derived, not minted at random.** An earlier revision
   generated a fresh random id per process, which meant findings persisted
   under a `scopeId` were orphaned on the next launch. They are now an HMAC of

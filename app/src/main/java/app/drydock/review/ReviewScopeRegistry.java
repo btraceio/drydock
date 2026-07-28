@@ -46,13 +46,32 @@ public final class ReviewScopeRegistry {
     private static final char[] BASE32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ".toCharArray();
     private static final SecureRandom RANDOM = new SecureRandom();
 
-    /** Identity of a scope, independent of its minted id and of any bound session. */
+    /**
+     * Identity of a scope: <em>a place, plus which pull request it is</em> --
+     * the kind, the repository, the worktree, and the PR number. Nothing
+     * else.
+     *
+     * <p><strong>Base and head are deliberately excluded.</strong> They are
+     * properties of a review, not what makes it that review, and both move
+     * for reasons that have nothing to do with the review: the base is
+     * derived from the repository, and a worktree's head changes whenever
+     * someone commits or switches branches inside it.
+     *
+     * <p>Including them was a real bug. Findings and verdicts are keyed by
+     * {@code (scopeId, …)}, so anything that changed the base -- checking out
+     * a pull request, or simply {@code git switch} in the main checkout --
+     * re-derived every worktree's handle and made that worktree's findings
+     * and verdicts vanish from the UI while sitting untouched in the store
+     * under the old handle. Silently: the queue showed the new handle with
+     * nothing against it, and the reviewer had no way to tell their review
+     * had been orphaned rather than never made.</p>
+     */
     private record Identity(ReviewScope.Kind kind, Path repoRoot, Optional<Path> worktree,
-                            String base, String head, Optional<Integer> pr) {
+                            Optional<Integer> pr) {
         static Identity of(ReviewScope scope) {
             return new Identity(scope.kind(), normalized(scope.repoRoot()),
-                    scope.worktree().map(Identity::normalized), scope.base(),
-                    scope.head(), scope.pr().map(ReviewScope.PullRequestRef::number));
+                    scope.worktree().map(Identity::normalized),
+                    scope.pr().map(ReviewScope.PullRequestRef::number));
         }
 
         private static Path normalized(Path path) {
@@ -218,8 +237,6 @@ public final class ReviewScopeRegistry {
             update(mac, identity.kind().name());
             update(mac, identity.repoRoot().toString());
             update(mac, identity.worktree().map(Path::toString).orElse(""));
-            update(mac, identity.base());
-            update(mac, identity.head());
             update(mac, identity.pr().map(Object::toString).orElse(""));
             return opaqueId(mac.doFinal());
         } catch (Exception e) {

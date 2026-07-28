@@ -136,6 +136,19 @@ public final class ReviewQueueService {
                             LOG.log(Level.DEBUG, "Could not read status of " + repository.root(), failure);
                             return new Fetch<>(Optional.empty(), false);
                         });
+        // The base every review diffs against: the repository's own default
+        // branch, NOT whatever the main checkout happens to be on. Deriving
+        // it from the current branch made a `git switch` in another terminal
+        // silently recompute every queue item's diff.
+        CompletableFuture<Fetch<Optional<String>>> defaultBranch =
+                gitStatusService.defaultBranch(repository.root()).handle((value, failure) -> {
+                    if (failure == null) {
+                        return new Fetch<>(value, true);
+                    }
+                    LOG.log(Level.DEBUG, "Could not resolve the default branch of "
+                            + repository.root(), failure);
+                    return new Fetch<>(Optional.<String>empty(), false);
+                });
         CompletableFuture<Fetch<List<GhCliService.ReviewRequest>>> requests =
                 reviewRequests.forRepository(repository.root()).handle((value, failure) -> {
                     if (failure == null) {
@@ -146,8 +159,11 @@ public final class ReviewQueueService {
                 });
 
         return worktrees.thenCombine(status, (trees, mainStatus) ->
-                        new PartialScan(trees.value(), mainStatus.value(),
+                        new PartialScan(trees.value(), mainStatus.value(), Optional.<String>empty(),
                                 trees.complete() && mainStatus.complete()))
+                .thenCombine(defaultBranch, (scan, branch) ->
+                        new PartialScan(scan.worktrees(), scan.status(), branch.value(),
+                                scan.localComplete() && branch.complete()))
                 .thenCombine(requests, (scan, prs) -> new RepositoryScan(repository,
                         build(repository, sessions, scan, prs.value()), scan.localComplete(), prs.complete()));
     }
@@ -155,14 +171,14 @@ public final class ReviewQueueService {
     private record Fetch<T>(T value, boolean complete) { }
 
     private record PartialScan(List<WorktreeService.Worktree> worktrees, Optional<GitStatus> status,
-                               boolean localComplete) { }
+                               Optional<String> defaultBranch, boolean localComplete) { }
 
     private record RepositoryScan(RepositoryTarget repository, List<ReviewItem> items,
                                   boolean localComplete, boolean requestsComplete) { }
 
     private List<ReviewItem> build(RepositoryTarget repository, SessionLookup sessions,
                                    PartialScan scan, List<GhCliService.ReviewRequest> requests) {
-        String base = baseBranchOf(scan.status());
+        String base = baseBranchOf(scan.defaultBranch(), scan.status());
         List<ReviewItem> items = new ArrayList<>();
 
         // MINE -- the main checkout's uncommitted work, when there is any.
@@ -229,14 +245,23 @@ public final class ReviewQueueService {
 
     /**
      * The branch every worktree in this repository is reviewed against: the
-     * main checkout's current branch, which is what {@code DiffService}'s
-     * {@code BASE} scope already diffs against. A detached main checkout has
-     * no name to show, so {@code HEAD} stands in.
+     * repository's <em>default</em> branch.
+     *
+     * <p>It used to be the main checkout's current branch. That made the base
+     * -- and so every queue item's diff -- follow whatever the user happened
+     * to have checked out, so switching branches in another terminal silently
+     * recomputed every review against a different thing, leaving findings
+     * anchored by line key pointing at unrelated code.</p>
+     *
+     * <p>The current branch is still the last resort, for a repository with
+     * no {@code origin/HEAD} and none of the conventional default names; a
+     * detached checkout with neither leaves {@code HEAD}.</p>
      */
-    private static String baseBranchOf(Optional<GitStatus> status) {
-        return status.map(GitStatus::branch)
-                .filter(GitBranchState.OnBranch.class::isInstance)
-                .map(branch -> ((GitBranchState.OnBranch) branch).name())
+    private static String baseBranchOf(Optional<String> defaultBranch, Optional<GitStatus> status) {
+        return defaultBranch
+                .or(() -> status.map(GitStatus::branch)
+                        .filter(GitBranchState.OnBranch.class::isInstance)
+                        .map(branch -> ((GitBranchState.OnBranch) branch).name()))
                 .orElse("HEAD");
     }
 

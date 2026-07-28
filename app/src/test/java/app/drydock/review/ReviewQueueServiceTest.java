@@ -164,6 +164,45 @@ class ReviewQueueServiceTest {
         assertEquals(ReviewScope.Kind.WORKTREE, items.get(0).scope().kind());
     }
 
+    /**
+     * The end-to-end regression test for the orphaned-findings bug: the base
+     * used to be the main checkout's CURRENT branch and part of scope
+     * identity, so switching branches in the main checkout re-derived every
+     * worktree's handle and silently detached its findings and verdicts.
+     */
+    @Test
+    void switchingTheMainCheckoutsBranchKeepsEveryHandleAndBase(
+            @TempDir Path dir, @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(dir);
+        gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/stable").get();
+        ReviewQueueService service = serviceWith(NO_REQUESTS);
+        ReviewItem before = service.assemble(List.of(target(repo)), checkout -> Optional.empty())
+                .get().get(0);
+
+        // Exactly what a reviewer does in another terminal, mid-review.
+        runGit(repo, "switch", "-c", "some-other-thing");
+        ReviewItem after = service.assemble(List.of(target(repo)), checkout -> Optional.empty())
+                .get().get(0);
+
+        assertEquals(before.scope().id(), after.scope().id(),
+                "a branch switch in the main checkout must not orphan a worktree's findings");
+        assertEquals("main", after.scope().base(),
+                "the base is the repository's default branch, not whatever is checked out");
+    }
+
+    @Test
+    void theBaseIsTheDefaultBranchNotTheCurrentOne(@TempDir Path dir, @TempDir Path worktreeParent)
+            throws Exception {
+        Path repo = initCommittedRepo(dir);
+        gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/x").get();
+        runGit(repo, "switch", "-c", "scratch");
+
+        List<ReviewItem> items = serviceWith(NO_REQUESTS)
+                .assemble(List.of(target(repo)), checkout -> Optional.empty()).get();
+
+        assertEquals("main", itemTitled(items, "feat/x").scope().base());
+    }
+
     @Test
     void reassemblingKeepsEveryScopeHandle(@TempDir Path dir, @TempDir Path worktreeParent) throws Exception {
         Path repo = initCommittedRepo(dir);
