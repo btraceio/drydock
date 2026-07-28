@@ -10,7 +10,6 @@ import app.drydock.terminal.api.TerminalHostView;
 import app.drydock.terminal.api.TerminalRuntime;
 import app.drydock.terminal.api.TerminalSurface;
 import app.drydock.ui.explorer.SessionExplorerView;
-import app.drydock.ui.review.ReviewView;
 import javafx.animation.PauseTransition;
 import javafx.application.Platform;
 import javafx.css.PseudoClass;
@@ -81,8 +80,15 @@ final class OpenSessionTab {
     private static final long SHELL_CLOSE_GRACE_MILLIS = 3000;
     private static final long SHELL_CLOSE_POLL_MILLIS = 100;
 
-    /** The four views a session tab can show in its content area (design handoff "Session Explorer" / "Diff Review"). */
-    enum SubTab { CLAUDE, TERMINAL, EXPLORER, REVIEW }
+    /**
+     * The three views a session tab can show in its content area (design
+     * handoff "Session Explorer"). Review used to be a fourth: it is now a
+     * global destination (Review handoff §1), because a per-session tab
+     * cannot show a queue that spans repositories, and because it gated
+     * review off for remote repositories -- while reviewing a remote PR is
+     * the primary use case. {@code ⌘4} navigates there instead.
+     */
+    enum SubTab { CLAUDE, TERMINAL, EXPLORER }
 
     /** One lazily-created native trio for the shell sub-tab (runtime + host, themed by MainWorkspace). */
     record ShellTerminal(TerminalRuntime runtime, TerminalHostView host) { }
@@ -104,19 +110,15 @@ final class OpenSessionTab {
     private final Label statusLabel = new Label("Starting session...");
     private final BorderPane content = new BorderPane();
 
-    // -- Bottom Terminal/Explorer/Review sub-tab bar (handoff "Session Explorer" / "Diff Review") --
+    // -- Bottom Claude/Terminal/Explorer sub-tab bar (handoff "Session Explorer") --
     private final ToggleButton claudeSubTabButton = new ToggleButton("✳  Claude");
     private final ToggleButton terminalSubTabButton = new ToggleButton("❯_  Terminal");
     private final ToggleButton explorerSubTabButton = new ToggleButton("▤  Explorer");
-    private final ToggleButton reviewSubTabButton = new ToggleButton("◨  Review");
     private final Label subTabContext = new Label();
     private SubTab activeSubTab = SubTab.CLAUDE;
     /** Built on first switch to Explorer, via {@link #setExplorerFactory}. */
     private Region explorerView;
     private Supplier<Region> explorerFactory;
-    /** Built on first switch to Review, via {@link #setReviewFactory}. */
-    private Region reviewView;
-    private Supplier<Region> reviewFactory;
 
     // -- Ephemeral shell Terminal sub-tab (never persisted; created on first switch) --
     /** Supplies a fresh shell runtime+host whose wakeup drives the argument (the shell bridge's tickAndDraw). */
@@ -173,6 +175,8 @@ final class OpenSessionTab {
     private Runnable onPreviousSessionTab = () -> { };
     private Runnable onNextSessionTab = () -> { };
     private Runnable onToggleSidebar = () -> { };
+    /** ⌘4 intercepted inside the terminal: navigate to Review, scoped to this session. */
+    private Runnable onShowReview = () -> { };
 
     private String displayName;
 
@@ -291,23 +295,15 @@ final class OpenSessionTab {
         explorerSubTabButton.setFocusTraversable(false);
         explorerSubTabButton.setOnAction(e -> showSubTab(SubTab.EXPLORER));
 
-        reviewSubTabButton.getStyleClass().add("session-subtab");
-        reviewSubTabButton.setFocusTraversable(false);
-        reviewSubTabButton.setOnAction(e -> showSubTab(SubTab.REVIEW));
-
-        // Remote repositories have no local checkout for Explorer (local file
-        // search) or Review (local diffs) to operate on -- spec: Feature
-        // gating. MainWorkspace never wires their factories for a remote
-        // tab, so disable the toggles up front instead of letting a click
-        // silently no-op in showSubTab.
+        // A remote repository has no local checkout for the Explorer's file
+        // search to operate on -- spec: Feature gating. MainWorkspace never
+        // wires its factory for a remote tab, so disable the toggle up front
+        // instead of letting a click silently no-op in showSubTab.
         if (isRemote) {
             explorerSubTabButton.setDisable(true);
-            reviewSubTabButton.setDisable(true);
             explorerSubTabButton.setTooltip(new Tooltip("Not available for remote repositories"));
-            reviewSubTabButton.setTooltip(new Tooltip("Not available for remote repositories"));
         } else {
             explorerSubTabButton.setTooltip(new Tooltip("Explorer (⌘3)"));
-            reviewSubTabButton.setTooltip(new Tooltip("Review (⌘4)"));
         }
 
         subTabContext.getStyleClass().add("session-subtab-context");
@@ -315,7 +311,7 @@ final class OpenSessionTab {
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
 
-        HBox bar = new HBox(4, claudeSubTabButton, terminalSubTabButton, explorerSubTabButton, reviewSubTabButton, spacer, subTabContext);
+        HBox bar = new HBox(4, claudeSubTabButton, terminalSubTabButton, explorerSubTabButton, spacer, subTabContext);
         bar.setAlignment(Pos.CENTER_LEFT);
         bar.getStyleClass().add("session-subtab-bar");
         return bar;
@@ -324,11 +320,6 @@ final class OpenSessionTab {
     /** Supplies the Explorer view on first use (MainWorkspace wires this; it knows the session's search root). */
     void setExplorerFactory(Supplier<Region> factory) {
         this.explorerFactory = factory;
-    }
-
-    /** Supplies the Review view on first use (MainWorkspace wires this; it knows the session's checkout + services). */
-    void setReviewFactory(Supplier<Region> factory) {
-        this.reviewFactory = factory;
     }
 
     /** Supplies a fresh shell runtime+host on first switch to the Terminal sub-tab (MainWorkspace wires this). */
@@ -347,9 +338,9 @@ final class OpenSessionTab {
     }
 
     /**
-     * Explorer bridge for the Review tab (design handoff section C
-     * "Explorer integration"): builds the Explorer if needed, switches to
-     * it, and opens {@code relativeFile} at a 1-based line.
+     * Explorer bridge for the Review destination's {@code ⤢} (design handoff
+     * section C "Explorer integration"): builds the Explorer if needed,
+     * switches to it, and opens {@code relativeFile} at a 1-based line.
      */
     void openExplorerAt(Path relativeFile, int line) {
         showSubTab(SubTab.EXPLORER);
@@ -365,13 +356,7 @@ final class OpenSessionTab {
         }
     }
 
-    /** Diagnostic-only (see MainWorkspace.diagShowReview): switches to the Review sub-tab and returns its view. */
-    ReviewView diagShowReview() {
-        showSubTab(SubTab.REVIEW);
-        return reviewView instanceof ReviewView review ? review : null;
-    }
-
-    /** Explorer bridge for the Review tab: switches to the Explorer and runs a text search for {@code token}. */
+    /** Explorer bridge for Review: switches to the Explorer and runs a text search for {@code token}. */
     void searchInExplorer(String token) {
         showSubTab(SubTab.EXPLORER);
         if (explorerView instanceof SessionExplorerView explorer) {
@@ -385,8 +370,8 @@ final class OpenSessionTab {
 
     /**
      * Switches between the native-surface sub-tabs (Claude, Terminal) and
-     * the scene-graph ones (Explorer, Review). The native views overlay the
-     * scene, so showing Explorer/Review must both swap the center node AND
+     * the scene-graph one (Explorer). The native views overlay the
+     * scene, so showing the Explorer must both swap the center node AND
      * hide the native hosts (else they keep painting over the view);
      * switching to a native sub-tab restores its placeholder center first
      * and re-runs geometry after the layout pass so the native frame tracks
@@ -404,8 +389,8 @@ final class OpenSessionTab {
             focusActiveNativeSubTab();
             return;
         }
-        if (subTab == SubTab.EXPLORER || subTab == SubTab.REVIEW) {
-            Region view = subTab == SubTab.EXPLORER ? explorerViewOrBuild() : reviewViewOrBuild();
+        if (subTab == SubTab.EXPLORER) {
+            Region view = explorerViewOrBuild();
             if (view == null) {
                 // Build failed: undo the button selection, stay put.
                 selectSubTabButton(activeSubTab);
@@ -440,6 +425,19 @@ final class OpenSessionTab {
         }
     }
 
+    /**
+     * Re-runs the active native surface's geometry. Called after the
+     * workspace swaps the centre back from the Review destination: the swap
+     * only invalidates the placeholder's bounds at the next layout pass, so
+     * the native frame would otherwise keep tracking stale bounds.
+     */
+    void updateGeometryNow() {
+        TerminalBridge active = activeSubTab == SubTab.TERMINAL ? shellBridge : bridge;
+        if (active != null) {
+            active.updateGeometry();
+        }
+    }
+
     /** Refocuses whichever native terminal (Claude or shell) the active sub-tab shows, if any. */
     void focusActiveNativeSubTab() {
         if (activeSubTab == SubTab.CLAUDE) {
@@ -453,7 +451,6 @@ final class OpenSessionTab {
         claudeSubTabButton.setSelected(subTab == SubTab.CLAUDE);
         terminalSubTabButton.setSelected(subTab == SubTab.TERMINAL);
         explorerSubTabButton.setSelected(subTab == SubTab.EXPLORER);
-        reviewSubTabButton.setSelected(subTab == SubTab.REVIEW);
     }
 
     /**
@@ -510,7 +507,9 @@ final class OpenSessionTab {
             case CLAUDE_SUB_TAB -> showSubTab(SubTab.CLAUDE);
             case TERMINAL_SUB_TAB -> showSubTab(SubTab.TERMINAL);
             case EXPLORER_SUB_TAB -> showSubTab(SubTab.EXPLORER);
-            case REVIEW_SUB_TAB -> showSubTab(SubTab.REVIEW);
+            // ⌘4 is a navigation command now, not a view switch: it selects
+            // the global Review destination, scoped to this session.
+            case REVIEW_SUB_TAB -> onShowReview.run();
             case PREVIOUS_SESSION_TAB -> onPreviousSessionTab.run();
             case NEXT_SESSION_TAB -> onNextSessionTab.run();
             case TOGGLE_SIDEBAR -> onToggleSidebar.run();
@@ -524,12 +523,6 @@ final class OpenSessionTab {
         return explorerView;
     }
 
-    private Region reviewViewOrBuild() {
-        if (reviewView == null && reviewFactory != null) {
-            reviewView = reviewFactory.get();
-        }
-        return reviewView;
-    }
 
     private HBox buildTabGraphic(Optional<Repository> repository) {
         tabRepoLabel.getStyleClass().add("tab-repo-label");
@@ -775,6 +768,11 @@ final class OpenSessionTab {
 
     void setOnToggleSidebar(Runnable handler) {
         this.onToggleSidebar = handler == null ? () -> { } : handler;
+    }
+
+    /** ⌘4 target: the workspace navigates to the Review destination for this session's checkout. */
+    void setOnShowReview(Runnable handler) {
+        this.onShowReview = handler == null ? () -> { } : handler;
     }
 
     /**

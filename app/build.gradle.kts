@@ -93,10 +93,42 @@ dependencies {
     testImplementation(platform("org.junit:junit-bom:5.11.4"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+
+    // Headless JavaFX harness (see the Monocle block in tasks.test). TestFX
+    // supplies the robot and the node-query DSL; Monocle supplies a Glass
+    // platform that needs no window server, so view tests run identically on
+    // a developer's Mac and on a CI runner with no GUI session. hamcrest is
+    // explicit because testfx-core exposes org.hamcrest.Matcher in its public
+    // API but only declares the dependency at runtime scope.
+    testImplementation("org.hamcrest:hamcrest:2.2")
+    testImplementation("org.testfx:testfx-core:4.0.18")
+    testImplementation("org.testfx:testfx-junit5:4.0.18")
+    testRuntimeOnly("org.testfx:openjfx-monocle:21.0.2")
 }
 
 tasks.test {
     useJUnitPlatform()
+
+    // Headless JavaFX. Monocle replaces the platform's Glass backend with one
+    // that renders to memory, so a test can show a real Stage, apply the real
+    // stylesheets and drive real key events without a window server -- which
+    // is what lets the view tests run on the macos-14 CI runner.
+    //
+    // Set for the whole test JVM rather than per test class: these are read
+    // once at toolkit startup, and Gradle runs one JVM for the suite. The
+    // non-FX tests are unaffected.
+    //
+    // headless.geometry is load-bearing: Monocle's default virtual screen is
+    // 1280x800, and a Scene larger than the screen overflows the software
+    // pixel buffer (BufferOverflowException from the Prism SW pipeline). The
+    // Review view's rails only stay expanded above 1320px wide, so the
+    // virtual screen has to be bigger than the widest scene any test builds.
+    systemProperty("glass.platform", "Monocle")
+    systemProperty("monocle.platform", "Headless")
+    systemProperty("prism.order", "sw")
+    systemProperty("javafx.headless", "true")
+    systemProperty("headless.geometry", "1920x1200-32")
+
 
     // Inputs for RuntimeImageModuleListTest: the packaged app jar, its runtime
     // classpath, and the convention-plugin source that declares the jlink

@@ -747,6 +747,13 @@
     -fx-text-fill: -drydock-text-dim;
 }
 
+.shortcut-section-label {
+    -fx-font-size: 10px;
+    -fx-font-weight: 700;
+    -fx-text-fill: -drydock-text-faint;
+    -fx-padding: 8 0 2 0;
+}
+
 /* ---- Menus / context menus ---------------------------------------------- */
 
 .context-menu {
@@ -2095,4 +2102,306 @@
 .settings-slider .thumb {
     -fx-background-color: -drydock-accent;
     -fx-background-radius: 1em;
+}
+
+/* ---- Review destination (Review handoff sections 3 & 4) ------------------
+ *
+ * Structure only, as everywhere in this sheet: every colour is a token from
+ * theme-dark.css / theme-light.css, and every font size is a px literal so
+ * UiFontScale's interface-size slider scales it (both invariants are pinned
+ * by ThemeTokenContractTest). Radii stay on the handoff's 6 / 8 / 12 ladder
+ * (control · card · pill).
+ */
+
+.review-destination {
+    -fx-background-color: -drydock-main;
+}
+
+/* Title bar -- 36px, above every rail. */
+.review-title-bar {
+    -fx-background-color: -drydock-titlebar;
+    -fx-border-color: transparent transparent -drydock-border transparent;
+    -fx-border-width: 0 0 1 0;
+    -fx-min-height: 36px;
+    -fx-max-height: 36px;
+    -fx-padding: 0 12 0 12;
+}
+.review-title-glyph {
+    -fx-text-fill: -drydock-accent;
+    -fx-font-size: 12px;
+}
+.review-title {
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 13px;
+    -fx-font-weight: 600;
+}
+.review-title-counts {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 11px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+
+/* The pill-shaped chip buttons of the title bar and the session row. */
+.review-chip-button {
+    -fx-background-color: transparent;
+    -fx-background-radius: 12px;
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 12px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 11px;
+    -fx-padding: 3 10 3 10;
+    -fx-cursor: hand;
+}
+.review-chip-button:hover {
+    -fx-text-fill: -drydock-text;
+    -fx-border-color: -drydock-text-dim;
+}
+.review-chip-button:focused {
+    -fx-border-color: -drydock-accent;
+    -fx-text-fill: -drydock-text;
+}
+
+/* Queue rail (spec 4.1) -- 236px / 206px narrow / 44px collapsed. */
+.review-queue-rail {
+    -fx-background-color: -drydock-queue-rail;
+    -fx-border-color: transparent -drydock-border transparent transparent;
+    -fx-border-width: 0 1 0 0;
+}
+.review-rail-header {
+    -fx-background-color: transparent;
+    -fx-background-radius: 0;
+    -fx-min-height: 28px;
+    -fx-max-height: 28px;
+    -fx-padding: 0 9 0 9;
+    -fx-cursor: hand;
+}
+.review-rail-header:hover {
+    -fx-background-color: -drydock-hover;
+}
+.review-rail-header:focused {
+    -fx-background-color: -drydock-accent-soft;
+}
+.review-rail-chevron {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 11px;
+}
+.review-rail-title {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10px;
+    -fx-font-weight: 600;
+}
+.review-rail-hint {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-rail-footer {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-border-color: -drydock-border transparent transparent transparent;
+    -fx-border-width: 1 0 0 0;
+    -fx-padding: 6 10 6 10;
+}
+.review-queue-scroll, .review-queue-scroll .viewport {
+    -fx-background-color: transparent;
+}
+.review-queue-items {
+    -fx-padding: 0 6 8 6;
+    -fx-spacing: 3;
+}
+.review-queue-group {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 9px;
+    -fx-font-weight: 700;
+    -fx-padding: 8 0 2 4;
+}
+.review-queue-item {
+    -fx-background-color: transparent;
+    -fx-background-radius: 6px;
+    -fx-border-color: -drydock-border;
+    -fx-border-radius: 6px;
+    -fx-padding: 7 8 7 8;
+    -fx-alignment: center-left;
+    -fx-cursor: hand;
+}
+.review-queue-item.collapsed {
+    -fx-padding: 7 0 7 0;
+    -fx-alignment: center;
+}
+.review-queue-item:hover {
+    -fx-border-color: -drydock-border-strong;
+}
+.review-queue-item:selected {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-border-color: -drydock-accent;
+}
+/* The focus ring is a real ring, not merely the selection tint: keyboard
+   focus and mouse selection are different states and must look different. */
+.review-queue-item:focused {
+    -fx-border-color: -drydock-accent;
+    -fx-effect: dropshadow(gaussian, -drydock-accent-soft, 6, 0.6, 0, 0);
+}
+.review-queue-icon-column {
+    -fx-min-width: 22px;
+    -fx-max-width: 22px;
+}
+.review-queue-icon {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 11px;
+}
+.review-queue-item:selected .review-queue-icon {
+    -fx-text-fill: -drydock-accent;
+}
+.review-queue-count {
+    -fx-font-size: 9px;
+    -fx-font-weight: 700;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-queue-count.count-open {
+    -fx-text-fill: -drydock-question;
+}
+.review-queue-count.count-blocking {
+    -fx-text-fill: -drydock-blocking;
+}
+.review-queue-dot {
+    -fx-min-width: 5px;  -fx-max-width: 5px;
+    -fx-min-height: 5px; -fx-max-height: 5px;
+    -fx-background-radius: 100px;
+    -fx-background-color: transparent;
+}
+.review-queue-dot.dot-running, .review-session-dot.dot-running {
+    -fx-background-color: -drydock-running;
+}
+.review-queue-dot.dot-idle, .review-session-dot.dot-idle {
+    -fx-background-color: -drydock-text-faint;
+}
+.review-queue-dot.dot-none, .review-session-dot.dot-none {
+    -fx-background-color: transparent;
+}
+.review-queue-title {
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 11.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-queue-item:selected .review-queue-title {
+    -fx-text-fill: -drydock-text;
+}
+.review-queue-subtitle {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10.5px;
+}
+
+/* Item header -- two rows: what is being reviewed, and its session binding. */
+.review-centre {
+    -fx-background-color: -drydock-main;
+}
+.review-item-header {
+    -fx-background-color: -drydock-chrome;
+    -fx-border-color: transparent transparent -drydock-border transparent;
+    -fx-border-width: 0 0 1 0;
+}
+.review-item-header-row {
+    -fx-padding: 7 12 7 12;
+}
+.review-item-icon {
+    -fx-text-fill: -drydock-accent;
+    -fx-font-size: 11px;
+}
+.review-item-title {
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 12.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-item-context {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 11px;
+}
+.review-session-dot {
+    -fx-min-width: 6px;  -fx-max-width: 6px;
+    -fx-min-height: 6px; -fx-max-height: 6px;
+    -fx-background-radius: 100px;
+    -fx-background-color: transparent;
+}
+.review-session-line {
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 11px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-session-hint {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10.5px;
+}
+
+/* Centre body + its placeholder states (spec section 6). */
+.review-body {
+    -fx-background-color: -drydock-main;
+}
+.review-placeholder {
+    -fx-padding: 32;
+}
+.review-placeholder-title {
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 14px;
+    -fx-font-weight: 600;
+}
+.review-placeholder-detail {
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 12px;
+}
+.review-placeholder-mono {
+    -fx-text-fill: -drydock-code-type;
+    -fx-font-size: 11.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-background-color: -drydock-code-bg;
+    -fx-background-radius: 6px;
+    -fx-border-color: -drydock-border;
+    -fx-border-radius: 6px;
+    -fx-padding: 8 10 8 10;
+}
+
+/* Sidebar destination row + the per-worktree open-findings badge. */
+.sidebar-destination {
+    -fx-background-color: transparent;
+    -fx-background-radius: 8px;
+    -fx-border-color: transparent;
+    -fx-border-radius: 8px;
+    -fx-padding: 7 10 7 10;
+    -fx-alignment: center-left;
+    -fx-cursor: hand;
+    -fx-max-width: 1000px;
+}
+.sidebar-destination:hover {
+    -fx-background-color: -drydock-hover;
+}
+.sidebar-destination:focused {
+    -fx-border-color: -drydock-accent;
+}
+.sidebar-destination.active {
+    -fx-background-color: -drydock-accent-soft;
+}
+.sidebar-destination-glyph {
+    -fx-text-fill: -drydock-accent;
+    -fx-font-size: 12px;
+}
+.sidebar-destination-label {
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 12px;
+    -fx-font-weight: 600;
+}
+.sidebar-destination-badge {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-background-radius: 12px;
+    -fx-text-fill: -drydock-accent;
+    -fx-font-size: 10px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-padding: 1 7 1 7;
+}
+.worktree-findings-badge {
+    -fx-background-color: -drydock-question-soft;
+    -fx-background-radius: 6px;
+    -fx-text-fill: -drydock-question;
+    -fx-font-size: 9.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-padding: 0 5 0 5;
 }

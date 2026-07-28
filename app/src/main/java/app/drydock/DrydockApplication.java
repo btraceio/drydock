@@ -23,6 +23,7 @@ import app.drydock.mcp.McpSessionRegistry;
 import app.drydock.mcp.McpToolRouter;
 import app.drydock.mcp.WorkspaceMcpSessionContext;
 import app.drydock.review.AnnotationStore;
+import app.drydock.review.ReviewScopeRegistry;
 import app.drydock.search.SessionSearchService;
 import app.drydock.state.JsonApplicationStateRepository;
 import app.drydock.ui.AppShell;
@@ -30,10 +31,10 @@ import app.drydock.ui.GitHubCloneModal;
 import app.drydock.ui.MainWorkspace;
 import app.drydock.ui.RemoteRepositoryModal;
 import app.drydock.ui.RepositorySidebar;
+import app.drydock.ui.review.ReviewDestinationView;
 import app.drydock.ui.SettingsModal;
 import app.drydock.ui.SizeSetting;
 import app.drydock.ui.model.WorkspaceViewModel;
-import app.drydock.ui.review.ReviewView;
 import javafx.application.Application;
 import javafx.application.Platform;
 import javafx.scene.control.Alert;
@@ -125,6 +126,8 @@ public final class DrydockApplication extends Application {
     private AppShell appShell;
     private GitHubService gitHubService;
     private AnnotationStore annotationStore;
+    /** Cross-repo review scope handles, shared by the Review destination and the MCP tool router. */
+    private ReviewScopeRegistry reviewScopeRegistry;
     private McpServer mcpServer;
 
     private boolean shutdownConfirmed;
@@ -197,12 +200,20 @@ public final class DrydockApplication extends Application {
         WorkspaceViewModel viewModel = new WorkspaceViewModel();
         viewModel.setSessions(sessionManager.sessions());
 
+        // Cross-repo review scope handles. Owned here rather than by the
+        // workspace because the MCP tool router addresses scopes too, and
+        // both must resolve the same handle to the same review.
+        reviewScopeRegistry = new ReviewScopeRegistry();
+
         mainWorkspace = new MainWorkspace(sessionManager, agentRegistry, repositoryManager, gitStatusService,
-                searchService, ghCliService, worktreeService, diffService, changedLineService, annotationStore,
-                viewModel, primaryStage);
+                searchService, ghCliService, worktreeService, changedLineService, annotationStore,
+                reviewScopeRegistry, viewModel, primaryStage);
         RepositorySidebar sidebar =
                 new RepositorySidebar(repositoryManager, gitStatusService, worktreeService, sessionManager,
                         mainWorkspace, viewModel);
+        sidebar.setReviewQueueSize(mainWorkspace::reviewQueueSize);
+        sidebar.setOpenFindingsAt(mainWorkspace::openFindingsAt);
+        mainWorkspace.setOnReviewQueueChanged(sidebar::refreshReviewBadges);
 
         installSessionActivityHooks(activityDir);
         startMcpServer(stateDir);
@@ -220,6 +231,9 @@ public final class DrydockApplication extends Application {
                 DEFAULT_SCENE_WIDTH, DEFAULT_SCENE_HEIGHT);
 
         mainWorkspace.setThemeProvider(() -> appShell.themeManager().theme());
+        // Review's ? button shares the one overlay, so the table stays in
+        // one place and cannot drift from what is actually bound.
+        mainWorkspace.setOnShowShortcuts(appShell::showShortcutsOverlay);
         mainWorkspace.setTerminalFontSizeProvider(
                 () -> repositoryManager.state().ui().terminalFontSize());
         // Warms the ghostty config cache for the pair the FIRST opened
@@ -496,28 +510,20 @@ public final class DrydockApplication extends Application {
             driver.start();
         }
 
-        // Diagnostic hook for the Review tab's visual pass: switches the
-        // selected tab to Review and shows the working-tree diff (the only
-        // non-empty scope for a session opened in a repository root) after
-        // <delaySeconds>. Inert unless -Dapp.drydock.diag.openReview is set.
+        // Diagnostic hook for the Review destination's visual pass: shows
+        // Review and lets its queue assemble, after <delaySeconds>. Inert
+        // unless -Dapp.drydock.diag.openReview is set.
         String openReview = System.getProperty("app.drydock.diag.openReview");
         if (openReview != null) {
             long reviewDelayMillis = (long) (Double.parseDouble(openReview.strip()) * 1000);
             Thread reviewOpener = new Thread(() -> {
                 try {
                     Thread.sleep(reviewDelayMillis);
-                    ReviewView review = onFx(mainWorkspace::diagShowReview);
-                    if (review == null) {
-                        System.out.println("[diag] openReview: no Review view on the selected tab");
-                        return;
-                    }
-                    // The sub-tab switch and first diff render need a few pulses.
-                    Thread.sleep(2_000);
-                    onFx(() -> {
-                        review.diagSelectWorkingTree();
-                        return null;
-                    });
-                    System.out.println("[diag] review opened on the working-tree scope");
+                    ReviewDestinationView review = onFx(mainWorkspace::diagShowReview);
+                    // The queue assembles off-thread (git + gh per repo).
+                    Thread.sleep(3_000);
+                    System.out.println("[diag] review opened with "
+                            + onFx(() -> review.diagItems().size()) + " queue items");
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                 } catch (RuntimeException e) {
@@ -661,8 +667,13 @@ public final class DrydockApplication extends Application {
             boolean cmd = event.isShortcutDown();
 
             if (event.getCode() == KeyCode.ESCAPE) {
+                // Topmost-first (Review spec section 5): the modal, then the
+                // Review destination, then the tab selection.
                 if (appShell.modalLayer().isShowingModal()) {
                     appShell.modalLayer().close();
+                    event.consume();
+                } else if (!inTextInput && mainWorkspace.isReviewShowing()) {
+                    mainWorkspace.hideReview();
                     event.consume();
                 } else if (!inTextInput) {
                     mainWorkspace.showPicker();
@@ -711,7 +722,7 @@ public final class DrydockApplication extends Application {
                 mainWorkspace.showExplorerSubTab();
                 event.consume();
             } else if (cmd && event.getCode() == KeyCode.DIGIT4) {
-                mainWorkspace.showReviewSubTab();
+                mainWorkspace.showReviewForCurrentSession();
                 event.consume();
             } else if (cmd && event.getCode() == KeyCode.R) {
                 mainWorkspace.activeSessionId().flatMap(id -> sessionManager.sessions().stream()

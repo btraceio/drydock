@@ -4,7 +4,7 @@ import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.Repository;
 import app.drydock.git.WorktreeService;
-import app.drydock.ui.review.ReviewView;
+import java.nio.file.Path;
 
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -12,7 +12,7 @@ import java.util.concurrent.CompletableFuture;
 /**
  * The session/worktree actions the sidebar can ask the main workspace to
  * perform, plus the one query it renders from ({@link #activeSessionId()}).
- * Modeled on {@link ReviewView.ExplorerBridge}: the
+ * Modeled on a narrow bridge rather than the full surface: the
  * consumer ({@link RepositorySidebar}) depends on this narrow bridge, and
  * {@link MainWorkspace} implements it — the sidebar never sees the
  * workspace's full surface (tab bookkeeping, native terminal wiring, …).
@@ -44,4 +44,17 @@ public interface WorkspaceNavigator {
 
     /** The session backing the currently selected tab, if any (drives the sidebar's active row). */
     Optional<ManagedSessionId> activeSessionId();
+
+    /**
+     * Shows the Review destination (Review handoff §2: a sidebar
+     * destination pinned above the repository tree), keeping the queue's
+     * current selection.
+     */
+    void showReview();
+
+    /**
+     * Shows Review with the item for {@code checkoutRoot} selected -- {@code
+     * ⌘4} from a session, and the sidebar's per-worktree {@code ◨n} badge.
+     */
+    void showReviewForCheckout(Path checkoutRoot);
 }

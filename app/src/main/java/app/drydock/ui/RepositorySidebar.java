@@ -63,6 +63,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -72,6 +73,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.function.IntSupplier;
 
 /**
  * The repository sidebar, rebuilt to the design handoff (README section 2)
@@ -113,6 +116,29 @@ public final class RepositorySidebar extends VBox {
     private final ExternalEditorLauncher editorLauncher = new ExternalEditorLauncher();
 
     private final TextField filterField = new TextField();
+
+    /**
+     * The Review destination row, pinned above the repository tree (Review
+     * handoff section 2). A real focus-traversable {@link Button}: the
+     * destination has to be reachable without the mouse, exactly like the
+     * tree below it.
+     */
+    private final Button reviewDestinationButton = new Button();
+    private final Label reviewDestinationBadge = new Label();
+
+    /** How many items the Review queue holds right now (drives the badge). */
+    private IntSupplier reviewQueueSize = () -> 0;
+
+    /** Open findings for a worktree checkout, if any -- the per-row ◨n badge. */
+    private Function<Path, Optional<Integer>> openFindingsAt = path -> Optional.empty();
+
+    /**
+     * The finding counts the tree was last rendered with. A queue refresh
+     * that changes no count must not rebuild the tree: rebuild-the-world is
+     * a last resort (AGENTS.md), and Review reassembles its queue every time
+     * the destination is shown.
+     */
+    private Map<Path, Integer> renderedFindingCounts = Map.of();
     private final TreeItem<SidebarNode> treeRoot = new TreeItem<>();
     private final TreeView<SidebarNode> tree = new TreeView<>(treeRoot);
     private final Label footerLabel = new Label();
@@ -214,6 +240,23 @@ public final class RepositorySidebar extends VBox {
         VBox header = new VBox(addButton, filterField);
         header.getStyleClass().add("sidebar-header");
 
+        // -- Review destination, above the tree ------------------------------
+        Label reviewGlyph = new Label("◨");
+        reviewGlyph.getStyleClass().add("sidebar-destination-glyph");
+        Label reviewLabel = new Label("Review");
+        reviewLabel.getStyleClass().add("sidebar-destination-label");
+        reviewDestinationBadge.getStyleClass().add("sidebar-destination-badge");
+        Region reviewSpacer = new Region();
+        HBox.setHgrow(reviewSpacer, Priority.ALWAYS);
+        HBox reviewRow = new HBox(8, reviewGlyph, reviewLabel, reviewSpacer, reviewDestinationBadge);
+        reviewRow.setAlignment(Pos.CENTER_LEFT);
+        reviewDestinationButton.setGraphic(reviewRow);
+        reviewDestinationButton.getStyleClass().add("sidebar-destination");
+        reviewDestinationButton.setMaxWidth(Double.MAX_VALUE);
+        reviewDestinationButton.setTooltip(new Tooltip("Review — local changes, agent worktrees and PRs (⌘4)"));
+        reviewDestinationButton.setOnAction(e -> navigator.showReview());
+        refreshReviewBadges();
+
         // -- Tree -----------------------------------------------------------
         tree.getStyleClass().add("repo-tree");
         tree.setShowRoot(false);
@@ -238,7 +281,7 @@ public final class RepositorySidebar extends VBox {
         HBox footer = new HBox(footerDot, footerLabel);
         footer.getStyleClass().add("sidebar-footer");
 
-        getChildren().addAll(header, tree, footer);
+        getChildren().addAll(header, reviewDestinationButton, tree, footer);
 
         // Keep the displayed list in sync with EVERY repository mutation,
         // not just the ones initiated by this sidebar's own handlers. The
@@ -635,6 +678,54 @@ public final class RepositorySidebar extends VBox {
         collapsed.retainAll(repoIds);
         staleBucketExpanded.retainAll(repoIds);
         lockedBucketExpanded.retainAll(repoIds);
+    }
+
+    /** Supplies the Review queue's item count for the destination badge. */
+    public void setReviewQueueSize(IntSupplier supplier) {
+        this.reviewQueueSize = supplier == null ? () -> 0 : supplier;
+        refreshReviewBadges();
+    }
+
+    /** Supplies a worktree checkout's open-finding count for its {@code ◨n} badge. */
+    public void setOpenFindingsAt(Function<Path, Optional<Integer>> lookup) {
+        this.openFindingsAt = lookup == null ? path -> Optional.empty() : lookup;
+        refreshReviewBadges();
+    }
+
+    /**
+     * Re-reads the Review counts: the destination's item badge, and the
+     * per-worktree {@code ◨n} badges the tree cells draw. Called after every
+     * queue reassembly.
+     */
+    public void refreshReviewBadges() {
+        int items = reviewQueueSize.getAsInt();
+        reviewDestinationBadge.setText(items == 0 ? "" : String.valueOf(items));
+        reviewDestinationBadge.setVisible(items > 0);
+        reviewDestinationBadge.setManaged(items > 0);
+
+        Map<Path, Integer> current = currentFindingCounts();
+        if (!current.equals(renderedFindingCounts)) {
+            renderedFindingCounts = current;
+            rebuildTree();
+        }
+    }
+
+    /** Every worktree path the tree can show, mapped to its open-finding count. */
+    private Map<Path, Integer> currentFindingCounts() {
+        Map<Path, Integer> counts = new LinkedHashMap<>();
+        for (Repository repository : repositoryManager.repositories()) {
+            for (SidebarNode child : childNodesFor(repository)) {
+                Path checkout = switch (child) {
+                    case SidebarNode.SessionNode node -> node.session().worktreeRoot().orElse(null);
+                    case SidebarNode.UnopenedWorktreeNode node -> node.worktree().path();
+                    default -> null;
+                };
+                if (checkout != null) {
+                    openFindingsAt.apply(checkout).ifPresent(count -> counts.put(checkout, count));
+                }
+            }
+        }
+        return Map.copyOf(counts);
     }
 
     /** Re-renders the one row backed by {@code worktreeRoot} (a worktree session row or an unopened row). */
@@ -1375,6 +1466,28 @@ public final class RepositorySidebar extends VBox {
             return counts.toString();
         }
 
+        /**
+         * The {@code ◨n} badge (Review handoff section 2): that worktree's
+         * open findings, and a jump into Review filtered to it. Absent
+         * rather than zero when no reviewer has run -- a confident zero would
+         * read as "reviewed, nothing found".
+         */
+        private Optional<Label> findingsBadge(Path checkoutRoot) {
+            return openFindingsAt.apply(checkoutRoot).map(count -> {
+                Label badge = new Label("◨" + count);
+                badge.getStyleClass().add("worktree-findings-badge");
+                Tooltip.install(badge, new Tooltip(count + (count == 1 ? " open finding" : " open findings")
+                        + " — click to review this worktree"));
+                badge.setOnMouseClicked(event -> {
+                    if (event.getButton() == MouseButton.PRIMARY) {
+                        navigator.showReviewForCheckout(checkoutRoot);
+                        event.consume();
+                    }
+                });
+                return badge;
+            });
+        }
+
         private HBox buildSessionRow(ManagedAgentSession session, Repository repository) {
             boolean live = SessionStatusStyles.isRunning(session.status());
             Region dot = SessionStatusStyles.createDot(8, session.status(), live);
@@ -1431,6 +1544,8 @@ public final class RepositorySidebar extends VBox {
             if (prChip != null) {
                 row.getChildren().add(row.getChildren().indexOf(actions), prChip);
             }
+            session.worktreeRoot().ifPresent(root -> findingsBadge(root)
+                    .ifPresent(badge -> row.getChildren().add(row.getChildren().indexOf(actions), badge)));
             // A session whose Claude is blocked on a human gets a badge: it
             // is the one state that makes no further progress until the user
             // comes back to it. Cleared by switching to the session.
@@ -1512,6 +1627,8 @@ public final class RepositorySidebar extends VBox {
             });
 
             HBox row = new HBox(8, statusCol, text, startPill);
+            findingsBadge(worktree.path())
+                    .ifPresent(badge -> row.getChildren().add(row.getChildren().indexOf(startPill), badge));
             if (!worktree.mainCheckout()) {
                 Button delete = quickAction("🗑", "Delete worktree & branch", true,
                         () -> onDeleteUnopenedWorktree(repository, worktree));

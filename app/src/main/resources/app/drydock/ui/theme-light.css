@@ -51,6 +51,27 @@
     -drydock-sel-bg: rgba(217, 119, 87, 0.16);
     -drydock-changed-gutter: #4c9d5e;
 
+    /* Review destination (light equivalents of the dark set). The Review
+     * handoff specifies dark values only; these keep the same ordering
+     * against the existing light ramp -- queue and intent rails sit between
+     * the main pane (#faf9f6) and the sidebar (#f4f2ee), progressively more
+     * "chrome" the further left they are. */
+    -drydock-queue-rail: #f2f0ec;
+    -drydock-intent-rail: #efece7;
+    -drydock-hunk-header: #ebe8e3;
+
+    /* Semantic severities/risks (light equivalents of the dark set). */
+    -drydock-blocking: #c6493f;
+    -drydock-blocking-soft: rgba(198, 73, 63, 0.14);
+    -drydock-question: #b07c1e;
+    -drydock-question-soft: rgba(176, 124, 30, 0.14);
+    -drydock-deviation: #8a4fb5;
+    -drydock-deviation-soft: rgba(138, 79, 181, 0.14);
+    -drydock-resolved: #4c9d5e;
+    -drydock-resolved-soft: rgba(76, 157, 94, 0.14);
+    -drydock-mcp: #3b6cb7;
+    -drydock-mcp-soft: rgba(59, 108, 183, 0.14);
+
     /* Read-only code viewer palette (light equivalents of the dark set). */
     -drydock-code-text: #3b3d44;
     -drydock-code-kw: #a626a4;

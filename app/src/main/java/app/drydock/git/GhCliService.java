@@ -6,6 +6,7 @@ import app.drydock.process.ProcessTimeoutException;
 import app.drydock.state.json.JsonParseException;
 import app.drydock.state.json.JsonParser;
 import app.drydock.state.json.JsonValue;
+import app.drydock.state.json.JsonValue.JsonArray;
 import app.drydock.state.json.JsonValue.JsonNumber;
 import app.drydock.state.json.JsonValue.JsonObject;
 import app.drydock.state.json.JsonValue.JsonString;
@@ -17,8 +18,10 @@ import java.lang.System.Logger.Level;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
@@ -52,6 +55,26 @@ public final class GhCliService implements AutoCloseable {
     public record PrInfo(int number, PrLifecycle state, Optional<String> url) {
         public enum PrLifecycle { OPEN, MERGED, CLOSED, UNKNOWN }
     }
+
+    /**
+     * One row of {@code gh pr list --search "review-requested:@me"} (Review
+     * spec §4.1, the REQUESTED queue group). Carries what the queue rail
+     * renders plus the refs the checkout gate needs.
+     */
+    public record ReviewRequest(int number, String title, String headRefName, String baseRefName,
+                                Optional<String> author, Optional<String> url, int changedFiles,
+                                boolean draft) {
+        public ReviewRequest {
+            Objects.requireNonNull(title, "title");
+            Objects.requireNonNull(headRefName, "headRefName");
+            Objects.requireNonNull(baseRefName, "baseRefName");
+            Objects.requireNonNull(author, "author");
+            Objects.requireNonNull(url, "url");
+        }
+    }
+
+    /** How many review-requested PRs one {@code gh pr list} call may return. */
+    private static final int REVIEW_REQUEST_LIMIT = 50;
 
     private final ExecutorService executor;
     private final boolean ownsExecutor;
@@ -128,6 +151,81 @@ public final class GhCliService implements AutoCloseable {
             LOG.log(Level.DEBUG, "Unparseable gh pr view output", e);
             return Optional.empty();
         }
+    }
+
+    /**
+     * The open PRs in {@code root}'s repository that ask this user for a
+     * review -- the REQUESTED group of the Review queue.
+     *
+     * <p>An empty list means "nothing to tell you", and covers every
+     * no-information case alike: {@code gh} missing, not authenticated, the
+     * repository having no GitHub remote, or genuinely no requests. Review
+     * degrades rather than blocks (spec §6), so no caller distinguishes
+     * them; each is logged.</p>
+     */
+    public CompletableFuture<List<ReviewRequest>> listReviewRequests(Path root) {
+        return CompletableFuture.supplyAsync(() -> listReviewRequestsBlocking(root), executor);
+    }
+
+    List<ReviewRequest> listReviewRequestsBlocking(Path root) {
+        Path gh = locate().orElse(null);
+        if (gh == null) {
+            return List.of();
+        }
+        ProcessResult result = runIn(root, List.of(gh.toString(), "pr", "list",
+                "--search", "review-requested:@me",
+                "--state", "open",
+                "--limit", String.valueOf(REVIEW_REQUEST_LIMIT),
+                "--json", "number,title,headRefName,baseRefName,author,url,changedFiles,isDraft"));
+        if (result == null) {
+            return List.of();
+        }
+        if (result.exitCode() != 0) {
+            LOG.log(Level.DEBUG, "gh pr list (review-requested) in " + root + " exited " + result.exitCode()
+                    + (result.stderr().isBlank() ? "" : ": " + ProcessRunner.excerpt(result.stderr())));
+            return List.of();
+        }
+        try {
+            if (!(JsonParser.parse(result.stdout()) instanceof JsonArray array)) {
+                return List.of();
+            }
+            List<ReviewRequest> requests = new ArrayList<>();
+            for (JsonValue element : array.elements()) {
+                parseReviewRequest(element).ifPresent(requests::add);
+            }
+            return List.copyOf(requests);
+        } catch (JsonParseException | NumberFormatException e) {
+            LOG.log(Level.DEBUG, "Unparseable gh pr list output", e);
+            return List.of();
+        }
+    }
+
+    /**
+     * A row missing any of the fields the queue needs is skipped rather than
+     * failing the whole list: one malformed PR must not empty the REQUESTED
+     * group.
+     */
+    private static Optional<ReviewRequest> parseReviewRequest(JsonValue element) {
+        if (!(element instanceof JsonObject obj)
+                || !(obj.get("number") instanceof JsonNumber number)
+                || !(obj.get("headRefName") instanceof JsonString head)
+                || !(obj.get("baseRefName") instanceof JsonString base)) {
+            return Optional.empty();
+        }
+        int prNumber = number.asInt();
+        if (prNumber <= 0) {
+            return Optional.empty();
+        }
+        String title = obj.get("title") instanceof JsonString t ? t.value() : head.value();
+        Optional<String> author = obj.get("author") instanceof JsonObject a
+                && a.get("login") instanceof JsonString login
+                ? Optional.of(login.value())
+                : Optional.empty();
+        Optional<String> url = obj.get("url") instanceof JsonString u ? Optional.of(u.value()) : Optional.empty();
+        int changedFiles = obj.get("changedFiles") instanceof JsonNumber c ? c.asInt() : 0;
+        boolean draft = obj.get("isDraft") instanceof JsonValue.JsonBoolean d && d.value();
+        return Optional.of(new ReviewRequest(prNumber, title, head.value(), base.value(),
+                author, url, changedFiles, draft));
     }
 
     private static PrInfo.PrLifecycle lifecycleOf(String raw) {
