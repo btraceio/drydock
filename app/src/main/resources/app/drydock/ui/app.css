@@ -2841,7 +2841,8 @@
 /* The ◆n pin beside a diff line. Dims -- never disappears -- when its
    finding is filtered out: the line still carries one. */
 .review-line-pin {
-    -fx-background-color: transparent;
+    -fx-background-color: -drydock-code-bg;
+    -fx-border-color: -drydock-border;
     -fx-background-radius: 6px;
     -fx-border-color: transparent;
     -fx-border-radius: 6px;
@@ -2850,6 +2851,8 @@
     -fx-font-family: "JetBrains Mono", "Menlo", monospace;
     -fx-padding: 0 5 0 5;
     -fx-cursor: hand;
+    -fx-background-radius: 6px;
+    -fx-border-radius: 6px;
 }
 .review-line-pin.severity-blocking { -fx-text-fill: -drydock-blocking; }
 .review-line-pin.severity-question { -fx-text-fill: -drydock-question; }

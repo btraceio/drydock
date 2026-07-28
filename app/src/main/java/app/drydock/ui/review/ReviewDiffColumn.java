@@ -397,11 +397,21 @@ final class ReviewDiffColumn extends BorderPane {
         });
 
         TextFlow source = highlighted(row.file(), line.text());
-        HBox.setHgrow(source, Priority.ALWAYS);
+        // Deliberately NOT Hgrow. A growing source column pushes the pin to
+        // the right edge of the CONTENT, which on a wide diff is far outside
+        // the viewport -- the pins were rendering correctly and were simply
+        // never on screen. Sitting the pin immediately after the code keeps
+        // it visible without horizontal scrolling; the design right-aligns it
+        // to the card edge instead, which a virtualized row whose width is
+        // the widest line in the whole diff cannot do.
 
         HBox box = new HBox(oldNumber, newNumber, sign, source);
         for (Pin pin : pinSource.pinsAt(row.file(), row.lineKey())) {
-            Button marker = new Button("◆" + pin.number());
+            // A filtered-out finding has no pin number -- the numbers are the
+            // margin's render order, and it is not being rendered. It keeps a
+            // bare diamond rather than borrowing a number it does not have:
+            // the line still carries a finding, and "◆0" would be a lie.
+            Button marker = new Button(pin.number() > 0 ? "◆" + pin.number() : "◆");
             marker.getStyleClass().addAll("review-line-pin", pin.severityStyleClass());
             if (pin.dimmed()) {
                 marker.getStyleClass().add("dimmed");

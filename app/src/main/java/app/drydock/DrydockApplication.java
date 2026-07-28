@@ -23,7 +23,11 @@ import app.drydock.mcp.McpServer;
 import app.drydock.mcp.McpSessionRegistry;
 import app.drydock.mcp.McpToolRouter;
 import app.drydock.mcp.WorkspaceMcpSessionContext;
+import app.drydock.review.AnnotationStatus;
 import app.drydock.review.AnnotationStore;
+import app.drydock.review.Confidence;
+import app.drydock.review.ReviewAnnotation;
+import app.drydock.review.Severity;
 import app.drydock.review.ReviewScopeRegistry;
 import app.drydock.search.SessionSearchService;
 import app.drydock.state.JsonApplicationStateRepository;
@@ -66,6 +70,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.Base64;
+import java.util.List;
 import java.util.Optional;
 import java.util.function.Supplier;
 
@@ -234,7 +239,7 @@ public final class DrydockApplication extends Application {
                     // ghostty surface in place (no session restart needed).
                     mainWorkspace.applyTerminalTheme(theme);
                 },
-                DEFAULT_SCENE_WIDTH, DEFAULT_SCENE_HEIGHT);
+                sceneWidth(), sceneHeight());
 
         mainWorkspace.setThemeProvider(() -> appShell.themeManager().theme());
         // Review's ? button shares the one overlay, so the table stays in
@@ -541,6 +546,10 @@ public final class DrydockApplication extends Application {
                     // screen-recording permission and cannot pick up another
                     // window, so it is the only visual evidence that is both
                     // available headlessly and guaranteed to be OUR UI.
+                    if (Boolean.getBoolean("app.drydock.diag.seedFindings")) {
+                        System.out.println("[diag] seeded: " + onFx(() -> seedFindings(review)));
+                        Thread.sleep(1_500);
+                    }
                     String shot = System.getProperty("app.drydock.diag.screenshot");
                     if (shot != null) {
                         System.out.println("[diag] screenshot: " + onFx(() -> snapshotScene(shot)));
@@ -769,6 +778,104 @@ public final class DrydockApplication extends Application {
                 event.consume();
             }
         });
+    }
+
+    /**
+     * Window size for this launch. Overridable only for the visual pass
+     * (-Dapp.drydock.diag.windowSize=1800x1000): Review's rails collapse at
+     * documented widths, so photographing them expanded means being able to
+     * ask for a window wide enough.
+     */
+    private static double sceneWidth() {
+        return diagWindowSize().map(size -> size[0]).orElse(DEFAULT_SCENE_WIDTH);
+    }
+
+    private static double sceneHeight() {
+        return diagWindowSize().map(size -> size[1]).orElse(DEFAULT_SCENE_HEIGHT);
+    }
+
+    private static Optional<double[]> diagWindowSize() {
+        String raw = System.getProperty("app.drydock.diag.windowSize");
+        if (raw == null) {
+            return Optional.empty();
+        }
+        String[] parts = raw.toLowerCase(java.util.Locale.ROOT).split("x");
+        if (parts.length != 2) {
+            return Optional.empty();
+        }
+        try {
+            return Optional.of(new double[] {
+                    Double.parseDouble(parts[0].strip()), Double.parseDouble(parts[1].strip()) });
+        } catch (NumberFormatException e) {
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * Seeds representative findings against the selected scope, anchored to
+     * lines that are actually in the diff. Diagnostic-only: the findings
+     * margin renders severity pills, pins, patches and ASK chips, and none of
+     * that can be seen -- or shown to a reviewer -- without findings to
+     * render.
+     */
+    private String seedFindings(ReviewDestinationView review) {
+        Optional<String> scopeId = review.diagSelectedScopeId();
+        if (scopeId.isEmpty()) {
+            return "no scope selected";
+        }
+        List<String[]> anchors = review.diagAnchors(4);
+        if (anchors.isEmpty()) {
+            return "no changed lines to anchor to";
+        }
+        java.time.Instant now = java.time.Instant.now();
+        String[] a0 = anchors.get(0);
+        String[] a1 = anchors.get(Math.min(1, anchors.size() - 1));
+        String[] a2 = anchors.get(Math.min(2, anchors.size() - 1));
+        String[] a3 = anchors.get(Math.min(3, anchors.size() - 1));
+
+        annotationStore.upsert(new ReviewAnnotation(scopeId.get(), "f_leak_1", Optional.empty(),
+                a0[0], a0[1], a0[1], Severity.BLOCKING, Confidence.HIGH,
+                Optional.of("Event filter never detached"), "Claude", now,
+                List.of(), Optional.of(new ReviewAnnotation.Patch(
+                        "-        scene.addEventFilter(MOUSE_DRAGGED, tracker);\n"
+                                + "+        scene.removeEventFilter(MOUSE_DRAGGED, tracker);",
+                        "one line in onRelease")),
+                Optional.empty(),
+                List.of(new ReviewAnnotation.Ask("Why is it a leak?", "Explain why this leaks."),
+                        new ReviewAnnotation.Ask("What breaks?", "What breaks in practice?")),
+                List.of(new ReviewAnnotation.Message("Claude", now,
+                        "The filter is added on every press and never removed on release -- one "
+                                + "leaked listener per drag. After a few minutes of resizing, every "
+                                + "mouse move runs dozens of stale trackers.")),
+                Optional.empty(), AnnotationStatus.OPEN));
+
+        annotationStore.upsert(new ReviewAnnotation(scopeId.get(), "f_clamp_2", Optional.empty(),
+                a1[0], a1[1], a1[1], Severity.QUESTION, Confidence.MEDIUM,
+                Optional.of("Width is committed unclamped"), "Claude", now,
+                List.of(), Optional.empty(), Optional.empty(), List.of(),
+                List.of(new ReviewAnnotation.Message("Claude", now,
+                                "This commits the raw width before the clamp runs. Deliberate?"),
+                        new ReviewAnnotation.Message("You", now, "No -- good catch, I will fix it.")),
+                Optional.empty(), AnnotationStatus.OPEN));
+
+        annotationStore.upsert(new ReviewAnnotation(scopeId.get(), "f_dev_3", Optional.empty(),
+                a2[0], a2[1], a2[1], Severity.DEVIATION, Confidence.HIGH,
+                Optional.of("Minimum width is 220, you asked for 240"), "Claude", now,
+                List.of(), Optional.empty(),
+                Optional.of(new ReviewAnnotation.DeviatesFrom("min width 240", Optional.of(9))),
+                List.of(),
+                List.of(new ReviewAnnotation.Message("Claude", now,
+                        "Step 5 set the clamp to 240; step 7 reverted it to 220.")),
+                Optional.empty(), AnnotationStatus.OPEN));
+
+        annotationStore.upsert(new ReviewAnnotation(scopeId.get(), "f_nit_4", Optional.empty(),
+                a3[0], a3[1], a3[1], Severity.NIT, Confidence.UNSURE,
+                Optional.of("Spelling in a comment"), "Claude", now,
+                List.of(), Optional.empty(), Optional.empty(), List.of(),
+                List.of(new ReviewAnnotation.Message("Claude", now, "\"recieve\" -> \"receive\".")),
+                Optional.empty(), AnnotationStatus.RESOLVED));
+
+        return "4 findings against " + scopeId.get();
     }
 
     /**

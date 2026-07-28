@@ -497,6 +497,9 @@ public final class ReviewDestinationView extends BorderPane {
                     continue;
                 }
                 Integer number = numbers.get(finding.key());
+                // number == null means the margin is not showing this finding
+                // (the `open` filter, or another intent). The pin dims and
+                // drops its number rather than inventing one.
                 pins.add(new ReviewDiffColumn.Pin(number == null ? 0 : number,
                         finding.effectiveSeverity().styleClass(), finding.key(), number == null));
             }
@@ -954,6 +957,31 @@ public final class ReviewDestinationView extends BorderPane {
                     + host.diagDiffSummary(itemScope));
         }
         return report;
+    }
+
+    /** Diagnostic-only: the scope the queue has selected. */
+    public Optional<String> diagSelectedScopeId() {
+        return selectedScope().map(ReviewScope::id);
+    }
+
+    /**
+     * Diagnostic-only: the first {@code count} changed lines currently
+     * rendered, as {@code [file, lineKey]}. Lets the visual pass seed
+     * findings anchored to lines that genuinely exist, so the pins land on
+     * real rows instead of nowhere.
+     */
+    public List<String[]> diagAnchors(int count) {
+        List<String[]> anchors = new java.util.ArrayList<>();
+        for (ReviewDiffRow row : diffColumn.diagRows()) {
+            if (anchors.size() >= count) {
+                break;
+            }
+            if (row instanceof ReviewDiffRow.Line line
+                    && line.line().kind() != app.drydock.git.UnifiedDiff.Line.Kind.CONTEXT) {
+                anchors.add(new String[] { line.file(), line.lineKey() });
+            }
+        }
+        return anchors;
     }
 
     /** Diagnostic-only: the queue rows currently rendered (visual verification harness). */

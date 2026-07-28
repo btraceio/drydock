@@ -56,7 +56,15 @@ evidence before. It uses `java.desktop` (already on the jlink module list)
 rather than `javafx.swing` (which is not), copying pixels out of the
 `WritableImage` by hand.
 
-Two bugs were found by looking at that image and by nothing else:
+Two companion flags make the surface photographable:
+`-Dapp.drydock.diag.windowSize=1800x1000` (the rails collapse at documented
+widths, so showing them expanded means asking for a wide enough window) and
+`-Dapp.drydock.diag.seedFindings=true`, which seeds representative findings
+anchored to lines that are genuinely in the diff — the margin's severity
+pills, pins, patch blocks and ASK chips cannot be seen, or shown to a
+reviewer, without findings to render.
+
+Four bugs were found by looking at those images and by nothing else:
 
 - The verdict bar was stuck on **"no intent"** on every freshly opened item,
   so Approve, Request change and Submit were all dead. Intents fall back to
@@ -65,6 +73,16 @@ Two bugs were found by looking at that image and by nothing else:
   re-rendered. Every test until then supplied the diff synchronously and so
   could not see it. `ReviewIntentFallbackTest` now drives the real
   asynchronous path.
+- The **`◆n` pins were never on screen.** They rendered correctly, but the
+  source column grew to fill the row, pushing each pin to the right edge of
+  the *content* — which on a wide diff is far outside the viewport. They now
+  sit immediately after the code. The design right-aligns them to the card
+  edge instead, which a virtualized row as wide as the longest line in the
+  whole diff cannot do.
+- A pin whose finding is filtered out showed **`◆0`** — a number it did not
+  have, since the numbers are the margin's render order. It keeps a bare
+  dimmed diamond now: the line still carries a finding, and an invented
+  number is a lie.
 - Diff rows were **almost twice their intended height**. Section 4.8's
   "row padding 8 / 6 / 4px" is the prototype's `ipad`, which it applies to
   the queue and intent cards — not to code lines, whose height is
