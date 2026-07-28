@@ -863,6 +863,17 @@
     -fx-background-color: -drydock-accent-soft;
     -fx-text-fill: -drydock-accent;
 }
+/* The ⌘n hint on a sub-tab button: always dimmer than the label it follows,
+ * including on the selected tab, so it reads as an annotation rather than
+ * as part of the name. */
+.session-subtab-key {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.session-subtab:selected .session-subtab-key {
+    -fx-text-fill: -drydock-text-dim;
+}
 .session-subtab-context {
     -fx-text-fill: -drydock-text-faint;
     -fx-font-size: 11.5px;

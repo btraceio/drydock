@@ -328,6 +328,10 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
         tabPane.getStyleClass().add("session-tabs");
         tabPane.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE); // tabs carry their own close button
+        // Drag to reorder: the tab strip is the user's own ordering of the
+        // sessions they are juggling. Purely visual -- nothing keys off tab
+        // position except the ⌘[ / ⌘] neighbours, which follow the strip.
+        tabPane.setTabDragPolicy(TabPane.TabDragPolicy.REORDER);
 
         // The design's resume picker is parked for now: sessions are
         // already persisted per repository in the sidebar, so the default
@@ -510,7 +514,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         target.getStyleClass().add("worktree-context-line");
         Label hint = new Label("Discovered via git worktree list.");
         hint.getStyleClass().add("picker-empty-hint");
-        Button start = new Button("Start a Claude session ▸");
+        Button start = new Button("Start a session ▸");
         start.getStyleClass().add("worktree-create-button");
         start.setFocusTraversable(false);
         start.setOnAction(e -> promptStartWorktreeSession(repository, worktree));
@@ -1354,7 +1358,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         // immediately, and a sidebar resume racing the launch must find
         // this pending tab instead of starting a second surface.
         ManagedAgentSession prepared = sessionManager.prepareSession(repository, agent);
-        OpenSessionTab placeholderTab = showPendingTab(prepared.id(), "Starting...",
+        OpenSessionTab placeholderTab = showPendingTab(prepared.id(), "Starting...", AgentLabels.displayName(agentRegistry, prepared),
                 Optional.of(repository), repository.root());
 
         double scale = stage.getOutputScaleX();
@@ -1443,7 +1447,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         // as openNewSession.
         ManagedAgentSession prepared =
                 sessionManager.prepareWorktreeSession(repository, branch, worktreeRoot, branchCreatedHere, agent);
-        OpenSessionTab placeholderTab = showPendingTab(prepared.id(), branch,
+        OpenSessionTab placeholderTab = showPendingTab(prepared.id(), branch, AgentLabels.displayName(agentRegistry, prepared),
                 Optional.of(repository), worktreeRoot);
 
         double scale = stage.getOutputScaleX();
@@ -1604,7 +1608,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             return;
         }
 
-        OpenSessionTab placeholderTab = showPendingTab(session.id(), session.displayName(),
+        OpenSessionTab placeholderTab = showPendingTab(session.id(), session.displayName(), AgentLabels.displayName(agentRegistry, session),
                 repositoryFor(session), session.workingDirectory());
 
         double scale = stage.getOutputScaleX();
@@ -1684,7 +1688,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     private void handleOpenResult(OpenSessionTab placeholderTab, SessionOpenResult result, Throwable ex) {
         if (ex != null) {
             removeTab(placeholderTab);
-            UiErrors.show("Could not start Claude session", ex);
+            UiErrors.show("Could not start " + placeholderTab.agentName() + " session", ex);
             return;
         }
         // launchSession only ever produces Opened -- see SessionManager.finalizeCreate.
@@ -1700,7 +1704,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                                      SessionOpenResult result, Throwable ex) {
         if (ex != null) {
             removeTab(placeholderTab);
-            UiErrors.show("Could not resume Claude session", ex);
+            UiErrors.show("Could not resume " + placeholderTab.agentName() + " session", ex);
             return;
         }
         switch (result) {
@@ -1762,7 +1766,8 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         Alert prompt = new Alert(Alert.AlertType.CONFIRMATION);
         prompt.setTitle("Conversation not found");
         prompt.setHeaderText("The conversation for \"" + session.displayName() + "\" no longer exists");
-        prompt.setContentText("Claude has no stored history for this session's conversation id anymore "
+        prompt.setContentText(AgentLabels.displayName(agentRegistry, session)
+                + " has no stored history for this session's conversation id anymore "
                 + "(it may have been cleaned up). Start a fresh conversation under the same name, "
                 + "or delete the session?");
         prompt.getButtonTypes().setAll(startFresh, delete, ButtonType.CANCEL);
@@ -1784,7 +1789,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         }
 
         // Start fresh: reuse the managed session row, new claude conversation.
-        OpenSessionTab placeholderTab = showPendingTab(session.id(), session.displayName(),
+        OpenSessionTab placeholderTab = showPendingTab(session.id(), session.displayName(), AgentLabels.displayName(agentRegistry, session),
                 repositoryFor(session), session.workingDirectory());
         double scale = stage.getOutputScaleX();
         sessionManager.startFreshConversation(session.id(), placeholderTab.app(), placeholderTab.host(), scale)
@@ -2158,9 +2163,10 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * runtime/host pair.
      * {@link #attachOpenedSession}/{@link #removeTab} de-register it.
      */
-    private OpenSessionTab showPendingTab(ManagedSessionId sessionId, String displayName,
+    private OpenSessionTab showPendingTab(ManagedSessionId sessionId, String displayName, String agentName,
                                           Optional<Repository> repository, Path searchRoot) {
-        OpenSessionTab placeholderTab = createOpenSessionTab(sessionId, displayName, repository, searchRoot);
+        OpenSessionTab placeholderTab =
+                createOpenSessionTab(sessionId, displayName, agentName, repository, searchRoot);
         pendingTabs.put(sessionId, placeholderTab);
         addAndSelect(placeholderTab);
         return placeholderTab;
@@ -2175,7 +2181,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * one-element holder, since the runtime requires the callback up front,
      * before the {@link OpenSessionTab} it needs to call back into can exist.
      */
-    private OpenSessionTab createOpenSessionTab(ManagedSessionId sessionId, String displayName,
+    private OpenSessionTab createOpenSessionTab(ManagedSessionId sessionId, String displayName, String agentName,
                                                  Optional<Repository> repository, Path searchRoot) {
         TerminalFactory.ensureProcessInitialized();
 
@@ -2205,7 +2211,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             app.close();
             throw e;
         }
-        OpenSessionTab openTab = new OpenSessionTab(sessionId, displayName, repository, stage, app, host);
+        OpenSessionTab openTab = new OpenSessionTab(sessionId, displayName, agentName, repository, stage, app, host);
         holder[0] = openTab;
 
         // The ephemeral shell Terminal sub-tab (created lazily on first

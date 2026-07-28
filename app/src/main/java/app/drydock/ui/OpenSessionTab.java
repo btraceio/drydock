@@ -15,6 +15,7 @@ import javafx.application.Platform;
 import javafx.css.PseudoClass;
 import javafx.geometry.Pos;
 import javafx.scene.control.Button;
+import javafx.scene.control.ContentDisplay;
 import javafx.scene.control.Label;
 import javafx.scene.control.ProgressIndicator;
 import javafx.scene.control.Tab;
@@ -110,8 +111,9 @@ final class OpenSessionTab {
     private final Label statusLabel = new Label("Starting session...");
     private final BorderPane content = new BorderPane();
 
-    // -- Bottom Claude/Terminal/Explorer sub-tab bar (handoff "Session Explorer") --
-    private final ToggleButton claudeSubTabButton = new ToggleButton("✳  Claude");
+    // -- Bottom Agent/Terminal/Explorer sub-tab bar (handoff "Session Explorer") --
+    /** Text set in the constructor: it names THIS session's agent (Claude, Codex, …). */
+    private final ToggleButton claudeSubTabButton = new ToggleButton();
     private final ToggleButton terminalSubTabButton = new ToggleButton("❯_  Terminal");
     private final ToggleButton explorerSubTabButton = new ToggleButton("▤  Explorer");
     private final Label subTabContext = new Label();
@@ -180,6 +182,9 @@ final class OpenSessionTab {
 
     private String displayName;
 
+    /** Display name of this session's agent; fixed at creation (a session never changes agent). */
+    private final String agentName;
+
     /**
      * Whether this tab's repository lives on a remote host (spec: SSH remote
      * repositories) -- derived once from the constructor's {@code
@@ -189,10 +194,16 @@ final class OpenSessionTab {
      */
     private final boolean isRemote;
 
-    OpenSessionTab(ManagedSessionId sessionId, String displayName, Optional<Repository> repository,
+    /**
+     * @param agentName display name of the agent this session runs (see
+     *                  {@link AgentLabels}); it labels the agent sub-tab, which
+     *                  must never claim "Claude" for a Codex or Pi session.
+     */
+    OpenSessionTab(ManagedSessionId sessionId, String displayName, String agentName, Optional<Repository> repository,
                    Stage stage, TerminalRuntime app, TerminalHostView host) {
         this.sessionId = sessionId;
         this.displayName = displayName;
+        this.agentName = agentName;
         this.stage = stage;
         this.isRemote = repository.map(Repository::isRemote).orElse(false);
         this.bridge = new TerminalBridge(app, host, placeholder, stage::getOutputScaleX,
@@ -282,7 +293,8 @@ final class OpenSessionTab {
     private Region buildSubTabBar() {
         claudeSubTabButton.getStyleClass().add("session-subtab");
         claudeSubTabButton.setFocusTraversable(false);
-        claudeSubTabButton.setTooltip(new Tooltip("Claude (⌘1)"));
+        claudeSubTabButton.setText(AgentLabels.subTabLabel(agentName));
+        claudeSubTabButton.setTooltip(new Tooltip(AgentLabels.subTabTooltip(agentName)));
         claudeSubTabButton.setSelected(true);
         claudeSubTabButton.setOnAction(e -> showSubTab(SubTab.CLAUDE));
 
@@ -305,6 +317,18 @@ final class OpenSessionTab {
         } else {
             explorerSubTabButton.setTooltip(new Tooltip("Explorer (⌘3)"));
         }
+
+        // The shortcut is spelled out ON the button, not only in its tooltip:
+        // a tooltip is only found by someone who already suspects there is a
+        // shortcut. Disabled sub-tabs get none -- their key does nothing.
+        showKeyHint(claudeSubTabButton, "⌘1");
+        showKeyHint(terminalSubTabButton, "⌘2");
+        if (!isRemote) {
+            showKeyHint(explorerSubTabButton, "⌘3");
+        }
+        // No ⌘4 hint here: Review is no longer a sub-tab, so there is no
+        // button to put it on. It is advertised in the shortcuts overlay and
+        // on the sidebar's Review row instead.
 
         subTabContext.getStyleClass().add("session-subtab-context");
 
@@ -436,6 +460,19 @@ final class OpenSessionTab {
         if (active != null) {
             active.updateGeometry();
         }
+    }
+
+    /**
+     * Puts the sub-tab's keyboard shortcut on the button itself, right of its
+     * label, in the dimmer key style. A graphic (rather than more text) keeps
+     * the label's own styling -- selected/{@code :keys} colouring -- untouched.
+     */
+    private static void showKeyHint(ToggleButton button, String shortcut) {
+        Label hint = new Label(shortcut);
+        hint.getStyleClass().add("session-subtab-key");
+        button.setGraphic(hint);
+        button.setContentDisplay(ContentDisplay.RIGHT);
+        button.setGraphicTextGap(8);
     }
 
     /** Refocuses whichever native terminal (Claude or shell) the active sub-tab shows, if any. */
@@ -733,15 +770,36 @@ final class OpenSessionTab {
         int index = tabLabels.getChildren().indexOf(renameField);
         if (index >= 0) {
             tabLabels.getChildren().set(index, tabTitleLabel);
-            // Rename over: give the terminal its key routing back (no-op
-            // when another sub-tab is showing).
-            bridge.applyVisibility();
+            // Rename over: give the showing terminal its key routing back
+            // (no-op when Explorer/Review is the active sub-tab).
+            restoreTerminalFocus();
         }
     }
 
-    /** Releases the terminal's AppKit first-responder status so JavaFX text inputs receive keys. */
+    /**
+     * Releases the terminal's AppKit first-responder status so JavaFX text
+     * inputs receive keys.
+     *
+     * <p>BOTH native surfaces are released, not just the agent's: the shell
+     * sub-tab has its own bridge, and while it was showing it kept the
+     * responder through a rename or a sidebar-filter click -- every keystroke
+     * went into the shell and nothing could be typed anywhere else.</p>
+     */
     void releaseTerminalFocus() {
         bridge.releaseFocus();
+        if (shellBridge != null) {
+            shellBridge.releaseFocus();
+        }
+    }
+
+    /** Undoes {@link #releaseTerminalFocus}: gives the showing native surface its key routing back. */
+    private void restoreTerminalFocus() {
+        // applyVisibility is a no-op for a bridge whose sub-tab isn't showing,
+        // so this refocuses the active surface and only that one.
+        bridge.applyVisibility();
+        if (shellBridge != null) {
+            shellBridge.applyVisibility();
+        }
     }
 
     // ---- Wiring from MainWorkspace ------------------------------------------
@@ -789,6 +847,11 @@ final class OpenSessionTab {
         this.displayName = displayName;
         tabTitleLabel.setText(displayName);
         headerTitle.setText(displayName);
+    }
+
+    /** Display name of the agent this session runs; names it in this tab's own copy. */
+    String agentName() {
+        return agentName;
     }
 
     String displayName() {

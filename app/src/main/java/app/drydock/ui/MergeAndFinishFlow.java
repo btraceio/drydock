@@ -66,6 +66,13 @@ final class MergeAndFinishFlow {
     private String branch;
     private String base;
     private WorktreeService.MergeTarget target;
+    /**
+     * Who the copy says did the work, read ONCE in {@link #start}. The
+     * cleanup deletes the session -- and with it the tab -- before the
+     * "conflicts resolved by X" headline is built, so a lazy lookup would
+     * lose the name in exactly the run that earned it.
+     */
+    private String agentName = "the agent";
     private boolean conflictsHandedOff;
     private Optional<String> lastProbeDetail = Optional.empty();
     /** The node this flow currently owns in the shared modal layer. */
@@ -117,6 +124,7 @@ final class MergeAndFinishFlow {
         // controller's in-flight guard with nothing to show for it.
         OpenSessionTab tab = openTab.apply(sessionId);
         if (tab != null) {
+            agentName = tab.agentName();
             tab.showHandoffRunning("Merging…");
         }
         attempt(() -> worktreeService.inspectMergeTarget(repositoryRoot, branch)
@@ -157,7 +165,8 @@ final class MergeAndFinishFlow {
                         stop(MergeFinishDecision.forFailedMerge(branch, base, messageOf(ex)));
                         return;
                     }
-                    apply(MergeFinishDecision.forVerdict(verdict, repositoryRoot.toString(), branch, base, false));
+                    apply(MergeFinishDecision.forVerdict(verdict, repositoryRoot.toString(), branch, base, false,
+                            agentName));
                 }));
     }
 
@@ -191,7 +200,8 @@ final class MergeAndFinishFlow {
                         return;
                     }
                     MergeFinishDecision.Next next =
-                            MergeFinishDecision.forVerdict(verdict, repositoryRoot.toString(), branch, base, true);
+                            MergeFinishDecision.forVerdict(verdict, repositoryRoot.toString(), branch, base, true,
+                                    agentName);
                     if (next instanceof MergeFinishDecision.Next.KeepWaiting) {
                         pollAgain(attemptNumber + 1);
                         return;
@@ -207,7 +217,7 @@ final class MergeAndFinishFlow {
      * <p>The verdict that got us here proves a merge commit of the tip
      * recorded at pre-flight is on the base branch -- it says nothing about
      * where the branch points now, and on the hand-off path minutes have
-     * passed with the session's Claude sitting in the worktree. {@link
+     * passed with the session's agent sitting in the worktree. {@link
      * BranchDeleteGate} re-reads the tip and turns any movement (or a re-read
      * that failed) into a refusal to run {@code git branch -D}; it lives
      * outside this class so that "the second tip is actually read again" is
@@ -226,14 +236,14 @@ final class MergeAndFinishFlow {
                         // The merge landed; only the cleanup call failed to
                         // run, so this is a Done, not a ✗.
                         done(MergeFinishDecision.forFailedCleanup(branch, base, conflictsHandedOff,
-                                messageOf(ex)));
+                                messageOf(ex), agentName));
                         return;
                     }
                     if (outcome.sessionDeleted()) {
                         onSessionDeleted.accept(sessionId);
                     }
                     onSessionsChanged.run();
-                    apply(MergeFinishDecision.forCleanup(outcome, branch, base, conflictsHandedOff));
+                    apply(MergeFinishDecision.forCleanup(outcome, branch, base, conflictsHandedOff, agentName));
                 }));
     }
 

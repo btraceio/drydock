@@ -221,7 +221,7 @@ public final class DrydockApplication extends Application {
                 reviewScopeRegistry, mcpActivityLog, viewModel, primaryStage);
         RepositorySidebar sidebar =
                 new RepositorySidebar(repositoryManager, gitStatusService, worktreeService, sessionManager,
-                        mainWorkspace, viewModel);
+                        agentRegistry, mainWorkspace, viewModel);
         sidebar.setReviewQueueSize(mainWorkspace::reviewQueueSize);
         sidebar.setOpenFindingsAt(mainWorkspace::openFindingsAt);
         mainWorkspace.setOnReviewQueueChanged(sidebar::refreshReviewBadges);
@@ -937,7 +937,7 @@ public final class DrydockApplication extends Application {
 
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
         confirm.setTitle("Quit Drydock");
-        confirm.setHeaderText("One or more Claude sessions are still running");
+        confirm.setHeaderText("One or more agent sessions are still running");
         confirm.setContentText("Closing will stop every running session's terminal (each is asked to exit "
                 + "gracefully first). Continue?");
         Optional<ButtonType> choice = confirm.showAndWait();
@@ -1090,6 +1090,7 @@ public final class DrydockApplication extends Application {
                 repositoryManager::repositories,
                 annotationStore,
                 reviewScopeRegistry,
+                agentRegistry,
                 mainWorkspace.intentGrouping(),
                 diffService,
                 gitStatusService,

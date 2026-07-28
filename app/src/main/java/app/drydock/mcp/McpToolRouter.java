@@ -194,14 +194,6 @@ public final class McpToolRouter {
     /** Default byte budget for one {@code review_scope} page (schema §1). */
     static final int DEFAULT_SCOPE_BYTES = 24_000;
 
-    /**
-     * The author every agent-written finding and answer is attributed to. One
-     * name, not the caller's session id: the margin shows who said a thing,
-     * and "Claude" is what the human recognizes. The per-reviewer name
-     * arrives with the reviewer selector.
-     */
-    private static final String REVIEWER_AUTHOR = "Claude";
-
     /** Ceiling on a caller-supplied budget, so one call cannot ask for the whole diff at once. */
     private static final int MAX_SCOPE_BYTES = 256_000;
 
@@ -270,7 +262,7 @@ public final class McpToolRouter {
         if (!(args.get("findings") instanceof JsonArray array)) {
             throw new McpToolException("findings must be an array");
         }
-        String author = REVIEWER_AUTHOR;
+        String author = context.reviewerName(caller);
         List<ReviewAnnotation> decoded = new java.util.ArrayList<>();
         for (JsonValue element : array.elements()) {
             if (!(element instanceof JsonObject obj)) {
@@ -313,7 +305,7 @@ public final class McpToolRouter {
             text.append("\n\n[proposes resolving this finding]");
         }
 
-        String author = REVIEWER_AUTHOR;
+        String author = context.reviewerName(caller);
         ReviewAnnotation.Key key = new ReviewAnnotation.Key(scope.id(), findingId);
         ReviewAnnotation updated = context.mutateAnnotation(key, current ->
                         current.withReply(new ReviewAnnotation.Message(author, Instant.now(),

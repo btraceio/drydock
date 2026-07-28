@@ -130,7 +130,7 @@ final class FinishWorktreePanel extends VBox {
                                 "finish-action-accent", () -> runAndClose(actions::mergeIntoBase, onClose))
                         : disabledAction("Merge into " + context.base(), context.mergeCaption()));
                 getChildren().add(action("Create pull request",
-                        "Hand off to Claude — push branch & open a PR", "finish-action",
+                        "Hand off to the agent — push branch & open a PR", "finish-action",
                         () -> runAndClose(actions::createPullRequest, onClose)));
                 getChildren().add(action(context.deleteTitle(), context.deleteCaption(),
                         "finish-action-destructive", () -> runAndClose(actions::deleteWorktree, onClose)));

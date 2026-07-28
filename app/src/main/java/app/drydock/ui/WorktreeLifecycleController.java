@@ -386,7 +386,7 @@ final class WorktreeLifecycleController {
         if (tab == null) {
             return;
         }
-        tab.showHandoffRunning("Claude is opening a PR…");
+        tab.showHandoffRunning(tab.agentName() + " is opening a PR…");
         tab.sendPrompt("Push this worktree's branch '" + branch + "' to origin (git push -u origin " + branch
                 + ") and open a pull request with gh pr create --fill, then report the PR number.");
         if (!ghCliService.isAvailable()) {

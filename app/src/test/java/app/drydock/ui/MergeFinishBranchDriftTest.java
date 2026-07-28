@@ -28,7 +28,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * commit of the tip recorded at pre-flight sits on the base branch. It cannot
  * prove anything about where {@code refs/heads/<branch>} points by the time
  * {@code git branch -D} runs, and on the conflict hand-off path minutes pass
- * in between with the session's Claude running inside the worktree. This test
+ * in between with the session's agent running inside the worktree. This test
  * builds exactly that history -- verified merge, then another commit on the
  * branch -- and asserts the branch, and therefore the commit, survives, with
  * copy that says so.</p>
@@ -87,8 +87,8 @@ class MergeFinishBranchDriftTest {
                     "precondition: the drifted commit is NOT in main, which is why deleting it would lose it");
 
             MergeFinishDecision.Next.Done done =
-                    MergeFinishDecision.forCleanup(outcome, "feat/x", "main", true);
-            assertEquals("✓ Merged feat/x into main — conflicts resolved by Claude", done.headline());
+                    MergeFinishDecision.forCleanup(outcome, "feat/x", "main", true, "Codex");
+            assertEquals("✓ Merged feat/x into main — conflicts resolved by Codex", done.headline());
             assertEquals("worktree removed · branch feat/x kept — it moved since the merge · session closed",
                     done.detail());
         }

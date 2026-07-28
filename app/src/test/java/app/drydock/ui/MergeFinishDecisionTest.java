@@ -132,7 +132,7 @@ class MergeFinishDecisionTest {
                         || verdict instanceof MergeVerdict.AlreadyMerged;
 
                 MergeFinishDecision.Next next =
-                        MergeFinishDecision.forVerdict(verdict, "/repo", "feat/x", "main", afterHandOff);
+                        MergeFinishDecision.forVerdict(verdict, "/repo", "feat/x", "main", afterHandOff, "Codex");
 
                 assertEquals(expectCleanUp, next instanceof MergeFinishDecision.Next.CleanUp,
                         verdict + " afterHandOff=" + afterHandOff);
@@ -145,14 +145,14 @@ class MergeFinishDecisionTest {
         // Exercised only by the loop above as "not CleanUp"; assert the actual copy too,
         // since the loop can't tell a correct Stopped from a mangled one.
         MergeFinishDecision.Next.Stopped notMerged = assertInstanceOf(MergeFinishDecision.Next.Stopped.class,
-                MergeFinishDecision.forVerdict(new MergeVerdict.NotMerged(), "/repo", "feat/x", "main", false));
+                MergeFinishDecision.forVerdict(new MergeVerdict.NotMerged(), "/repo", "feat/x", "main", false, "Codex"));
         assertEquals("Nothing was merged", notMerged.headline());
         assertEquals("Git left main unchanged and reported no conflicts. Nothing was deleted.",
                 notMerged.detail());
 
         MergeFinishDecision.Next.Stopped indeterminate = assertInstanceOf(MergeFinishDecision.Next.Stopped.class,
                 MergeFinishDecision.forVerdict(new MergeVerdict.Indeterminate("HEAD moved"),
-                        "/repo", "feat/x", "main", false));
+                        "/repo", "feat/x", "main", false, "Codex"));
         assertEquals("Could not confirm the merge", indeterminate.headline());
         assertEquals("HEAD moved", indeterminate.detail());
     }
@@ -161,9 +161,9 @@ class MergeFinishDecisionTest {
     void aConflictHandsOffWithAPromptThatNamesTheFilesToEdit() {
         MergeFinishDecision.Next.HandOff handOff = assertInstanceOf(MergeFinishDecision.Next.HandOff.class,
                 MergeFinishDecision.forVerdict(new MergeVerdict.Conflicted(List.of("README.md", "src/A.java")),
-                        "/repo", "feat/x", "main", false));
+                        "/repo", "feat/x", "main", false, "Codex"));
 
-        assertEquals("Conflicts in 2 files — Claude is resolving them in the main checkout…",
+        assertEquals("Conflicts in 2 files — Codex is resolving them in the main checkout…",
                 handOff.headline());
         // The whole prompt, verbatim: this is copy a user and an agent both read, so a
         // partial contains() could pass while the sentence around it was mangled.
@@ -182,13 +182,13 @@ class MergeFinishDecisionTest {
     void aConflictAfterTheHandOffKeepsWaiting() {
         assertInstanceOf(MergeFinishDecision.Next.KeepWaiting.class,
                 MergeFinishDecision.forVerdict(new MergeVerdict.Conflicted(List.of("README.md")),
-                        "/repo", "feat/x", "main", true));
+                        "/repo", "feat/x", "main", true, "Codex"));
     }
 
     @Test
     void anAbortedMergeDuringTheHandOffStopsWithoutDeletingAnything() {
         MergeFinishDecision.Next.Stopped stopped = assertInstanceOf(MergeFinishDecision.Next.Stopped.class,
-                MergeFinishDecision.forVerdict(new MergeVerdict.NotMerged(), "/repo", "feat/x", "main", true));
+                MergeFinishDecision.forVerdict(new MergeVerdict.NotMerged(), "/repo", "feat/x", "main", true, "Codex"));
 
         assertEquals("The merge was abandoned", stopped.headline());
         assertTrue(stopped.detail().contains("Nothing was deleted"));
@@ -197,13 +197,13 @@ class MergeFinishDecisionTest {
     @Test
     void unknownStatesKeepWaitingDuringTheHandOffButStopBeforeIt() {
         assertInstanceOf(MergeFinishDecision.Next.KeepWaiting.class, MergeFinishDecision.forVerdict(
-                new MergeVerdict.Indeterminate("HEAD moved"), "/repo", "feat/x", "main", true));
+                new MergeVerdict.Indeterminate("HEAD moved"), "/repo", "feat/x", "main", true, "Codex"));
         assertInstanceOf(MergeFinishDecision.Next.KeepWaiting.class, MergeFinishDecision.forVerdict(
-                new MergeVerdict.Refused("hook said no"), "/repo", "feat/x", "main", true));
+                new MergeVerdict.Refused("hook said no"), "/repo", "feat/x", "main", true, "Codex"));
 
         MergeFinishDecision.Next.Stopped refused = assertInstanceOf(MergeFinishDecision.Next.Stopped.class,
                 MergeFinishDecision.forVerdict(new MergeVerdict.Refused("hook said no"),
-                        "/repo", "feat/x", "main", false));
+                        "/repo", "feat/x", "main", false, "Codex"));
         assertEquals("Could not merge feat/x into main", refused.headline());
         assertEquals("hook said no", refused.detail());
     }
@@ -213,7 +213,7 @@ class MergeFinishDecisionTest {
         MergeFinishDecision.Next.Done done = MergeFinishDecision.forCleanup(
                 new MergeFinishDecision.CleanupOutcome(true, MergeFinishDecision.BranchResult.DELETED,
                         true, Optional.empty()),
-                "feat/x", "main", false);
+                "feat/x", "main", false, "Codex");
 
         assertEquals("✓ Merged feat/x into main", done.headline());
         assertEquals("worktree removed · branch feat/x deleted · session closed", done.detail());
@@ -224,9 +224,9 @@ class MergeFinishDecisionTest {
         MergeFinishDecision.Next.Done done = MergeFinishDecision.forCleanup(
                 new MergeFinishDecision.CleanupOutcome(true, MergeFinishDecision.BranchResult.DELETED,
                         true, Optional.empty()),
-                "feat/x", "main", true);
+                "feat/x", "main", true, "Codex");
 
-        assertEquals("✓ Merged feat/x into main — conflicts resolved by Claude", done.headline());
+        assertEquals("✓ Merged feat/x into main — conflicts resolved by Codex", done.headline());
     }
 
     @Test
@@ -234,17 +234,17 @@ class MergeFinishDecisionTest {
         assertEquals("worktree removed · branch feat/x kept (already existed) · session closed",
                 MergeFinishDecision.forCleanup(new MergeFinishDecision.CleanupOutcome(
                         true, MergeFinishDecision.BranchResult.KEPT_NOT_OURS, true, Optional.empty()),
-                        "feat/x", "main", false).detail());
+                        "feat/x", "main", false, "Codex").detail());
 
         assertEquals("worktree removed · branch feat/x kept (could not delete) · session closed",
                 MergeFinishDecision.forCleanup(new MergeFinishDecision.CleanupOutcome(
                         true, MergeFinishDecision.BranchResult.DELETE_FAILED, true, Optional.empty()),
-                        "feat/x", "main", false).detail());
+                        "feat/x", "main", false, "Codex").detail());
 
         assertEquals("worktree kept — it has uncommitted changes · branch feat/x kept · session left open",
                 MergeFinishDecision.forCleanup(new MergeFinishDecision.CleanupOutcome(
                         false, MergeFinishDecision.BranchResult.NOT_ATTEMPTED, false,
-                        Optional.of("it has uncommitted changes")), "feat/x", "main", false).detail());
+                        Optional.of("it has uncommitted changes")), "feat/x", "main", false, "Codex").detail());
     }
 
     @Test
@@ -258,7 +258,7 @@ class MergeFinishDecisionTest {
         assertEquals("worktree removed · branch feat/x kept — it moved since the merge · session closed",
                 MergeFinishDecision.forCleanup(new MergeFinishDecision.CleanupOutcome(
                         true, MergeFinishDecision.BranchResult.KEPT_MOVED, true, Optional.empty()),
-                        "feat/x", "main", false).detail());
+                        "feat/x", "main", false, "Codex").detail());
     }
 
     @Test
@@ -350,7 +350,7 @@ class MergeFinishDecisionTest {
         // accomplished what it set out to do.
         assertEquals("Close", MergeFinishDecision.forTimeout("feat/x", "main", Optional.empty()).buttonLabel());
         assertEquals("Done",
-                MergeFinishDecision.forFailedCleanup("feat/x", "main", false, "executor shut down").buttonLabel());
+                MergeFinishDecision.forFailedCleanup("feat/x", "main", false, "executor shut down", "Codex").buttonLabel());
     }
 
     @Test
@@ -368,7 +368,7 @@ class MergeFinishDecisionTest {
         // call was never made -- two wordings for it would drift apart.
         MergeFinishDecision.Next.Stopped refused = assertInstanceOf(MergeFinishDecision.Next.Stopped.class,
                 MergeFinishDecision.forVerdict(new MergeVerdict.Refused("hook said no"),
-                        "/repo", "feat/x", "main", false));
+                        "/repo", "feat/x", "main", false, "Codex"));
         MergeFinishDecision.Next.Stopped neverRan =
                 MergeFinishDecision.forFailedMerge("feat/x", "main", "executor shut down");
 
@@ -382,7 +382,7 @@ class MergeFinishDecisionTest {
         // The merge commit is in the base branch; a ✗ headline here would send the
         // user looking for a merge that is already there.
         MergeFinishDecision.Next.Done done =
-                MergeFinishDecision.forFailedCleanup("feat/x", "main", false, "executor shut down");
+                MergeFinishDecision.forFailedCleanup("feat/x", "main", false, "executor shut down", "Codex");
 
         assertEquals("✓ Merged feat/x into main", done.headline());
         assertEquals("cleanup did not run: executor shut down"
@@ -391,8 +391,8 @@ class MergeFinishDecisionTest {
 
     @Test
     void aCleanupThatNeverRanStillCreditsResolvedConflicts() {
-        assertEquals("✓ Merged feat/x into main — conflicts resolved by Claude",
-                MergeFinishDecision.forFailedCleanup("feat/x", "main", true, "executor shut down").headline());
+        assertEquals("✓ Merged feat/x into main — conflicts resolved by Codex",
+                MergeFinishDecision.forFailedCleanup("feat/x", "main", true, "executor shut down", "Codex").headline());
     }
 
     @Test

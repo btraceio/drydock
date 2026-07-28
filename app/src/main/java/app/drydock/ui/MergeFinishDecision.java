@@ -198,13 +198,13 @@ final class MergeFinishDecision {
 
     /**
      * What a verdict means. {@code afterHandOff} is the difference between
-     * "this is the answer" and "the agent is still working": once Claude has
-     * been asked to resolve the conflicts, anything short of a confirmed
+     * "this is the answer" and "the agent is still working": once the agent
+     * has been asked to resolve the conflicts, anything short of a confirmed
      * merge or an explicit abandonment is a reason to wait, never a reason
      * to delete.
      */
     static Next forVerdict(MergeVerdict verdict, String mainCheckout, String branch, String base,
-                           boolean afterHandOff) {
+                           boolean afterHandOff, String agentName) {
         return switch (verdict) {
             case MergeVerdict.Merged ignored -> new Next.CleanUp();
             case MergeVerdict.AlreadyMerged ignored -> new Next.CleanUp();
@@ -213,7 +213,7 @@ final class MergeFinishDecision {
                     : new Next.HandOff(
                             "Conflicts in " + conflicted.unmergedPaths().size()
                                     + (conflicted.unmergedPaths().size() == 1 ? " file" : " files")
-                                    + " — Claude is resolving them in the main checkout…",
+                                    + " — " + agentName + " is resolving them in the main checkout…",
                             handOffPrompt(mainCheckout, branch, base, conflicted.unmergedPaths()));
             case MergeVerdict.NotMerged ignored -> afterHandOff
                     ? new Next.Stopped("The merge was abandoned",
@@ -266,8 +266,9 @@ final class MergeFinishDecision {
      * reported as a failure because the cleanup was partial, and a session
      * that is still open is never reported as closed.
      */
-    static Next.Done forCleanup(CleanupOutcome outcome, String branch, String base, boolean conflictsResolved) {
-        String headline = mergedHeadline(branch, base, conflictsResolved);
+    static Next.Done forCleanup(CleanupOutcome outcome, String branch, String base, boolean conflictsResolved,
+                                String agentName) {
+        String headline = mergedHeadline(branch, base, conflictsResolved, agentName);
         String worktree = outcome.worktreeRemoved()
                 ? "worktree removed"
                 : "worktree kept — " + outcome.worktreeKeptReason().orElse("git refused to remove it");
@@ -286,9 +287,10 @@ final class MergeFinishDecision {
     }
 
     /** The one place the "this merge landed" headline is worded; shared by the two outcomes that report one. */
-    private static String mergedHeadline(String branch, String base, boolean conflictsResolved) {
+    private static String mergedHeadline(String branch, String base, boolean conflictsResolved,
+                                         String agentName) {
         return "✓ Merged " + branch + " into " + base
-                + (conflictsResolved ? " — conflicts resolved by Claude" : "");
+                + (conflictsResolved ? " — conflicts resolved by " + agentName : "");
     }
 
     /**
@@ -347,8 +349,9 @@ final class MergeFinishDecision {
      * downgrade a merge that is already in the base branch to a ✗ failure --
      * the user would go looking for a merge commit that is right there.
      */
-    static Next.Done forFailedCleanup(String branch, String base, boolean conflictsResolved, String detail) {
-        return new Next.Done(mergedHeadline(branch, base, conflictsResolved),
+    static Next.Done forFailedCleanup(String branch, String base, boolean conflictsResolved, String detail,
+                                      String agentName) {
+        return new Next.Done(mergedHeadline(branch, base, conflictsResolved, agentName),
                 String.join(" · ", "cleanup did not run: " + detail,
                         "worktree, branch and session left as they are"));
     }

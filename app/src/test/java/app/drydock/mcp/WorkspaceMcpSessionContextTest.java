@@ -327,6 +327,10 @@ class WorkspaceMcpSessionContextTest {
         return contextWith(root, List.of(localRepository(root)));
     }
 
+    /** No providers discovered: display names fall back to the title-cased kind. */
+    private final app.drydock.agent.api.AgentRegistry agentRegistry =
+            new app.drydock.agent.api.AgentRegistry(List.of(), null);
+
     private WorkspaceMcpSessionContext contextWith(Path root, List<Repository> repositories) throws IOException {
         caller(root);
         annotationStore = new AnnotationStore(root.resolve("annotations.json"));
@@ -335,6 +339,7 @@ class WorkspaceMcpSessionContextTest {
                 () -> repositories,
                 annotationStore,
                 new app.drydock.review.ReviewScopeRegistry(),
+                agentRegistry,
                 new app.drydock.review.IntentGrouping(),
                 new app.drydock.git.DiffService(),
                 gitStatusService,

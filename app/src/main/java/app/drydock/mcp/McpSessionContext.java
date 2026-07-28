@@ -79,6 +79,13 @@ public interface McpSessionContext {
      */
     Optional<ReviewScope> reviewScope(String scopeId, ManagedSessionId caller);
 
+    /**
+     * The display name of the agent behind {@code caller}, for attributing
+     * what it writes. A finding says who found it, and a Codex session's
+     * findings must not be signed "Claude".
+     */
+    String reviewerName(ManagedSessionId caller);
+
     /** The diff of a scope, already parsed. Runs git, so never on the FX thread. */
     UnifiedDiff reviewDiff(ReviewScope scope) throws McpToolException;
 

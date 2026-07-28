@@ -98,6 +98,14 @@ final class FakeMcpSessionContext implements McpSessionContext {
     final List<app.drydock.review.ReviewVerdict> verdicts = new ArrayList<>();
     final Set<String> submitted = new LinkedHashSet<>();
 
+    /** The agent this fake's caller runs; a finding is signed with it. */
+    String reviewerName = "Claude";
+
+    @Override
+    public String reviewerName(ManagedSessionId caller) {
+        return reviewerName;
+    }
+
     @Override
     public Optional<app.drydock.review.ReviewScope> reviewScope(String scopeId, ManagedSessionId caller) {
         if (!addressableScopes.getOrDefault(caller, Set.of()).contains(scopeId)) {
