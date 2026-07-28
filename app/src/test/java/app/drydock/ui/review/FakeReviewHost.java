@@ -199,8 +199,8 @@ final class FakeReviewHost implements ReviewDestinationView.Host {
     }
 
     @Override
-    public Optional<UnifiedDiff> readPatchOnly(ReviewScope scope) {
-        return patch;
+    public void readPatchOnly(ReviewScope scope, java.util.function.Consumer<Optional<UnifiedDiff>> onComplete) {
+        onComplete.accept(patch);
     }
 
     @Override

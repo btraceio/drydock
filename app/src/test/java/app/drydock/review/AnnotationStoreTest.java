@@ -18,6 +18,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -41,6 +42,20 @@ class AnnotationStoreTest {
                 List.of(), Optional.empty(), Optional.empty(), List.of(),
                 List.of(new ReviewAnnotation.Message("Claude", AT, "body")),
                 Optional.empty(), AnnotationStatus.OPEN);
+    }
+
+    @Test
+    void persistsTheSecretUsedForRestartStableScopeIds(@TempDir Path dir) {
+        Path file = dir.resolve("annotations.json");
+        byte[] original;
+        try (AnnotationStore store = new AnnotationStore(file)) {
+            original = store.scopeIdSecret();
+            store.upsert(finding("rs_scope", "f1"));
+        }
+
+        try (AnnotationStore reopened = new AnnotationStore(file)) {
+            assertArrayEquals(original, reopened.scopeIdSecret());
+        }
     }
 
     // ---- the keying bug -----------------------------------------------------

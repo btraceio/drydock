@@ -27,7 +27,7 @@ session's checkout.
 
 | Piece | Class | Notes |
 |---|---|---|
-| Scope handles | `app.drydock.review.ReviewScope` / `ReviewScopeRegistry` | Opaque `rs_…` handles minted per reviewable thing (Review MCP schema §0). Minting is idempotent on identity (kind + repo + worktree + base + head + PR), so a queue rescan never orphans anything keyed by `(scopeId, …)`. Grants let a human hand one session's agent another worktree's scope. |
+| Scope handles | `app.drydock.review.ReviewScope` / `ReviewScopeRegistry` | Opaque `rs_…` handles derived by HMAC from the scope's identity (kind + repo + worktree + base + head + PR) and a per-profile secret persisted in the annotation store. Deterministic, so a handle survives a restart and persisted findings stay addressable; keyed rather than path-derived, so the handle leaks no repository paths. Grants let a human hand one session's agent another worktree's scope. |
 | Queue assembly | `ReviewQueueService` | `WorktreeService.list` + `GitStatusService` + `gh pr list --search "review-requested:@me"`, grouped MINE / AGENTS / REQUESTED / STACK. A repository whose git fails, or a missing `gh`, contributes nothing and is logged — the rest of the queue still assembles. |
 | `gh` review requests | `GhCliService.listReviewRequests` | Read-only, per repository, bounded; a malformed row is skipped rather than emptying the group. |
 | Destination view | `app.drydock.ui.review.ReviewDestinationView` | 36px title bar, queue rail, two-row item header (what is being reviewed; its session binding), and a body supplied by its `Host`. |
@@ -79,6 +79,14 @@ need a look before the next milestone builds on them.
   names because the meanings are unrelated: a MED-risk intent is not a dirty
   worktree, and collapsing them would make a future palette change to one
   silently move the other.
+- **Scope handles are derived, not minted at random.** An earlier revision
+  generated a fresh random id per process, which meant findings persisted
+  under a `scopeId` were orphaned on the next launch. They are now an HMAC of
+  the scope's identity under a per-profile secret stored alongside the
+  findings (schema version 3), so the same worktree resolves to the same
+  handle across restarts without putting repository paths in the handle.
+  Identity paths are normalized, so a symlinked or relative root does not
+  produce a second handle for the same scope.
 - **The `STACK` group is modelled but never produced.** Stacked-PR detection
   is not implemented; this is open decision §10.4 (stacks have no dedicated
   view), so nothing was invented for it.

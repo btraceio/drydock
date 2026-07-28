@@ -1128,26 +1128,22 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         }
 
         @Override
-        public Optional<UnifiedDiff> readPatchOnly(ReviewScope scope) {
+        public void readPatchOnly(ReviewScope scope, Consumer<Optional<UnifiedDiff>> onComplete) {
             Optional<Integer> pr = scope.pr().map(ReviewScope.PullRequestRef::number);
             if (pr.isEmpty()) {
-                return Optional.empty();
+                onComplete.accept(Optional.empty());
+                return;
             }
-            try {
-                // Bounded, and only ever reached from a click that has already
-                // rendered its own state; the alternative -- a second async
-                // hop into the body factory -- would have the body rebuild
-                // underneath the reader.
-                return ghCliService.prDiff(scope.repoRoot(), pr.get())
-                        .get(30, TimeUnit.SECONDS)
-                        .map(DiffService::parseUnified);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return Optional.empty();
-            } catch (ExecutionException | TimeoutException e) {
-                LOG.log(Level.WARNING, "Could not read the patch for PR #" + pr.get(), e);
-                return Optional.empty();
-            }
+            ghCliService.prDiff(scope.repoRoot(), pr.get())
+                    .thenApply(diff -> diff.map(DiffService::parseUnified))
+                    .whenComplete((patch, failure) -> Platform.runLater(() -> {
+                        if (failure != null) {
+                            LOG.log(Level.WARNING, "Could not read the patch for PR #" + pr.get(), failure);
+                            onComplete.accept(Optional.empty());
+                            return;
+                        }
+                        onComplete.accept(patch);
+                    }));
         }
 
         @Override

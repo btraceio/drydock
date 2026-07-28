@@ -17,9 +17,11 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.security.SecureRandom;
 import java.time.DateTimeException;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -65,10 +67,12 @@ public final class AnnotationStore implements AutoCloseable {
 
     /**
      * 1 keyed findings by {@code (sessionId, DiffScope)}; 2 keys them by
-     * scope handle. A v1 file is migrated on read rather than dropped -- see
+     * scope handle; 3 adds the secret used to derive restart-stable scope
+     * handles. A v1 file is migrated on read rather than dropped -- see
      * {@link #legacyScopeId}.
      */
-    private static final int SCHEMA_VERSION = 2;
+    private static final int SCHEMA_VERSION = 3;
+    private static final SecureRandom RANDOM = new SecureRandom();
 
     /**
      * The scope id a pre-scope-handle finding is parked under. Scope handles
@@ -95,6 +99,9 @@ public final class AnnotationStore implements AutoCloseable {
     /** Scopes whose review has been submitted. */
     private final List<String> submitted = new ArrayList<>();
 
+    /** Persisted per-profile secret used to derive opaque, restart-stable scope ids. */
+    private String scopeIdSecret = newScopeIdSecret();
+
     private final AtomicReference<Snapshot> pendingSnapshot = new AtomicReference<>();
 
     /**
@@ -110,7 +117,7 @@ public final class AnnotationStore implements AutoCloseable {
     private final List<Consumer<ReviewAnnotation.Key>> changeListeners = new CopyOnWriteArrayList<>();
 
     private record Snapshot(List<ReviewAnnotation> findings, List<ReviewVerdict> verdicts,
-                            List<String> submitted) {
+                            List<String> submitted, String scopeIdSecret) {
     }
 
     public AnnotationStore(Path file) {
@@ -121,6 +128,11 @@ public final class AnnotationStore implements AutoCloseable {
     /** The annotations file next to {@code stateFile} (same directory, {@code annotations.json}). */
     public static Path siblingOf(Path stateFile) {
         return stateFile.toAbsolutePath().normalize().resolveSibling("annotations.json");
+    }
+
+    /** A defensive copy of the profile secret used by {@link ReviewScopeRegistry}. */
+    public synchronized byte[] scopeIdSecret() {
+        return Base64.getUrlDecoder().decode(scopeIdSecret);
     }
 
     // ---- queries ------------------------------------------------------------
@@ -399,7 +411,7 @@ public final class AnnotationStore implements AutoCloseable {
 
     private void persistAsync() {
         Snapshot snapshot = new Snapshot(List.copyOf(findings.values()),
-                List.copyOf(verdicts.values()), List.copyOf(submitted));
+                List.copyOf(verdicts.values()), List.copyOf(submitted), scopeIdSecret);
         // Queue a writer task only when there is no snapshot already
         // pending; otherwise the queued task picks up this newer one.
         if (pendingSnapshot.getAndSet(snapshot) == null) {
@@ -417,7 +429,7 @@ public final class AnnotationStore implements AutoCloseable {
             Path directory = file.getParent();
             Files.createDirectories(directory);
             String text = JsonWriter.write(toJson(snapshot.findings(), snapshot.verdicts(),
-                    snapshot.submitted()));
+                    snapshot.submitted(), snapshot.scopeIdSecret()));
             Path tempFile = Files.createTempFile(directory, file.getFileName().toString() + ".", ".tmp");
             try {
                 Files.writeString(tempFile, text, StandardCharsets.UTF_8);
@@ -437,6 +449,7 @@ public final class AnnotationStore implements AutoCloseable {
         try {
             String text = Files.readString(file, StandardCharsets.UTF_8);
             JsonValue parsed = JsonParser.parse(text);
+            scopeIdSecretFromJson(parsed).ifPresent(secret -> scopeIdSecret = secret);
             for (ReviewAnnotation finding : fromJson(parsed)) {
                 findings.put(finding.key(), finding);
             }
@@ -453,8 +466,14 @@ public final class AnnotationStore implements AutoCloseable {
 
     static JsonValue toJson(List<ReviewAnnotation> findings, List<ReviewVerdict> verdicts,
                             List<String> submitted) {
+        return toJson(findings, verdicts, submitted, newScopeIdSecret());
+    }
+
+    private static JsonValue toJson(List<ReviewAnnotation> findings, List<ReviewVerdict> verdicts,
+                                    List<String> submitted, String scopeIdSecret) {
         JsonObject root = JsonObject.empty();
         root.put("schemaVersion", JsonNumber.of(SCHEMA_VERSION));
+        root.put("scopeIdSecret", new JsonString(scopeIdSecret));
 
         List<JsonValue> entries = new ArrayList<>();
         for (ReviewAnnotation finding : findings) {
@@ -480,6 +499,24 @@ public final class AnnotationStore implements AutoCloseable {
         }
         root.put("submitted", new JsonArray(submittedEntries));
         return root;
+    }
+
+    private static Optional<String> scopeIdSecretFromJson(JsonValue value) {
+        if (!(value instanceof JsonObject root) || !(root.get("scopeIdSecret") instanceof JsonString secret)) {
+            return Optional.empty();
+        }
+        try {
+            byte[] decoded = Base64.getUrlDecoder().decode(secret.value());
+            return decoded.length >= 16 ? Optional.of(secret.value()) : Optional.empty();
+        } catch (IllegalArgumentException ignored) {
+            return Optional.empty();
+        }
+    }
+
+    private static String newScopeIdSecret() {
+        byte[] secret = new byte[32];
+        RANDOM.nextBytes(secret);
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(secret);
     }
 
     private static JsonObject findingToJson(ReviewAnnotation finding) {

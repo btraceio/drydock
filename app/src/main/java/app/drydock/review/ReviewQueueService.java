@@ -88,22 +88,24 @@ public final class ReviewQueueService {
      * Repositories are scanned concurrently; the future completes when all
      * of them have either produced items or failed.
      *
-     * <p>Handles for scopes that are no longer in the queue are revoked, so
-     * a worktree that was removed stops being addressable over MCP.</p>
+     * <p>Handles for scopes confirmed no longer in the queue are revoked, so
+     * a worktree that was removed stops being addressable over MCP. A failed
+     * scan is not evidence that an existing scope departed.</p>
      */
     public CompletableFuture<List<ReviewItem>> assemble(List<RepositoryTarget> repositories,
                                                         SessionLookup sessions) {
         Objects.requireNonNull(sessions, "sessions");
-        List<CompletableFuture<List<ReviewItem>>> perRepository = repositories.stream()
+        List<CompletableFuture<RepositoryScan>> perRepository = repositories.stream()
                 .map(repository -> assembleRepository(repository, sessions))
                 .toList();
         return CompletableFuture.allOf(perRepository.toArray(CompletableFuture[]::new))
                 .thenApply(ignored -> {
-                    List<ReviewItem> items = perRepository.stream()
-                            .flatMap(future -> future.join().stream())
+                    List<RepositoryScan> scans = perRepository.stream().map(CompletableFuture::join).toList();
+                    List<ReviewItem> items = scans.stream()
+                            .flatMap(scan -> scan.items().stream())
                             .sorted(Comparator.comparingInt(item -> item.group().ordinal()))
                             .toList();
-                    revokeDepartedScopes(items);
+                    revokeDepartedScopes(scans);
                     return items;
                 });
     }
@@ -114,31 +116,49 @@ public final class ReviewQueueService {
      * PR list is the slow one (a network call), and it must not serialize
      * behind two local git commands.
      */
-    private CompletableFuture<List<ReviewItem>> assembleRepository(RepositoryTarget repository,
+    private CompletableFuture<RepositoryScan> assembleRepository(RepositoryTarget repository,
                                                                    SessionLookup sessions) {
-        CompletableFuture<List<WorktreeService.Worktree>> worktrees =
-                worktreeService.list(repository.root()).exceptionally(failure -> {
+        CompletableFuture<Fetch<List<WorktreeService.Worktree>>> worktrees =
+                worktreeService.list(repository.root()).handle((value, failure) -> {
+                    if (failure == null) {
+                        return new Fetch<>(value, true);
+                    }
                     LOG.log(Level.DEBUG, "Could not list worktrees of " + repository.root(), failure);
-                    return List.of();
+                    return new Fetch<>(List.of(), false);
                 });
-        CompletableFuture<Optional<GitStatus>> status =
+        CompletableFuture<Fetch<Optional<GitStatus>>> status =
                 gitStatusService.getStatus(repository.root())
                         .<Optional<GitStatus>>thenApply(Optional::of)
-                        .exceptionally(failure -> {
+                        .handle((value, failure) -> {
+                            if (failure == null) {
+                                return new Fetch<>(value, true);
+                            }
                             LOG.log(Level.DEBUG, "Could not read status of " + repository.root(), failure);
-                            return Optional.empty();
+                            return new Fetch<>(Optional.empty(), false);
                         });
-        CompletableFuture<List<GhCliService.ReviewRequest>> requests =
-                reviewRequests.forRepository(repository.root()).exceptionally(failure -> {
+        CompletableFuture<Fetch<List<GhCliService.ReviewRequest>>> requests =
+                reviewRequests.forRepository(repository.root()).handle((value, failure) -> {
+                    if (failure == null) {
+                        return new Fetch<>(value, true);
+                    }
                     LOG.log(Level.DEBUG, "Could not list review requests for " + repository.root(), failure);
-                    return List.of();
+                    return new Fetch<>(List.of(), false);
                 });
 
-        return worktrees.thenCombine(status, PartialScan::new)
-                .thenCombine(requests, (scan, prs) -> build(repository, sessions, scan, prs));
+        return worktrees.thenCombine(status, (trees, mainStatus) ->
+                        new PartialScan(trees.value(), mainStatus.value(),
+                                trees.complete() && mainStatus.complete()))
+                .thenCombine(requests, (scan, prs) -> new RepositoryScan(repository,
+                        build(repository, sessions, scan, prs.value()), scan.localComplete(), prs.complete()));
     }
 
-    private record PartialScan(List<WorktreeService.Worktree> worktrees, Optional<GitStatus> status) { }
+    private record Fetch<T>(T value, boolean complete) { }
+
+    private record PartialScan(List<WorktreeService.Worktree> worktrees, Optional<GitStatus> status,
+                               boolean localComplete) { }
+
+    private record RepositoryScan(RepositoryTarget repository, List<ReviewItem> items,
+                                  boolean localComplete, boolean requestsComplete) { }
 
     private List<ReviewItem> build(RepositoryTarget repository, SessionLookup sessions,
                                    PartialScan scan, List<GhCliService.ReviewRequest> requests) {
@@ -221,17 +241,26 @@ public final class ReviewQueueService {
     }
 
     /**
-     * Revokes handles for scopes that are no longer in the queue. Without
-     * this a pruned worktree's handle would stay addressable over MCP for
-     * the life of the process (schema §0: the handle is revoked when the
-     * item leaves the queue).
+     * Revokes handles only when the source authoritative for their kind
+     * completed successfully and no longer lists them. Without this a pruned
+     * worktree's handle would stay addressable over MCP; treating a failed
+     * command as an empty result would instead revoke live scopes.
      */
-    private void revokeDepartedScopes(List<ReviewItem> items) {
-        Set<String> live = items.stream()
-                .map(item -> item.scope().id())
-                .collect(Collectors.toUnmodifiableSet());
+    private void revokeDepartedScopes(List<RepositoryScan> scans) {
         for (ReviewScope scope : scopeRegistry.scopes()) {
-            if (!live.contains(scope.id())) {
+            Optional<RepositoryScan> scan = scans.stream()
+                    .filter(candidate -> candidate.repository().root().toAbsolutePath().normalize()
+                            .equals(scope.repoRoot().toAbsolutePath().normalize()))
+                    .findFirst();
+            if (scan.isEmpty()) {
+                continue;
+            }
+            boolean sourceCompleted = scope.kind() == ReviewScope.Kind.PR
+                    ? scan.get().requestsComplete()
+                    : scan.get().localComplete();
+            boolean stillLive = scan.get().items().stream()
+                    .anyMatch(item -> item.scope().id().equals(scope.id()));
+            if (sourceCompleted && !stillLive) {
                 scopeRegistry.revoke(scope.id());
             }
         }

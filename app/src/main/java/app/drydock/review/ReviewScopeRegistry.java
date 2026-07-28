@@ -2,6 +2,9 @@ package app.drydock.review;
 
 import app.drydock.domain.ManagedSessionId;
 
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.security.SecureRandom;
 import java.util.ArrayList;
@@ -39,24 +42,48 @@ import java.util.function.Consumer;
  */
 public final class ReviewScopeRegistry {
 
-    /** Crockford base32, so ids are opaque, case-insensitive and free of look-alike glyphs. */
+    /** Crockford base32 keeps schema-compatible opaque, case-insensitive ids. */
     private static final char[] BASE32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ".toCharArray();
-
     private static final SecureRandom RANDOM = new SecureRandom();
 
     /** Identity of a scope, independent of its minted id and of any bound session. */
     private record Identity(ReviewScope.Kind kind, Path repoRoot, Optional<Path> worktree,
                             String base, String head, Optional<Integer> pr) {
         static Identity of(ReviewScope scope) {
-            return new Identity(scope.kind(), scope.repoRoot(), scope.worktree(), scope.base(),
+            return new Identity(scope.kind(), normalized(scope.repoRoot()),
+                    scope.worktree().map(Identity::normalized), scope.base(),
                     scope.head(), scope.pr().map(ReviewScope.PullRequestRef::number));
+        }
+
+        private static Path normalized(Path path) {
+            return path.toAbsolutePath().normalize();
         }
     }
 
+    private final byte[] scopeIdSecret;
     private final Map<String, ReviewScope> byId = new ConcurrentHashMap<>();
     private final Map<Identity, String> idByIdentity = new ConcurrentHashMap<>();
     private final Map<String, Set<ManagedSessionId>> grants = new ConcurrentHashMap<>();
     private final List<Consumer<String>> listeners = new CopyOnWriteArrayList<>();
+
+    /** Creates a registry with a fresh secret for callers that do not persist review data. */
+    public ReviewScopeRegistry() {
+        this(newSecret());
+    }
+
+    /**
+     * Creates a registry whose scope handles are deterministic for this
+     * secret. Application startup obtains the secret from {@link
+     * AnnotationStore}, so a persisted annotation remains addressable after
+     * a restart without exposing repository paths in the handle.
+     */
+    public ReviewScopeRegistry(byte[] scopeIdSecret) {
+        Objects.requireNonNull(scopeIdSecret, "scopeIdSecret");
+        if (scopeIdSecret.length < 16) {
+            throw new IllegalArgumentException("scopeIdSecret must contain at least 128 bits");
+        }
+        this.scopeIdSecret = scopeIdSecret.clone();
+    }
 
     /**
      * Mints a handle for {@code spec}, or returns the existing handle when a
@@ -72,7 +99,7 @@ public final class ReviewScopeRegistry {
     public ReviewScope mint(ReviewScope spec) {
         Objects.requireNonNull(spec, "spec");
         Identity identity = Identity.of(spec);
-        String id = idByIdentity.computeIfAbsent(identity, key -> newId());
+        String id = idByIdentity.computeIfAbsent(identity, this::newId);
         ReviewScope scope = new ReviewScope(id, spec.kind(), spec.repoRoot(), spec.worktree(),
                 spec.base(), spec.head(), spec.pr(), spec.sessionId());
         ReviewScope previous = byId.put(id, scope);
@@ -112,8 +139,9 @@ public final class ReviewScopeRegistry {
      * Drops the handle and every grant against it -- the item left the
      * queue. Findings keyed by this id are not touched here: the store owns
      * their lifetime, and revoking a handle for an item that later comes
-     * back (a worktree that was pruned and re-added) mints a new id by
-     * design, because it is genuinely not the same review any more.
+     * back remains addressable under its stable identity-derived id. The
+     * store owns the lifetime of its review data, while this registry owns
+     * whether an agent may currently address it.
      */
     public void revoke(String id) {
         if (id == null) {
@@ -183,24 +211,47 @@ public final class ReviewScopeRegistry {
         }
     }
 
-    /**
-     * A time-ordered, opaque id in the shape the schema documents
-     * ({@code rs_01J…}): 48 bits of epoch milliseconds followed by 40 random
-     * bits, Crockford base32. Sortable by mint time, unguessable enough that
-     * an id leaking into a transcript is not an address an agent can walk.
-     */
-    private static String newId() {
-        long millis = System.currentTimeMillis() & 0xFFFF_FFFF_FFFFL;
-        long random = ((long) RANDOM.nextInt()) & 0xFF_FFFF_FFFFL;
+    private String newId(Identity identity) {
+        try {
+            Mac mac = Mac.getInstance("HmacSHA256");
+            mac.init(new SecretKeySpec(scopeIdSecret, "HmacSHA256"));
+            update(mac, identity.kind().name());
+            update(mac, identity.repoRoot().toString());
+            update(mac, identity.worktree().map(Path::toString).orElse(""));
+            update(mac, identity.base());
+            update(mac, identity.head());
+            update(mac, identity.pr().map(Object::toString).orElse(""));
+            return opaqueId(mac.doFinal());
+        } catch (Exception e) {
+            throw new IllegalStateException("Unable to create a review scope id", e);
+        }
+    }
+
+    private static void update(Mac mac, String value) {
+        byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
+        mac.update((byte) (bytes.length >>> 24));
+        mac.update((byte) (bytes.length >>> 16));
+        mac.update((byte) (bytes.length >>> 8));
+        mac.update((byte) bytes.length);
+        mac.update(bytes);
+    }
+
+    private static String opaqueId(byte[] digest) {
         StringBuilder out = new StringBuilder("rs_");
-        appendBase32(out, millis, 10);
-        appendBase32(out, random, 8);
+        int bit = 0;
+        for (int group = 0; group < 18; group++) {
+            int value = 0;
+            for (int offset = 0; offset < 5; offset++, bit++) {
+                value = (value << 1) | ((digest[bit / 8] >>> (7 - (bit % 8))) & 1);
+            }
+            out.append(BASE32[value]);
+        }
         return out.toString();
     }
 
-    private static void appendBase32(StringBuilder out, long value, int chars) {
-        for (int shift = (chars - 1) * 5; shift >= 0; shift -= 5) {
-            out.append(BASE32[(int) ((value >>> shift) & 0x1F)]);
-        }
+    private static byte[] newSecret() {
+        byte[] secret = new byte[32];
+        RANDOM.nextBytes(secret);
+        return secret;
     }
 }

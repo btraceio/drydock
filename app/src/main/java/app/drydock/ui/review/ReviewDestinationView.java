@@ -145,7 +145,8 @@ public final class ReviewDestinationView extends BorderPane {
          * The gate's second action: the PR's patch with no worktree. Empty
          * when it cannot be read (no {@code gh}, or no access).
          */
-        Optional<app.drydock.git.UnifiedDiff> readPatchOnly(ReviewScope scope);
+        void readPatchOnly(ReviewScope scope,
+                           Consumer<Optional<app.drydock.git.UnifiedDiff>> onComplete);
     }
 
     private final Host host;
@@ -160,7 +161,7 @@ public final class ReviewDestinationView extends BorderPane {
     private final Optional<ReviewMcpActivityPanel> mcpPanel;
 
     /** Scopes the human chose to read without a checkout ({@code Read the patch only}). */
-    private final java.util.Set<String> patchOnlyScopes = new java.util.HashSet<>();
+    private final java.util.Map<String, app.drydock.git.UnifiedDiff> patchOnlyDiffs = new java.util.HashMap<>();
 
     /** The intent the verdict bar is settling; {@code [} / {@code ]} / {@code n} move it. */
     private int intentIndex;
@@ -626,7 +627,7 @@ public final class ReviewDestinationView extends BorderPane {
             return supplied.get();
         }
         if (item.scope().worktree().isEmpty()) {
-            if (patchOnlyScopes.contains(item.scope().id())) {
+            if (patchOnlyDiffs.containsKey(item.scope().id())) {
                 return patchOnlyBody(item.scope());
             }
             checkoutGate.setScope(item.scope());
@@ -668,14 +669,7 @@ public final class ReviewDestinationView extends BorderPane {
      * reader must not be left guessing why.
      */
     private Region patchOnlyBody(ReviewScope scope) {
-        Optional<app.drydock.git.UnifiedDiff> patch = host.readPatchOnly(scope);
-        if (patch.isEmpty()) {
-            return placeholder("Could not read the patch",
-                    "The GitHub CLI could not return this pull request's diff. Check that gh is "
-                            + "installed and authenticated, or start a session to review it locally.",
-                    "gh pr diff " + scope.pr().map(pr -> String.valueOf(pr.number())).orElse("<n>"));
-        }
-        diffColumn.showDiff(patch.get());
+        diffColumn.showDiff(patchOnlyDiffs.get(scope.id()));
         VBox.setVgrow(diffColumn, Priority.ALWAYS);
         VBox box = new VBox(ReviewCheckoutGate.readOnlyBanner(
                 scope.pr().map(ReviewScope.PullRequestRef::number).orElse(0)), diffColumn);
@@ -692,8 +686,19 @@ public final class ReviewDestinationView extends BorderPane {
 
         @Override
         public void readPatchOnly(ReviewScope scope) {
-            patchOnlyScopes.add(scope.id());
-            queue.selected().ifPresent(item -> body.getChildren().setAll(bodyFor(item)));
+            host.readPatchOnly(scope, patch -> {
+                if (!checkoutGate.isShowing(scope)) {
+                    return;
+                }
+                if (patch.isEmpty()) {
+                    checkoutGate.showFailure("The GitHub CLI could not return this pull request's diff. "
+                            + "Check that gh is installed and authenticated, or start a session to review it locally.");
+                    return;
+                }
+                patchOnlyDiffs.put(scope.id(), patch.get());
+                queue.selected().filter(item -> item.scope().id().equals(scope.id()))
+                        .ifPresent(item -> body.getChildren().setAll(bodyFor(item)));
+            });
         }
     }
 

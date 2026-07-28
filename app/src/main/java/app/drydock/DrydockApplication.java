@@ -206,7 +206,7 @@ public final class DrydockApplication extends Application {
         // Cross-repo review scope handles. Owned here rather than by the
         // workspace because the MCP tool router addresses scopes too, and
         // both must resolve the same handle to the same review.
-        reviewScopeRegistry = new ReviewScopeRegistry();
+        reviewScopeRegistry = new ReviewScopeRegistry(annotationStore.scopeIdSecret());
         // Created before both readers: the Review view is built now, the MCP
         // server starts below, and they must share one log.
         mcpActivityLog = new McpActivityLog();

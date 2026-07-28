@@ -137,22 +137,31 @@ public final class PrCheckoutService implements AutoCloseable {
         // running it INSIDE the new worktree checks the PR out there and
         // leaves the main checkout alone.
         String branch = localBranchFor(prNumber);
-        ProcessResult checkedOut = run(List.of(gh.toString(), "pr", "checkout",
-                String.valueOf(prNumber), "--branch", branch), worktree, CHECKOUT_TIMEOUT);
-        if (checkedOut.exitCode() != 0) {
-            // A half-made checkout is worse than none: the next attempt would
-            // collide with the directory this one left behind.
-            removeQuietly(git, repositoryRoot, worktree);
+        try {
+            ProcessResult checkedOut = run(List.of(gh.toString(), "pr", "checkout",
+                    String.valueOf(prNumber), "--branch", branch), worktree, CHECKOUT_TIMEOUT);
+            if (checkedOut.exitCode() == 0) {
+                return worktree;
+            }
             throw new PrCheckoutException("Could not check out PR #" + prNumber + ": "
                     + ProcessRunner.excerpt(checkedOut.stderr()));
+        } catch (RuntimeException failure) {
+            // Timeouts, interrupts and process-launch failures from run()
+            // also happen after step 1 and must not strand that worktree.
+            removeQuietly(git, repositoryRoot, worktree);
+            throw failure;
         }
-        return worktree;
     }
 
     private void removeQuietly(Path git, Path repositoryRoot, Path worktree) {
         try {
-            run(List.of(git.toString(), "-C", repositoryRoot.toString(),
+            ProcessResult removed = run(List.of(git.toString(), "-C", repositoryRoot.toString(),
                     "worktree", "remove", "--force", worktree.toString()), repositoryRoot, GIT_TIMEOUT);
+            if (removed.exitCode() != 0) {
+                LOG.log(Level.WARNING, "Could not clean up the worktree at " + worktree
+                        + " after a failed PR checkout; remove it by hand: "
+                        + ProcessRunner.excerpt(removed.stderr()));
+            }
         } catch (RuntimeException e) {
             LOG.log(Level.WARNING, "Could not clean up the worktree at " + worktree
                     + " after a failed PR checkout; remove it by hand", e);

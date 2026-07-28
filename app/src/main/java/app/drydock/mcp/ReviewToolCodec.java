@@ -93,20 +93,19 @@ final class ReviewToolCodec {
         int i = start;
         for (; i < refs.size(); i++) {
             HunkRef ref = refs.get(i);
-            JsonObject encoded = hunkToJson(ref, Integer.MAX_VALUE);
+            JsonObject encoded = hunkToJson(ref, budget);
             int size = approximateBytes(encoded);
-            if (size > budget) {
-                if (page.isEmpty()) {
-                    // Does not fit even alone: truncate rather than stall the
-                    // caller on a hunk it can never receive whole.
-                    page.add(hunkToJson(ref, Math.max(1, budget / 80)).put("truncated", new JsonBoolean(true)));
-                    truncatedHunk = true;
-                    i++;
-                }
+            boolean truncated = encoded.get("truncated") instanceof JsonBoolean marker && marker.value();
+            if (truncated && !page.isEmpty()) {
                 break;
             }
             page.add(encoded);
             budget -= size;
+            truncatedHunk |= truncated;
+            if (truncated) {
+                i++;
+                break;
+            }
         }
         Optional<String> next = i < refs.size() ? Optional.of(refs.get(i).id()) : Optional.empty();
         return new ScopePage(page, next, truncatedHunk);
@@ -139,7 +138,7 @@ final class ReviewToolCodec {
         return 0;
     }
 
-    private static JsonObject hunkToJson(HunkRef ref, int maxLines) {
+    private static JsonObject hunkToJson(HunkRef ref, int maxBytes) {
         JsonObject obj = JsonObject.empty();
         obj.put("id", new JsonString(ref.id()));
         obj.put("file", new JsonString(ref.file()));
@@ -152,23 +151,59 @@ final class ReviewToolCodec {
                 .filter(line -> line.newLine().isPresent()).count()));
 
         List<JsonValue> encoded = new ArrayList<>();
-        for (UnifiedDiff.Line line : lines.subList(0, Math.min(lines.size(), maxLines))) {
-            JsonObject lineObj = JsonObject.empty();
-            lineObj.put("key", new JsonString(line.lineKey()));
-            lineObj.put("sign", new JsonString(switch (line.kind()) {
-                case ADD -> "+";
-                case DEL -> "-";
-                case CONTEXT -> " ";
-            }));
-            lineObj.put("old", line.oldLine().isPresent()
-                    ? JsonNumber.of(line.oldLine().getAsInt()) : JsonValue.JsonNull.INSTANCE);
-            lineObj.put("new", line.newLine().isPresent()
-                    ? JsonNumber.of(line.newLine().getAsInt()) : JsonValue.JsonNull.INSTANCE);
-            lineObj.put("text", new JsonString(line.text()));
+        int contentBudget = Math.max(0, maxBytes - 20); // reserve ,"truncated":true
+        for (UnifiedDiff.Line line : lines) {
+            JsonObject lineObj = lineToJson(line, truncateUtf8(line.text(), contentBudget));
             encoded.add(lineObj);
+            obj.put("lines", new JsonArray(encoded));
+            if (approximateBytes(obj) > contentBudget) {
+                encoded.remove(encoded.size() - 1);
+                obj.put("lines", new JsonArray(encoded));
+                obj.put("truncated", new JsonBoolean(true));
+                return obj;
+            }
+            if (!line.text().equals(((JsonString) lineObj.get("text")).value())) {
+                obj.put("truncated", new JsonBoolean(true));
+                return obj;
+            }
         }
         obj.put("lines", new JsonArray(encoded));
         return obj;
+    }
+
+    private static JsonObject lineToJson(UnifiedDiff.Line line, String text) {
+        JsonObject lineObj = JsonObject.empty();
+        lineObj.put("key", new JsonString(line.lineKey()));
+        lineObj.put("sign", new JsonString(switch (line.kind()) {
+            case ADD -> "+";
+            case DEL -> "-";
+            case CONTEXT -> " ";
+        }));
+        lineObj.put("old", line.oldLine().isPresent()
+                ? JsonNumber.of(line.oldLine().getAsInt()) : JsonValue.JsonNull.INSTANCE);
+        lineObj.put("new", line.newLine().isPresent()
+                ? JsonNumber.of(line.newLine().getAsInt()) : JsonValue.JsonNull.INSTANCE);
+        lineObj.put("text", new JsonString(text));
+        return lineObj;
+    }
+
+    /** Returns a UTF-8-bounded prefix without ever serializing a huge source line. */
+    private static String truncateUtf8(String text, int maxBytes) {
+        if (maxBytes <= 0) {
+            return "";
+        }
+        int used = 0;
+        int end = 0;
+        while (end < text.length()) {
+            int codePoint = text.codePointAt(end);
+            int bytes = codePoint <= 0x7F ? 1 : codePoint <= 0x7FF ? 2 : codePoint <= 0xFFFF ? 3 : 4;
+            if (used + bytes > maxBytes) {
+                return text.substring(0, end) + "…";
+            }
+            used += bytes;
+            end += Character.charCount(codePoint);
+        }
+        return text;
     }
 
     private static int firstOld(List<UnifiedDiff.Line> lines) {

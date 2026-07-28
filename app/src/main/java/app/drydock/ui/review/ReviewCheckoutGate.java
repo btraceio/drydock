@@ -66,11 +66,7 @@ final class ReviewCheckoutGate extends VBox {
         startButton.getStyleClass().addAll("review-verdict-action", "primary");
         startButton.setOnAction(e -> start());
         readOnlyButton.getStyleClass().add("review-verdict-action");
-        readOnlyButton.setOnAction(e -> {
-            if (scope != null) {
-                host.readPatchOnly(scope);
-            }
-        });
+        readOnlyButton.setOnAction(e -> readPatchOnly());
         actions.setAlignment(Pos.CENTER);
         actions.getChildren().setAll(startButton, readOnlyButton);
 
@@ -122,6 +118,22 @@ final class ReviewCheckoutGate extends VBox {
         startButton.setDisable(true);
         readOnlyButton.setDisable(true);
         host.startSessionAndReview(scope);
+    }
+
+    private void readPatchOnly() {
+        if (scope == null) {
+            return;
+        }
+        clearFailure();
+        setProgressVisible(true);
+        progressLabel.setText("Reading the pull request patch…");
+        startButton.setDisable(true);
+        readOnlyButton.setDisable(true);
+        host.readPatchOnly(scope);
+    }
+
+    boolean isShowing(ReviewScope candidate) {
+        return scope != null && scope.id().equals(candidate.id());
     }
 
     /** Reports a failed checkout; the gate returns to its offer so it can be retried. */

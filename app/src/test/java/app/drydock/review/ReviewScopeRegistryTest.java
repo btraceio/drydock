@@ -122,13 +122,23 @@ class ReviewScopeRegistryTest {
     }
 
     @Test
-    void anItemThatComesBackAfterRevocationGetsAFreshHandle() {
+    void anItemThatComesBackAfterRevocationKeepsItsStableHandle() {
         ReviewScope first = registry.mint(worktreeSpec("feat/a", Optional.empty()));
         registry.revoke(first.id());
 
         ReviewScope second = registry.mint(worktreeSpec("feat/a", Optional.empty()));
 
-        assertNotEquals(first.id(), second.id());
+        assertEquals(first.id(), second.id());
+    }
+
+    @Test
+    void registriesWithTheSamePersistedSecretMintTheSameHandle() {
+        byte[] secret = new byte[32];
+        ReviewScopeRegistry beforeRestart = new ReviewScopeRegistry(secret);
+        ReviewScopeRegistry afterRestart = new ReviewScopeRegistry(secret);
+
+        assertEquals(beforeRestart.mint(worktreeSpec("feat/a", Optional.empty())).id(),
+                afterRestart.mint(worktreeSpec("feat/a", Optional.empty())).id());
     }
 
     @Test
