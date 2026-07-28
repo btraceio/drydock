@@ -46,6 +46,18 @@ session's checkout.
 | MCP activity | `app.drydock.mcp.McpActivityLog` + `ReviewMcpActivityPanel` | Bounded ring buffer written by the one place every tool call passes through; `\` opens the panel, with a payload inspector and a budget bar. A hidden panel listens to nothing. |
 | Sidebar entry | `RepositorySidebar` | Focusable `◨ Review` row above the tree with an item-count badge, plus a `◨n` badge on worktree rows that jumps into Review scoped to that worktree. |
 
+## What it looks like
+
+Every rail expanded, with findings, on a 75-file worktree review:
+
+![Review with the queue, intent rail and findings margin expanded](images/review/review-expanded.png)
+
+The same review narrowed past the collapse thresholds of section 4.9 — queue
+and intents fold to their icon strips, the findings margin and the verdict
+bar stay:
+
+![Review with the queue and intent rails collapsed](images/review/review-narrow.png)
+
 ## Visual verification
 
 `-Dapp.drydock.diag.screenshot=<path>` renders the scene graph to a PNG from

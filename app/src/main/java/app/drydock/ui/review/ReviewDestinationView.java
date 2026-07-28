@@ -959,6 +959,14 @@ public final class ReviewDestinationView extends BorderPane {
         return report;
     }
 
+    /** Diagnostic-only: selects the {@code index}-th queue item, for the visual pass. */
+    public void diagSelectItem(int index) {
+        List<ReviewItem> items = queue.items();
+        if (index >= 0 && index < items.size()) {
+            queue.select(items.get(index).scope().id());
+        }
+    }
+
     /** Diagnostic-only: the scope the queue has selected. */
     public Optional<String> diagSelectedScopeId() {
         return selectedScope().map(ReviewScope::id);

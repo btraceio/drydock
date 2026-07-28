@@ -546,6 +546,17 @@ public final class DrydockApplication extends Application {
                     // screen-recording permission and cannot pick up another
                     // window, so it is the only visual evidence that is both
                     // available headlessly and guaranteed to be OUR UI.
+                    String item = System.getProperty("app.drydock.diag.reviewItem");
+                    if (item != null) {
+                        int index = Integer.parseInt(item.strip());
+                        onFx(() -> {
+                            review.diagSelectItem(index);
+                            return null;
+                        });
+                        // The selected item's diff is a git process.
+                        Thread.sleep(3_000);
+                        System.out.println("[diag] selected item " + index);
+                    }
                     if (Boolean.getBoolean("app.drydock.diag.seedFindings")) {
                         System.out.println("[diag] seeded: " + onFx(() -> seedFindings(review)));
                         Thread.sleep(1_500);
