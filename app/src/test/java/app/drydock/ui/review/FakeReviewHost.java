@@ -184,6 +184,25 @@ final class FakeReviewHost implements ReviewDestinationView.Host {
         selectedReviewer = reviewer;
     }
 
+    final List<String> checkoutRequests = new ArrayList<>();
+    /** When set, the fake checkout reports this failure instead of succeeding. */
+    String checkoutFailure;
+    /** The patch "Read the patch only" returns; empty models gh being unable to read it. */
+    Optional<UnifiedDiff> patch = Optional.empty();
+
+    @Override
+    public void startSessionAndReview(ReviewScope scope, java.util.function.Consumer<String> onFailed) {
+        checkoutRequests.add(scope.id());
+        if (checkoutFailure != null) {
+            onFailed.accept(checkoutFailure);
+        }
+    }
+
+    @Override
+    public Optional<UnifiedDiff> readPatchOnly(ReviewScope scope) {
+        return patch;
+    }
+
     @Override
     public boolean runReview(ReviewScope scope) {
         if (reviewers.isEmpty()) {

@@ -41,6 +41,7 @@ session's checkout.
 | Verdict bar | `ReviewVerdictBar` | Below both columns and always in the layout, so collapsing every rail cannot take the primary action with it. Approval is refused inline while a blocking finding of the intent is open. |
 | Review MCP tools | `McpToolRouter` + `ReviewToolCodec` | `review_scope` (paged on a byte budget), `review_intents`, `review_finding` (idempotent upsert), `review_answer`, `review_state`. Every inbound text field goes through `PromptSafety.checkInboundText`. |
 | Intent rail | `ReviewIntentRail` | 232 / 196 narrow / 40px collapsed. Risk heat bar, kind tag, collapsed-intent note; settled intents dim, and collapse to a status dot rather than a clipped label. |
+| PR checkout | `app.drydock.git.PrCheckoutService` + `ReviewCheckoutGate` | Detached worktree, then `gh pr checkout` **inside it**, then a session, then the scope grant. A failed checkout removes the worktree it made. |
 | Sidebar entry | `RepositorySidebar` | Focusable `◨ Review` row above the tree with an item-count badge, plus a `◨n` badge on worktree rows that jumps into Review scoped to that worktree. |
 
 ## Known deviations from the handoff
@@ -198,6 +199,37 @@ need a look before the next milestone builds on them.
   scope" grants the scope to its bound session and asks that session's agent
   to review it — the grant is the human action the schema requires before an
   agent may address a scope that is not its own.
+
+### Review — M5 (the PR loop)
+
+- **`gh pr checkout --worktree` does not exist.** The handoff gives that as
+  the literal command; `gh` (checked against 2.96) has no such flag, and
+  `gh pr checkout` always operates on the working tree it is run in — so
+  running it in the repository root would move the reviewer's **main
+  checkout** onto the PR branch mid-task. drydock instead does
+  `git worktree add --detach <dir>` and then runs
+  `gh pr checkout <n> --branch pr-<n>` *inside* that worktree, where `gh`
+  resolves the repository from its working directory. The gate prints this
+  sequence rather than the handoff's, because the reader may run it
+  themselves and the handoff's would fail.
+- **A failed checkout cleans up after itself.** A half-made worktree is worse
+  than none: the next attempt would collide with the directory left behind.
+  Covered by a test that also pins that the main checkout's branch and HEAD
+  do not move.
+- **Checking out is not in `GhCliService`.** That service's contract is
+  read-only observation; checking a PR out changes a working tree, so it
+  lives in its own service. `gh pr diff` (the "Read the patch only" path) is
+  read-only and does belong there.
+- **"Read the patch only" reuses the diff parser.** `gh pr diff` output goes
+  through the same `UnifiedDiff` parser as a local `git diff`, so a PR read
+  without a worktree renders exactly like one with — with a banner saying the
+  agent actions are unavailable, because everything that needs a session is.
+- **Submitting hands off to the existing Finish flow.** The review is over,
+  and merge / open a PR / delete the worktree is what that flow already does.
+- **The `gh pr checkout` step itself is not unit-tested.** It needs a real
+  pull request; the pre-flight refusals, the branch naming and the
+  failure-cleanup path are covered, and the end-to-end run is the manual
+  pass.
 
 ### Open decisions carried forward
 

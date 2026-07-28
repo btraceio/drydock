@@ -213,6 +213,20 @@ final class ReviewDiffColumn extends BorderPane {
         }
     }
 
+    /**
+     * Renders a diff that did not come from this column's own git call --
+     * {@code gh pr diff} for the "Read the patch only" path, which has no
+     * checkout to run git in. Clears the scope so a later reload cannot
+     * overwrite it with a local diff of the wrong tree.
+     */
+    void showDiff(UnifiedDiff supplied) {
+        scope = null;
+        requestToken++;
+        diff = supplied;
+        expandedRuns.clear();
+        rebuild();
+    }
+
     /** {@code d}: applies a density by swapping the root's style class (spec §4.8). */
     void setDensity(ReviewDensity density) {
         for (ReviewDensity value : ReviewDensity.values()) {

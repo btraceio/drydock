@@ -28,6 +28,7 @@ import javafx.scene.layout.VBox;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.function.Consumer;
 
 /**
  * The Review destination (Review handoff §1): one surface for local
@@ -131,6 +132,20 @@ public final class ReviewDestinationView extends BorderPane {
          * reviewer, or no session to run it in).
          */
         boolean runReview(ReviewScope scope);
+
+        /**
+         * The checkout gate's primary action: worktree, {@code gh pr
+         * checkout}, session, scope grant. Reports back through
+         * {@code onCheckoutFailed} rather than throwing -- it is a long
+         * network operation the gate is already showing progress for.
+         */
+        void startSessionAndReview(ReviewScope scope, Consumer<String> onCheckoutFailed);
+
+        /**
+         * The gate's second action: the PR's patch with no worktree. Empty
+         * when it cannot be read (no {@code gh}, or no access).
+         */
+        Optional<app.drydock.git.UnifiedDiff> readPatchOnly(ReviewScope scope);
     }
 
     private final Host host;
@@ -139,6 +154,10 @@ public final class ReviewDestinationView extends BorderPane {
     private final ReviewIntentRail intentRail = new ReviewIntentRail();
     private final ReviewFindingsMargin margin;
     private final ReviewVerdictBar verdictBar;
+    private final ReviewCheckoutGate checkoutGate;
+
+    /** Scopes the human chose to read without a checkout ({@code Read the patch only}). */
+    private final java.util.Set<String> patchOnlyScopes = new java.util.HashSet<>();
 
     /** The intent the verdict bar is settling; {@code [} / {@code ]} / {@code n} move it. */
     private int intentIndex;
@@ -171,6 +190,7 @@ public final class ReviewDestinationView extends BorderPane {
         this.host = host;
         this.diffColumn = new ReviewDiffColumn(diffService, host::openInExplorer);
         this.margin = new ReviewFindingsMargin(new MarginHost());
+        this.checkoutGate = new ReviewCheckoutGate(new GateHost());
         this.verdictBar = new ReviewVerdictBar(new VerdictHost());
         getStyleClass().add("review-destination");
 
@@ -582,7 +602,11 @@ public final class ReviewDestinationView extends BorderPane {
             return supplied.get();
         }
         if (item.scope().worktree().isEmpty()) {
-            return checkoutGate(item.scope());
+            if (patchOnlyScopes.contains(item.scope().id())) {
+                return patchOnlyBody(item.scope());
+            }
+            checkoutGate.setScope(item.scope());
+            return checkoutGate;
         }
         diffColumn.setScope(item.scope());
         VBox.setVgrow(diffColumn, Priority.ALWAYS);
@@ -614,21 +638,39 @@ public final class ReviewDestinationView extends BorderPane {
     }
 
     /**
-     * The checkout gate (spec §6). A PR with no worktree has no session, and
-     * therefore no agent -- which is why this is a gate rather than a
-     * convenience. The buttons arrive with the checkout flow.
+     * {@code Read the patch only}: the PR's own diff with no worktree behind
+     * it. A banner says so, because everything that needs a session -- the
+     * reviewer, the ASK chips, Apply patch -- is unavailable here and the
+     * reader must not be left guessing why.
      */
-    private Region checkoutGate(ReviewScope scope) {
-        String title = scope.pr()
-                .map(pr -> "PR #" + pr.number() + " has no session yet")
-                .orElse("This scope has no checkout yet");
-        String command = scope.pr()
-                .map(pr -> "gh pr checkout " + pr.number() + " --worktree")
-                .orElse("git worktree add");
-        return placeholder(title,
-                "Reviewing it starts a worktree and a session, so an agent can read the diff "
-                        + "and answer questions about it.",
-                command);
+    private Region patchOnlyBody(ReviewScope scope) {
+        Optional<app.drydock.git.UnifiedDiff> patch = host.readPatchOnly(scope);
+        if (patch.isEmpty()) {
+            return placeholder("Could not read the patch",
+                    "The GitHub CLI could not return this pull request's diff. Check that gh is "
+                            + "installed and authenticated, or start a session to review it locally.",
+                    "gh pr diff " + scope.pr().map(pr -> String.valueOf(pr.number())).orElse("<n>"));
+        }
+        diffColumn.showDiff(patch.get());
+        VBox.setVgrow(diffColumn, Priority.ALWAYS);
+        VBox box = new VBox(ReviewCheckoutGate.readOnlyBanner(
+                scope.pr().map(ReviewScope.PullRequestRef::number).orElse(0)), diffColumn);
+        VBox.setVgrow(box, Priority.ALWAYS);
+        return box;
+    }
+
+    /** The checkout gate's window onto the host. */
+    private final class GateHost implements ReviewCheckoutGate.Host {
+        @Override
+        public void startSessionAndReview(ReviewScope scope) {
+            host.startSessionAndReview(scope, checkoutGate::showFailure);
+        }
+
+        @Override
+        public void readPatchOnly(ReviewScope scope) {
+            patchOnlyScopes.add(scope.id());
+            queue.selected().ifPresent(item -> body.getChildren().setAll(bodyFor(item)));
+        }
     }
 
     private static Region placeholder(String title, String detail, String mono) {

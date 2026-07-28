@@ -21,11 +21,15 @@ import app.drydock.git.ChangedLineService;
 import app.drydock.git.DiffScope;
 import app.drydock.git.DiffService;
 import app.drydock.git.GhCliService;
+import app.drydock.git.PrCheckoutService;
+import app.drydock.git.UnifiedDiff;
+import app.drydock.git.WorktreeNaming;
 import app.drydock.git.GitBranchState;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.GitTarget;
 import app.drydock.git.WorktreeService;
 import app.drydock.mcp.McpSessionRegistry.Spawn;
+import app.drydock.config.UserConfig;
 import app.drydock.mcp.WorkspaceMcpSessionContext;
 import app.drydock.process.SshCommandBuilder;
 import app.drydock.review.AnnotationStore;
@@ -97,6 +101,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.DoubleSupplier;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
@@ -171,6 +176,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * remembered rail-collapse state.
      */
     private final ReviewDestinationView reviewDestination;
+    private final PrCheckoutService prCheckoutService = new PrCheckoutService();
     private final ReviewScopeRegistry reviewScopeRegistry;
     private final ReviewQueueService reviewQueueService;
     private final IntentGrouping intentGrouping = new IntentGrouping();
@@ -390,6 +396,15 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
         exitWatcher.setCycleCount(Animation.INDEFINITE);
         exitWatcher.play();
+    }
+
+    /**
+     * Releases the background executors this workspace owns. Lifecycle
+     * symmetry (AGENTS.md): anything with an executor gets a close that
+     * shutdown actually calls.
+     */
+    public void closeReviewServices() {
+        prCheckoutService.close();
     }
 
     /** Re-reads the finding counts the Review queue and the sidebar badges render. */
@@ -1016,9 +1031,22 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             }
         }
 
+        /**
+         * Records the submission and hands the worktree to the Finish flow --
+         * the review is over, and merging, opening a PR or deleting the
+         * worktree is exactly what that flow already does. A scope with no
+         * bound session has nothing to finish, and simply records the
+         * submission.
+         */
         @Override
         public void submit(ReviewScope scope) {
             annotationStore.markSubmitted(scope.id());
+            Optional<ManagedSessionId> session = scope.sessionId();
+            Optional<Path> worktree = scope.worktree();
+            if (session.isPresent() && worktree.isPresent()) {
+                hideReview();
+                worktreeLifecycle.finishAfterReview(session.get(), worktree.get());
+            }
         }
 
         /**
@@ -1050,6 +1078,67 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
          * "Run review": it is the only way an agent may address a scope that
          * is not its own, and it is always a human action.
          */
+        /**
+         * The checkout gate's primary action, end to end: a worktree, the PR
+         * checked out into it, a session started on it, and the scope handle
+         * granted to that session so its agent may review it.
+         *
+         * <p>Every step runs off the FX thread and reports failure back to
+         * the gate, which is already showing progress -- a network fetch of a
+         * whole branch is not something to do behind a frozen window.</p>
+         */
+        @Override
+        public void startSessionAndReview(ReviewScope scope, Consumer<String> onCheckoutFailed) {
+            Optional<Integer> pr = scope.pr().map(ReviewScope.PullRequestRef::number);
+            if (pr.isEmpty()) {
+                onCheckoutFailed.accept("This scope is not a pull request.");
+                return;
+            }
+            Optional<Repository> repository = repositoryManager.repositories().stream()
+                    .filter(candidate -> candidate.root().equals(scope.repoRoot()))
+                    .findFirst();
+            if (repository.isEmpty()) {
+                onCheckoutFailed.accept("The repository this pull request belongs to is no longer registered.");
+                return;
+            }
+            Path worktree = WorktreeNaming.defaultDirectory(Path.of(System.getProperty("user.home")),
+                    UserConfig.load().worktreesDirectory(), repository.get().displayName(),
+                    PrCheckoutService.localBranchFor(pr.get()));
+
+            prCheckoutService.checkout(scope.repoRoot(), worktree, pr.get())
+                    .whenComplete((created, failure) -> Platform.runLater(() -> {
+                        if (failure != null) {
+                            LOG.log(Level.WARNING, "PR checkout failed for #" + pr.get(), failure);
+                            onCheckoutFailed.accept(UiErrors.unwrap(failure).getMessage());
+                            return;
+                        }
+                        openCheckedOutPr(repository.get(), scope, created, pr.get(), onCheckoutFailed);
+                    }));
+        }
+
+        @Override
+        public Optional<UnifiedDiff> readPatchOnly(ReviewScope scope) {
+            Optional<Integer> pr = scope.pr().map(ReviewScope.PullRequestRef::number);
+            if (pr.isEmpty()) {
+                return Optional.empty();
+            }
+            try {
+                // Bounded, and only ever reached from a click that has already
+                // rendered its own state; the alternative -- a second async
+                // hop into the body factory -- would have the body rebuild
+                // underneath the reader.
+                return ghCliService.prDiff(scope.repoRoot(), pr.get())
+                        .get(30, TimeUnit.SECONDS)
+                        .map(DiffService::parseUnified);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return Optional.empty();
+            } catch (ExecutionException | TimeoutException e) {
+                LOG.log(Level.WARNING, "Could not read the patch for PR #" + pr.get(), e);
+                return Optional.empty();
+            }
+        }
+
         @Override
         public boolean runReview(ReviewScope scope) {
             Optional<ManagedSessionId> session = scope.sessionId();
@@ -1062,6 +1151,35 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                             + "Read review_scope for handle " + scope.id()
                             + ", then post review_intents and review_finding against it. "
                             + "Call review_state first so already-settled findings are not re-flagged.");
+        }
+    }
+
+    /**
+     * Starts a session on the freshly checked-out worktree and grants it the
+     * scope, so its agent may review the PR. The grant is the human action
+     * the MCP schema requires; it happens here because this whole flow began
+     * with a human clicking "Start session &amp; review".
+     */
+    private void openCheckedOutPr(Repository repository, ReviewScope scope, Path worktree,
+                                  int prNumber, Consumer<String> onFailure) {
+        try {
+            ManagedSessionId session = openWorktreeSession(repository,
+                    PrCheckoutService.localBranchFor(prNumber), worktree, Optional.empty(),
+                    false, AgentKind.CLAUDE, Spawn.FORBIDDEN);
+            // Re-mint so the scope now names its worktree and its session;
+            // minting is idempotent on identity, but the identity changed --
+            // it has a worktree now -- so this is a new handle, and the old
+            // PR-without-checkout handle leaves the queue on the next scan.
+            ReviewScope bound = reviewScopeRegistry.mint(ReviewScopeRegistry.spec(
+                    ReviewScope.Kind.PR, scope.repoRoot(), Optional.of(worktree),
+                    scope.base(), scope.head(), scope.pr(), Optional.of(session)));
+            reviewScopeRegistry.grant(bound.id(), session);
+            pendingReviewSelection = worktree;
+            refreshReviewQueue();
+        } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, "Could not start a session on the checked-out PR #" + prNumber, e);
+            onFailure.accept("The pull request was checked out, but the session could not start: "
+                    + UiErrors.unwrap(e).getMessage());
         }
     }
 

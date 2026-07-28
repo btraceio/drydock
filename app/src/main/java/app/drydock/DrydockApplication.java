@@ -816,6 +816,9 @@ public final class DrydockApplication extends Application {
                 closeQuietly("sidebar-width persistence", () -> repositoryManager.updateSidebarWidth(sidebarWidth));
             }
         }
+        if (mainWorkspace != null) {
+            closeQuietly("Review services", mainWorkspace::closeReviewServices);
+        }
         closeQuietly("UserConfig saves", UserConfig::flushPendingSaves);
         if (gitHubService != null) {
             closeQuietly("GitHubService", gitHubService::close);

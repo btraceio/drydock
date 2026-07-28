@@ -208,8 +208,17 @@ class ReviewDestinationViewTest extends ApplicationTest {
 
         assertEquals("PR #412 has no session yet",
                 ((Label) lookup(".review-placeholder-title").query()).getText());
-        assertEquals("gh pr checkout 412 --worktree",
-                ((Label) lookup(".review-placeholder-mono").query()).getText());
+
+        // The gate shows the commands drydock ACTUALLY runs. `gh pr checkout`
+        // has no --worktree flag (checked against gh 2.96), and it always
+        // operates on the working tree it is run in -- so the sequence is a
+        // detached worktree first, then gh inside it. Printing the handoff's
+        // command here would tell the reader to do something that fails.
+        String commands = ((Label) lookup(".review-placeholder-mono").query()).getText();
+        assertTrue(commands.contains("git worktree add --detach"), commands);
+        assertTrue(commands.contains("gh pr checkout 412 --branch pr-412"), commands);
+        assertFalse(commands.contains("--worktree\n") || commands.endsWith("--worktree"),
+                "must not advertise a flag gh does not have: " + commands);
     }
 
     // ---- fixtures -----------------------------------------------------------

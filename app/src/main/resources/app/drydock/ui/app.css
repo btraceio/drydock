@@ -3031,3 +3031,26 @@
 .review-intent-dot.decision-approved,
 .review-intent-dot.decision-auto-approved { -fx-background-color: -drydock-resolved; }
 .review-intent-dot.decision-changes { -fx-background-color: -drydock-question; }
+
+/* ---- Review checkout gate (handoff section 6) ---------------------------- */
+
+.review-gate {
+    -fx-padding: 32;
+}
+.review-gate-failure {
+    -fx-text-fill: -drydock-blocking;
+    -fx-font-size: 11.5px;
+    -fx-background-color: -drydock-blocking-soft;
+    -fx-background-radius: 6px;
+    -fx-padding: 8 10 8 10;
+}
+.review-readonly-banner-row {
+    -fx-background-color: -drydock-question-soft;
+    -fx-border-color: transparent transparent -drydock-border transparent;
+    -fx-border-width: 0 0 1 0;
+    -fx-padding: 7 12 7 12;
+}
+.review-readonly-banner {
+    -fx-text-fill: -drydock-question;
+    -fx-font-size: 11px;
+}

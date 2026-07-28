@@ -171,6 +171,16 @@ public final class DiffService implements AutoCloseable {
      * carries the gutter values (and stable annotation keys). Binary
      * files produce a file entry with no hunks.
      */
+    /**
+     * Parses a unified diff that did not come from this service's own
+     * {@code git diff} -- {@code gh pr diff} for the "Read the patch only"
+     * path, which has no local checkout to run git in. Same parser, so a PR
+     * read without a worktree renders exactly like one with.
+     */
+    public static UnifiedDiff parseUnified(String unifiedDiff) {
+        return parse(unifiedDiff, Set.of());
+    }
+
     static UnifiedDiff parse(String stdout, Set<String> stagedPaths) {
         List<UnifiedDiff.FileDiff> files = new ArrayList<>();
 

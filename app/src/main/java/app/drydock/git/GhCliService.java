@@ -29,11 +29,12 @@ import java.util.concurrent.Executors;
 import java.util.regex.Pattern;
 
 /**
- * READ-ONLY queries against the GitHub CLI ({@code gh}), used solely to
- * reconcile a worktree session's PR chip after a hand-off (design handoff
- * section B: the app itself never runs {@code gh pr create} or any other
- * mutation -- Claude in the terminal does; this service only observes the
- * result via {@code gh pr view}).
+ * READ-ONLY queries against the GitHub CLI ({@code gh}): the PR chip a
+ * worktree session reconciles after a hand-off, the review-requested queue,
+ * and the patch behind "Read the patch only". The app never runs
+ * {@code gh pr create} or any other mutation -- Claude in the terminal does;
+ * this service only observes. Checking a PR out is a working-tree change and
+ * lives in {@code PrCheckoutService}, not here.
  *
  * <p>{@code gh} is optional: when it is not installed, {@link #viewPr}
  * completes with an empty result and callers fall back to an optimistic
@@ -226,6 +227,35 @@ public final class GhCliService implements AutoCloseable {
         boolean draft = obj.get("isDraft") instanceof JsonValue.JsonBoolean d && d.value();
         return Optional.of(new ReviewRequest(prNumber, title, head.value(), base.value(),
                 author, url, changedFiles, draft));
+    }
+
+    /**
+     * The unified diff of a pull request, as {@code gh pr diff} prints it --
+     * the "Read the patch only" path (Review handoff §6), which needs no
+     * worktree and therefore no session and no agent.
+     *
+     * <p>Empty when {@code gh} is missing, unauthenticated, or the PR cannot
+     * be read; the caller shows the gate rather than an empty diff.</p>
+     */
+    public CompletableFuture<Optional<String>> prDiff(Path root, int prNumber) {
+        return CompletableFuture.supplyAsync(() -> prDiffBlocking(root, prNumber), executor);
+    }
+
+    Optional<String> prDiffBlocking(Path root, int prNumber) {
+        Path gh = locate().orElse(null);
+        if (gh == null || prNumber <= 0) {
+            return Optional.empty();
+        }
+        ProcessResult result = runIn(root,
+                List.of(gh.toString(), "pr", "diff", String.valueOf(prNumber), "--patch"));
+        if (result == null || result.exitCode() != 0) {
+            if (result != null) {
+                LOG.log(Level.DEBUG, "gh pr diff " + prNumber + " exited " + result.exitCode()
+                        + (result.stderr().isBlank() ? "" : ": " + ProcessRunner.excerpt(result.stderr())));
+            }
+            return Optional.empty();
+        }
+        return result.stdout().isBlank() ? Optional.empty() : Optional.of(result.stdout());
     }
 
     private static PrInfo.PrLifecycle lifecycleOf(String raw) {
