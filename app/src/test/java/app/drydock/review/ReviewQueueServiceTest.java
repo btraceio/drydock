@@ -109,6 +109,7 @@ class ReviewQueueServiceTest {
         assertEquals("main", agentsItem.scope().base());
         assertEquals(Optional.of(mine.toRealPath()), mineItem.scope().worktree().map(ReviewQueueServiceTest::real));
         assertTrue(agentsItem.scope().sessionId().isPresent());
+        assertDiffsResolve(items);
     }
 
     @Test
@@ -188,6 +189,7 @@ class ReviewQueueServiceTest {
                 "a branch switch in the main checkout must not orphan a worktree's findings");
         assertEquals("main", after.scope().base(),
                 "the base is the repository's default branch, not whatever is checked out");
+        assertDiffsResolve(List.of(after));
     }
 
     @Test
@@ -201,6 +203,7 @@ class ReviewQueueServiceTest {
                 .assemble(List.of(target(repo)), checkout -> Optional.empty()).get();
 
         assertEquals("main", itemTitled(items, "feat/x").scope().base());
+        assertDiffsResolve(items);
     }
 
     /**
@@ -252,7 +255,16 @@ class ReviewQueueServiceTest {
         assertDiffsResolve(items);
     }
 
-    /** Runs the real diff for each item and fails on the first that cannot resolve its base. */
+    /**
+     * Runs the real diff for each item and fails on the first that cannot
+     * resolve its base.
+     *
+     * <p>Every test that asserts on a base string calls this too. Asserting
+     * the base's <em>name</em> is the wrong altitude on its own: a base is
+     * only useful if git can resolve it, and a name-only assertion passed
+     * happily while {@code origin/HEAD} handed the diff a branch with no
+     * local ref.</p>
+     */
     private void assertDiffsResolve(List<ReviewItem> items) throws Exception {
         try (app.drydock.git.DiffService diffService = new app.drydock.git.DiffService()) {
             for (ReviewItem item : items) {

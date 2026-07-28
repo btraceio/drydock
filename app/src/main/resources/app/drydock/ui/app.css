@@ -2575,11 +2575,17 @@
     -fx-border-width: 0 0 0 2;
 }
 
-/* Density (spec 4.8) -- code font, row height and row padding. The px
-   literals are what UiFontScale scales, so density stays a relative choice
-   on top of the user's absolute interface size. Row height carries the
-   handoff's line-height ratios (font x 1.6 / 1.42 / 1.25), because JavaFX
-   has no line-height on a single-line row. */
+/* Density (spec 4.8) -- code font size and row height. The px literals are
+   what UiFontScale scales, so density stays a relative choice on top of the
+   user's absolute interface size.
+   
+   A diff row's height is font-size x line-height (1.6 / 1.42 / 1.25), which
+   is what the prototype gives its code rows; JavaFX has no line-height on a
+   single-line row, so it becomes -fx-min-height. The 8/6/4px "row padding"
+   of section 4.8 is the prototype's `ipad`, which it applies to the QUEUE
+   and INTENT cards, not to code lines -- putting it here too made every diff
+   row almost twice its intended height. Code rows take horizontal padding
+   only. */
 .density-cozy .review-code-span,
 .density-cozy .review-code-gutter,
 .density-cozy .review-code-sign {
@@ -2588,7 +2594,7 @@
 .density-cozy .review-code-row,
 .density-cozy .review-collapsed-run {
     -fx-min-height: 20px;
-    -fx-padding: 8 10 8 10;
+    -fx-padding: 0 10 0 10;
 }
 .density-compact .review-code-span,
 .density-compact .review-code-gutter,
@@ -2598,7 +2604,7 @@
 .density-compact .review-code-row,
 .density-compact .review-collapsed-run {
     -fx-min-height: 16px;
-    -fx-padding: 6 10 6 10;
+    -fx-padding: 0 10 0 10;
 }
 .density-dense .review-code-span,
 .density-dense .review-code-gutter,
@@ -2608,7 +2614,7 @@
 .density-dense .review-code-row,
 .density-dense .review-collapsed-run {
     -fx-min-height: 14px;
-    -fx-padding: 4 10 4 10;
+    -fx-padding: 0 10 0 10;
 }
 
 /* ---- Review findings margin + verdict bar (handoff sections 4.5, 4.6) ---- */

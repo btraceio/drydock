@@ -237,6 +237,11 @@ public final class ReviewDestinationView extends BorderPane {
         });
         margin.setOnFilterChanged(filter -> refreshReviewState());
         diffColumn.setPinSource(new PinSource());
+        // The by-file intent fallback is derived from the diff, and the diff
+        // arrives asynchronously -- so the verdict bar has to be re-rendered
+        // when it lands, or it stays on the "no intent" it correctly computed
+        // from an empty diff and never recovers.
+        diffColumn.setOnDiffLoaded(this::refreshReviewState);
 
         widthProperty().addListener((obs, old, width) -> applyResponsiveLayout(width.doubleValue()));
         addEventFilter(KeyEvent.KEY_PRESSED, this::onKeyPressed);

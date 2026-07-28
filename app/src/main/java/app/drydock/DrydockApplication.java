@@ -536,6 +536,15 @@ public final class DrydockApplication extends Application {
                     for (String line : onFx(review::diagAllItemDiffs)) {
                         System.out.println("[diag] item: " + line);
                     }
+                    // Renders the scene graph to a PNG from inside the
+                    // process. Unlike a screen capture this needs no OS
+                    // screen-recording permission and cannot pick up another
+                    // window, so it is the only visual evidence that is both
+                    // available headlessly and guaranteed to be OUR UI.
+                    String shot = System.getProperty("app.drydock.diag.screenshot");
+                    if (shot != null) {
+                        System.out.println("[diag] screenshot: " + onFx(() -> snapshotScene(shot)));
+                    }
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                 } catch (RuntimeException e) {
@@ -760,6 +769,39 @@ public final class DrydockApplication extends Application {
                 event.consume();
             }
         });
+    }
+
+    /**
+     * Writes the current scene to {@code path} as a PNG, on the FX thread.
+     * Diagnostic-only: the visual pass has no other way to see the real UI,
+     * because the FX layer has no headless harness inside the running app
+     * (docs/architecture.md).
+     */
+    private String snapshotScene(String path) {
+        try {
+            javafx.scene.image.WritableImage image = appShell.scene().snapshot(null);
+            int width = (int) image.getWidth();
+            int height = (int) image.getHeight();
+            // Pixels are copied by hand rather than through SwingFXUtils: that
+            // lives in javafx.swing, which the runtime image does not carry.
+            // java.desktop (BufferedImage/ImageIO) is already on the module
+            // list, so this adds no module to the packaged app.
+            int[] argb = new int[width * height];
+            image.getPixelReader().getPixels(0, 0, width, height,
+                    javafx.scene.image.PixelFormat.getIntArgbInstance(), argb, 0, width);
+            java.awt.image.BufferedImage out = new java.awt.image.BufferedImage(
+                    width, height, java.awt.image.BufferedImage.TYPE_INT_ARGB);
+            out.setRGB(0, 0, width, height, argb, 0, width);
+            java.io.File file = new java.io.File(path);
+            java.io.File parent = file.getParentFile();
+            if (parent != null) {
+                parent.mkdirs();
+            }
+            javax.imageio.ImageIO.write(out, "png", file);
+            return path + " (" + width + "x" + height + ")";
+        } catch (Exception e) {
+            return "FAILED: " + e;
+        }
     }
 
     /** ⌘N target: the active tab's repository, else the first registered one. */

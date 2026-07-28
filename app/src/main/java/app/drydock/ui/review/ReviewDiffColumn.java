@@ -102,6 +102,14 @@ final class ReviewDiffColumn extends BorderPane {
     private final ObservableList<ReviewDiffRow> rows = FXCollections.observableArrayList();
     private final ListView<ReviewDiffRow> list = new ListView<>(rows);
 
+    /**
+     * Fired once a diff has landed. Intents fall back to one-per-file, so
+     * they are derived FROM the diff -- without this the verdict bar renders
+     * before the diff exists, concludes there are no intents, and stays that
+     * way.
+     */
+    private Runnable onDiffLoaded = () -> { };
+
     private ReviewScope scope;
     private UnifiedDiff diff = new UnifiedDiff(List.of());
 
@@ -194,10 +202,16 @@ final class ReviewDiffColumn extends BorderPane {
                     diff = result;
                     symbolIndex = SymbolIndex.of(diff);
                     rebuild();
+                    onDiffLoaded.run();
                 }));
     }
 
     // ---- presentation state -------------------------------------------------
+
+    /** Notified when a diff has landed, so anything derived from it can re-render. */
+    void setOnDiffLoaded(Runnable handler) {
+        this.onDiffLoaded = handler == null ? () -> { } : handler;
+    }
 
     /** Supplies the {@code ◆n} pins; set once by the destination. */
     void setPinSource(PinSource source) {
@@ -239,6 +253,7 @@ final class ReviewDiffColumn extends BorderPane {
         symbolIndex = SymbolIndex.of(diff);
         expandedRuns.clear();
         rebuild();
+        onDiffLoaded.run();
     }
 
     /** {@code d}: applies a density by swapping the root's style class (spec §4.8). */

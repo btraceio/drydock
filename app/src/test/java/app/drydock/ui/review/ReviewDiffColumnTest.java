@@ -197,7 +197,12 @@ class ReviewDiffColumnTest extends ApplicationTest {
         repo = initCommittedRepo(Files.createTempDirectory("drydock-clean"));
 
         showScope(workingTreeScope(repo));
-        awaitRowsMatching(rows -> rows.stream().anyMatch(ReviewDiffRow.Message.class::isInstance));
+        // Specifically the FINAL message: "Diffing…" is a Message row too, so
+        // waiting for any message races the placeholder rather than the
+        // result.
+        awaitRowsMatching(rows -> rows.stream()
+                .anyMatch(row -> row instanceof ReviewDiffRow.Message message
+                        && message.text().equals("No changes in this scope.")));
 
         assertEquals("No changes in this scope.",
                 ((Label) lookup(".review-diff-message").query()).getText());

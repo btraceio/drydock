@@ -46,6 +46,31 @@ session's checkout.
 | MCP activity | `app.drydock.mcp.McpActivityLog` + `ReviewMcpActivityPanel` | Bounded ring buffer written by the one place every tool call passes through; `\` opens the panel, with a payload inspector and a budget bar. A hidden panel listens to nothing. |
 | Sidebar entry | `RepositorySidebar` | Focusable `◨ Review` row above the tree with an item-count badge, plus a `◨n` badge on worktree rows that jumps into Review scoped to that worktree. |
 
+## Visual verification
+
+`-Dapp.drydock.diag.screenshot=<path>` renders the scene graph to a PNG from
+inside the process, on the FX thread. It needs no macOS screen-recording
+permission, cannot capture the wrong window, and works where a screen
+capture is unavailable — which is the only reason the FX layer had no visual
+evidence before. It uses `java.desktop` (already on the jlink module list)
+rather than `javafx.swing` (which is not), copying pixels out of the
+`WritableImage` by hand.
+
+Two bugs were found by looking at that image and by nothing else:
+
+- The verdict bar was stuck on **"no intent"** on every freshly opened item,
+  so Approve, Request change and Submit were all dead. Intents fall back to
+  one-per-file and are therefore derived *from* the diff, which arrives
+  asynchronously; the bar rendered once against an empty diff and never
+  re-rendered. Every test until then supplied the diff synchronously and so
+  could not see it. `ReviewIntentFallbackTest` now drives the real
+  asynchronous path.
+- Diff rows were **almost twice their intended height**. Section 4.8's
+  "row padding 8 / 6 / 4px" is the prototype's `ipad`, which it applies to
+  the queue and intent cards — not to code lines, whose height is
+  font-size × line-height. Applying it to both gave 36px rows where the
+  design wants 20px.
+
 ## Known deviations from the handoff
 
 - The tab-strip "+" button sits at the top-right of the strip (a TabPane
