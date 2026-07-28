@@ -64,6 +64,14 @@ final class TerminalBridge {
     private boolean workspaceWantsVisible;
     /** Whether the tab's Terminal sub-tab is the active one (the Explorer/Review replace the terminal region). */
     private boolean terminalSubTabActive = true;
+    /**
+     * The last first-responder verdict this bridge SENT to its native view
+     * ({@link #focus()} / {@link #releaseFocus()}). AppKit exposes no read
+     * back, so this records what Drydock asked for -- which is exactly the
+     * layer where "the shell was never told to let go" is visible, and what
+     * the {@code app.drydock.diag.tabScript} keys dump reports.
+     */
+    private boolean nativeFocusRequested;
 
     TerminalBridge(TerminalRuntime app, TerminalHostView host, Region anchor, DoubleSupplier outputScale,
                    Supplier<ManagedSessionId> sessionId, Consumer<Shortcut> shortcutHandler) {
@@ -298,10 +306,16 @@ final class TerminalBridge {
             // the anchor's :focused state is what the UI's "keys go to the
             // terminal" indicators key off.
             anchor.requestFocus();
+            nativeFocusRequested = true;
         } catch (IllegalStateException e) {
             // See tickAndDraw's identical catch: surface closed out from
             // under this tab in the gap before markSurfaceClosing() runs.
         }
+    }
+
+    /** See {@link #nativeFocusRequested}; for the diagnostic keyboard-ownership dump. */
+    boolean nativeFocusRequested() {
+        return nativeFocusRequested;
     }
 
     /** Releases the terminal's AppKit first-responder status so JavaFX text inputs receive keys. */
@@ -314,6 +328,7 @@ final class TerminalBridge {
             if (surface != null) {
                 surface.setFocus(false);
             }
+            nativeFocusRequested = false;
         } catch (IllegalStateException e) {
             // Surface closed in the teardown gap; see tickAndDraw's identical catch.
         }

@@ -72,7 +72,18 @@ milestones (Gate 0C onward) land.
   `app.drydock.diag.explorerScript` hook (see `DrydockApplication`) drives
   the editable Explorer for exactly this purpose; the editor's
   conflict-banner button truncation was found this way and could not have
-  been found any other way.
+  been found any other way. `app.drydock.diag.tabScript` is its counterpart
+  for keyboard ownership (`subtab`, `rename`, `filter`, `keys`): AppKit will
+  not report the first responder back, so the `keys` dump prints what each
+  native surface was last *told*, which is the layer where "the shell
+  terminal was never asked to let go" is visible.
+
+  Prefer the scripts' own `shot:<path>` verb (a JavaFX scene snapshot) over
+  `screencapture`: TCC attributes screen recording to the *responsible* app,
+  so an agent session hosted inside Drydock's own terminal inherits
+  `Drydock.app`'s grants and `screencapture` fails with "could not create
+  image from display". The scene snapshot needs no permission — but it also
+  does not include the native Ghostty overlay, which stays black.
 
   Two constraints still apply. `screencapture -R <rect>` grabs a *screen
   region*, so the target window must be frontmost or an overlapping window

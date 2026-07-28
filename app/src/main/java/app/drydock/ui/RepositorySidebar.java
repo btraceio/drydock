@@ -410,6 +410,19 @@ public final class RepositorySidebar extends VBox {
     }
 
     /**
+     * Diagnostic-only ({@code app.drydock.diag.tabScript}): focuses the filter
+     * and types into it through the real text property, so the automated pass
+     * can check that a session's native terminal actually let the keyboard go
+     * -- the filter is the second place (with the tab rename) where keystrokes
+     * used to disappear into the shell.
+     */
+    public void diagFilter(String text) {
+        focusFilter();
+        filterField.setText(text);
+        filterField.positionCaret(text.length());
+    }
+
+    /**
      * Re-fetches repo AND worktree statuses when the event was driven by an
      * actual session change (fetch-once caching left branch tags and dirty
      * dots permanently stale; see {@link #statusRefreshedFor}). The fetches

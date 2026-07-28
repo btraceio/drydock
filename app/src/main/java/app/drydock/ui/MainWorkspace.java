@@ -92,6 +92,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
@@ -2025,6 +2026,36 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     public ReviewDestinationView diagShowReview() {
         showReview();
         return reviewDestination;
+    }
+
+    /**
+     * Diagnostic-only: switches the selected tab's sub-tab through the same
+     * call ⌘1--⌘3 make. Exists so the keyboard-ownership pass can put a
+     * session on its shell terminal, which is the state in which the rename
+     * and sidebar-filter paths used to lose every keystroke to the shell.
+     */
+    public void diagShowSubTab(String name) {
+        OpenSessionTab.SubTab subTab = switch (name.strip().toLowerCase(Locale.ROOT)) {
+            case "terminal" -> OpenSessionTab.SubTab.TERMINAL;
+            case "explorer" -> OpenSessionTab.SubTab.EXPLORER;
+            default -> OpenSessionTab.SubTab.CLAUDE;
+        };
+        currentlySelected().ifPresent(open -> open.diagShowSubTab(subTab));
+    }
+
+    /** Diagnostic-only: starts the selected tab's inline rename, as a double-click on its title does. */
+    public void diagStartRename() {
+        currentlySelected().ifPresent(OpenSessionTab::diagStartRename);
+    }
+
+    /** Diagnostic-only: ends the selected tab's inline rename, as Esc does. */
+    public void diagCancelRename() {
+        currentlySelected().ifPresent(OpenSessionTab::diagCancelRename);
+    }
+
+    /** Diagnostic-only: the selected tab's keyboard-ownership summary (see {@code OpenSessionTab}). */
+    public String diagKeyboardState() {
+        return currentlySelected().map(OpenSessionTab::diagKeyboardState).orElse("no selected tab");
     }
 
     // ---- Exit watcher --------------------------------------------------------

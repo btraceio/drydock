@@ -776,6 +776,41 @@ final class OpenSessionTab {
         }
     }
 
+    // ---- Diagnostics (app.drydock.diag.tabScript) ---------------------------
+
+    /** Starts the inline rename exactly as a double-click on the tab title does. */
+    void diagStartRename() {
+        startInlineRename();
+    }
+
+    /** Ends the inline rename exactly as Esc does (no rename applied). */
+    void diagCancelRename() {
+        cancelInlineRename();
+    }
+
+    /**
+     * Who this tab last told the keyboard to go to, per native surface.
+     *
+     * <p>This is the machine-checkable form of "typing lands in the terminal
+     * instead of the field": the sub-tab that is showing must be the only
+     * surface with {@code focus=true}, and while a rename or the sidebar
+     * filter holds JavaFX focus BOTH must be false. It reports what Drydock
+     * asked AppKit for (see {@code TerminalBridge.nativeFocusRequested})
+     * rather than the real first responder, which AppKit will not report --
+     * but the bug this exists to catch was Drydock never asking at all.</p>
+     */
+    String diagKeyboardState() {
+        return "subtab=" + activeSubTab
+                + " agentSurface=" + bridge.nativeFocusRequested()
+                + " shellSurface=" + (shellBridge == null ? "absent" : shellBridge.nativeFocusRequested())
+                + " renaming=" + tabLabels.getChildren().contains(renameField);
+    }
+
+    /** Switches sub-tab exactly as ⌘1--⌘4 and the sub-tab buttons do. */
+    void diagShowSubTab(SubTab subTab) {
+        showSubTab(subTab);
+    }
+
     /**
      * Releases the terminal's AppKit first-responder status so JavaFX text
      * inputs receive keys.

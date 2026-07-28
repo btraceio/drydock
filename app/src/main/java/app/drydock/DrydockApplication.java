@@ -42,6 +42,7 @@ import app.drydock.ui.SizeSetting;
 import app.drydock.ui.model.WorkspaceViewModel;
 import javafx.application.Application;
 import javafx.application.Platform;
+import javafx.scene.Node;
 import javafx.scene.control.Alert;
 import javafx.scene.control.ButtonType;
 import javafx.scene.control.TextInputControl;
@@ -617,6 +618,49 @@ public final class DrydockApplication extends Application {
             driver.start();
         }
 
+        // Diagnostic hook for the keyboard-ownership pass: the one thing no
+        // test here can reach is "which surface do my keystrokes go to",
+        // because the native terminal's NSEvent monitor sees keys before
+        // JavaFX does and AppKit will not report the first responder back.
+        // This drives the two flows where keystrokes used to vanish into a
+        // terminal -- the inline tab rename and the sidebar filter -- and
+        // dumps what each surface was last told, which is the layer the bug
+        // lived at (the shell bridge was never told to let go).
+        //
+        // Value is a comma-separated "<atSeconds>:<verb>[:<arg>]" script, same
+        // shape as diag.explorerScript. Verbs:
+        //   subtab:terminal   switch the selected tab's sub-tab (as ⌘1--⌘4 do)
+        //   rename            start the inline rename (as a title double-click does)
+        //   renamecancel      end it (as Esc does)
+        //   filter:text       focus the sidebar filter and type into it (as ⌘F + typing does)
+        //   keys              print the keyboard-ownership dump
+        //   shot:/tmp/a.png   snapshot the scene
+        //   mark:label        print a marker to synchronise on
+        // Inert unless -Dapp.drydock.diag.tabScript is set.
+        String tabScript = System.getProperty("app.drydock.diag.tabScript");
+        if (tabScript != null) {
+            Thread driver = new Thread(() -> {
+                long start = System.nanoTime();
+                for (String step : tabScript.split(",")) {
+                    String[] parts = step.split(":", 3);
+                    long atMillis = (long) (Double.parseDouble(parts[0].strip()) * 1000);
+                    long elapsed = (System.nanoTime() - start) / 1_000_000;
+                    if (elapsed < atMillis) {
+                        try {
+                            Thread.sleep(atMillis - elapsed);
+                        } catch (InterruptedException e) {
+                            return;
+                        }
+                    }
+                    String verb = parts[1].strip();
+                    String arg = parts.length > 2 ? parts[2] : "";
+                    Platform.runLater(() -> diagTabStep(primaryStage, sidebar, verb, arg));
+                }
+            });
+            driver.setDaemon(true);
+            driver.start();
+        }
+
         // Diagnostic hook: sends 10 synthetic scroll-up events through the
         // selected tab's scroll path (verifies the Java ->
         // ghostty_surface_mouse_scroll pipeline without real NSEvents).
@@ -1168,6 +1212,45 @@ public final class DrydockApplication extends Application {
      * filter does -- so what this exercises is the real path, not a
      * test-only shortcut past it.
      */
+    /**
+     * One step of {@code app.drydock.diag.tabScript}; see that hook's comment
+     * in {@link #startOnFxThread} for the verbs. FX thread.
+     */
+    private void diagTabStep(Stage stage, RepositorySidebar sidebar, String verb, String arg) {
+        try {
+            switch (verb) {
+                case "subtab" -> {
+                    mainWorkspace.diagShowSubTab(arg);
+                    System.out.println("[diag] subtab " + arg.strip());
+                }
+                case "rename" -> {
+                    mainWorkspace.diagStartRename();
+                    System.out.println("[diag] rename started");
+                }
+                case "renamecancel" -> {
+                    mainWorkspace.diagCancelRename();
+                    System.out.println("[diag] rename cancelled");
+                }
+                case "filter" -> {
+                    sidebar.diagFilter(arg);
+                    System.out.println("[diag] filter typed: " + arg);
+                }
+                case "keys" -> System.out.println("[diag] keys " + mainWorkspace.diagKeyboardState()
+                        + " focusOwner=" + describeFocusOwner());
+                case "shot" -> diagSnapshot(stage, Path.of(arg));
+                default -> System.out.println("[diag] mark " + arg);
+            }
+        } catch (RuntimeException e) {
+            System.out.println("[diag] tab step '" + verb + "' failed: " + e);
+        }
+    }
+
+    /** The JavaFX focus owner's simple class name, for the keyboard-ownership dump. */
+    private String describeFocusOwner() {
+        Node owner = appShell.scene().getFocusOwner();
+        return owner == null ? "none" : owner.getClass().getSimpleName();
+    }
+
     private void diagSettingsStep(Stage stage, String verb, String arg) {
         try {
             switch (verb) {
