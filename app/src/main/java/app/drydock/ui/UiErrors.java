@@ -9,6 +9,8 @@ import javafx.scene.control.Alert;
 import javafx.scene.control.TextArea;
 
 import java.io.IOException;
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.util.concurrent.CompletionException;
 
 /**
@@ -28,6 +30,40 @@ public final class UiErrors {
         return (failure instanceof CompletionException && failure.getCause() != null)
                 ? failure.getCause()
                 : failure;
+    }
+
+    /**
+     * The no-diagnosis form, for a failure nothing anticipated: the uncaught
+     * FX-thread handler. {@link #show(String, Throwable)} names a known
+     * failure mode; here there is none, so the value is the stack trace,
+     * carried in the dialog's expandable half -- selectable, so it can be
+     * pasted into a report. {@code note} prefixes it (where the same record
+     * was also written, so it survives closing the dialog); empty for none.
+     *
+     * <p>The trace does not wrap: a {@link StackOverflowError} carries
+     * hundreds of frames and the point is the repeating cycle at the top, so
+     * the pane scrolls rather than reflowing frames into each other.</p>
+     */
+    public static void showUnexpected(String title, Throwable error, String note) {
+        Alert alert = new Alert(Alert.AlertType.ERROR);
+        alert.setTitle(title);
+        alert.setHeaderText("An unexpected error occurred");
+        alert.setContentText(String.valueOf(unwrap(error)));
+
+        StringWriter trace = new StringWriter(8192);
+        PrintWriter out = new PrintWriter(trace);
+        if (!note.isBlank()) {
+            out.println(note);
+            out.println();
+        }
+        error.printStackTrace(out);
+
+        TextArea details = new TextArea(trace.toString());
+        details.setEditable(false);
+        details.setPrefRowCount(18);
+        details.setPrefColumnCount(100);
+        alert.getDialogPane().setExpandableContent(details);
+        alert.showAndWait();
     }
 
     static void show(String title, Throwable failure) {

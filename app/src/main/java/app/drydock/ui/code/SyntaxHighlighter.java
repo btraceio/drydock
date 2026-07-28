@@ -72,13 +72,29 @@ public final class SyntaxHighlighter {
             + "package|private|protected|public|return|sealed|super|this|throw|try|typealias|val|var|when|while|"
             + "true|false|plugins|dependencies|implementation|testImplementation|apply|tasks";
 
+    // Every pattern below spans a multi-line body with [\s\S]*?, never
+    // (?:.|\R)*? : a lazy closure over a GROUP compiles to a recursive Loop
+    // node, one stack frame per character, so an opener that never closes --
+    // a block comment in the Review diff column, which highlights ONE LINE at
+    // a time -- overflowed the stack and killed the FX thread. A closure over
+    // a single character class is an iterative Curly and costs no stack. A
+    // string literal needs a group either way (an escape is two characters),
+    // so DQ_STRING/SQ_STRING are unrolled and possessive instead.
+    // SyntaxHighlighterTest enforces this over every Pattern in this class.
+
+    /** A double-quoted literal, escapes included; unrolled and possessive, so no group closure runs per character. */
+    private static final String DQ_STRING = "\"[^\"\\\\\n]*+(?:\\\\.[^\"\\\\\n]*+)*+\"";
+
+    /** {@link #DQ_STRING} for single quotes. */
+    private static final String SQ_STRING = "'[^'\\\\\n]*+(?:\\\\.[^'\\\\\n]*+)*+'";
+
     private static final Pattern JAVA_PATTERN = buildCodePattern(JAVA_KEYWORDS);
     private static final Pattern KOTLIN_PATTERN = buildCodePattern(KOTLIN_KEYWORDS);
 
     private static Pattern buildCodePattern(String keywords) {
         return Pattern.compile(
-                "(?<COM>//[^\n]*|/\\*(?:.|\\R)*?\\*/)"
-                + "|(?<STR>\"\"\"(?:.|\\R)*?\"\"\"|\"(?:\\\\.|[^\"\\\\\n])*\"|'(?:\\\\.|[^'\\\\\n])*')"
+                "(?<COM>//[^\n]*|/\\*[\\s\\S]*?\\*/)"
+                + "|(?<STR>\"\"\"[\\s\\S]*?\"\"\"|" + DQ_STRING + "|" + SQ_STRING + ")"
                 + "|(?<ANNO>@[A-Za-z_][A-Za-z0-9_.]*)"
                 + "|(?<KW>\\b(?:" + keywords + ")\\b)"
                 + "|(?<NUM>\\b(?:0[xX][0-9a-fA-F_]+|\\d[\\d_]*(?:\\.\\d+)?[fFdDlL]?)\\b)"
@@ -88,8 +104,8 @@ public final class SyntaxHighlighter {
     }
 
     private static final Pattern CSS_PATTERN = Pattern.compile(
-            "(?<COM>/\\*(?:.|\\R)*?\\*/)"
-            + "|(?<STR>\"(?:\\\\.|[^\"\\\\\n])*\"|'(?:\\\\.|[^'\\\\\n])*')"
+            "(?<COM>/\\*[\\s\\S]*?\\*/)"
+            + "|(?<STR>" + DQ_STRING + "|" + SQ_STRING + ")"
             + "|(?<ANNO>-[a-zA-Z-]+(?=\\s*:))"
             // NUM (hex colors) must precede KW: an id-selector-shaped
             // alternative would otherwise swallow #d97757-style colors.
@@ -99,15 +115,15 @@ public final class SyntaxHighlighter {
             + "|(?<PUNCT>[{}();:,])");
 
     private static final Pattern JSON_PATTERN = Pattern.compile(
-            "(?<ANNO>\"(?:\\\\.|[^\"\\\\\n])*\"(?=\\s*:))"
-            + "|(?<STR>\"(?:\\\\.|[^\"\\\\\n])*\")"
+            "(?<ANNO>" + DQ_STRING + "(?=\\s*:))"
+            + "|(?<STR>" + DQ_STRING + ")"
             + "|(?<KW>\\b(?:true|false|null)\\b)"
             + "|(?<NUM>-?\\b\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?\\b)"
             + "|(?<PUNCT>[{}\\[\\]:,])");
 
     private static final Pattern MARKDOWN_PATTERN = Pattern.compile(
             "(?<KW>^#{1,6}[^\n]*$)"
-            + "|(?<STR>`[^`\n]+`|```(?:.|\\R)*?```)"
+            + "|(?<STR>`[^`\n]+`|```[\\s\\S]*?```)"
             + "|(?<ANNO>\\[[^\\]\n]*\\]\\([^)\n]*\\))"
             + "|(?<NUM>^\\s*(?:[-*+]|\\d+\\.)\\s)",
             Pattern.MULTILINE);

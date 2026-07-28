@@ -3,6 +3,7 @@ package app.drydock;
 import app.drydock.agent.api.Agent;
 import app.drydock.agent.api.AgentContext;
 import app.drydock.agent.api.AgentRegistry;
+import app.drydock.app.DiagnosticLogFile;
 import app.drydock.app.RepositoryManager;
 import app.drydock.app.SessionManager;
 import app.drydock.activity.SessionActivityWatcher;
@@ -39,6 +40,7 @@ import app.drydock.ui.RepositorySidebar;
 import app.drydock.ui.review.ReviewDestinationView;
 import app.drydock.ui.SettingsModal;
 import app.drydock.ui.SizeSetting;
+import app.drydock.ui.UiErrors;
 import app.drydock.ui.model.WorkspaceViewModel;
 import javafx.application.Application;
 import javafx.application.Platform;
@@ -149,6 +151,10 @@ public final class DrydockApplication extends Application {
         // below, start() itself) through one log-and-alert handler.
         Thread.currentThread().setUncaughtExceptionHandler(
                 (thread, error) -> reportUncaughtFxException(error));
+        // Idempotent, and Main is not the only way in (an IDE run config or a
+        // future jlink main can call launch() directly); without this the
+        // dialog silently loses its "also written to" half on those paths.
+        DiagnosticLogFile.install();
         try {
             startOnFxThread(primaryStage);
         } catch (RuntimeException | Error e) {
@@ -160,11 +166,10 @@ public final class DrydockApplication extends Application {
     private static void reportUncaughtFxException(Throwable error) {
         LOG.log(Level.ERROR, "Uncaught exception on the JavaFX Application Thread", error);
         try {
-            Alert alert = new Alert(Alert.AlertType.ERROR);
-            alert.setTitle(WINDOW_TITLE);
-            alert.setHeaderText("An unexpected error occurred");
-            alert.setContentText(String.valueOf(error));
-            alert.showAndWait();
+            String note = DiagnosticLogFile.installedDirectory()
+                    .map(directory -> "Also written to " + directory)
+                    .orElse("");
+            UiErrors.showUnexpected(WINDOW_TITLE, error, note);
         } catch (RuntimeException alertFailure) {
             // Toolkit too broken to show UI; the log line above is all we can do.
             LOG.log(Level.WARNING, "Could not show the error alert", alertFailure);

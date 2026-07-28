@@ -1,5 +1,6 @@
 package app.drydock;
 
+import app.drydock.app.DiagnosticLogFile;
 import app.drydock.app.LoginShellEnvironment;
 
 import java.awt.Toolkit;
@@ -19,6 +20,10 @@ public final class Main {
     }
 
     public static void main(String[] args) {
+        // First: a bundled .app discards stderr, so without this a crash
+        // leaves nothing but the dialog's one-line message.
+        DiagnosticLogFile.install();
+
         // Must run before anything touches System.getenv()/ProcessBuilder
         // (including the AWT init below); see LoginShellEnvironment's Javadoc
         // (the JDK snapshots the environment on first use, and Finder launches
