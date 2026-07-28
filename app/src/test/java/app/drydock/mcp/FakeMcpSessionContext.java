@@ -20,6 +20,14 @@ final class FakeMcpSessionContext implements McpSessionContext {
     Optional<Path> worktreePath = Optional.empty();
     Optional<String> baseBranch = Optional.of("main");
     final List<ReviewAnnotation> annotations = new ArrayList<>();
+
+    /**
+     * Which review scopes each caller may address. Findings are keyed by
+     * scope handle now, so the fake models the registry's authorization
+     * boundary rather than a session-owns-annotation relation that no longer
+     * exists; a caller with no entry here sees nothing.
+     */
+    final Map<ManagedSessionId, Set<String>> addressableScopes = new HashMap<>();
     final List<RepoSummary> repositories = new ArrayList<>();
     final List<SessionSummary> sessions = new ArrayList<>();
     final List<Path> worktrees = new ArrayList<>();
@@ -62,23 +70,32 @@ final class FakeMcpSessionContext implements McpSessionContext {
         return baseBranch;
     }
 
+    /**
+     * Honors the interface contract: the findings of every scope this caller
+     * may address. An unscoped fake would let a cross-scope test pass for the
+     * wrong reason -- the router would have to filter again, putting the
+     * authorization boundary back into the adapter layer.
+     */
     @Override
     public List<ReviewAnnotation> annotations(ManagedSessionId caller) {
-        // Honors the interface contract: "the calling session's annotations".
-        // An unscoped fake would let a cross-session test pass for the wrong
-        // reason -- the router would have to filter again, putting session
-        // ownership (domain logic) back into the adapter layer.
+        Set<String> allowed = addressableScopes.getOrDefault(caller, Set.of());
         return annotations.stream()
-                .filter(annotation -> annotation.sessionId().equals(caller))
+                .filter(annotation -> allowed.contains(annotation.scopeId()))
                 .toList();
+    }
+
+    /** Grants {@code caller} access to {@code scopeId}, as the scope registry does. */
+    void grant(ManagedSessionId caller, String scopeId) {
+        addressableScopes.computeIfAbsent(caller, key -> new LinkedHashSet<>()).add(scopeId);
     }
 
     /** Mirrors {@code AnnotationStore.mutate}: the transform sees the STORED value, never the caller's. */
     @Override
-    public Optional<ReviewAnnotation> mutateAnnotation(String id, UnaryOperator<ReviewAnnotation> transform) {
+    public Optional<ReviewAnnotation> mutateAnnotation(ReviewAnnotation.Key key,
+                                                       UnaryOperator<ReviewAnnotation> transform) {
         beforeMutate.run();
         for (int i = 0; i < annotations.size(); i++) {
-            if (annotations.get(i).id().equals(id)) {
+            if (annotations.get(i).key().equals(key)) {
                 ReviewAnnotation updated = transform.apply(annotations.get(i));
                 annotations.set(i, updated);
                 return Optional.of(updated);
@@ -89,7 +106,7 @@ final class FakeMcpSessionContext implements McpSessionContext {
 
     /** Unconditional replace, for tests setting up a starting value. */
     void store(ReviewAnnotation annotation) {
-        annotations.replaceAll(existing -> existing.id().equals(annotation.id()) ? annotation : existing);
+        annotations.replaceAll(existing -> existing.key().equals(annotation.key()) ? annotation : existing);
     }
 
     @Override

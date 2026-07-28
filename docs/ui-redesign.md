@@ -36,6 +36,9 @@ session's checkout.
 | Density | `ReviewDensity` | `d` cycles cozy/compact/dense by swapping one style class; the measurements are `px` literals in `app.css`, so density stays relative to the user's absolute interface size. |
 | Queue rail | `ReviewQueueRail` | 236 / 206 narrow / 44 collapsed, animated the way `SessionExplorerView` animates its search rail. Every row is a real focusable `Button`. |
 | Terminal swap | `MainWorkspace.setReviewShowing` | Review is a scene-graph view, so showing it hides every native terminal — one writer (`updateTerminalVisibility`) over three independent conditions (selected tab, modal up, Review showing), and `updateGeometryNow()` on the way back. |
+| Findings + verdicts | `app.drydock.review.AnnotationStore` / `ReviewAnnotation` / `ReviewVerdict` / `ReviewIntent` / `IntentGrouping` | Everything keyed by `(scopeId, id)`. Findings carry severity, confidence, intent, evidence, a proposed patch, ASK chips, a thread and a human severity override. Intents come from `review_intents`, or from the by-file fallback that keeps the verdict bar meaningful with no reviewer configured. |
+| Findings margin | `ReviewFindingsMargin` | 336 / 286 narrow / 30px strip. Cards sit beside the code, never inline. Reply drafts are held by the margin keyed by `(scopeId, id)`, not by the card node — a card is rebuilt whenever its finding changes, and a node-owned draft would go with it. |
+| Verdict bar | `ReviewVerdictBar` | Below both columns and always in the layout, so collapsing every rail cannot take the primary action with it. Approval is refused inline while a blocking finding of the intent is open. |
 | Sidebar entry | `RepositorySidebar` | Focusable `◨ Review` row above the tree with an item-count badge, plus a `◨n` badge on worktree rows that jumps into Review scoped to that worktree. |
 
 ## Known deviations from the handoff
@@ -119,6 +122,38 @@ need a look before the next milestone builds on them.
 - **`hot path` tags are not rendered.** The spec lists them on hunk cards,
   but their only source is `review_intents` over MCP; nothing was invented
   for them ahead of that.
+
+### Review — M3 (findings, threads, verdicts)
+
+- **`ReviewAnnotation` keeps its name but is now a finding.** The handoff's
+  data model calls it `Finding` while its port map says to extend
+  `ReviewAnnotation`; the existing name was kept to match the port map and
+  keep the diff small. A human annotation and an agent finding are the same
+  record, distinguished only by `author`.
+- **Annotations written before scope handles existed are migrated, not
+  dropped.** A v1 file names a session and a `DiffScope`, which cannot
+  identify a handle minted this process. Those entries are parked under a
+  deterministic `legacy:` scope id and adopted the first time the matching
+  scope is minted; a finding the live scope already has always wins.
+- **`review_reply` refuses an ambiguous finding id.** Ids repeat across
+  scopes, so an id alone can name two findings. The tool lists the candidate
+  scopes and asks for `scopeId` rather than picking one — guessing is exactly
+  the bug the scoped key exists to prevent.
+- **`Apply patch` is a hand-off, not an edit.** drydock does not apply the
+  unified diff itself; it sends the proposal to the scope's live session, as
+  every other worktree action does, and records only that the hand-off
+  happened. With no session bound, nothing is recorded.
+- **`f` and `⇧F` are different keys.** The spec gives `f` to focus mode and
+  `F` to the whole-review filter. Plain `f` collapses/restores every rail;
+  Shift+F widens the margin.
+- **The intent rail is not built yet.** `[`, `]` and `n` move the intent the
+  verdict bar is settling, which is visible and meaningful, but the rail
+  itself (with risk heat and collapsed refactor cards) belongs to the
+  milestone that adds `review_intents`. `i` is bound with the rail, not
+  before it.
+- **Per-finding verdicts are still open** (handoff §10.5): a finding can stay
+  open under an approved intent unless it is `blocking`. Implemented as
+  specified, flagged as undecided.
 
 ### Open decisions carried forward
 

@@ -2610,3 +2610,330 @@
     -fx-min-height: 14px;
     -fx-padding: 4 10 4 10;
 }
+
+/* ---- Review findings margin + verdict bar (handoff sections 4.5, 4.6) ---- */
+
+.review-findings-margin {
+    -fx-background-color: -drydock-chrome;
+    -fx-border-color: transparent transparent transparent -drydock-border;
+    -fx-border-width: 0 0 0 1;
+}
+.review-margin-header {
+    -fx-min-height: 28px;
+    -fx-max-height: 28px;
+    -fx-padding: 0 9 0 6;
+}
+.review-rail-chevron-button {
+    -fx-background-color: transparent;
+    -fx-background-radius: 6px;
+    -fx-border-color: transparent;
+    -fx-border-radius: 6px;
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 11px;
+    -fx-padding: 2 5 2 5;
+    -fx-cursor: hand;
+}
+.review-rail-chevron-button:hover { -fx-text-fill: -drydock-text; }
+.review-rail-chevron-button:focused { -fx-border-color: -drydock-accent; }
+
+.review-filter-button {
+    -fx-background-color: transparent;
+    -fx-background-radius: 12px;
+    -fx-border-color: -drydock-border;
+    -fx-border-radius: 12px;
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10px;
+    -fx-padding: 2 8 2 8;
+    -fx-cursor: hand;
+}
+.review-filter-button:hover { -fx-text-fill: -drydock-text; }
+.review-filter-button:selected {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-border-color: -drydock-accent;
+    -fx-text-fill: -drydock-accent;
+}
+.review-filter-button:focused { -fx-border-color: -drydock-accent; }
+
+.review-findings-scroll, .review-findings-scroll .viewport {
+    -fx-background-color: transparent;
+}
+.review-findings-cards {
+    -fx-padding: 4 8 10 8;
+    -fx-spacing: 8;
+}
+.review-findings-empty {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 11.5px;
+    -fx-padding: 10 4 10 4;
+}
+
+/* The 30px collapsed strip: the count stays, coloured by the worst severity;
+   only the descriptions go. Collapsing never removes information about
+   whether findings exist. */
+.review-margin-collapsed {
+    -fx-padding: 8 0 0 0;
+}
+.review-margin-collapsed-count {
+    -fx-font-size: 11px;
+    -fx-font-weight: 700;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-text-fill: -drydock-text-dim;
+}
+
+.review-finding-card {
+    -fx-background-color: -drydock-code-bg;
+    -fx-background-radius: 8px;
+    -fx-border-color: -drydock-border;
+    -fx-border-radius: 8px;
+    -fx-padding: 10;
+}
+.review-finding-card:focused,
+.review-finding-card.focused {
+    -fx-border-color: -drydock-accent;
+}
+.review-finding-card.resolved {
+    -fx-opacity: 0.55;
+}
+.review-finding-card.severity-blocking { -fx-border-color: -drydock-blocking; }
+.review-finding-card.severity-question { -fx-border-color: -drydock-question; }
+.review-finding-card.severity-deviation { -fx-border-color: -drydock-deviation; }
+.review-finding-card.severity-nit { -fx-border-color: -drydock-border-strong; }
+
+.review-severity-pill {
+    -fx-background-radius: 12px;
+    -fx-font-size: 9.5px;
+    -fx-font-weight: 700;
+    -fx-padding: 1 7 1 7;
+}
+.review-severity-pill.severity-blocking {
+    -fx-background-color: -drydock-blocking-soft;
+    -fx-text-fill: -drydock-blocking;
+}
+.review-severity-pill.severity-question {
+    -fx-background-color: -drydock-question-soft;
+    -fx-text-fill: -drydock-question;
+}
+.review-severity-pill.severity-deviation {
+    -fx-background-color: -drydock-deviation-soft;
+    -fx-text-fill: -drydock-deviation;
+}
+.review-severity-pill.severity-nit {
+    -fx-background-color: -drydock-hover;
+    -fx-text-fill: -drydock-text-dim;
+}
+
+.review-finding-author {
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 11px;
+}
+.review-finding-pin {
+    -fx-font-size: 10px;
+    -fx-font-weight: 700;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-finding-pin.severity-blocking { -fx-text-fill: -drydock-blocking; }
+.review-finding-pin.severity-question { -fx-text-fill: -drydock-question; }
+.review-finding-pin.severity-deviation { -fx-text-fill: -drydock-deviation; }
+.review-finding-pin.severity-nit { -fx-text-fill: -drydock-text-faint; }
+
+.review-finding-body {
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 12px;
+}
+.review-finding-meta {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-finding-meta.deviation {
+    -fx-text-fill: -drydock-deviation;
+}
+.review-patch-block {
+    -fx-background-color: -drydock-input-bg;
+    -fx-background-radius: 6px;
+    -fx-border-color: -drydock-border;
+    -fx-border-radius: 6px;
+    -fx-padding: 8;
+}
+.review-patch-body {
+    -fx-text-fill: -drydock-code-text;
+    -fx-font-size: 10.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+
+.review-thread {
+    -fx-border-color: -drydock-border transparent transparent transparent;
+    -fx-border-width: 1 0 0 0;
+    -fx-padding: 8 0 0 0;
+}
+.review-thread-author {
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 10px;
+    -fx-font-weight: 600;
+}
+.review-thread-text {
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 11.5px;
+}
+
+.review-ask-caption {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 9px;
+    -fx-font-weight: 700;
+}
+.review-ask-chip {
+    -fx-background-color: transparent;
+    -fx-background-radius: 12px;
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 12px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 10px;
+    -fx-padding: 2 8 2 8;
+    -fx-cursor: hand;
+}
+.review-ask-chip:hover {
+    -fx-text-fill: -drydock-text;
+    -fx-border-color: -drydock-mcp;
+}
+.review-ask-chip:focused {
+    -fx-border-color: -drydock-accent;
+}
+
+.review-card-actions {
+    -fx-border-color: -drydock-border transparent transparent transparent;
+    -fx-border-width: 1 0 0 0;
+    -fx-padding: 8 0 0 0;
+}
+.review-reply-input {
+    -fx-background-color: -drydock-input-bg;
+    -fx-background-radius: 6px;
+    -fx-border-color: -drydock-border;
+    -fx-border-radius: 6px;
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 11.5px;
+}
+.review-reply-input .content { -fx-background-color: -drydock-input-bg; }
+.review-reply-input:focused { -fx-border-color: -drydock-accent; }
+.review-card-action {
+    -fx-background-color: transparent;
+    -fx-background-radius: 6px;
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 6px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 10.5px;
+    -fx-padding: 3 9 3 9;
+    -fx-cursor: hand;
+}
+.review-card-action:hover { -fx-text-fill: -drydock-text; }
+.review-card-action:focused { -fx-border-color: -drydock-accent; }
+.review-card-action.primary {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-border-color: -drydock-accent;
+    -fx-text-fill: -drydock-accent;
+}
+
+/* The ◆n pin beside a diff line. Dims -- never disappears -- when its
+   finding is filtered out: the line still carries one. */
+.review-line-pin {
+    -fx-background-color: transparent;
+    -fx-background-radius: 6px;
+    -fx-border-color: transparent;
+    -fx-border-radius: 6px;
+    -fx-font-size: 9.5px;
+    -fx-font-weight: 700;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-padding: 0 5 0 5;
+    -fx-cursor: hand;
+}
+.review-line-pin.severity-blocking { -fx-text-fill: -drydock-blocking; }
+.review-line-pin.severity-question { -fx-text-fill: -drydock-question; }
+.review-line-pin.severity-deviation { -fx-text-fill: -drydock-deviation; }
+.review-line-pin.severity-nit { -fx-text-fill: -drydock-text-faint; }
+.review-line-pin.dimmed { -fx-opacity: 0.35; }
+.review-line-pin:focused { -fx-border-color: -drydock-accent; }
+
+/* Verdict bar -- BELOW both columns and always in the layout, so collapsing
+   the margin can never take the primary action with it. */
+.review-verdict-bar {
+    -fx-background-color: -drydock-chrome;
+    -fx-border-color: -drydock-border transparent transparent transparent;
+    -fx-border-width: 1 0 0 0;
+}
+.review-verdict-actions {
+    -fx-padding: 8 12 8 12;
+}
+.review-verdict-footer {
+    -fx-background-color: -drydock-titlebar;
+    -fx-border-color: -drydock-border transparent transparent transparent;
+    -fx-border-width: 1 0 0 0;
+    -fx-min-height: 28px;
+    -fx-max-height: 28px;
+    -fx-padding: 0 12 0 12;
+}
+.review-verdict-intent {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-verdict-action {
+    -fx-background-color: transparent;
+    -fx-background-radius: 6px;
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 6px;
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 11.5px;
+    -fx-padding: 6 12 6 12;
+    -fx-cursor: hand;
+}
+.review-verdict-action:hover { -fx-border-color: -drydock-text-dim; }
+.review-verdict-action:focused { -fx-border-color: -drydock-accent; }
+.review-verdict-action.primary {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-border-color: -drydock-accent;
+    -fx-text-fill: -drydock-accent;
+}
+/* Refused, not disabled: the reason sits beside it and the way out is in
+   the margin. A greyed-out button would say neither. */
+.review-verdict-action.primary:refused {
+    -fx-background-color: transparent;
+    -fx-border-color: -drydock-blocking;
+    -fx-text-fill: -drydock-text-faint;
+}
+.review-verdict-refusal {
+    -fx-text-fill: -drydock-blocking;
+    -fx-font-size: 11px;
+}
+.review-verdict-settled {
+    -fx-font-size: 11.5px;
+    -fx-text-fill: -drydock-text-dim;
+}
+.review-verdict-settled.decision-approved { -fx-text-fill: -drydock-resolved; }
+.review-verdict-settled.decision-changes { -fx-text-fill: -drydock-question; }
+.review-verdict-settled.decision-auto-approved { -fx-text-fill: -drydock-resolved; }
+.review-verdict-hint {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10.5px;
+}
+.review-verdict-progress-label {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-progress {
+    -fx-background-color: -drydock-border;
+    -fx-background-radius: 6px;
+    -fx-min-width: 120px;
+    -fx-max-width: 120px;
+    -fx-min-height: 4px;
+    -fx-max-height: 4px;
+}
+.review-progress-fill {
+    -fx-background-color: -drydock-resolved;
+    -fx-background-radius: 6px;
+    -fx-min-height: 4px;
+    -fx-max-height: 4px;
+}
+.review-progress-track {
+    -fx-background-color: -drydock-border;
+    -fx-background-radius: 6px;
+}

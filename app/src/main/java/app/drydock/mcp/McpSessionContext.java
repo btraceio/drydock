@@ -43,13 +43,16 @@ public interface McpSessionContext {
     /** Base branch the caller's Review scope diffs against, for {@code review_comments}. */
     Optional<String> baseBranch(ManagedSessionId caller);
 
-    /** The calling session's annotations, unfiltered. */
+    /**
+     * Every finding of every review scope the caller may address: the scopes
+     * bound to its session, plus any the human granted it. Unfiltered.
+     */
     List<ReviewAnnotation> annotations(ManagedSessionId caller);
 
     /**
-     * Atomically re-reads the annotation with {@code id}, applies {@code
+     * Atomically re-reads the finding under {@code key}, applies {@code
      * transform} and stores the result, then flushes so the human's view sees
-     * it. Empty when no annotation has that id.
+     * it. Empty when nothing is stored under that key.
      *
      * <p>A transform rather than a plain "replace this value": the human's
      * Review tab writes the same threads from the FX thread, so a caller that
@@ -58,7 +61,8 @@ public interface McpSessionContext {
      * so a decision made inside it (including refusing by throwing) is made
      * against what is actually there.</p>
      */
-    Optional<ReviewAnnotation> mutateAnnotation(String id, UnaryOperator<ReviewAnnotation> transform);
+    Optional<ReviewAnnotation> mutateAnnotation(ReviewAnnotation.Key key,
+                                                UnaryOperator<ReviewAnnotation> transform);
 
     /**
      * Reads {@code line} of {@code file} in the caller's worktree, with up to

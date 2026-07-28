@@ -17,6 +17,8 @@ import app.drydock.git.WorktreeNotCleanException;
 import app.drydock.git.WorktreeService;
 import app.drydock.git.WorktreeService.Worktree;
 import app.drydock.review.AnnotationStore;
+import app.drydock.review.ReviewScope;
+import app.drydock.review.ReviewScopeRegistry;
 import app.drydock.review.ReviewAnnotation;
 
 import java.io.IOException;
@@ -82,6 +84,7 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
     private final Supplier<List<ManagedAgentSession>> sessionCatalog;
     private final Supplier<List<Repository>> repositoryCatalog;
     private final AnnotationStore annotationStore;
+    private final ReviewScopeRegistry reviewScopeRegistry;
     private final GitStatusService gitStatusService;
     private final WorktreeService worktreeService;
     private final Supplier<UserConfig> userConfig;
@@ -97,6 +100,7 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
     public WorkspaceMcpSessionContext(Supplier<List<ManagedAgentSession>> sessionCatalog,
                                       Supplier<List<Repository>> repositoryCatalog,
                                       AnnotationStore annotationStore,
+                                      ReviewScopeRegistry reviewScopeRegistry,
                                       GitStatusService gitStatusService,
                                       WorktreeService worktreeService,
                                       Supplier<UserConfig> userConfig,
@@ -105,6 +109,7 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
         this.sessionCatalog = Objects.requireNonNull(sessionCatalog, "sessionCatalog");
         this.repositoryCatalog = Objects.requireNonNull(repositoryCatalog, "repositoryCatalog");
         this.annotationStore = Objects.requireNonNull(annotationStore, "annotationStore");
+        this.reviewScopeRegistry = Objects.requireNonNull(reviewScopeRegistry, "reviewScopeRegistry");
         this.gitStatusService = Objects.requireNonNull(gitStatusService, "gitStatusService");
         this.worktreeService = Objects.requireNonNull(worktreeService, "worktreeService");
         this.userConfig = Objects.requireNonNull(userConfig, "userConfig");
@@ -166,14 +171,27 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
 
     // ---- annotations --------------------------------------------------------
 
+    /**
+     * Findings are keyed by scope handle, not by session, so this resolves
+     * the caller's addressable scopes first (its own, plus any granted) and
+     * collects their findings. A caller with no scope sees nothing rather
+     * than everything -- the registry is the authorization boundary.
+     */
     @Override
     public List<ReviewAnnotation> annotations(ManagedSessionId caller) {
-        return annotationStore.forSession(caller);
+        List<ReviewAnnotation> findings = new ArrayList<>();
+        for (ReviewScope scope : reviewScopeRegistry.scopes()) {
+            if (reviewScopeRegistry.isAddressableBy(scope.id(), caller)) {
+                findings.addAll(annotationStore.forScope(scope.id()));
+            }
+        }
+        return List.copyOf(findings);
     }
 
     @Override
-    public Optional<ReviewAnnotation> mutateAnnotation(String id, UnaryOperator<ReviewAnnotation> transform) {
-        Optional<ReviewAnnotation> updated = annotationStore.mutate(id, transform);
+    public Optional<ReviewAnnotation> mutateAnnotation(ReviewAnnotation.Key key,
+                                                       UnaryOperator<ReviewAnnotation> transform) {
+        Optional<ReviewAnnotation> updated = annotationStore.mutate(key, transform);
         // The human's Review card refreshes off the store's change listener;
         // the flush is so the note survives a crash before the next autosave.
         updated.ifPresent(annotation -> annotationStore.flushPendingSaves());

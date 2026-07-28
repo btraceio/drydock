@@ -46,6 +46,14 @@ final class ShortcutsOverlay {
                     {"Open the bound session", "o"},
                     {"Cycle density: cozy · compact · dense", "d"},
                     {"Show or hide unchanged lines", "c"},
+                    {"Previous / next intent", "[ / ]"},
+                    {"Next unsettled intent", "n"},
+                    {"Approve the current intent", "a"},
+                    {"Request changes", "r"},
+                    {"Undo this intent's verdict", "u"},
+                    {"Submit the review", "⏎"},
+                    {"Collapse the findings margin", "m"},
+                    {"Findings from the whole review", "⇧F"},
             }),
     };
 

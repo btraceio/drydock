@@ -67,8 +67,32 @@ final class ReviewDiffColumn extends BorderPane {
         boolean openFileAtLine(ReviewScope scope, Path file, int line);
     }
 
+    /** Findings anchored to a line, and what happens when their pin is clicked (spec §4.4). */
+    interface PinSource {
+        /** The pin numbers of the findings anchored to {@code lineKey} in {@code file}, in margin order. */
+        List<Pin> pinsAt(String file, String lineKey);
+
+        /** Clicking a line or its pin focuses the matching card. */
+        void focusFinding(Pin pin);
+    }
+
+    /** One {@code ◆n} marker: its number, its severity style class, and its finding's key. */
+    record Pin(int number, String severityStyleClass, app.drydock.review.ReviewAnnotation.Key key,
+               boolean dimmed) {
+    }
+
     private final DiffService diffService;
     private final ExplorerBridge explorerBridge;
+    private PinSource pinSource = new PinSource() {
+        @Override
+        public List<Pin> pinsAt(String file, String lineKey) {
+            return List.of();
+        }
+
+        @Override
+        public void focusFinding(Pin pin) {
+        }
+    };
 
     private final Label summaryLabel = new Label();
     private final Button contextToggle = new Button();
@@ -161,6 +185,33 @@ final class ReviewDiffColumn extends BorderPane {
     }
 
     // ---- presentation state -------------------------------------------------
+
+    /** Supplies the {@code ◆n} pins; set once by the destination. */
+    void setPinSource(PinSource source) {
+        if (source != null) {
+            this.pinSource = source;
+        }
+    }
+
+    /** Re-renders the rows so pin markers pick up a changed finding set. */
+    void refreshPins() {
+        // A full row swap is one list operation; the rows themselves are
+        // unchanged data, so this costs a re-render of the visible cells only.
+        List<ReviewDiffRow> current = List.copyOf(rows);
+        rows.setAll(List.of());
+        rows.setAll(current);
+    }
+
+    /** Scrolls to the row anchored at {@code lineKey} in {@code file} (card → line linkage). */
+    void revealLine(String file, String lineKey) {
+        for (int i = 0; i < rows.size(); i++) {
+            if (rows.get(i) instanceof ReviewDiffRow.Line line
+                    && line.file().equals(file) && line.lineKey().equals(lineKey)) {
+                list.scrollTo(Math.max(0, i - 3));
+                return;
+            }
+        }
+    }
 
     /** {@code d}: applies a density by swapping the root's style class (spec §4.8). */
     void setDensity(ReviewDensity density) {
@@ -306,6 +357,16 @@ final class ReviewDiffColumn extends BorderPane {
         HBox.setHgrow(source, Priority.ALWAYS);
 
         HBox box = new HBox(oldNumber, newNumber, sign, source);
+        for (Pin pin : pinSource.pinsAt(row.file(), row.lineKey())) {
+            Button marker = new Button("◆" + pin.number());
+            marker.getStyleClass().addAll("review-line-pin", pin.severityStyleClass());
+            if (pin.dimmed()) {
+                marker.getStyleClass().add("dimmed");
+            }
+            marker.setTooltip(new Tooltip("Show finding " + pin.number() + " in the margin"));
+            marker.setOnAction(e -> pinSource.focusFinding(pin));
+            box.getChildren().add(marker);
+        }
         box.setAlignment(Pos.CENTER_LEFT);
         box.getStyleClass().addAll("review-code-row", switch (line.kind()) {
             case ADD -> "row-add";
@@ -364,6 +425,11 @@ final class ReviewDiffColumn extends BorderPane {
         HBox box = new HBox(label);
         box.setAlignment(Pos.CENTER_LEFT);
         return box;
+    }
+
+    /** The diff currently rendered (the intent fallback groups by its files). */
+    UnifiedDiff currentDiff() {
+        return diff;
     }
 
     /** Diagnostic/test-only: the rows currently rendered. */

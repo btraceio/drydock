@@ -17,6 +17,7 @@ import app.drydock.domain.SshRemote;
 import app.drydock.domain.UiTheme;
 import app.drydock.domain.WorkspaceUiState;
 import app.drydock.git.ChangedLineService;
+import app.drydock.git.DiffScope;
 import app.drydock.git.DiffService;
 import app.drydock.git.GhCliService;
 import app.drydock.git.GitBranchState;
@@ -27,6 +28,12 @@ import app.drydock.mcp.McpSessionRegistry.Spawn;
 import app.drydock.mcp.WorkspaceMcpSessionContext;
 import app.drydock.process.SshCommandBuilder;
 import app.drydock.review.AnnotationStore;
+import app.drydock.review.IntentGrouping;
+import app.drydock.review.ReviewItem;
+import app.drydock.review.ReviewAnnotation;
+import app.drydock.review.ReviewIntent;
+import app.drydock.review.ReviewVerdict;
+import app.drydock.review.Severity;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.ReviewQueueService;
 import app.drydock.review.ReviewScope;
@@ -74,6 +81,7 @@ import java.io.IOException;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.HashMap;
@@ -164,6 +172,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     private final ReviewDestinationView reviewDestination;
     private final ReviewScopeRegistry reviewScopeRegistry;
     private final ReviewQueueService reviewQueueService;
+    private final IntentGrouping intentGrouping = new IntentGrouping();
 
     /**
      * True while the Review destination owns the centre. Tracked separately
@@ -373,7 +382,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         // executor -- so the counts have to be told, not polled. No
         // unsubscribe: this workspace and the store share the application's
         // lifetime.
-        annotationStore.addChangeListener(id -> Platform.runLater(this::refreshReviewCounts));
+        annotationStore.addChangeListener(key -> Platform.runLater(this::refreshReviewCounts));
 
         exitWatcher.setCycleCount(Animation.INDEFINITE);
         exitWatcher.play();
@@ -382,6 +391,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     /** Re-reads the finding counts the Review queue and the sidebar badges render. */
     private void refreshReviewCounts() {
         reviewDestination.refreshCounts();
+        reviewDestination.refreshReviewState();
         onReviewQueueChanged.run();
     }
 
@@ -739,6 +749,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                         LOG.log(Level.WARNING, "Could not assemble the Review queue", failure);
                         return;
                     }
+                    adoptLegacyAnnotations(items);
                     reviewDestination.setItems(items, local.size());
                     if (pendingReviewSelection != null) {
                         selectReviewScopeFor(pendingReviewSelection);
@@ -746,6 +757,31 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                     }
                     onReviewQueueChanged.run();
                 }));
+    }
+
+    /**
+     * Moves annotations written before scope handles existed onto the scope
+     * they now belong to (see {@code AnnotationStore.adoptLegacy}). Runs on
+     * every queue assembly because a session may only bind to its worktree
+     * later; adoption is idempotent, so repeating it costs nothing once the
+     * legacy entries are gone.
+     */
+    private void adoptLegacyAnnotations(List<ReviewItem> items) {
+        for (ReviewItem item : items) {
+            ReviewScope scope = item.scope();
+            Optional<ManagedSessionId> session = scope.sessionId();
+            if (session.isEmpty()) {
+                continue;
+            }
+            DiffScope diffScope = scope.kind() == ReviewScope.Kind.WORKING_TREE
+                    ? DiffScope.WORKING_TREE
+                    : DiffScope.BASE;
+            int adopted = annotationStore.adoptLegacy(session.get(), diffScope, scope.id());
+            if (adopted > 0) {
+                LOG.log(Level.INFO, "Adopted " + adopted + " pre-scope-handle annotation(s) into "
+                        + scope.id());
+            }
+        }
     }
 
     /** Selects the queue item whose scope is checked out at {@code checkoutRoot}, if it exists yet. */
@@ -764,16 +800,17 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 .findFirst();
     }
 
-    /** Open findings for {@code scope} -- empty until a reviewer has run against it (spec section 4.1). */
+    /**
+     * Open findings for {@code scope} -- empty when no reviewer has run
+     * against it (spec §4.1), which is not the same as zero. A scope with no
+     * findings at all has never been reviewed; one whose findings are all
+     * resolved genuinely has none open, and says so.
+     */
     private Optional<Integer> openFindingsFor(ReviewScope scope) {
-        Optional<ManagedSessionId> session = scope.sessionId();
-        if (session.isEmpty()) {
+        if (annotationStore.forScope(scope.id()).isEmpty()) {
             return Optional.empty();
         }
-        long open = annotationStore.forSession(session.get()).stream()
-                .filter(annotation -> annotation.status() == AnnotationStatus.OPEN)
-                .count();
-        return Optional.of((int) open);
+        return Optional.of((int) annotationStore.openCount(scope.id()));
     }
 
     /** {@code running} / {@code idle} for a scope's bound session; empty when none is bound. */
@@ -872,6 +909,125 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             open.openExplorerAt(file, line);
             return true;
         }
+
+        @Override
+        public List<ReviewAnnotation> findings(ReviewScope scope) {
+            return annotationStore.forScope(scope.id());
+        }
+
+        @Override
+        public List<ReviewIntent> intents(ReviewScope scope) {
+            return intentGrouping.intentsFor(scope.id(), reviewDestination.currentDiff());
+        }
+
+        @Override
+        public Optional<ReviewVerdict> verdict(ReviewScope scope, ReviewIntent intent) {
+            return annotationStore.verdict(scope.id(), intent.id());
+        }
+
+        @Override
+        public void setVerdict(ReviewScope scope, ReviewIntent intent,
+                               Optional<ReviewVerdict.Decision> decision) {
+            if (decision.isEmpty()) {
+                annotationStore.clearVerdict(scope.id(), intent.id());
+                return;
+            }
+            // Approval is refused, not merely discouraged, while a blocking
+            // finding of this intent is open (spec §4.6). Checked here as well
+            // as in the bar so the keyboard path cannot slip past the button's
+            // refusal.
+            if (decision.get() == ReviewVerdict.Decision.APPROVED
+                    && blockingFindingOpen(scope, intent)) {
+                return;
+            }
+            annotationStore.putVerdict(new ReviewVerdict(scope.id(), intent.id(), decision.get(),
+                    Optional.empty(), Instant.now()));
+        }
+
+        @Override
+        public void setResolved(ReviewScope scope, ReviewAnnotation finding, boolean resolved) {
+            annotationStore.mutate(finding.key(), current -> current.withStatus(
+                    resolved ? AnnotationStatus.RESOLVED : AnnotationStatus.OPEN));
+        }
+
+        @Override
+        public void postMessage(ReviewScope scope, ReviewAnnotation finding, String body) {
+            annotationStore.mutate(finding.key(), current -> current.withReply(
+                    new ReviewAnnotation.Message("You", Instant.now(), body)));
+        }
+
+        /**
+         * {@code Apply patch}. drydock does not apply the patch itself: it
+         * hands the proposal to the scope's live session, exactly as every
+         * other worktree action hands work to the agent. What it records is
+         * the hand-off, never a fabricated outcome.
+         */
+        @Override
+        public void applyPatch(ReviewScope scope, ReviewAnnotation finding) {
+            finding.patch().ifPresent(patch -> {
+                boolean handedOff = sendToBoundSession(scope,
+                        "Apply this proposed patch from the review of " + finding.file()
+                                + " (" + patch.summary() + "), then summarize what changed:\n"
+                                + patch.unified());
+                if (handedOff) {
+                    annotationStore.mutate(finding.key(),
+                            current -> current.withStatus(AnnotationStatus.SENT));
+                }
+            });
+        }
+
+        @Override
+        public void overrideSeverity(ReviewScope scope, ReviewAnnotation finding, Severity severity) {
+            annotationStore.mutate(finding.key(), current -> current.withSeverityOverride(severity));
+        }
+
+        @Override
+        public void askAgentToFix(ReviewScope scope, ReviewIntent intent,
+                                  List<ReviewAnnotation> findings) {
+            if (findings.isEmpty()) {
+                return;
+            }
+            StringBuilder prompt = new StringBuilder("Address these review findings on \"")
+                    .append(intent.title()).append("\", then summarize what you changed: ");
+            int n = 1;
+            for (ReviewAnnotation finding : findings) {
+                prompt.append('[').append(n++).append("] ").append(finding.file()).append(' ')
+                        .append(finding.startKey()).append(": ")
+                        .append(finding.displayTitle().replaceAll("\\s+", " ")).append(". ");
+            }
+            if (sendToBoundSession(scope, prompt.toString().strip())) {
+                for (ReviewAnnotation finding : findings) {
+                    annotationStore.mutate(finding.key(),
+                            current -> current.withStatus(AnnotationStatus.SENT));
+                }
+            }
+        }
+
+        @Override
+        public void submit(ReviewScope scope) {
+            annotationStore.markSubmitted(scope.id());
+        }
+    }
+
+    private boolean blockingFindingOpen(ReviewScope scope, ReviewIntent intent) {
+        return annotationStore.forScope(scope.id()).stream()
+                .filter(finding -> finding.intentId()
+                        .map(id -> id.equals(intent.id())).orElse(true))
+                .anyMatch(ReviewAnnotation::blocksApproval);
+    }
+
+    /**
+     * Sends {@code prompt} to the scope's bound session's live terminal.
+     * False when there is no session or its tab is not open -- the caller
+     * then records nothing, because the hand-off did not happen.
+     */
+    private boolean sendToBoundSession(ReviewScope scope, String prompt) {
+        OpenSessionTab open = scope.sessionId().map(openTabs::get).orElse(null);
+        if (open == null) {
+            return false;
+        }
+        open.sendPrompt(prompt);
+        return true;
     }
 
     /** ⌘⇧]: selects the next session tab (wraps around). */
@@ -1585,7 +1741,13 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     /** Called by the sidebar after {@link SessionManager#deleteSession} so any open tab disappears too. */
     @Override
     public void noteSessionDeleted(ManagedSessionId sessionId) {
-        annotationStore.removeSession(sessionId);
+        // Findings are keyed by scope handle now, so a deleted session's
+        // review data is reached through the scopes that were bound to it.
+        for (ReviewScope scope : reviewScopeRegistry.scopes()) {
+            if (scope.sessionId().filter(sessionId::equals).isPresent()) {
+                annotationStore.removeScope(scope.id());
+            }
+        }
         // A deleted session is never coming back, so its activity file would
         // otherwise linger until the next startup purge.
         forgetActivity(sessionId);

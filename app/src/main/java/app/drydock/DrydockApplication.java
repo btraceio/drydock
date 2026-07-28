@@ -924,6 +924,7 @@ public final class DrydockApplication extends Application {
                 sessionManager::sessions,
                 repositoryManager::repositories,
                 annotationStore,
+                reviewScopeRegistry,
                 gitStatusService,
                 worktreeService,
                 UserConfig::load,

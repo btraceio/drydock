@@ -5,6 +5,8 @@ import app.drydock.git.DiffScope;
 import app.drydock.mcp.McpSessionRegistry.Spawn;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.ReviewAnnotation;
+import app.drydock.review.Confidence;
+import app.drydock.review.Severity;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -34,14 +36,18 @@ class McpToolRouterReplyTest {
         McpSessionRegistry registry = new McpSessionRegistry();
         registry.mint(caller, Spawn.ALLOWED);
         router = new McpToolRouter(context, registry);
-        open = ReviewAnnotation.create(caller, DiffScope.BASE, "src/Main.java", "n42", "n42",
+        context.grant(caller, SCOPE);
+        open = ReviewAnnotation.human(SCOPE, "src/Main.java", "n42", "n42",
                 new ReviewAnnotation.Message("You", Instant.parse("2026-07-25T10:00:00Z"), "needs a null check"));
         context.annotations.add(open);
     }
 
+    /** The one review scope this caller may address. */
+    private static final String SCOPE = "rs_test";
+
     private ReviewAnnotation reloaded() {
         return context.annotations.stream()
-                .filter(annotation -> annotation.id().equals(open.id()))
+                .filter(annotation -> annotation.key().equals(open.key()))
                 .findFirst()
                 .orElseThrow();
     }
@@ -85,8 +91,7 @@ class McpToolRouterReplyTest {
 
     @Test
     void anotherSessionsAnnotationIsNotAddressable() {
-        ManagedSessionId other = ManagedSessionId.newId();
-        ReviewAnnotation foreign = ReviewAnnotation.create(other, DiffScope.BASE, "other.java", "n1", "n1",
+        ReviewAnnotation foreign = ReviewAnnotation.human("rs_theirs", "other.java", "n1", "n1",
                 new ReviewAnnotation.Message("You", Instant.EPOCH, "not yours"));
         context.annotations.add(foreign);
 
@@ -95,8 +100,42 @@ class McpToolRouterReplyTest {
 
         assertTrue(failure.getMessage().contains(foreign.id()), failure.getMessage());
         assertEquals(AnnotationStatus.OPEN, context.annotations.stream()
-                .filter(annotation -> annotation.id().equals(foreign.id()))
+                .filter(annotation -> annotation.key().equals(foreign.key()))
                 .findFirst().orElseThrow().status());
+    }
+
+    /**
+     * The keying bug, at the MCP surface: the same finding id in two scopes
+     * the caller can reach is ambiguous, and must be refused rather than
+     * resolved by picking one.
+     */
+    @Test
+    void anIdPresentInTwoAddressableScopesIsRefusedRatherThanGuessed() {
+        context.grant(caller, "rs_second");
+        context.annotations.add(new ReviewAnnotation("rs_second", open.id(), Optional.empty(),
+                "other.java", "n1", "n1", Severity.QUESTION, Confidence.HIGH, Optional.empty(),
+                "You", Instant.EPOCH, List.of(), Optional.empty(), Optional.empty(), List.of(),
+                List.of(), Optional.empty(), AnnotationStatus.OPEN));
+
+        McpToolException failure = assertThrows(McpToolException.class,
+                () -> router.call(caller, "review_reply", args("id", open.id(), "note", "done")));
+
+        assertTrue(failure.getMessage().contains("more than one review scope"), failure.getMessage());
+        assertEquals(1, reloaded().thread().size(), "nothing may be written while it is ambiguous");
+    }
+
+    @Test
+    void anAmbiguousIdIsResolvedByPassingTheScope() throws Exception {
+        context.grant(caller, "rs_second");
+        context.annotations.add(new ReviewAnnotation("rs_second", open.id(), Optional.empty(),
+                "other.java", "n1", "n1", Severity.QUESTION, Confidence.HIGH, Optional.empty(),
+                "You", Instant.EPOCH, List.of(), Optional.empty(), Optional.empty(), List.of(),
+                List.of(), Optional.empty(), AnnotationStatus.OPEN));
+
+        router.call(caller, "review_reply",
+                args("id", open.id(), "scopeId", SCOPE, "note", "done"));
+
+        assertEquals(2, reloaded().thread().size());
     }
 
     @Test

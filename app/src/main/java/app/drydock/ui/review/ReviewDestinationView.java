@@ -1,8 +1,12 @@
 package app.drydock.ui.review;
 
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.review.ReviewAnnotation;
+import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewItem;
 import app.drydock.review.ReviewScope;
+import app.drydock.review.ReviewVerdict;
+import app.drydock.review.Severity;
 
 import javafx.application.Platform;
 import javafx.geometry.Pos;
@@ -40,6 +44,8 @@ public final class ReviewDestinationView extends BorderPane {
     /** Below this width the rails take their narrow sizes; below {@link #QUEUE_COLLAPSE_WIDTH} they collapse (spec §4.9). */
     private static final double NARROW_WIDTH = 1320;
     private static final double QUEUE_COLLAPSE_WIDTH = 1180;
+    private static final double INTENT_COLLAPSE_WIDTH = 1040;
+    private static final double MARGIN_COLLAPSE_WIDTH = 880;
 
     /** What the view needs from the workspace. All calls happen on the FX thread. */
     public interface Host {
@@ -70,11 +76,50 @@ public final class ReviewDestinationView extends BorderPane {
          * open it (no session, or its tab is closed).
          */
         boolean openInExplorer(ReviewScope scope, java.nio.file.Path file, int line);
+
+        /** Every finding of {@code scope}, newest state (the store is the truth). */
+        List<ReviewAnnotation> findings(ReviewScope scope);
+
+        /** The intents of {@code scope}: the reviewer's grouping, or the by-file fallback. */
+        List<ReviewIntent> intents(ReviewScope scope);
+
+        /** The verdict recorded on one intent, if any. */
+        Optional<ReviewVerdict> verdict(ReviewScope scope, ReviewIntent intent);
+
+        /** Records a verdict; {@code decision} empty undoes it. */
+        void setVerdict(ReviewScope scope, ReviewIntent intent,
+                        Optional<ReviewVerdict.Decision> decision);
+
+        /** Resolve / Reopen one finding. */
+        void setResolved(ReviewScope scope, ReviewAnnotation finding, boolean resolved);
+
+        /** Appends a human message to a thread (Reply, and the ASK chips). */
+        void postMessage(ReviewScope scope, ReviewAnnotation finding, String body);
+
+        /** {@code Apply patch} -- a human click; drydock never applies one on its own. */
+        void applyPatch(ReviewScope scope, ReviewAnnotation finding);
+
+        /** Records the human's severity override. */
+        void overrideSeverity(ReviewScope scope, ReviewAnnotation finding, Severity severity);
+
+        /** Hands an intent's open findings to the scope's bound session. */
+        void askAgentToFix(ReviewScope scope, ReviewIntent intent, List<ReviewAnnotation> findings);
+
+        /** Posts the review once every intent is settled. */
+        void submit(ReviewScope scope);
     }
 
     private final Host host;
     private final ReviewQueueRail queue = new ReviewQueueRail();
     private final ReviewDiffColumn diffColumn;
+    private final ReviewFindingsMargin margin;
+    private final ReviewVerdictBar verdictBar;
+
+    /** The intent the verdict bar is settling; {@code [} / {@code ]} / {@code n} move it. */
+    private int intentIndex;
+
+    /** Set by {@code m}/{@code f}; remembered independently of the responsive collapse. */
+    private boolean marginCollapsedByUser;
 
     private final Label countsLabel = new Label();
     private final Label headerIcon = new Label();
@@ -95,6 +140,8 @@ public final class ReviewDestinationView extends BorderPane {
     public ReviewDestinationView(Host host, app.drydock.git.DiffService diffService) {
         this.host = host;
         this.diffColumn = new ReviewDiffColumn(diffService, host::openInExplorer);
+        this.margin = new ReviewFindingsMargin(new MarginHost());
+        this.verdictBar = new ReviewVerdictBar(new VerdictHost());
         getStyleClass().add("review-destination");
 
         setTop(buildTitleBar());
@@ -105,6 +152,9 @@ public final class ReviewDestinationView extends BorderPane {
         queue.setOnToggleCollapse(() -> setQueueCollapsed(!queue.collapsed()));
         queue.setFindingCount(item -> host.openFindings(item.scope()));
         queue.setSessionDot(item -> host.sessionState(item.scope()));
+        margin.setOnToggleCollapse(() -> setMarginCollapsed(!margin.collapsed()));
+        margin.setOnFilterChanged(filter -> refreshReviewState());
+        diffColumn.setPinSource(new PinSource());
 
         widthProperty().addListener((obs, old, width) -> applyResponsiveLayout(width.doubleValue()));
         addEventFilter(KeyEvent.KEY_PRESSED, this::onKeyPressed);
@@ -168,9 +218,15 @@ public final class ReviewDestinationView extends BorderPane {
         header.getStyleClass().add("review-item-header");
 
         body.getStyleClass().add("review-body");
-        VBox.setVgrow(body, Priority.ALWAYS);
+        HBox.setHgrow(body, Priority.ALWAYS);
 
-        VBox centre = new VBox(header, body);
+        // The margin sits BESIDE the code, never inline, so the diff stays
+        // continuous (spec §4.5); the verdict bar sits BELOW both, so
+        // collapsing the margin never takes the primary action with it.
+        HBox columns = new HBox(body, margin);
+        VBox.setVgrow(columns, Priority.ALWAYS);
+
+        VBox centre = new VBox(header, columns, verdictBar);
         centre.getStyleClass().add("review-centre");
         return centre;
     }
@@ -211,6 +267,235 @@ public final class ReviewDestinationView extends BorderPane {
         queue.refreshRows();
     }
 
+    /**
+     * Re-reads findings, intents and verdicts from the store. Called on every
+     * store change, including the MCP router's, because a view that renders
+     * from a cached value silently discards the other writer's work.
+     */
+    public void refreshReviewState() {
+        Optional<ReviewScope> scope = selectedScope();
+        if (scope.isEmpty()) {
+            margin.setFindings(List.of());
+            verdictBar.update(null, Optional.empty(), false, 0, 0);
+            return;
+        }
+        margin.invalidate(null);
+        margin.setFindings(findingsForMargin(scope.get()));
+        diffColumn.refreshPins();
+        renderVerdictBar(scope.get());
+    }
+
+    /**
+     * What the margin shows: the current intent's findings, or the whole
+     * review's when {@code F} is on. A finding that names no intent is shown
+     * either way -- it belongs to the review even if nothing grouped it.
+     */
+    private List<ReviewAnnotation> findingsForMargin(ReviewScope scope) {
+        List<ReviewAnnotation> all = host.findings(scope);
+        if (margin.wholeReview()) {
+            return all;
+        }
+        Optional<ReviewIntent> current = currentIntent();
+        if (current.isEmpty()) {
+            return all;
+        }
+        return all.stream()
+                .filter(finding -> finding.intentId()
+                        .map(id -> id.equals(current.get().id()))
+                        .orElse(true))
+                .toList();
+    }
+
+    private List<ReviewIntent> intents() {
+        return selectedScope().map(host::intents).orElse(List.of());
+    }
+
+    private Optional<ReviewIntent> currentIntent() {
+        List<ReviewIntent> intents = intents();
+        if (intents.isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.of(intents.get(Math.clamp(intentIndex, 0, intents.size() - 1)));
+    }
+
+    private void renderVerdictBar(ReviewScope scope) {
+        List<ReviewIntent> intents = intents();
+        Optional<ReviewIntent> current = currentIntent();
+        if (current.isEmpty()) {
+            verdictBar.update(null, Optional.empty(), false, 0, 0);
+            return;
+        }
+        // Collapsed intents do not count toward progress: the point of the
+        // collapse is that there is nothing to read.
+        List<ReviewIntent> counted = intents.stream()
+                .filter(ReviewIntent::countsTowardProgress)
+                .toList();
+        long settled = counted.stream()
+                .filter(intent -> host.verdict(scope, intent).isPresent())
+                .count();
+        boolean blocked = host.findings(scope).stream()
+                .filter(finding -> finding.intentId()
+                        .map(id -> id.equals(current.get().id()))
+                        .orElse(true))
+                .anyMatch(ReviewAnnotation::blocksApproval);
+        verdictBar.update(current.get(), host.verdict(scope, current.get()), blocked,
+                (int) settled, counted.size());
+    }
+
+    /** {@code [} / {@code ]}: moves the intent the verdict bar is settling. */
+    private void moveIntent(int delta) {
+        List<ReviewIntent> intents = intents();
+        if (intents.isEmpty()) {
+            return;
+        }
+        intentIndex = (int) Math.clamp((long) intentIndex + delta, 0, intents.size() - 1);
+        refreshReviewState();
+    }
+
+    /** {@code n}: jumps to the next intent with no verdict yet. */
+    private void nextUnsettledIntent() {
+        Optional<ReviewScope> scope = selectedScope();
+        List<ReviewIntent> intents = intents();
+        if (scope.isEmpty() || intents.isEmpty()) {
+            return;
+        }
+        for (int offset = 1; offset <= intents.size(); offset++) {
+            int candidate = (intentIndex + offset) % intents.size();
+            ReviewIntent intent = intents.get(candidate);
+            if (intent.countsTowardProgress() && host.verdict(scope.get(), intent).isEmpty()) {
+                intentIndex = candidate;
+                refreshReviewState();
+                return;
+            }
+        }
+    }
+
+    /**
+     * The {@code ◆n} pins beside the code and their two-way linkage to the
+     * margin (spec §4.4). A pin whose finding is filtered out dims rather
+     * than disappearing -- the line still carries a finding, the reader has
+     * simply chosen not to look at it.
+     */
+    private final class PinSource implements ReviewDiffColumn.PinSource {
+        @Override
+        public List<ReviewDiffColumn.Pin> pinsAt(String file, String lineKey) {
+            Optional<ReviewScope> scope = selectedScope();
+            if (scope.isEmpty()) {
+                return List.of();
+            }
+            var numbers = margin.pinNumbers();
+            List<ReviewDiffColumn.Pin> pins = new java.util.ArrayList<>();
+            for (ReviewAnnotation finding : host.findings(scope.get())) {
+                if (!finding.file().equals(file)) {
+                    continue;
+                }
+                if (!finding.startKey().equals(lineKey) && !finding.endKey().equals(lineKey)) {
+                    continue;
+                }
+                Integer number = numbers.get(finding.key());
+                pins.add(new ReviewDiffColumn.Pin(number == null ? 0 : number,
+                        finding.effectiveSeverity().styleClass(), finding.key(), number == null));
+            }
+            return List.copyOf(pins);
+        }
+
+        @Override
+        public void focusFinding(ReviewDiffColumn.Pin pin) {
+            margin.focus(pin.key());
+        }
+    }
+
+    /** The margin's window onto the host, with the scope filled in. */
+    private final class MarginHost implements ReviewFindingsMargin.Host {
+        @Override
+        public void setResolved(ReviewAnnotation finding, boolean resolved) {
+            selectedScope().ifPresent(scope -> host.setResolved(scope, finding, resolved));
+        }
+
+        @Override
+        public void postMessage(ReviewAnnotation finding, String body) {
+            selectedScope().ifPresent(scope -> host.postMessage(scope, finding, body));
+        }
+
+        @Override
+        public void applyPatch(ReviewAnnotation finding) {
+            selectedScope().ifPresent(scope -> host.applyPatch(scope, finding));
+        }
+
+        @Override
+        public void overrideSeverity(ReviewAnnotation finding, Severity severity) {
+            selectedScope().ifPresent(scope -> host.overrideSeverity(scope, finding, severity));
+        }
+
+        @Override
+        public void focusLine(ReviewAnnotation finding) {
+            diffColumn.revealLine(finding.file(), finding.startKey());
+        }
+    }
+
+    /** The verdict bar's window onto the host, with the scope filled in. */
+    private final class VerdictHost implements ReviewVerdictBar.Host {
+        @Override
+        public void approve(ReviewIntent intent) {
+            selectedScope().ifPresent(scope ->
+                    host.setVerdict(scope, intent, Optional.of(ReviewVerdict.Decision.APPROVED)));
+        }
+
+        @Override
+        public void requestChanges(ReviewIntent intent) {
+            selectedScope().ifPresent(scope ->
+                    host.setVerdict(scope, intent, Optional.of(ReviewVerdict.Decision.CHANGES)));
+        }
+
+        @Override
+        public void askAgentToFix(ReviewIntent intent) {
+            selectedScope().ifPresent(scope -> host.askAgentToFix(scope, intent,
+                    host.findings(scope).stream()
+                            .filter(finding -> !finding.resolved())
+                            .filter(finding -> finding.intentId()
+                                    .map(id -> id.equals(intent.id())).orElse(true))
+                            .toList()));
+        }
+
+        @Override
+        public void undo(ReviewIntent intent) {
+            selectedScope().ifPresent(scope -> host.setVerdict(scope, intent, Optional.empty()));
+        }
+
+        @Override
+        public void nextUnsettled() {
+            nextUnsettledIntent();
+        }
+
+        @Override
+        public void submit() {
+            submitReview();
+        }
+    }
+
+    /**
+     * Submit (spec §4.6): with anything unsettled this jumps to the first
+     * such intent rather than posting a partial review; once everything is
+     * settled it posts ONE review.
+     */
+    private void submitReview() {
+        Optional<ReviewScope> scope = selectedScope();
+        if (scope.isEmpty()) {
+            return;
+        }
+        List<ReviewIntent> counted = intents().stream()
+                .filter(ReviewIntent::countsTowardProgress)
+                .toList();
+        for (int i = 0; i < counted.size(); i++) {
+            if (host.verdict(scope.get(), counted.get(i)).isEmpty()) {
+                intentIndex = intents().indexOf(counted.get(i));
+                refreshReviewState();
+                return;
+            }
+        }
+        host.submit(scope.get());
+    }
+
     // ---- item rendering -----------------------------------------------------
 
     private void showItem(ReviewItem item) {
@@ -230,6 +515,8 @@ public final class ReviewDestinationView extends BorderPane {
         headerContext.setText(item.subtitle() + "  ·  vs " + scope.base());
         setSessionRow(scope, sessionLineFor(scope), scope.sessionId().isPresent());
         body.getChildren().setAll(bodyFor(item));
+        intentIndex = 0;
+        refreshReviewState();
     }
 
     /**
@@ -323,11 +610,45 @@ public final class ReviewDestinationView extends BorderPane {
     private void applyResponsiveLayout(double width) {
         queue.setNarrow(width < NARROW_WIDTH);
         queue.setCollapsed(queueCollapsedByUser || width < QUEUE_COLLAPSE_WIDTH);
+        margin.setNarrow(width < NARROW_WIDTH);
+        margin.setCollapsed(marginCollapsedByUser || width < MARGIN_COLLAPSE_WIDTH);
     }
 
     private void setQueueCollapsed(boolean collapsed) {
         queueCollapsedByUser = collapsed;
         applyResponsiveLayout(getWidth());
+    }
+
+    private void setMarginCollapsed(boolean collapsed) {
+        marginCollapsedByUser = collapsed;
+        applyResponsiveLayout(getWidth());
+    }
+
+    /**
+     * {@code f}: collapses every rail so code and findings own the window --
+     * the "review mode" behaviour without a separate mode. A toggle, not a
+     * one-way collapse, or the second press would be a dead key.
+     */
+    private void setFocusMode(boolean on) {
+        queueCollapsedByUser = on;
+        marginCollapsedByUser = on;
+        applyResponsiveLayout(getWidth());
+    }
+
+    private void verdictAction(ReviewVerdict.Decision decision) {
+        Optional<ReviewScope> scope = selectedScope();
+        Optional<ReviewIntent> intent = currentIntent();
+        if (scope.isPresent() && intent.isPresent()) {
+            host.setVerdict(scope.get(), intent.get(), Optional.of(decision));
+        }
+    }
+
+    private void undoVerdict() {
+        Optional<ReviewScope> scope = selectedScope();
+        Optional<ReviewIntent> intent = currentIntent();
+        if (scope.isPresent() && intent.isPresent()) {
+            host.setVerdict(scope.get(), intent.get(), Optional.empty());
+        }
     }
 
     private void cycleDensity() {
@@ -363,13 +684,26 @@ public final class ReviewDestinationView extends BorderPane {
             case J -> { queue.moveSelection(1); yield true; }
             case K -> { queue.moveSelection(-1); yield true; }
             case Q -> { setQueueCollapsed(!queue.collapsed()); yield true; }
-            // Focus mode: collapse every rail, or restore them all if
-            // everything is already collapsed. A one-way "collapse" would
-            // make f a dead key on its second press.
-            case F -> { setQueueCollapsed(!queueCollapsedByUser); yield true; }
             case O -> { openBoundSession(); yield true; }
             case D -> { cycleDensity(); yield true; }
             case C -> { diffColumn.toggleContext(); yield true; }
+            case M -> { setMarginCollapsed(!margin.collapsed()); yield true; }
+            case OPEN_BRACKET -> { moveIntent(-1); yield true; }
+            case CLOSE_BRACKET -> { moveIntent(1); yield true; }
+            case N -> { nextUnsettledIntent(); yield true; }
+            case A -> { verdictAction(ReviewVerdict.Decision.APPROVED); yield true; }
+            case R -> { verdictAction(ReviewVerdict.Decision.CHANGES); yield true; }
+            case U -> { undoVerdict(); yield true; }
+            case ENTER -> { submitReview(); yield true; }
+            // Shift+F is the whole-review filter; plain f is focus mode.
+            case F -> {
+                if (event.isShiftDown()) {
+                    margin.setWholeReview(!margin.wholeReview());
+                } else {
+                    setFocusMode(!(queueCollapsedByUser && marginCollapsedByUser));
+                }
+                yield true;
+            }
             default -> false;
         };
         if (handled) {
@@ -387,6 +721,15 @@ public final class ReviewDestinationView extends BorderPane {
     public void onShown() {
         host.refreshQueue();
         Platform.runLater(this::requestFocus);
+    }
+
+    /**
+     * The diff currently rendered. The intent fallback groups by file, so it
+     * needs the same diff the column is showing rather than a second one -- a
+     * grouping derived from a re-read would drift from what is on screen.
+     */
+    public app.drydock.git.UnifiedDiff currentDiff() {
+        return diffColumn.currentDiff();
     }
 
     /** Diagnostic-only: the queue rows currently rendered (visual verification harness). */

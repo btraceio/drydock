@@ -334,6 +334,7 @@ class WorkspaceMcpSessionContextTest {
                 () -> List.of(session),
                 () -> repositories,
                 annotationStore,
+                new app.drydock.review.ReviewScopeRegistry(),
                 gitStatusService,
                 worktreeService,
                 UserConfig::empty,

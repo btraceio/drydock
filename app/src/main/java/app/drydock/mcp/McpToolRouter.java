@@ -60,21 +60,24 @@ public final class McpToolRouter {
     public List<JsonValue> toolDescriptors() {
         return List.of(
                 descriptor("review_comments",
-                        "Lists this session's open (OPEN or SENT) review-annotation threads, with the "
-                                + "base branch, decoded line number, and a working-tree excerpt so an "
-                                + "agent can re-locate each comment as its own edits shift line numbers.",
+                        "Lists the open (OPEN or SENT) review threads of every review scope this session "
+                                + "may address, with the base branch, decoded line number, and a "
+                                + "working-tree excerpt so an agent can re-locate each comment as its own "
+                                + "edits shift line numbers.",
                         JsonObject.empty()
-                                .put("scope", schemaString("Diff scope to filter by: WORKING_TREE, "
-                                        + "UPSTREAM, or BASE. Omit for every scope."))),
+                                .put("scopeId", schemaString("Review scope handle to filter by. Omit for "
+                                        + "every scope this session may address."))),
                 descriptor("review_reply",
-                        "Appends a Claude-authored note to a review-annotation thread. Pass "
-                                + "addressed: true to claim the annotation as ADDRESSED; the human still "
-                                + "confirms with RESOLVED. Refused outright for threads already RESOLVED "
-                                + "or FIXED.",
+                        "Appends a Claude-authored note to a review thread. Pass addressed: true to claim "
+                                + "the thread as ADDRESSED; the human still confirms with RESOLVED. "
+                                + "Refused outright for threads already RESOLVED or FIXED.",
                         JsonObject.empty()
-                                .put("id", schemaString("Id of the annotation to reply to."))
+                                .put("id", schemaString("Id of the finding to reply to."))
+                                .put("scopeId", schemaString("Review scope handle the finding belongs to. "
+                                        + "Required only when the same id exists in more than one scope "
+                                        + "this session may address."))
                                 .put("note", schemaString("Reply text to append to the thread."))
-                                .put("addressed", schemaBoolean("Whether to mark the annotation ADDRESSED. "
+                                .put("addressed", schemaBoolean("Whether to mark the thread ADDRESSED. "
                                         + "Defaults to false.")),
                         "id", "note"),
                 descriptor("worktree_create",
@@ -119,12 +122,12 @@ public final class McpToolRouter {
         requireLiveSession(caller);
         JsonObject args = asObject(arguments);
 
-        Optional<DiffScope> scopeFilter = optionalScope(args);
+        Optional<String> scopeFilter = optionalStringArg(args, "scopeId");
 
         JsonArray comments = new JsonArray(context.annotations(caller).stream()
                 .filter(annotation -> annotation.status() == AnnotationStatus.OPEN
                         || annotation.status() == AnnotationStatus.SENT)
-                .filter(annotation -> scopeFilter.isEmpty() || annotation.scope() == scopeFilter.get())
+                .filter(annotation -> scopeFilter.isEmpty() || annotation.scopeId().equals(scopeFilter.get()))
                 .map(annotation -> toComment(caller, annotation))
                 .flatMap(Optional::stream)
                 .toList());
@@ -132,19 +135,6 @@ public final class McpToolRouter {
         return JsonObject.empty()
                 .put("base_branch", optionalString(context.baseBranch(caller)))
                 .put("comments", comments);
-    }
-
-    private Optional<DiffScope> optionalScope(JsonObject args) throws McpToolException {
-        Optional<String> raw = optionalStringArg(args, "scope");
-        if (raw.isEmpty()) {
-            return Optional.empty();
-        }
-        try {
-            return Optional.of(DiffScope.valueOf(raw.get()));
-        } catch (IllegalArgumentException e) {
-            throw new McpToolException("Unknown scope '" + raw.get()
-                    + "'; must be one of WORKING_TREE, UPSTREAM, BASE.");
-        }
     }
 
     private Optional<JsonValue> toComment(ManagedSessionId caller, ReviewAnnotation annotation) {
@@ -181,7 +171,8 @@ public final class McpToolRouter {
                 .put("line", JsonNumber.of(ref.line()))
                 .put("deleted_line", new JsonBoolean(ref.deleted()))
                 .put("status", new JsonString(annotation.status().name()))
-                .put("scope", new JsonString(annotation.scope().name()))
+                .put("scopeId", new JsonString(annotation.scopeId()))
+                .put("severity", new JsonString(annotation.effectiveSeverity().wireName()))
                 .put("excerpt", excerpt)
                 .put("hint", hint)
                 .put("thread", thread));
@@ -195,19 +186,20 @@ public final class McpToolRouter {
         String id = requiredStringArg(args, "id");
         String note = requiredStringArg(args, "note");
         boolean addressed = optionalBooleanArg(args, "addressed", false);
+        Optional<String> scopeId = optionalStringArg(args, "scopeId");
 
-        // Ownership only. Which session owns an annotation cannot change, so
-        // unlike the status this read cannot go stale; the store's own
-        // by-id lookup below is what decides on current values.
-        context.annotations(caller).stream()
-                .filter(candidate -> candidate.id().equals(id))
-                .findFirst()
-                .orElseThrow(() -> new McpToolException("No such annotation '" + id + "'."));
+        // Resolves WHICH finding, not its current value. Finding ids are
+        // agent-chosen and repeat across scopes, so an id alone can name two
+        // different findings; that ambiguity is refused rather than guessed,
+        // because guessing is precisely the bug (scoped) keying exists to
+        // prevent. The store's own keyed lookup below decides on current
+        // values.
+        ReviewAnnotation.Key key = resolveFindingKey(caller, id, scopeId);
 
         ReviewAnnotation.Message reply = new ReviewAnnotation.Message("Claude", Instant.now(), note);
         Optional<ReviewAnnotation> result;
         try {
-            result = context.mutateAnnotation(id, current -> {
+            result = context.mutateAnnotation(key, current -> {
                 // Checked INSIDE the transform, against the stored value: the
                 // human may have clicked Resolve between the ownership read
                 // above and this write, and a refusal decided outside would
@@ -226,10 +218,36 @@ public final class McpToolRouter {
         }
 
         ReviewAnnotation updated = result.orElseThrow(() ->
-                new McpToolException("No such annotation '" + id + "'."));
+                new McpToolException("No such finding '" + id + "'."));
         return JsonObject.empty()
                 .put("id", new JsonString(updated.id()))
+                .put("scopeId", new JsonString(updated.scopeId()))
                 .put("status", new JsonString(updated.status().name()));
+    }
+
+    /**
+     * Finds the one finding {@code id} names among the caller's addressable
+     * scopes. An id present in two scopes is ambiguous and is refused with
+     * the candidates listed, so the agent re-calls with {@code scopeId}
+     * rather than having drydock pick one.
+     */
+    private ReviewAnnotation.Key resolveFindingKey(ManagedSessionId caller, String id,
+                                                   Optional<String> scopeId) throws McpToolException {
+        List<ReviewAnnotation> matches = context.annotations(caller).stream()
+                .filter(candidate -> candidate.id().equals(id))
+                .filter(candidate -> scopeId.isEmpty() || candidate.scopeId().equals(scopeId.get()))
+                .toList();
+        if (matches.isEmpty()) {
+            throw new McpToolException("No such finding '" + id + "'"
+                    + scopeId.map(scope -> " in scope '" + scope + "'").orElse("") + ".");
+        }
+        if (matches.size() > 1) {
+            throw new McpToolException("Finding '" + id + "' exists in more than one review scope ("
+                    + matches.stream().map(ReviewAnnotation::scopeId).distinct().sorted()
+                            .collect(java.util.stream.Collectors.joining(", "))
+                    + "); pass scopeId to say which.");
+        }
+        return matches.get(0).key();
     }
 
     /**

@@ -40,51 +40,31 @@ class ReviewDestinationViewTest extends ApplicationTest {
     /** Wider than the 1320px narrow threshold, so the rails start expanded. */
     private static final double SCENE_WIDTH = 1400;
 
-    private final List<ManagedSessionId> openedSessions = new ArrayList<>();
+    private FakeReviewHost host;
     private ReviewDestinationView view;
+    private final app.drydock.git.DiffService diffService = new app.drydock.git.DiffService();
+
+    @org.junit.jupiter.api.AfterEach
+    void tearDown() {
+        diffService.close();
+        host.store.close();
+    }
 
     @Override
     public void start(Stage stage) {
-        view = new ReviewDestinationView(new RecordingHost(), new app.drydock.git.DiffService());
+        try {
+            host = new FakeReviewHost(java.nio.file.Files.createTempDirectory("drydock-review-view")
+                    .resolve("annotations.json"));
+        } catch (java.io.IOException e) {
+            throw new java.io.UncheckedIOException(e);
+        }
+        view = new ReviewDestinationView(host, diffService);
         Scene scene = new Scene(view, SCENE_WIDTH, 900);
         scene.getStylesheets().addAll(
                 getClass().getResource("/app/drydock/ui/app.css").toExternalForm(),
                 getClass().getResource("/app/drydock/ui/theme-dark.css").toExternalForm());
         stage.setScene(scene);
         stage.show();
-    }
-
-    private final class RecordingHost implements ReviewDestinationView.Host {
-        @Override
-        public void refreshQueue() { }
-
-        @Override
-        public void openSession(ManagedSessionId sessionId) {
-            openedSessions.add(sessionId);
-        }
-
-        @Override
-        public Optional<Region> bodyFor(ReviewScope scope) {
-            return Optional.empty();
-        }
-
-        @Override
-        public Optional<Integer> openFindings(ReviewScope scope) {
-            return scope.head().equals("feat/b") ? Optional.of(3) : Optional.empty();
-        }
-
-        @Override
-        public Optional<String> sessionState(ReviewScope scope) {
-            return scope.sessionId().map(id -> "running");
-        }
-
-        @Override
-        public void showShortcuts() { }
-
-        @Override
-        public boolean openInExplorer(ReviewScope scope, java.nio.file.Path file, int line) {
-            return false;
-        }
     }
 
     @Test
@@ -140,11 +120,11 @@ class ReviewDestinationViewTest extends ApplicationTest {
                 item(registry, "feat/b", Optional.of(session))), 1));
 
         type(KeyCode.O);
-        assertTrue(openedSessions.isEmpty(), "an item with no session must not open one");
+        assertTrue(host.openedSessions.isEmpty(), "an item with no session must not open one");
 
         type(KeyCode.J);
         type(KeyCode.O);
-        assertEquals(List.of(session), openedSessions);
+        assertEquals(List.of(session), host.openedSessions);
     }
 
     /**
@@ -174,12 +154,33 @@ class ReviewDestinationViewTest extends ApplicationTest {
      */
     @Test
     void onlyItemsWithFindingsCarryACountBadge() {
-        seedQueue();
+        ReviewScopeRegistry registry = new ReviewScopeRegistry();
+        ReviewItem a = item(registry, "feat/a", Optional.empty());
+        ReviewItem b = item(registry, "feat/b", Optional.empty());
+        host.store.upsert(finding(b.scope().id(), "f1"));
+        host.store.upsert(finding(b.scope().id(), "f2"));
+        interact(() -> view.setItems(List.of(a, b), 1));
 
         List<String> badges = lookup(".review-queue-count").queryAll().stream()
                 .map(node -> ((Label) node).getText())
                 .toList();
-        assertEquals(List.of("3"), badges);
+        assertEquals(List.of("2"), badges,
+                "only the item whose reviewer has run carries a count");
+    }
+
+    static app.drydock.review.ReviewAnnotation finding(String scopeId, String id) {
+        return finding(scopeId, id, app.drydock.review.Severity.QUESTION);
+    }
+
+    static app.drydock.review.ReviewAnnotation finding(String scopeId, String id,
+                                                       app.drydock.review.Severity severity) {
+        return new app.drydock.review.ReviewAnnotation(scopeId, id,
+                Optional.of("file:src/Main.java"), "src/Main.java", "n1", "n1", severity,
+                app.drydock.review.Confidence.HIGH, Optional.of("Title " + id), "Claude",
+                java.time.Instant.EPOCH, List.of(), Optional.empty(), Optional.empty(), List.of(),
+                List.of(new app.drydock.review.ReviewAnnotation.Message("Claude",
+                        java.time.Instant.EPOCH, "body of " + id)),
+                Optional.empty(), app.drydock.review.AnnotationStatus.OPEN);
     }
 
     @Test
