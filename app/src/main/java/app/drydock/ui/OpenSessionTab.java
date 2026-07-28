@@ -804,6 +804,11 @@ final class OpenSessionTab {
         headerTitle.setText(displayName);
     }
 
+    /** Display name of the agent this session runs; names it in this tab's own copy. */
+    String agentName() {
+        return agentName;
+    }
+
     String displayName() {
         return displayName;
     }

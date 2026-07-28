@@ -124,7 +124,8 @@ public final class ReviewView extends BorderPane {
             diffList.widthProperty().subtract(VERTICAL_SCROLLBAR_ALLOWANCE);
 
     private final Label summaryLabel = new Label();
-    private final Button sendButton = new Button("Send to Claude");
+    /** Text set in the constructor: it names the session's own agent, not always Claude. */
+    private final Button sendButton = new Button();
     private final HBox banner = new HBox(8);
     private final Label bannerLabel = new Label();
 
@@ -161,11 +162,20 @@ public final class ReviewView extends BorderPane {
     /** Unsubscribes {@link #onAnnotationChanged} from {@link #annotationStore}; run by {@link #dispose()}. */
     private final Runnable annotationChangesUnsubscribe;
 
+    /** Display name of this session's agent (see the constructor). */
+    private final String agentName;
+
+    /**
+     * @param agentName display name of the agent this session runs; the
+     *                  annotations are handed to THAT agent, so the copy names it
+     */
     public ReviewView(ManagedSessionId sessionId, Path checkoutRoot, Path repositoryRoot,
                       DiffService diffService, ChangedLineService changedLineService,
                       GitStatusService gitStatusService, AnnotationStore annotationStore,
-                      Consumer<String> promptSender, ExplorerBridge explorerBridge) {
+                      String agentName, Consumer<String> promptSender, ExplorerBridge explorerBridge) {
         this.sessionId = sessionId;
+        this.agentName = agentName;
+        sendButton.setText("Send to " + agentName);
         this.checkoutRoot = checkoutRoot;
         this.diffService = diffService;
         this.changedLineService = changedLineService;
@@ -1127,7 +1137,7 @@ public final class ReviewView extends BorderPane {
                     .ifPresent(this::replaceCardRow);
         }
         bannerLabel.setText(open.size() + (open.size() == 1 ? " annotation" : " annotations")
-                + " sent to Claude");
+                + " sent to " + agentName);
         banner.setVisible(true);
         banner.setManaged(true);
         updateSummary();

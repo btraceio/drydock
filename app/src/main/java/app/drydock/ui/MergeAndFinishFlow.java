@@ -157,8 +157,19 @@ final class MergeAndFinishFlow {
                         stop(MergeFinishDecision.forFailedMerge(branch, base, messageOf(ex)));
                         return;
                     }
-                    apply(MergeFinishDecision.forVerdict(verdict, repositoryRoot.toString(), branch, base, false));
+                    apply(MergeFinishDecision.forVerdict(verdict, repositoryRoot.toString(), branch, base, false,
+                            agentName()));
                 }));
+    }
+
+    /**
+     * Name of the agent this flow hands conflicts to, for the copy that says
+     * who is working. The tab can be gone by then (closed mid-flow), which is
+     * exactly when a name would be a guess -- so it falls back to "the agent".
+     */
+    private String agentName() {
+        OpenSessionTab tab = openTab.apply(sessionId);
+        return tab == null ? "the agent" : tab.agentName();
     }
 
     private void handOff(MergeFinishDecision.Next.HandOff handOff) {
@@ -191,7 +202,8 @@ final class MergeAndFinishFlow {
                         return;
                     }
                     MergeFinishDecision.Next next =
-                            MergeFinishDecision.forVerdict(verdict, repositoryRoot.toString(), branch, base, true);
+                            MergeFinishDecision.forVerdict(verdict, repositoryRoot.toString(), branch, base, true,
+                                    agentName());
                     if (next instanceof MergeFinishDecision.Next.KeepWaiting) {
                         pollAgain(attemptNumber + 1);
                         return;
@@ -207,7 +219,7 @@ final class MergeAndFinishFlow {
      * <p>The verdict that got us here proves a merge commit of the tip
      * recorded at pre-flight is on the base branch -- it says nothing about
      * where the branch points now, and on the hand-off path minutes have
-     * passed with the session's Claude sitting in the worktree. {@link
+     * passed with the session's agent sitting in the worktree. {@link
      * BranchDeleteGate} re-reads the tip and turns any movement (or a re-read
      * that failed) into a refusal to run {@code git branch -D}; it lives
      * outside this class so that "the second tip is actually read again" is
@@ -226,14 +238,14 @@ final class MergeAndFinishFlow {
                         // The merge landed; only the cleanup call failed to
                         // run, so this is a Done, not a ✗.
                         done(MergeFinishDecision.forFailedCleanup(branch, base, conflictsHandedOff,
-                                messageOf(ex)));
+                                messageOf(ex), agentName()));
                         return;
                     }
                     if (outcome.sessionDeleted()) {
                         onSessionDeleted.accept(sessionId);
                     }
                     onSessionsChanged.run();
-                    apply(MergeFinishDecision.forCleanup(outcome, branch, base, conflictsHandedOff));
+                    apply(MergeFinishDecision.forCleanup(outcome, branch, base, conflictsHandedOff, agentName()));
                 }));
     }
 

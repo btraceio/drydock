@@ -202,7 +202,7 @@ public final class DrydockApplication extends Application {
                 viewModel, primaryStage);
         RepositorySidebar sidebar =
                 new RepositorySidebar(repositoryManager, gitStatusService, worktreeService, sessionManager,
-                        mainWorkspace, viewModel);
+                        agentRegistry, mainWorkspace, viewModel);
 
         installSessionActivityHooks(activityDir);
         startMcpServer(stateDir);
@@ -761,7 +761,7 @@ public final class DrydockApplication extends Application {
 
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
         confirm.setTitle("Quit Drydock");
-        confirm.setHeaderText("One or more Claude sessions are still running");
+        confirm.setHeaderText("One or more agent sessions are still running");
         confirm.setContentText("Closing will stop every running session's terminal (each is asked to exit "
                 + "gracefully first). Continue?");
         Optional<ButtonType> choice = confirm.showAndWait();

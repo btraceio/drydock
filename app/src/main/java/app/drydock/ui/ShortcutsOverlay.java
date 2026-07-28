@@ -21,7 +21,7 @@ final class ShortcutsOverlay {
     private static final String[][] SHORTCUTS = {
             {"New session", "⌘N"},
             {"Rename session", "⌘R"},
-            {"Claude view", "⌘1"},
+            {"Agent view", "⌘1"},
             {"Terminal view", "⌘2"},
             {"Explorer view", "⌘3"},
             {"Review view", "⌘4"},

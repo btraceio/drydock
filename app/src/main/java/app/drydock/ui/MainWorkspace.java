@@ -422,7 +422,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         target.getStyleClass().add("worktree-context-line");
         Label hint = new Label("Discovered via git worktree list.");
         hint.getStyleClass().add("picker-empty-hint");
-        Button start = new Button("Start a Claude session ▸");
+        Button start = new Button("Start a session ▸");
         start.getStyleClass().add("worktree-create-button");
         start.setFocusTraversable(false);
         start.setOnAction(e -> promptStartWorktreeSession(repository, worktree));
@@ -1019,7 +1019,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     private void handleOpenResult(OpenSessionTab placeholderTab, SessionOpenResult result, Throwable ex) {
         if (ex != null) {
             removeTab(placeholderTab);
-            UiErrors.show("Could not start Claude session", ex);
+            UiErrors.show("Could not start " + placeholderTab.agentName() + " session", ex);
             return;
         }
         // launchSession only ever produces Opened -- see SessionManager.finalizeCreate.
@@ -1035,7 +1035,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                                      SessionOpenResult result, Throwable ex) {
         if (ex != null) {
             removeTab(placeholderTab);
-            UiErrors.show("Could not resume Claude session", ex);
+            UiErrors.show("Could not resume " + placeholderTab.agentName() + " session", ex);
             return;
         }
         switch (result) {
@@ -1097,7 +1097,8 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         Alert prompt = new Alert(Alert.AlertType.CONFIRMATION);
         prompt.setTitle("Conversation not found");
         prompt.setHeaderText("The conversation for \"" + session.displayName() + "\" no longer exists");
-        prompt.setContentText("Claude has no stored history for this session's conversation id anymore "
+        prompt.setContentText(AgentLabels.displayName(agentRegistry, session.agentKind())
+                + " has no stored history for this session's conversation id anymore "
                 + "(it may have been cleaned up). Start a fresh conversation under the same name, "
                 + "or delete the session?");
         prompt.getButtonTypes().setAll(startFresh, delete, ButtonType.CANCEL);
@@ -1603,7 +1604,8 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             // session's tab has adopted the real id -- annotations must key on it.
             repository.ifPresent(repo -> openTab.setReviewFactory(() -> new ReviewView(
                     openTab.sessionId(), searchRoot, repo.root(), diffService, changedLineService, gitStatusService,
-                    annotationStore, openTab::sendPrompt, new ReviewView.ExplorerBridge() {
+                    annotationStore, openTab.agentName(), openTab::sendPrompt,
+                    new ReviewView.ExplorerBridge() {
                         @Override
                         public void openFileAtLine(Path relativeFile, int line) {
                             openTab.openExplorerAt(relativeFile, line);

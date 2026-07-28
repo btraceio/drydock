@@ -1,5 +1,6 @@
 package app.drydock.ui;
 
+import app.drydock.agent.api.AgentRegistry;
 import app.drydock.app.ExternalEditorLauncher;
 import app.drydock.app.FinderLauncher;
 import app.drydock.app.RepositoryManager;
@@ -167,6 +168,7 @@ public final class RepositorySidebar extends VBox {
     // stale data. Pruned on structural changes (see pruneRowCaches).
     private final Map<ManagedSessionId, ContextMenu> sessionMenus = new HashMap<>();
     private final Map<ManagedSessionId, Tooltip> sessionTooltips = new HashMap<>();
+    private final AgentRegistry agentRegistry;
     private final Map<RepositoryId, ContextMenu> repoMenus = new HashMap<>();
     private final Map<RepositoryId, ContextMenu> newSessionMenus = new HashMap<>();
     private final Map<Path, Tooltip> unopenedTooltips = new HashMap<>();
@@ -185,8 +187,10 @@ public final class RepositorySidebar extends VBox {
 
     public RepositorySidebar(RepositoryManager repositoryManager, GitStatusService gitStatusService,
                               WorktreeService worktreeService, SessionManager sessionManager,
-                              WorkspaceNavigator navigator, WorkspaceViewModel viewModel) {
+                              AgentRegistry agentRegistry, WorkspaceNavigator navigator,
+                              WorkspaceViewModel viewModel) {
         this.repositoryManager = repositoryManager;
+        this.agentRegistry = agentRegistry;
         this.gitStatusService = gitStatusService;
         this.worktreeService = worktreeService;
         this.sessionManager = sessionManager;
@@ -1156,7 +1160,8 @@ public final class RepositorySidebar extends VBox {
         confirm.setTitle("Delete session");
         confirm.setHeaderText("Delete session \"" + session.displayName() + "\"?");
         confirm.setContentText("This removes the session from the manager (stopping it first if running). "
-                + "Claude's own conversation history on disk is not deleted.");
+                + AgentLabels.displayName(agentRegistry, session.agentKind())
+                + "'s own conversation history on disk is not deleted.");
         confirm.showAndWait().filter(button -> button == ButtonType.OK).ifPresent(button ->
                 sessionManager.deleteSession(session.id()).whenComplete((v, ex) -> Platform.runLater(() -> {
                     if (ex != null) {
@@ -1457,7 +1462,9 @@ public final class RepositorySidebar extends VBox {
                     ? repository.remote().host() + ":" + repository.remote().remotePath()
                     : session.workingDirectory().toString();
             rowTip.setText("Status: " + session.status()
-                    + (activity == SessionActivity.UNKNOWN ? "" : "\nClaude: " + activityLabel(activity))
+                    + (activity == SessionActivity.UNKNOWN ? ""
+                            : "\n" + AgentLabels.displayName(agentRegistry, session.agentKind()) + ": "
+                                    + activityLabel(activity))
                     + "\nLast opened: " + session.lastOpenedAt()
                     + "\nWorking directory: " + workingDirectoryText);
             Tooltip.install(row, rowTip);
@@ -1701,7 +1708,7 @@ public final class RepositorySidebar extends VBox {
 
     private ContextMenu repoMenu(Repository repository) {
         return repoMenus.computeIfAbsent(repository.id(), id -> {
-            MenuItem newSession = new MenuItem("New Claude session");
+            MenuItem newSession = new MenuItem("New session");
             newSession.setOnAction(e -> navigator.openNewSession(repository));
 
             MenuItem refresh = new MenuItem("Refresh");

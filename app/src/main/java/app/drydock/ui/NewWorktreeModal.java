@@ -33,7 +33,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * picker, the fork-from base (an editable combo box defaulting to the repo's
  * current branch, populated with local branches), a worktree directory
  * auto-derived from the branch slug (editable; auto-derivation stops after a
- * manual edit), an {@link AgentSelector}, and an optional "Start Claude with
+ * manual edit), an {@link AgentSelector}, and an optional "Start the agent with
  * a task" text. The footer
  * previews the literal {@code git worktree add} command this modal runs --
  * merge and delete (see {@code WorktreeLifecycleController}) run their own
@@ -123,7 +123,7 @@ final class NewWorktreeModal extends VBox {
                 }));
 
         taskField.getStyleClass().add("worktree-task");
-        taskField.setPromptText("Optional: describe the task; it is typed into the new session's Claude");
+        taskField.setPromptText("Optional: describe the task; it is typed into the new session's agent");
         taskField.setPrefRowCount(3);
         taskField.setWrapText(true);
 
@@ -228,7 +228,7 @@ final class NewWorktreeModal extends VBox {
                 baseGroup,
                 fieldGroup("Worktree directory", directoryField),
                 agentSelector,
-                fieldGroup("Start Claude with a task", taskField),
+                fieldGroup("Start the agent with a task", taskField),
                 commandPreview, hintLine, errorLine, buttons);
 
         loadCatalog(repository, gitStatusService, worktreeService);
