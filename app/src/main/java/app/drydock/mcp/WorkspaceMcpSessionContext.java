@@ -17,7 +17,13 @@ import app.drydock.git.WorktreeNotCleanException;
 import app.drydock.git.WorktreeService;
 import app.drydock.git.WorktreeService.Worktree;
 import app.drydock.review.AnnotationStore;
+import app.drydock.git.DiffScope;
+import app.drydock.git.DiffService;
+import app.drydock.git.UnifiedDiff;
+import app.drydock.review.IntentGrouping;
+import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
+import app.drydock.review.ReviewVerdict;
 import app.drydock.review.ReviewScopeRegistry;
 import app.drydock.review.ReviewAnnotation;
 
@@ -85,6 +91,8 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
     private final Supplier<List<Repository>> repositoryCatalog;
     private final AnnotationStore annotationStore;
     private final ReviewScopeRegistry reviewScopeRegistry;
+    private final IntentGrouping intentGrouping;
+    private final DiffService diffService;
     private final GitStatusService gitStatusService;
     private final WorktreeService worktreeService;
     private final Supplier<UserConfig> userConfig;
@@ -101,6 +109,8 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
                                       Supplier<List<Repository>> repositoryCatalog,
                                       AnnotationStore annotationStore,
                                       ReviewScopeRegistry reviewScopeRegistry,
+                                      IntentGrouping intentGrouping,
+                                      DiffService diffService,
                                       GitStatusService gitStatusService,
                                       WorktreeService worktreeService,
                                       Supplier<UserConfig> userConfig,
@@ -110,6 +120,8 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
         this.repositoryCatalog = Objects.requireNonNull(repositoryCatalog, "repositoryCatalog");
         this.annotationStore = Objects.requireNonNull(annotationStore, "annotationStore");
         this.reviewScopeRegistry = Objects.requireNonNull(reviewScopeRegistry, "reviewScopeRegistry");
+        this.intentGrouping = Objects.requireNonNull(intentGrouping, "intentGrouping");
+        this.diffService = Objects.requireNonNull(diffService, "diffService");
         this.gitStatusService = Objects.requireNonNull(gitStatusService, "gitStatusService");
         this.worktreeService = Objects.requireNonNull(worktreeService, "worktreeService");
         this.userConfig = Objects.requireNonNull(userConfig, "userConfig");
@@ -186,6 +198,74 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
             }
         }
         return List.copyOf(findings);
+    }
+
+    // ---- review scopes ------------------------------------------------------
+
+    @Override
+    public Optional<ReviewScope> reviewScope(String scopeId, ManagedSessionId caller) {
+        // Unknown and forbidden are one answer on purpose: an agent must not
+        // be able to learn that a scope exists by probing ids.
+        if (!reviewScopeRegistry.isAddressableBy(scopeId, caller)) {
+            return Optional.empty();
+        }
+        return reviewScopeRegistry.byId(scopeId);
+    }
+
+    @Override
+    public UnifiedDiff reviewDiff(ReviewScope scope) throws McpToolException {
+        DiffScope diffScope = scope.kind() == ReviewScope.Kind.WORKING_TREE
+                ? DiffScope.WORKING_TREE
+                : DiffScope.BASE;
+        try {
+            return diffService.diff(scope.diffRoot(), diffScope, scope.base(),
+                    DiffService.REVIEW_CONTEXT_LINES).get(JOIN_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new McpToolException("Interrupted while diffing " + scope.diffRoot());
+        } catch (ExecutionException | CompletionException e) {
+            throw new McpToolException("Could not diff " + scope.diffRoot() + ": "
+                    + (e.getCause() == null ? e.getMessage() : e.getCause().getMessage()));
+        } catch (TimeoutException e) {
+            throw new McpToolException("Timed out diffing " + scope.diffRoot());
+        }
+    }
+
+    @Override
+    public void putIntents(String scopeId, List<ReviewIntent> intents) {
+        intentGrouping.set(scopeId, intents);
+    }
+
+    @Override
+    public void upsertFindings(List<ReviewAnnotation> findings) {
+        findings.forEach(annotationStore::upsert);
+        annotationStore.flushPendingSaves();
+    }
+
+    @Override
+    public List<ReviewAnnotation> findingsOf(String scopeId) {
+        return annotationStore.forScope(scopeId);
+    }
+
+    @Override
+    public List<ReviewVerdict> verdictsOf(String scopeId) {
+        return annotationStore.verdictsFor(scopeId);
+    }
+
+    @Override
+    public boolean reviewSubmitted(String scopeId) {
+        return annotationStore.isSubmitted(scopeId);
+    }
+
+    /**
+     * The bound session's own turns. Empty until the transcript reader is
+     * wired to it -- {@code review_scope} treats {@code promptHistory} as an
+     * optional include, so an empty list is a valid answer rather than a
+     * failure.
+     */
+    @Override
+    public List<PromptStep> promptHistory(ReviewScope scope) {
+        return List.of();
     }
 
     @Override

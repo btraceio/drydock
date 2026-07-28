@@ -1,7 +1,11 @@
 package app.drydock.mcp;
 
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.git.UnifiedDiff;
 import app.drydock.review.ReviewAnnotation;
+import app.drydock.review.ReviewIntent;
+import app.drydock.review.ReviewScope;
+import app.drydock.review.ReviewVerdict;
 
 import java.nio.file.Path;
 import java.util.List;
@@ -63,6 +67,42 @@ public interface McpSessionContext {
      */
     Optional<ReviewAnnotation> mutateAnnotation(ReviewAnnotation.Key key,
                                                 UnaryOperator<ReviewAnnotation> transform);
+
+    // ---- review scopes (Review MCP schema) ----------------------------------
+
+    /**
+     * The review scope {@code scopeId} names, if the caller may address it:
+     * its own session's scopes plus any the human granted with "Run review".
+     * Empty for an unknown scope <em>and</em> for one the caller may not
+     * touch -- the two are deliberately indistinguishable, so probing scope
+     * ids tells an agent nothing.
+     */
+    Optional<ReviewScope> reviewScope(String scopeId, ManagedSessionId caller);
+
+    /** The diff of a scope, already parsed. Runs git, so never on the FX thread. */
+    UnifiedDiff reviewDiff(ReviewScope scope) throws McpToolException;
+
+    /** Replaces a scope's intent grouping ({@code review_intents}). */
+    void putIntents(String scopeId, List<ReviewIntent> intents);
+
+    /** Upserts findings on {@code finding.id}, so a re-run keeps existing threads. */
+    void upsertFindings(List<ReviewAnnotation> findings);
+
+    /** Every finding of one scope, whatever its state. */
+    List<ReviewAnnotation> findingsOf(String scopeId);
+
+    /** The verdicts recorded on one scope's intents. */
+    List<ReviewVerdict> verdictsOf(String scopeId);
+
+    /** Whether the human has submitted this scope's review. */
+    boolean reviewSubmitted(String scopeId);
+
+    /** The agent's own turns in the bound session, for the step timeline. */
+    List<PromptStep> promptHistory(ReviewScope scope);
+
+    /** One turn of the bound session's transcript ({@code review_scope.promptHistory}). */
+    record PromptStep(int step, java.time.Instant at, String prompt, String tool, List<String> files) {
+    }
 
     /**
      * Reads {@code line} of {@code file} in the caller's worktree, with up to

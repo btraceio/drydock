@@ -1,5 +1,6 @@
 package app.drydock.ui;
 
+import app.drydock.agent.api.Agent;
 import app.drydock.agent.api.AgentKind;
 import app.drydock.agent.api.AgentRegistry;
 import app.drydock.app.RepositoryManager;
@@ -194,6 +195,9 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * item happened to sort first.
      */
     private Path pendingReviewSelection;
+
+    /** Which agent "Run review" would use; null until the human picks one. */
+    private String selectedReviewer;
 
     /**
      * The per-worktree empty pane (worktree handoff: "No session in this
@@ -827,6 +831,15 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         return reviewDestination.diagItems().size();
     }
 
+    /**
+     * The intent grouping the MCP router writes and the Review view reads.
+     * Owned here (rather than by the router) because the view renders from it
+     * and the router only supplies it -- one holder, two readers.
+     */
+    public IntentGrouping intentGrouping() {
+        return intentGrouping;
+    }
+
     /** Notified after every queue reassembly, so the sidebar can re-render its badge. */
     public void setOnReviewQueueChanged(Runnable handler) {
         this.onReviewQueueChanged = handler == null ? () -> { } : handler;
@@ -1006,6 +1019,49 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         @Override
         public void submit(ReviewScope scope) {
             annotationStore.markSubmitted(scope.id());
+        }
+
+        /**
+         * The agents that can act as a reviewer: every provider drydock can
+         * launch. Empty leaves Review a plain diff, which it must always be
+         * able to be.
+         */
+        @Override
+        public List<String> reviewers() {
+            return agentRegistry.agents().stream()
+                    .filter(Agent::isAvailable)
+                    .map(Agent::displayName)
+                    .toList();
+        }
+
+        @Override
+        public Optional<String> selectedReviewer() {
+            return Optional.ofNullable(selectedReviewer);
+        }
+
+        @Override
+        public void selectReviewer(String reviewer) {
+            selectedReviewer = reviewer;
+        }
+
+        /**
+         * Grants the scope to its bound session and asks that session's agent
+         * to review it. The grant is what the schema calls the human pressing
+         * "Run review": it is the only way an agent may address a scope that
+         * is not its own, and it is always a human action.
+         */
+        @Override
+        public boolean runReview(ReviewScope scope) {
+            Optional<ManagedSessionId> session = scope.sessionId();
+            if (session.isEmpty()) {
+                return false;
+            }
+            reviewScopeRegistry.grant(scope.id(), session.get());
+            return sendToBoundSession(scope,
+                    "Review the changes in this worktree with the drydock review tools. "
+                            + "Read review_scope for handle " + scope.id()
+                            + ", then post review_intents and review_finding against it. "
+                            + "Call review_state first so already-settled findings are not re-flagged.");
         }
     }
 

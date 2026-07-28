@@ -52,6 +52,7 @@ final class ShortcutsOverlay {
                     {"Request changes", "r"},
                     {"Undo this intent's verdict", "u"},
                     {"Submit the review", "⏎"},
+                    {"Collapse the intents", "i"},
                     {"Collapse the findings margin", "m"},
                     {"Findings from the whole review", "⇧F"},
             }),

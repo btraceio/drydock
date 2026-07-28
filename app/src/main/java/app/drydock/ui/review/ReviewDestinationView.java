@@ -10,8 +10,12 @@ import app.drydock.review.Severity;
 
 import javafx.application.Platform;
 import javafx.geometry.Pos;
+import javafx.geometry.Side;
 import javafx.scene.control.Button;
+import javafx.scene.control.ContextMenu;
 import javafx.scene.control.Label;
+import javafx.scene.control.MenuItem;
+import javafx.scene.control.SeparatorMenuItem;
 import javafx.scene.control.TextInputControl;
 import javafx.scene.control.Tooltip;
 import javafx.scene.input.KeyCode;
@@ -107,11 +111,32 @@ public final class ReviewDestinationView extends BorderPane {
 
         /** Posts the review once every intent is settled. */
         void submit(ReviewScope scope);
+
+        /**
+         * The reviewers configured for this workspace, and which one Review
+         * would run. Empty when none is configured -- Review then works as a
+         * plain diff, which it must always be able to do.
+         */
+        List<String> reviewers();
+
+        /** The reviewer currently selected, if any. */
+        Optional<String> selectedReviewer();
+
+        /** Chooses which reviewer "Run review" would use. */
+        void selectReviewer(String reviewer);
+
+        /**
+         * Runs the selected reviewer against {@code scope}: grants it the
+         * scope handle and asks it to review. False when it cannot run (no
+         * reviewer, or no session to run it in).
+         */
+        boolean runReview(ReviewScope scope);
     }
 
     private final Host host;
     private final ReviewQueueRail queue = new ReviewQueueRail();
     private final ReviewDiffColumn diffColumn;
+    private final ReviewIntentRail intentRail = new ReviewIntentRail();
     private final ReviewFindingsMargin margin;
     private final ReviewVerdictBar verdictBar;
 
@@ -120,6 +145,9 @@ public final class ReviewDestinationView extends BorderPane {
 
     /** Set by {@code m}/{@code f}; remembered independently of the responsive collapse. */
     private boolean marginCollapsedByUser;
+
+    /** Set by {@code i}/{@code f}; remembered independently of the responsive collapse. */
+    private boolean intentsCollapsedByUser;
 
     private final Label countsLabel = new Label();
     private final Label headerIcon = new Label();
@@ -130,6 +158,8 @@ public final class ReviewDestinationView extends BorderPane {
     private final Button openSessionButton = new Button("Open session");
     private final Label returnHint = new Label("⌘4 from that session returns here");
     private final Button densityButton = new Button();
+    private final Button reviewerButton = new Button();
+    private final ContextMenu reviewerMenu = new ContextMenu();
     private final VBox body = new VBox();
 
     private ReviewDensity density = ReviewDensity.COZY;
@@ -145,7 +175,10 @@ public final class ReviewDestinationView extends BorderPane {
         getStyleClass().add("review-destination");
 
         setTop(buildTitleBar());
-        setLeft(queue);
+        // Queue then intents, left to right, exactly as the anatomy lays them
+        // out; the centre carries the code, the margin and the verdict bar.
+        HBox rails = new HBox(queue, intentRail);
+        setLeft(rails);
         setCenter(buildCenter());
 
         queue.setOnSelected(this::showItem);
@@ -153,6 +186,17 @@ public final class ReviewDestinationView extends BorderPane {
         queue.setFindingCount(item -> host.openFindings(item.scope()));
         queue.setSessionDot(item -> host.sessionState(item.scope()));
         margin.setOnToggleCollapse(() -> setMarginCollapsed(!margin.collapsed()));
+        intentRail.setOnToggleCollapse(() -> setIntentsCollapsed(!intentRail.collapsed()));
+        intentRail.setVerdictLookup(intent ->
+                selectedScope().flatMap(scope -> host.verdict(scope, intent)));
+        intentRail.setOnSelected(intent -> {
+            List<ReviewIntent> current = intents();
+            int index = current.indexOf(intent);
+            if (index >= 0) {
+                intentIndex = index;
+                refreshReviewState();
+            }
+        });
         margin.setOnFilterChanged(filter -> refreshReviewState());
         diffColumn.setPinSource(new PinSource());
 
@@ -174,17 +218,23 @@ public final class ReviewDestinationView extends BorderPane {
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
 
+        reviewerButton.getStyleClass().add("review-chip-button");
+        reviewerButton.setTooltip(new Tooltip("Reviewer, and re-run the review on this scope"));
+        reviewerButton.setOnAction(e -> showReviewerMenu());
+
         densityButton.getStyleClass().add("review-chip-button");
         densityButton.setTooltip(new Tooltip("Density: cozy · compact · dense (d)"));
         densityButton.setOnAction(e -> cycleDensity());
         applyDensity(density);
+        renderReviewerButton();
 
         Button shortcuts = new Button("?");
         shortcuts.getStyleClass().add("review-chip-button");
         shortcuts.setTooltip(new Tooltip("Shortcuts (?)"));
         shortcuts.setOnAction(e -> host.showShortcuts());
 
-        HBox bar = new HBox(8, glyph, title, countsLabel, spacer, densityButton, shortcuts);
+        HBox bar = new HBox(8, glyph, title, countsLabel, spacer, reviewerButton, densityButton,
+                shortcuts);
         bar.setAlignment(Pos.CENTER_LEFT);
         bar.getStyleClass().add("review-title-bar");
         return bar;
@@ -282,6 +332,7 @@ public final class ReviewDestinationView extends BorderPane {
         margin.invalidate(null);
         margin.setFindings(findingsForMargin(scope.get()));
         diffColumn.refreshPins();
+        intentRail.setIntents(intents(), currentIntent().map(ReviewIntent::id).orElse(null));
         renderVerdictBar(scope.get());
     }
 
@@ -610,6 +661,8 @@ public final class ReviewDestinationView extends BorderPane {
     private void applyResponsiveLayout(double width) {
         queue.setNarrow(width < NARROW_WIDTH);
         queue.setCollapsed(queueCollapsedByUser || width < QUEUE_COLLAPSE_WIDTH);
+        intentRail.setNarrow(width < NARROW_WIDTH);
+        intentRail.setCollapsed(intentsCollapsedByUser || width < INTENT_COLLAPSE_WIDTH);
         margin.setNarrow(width < NARROW_WIDTH);
         margin.setCollapsed(marginCollapsedByUser || width < MARGIN_COLLAPSE_WIDTH);
     }
@@ -624,6 +677,11 @@ public final class ReviewDestinationView extends BorderPane {
         applyResponsiveLayout(getWidth());
     }
 
+    private void setIntentsCollapsed(boolean collapsed) {
+        intentsCollapsedByUser = collapsed;
+        applyResponsiveLayout(getWidth());
+    }
+
     /**
      * {@code f}: collapses every rail so code and findings own the window --
      * the "review mode" behaviour without a separate mode. A toggle, not a
@@ -631,6 +689,7 @@ public final class ReviewDestinationView extends BorderPane {
      */
     private void setFocusMode(boolean on) {
         queueCollapsedByUser = on;
+        intentsCollapsedByUser = on;
         marginCollapsedByUser = on;
         applyResponsiveLayout(getWidth());
     }
@@ -649,6 +708,39 @@ public final class ReviewDestinationView extends BorderPane {
         if (scope.isPresent() && intent.isPresent()) {
             host.setVerdict(scope.get(), intent.get(), Optional.empty());
         }
+    }
+
+    /**
+     * The reviewer selector and "Re-run review on this scope". A menu rather
+     * than a cycle: which reviewer runs is a choice, and re-running is an
+     * action, so they must not share a click.
+     */
+    private void showReviewerMenu() {
+        reviewerMenu.getItems().clear();
+        List<String> reviewers = host.reviewers();
+        if (reviewers.isEmpty()) {
+            MenuItem none = new MenuItem("No reviewer configured");
+            none.setDisable(true);
+            reviewerMenu.getItems().add(none);
+        } else {
+            for (String reviewer : reviewers) {
+                MenuItem item = new MenuItem(reviewer);
+                item.setOnAction(e -> {
+                    host.selectReviewer(reviewer);
+                    renderReviewerButton();
+                });
+                reviewerMenu.getItems().add(item);
+            }
+            MenuItem rerun = new MenuItem("Re-run review on this scope");
+            rerun.setDisable(selectedScope().isEmpty());
+            rerun.setOnAction(e -> selectedScope().ifPresent(host::runReview));
+            reviewerMenu.getItems().addAll(new SeparatorMenuItem(), rerun);
+        }
+        reviewerMenu.show(reviewerButton, Side.BOTTOM, 0, 4);
+    }
+
+    private void renderReviewerButton() {
+        reviewerButton.setText(host.selectedReviewer().orElse("no reviewer"));
     }
 
     private void cycleDensity() {
@@ -688,6 +780,7 @@ public final class ReviewDestinationView extends BorderPane {
             case D -> { cycleDensity(); yield true; }
             case C -> { diffColumn.toggleContext(); yield true; }
             case M -> { setMarginCollapsed(!margin.collapsed()); yield true; }
+            case I -> { setIntentsCollapsed(!intentRail.collapsed()); yield true; }
             case OPEN_BRACKET -> { moveIntent(-1); yield true; }
             case CLOSE_BRACKET -> { moveIntent(1); yield true; }
             case N -> { nextUnsettledIntent(); yield true; }
@@ -700,7 +793,8 @@ public final class ReviewDestinationView extends BorderPane {
                 if (event.isShiftDown()) {
                     margin.setWholeReview(!margin.wholeReview());
                 } else {
-                    setFocusMode(!(queueCollapsedByUser && marginCollapsedByUser));
+                    setFocusMode(!(queueCollapsedByUser && intentsCollapsedByUser
+                            && marginCollapsedByUser));
                 }
                 yield true;
             }

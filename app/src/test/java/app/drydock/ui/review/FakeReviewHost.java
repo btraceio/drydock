@@ -163,4 +163,33 @@ final class FakeReviewHost implements ReviewDestinationView.Host {
         submittedScopes.add(scope.id());
         store.markSubmitted(scope.id());
     }
+
+    /** Reviewers this fake offers; empty models "no reviewer configured". */
+    final List<String> reviewers = new ArrayList<>();
+    String selectedReviewer;
+    final List<String> reviewRuns = new ArrayList<>();
+
+    @Override
+    public List<String> reviewers() {
+        return List.copyOf(reviewers);
+    }
+
+    @Override
+    public Optional<String> selectedReviewer() {
+        return Optional.ofNullable(selectedReviewer);
+    }
+
+    @Override
+    public void selectReviewer(String reviewer) {
+        selectedReviewer = reviewer;
+    }
+
+    @Override
+    public boolean runReview(ReviewScope scope) {
+        if (reviewers.isEmpty()) {
+            return false;
+        }
+        reviewRuns.add(scope.id());
+        return true;
+    }
 }

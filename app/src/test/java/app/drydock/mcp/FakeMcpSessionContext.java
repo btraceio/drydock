@@ -84,6 +84,66 @@ final class FakeMcpSessionContext implements McpSessionContext {
                 .toList();
     }
 
+    // ---- review scopes ------------------------------------------------------
+
+    /** Review scopes this fake knows about, by handle. */
+    final Map<String, app.drydock.review.ReviewScope> reviewScopes = new HashMap<>();
+
+    /** The diff {@link #reviewDiff} returns. */
+    app.drydock.git.UnifiedDiff reviewDiff = new app.drydock.git.UnifiedDiff(List.of());
+
+    /** The last intent grouping {@link #putIntents} received. */
+    final Map<String, List<app.drydock.review.ReviewIntent>> intents = new HashMap<>();
+
+    final List<app.drydock.review.ReviewVerdict> verdicts = new ArrayList<>();
+    final Set<String> submitted = new LinkedHashSet<>();
+
+    @Override
+    public Optional<app.drydock.review.ReviewScope> reviewScope(String scopeId, ManagedSessionId caller) {
+        if (!addressableScopes.getOrDefault(caller, Set.of()).contains(scopeId)) {
+            return Optional.empty();
+        }
+        return Optional.ofNullable(reviewScopes.get(scopeId));
+    }
+
+    @Override
+    public app.drydock.git.UnifiedDiff reviewDiff(app.drydock.review.ReviewScope scope) {
+        return reviewDiff;
+    }
+
+    @Override
+    public void putIntents(String scopeId, List<app.drydock.review.ReviewIntent> newIntents) {
+        intents.put(scopeId, List.copyOf(newIntents));
+    }
+
+    @Override
+    public void upsertFindings(List<ReviewAnnotation> findings) {
+        for (ReviewAnnotation finding : findings) {
+            annotations.removeIf(existing -> existing.key().equals(finding.key()));
+            annotations.add(finding);
+        }
+    }
+
+    @Override
+    public List<ReviewAnnotation> findingsOf(String scopeId) {
+        return annotations.stream().filter(finding -> finding.scopeId().equals(scopeId)).toList();
+    }
+
+    @Override
+    public List<app.drydock.review.ReviewVerdict> verdictsOf(String scopeId) {
+        return verdicts.stream().filter(verdict -> verdict.scopeId().equals(scopeId)).toList();
+    }
+
+    @Override
+    public boolean reviewSubmitted(String scopeId) {
+        return submitted.contains(scopeId);
+    }
+
+    @Override
+    public List<PromptStep> promptHistory(app.drydock.review.ReviewScope scope) {
+        return List.of();
+    }
+
     /** Grants {@code caller} access to {@code scopeId}, as the scope registry does. */
     void grant(ManagedSessionId caller, String scopeId) {
         addressableScopes.computeIfAbsent(caller, key -> new LinkedHashSet<>()).add(scopeId);

@@ -39,6 +39,8 @@ session's checkout.
 | Findings + verdicts | `app.drydock.review.AnnotationStore` / `ReviewAnnotation` / `ReviewVerdict` / `ReviewIntent` / `IntentGrouping` | Everything keyed by `(scopeId, id)`. Findings carry severity, confidence, intent, evidence, a proposed patch, ASK chips, a thread and a human severity override. Intents come from `review_intents`, or from the by-file fallback that keeps the verdict bar meaningful with no reviewer configured. |
 | Findings margin | `ReviewFindingsMargin` | 336 / 286 narrow / 30px strip. Cards sit beside the code, never inline. Reply drafts are held by the margin keyed by `(scopeId, id)`, not by the card node — a card is rebuilt whenever its finding changes, and a node-owned draft would go with it. |
 | Verdict bar | `ReviewVerdictBar` | Below both columns and always in the layout, so collapsing every rail cannot take the primary action with it. Approval is refused inline while a blocking finding of the intent is open. |
+| Review MCP tools | `McpToolRouter` + `ReviewToolCodec` | `review_scope` (paged on a byte budget), `review_intents`, `review_finding` (idempotent upsert), `review_answer`, `review_state`. Every inbound text field goes through `PromptSafety.checkInboundText`. |
+| Intent rail | `ReviewIntentRail` | 232 / 196 narrow / 40px collapsed. Risk heat bar, kind tag, collapsed-intent note; settled intents dim, and collapse to a status dot rather than a clipped label. |
 | Sidebar entry | `RepositorySidebar` | Focusable `◨ Review` row above the tree with an item-count badge, plus a `◨n` badge on worktree rows that jumps into Review scoped to that worktree. |
 
 ## Known deviations from the handoff
@@ -154,6 +156,48 @@ need a look before the next milestone builds on them.
 - **Per-finding verdicts are still open** (handoff §10.5): a finding can stay
   open under an approved intent unless it is `blocking`. Implemented as
   specified, flagged as undecided.
+
+### Review — M4 (the MCP surface)
+
+- **The human-side calls are not MCP tools.** The schema lists
+  `review_message` / `review_patch_apply` / `review_resolve` /
+  `review_verdict` / `review_submit` under "human-side writes"; exposing them
+  as agent-callable tools would let an agent approve its own work and resolve
+  its own findings. They are the UI's own actions against the store, and
+  agents observe them read-only through `review_state`. **This is the one
+  place the implementation deliberately narrows the schema, and it is worth a
+  second look.**
+- **`propose*` is recorded, never applied.** `review_answer`'s
+  `proposeSeverity` and `proposeResolve` are appended to the thread as
+  labelled suggestions. The store changes when the human accepts, so an agent
+  cannot downgrade or resolve its own finding.
+- **A re-run cannot undo the human.** `review_finding` upserts on the id and
+  refreshes the reviewer's opening statement, but the thread, the human's
+  severity override and the resolution all survive — they are the human's,
+  not the agent's to restate.
+- **A batch is all-or-nothing.** Findings are decoded in full before anything
+  is stored, so one malformed entry writes nothing rather than half a review.
+- **Unknown and forbidden scopes are one answer.** Probing scope handles must
+  not tell an agent that a scope exists.
+- **`PromptSafety` gained a second, different check.** Inbound finding text
+  refuses control characters but allows a leading `!`, `/` or `#`: those
+  rules are about what the claude TUI does with a typed line, and a finding
+  body is not typed as a line. It allows markup, because the margin renders
+  findings as `Label` text and there is no renderer to confuse — the real
+  hazard is that "Ask the agent to fix it" later types a finding's own words
+  into a terminal.
+- **A single oversized hunk is truncated, not dropped.** One generated file
+  must not make a scope unreadable.
+- **Notifications (schema §7) are not implemented.** `review/thread.message`,
+  `review/verdict` and `review/rescope` need a server-initiated channel that
+  `McpServer` does not have yet; agents poll `review_state` instead, which
+  the schema already positions as the read-path. Flagged rather than faked.
+- **`promptHistory` returns empty.** The step timeline is M6; `review_scope`
+  treats it as an optional include, so an empty list is a valid answer.
+- **The reviewer selector lists available agents.** "Re-run review on this
+  scope" grants the scope to its bound session and asks that session's agent
+  to review it — the grant is the human action the schema requires before an
+  agent may address a scope that is not its own.
 
 ### Open decisions carried forward
 

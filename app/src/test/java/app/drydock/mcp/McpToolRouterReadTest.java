@@ -64,7 +64,8 @@ class McpToolRouterReadTest {
                 .map(descriptor -> str(descriptor, "name"))
                 .toList();
 
-        assertEquals(List.of("review_comments", "review_reply", "worktree_create",
+        assertEquals(List.of("review_comments", "review_reply", "review_scope", "review_intents",
+                "review_finding", "review_answer", "review_state", "worktree_create",
                 "session_start", "repos_list", "sessions_list"), names);
     }
 
@@ -86,13 +87,18 @@ class McpToolRouterReadTest {
      */
     @Test
     void toolDescriptorsDeclareTheirRequiredArguments() {
-        Map<String, List<String>> expected = Map.of(
-                "review_comments", List.of(),
-                "review_reply", List.of("id", "note"),
-                "worktree_create", List.of("branch"),
-                "session_start", List.of("worktree_path"),
-                "repos_list", List.of(),
-                "sessions_list", List.of());
+        Map<String, List<String>> expected = Map.ofEntries(
+                Map.entry("review_comments", List.of()),
+                Map.entry("review_reply", List.of("id", "note")),
+                Map.entry("review_scope", List.of("scopeId")),
+                Map.entry("review_intents", List.of("scopeId", "intents")),
+                Map.entry("review_finding", List.of("scopeId", "findings")),
+                Map.entry("review_answer", List.of("scopeId", "findingId", "body")),
+                Map.entry("review_state", List.of("scopeId")),
+                Map.entry("worktree_create", List.of("branch")),
+                Map.entry("session_start", List.of("worktree_path")),
+                Map.entry("repos_list", List.of()),
+                Map.entry("sessions_list", List.of()));
 
         for (JsonValue descriptor : router.toolDescriptors()) {
             String name = str(descriptor, "name");

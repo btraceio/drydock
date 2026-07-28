@@ -2937,3 +2937,97 @@
     -fx-background-color: -drydock-border;
     -fx-background-radius: 6px;
 }
+
+/* ---- Review intent rail (handoff section 4.2) ---------------------------- */
+
+.review-intent-rail {
+    -fx-background-color: -drydock-intent-rail;
+    -fx-border-color: transparent -drydock-border transparent transparent;
+    -fx-border-width: 0 1 0 0;
+}
+.review-intent-scroll, .review-intent-scroll .viewport {
+    -fx-background-color: transparent;
+}
+.review-intent-cards {
+    -fx-padding: 0 6 8 6;
+    -fx-spacing: 4;
+}
+.review-intent-card {
+    -fx-background-color: transparent;
+    -fx-background-radius: 6px;
+    -fx-border-color: -drydock-border;
+    -fx-border-radius: 6px;
+    -fx-padding: 7 8 7 8;
+    -fx-alignment: center-left;
+    -fx-cursor: hand;
+}
+.review-intent-card.collapsed {
+    -fx-padding: 7 0 7 0;
+    -fx-alignment: center;
+}
+.review-intent-card:hover { -fx-border-color: -drydock-border-strong; }
+.review-intent-card:selected {
+    -fx-background-color: -drydock-active-bg;
+    -fx-border-color: -drydock-border-strong;
+}
+.review-intent-card:focused { -fx-border-color: -drydock-accent; }
+/* Settled intents dim; the verdict below them says why. */
+.review-intent-card.settled { -fx-opacity: 0.5; }
+.review-intent-card.settled:selected { -fx-opacity: 1; }
+
+.review-intent-number {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10.5px;
+    -fx-font-weight: 700;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-intent-card:selected .review-intent-number { -fx-text-fill: -drydock-accent; }
+.review-intent-title {
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 12px;
+    -fx-font-weight: 600;
+}
+.review-intent-card:selected .review-intent-title { -fx-text-fill: -drydock-text; }
+.review-intent-tag {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 9px;
+}
+.review-intent-rationale {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10.5px;
+}
+.review-intent-collapsed-note {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10px;
+    -fx-font-style: italic;
+}
+
+/* The risk heat bar: one bar, keyed to the intent's own risk. */
+.review-intent-heat {
+    -fx-min-height: 3px;
+    -fx-max-height: 3px;
+    -fx-background-radius: 2px;
+    -fx-background-color: -drydock-border;
+}
+.review-intent-heat.risk-high { -fx-background-color: -drydock-blocking; }
+.review-intent-heat.risk-med  { -fx-background-color: -drydock-question; }
+.review-intent-heat.risk-low  { -fx-background-color: -drydock-resolved; }
+.review-intent-heat.risk-none { -fx-background-color: -drydock-border-strong; }
+
+.review-intent-settled {
+    -fx-font-size: 9.5px;
+}
+.review-intent-settled.decision-approved,
+.review-intent-settled.decision-auto-approved { -fx-text-fill: -drydock-resolved; }
+.review-intent-settled.decision-changes { -fx-text-fill: -drydock-question; }
+
+/* Collapsed: a status dot, never a clipped label. */
+.review-intent-dot {
+    -fx-min-width: 5px;  -fx-max-width: 5px;
+    -fx-min-height: 5px; -fx-max-height: 5px;
+    -fx-background-radius: 100px;
+    -fx-background-color: -drydock-text-faint;
+}
+.review-intent-dot.decision-approved,
+.review-intent-dot.decision-auto-approved { -fx-background-color: -drydock-resolved; }
+.review-intent-dot.decision-changes { -fx-background-color: -drydock-question; }
