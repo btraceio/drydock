@@ -113,6 +113,9 @@ public final class ReviewDestinationView extends BorderPane {
         /** Posts the review once every intent is settled. */
         void submit(ReviewScope scope);
 
+        /** Diagnostic-only: runs {@code scope}'s diff and describes the result. */
+        String diagDiffSummary(ReviewScope scope);
+
         /**
          * The reviewers configured for this workspace, and which one Review
          * would run. Empty when none is configured -- Review then works as a
@@ -929,6 +932,23 @@ public final class ReviewDestinationView extends BorderPane {
      */
     public app.drydock.git.UnifiedDiff currentDiff() {
         return diffColumn.currentDiff();
+    }
+
+    /**
+     * Diagnostic-only: walks EVERY queue item and reports what its diff
+     * produced. The base a review diffs against is derived, so "the queue
+     * assembled" is not evidence that each item can actually resolve it --
+     * this is (see docs/architecture.md: no headless harness inside the
+     * running app).
+     */
+    public List<String> diagAllItemDiffs() {
+        List<String> report = new java.util.ArrayList<>();
+        for (ReviewItem item : queue.items()) {
+            ReviewScope itemScope = item.scope();
+            report.add(item.title() + " [base=" + itemScope.base() + "] "
+                    + host.diagDiffSummary(itemScope));
+        }
+        return report;
     }
 
     /** Diagnostic-only: the queue rows currently rendered (visual verification harness). */

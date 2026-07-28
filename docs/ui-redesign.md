@@ -90,6 +90,11 @@ need a look before the next milestone builds on them.
 - **The base is the repository's default branch, not the current one.**
   `GitStatusService.defaultBranch` resolves `origin/HEAD`, then the
   conventional names, and only then falls back to whatever is checked out.
+  It returns a ref that actually **resolves**: `origin/HEAD` names a *remote*
+  default, and `git clone -b feat/x` (or deleting a local `main` after a
+  merge) leaves no local branch of that name, so the bare name would fail
+  every worktree's diff with "unknown revision". With no local counterpart
+  the remote-tracking ref (`origin/main`) is used instead.
   Deriving it from the main checkout's current branch made every queue item's
   diff follow the user's branch switches, leaving line-key-anchored findings
   pointed at unrelated code with nothing on screen to say so.

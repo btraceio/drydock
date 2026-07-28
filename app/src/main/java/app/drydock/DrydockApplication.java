@@ -533,6 +533,9 @@ public final class DrydockApplication extends Application {
                     // The diff of the selected item lands a moment later.
                     Thread.sleep(3_000);
                     System.out.println("[diag] diff column: " + onFx(review::diagDiffSummary));
+                    for (String line : onFx(review::diagAllItemDiffs)) {
+                        System.out.println("[diag] item: " + line);
+                    }
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                 } catch (RuntimeException e) {

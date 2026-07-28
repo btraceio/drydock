@@ -204,6 +204,11 @@ final class FakeReviewHost implements ReviewDestinationView.Host {
     }
 
     @Override
+    public String diagDiffSummary(ReviewScope scope) {
+        return "0 files";
+    }
+
+    @Override
     public boolean runReview(ReviewScope scope) {
         if (reviewers.isEmpty()) {
             return false;

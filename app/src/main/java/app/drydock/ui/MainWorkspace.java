@@ -1146,6 +1146,28 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                     }));
         }
 
+        /**
+         * Diagnostic-only: runs the scope's real diff and reports what came
+         * back, so the visual pass can prove every queue item resolves its
+         * base rather than only the selected one.
+         */
+        @Override
+        public String diagDiffSummary(ReviewScope scope) {
+            DiffScope diffScope = scope.kind() == ReviewScope.Kind.WORKING_TREE
+                    ? DiffScope.WORKING_TREE
+                    : DiffScope.BASE;
+            try {
+                UnifiedDiff result = diffService.diff(scope.diffRoot(), diffScope, scope.base(),
+                        DiffService.REVIEW_CONTEXT_LINES).get(30, TimeUnit.SECONDS);
+                return result.files().size() + " files";
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return "INTERRUPTED";
+            } catch (ExecutionException | TimeoutException e) {
+                return "FAILED: " + UiErrors.unwrap(e).getMessage();
+            }
+        }
+
         @Override
         public boolean runReview(ReviewScope scope) {
             Optional<ManagedSessionId> session = scope.sessionId();

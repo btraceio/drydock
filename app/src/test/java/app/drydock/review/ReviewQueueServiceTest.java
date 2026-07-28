@@ -203,6 +203,74 @@ class ReviewQueueServiceTest {
         assertEquals("main", itemTitled(items, "feat/x").scope().base());
     }
 
+    /**
+     * The base is only useful if git can resolve it. This runs the real diff
+     * for EVERY queue item, which is what the column does -- a base that
+     * names a branch with no local ref fails with "unknown revision" and the
+     * item shows an error instead of a diff.
+     */
+    @Test
+    void everyQueueItemsBaseActuallyDiffs(@TempDir Path dir, @TempDir Path worktreeParent)
+            throws Exception {
+        Path repo = initCommittedRepo(dir);
+        gitStatusService.createWorktree(repo, worktreeParent.resolve("a"), "feat/a").get();
+        gitStatusService.createWorktree(repo, worktreeParent.resolve("b"), "feat/b").get();
+        Files.writeString(repo.resolve("README.md"), "edited\n");
+
+        List<ReviewItem> items = serviceWith(NO_REQUESTS)
+                .assemble(List.of(target(repo)), checkout -> Optional.empty()).get();
+
+        assertDiffsResolve(items);
+    }
+
+    /**
+     * The regression this guards: {@code origin/HEAD} names a REMOTE default,
+     * and {@code git clone -b feat/x} -- or deleting a local main after a
+     * merge -- leaves no local branch of that name. Handing the bare name to
+     * the diff would fail every worktree item with "unknown revision".
+     */
+    @Test
+    void aDefaultBranchWithNoLocalRefStillDiffs(@TempDir Path parent, @TempDir Path worktreeParent)
+            throws Exception {
+        Path upstream = initCommittedRepo(parent);
+        Path clone = parent.resolve("work");
+        runGitIn(parent, "clone", "--quiet", upstream.toString(), clone.toString());
+        runGit(clone, "config", "user.name", "Test");
+        runGit(clone, "config", "user.email", "test@example.com");
+        runGit(clone, "switch", "--quiet", "-c", "feat/x");
+        Files.writeString(clone.resolve("README.md"), "changed\n");
+        runGit(clone, "commit", "-qam", "change");
+        runGit(clone, "branch", "-D", "main");
+        gitStatusService.createWorktree(clone, worktreeParent.resolve("wt"), "feat/y").get();
+
+        List<ReviewItem> items = serviceWith(NO_REQUESTS)
+                .assemble(List.of(target(clone)), checkout -> Optional.empty()).get();
+
+        assertFalse(items.isEmpty(), "expected the worktree item");
+        assertEquals("origin/main", itemTitled(items, "feat/y").scope().base(),
+                "with no local main, the base must be the remote-tracking ref that does resolve");
+        assertDiffsResolve(items);
+    }
+
+    /** Runs the real diff for each item and fails on the first that cannot resolve its base. */
+    private void assertDiffsResolve(List<ReviewItem> items) throws Exception {
+        try (app.drydock.git.DiffService diffService = new app.drydock.git.DiffService()) {
+            for (ReviewItem item : items) {
+                ReviewScope scope = item.scope();
+                app.drydock.git.DiffScope diffScope =
+                        scope.kind() == ReviewScope.Kind.WORKING_TREE
+                                ? app.drydock.git.DiffScope.WORKING_TREE
+                                : app.drydock.git.DiffScope.BASE;
+                try {
+                    diffService.diff(scope.diffRoot(), diffScope, scope.base()).get();
+                } catch (Exception e) {
+                    throw new AssertionError("item '" + item.title() + "' could not diff against base '"
+                            + scope.base() + "': " + e.getCause(), e);
+                }
+            }
+        }
+    }
+
     @Test
     void reassemblingKeepsEveryScopeHandle(@TempDir Path dir, @TempDir Path worktreeParent) throws Exception {
         Path repo = initCommittedRepo(dir);
@@ -290,6 +358,11 @@ class ReviewQueueServiceTest {
         runGit(repo, "add", "README.md");
         runGit(repo, "commit", "-m", "initial commit");
         return repo;
+    }
+
+    /** As {@link #runGit}, for commands run in a directory that is not itself a repository. */
+    private static void runGitIn(Path directory, String... args) throws IOException, InterruptedException {
+        runGit(directory, args);
     }
 
     private static void runGit(Path repo, String... args) throws IOException, InterruptedException {

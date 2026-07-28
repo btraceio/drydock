@@ -390,20 +390,31 @@ public final class GitStatusService implements AutoCloseable {
         for (String line : runLinesAllowingFailure(git, repositoryRoot, List.of(
                 "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"))) {
             String head = line.strip();
-            if (head.startsWith("origin/")) {
-                return Optional.of(head.substring("origin/".length()));
+            if (!head.startsWith("origin/")) {
+                continue;
             }
+            String name = head.substring("origin/".length());
+            // The LOCAL branch when there is one, otherwise the
+            // remote-tracking ref. `git clone -b feat/x` (and deleting a
+            // local main after a merge) leaves origin/HEAD pointing at a
+            // branch with no local counterpart, and returning the bare name
+            // there would hand every diff a revision git cannot resolve.
+            return Optional.of(resolves(git, repositoryRoot, "refs/heads/" + name) ? name : head);
         }
         // No origin/HEAD (a local-only repository, or one never cloned): fall
-        // back to the conventional names, checked against refs that exist.
+        // back to the conventional names, and only to ones that exist.
         for (String candidate : List.of("main", "master", "trunk", "develop")) {
-            List<String> found = runLines(git, repositoryRoot, List.of(
-                    "for-each-ref", "--format=%(refname:short)", "refs/heads/" + candidate));
-            if (!found.isEmpty()) {
+            if (resolves(git, repositoryRoot, "refs/heads/" + candidate)) {
                 return Optional.of(candidate);
             }
         }
         return Optional.empty();
+    }
+
+    /** Whether {@code ref} exists in {@code repositoryRoot}. */
+    private boolean resolves(Path git, Path repositoryRoot, String ref) {
+        return !runLines(git, repositoryRoot, List.of(
+                "for-each-ref", "--format=%(refname:short)", ref)).isEmpty();
     }
 
     public CompletableFuture<BranchListing> listBranches(Path repositoryRoot) {
