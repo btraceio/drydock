@@ -42,6 +42,8 @@ session's checkout.
 | Review MCP tools | `McpToolRouter` + `ReviewToolCodec` | `review_scope` (paged on a byte budget), `review_intents`, `review_finding` (idempotent upsert), `review_answer`, `review_state`. Every inbound text field goes through `PromptSafety.checkInboundText`. |
 | Intent rail | `ReviewIntentRail` | 232 / 196 narrow / 40px collapsed. Risk heat bar, kind tag, collapsed-intent note; settled intents dim, and collapse to a status dot rather than a clipped label. |
 | PR checkout | `app.drydock.git.PrCheckoutService` + `ReviewCheckoutGate` | Detached worktree, then `gh pr checkout` **inside it**, then a session, then the scope grant. A failed checkout removes the worktree it made. |
+| Symbol lens | `SymbolIndex` + the diff column's popover | A local lexical index of the diff — never MCP. Identifiers it knows get a dotted underline; the popover chips each occurrence `in diff` / `not touched`. |
+| MCP activity | `app.drydock.mcp.McpActivityLog` + `ReviewMcpActivityPanel` | Bounded ring buffer written by the one place every tool call passes through; `\` opens the panel, with a payload inspector and a budget bar. A hidden panel listens to nothing. |
 | Sidebar entry | `RepositorySidebar` | Focusable `◨ Review` row above the tree with an item-count badge, plus a `◨n` badge on worktree rows that jumps into Review scoped to that worktree. |
 
 ## Known deviations from the handoff
@@ -230,6 +232,37 @@ need a look before the next milestone builds on them.
   pull request; the pre-flight refusals, the branch naming and the
   failure-cleanup path are covered, and the end-to-end run is the manual
   pass.
+
+### Review — M6 (extras)
+
+- **The symbol lens is a lexical index, and says so.** A resolver would need
+  a compiler per language. What the lens promises is "here is every place
+  this text appears"; the popover therefore calls them occurrences and
+  carries the caveat, rather than implying resolved references it did not
+  compute. Keywords and identifiers under three characters are excluded, and
+  a symbol appearing once gets no popover — an underline on every word would
+  mean nothing.
+- **The lens indexes the diff, not the repository.** Its promise is scoped to
+  what the reader is looking at. A repository-wide index would need
+  `SessionSearchService` and an invalidation story, and would make the
+  underline appear on symbols whose other uses are off-screen.
+- **The activity log is bounded but its counters are not.** A long review
+  makes thousands of calls; keeping them all would be an unbounded leak
+  behind a panel nobody has open. The buffer holds the last 500; the budget
+  bar counts the whole session.
+- **The budget bar is a reference point, not a limit.** Nothing enforces it —
+  `review_scope` pages on its own per-call `maxBytes`. It is there so a
+  reviewer reading far more than expected is visible at a glance.
+- **The agent step timeline is NOT implemented.** `review_scope.promptHistory`
+  returns an empty list, and the `t` toggle is not bound. The timeline needs
+  three things, and only the first is cheap: reading the session transcript
+  (`ConversationCatalog` already can), attributing each step to the lines it
+  touched, and computing which of those edits *survive to HEAD*. The last two
+  are real work — step→line attribution means reconstructing per-turn diffs,
+  and survives-to-HEAD means diffing each against the current tree — and a
+  plausible-looking approximation would be worse than nothing here, because
+  the whole value of the panel is answering "which of the agent's edits
+  actually made it" correctly. Left unbuilt and flagged rather than faked.
 
 ### Open decisions carried forward
 

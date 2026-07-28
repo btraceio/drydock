@@ -55,6 +55,7 @@ final class ShortcutsOverlay {
                     {"Collapse the intents", "i"},
                     {"Collapse the findings margin", "m"},
                     {"Findings from the whole review", "⇧F"},
+                    {"MCP activity log", "\\"},
             }),
     };
 

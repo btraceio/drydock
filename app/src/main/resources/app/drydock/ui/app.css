@@ -3054,3 +3054,144 @@
     -fx-text-fill: -drydock-question;
     -fx-font-size: 11px;
 }
+
+/* ---- Symbol lens + MCP activity panel (handoff sections 4.4, 4.7) -------- */
+
+/* Identifiers the local index knows: a dotted underline, and nothing else --
+   an underline on every word would mean nothing. */
+.review-code-symbol {
+    -fx-underline: true;
+    -fx-cursor: hand;
+}
+.review-lens-scroll, .review-lens-scroll .viewport {
+    -fx-background-color: -drydock-code-bg;
+}
+.review-lens {
+    -fx-background-color: -drydock-code-bg;
+    -fx-background-radius: 8px;
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 8px;
+    -fx-padding: 12;
+    -fx-max-width: 460px;
+}
+.review-lens-title {
+    -fx-text-fill: -drydock-code-fn;
+    -fx-font-size: 12.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-lens-summary {
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 11px;
+}
+.review-lens-caveat {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10px;
+}
+.review-lens-chip {
+    -fx-background-radius: 12px;
+    -fx-font-size: 9.5px;
+    -fx-padding: 1 7 1 7;
+}
+.review-lens-chip.in-diff {
+    -fx-background-color: -drydock-resolved-soft;
+    -fx-text-fill: -drydock-resolved;
+}
+.review-lens-chip.not-touched {
+    -fx-background-color: transparent;
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 12px;
+    -fx-text-fill: -drydock-text-faint;
+}
+.review-lens-where {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-lens-line {
+    -fx-background-color: transparent;
+    -fx-background-radius: 6px;
+    -fx-border-color: transparent;
+    -fx-border-radius: 6px;
+    -fx-text-fill: -drydock-code-text;
+    -fx-font-size: 10.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-alignment: center-left;
+    -fx-padding: 2 6 2 6;
+    -fx-cursor: hand;
+}
+.review-lens-line:hover { -fx-background-color: -drydock-hover; }
+.review-lens-line:focused { -fx-border-color: -drydock-accent; }
+
+.review-mcp-panel {
+    -fx-background-color: -drydock-code-bg;
+    -fx-border-color: -drydock-border transparent transparent transparent;
+    -fx-border-width: 1 0 0 0;
+}
+.review-mcp-header {
+    -fx-padding: 6 12 6 12;
+    -fx-border-color: transparent transparent -drydock-border transparent;
+    -fx-border-width: 0 0 1 0;
+}
+.review-mcp-header-label {
+    -fx-text-fill: -drydock-mcp;
+    -fx-font-size: 10px;
+    -fx-font-weight: 700;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-mcp-budget-label {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-mcp-budget {
+    -fx-background-color: -drydock-border;
+    -fx-background-radius: 6px;
+    -fx-min-width: 120px;  -fx-max-width: 120px;
+    -fx-min-height: 4px;   -fx-max-height: 4px;
+}
+.review-mcp-budget-fill {
+    -fx-background-color: -drydock-mcp;
+    -fx-background-radius: 6px;
+    -fx-min-height: 4px;   -fx-max-height: 4px;
+}
+.review-mcp-list, .review-mcp-list .viewport {
+    -fx-background-color: -drydock-code-bg;
+}
+.review-mcp-list .list-cell {
+    -fx-background-color: transparent;
+    -fx-padding: 2 10 2 10;
+}
+.review-mcp-list .list-cell:filled:selected {
+    -fx-background-color: -drydock-active-bg;
+}
+.review-mcp-list .list-cell.failed .review-mcp-tool {
+    -fx-text-fill: -drydock-blocking;
+}
+.review-mcp-time {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-mcp-direction {
+    -fx-text-fill: -drydock-mcp;
+    -fx-font-size: 10px;
+}
+.review-mcp-tool {
+    -fx-text-fill: -drydock-code-type;
+    -fx-font-size: 10.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-mcp-detail {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-mcp-payload {
+    -fx-background-color: -drydock-input-bg;
+    -fx-text-fill: -drydock-code-text;
+    -fx-font-size: 10.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-border-color: transparent transparent transparent -drydock-border;
+    -fx-border-width: 0 0 0 1;
+}
+.review-mcp-payload .content { -fx-background-color: -drydock-input-bg; }

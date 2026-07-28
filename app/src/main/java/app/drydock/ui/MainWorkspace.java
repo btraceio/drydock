@@ -28,6 +28,7 @@ import app.drydock.git.GitBranchState;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.GitTarget;
 import app.drydock.git.WorktreeService;
+import app.drydock.mcp.McpActivityLog;
 import app.drydock.mcp.McpSessionRegistry.Spawn;
 import app.drydock.config.UserConfig;
 import app.drydock.mcp.WorkspaceMcpSessionContext;
@@ -302,7 +303,8 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                           GitStatusService gitStatusService, SessionSearchService searchService,
                           GhCliService ghCliService, WorktreeService worktreeService, DiffService diffService,
                           ChangedLineService changedLineService, AnnotationStore annotationStore,
-                          ReviewScopeRegistry reviewScopeRegistry, WorkspaceViewModel viewModel, Stage stage) {
+                          ReviewScopeRegistry reviewScopeRegistry, McpActivityLog activityLog,
+                          WorkspaceViewModel viewModel, Stage stage) {
         this.sessionManager = sessionManager;
         this.agentRegistry = agentRegistry;
         this.repositoryManager = repositoryManager;
@@ -341,7 +343,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             }
         });
 
-        reviewDestination = new ReviewDestinationView(new ReviewHost(), diffService);
+        reviewDestination = new ReviewDestinationView(new ReviewHost(), diffService, activityLog);
         reviewDestination.setVisible(false);
         reviewDestination.setManaged(false);
 
@@ -711,6 +713,15 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     /** Whether Review currently owns the centre (the Esc unwind order asks). */
     public boolean isReviewShowing() {
         return reviewShowing;
+    }
+
+    /**
+     * Closes the topmost thing Review has open -- the symbol lens, then the
+     * MCP panel -- and reports whether it closed anything. False means Esc
+     * should move on and leave Review altogether.
+     */
+    public boolean unwindReviewOverlay() {
+        return reviewShowing && reviewDestination.unwindOne();
     }
 
     /** Leaves Review, restoring the tab pane and the selected tab's terminal. */

@@ -18,6 +18,7 @@ import app.drydock.git.WorktreeService;
 import app.drydock.github.GitHubService;
 import app.drydock.launcher.DockIcon;
 import app.drydock.mcp.McpConfigWriter;
+import app.drydock.mcp.McpActivityLog;
 import app.drydock.mcp.McpServer;
 import app.drydock.mcp.McpSessionRegistry;
 import app.drydock.mcp.McpToolRouter;
@@ -128,6 +129,8 @@ public final class DrydockApplication extends Application {
     private AnnotationStore annotationStore;
     /** Cross-repo review scope handles, shared by the Review destination and the MCP tool router. */
     private ReviewScopeRegistry reviewScopeRegistry;
+    /** Shared by the MCP server (writer) and the Review activity panel (reader). */
+    private McpActivityLog mcpActivityLog;
     private McpServer mcpServer;
 
     private boolean shutdownConfirmed;
@@ -204,10 +207,13 @@ public final class DrydockApplication extends Application {
         // workspace because the MCP tool router addresses scopes too, and
         // both must resolve the same handle to the same review.
         reviewScopeRegistry = new ReviewScopeRegistry();
+        // Created before both readers: the Review view is built now, the MCP
+        // server starts below, and they must share one log.
+        mcpActivityLog = new McpActivityLog();
 
         mainWorkspace = new MainWorkspace(sessionManager, agentRegistry, repositoryManager, gitStatusService,
                 searchService, ghCliService, worktreeService, diffService, changedLineService, annotationStore,
-                reviewScopeRegistry, viewModel, primaryStage);
+                reviewScopeRegistry, mcpActivityLog, viewModel, primaryStage);
         RepositorySidebar sidebar =
                 new RepositorySidebar(repositoryManager, gitStatusService, worktreeService, sessionManager,
                         mainWorkspace, viewModel);
@@ -675,6 +681,10 @@ public final class DrydockApplication extends Application {
                 if (appShell.modalLayer().isShowingModal()) {
                     appShell.modalLayer().close();
                     event.consume();
+                } else if (!inTextInput && mainWorkspace.unwindReviewOverlay()) {
+                    // Review had something open (the symbol lens, the MCP
+                    // panel); that closes first and Review stays.
+                    event.consume();
                 } else if (!inTextInput && mainWorkspace.isReviewShowing()) {
                     mainWorkspace.hideReview();
                     event.consume();
@@ -934,7 +944,7 @@ public final class DrydockApplication extends Application {
                 worktreeService,
                 UserConfig::load,
                 (worktree, prompt) -> mainWorkspace.startAgentSession(worktree, prompt));
-        McpServer server = new McpServer(registry, new McpToolRouter(context, registry));
+        McpServer server = new McpServer(registry, new McpToolRouter(context, registry), mcpActivityLog);
         // Published before start() so a shutdown racing startup still reaches
         // it. Publication alone would not be enough -- a close() that wins the
         // race would find nothing bound yet and no-op -- which is why

@@ -20,7 +20,10 @@ import javafx.scene.control.Tooltip;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
+import javafx.scene.control.ScrollPane;
 import javafx.scene.layout.Region;
+import javafx.scene.layout.VBox;
+import javafx.stage.Popup;
 import javafx.scene.text.Text;
 import javafx.scene.text.TextFlow;
 
@@ -101,6 +104,15 @@ final class ReviewDiffColumn extends BorderPane {
 
     private ReviewScope scope;
     private UnifiedDiff diff = new UnifiedDiff(List.of());
+
+    /**
+     * The symbol lens's index, rebuilt with the diff. Local, never MCP: see
+     * {@link SymbolIndex}.
+     */
+    private SymbolIndex symbolIndex = SymbolIndex.of(new UnifiedDiff(List.of()));
+
+    /** The one open lens popover, so a second click replaces it rather than stacking. */
+    private Popup lensPopup;
     private boolean showContext = true;
     private final Set<ReviewDiffRow.RunKey> expandedRuns = new HashSet<>();
 
@@ -180,6 +192,7 @@ final class ReviewDiffColumn extends BorderPane {
                         return;
                     }
                     diff = result;
+                    symbolIndex = SymbolIndex.of(diff);
                     rebuild();
                 }));
     }
@@ -223,6 +236,7 @@ final class ReviewDiffColumn extends BorderPane {
         scope = null;
         requestToken++;
         diff = supplied;
+        symbolIndex = SymbolIndex.of(diff);
         expandedRuns.clear();
         rebuild();
     }
@@ -396,13 +410,13 @@ final class ReviewDiffColumn extends BorderPane {
      * per row: one editor control per diff line would be thousands of
      * controls, and these rows are read-only.
      */
-    private static TextFlow highlighted(String file, String text) {
+    private TextFlow highlighted(String file, String text) {
         SyntaxHighlighter.Language language = SyntaxHighlighter.Language.fromFileName(file);
         List<Node> parts = new ArrayList<>();
         int last = 0;
         for (SyntaxHighlighter.Span span : SyntaxHighlighter.spans(text, language)) {
             if (span.start() > last) {
-                parts.add(plain(text.substring(last, span.start())));
+                parts.addAll(lensable(text.substring(last, span.start())));
             }
             Text styled = plain(text.substring(span.start(), span.start() + span.length()));
             styled.getStyleClass().add(span.styleClass());
@@ -410,11 +424,104 @@ final class ReviewDiffColumn extends BorderPane {
             last = span.start() + span.length();
         }
         if (last < text.length()) {
-            parts.add(plain(text.substring(last)));
+            parts.addAll(lensable(text.substring(last)));
         }
         TextFlow flow = new TextFlow(parts.toArray(Node[]::new));
         flow.getStyleClass().add("review-code-text");
         return flow;
+    }
+
+    /**
+     * Splits an unstyled run into identifiers the symbol index knows and the
+     * text between them. Only the known ones get the dotted underline and a
+     * click handler -- an underline on every word would mean nothing.
+     */
+    private List<Node> lensable(String text) {
+        List<Node> parts = new ArrayList<>();
+        java.util.regex.Matcher matcher =
+                java.util.regex.Pattern.compile("[A-Za-z_][A-Za-z0-9_]*").matcher(text);
+        int last = 0;
+        while (matcher.find()) {
+            String word = matcher.group();
+            if (!symbolIndex.hasEntry(word)) {
+                continue;
+            }
+            if (matcher.start() > last) {
+                parts.add(plain(text.substring(last, matcher.start())));
+            }
+            Text symbol = plain(word);
+            symbol.getStyleClass().add("review-code-symbol");
+            symbol.setOnMouseClicked(e -> showLens(word, symbol));
+            parts.add(symbol);
+            last = matcher.end();
+        }
+        if (last < text.length()) {
+            parts.add(plain(text.substring(last)));
+        }
+        return parts;
+    }
+
+    /** The symbol-lens popover: kind, count, and every occurrence chipped in-diff / not touched. */
+    private void showLens(String symbol, Node anchor) {
+        symbolIndex.lookup(symbol).ifPresent(entry -> {
+            hideLens();
+            VBox content = new VBox(6);
+            content.getStyleClass().add("review-lens");
+
+            Label title = new Label(symbol);
+            title.getStyleClass().add("review-lens-title");
+            Label summary = new Label(entry.occurrences().size() + " occurrences · "
+                    + entry.inDiffCount() + " on changed lines");
+            summary.getStyleClass().add("review-lens-summary");
+            Label caveat = new Label("Lexical index of this diff — occurrences, not resolved references.");
+            caveat.getStyleClass().add("review-lens-caveat");
+            caveat.setWrapText(true);
+            content.getChildren().addAll(title, summary, caveat);
+
+            for (SymbolIndex.Occurrence occurrence : entry.occurrences()) {
+                Label chip = new Label(occurrence.inDiff() ? "in diff" : "not touched");
+                chip.getStyleClass().addAll("review-lens-chip",
+                        occurrence.inDiff() ? "in-diff" : "not-touched");
+                Label where = new Label(occurrence.file() + ":" + occurrence.line());
+                where.getStyleClass().add("review-lens-where");
+                Button jump = new Button(occurrence.text().length() > 60
+                        ? occurrence.text().substring(0, 59) + "…" : occurrence.text());
+                jump.getStyleClass().add("review-lens-line");
+                jump.setOnAction(e -> {
+                    hideLens();
+                    revealLine(occurrence.file(), "n" + occurrence.line());
+                });
+                HBox row = new HBox(6, chip, where);
+                row.setAlignment(Pos.CENTER_LEFT);
+                content.getChildren().addAll(row, jump);
+            }
+
+            ScrollPane scroll = new ScrollPane(content);
+            scroll.setFitToWidth(true);
+            scroll.setMaxHeight(320);
+            scroll.getStyleClass().add("review-lens-scroll");
+
+            lensPopup = new Popup();
+            lensPopup.setAutoHide(true);
+            lensPopup.getContent().add(scroll);
+            var bounds = anchor.localToScreen(anchor.getBoundsInLocal());
+            if (bounds != null) {
+                lensPopup.show(anchor, bounds.getMinX(), bounds.getMaxY() + 4);
+            }
+        });
+    }
+
+    /** Closes the lens popover; part of Escape's unwind order. */
+    void hideLens() {
+        if (lensPopup != null) {
+            lensPopup.hide();
+            lensPopup = null;
+        }
+    }
+
+    /** Whether a lens popover is open (Escape unwinds topmost-first). */
+    boolean lensOpen() {
+        return lensPopup != null && lensPopup.isShowing();
     }
 
     private static Text plain(String text) {

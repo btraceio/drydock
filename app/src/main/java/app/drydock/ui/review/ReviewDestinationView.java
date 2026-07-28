@@ -156,6 +156,9 @@ public final class ReviewDestinationView extends BorderPane {
     private final ReviewVerdictBar verdictBar;
     private final ReviewCheckoutGate checkoutGate;
 
+    /** The MCP activity panel; absent when no server is running (tests, headless). */
+    private final Optional<ReviewMcpActivityPanel> mcpPanel;
+
     /** Scopes the human chose to read without a checkout ({@code Read the patch only}). */
     private final java.util.Set<String> patchOnlyScopes = new java.util.HashSet<>();
 
@@ -187,6 +190,17 @@ public final class ReviewDestinationView extends BorderPane {
     private boolean queueCollapsedByUser;
 
     public ReviewDestinationView(Host host, app.drydock.git.DiffService diffService) {
+        this(host, diffService, null);
+    }
+
+    /**
+     * @param activityLog the MCP traffic log the {@code \} panel renders, or
+     *                    {@code null} when no server is running -- Review must
+     *                    work with no agent at all, so the panel is optional
+     */
+    public ReviewDestinationView(Host host, app.drydock.git.DiffService diffService,
+                                 app.drydock.mcp.McpActivityLog activityLog) {
+        this.mcpPanel = ReviewMcpActivityPanel.createIfAvailable(activityLog);
         this.host = host;
         this.diffColumn = new ReviewDiffColumn(diffService, host::openInExplorer);
         this.margin = new ReviewFindingsMargin(new MarginHost());
@@ -296,7 +310,15 @@ public final class ReviewDestinationView extends BorderPane {
         HBox columns = new HBox(body, margin);
         VBox.setVgrow(columns, Priority.ALWAYS);
 
-        VBox centre = new VBox(header, columns, verdictBar);
+        VBox centre = new VBox(header, columns);
+        mcpPanel.ifPresent(panel -> {
+            panel.setVisible(false);
+            panel.setManaged(false);
+            centre.getChildren().add(panel);
+        });
+        // The verdict bar goes last, so even with the activity panel open it
+        // is still the bottom-most thing and still always present.
+        centre.getChildren().add(verdictBar);
         centre.getStyleClass().add("review-centre");
         return centre;
     }
@@ -353,6 +375,8 @@ public final class ReviewDestinationView extends BorderPane {
         margin.setFindings(findingsForMargin(scope.get()));
         diffColumn.refreshPins();
         intentRail.setIntents(intents(), currentIntent().map(ReviewIntent::id).orElse(null));
+        mcpPanel.filter(javafx.scene.Node::isVisible)
+                .ifPresent(panel -> panel.setScope(scope.get()));
         renderVerdictBar(scope.get());
     }
 
@@ -795,6 +819,21 @@ public final class ReviewDestinationView extends BorderPane {
         diffColumn.setDensity(newDensity);
     }
 
+    /** {@code \}: shows or hides the MCP activity panel; a hidden panel listens to nothing. */
+    private void toggleMcpPanel() {
+        mcpPanel.ifPresent(panel -> {
+            boolean show = !panel.isVisible();
+            panel.setVisible(show);
+            panel.setManaged(show);
+            if (show) {
+                panel.setScope(selectedScope().orElse(null));
+                panel.attach();
+            } else {
+                panel.detach();
+            }
+        });
+    }
+
     private void openBoundSession() {
         selectedScope().flatMap(ReviewScope::sessionId).ifPresent(host::openSession);
     }
@@ -823,6 +862,7 @@ public final class ReviewDestinationView extends BorderPane {
             case C -> { diffColumn.toggleContext(); yield true; }
             case M -> { setMarginCollapsed(!margin.collapsed()); yield true; }
             case I -> { setIntentsCollapsed(!intentRail.collapsed()); yield true; }
+            case BACK_SLASH -> { toggleMcpPanel(); yield true; }
             case OPEN_BRACKET -> { moveIntent(-1); yield true; }
             case CLOSE_BRACKET -> { moveIntent(1); yield true; }
             case N -> { nextUnsettledIntent(); yield true; }
@@ -845,6 +885,24 @@ public final class ReviewDestinationView extends BorderPane {
         if (handled) {
             event.consume();
         }
+    }
+
+    /**
+     * Escape's unwind, topmost-first (spec §5): the symbol-lens popover,
+     * then the MCP activity panel, then Review itself. Returns whether
+     * something was closed, so the scene filter knows whether to keep
+     * unwinding.
+     */
+    public boolean unwindOne() {
+        if (diffColumn.lensOpen()) {
+            diffColumn.hideLens();
+            return true;
+        }
+        if (mcpPanel.filter(javafx.scene.Node::isVisible).isPresent()) {
+            toggleMcpPanel();
+            return true;
+        }
+        return false;
     }
 
     /**

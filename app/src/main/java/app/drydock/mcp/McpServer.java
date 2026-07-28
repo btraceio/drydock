@@ -16,6 +16,7 @@ import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
 
 import java.io.IOException;
+import java.time.Instant;
 import java.io.InputStream;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -81,6 +82,13 @@ public final class McpServer implements AutoCloseable {
     private final McpSessionRegistry registry;
     private final McpToolRouter router;
 
+    /**
+     * The bounded traffic log the Review destination's activity panel renders
+     * (spec §4.7). Supplied rather than owned: the Review view is built
+     * before the server starts, and both must see the same log.
+     */
+    private final McpActivityLog activityLog;
+
     // Volatile: {@link #start()} runs on a startup virtual thread while
     // {@link #close()} is called from the JavaFX shutdown path, so a
     // non-volatile field would let a stop() racing startup read a stale null
@@ -98,7 +106,17 @@ public final class McpServer implements AutoCloseable {
      */
     private volatile boolean closed;
 
+    /** The traffic log, for the Review activity panel. */
+    public McpActivityLog activityLog() {
+        return activityLog;
+    }
+
     public McpServer(McpSessionRegistry registry, McpToolRouter router) {
+        this(registry, router, new McpActivityLog());
+    }
+
+    public McpServer(McpSessionRegistry registry, McpToolRouter router, McpActivityLog activityLog) {
+        this.activityLog = activityLog;
         this.registry = registry;
         this.router = router;
     }
@@ -271,13 +289,48 @@ public final class McpServer implements AutoCloseable {
 
             try {
                 JsonValue toolResult = router.call(caller, name, arguments);
+                logActivity(name, arguments, toolResult, false);
                 return successResponse(id, toolCallResult(toolResult, false));
             } catch (McpToolException e) {
                 // A tool failure is not a transport failure: it comes back as a
                 // 200 JSON-RPC result with isError: true, so the agent can read
                 // and act on the message rather than the transport swallowing it.
+                logActivity(name, arguments, new JsonString(e.getMessage()), true);
                 return successResponse(id, toolCallResult(new JsonString(e.getMessage()), true));
             }
+        }
+
+        /**
+         * Records one call in the activity log the Review panel renders.
+         * Never allowed to affect the call: a logging failure is not a tool
+         * failure, and the agent must get its answer either way.
+         */
+        private void logActivity(String tool, JsonValue arguments, JsonValue result, boolean failed) {
+            try {
+                int bytes = JsonWriter.write(result)
+                        .getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+                Optional<String> scopeId = arguments instanceof JsonObject args
+                        && args.get("scopeId") instanceof JsonString scope
+                        ? Optional.of(scope.value())
+                        : Optional.empty();
+                activityLog.record(new McpActivityLog.Entry(Instant.now(),
+                        tool.startsWith("review_") && !tool.equals("review_scope")
+                                && !tool.equals("review_state")
+                                ? McpActivityLog.Direction.INBOUND
+                                : McpActivityLog.Direction.OUTBOUND,
+                        tool, summarize(arguments), scopeId, bytes, failed));
+            } catch (RuntimeException e) {
+                LOG.log(Level.FINE, "Could not log MCP activity for " + tool, e);
+            }
+        }
+
+        /** A one-line detail for the panel: the arguments, bounded. */
+        private static String summarize(JsonValue arguments) {
+            if (arguments == null) {
+                return "";
+            }
+            String text = JsonWriter.write(arguments).replaceAll("\\s+", " ");
+            return text.length() <= 160 ? text : text.substring(0, 159) + "…";
         }
 
         private JsonValue initializeResult(JsonValue params) {
