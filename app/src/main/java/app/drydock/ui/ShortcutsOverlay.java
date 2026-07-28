@@ -10,28 +10,53 @@ import javafx.scene.layout.VBox;
 
 /**
  * The keyboard-shortcuts modal (design handoff section 8): a centered
- * 440px panel listing every shortcut as a label &harr; keycap row. Lists
- * only shortcuts the app actually binds (see {@code
- * DrydockApplication.installGlobalShortcuts} and the terminal-side intercepts
- * in {@code OpenSessionTab.onKeyEvent}) -- the design prototype's
- * resume-picker shortcuts are parked with the picker itself.
+ * 440px panel listing every shortcut as a label &harr; keycap row, grouped
+ * into sections. Lists only shortcuts the app actually binds (see {@code
+ * DrydockApplication.installGlobalShortcuts}, the terminal-side intercepts
+ * in {@code OpenSessionTab.onKeyEvent}, and {@code
+ * ReviewDestinationView.onKeyPressed}) -- the design prototype's
+ * resume-picker shortcuts are parked with the picker itself, and the
+ * Review keys that belong to features not yet built are added with those
+ * features, never ahead of them.
  */
 final class ShortcutsOverlay {
 
-    private static final String[][] SHORTCUTS = {
-            {"New session", "⌘N"},
-            {"Rename session", "⌘R"},
-            {"Agent view", "⌘1"},
-            {"Terminal view", "⌘2"},
-            {"Explorer view", "⌘3"},
-            {"Review view", "⌘4"},
-            {"Previous / next session tab", "⌘[ / ⌘]"},
-            {"Previous / next live session", "⌘↑ / ⌘↓"},
-            {"Toggle sidebar", "⌘0"},
-            {"Filter repositories", "⌘F"},
-            {"Toggle theme", "⌘⇧L"},
-            {"Settings", "⌘,"},
-            {"Cancel / close", "Esc"},
+    private record Section(String title, String[][] shortcuts) { }
+
+    private static final Section[] SECTIONS = {
+            new Section("", new String[][] {
+                    {"New session", "⌘N"},
+                    {"Rename session", "⌘R"},
+                    {"Agent view", "⌘1"},
+                    {"Terminal view", "⌘2"},
+                    {"Explorer view", "⌘3"},
+                    {"Review", "⌘4"},
+                    {"Previous / next session tab", "⌘[ / ⌘]"},
+                    {"Previous / next live session", "⌘↑ / ⌘↓"},
+                    {"Toggle sidebar", "⌘0"},
+                    {"Filter repositories", "⌘F"},
+                    {"Toggle theme", "⌘⇧L"},
+                    {"Settings", "⌘,"},
+                    {"Cancel / close", "Esc"},
+            }),
+            new Section("IN REVIEW", new String[][] {
+                    {"Previous / next review item", "j / k"},
+                    {"Collapse the queue", "q"},
+                    {"Focus mode — collapse every rail", "f"},
+                    {"Open the bound session", "o"},
+                    {"Cycle density: cozy · compact · dense", "d"},
+                    {"Show or hide unchanged lines", "c"},
+                    {"Previous / next intent", "[ / ]"},
+                    {"Next unsettled intent", "n"},
+                    {"Approve the current intent", "a"},
+                    {"Request changes", "r"},
+                    {"Undo this intent's verdict", "u"},
+                    {"Submit the review", "⏎"},
+                    {"Collapse the intents", "i"},
+                    {"Collapse the findings margin", "m"},
+                    {"Findings from the whole review", "⇧F"},
+                    {"MCP activity log", "\\"},
+            }),
     };
 
     private ShortcutsOverlay() {
@@ -51,16 +76,23 @@ final class ShortcutsOverlay {
         header.setAlignment(Pos.CENTER_LEFT);
 
         VBox rows = new VBox(4);
-        for (String[] shortcut : SHORTCUTS) {
-            Label label = new Label(shortcut[0]);
-            label.getStyleClass().add("shortcut-row-label");
-            Label keycap = new Label(shortcut[1]);
-            keycap.getStyleClass().add("keycap");
-            Region spacer = new Region();
-            HBox.setHgrow(spacer, Priority.ALWAYS);
-            HBox row = new HBox(10, label, spacer, keycap);
-            row.setAlignment(Pos.CENTER_LEFT);
-            rows.getChildren().add(row);
+        for (Section section : SECTIONS) {
+            if (!section.title().isEmpty()) {
+                Label sectionLabel = new Label(section.title());
+                sectionLabel.getStyleClass().add("shortcut-section-label");
+                rows.getChildren().add(sectionLabel);
+            }
+            for (String[] shortcut : section.shortcuts()) {
+                Label label = new Label(shortcut[0]);
+                label.getStyleClass().add("shortcut-row-label");
+                Label keycap = new Label(shortcut[1]);
+                keycap.getStyleClass().add("keycap");
+                Region spacer = new Region();
+                HBox.setHgrow(spacer, Priority.ALWAYS);
+                HBox row = new HBox(10, label, spacer, keycap);
+                row.setAlignment(Pos.CENTER_LEFT);
+                rows.getChildren().add(row);
+            }
         }
 
         VBox modal = new VBox(14, header, rows);

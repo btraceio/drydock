@@ -1,5 +1,6 @@
 package app.drydock.ui;
 
+import app.drydock.agent.api.Agent;
 import app.drydock.agent.api.AgentKind;
 import app.drydock.agent.api.AgentRegistry;
 import app.drydock.app.RepositoryManager;
@@ -17,20 +18,36 @@ import app.drydock.domain.SshRemote;
 import app.drydock.domain.UiTheme;
 import app.drydock.domain.WorkspaceUiState;
 import app.drydock.git.ChangedLineService;
+import app.drydock.git.DiffScope;
 import app.drydock.git.DiffService;
 import app.drydock.git.GhCliService;
+import app.drydock.git.PrCheckoutService;
+import app.drydock.git.UnifiedDiff;
+import app.drydock.git.WorktreeNaming;
 import app.drydock.git.GitBranchState;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.GitTarget;
 import app.drydock.git.WorktreeService;
+import app.drydock.mcp.McpActivityLog;
 import app.drydock.mcp.McpSessionRegistry.Spawn;
+import app.drydock.config.UserConfig;
 import app.drydock.mcp.WorkspaceMcpSessionContext;
 import app.drydock.process.SshCommandBuilder;
 import app.drydock.review.AnnotationStore;
+import app.drydock.review.IntentGrouping;
+import app.drydock.review.ReviewItem;
+import app.drydock.review.ReviewAnnotation;
+import app.drydock.review.ReviewIntent;
+import app.drydock.review.ReviewVerdict;
+import app.drydock.review.Severity;
+import app.drydock.review.AnnotationStatus;
+import app.drydock.review.ReviewQueueService;
+import app.drydock.review.ReviewScope;
+import app.drydock.review.ReviewScopeRegistry;
 import app.drydock.search.SessionSearchService;
 import app.drydock.ui.explorer.DiffOverlay;
 import app.drydock.ui.explorer.SessionExplorerView;
-import app.drydock.ui.review.ReviewView;
+import app.drydock.ui.review.ReviewDestinationView;
 import app.drydock.ui.model.WorkspaceViewModel;
 import app.drydock.terminal.TerminalFactory;
 import app.drydock.terminal.api.TerminalHostView;
@@ -70,12 +87,14 @@ import java.io.IOException;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -83,6 +102,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.DoubleSupplier;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
@@ -148,6 +168,43 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     private final Region emptyState;
     private final StackPane centerStack;
     private final MenuButton newTabButton = new MenuButton("＋");
+
+    /**
+     * The Review destination (Review handoff §1). A scene-graph view like
+     * the Explorer, so showing it hides every native terminal -- see {@link
+     * #setReviewShowing}. Built once and kept in {@link #centerStack};
+     * rebuilding it per visit would drop the queue selection and the
+     * remembered rail-collapse state.
+     */
+    private final ReviewDestinationView reviewDestination;
+    private final PrCheckoutService prCheckoutService = new PrCheckoutService();
+    private final ReviewScopeRegistry reviewScopeRegistry;
+    private final ReviewQueueService reviewQueueService;
+    private final IntentGrouping intentGrouping = new IntentGrouping();
+
+    /**
+     * True while the Review destination owns the centre. Tracked separately
+     * from {@link #terminalsObscured}: a modal opening and closing over
+     * Review must not un-hide the terminals underneath it.
+     */
+    private boolean reviewShowing;
+
+    /** Fires when the Review queue changes, so the sidebar can restyle its badge. */
+    private Runnable onReviewQueueChanged = () -> { };
+
+    /** Shows the shared shortcuts overlay (wired by DrydockApplication, which owns the modal layer). */
+    private Runnable onShowShortcuts = () -> { };
+
+    /**
+     * A checkout whose queue item should be selected once the in-flight
+     * refresh lands. {@code ⌘4} arrives before the queue exists on a cold
+     * start, and dropping the request there would land the user on whatever
+     * item happened to sort first.
+     */
+    private Path pendingReviewSelection;
+
+    /** Which agent "Run review" would use; null until the human picks one. */
+    private String selectedReviewer;
 
     /**
      * The per-worktree empty pane (worktree handoff: "No session in this
@@ -246,6 +303,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                           GitStatusService gitStatusService, SessionSearchService searchService,
                           GhCliService ghCliService, WorktreeService worktreeService, DiffService diffService,
                           ChangedLineService changedLineService, AnnotationStore annotationStore,
+                          ReviewScopeRegistry reviewScopeRegistry, McpActivityLog activityLog,
                           WorkspaceViewModel viewModel, Stage stage) {
         this.sessionManager = sessionManager;
         this.agentRegistry = agentRegistry;
@@ -257,6 +315,9 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         this.diffService = diffService;
         this.changedLineService = changedLineService;
         this.annotationStore = annotationStore;
+        this.reviewScopeRegistry = reviewScopeRegistry;
+        this.reviewQueueService = new ReviewQueueService(worktreeService, gitStatusService,
+                ghCliService::listReviewRequests, reviewScopeRegistry);
         this.viewModel = viewModel;
         this.stage = stage;
         this.worktreeLifecycle = new WorktreeLifecycleController(sessionManager, gitStatusService,
@@ -286,7 +347,11 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             }
         });
 
-        centerStack = new StackPane(tabPane, emptyState, newTabButton);
+        reviewDestination = new ReviewDestinationView(new ReviewHost(), diffService, activityLog);
+        reviewDestination.setVisible(false);
+        reviewDestination.setManaged(false);
+
+        centerStack = new StackPane(tabPane, emptyState, newTabButton, reviewDestination);
         StackPane.setAlignment(newTabButton, Pos.TOP_RIGHT);
         StackPane.setMargin(newTabButton, new Insets(10, 10, 0, 0));
         setCenter(centerStack);
@@ -295,9 +360,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             if (newTab != null) {
                 clearUnopenedWorktreeState();
             }
-            for (OpenSessionTab open : openTabs.values()) {
-                open.setVisible(!terminalsObscured && open.tab == newTab);
-            }
+            updateTerminalVisibility();
             updatePickerVisibility();
             // Tab selection only moves the active-row highlight; the model
             // turns this into activeSessionChanged, never a tree rebuild.
@@ -330,8 +393,31 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             }
         });
 
+        // Finding counts drive the queue's per-item badge and the sidebar's
+        // ◨n badges, and the MCP tool router writes to the store from its own
+        // executor -- so the counts have to be told, not polled. No
+        // unsubscribe: this workspace and the store share the application's
+        // lifetime.
+        annotationStore.addChangeListener(key -> Platform.runLater(this::refreshReviewCounts));
+
         exitWatcher.setCycleCount(Animation.INDEFINITE);
         exitWatcher.play();
+    }
+
+    /**
+     * Releases the background executors this workspace owns. Lifecycle
+     * symmetry (AGENTS.md): anything with an executor gets a close that
+     * shutdown actually calls.
+     */
+    public void closeReviewServices() {
+        prCheckoutService.close();
+    }
+
+    /** Re-reads the finding counts the Review queue and the sidebar badges render. */
+    private void refreshReviewCounts() {
+        reviewDestination.refreshCounts();
+        reviewDestination.refreshReviewState();
+        onReviewQueueChanged.run();
     }
 
     /** Pushes the manager's current session snapshot into the view model (FX thread; no-op if unchanged). */
@@ -393,7 +479,9 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * tabs at all it fills the pane.
      */
     private void updatePickerVisibility() {
-        boolean show = tabPane.getSelectionModel().getSelectedItem() == null;
+        // Review owns the whole centre while it is showing; the no-session
+        // placeholder underneath must not paint through the gaps.
+        boolean show = !reviewShowing && tabPane.getSelectionModel().getSelectedItem() == null;
         boolean hasTabs = !tabPane.getTabs().isEmpty();
         StackPane.setMargin(emptyState, new Insets(hasTabs ? TAB_STRIP_HEIGHT : 0, 0, 0, 0));
         boolean unopenedShowing = show && unopenedWorktreeState != null;
@@ -579,9 +667,574 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         currentlySelected().ifPresent(open -> open.showSubTab(OpenSessionTab.SubTab.EXPLORER));
     }
 
-    /** ⌘4: switches the selected session tab to its Review sub-tab. */
-    public void showReviewSubTab() {
-        currentlySelected().ifPresent(open -> open.showSubTab(OpenSessionTab.SubTab.REVIEW));
+    /**
+     * {@code ⌘4} from anywhere: navigates to the Review destination, scoped
+     * to the selected session's checkout when there is one (Review handoff
+     * §2). A navigation command, not a view switch -- Review spans
+     * repositories, so it cannot live inside one session's tab.
+     */
+    public void showReviewForCurrentSession() {
+        Optional<Path> checkout = currentlySelected()
+                .map(OpenSessionTab::sessionId)
+                .flatMap(id -> sessionManager.sessions().stream()
+                        .filter(session -> session.id().equals(id))
+                        .findFirst())
+                .map(session -> session.worktreeRoot().orElseGet(() ->
+                        repositoryFor(session).map(Repository::root).orElse(null)));
+        checkout.filter(Objects::nonNull).ifPresentOrElse(this::showReviewForCheckout,
+                this::showReview);
+    }
+
+    // ---- Review destination (Review handoff sections 1 & 2) -----------------
+
+    /**
+     * Shows the Review destination, keeping whatever the queue already had
+     * selected. Review is a scene-graph view stacked over the tab pane, so
+     * this must hide every native terminal exactly as the Explorer swap does
+     * -- the ghostty surfaces paint above the whole JavaFX scene and would
+     * otherwise sit on top of it.
+     */
+    @Override
+    public void showReview() {
+        setReviewShowing(true);
+    }
+
+    /**
+     * {@code ⌘4} and the sidebar's {@code ◨n} badge: shows Review with the
+     * item for {@code checkoutRoot} selected. The queue is reassembled
+     * asynchronously, so the selection is applied both now (for a scope that
+     * is already minted) and again when the refresh lands.
+     */
+    @Override
+    public void showReviewForCheckout(Path checkoutRoot) {
+        // Recorded before the refresh is kicked off, so the completion
+        // handler cannot land on a null request.
+        pendingReviewSelection = checkoutRoot;
+        setReviewShowing(true);
+        selectReviewScopeFor(checkoutRoot);
+    }
+
+    /** Whether Review currently owns the centre (the Esc unwind order asks). */
+    public boolean isReviewShowing() {
+        return reviewShowing;
+    }
+
+    /**
+     * Closes the topmost thing Review has open -- the symbol lens, then the
+     * MCP panel -- and reports whether it closed anything. False means Esc
+     * should move on and leave Review altogether.
+     */
+    public boolean unwindReviewOverlay() {
+        return reviewShowing && reviewDestination.unwindOne();
+    }
+
+    /** Leaves Review, restoring the tab pane and the selected tab's terminal. */
+    public void hideReview() {
+        setReviewShowing(false);
+    }
+
+    /**
+     * The one writer of {@link #reviewShowing}. Restoring the terminals goes
+     * through {@link #updateTerminalVisibility} and then re-runs geometry on
+     * the next pulse: the centre swap only invalidates the placeholder's
+     * bounds at the next layout pass, so the native frame would otherwise
+     * track stale bounds (the same ordering {@code OpenSessionTab.showSubTab}
+     * relies on).
+     */
+    private void setReviewShowing(boolean showing) {
+        if (reviewShowing == showing) {
+            if (showing) {
+                reviewDestination.onShown();
+            }
+            return;
+        }
+        reviewShowing = showing;
+        reviewDestination.setVisible(showing);
+        reviewDestination.setManaged(showing);
+        tabPane.setVisible(!showing);
+        newTabButton.setVisible(!showing);
+        newTabButton.setManaged(!showing);
+        updatePickerVisibility();
+        updateTerminalVisibility();
+        if (showing) {
+            reviewDestination.onShown();
+        } else {
+            Platform.runLater(() -> currentlySelected().ifPresent(OpenSessionTab::updateGeometryNow));
+        }
+    }
+
+    /**
+     * Reassembles the queue off the FX thread and pushes it into the view.
+     * Remote repositories are skipped: they have no local checkout for git
+     * to run in, and their root is a virtual placeholder that must never be
+     * resolved against the filesystem.
+     */
+    private void refreshReviewQueue() {
+        List<Repository> local = repositoryManager.repositories().stream()
+                .filter(repository -> !repository.isRemote())
+                .toList();
+        List<ReviewQueueService.RepositoryTarget> targets = local.stream()
+                .map(repository -> new ReviewQueueService.RepositoryTarget(
+                        repository.root(), repository.displayName()))
+                .toList();
+        reviewQueueService.assemble(targets, this::sessionAtCheckout)
+                .whenComplete((items, failure) -> Platform.runLater(() -> {
+                    if (failure != null) {
+                        LOG.log(Level.WARNING, "Could not assemble the Review queue", failure);
+                        return;
+                    }
+                    adoptLegacyAnnotations(items);
+                    reviewDestination.setItems(items, local.size());
+                    if (pendingReviewSelection != null) {
+                        selectReviewScopeFor(pendingReviewSelection);
+                        pendingReviewSelection = null;
+                    }
+                    onReviewQueueChanged.run();
+                }));
+    }
+
+    /**
+     * Moves annotations written before scope handles existed onto the scope
+     * they now belong to (see {@code AnnotationStore.adoptLegacy}). Runs on
+     * every queue assembly because a session may only bind to its worktree
+     * later; adoption is idempotent, so repeating it costs nothing once the
+     * legacy entries are gone.
+     */
+    private void adoptLegacyAnnotations(List<ReviewItem> items) {
+        for (ReviewItem item : items) {
+            ReviewScope scope = item.scope();
+            Optional<ManagedSessionId> session = scope.sessionId();
+            if (session.isEmpty()) {
+                continue;
+            }
+            DiffScope diffScope = scope.kind() == ReviewScope.Kind.WORKING_TREE
+                    ? DiffScope.WORKING_TREE
+                    : DiffScope.BASE;
+            int adopted = annotationStore.adoptLegacy(session.get(), diffScope, scope.id());
+            if (adopted > 0) {
+                LOG.log(Level.INFO, "Adopted " + adopted + " pre-scope-handle annotation(s) into "
+                        + scope.id());
+            }
+        }
+    }
+
+    /** Selects the queue item whose scope is checked out at {@code checkoutRoot}, if it exists yet. */
+    private void selectReviewScopeFor(Path checkoutRoot) {
+        reviewScopeRegistry.scopes().stream()
+                .filter(scope -> scope.worktree().filter(checkoutRoot::equals).isPresent())
+                .findFirst()
+                .ifPresent(scope -> reviewDestination.selectScope(scope.id()));
+    }
+
+    /** The managed session running in {@code checkoutRoot}, if any (the queue's MINE/AGENTS split). */
+    private Optional<ManagedSessionId> sessionAtCheckout(Path checkoutRoot) {
+        return sessionManager.sessions().stream()
+                .filter(session -> session.worktreeRoot().filter(checkoutRoot::equals).isPresent())
+                .map(ManagedAgentSession::id)
+                .findFirst();
+    }
+
+    /**
+     * Open findings for {@code scope} -- empty when no reviewer has run
+     * against it (spec §4.1), which is not the same as zero. A scope with no
+     * findings at all has never been reviewed; one whose findings are all
+     * resolved genuinely has none open, and says so.
+     */
+    private Optional<Integer> openFindingsFor(ReviewScope scope) {
+        if (annotationStore.forScope(scope.id()).isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.of((int) annotationStore.openCount(scope.id()));
+    }
+
+    /** {@code running} / {@code idle} for a scope's bound session; empty when none is bound. */
+    private Optional<String> reviewSessionState(ReviewScope scope) {
+        return scope.sessionId()
+                .flatMap(id -> sessionManager.sessions().stream()
+                        .filter(session -> session.id().equals(id))
+                        .findFirst())
+                .map(session -> session.status() == SessionStatus.RUNNING ? "running" : "idle");
+    }
+
+    /** How many Review queue items exist right now (the sidebar destination's badge). */
+    public int reviewQueueSize() {
+        return reviewDestination.diagItems().size();
+    }
+
+    /**
+     * The intent grouping the MCP router writes and the Review view reads.
+     * Owned here (rather than by the router) because the view renders from it
+     * and the router only supplies it -- one holder, two readers.
+     */
+    public IntentGrouping intentGrouping() {
+        return intentGrouping;
+    }
+
+    /** Notified after every queue reassembly, so the sidebar can re-render its badge. */
+    public void setOnReviewQueueChanged(Runnable handler) {
+        this.onReviewQueueChanged = handler == null ? () -> { } : handler;
+    }
+
+    /** Shows the shared shortcuts overlay (Review's {@code ?} button); the app shell owns the modal layer. */
+    public void setOnShowShortcuts(Runnable handler) {
+        this.onShowShortcuts = handler == null ? () -> { } : handler;
+    }
+
+    /** Open findings for the worktree at {@code checkoutRoot} (the sidebar's per-worktree ◨n badge). */
+    public Optional<Integer> openFindingsAt(Path checkoutRoot) {
+        return reviewScopeRegistry.scopes().stream()
+                .filter(scope -> scope.worktree().filter(checkoutRoot::equals).isPresent())
+                .findFirst()
+                .flatMap(this::openFindingsFor)
+                .filter(count -> count > 0);
+    }
+
+    /** The Review view's window onto the workspace (see {@link ReviewDestinationView.Host}). */
+    private final class ReviewHost implements ReviewDestinationView.Host {
+
+        @Override
+        public void refreshQueue() {
+            refreshReviewQueue();
+        }
+
+        @Override
+        public void openSession(ManagedSessionId sessionId) {
+            OpenSessionTab open = openTabs.get(sessionId);
+            if (open == null) {
+                // Not open: resume it, which opens a tab and leaves Review.
+                sessionManager.sessions().stream()
+                        .filter(session -> session.id().equals(sessionId))
+                        .findFirst()
+                        .ifPresent(MainWorkspace.this::resumeSession);
+                hideReview();
+                return;
+            }
+            hideReview();
+            tabPane.getSelectionModel().select(open.tab);
+        }
+
+        @Override
+        public Optional<Region> bodyFor(ReviewScope scope) {
+            // M2 returns the diff column here; until then the view renders
+            // its own placeholder, which is what the empty Optional means.
+            return Optional.empty();
+        }
+
+        @Override
+        public Optional<Integer> openFindings(ReviewScope scope) {
+            return openFindingsFor(scope);
+        }
+
+        @Override
+        public Optional<String> sessionState(ReviewScope scope) {
+            return reviewSessionState(scope);
+        }
+
+        @Override
+        public void showShortcuts() {
+            onShowShortcuts.run();
+        }
+
+        /**
+         * The Explorer lives inside a session's tab, so this can only work
+         * for a scope whose session is open. Reports that rather than
+         * pretending, which is what lets the diff column disable the button
+         * with an explanation instead of silently doing nothing.
+         */
+        @Override
+        public boolean openInExplorer(ReviewScope scope, Path file, int line) {
+            OpenSessionTab open = scope.sessionId().map(openTabs::get).orElse(null);
+            if (open == null) {
+                return false;
+            }
+            hideReview();
+            tabPane.getSelectionModel().select(open.tab);
+            open.openExplorerAt(file, line);
+            return true;
+        }
+
+        @Override
+        public List<ReviewAnnotation> findings(ReviewScope scope) {
+            return annotationStore.forScope(scope.id());
+        }
+
+        @Override
+        public List<ReviewIntent> intents(ReviewScope scope) {
+            return intentGrouping.intentsFor(scope.id(), reviewDestination.currentDiff());
+        }
+
+        @Override
+        public Optional<ReviewVerdict> verdict(ReviewScope scope, ReviewIntent intent) {
+            return annotationStore.verdict(scope.id(), intent.id());
+        }
+
+        @Override
+        public void setVerdict(ReviewScope scope, ReviewIntent intent,
+                               Optional<ReviewVerdict.Decision> decision) {
+            if (decision.isEmpty()) {
+                annotationStore.clearVerdict(scope.id(), intent.id());
+                return;
+            }
+            // Approval is refused, not merely discouraged, while a blocking
+            // finding of this intent is open (spec §4.6). Checked here as well
+            // as in the bar so the keyboard path cannot slip past the button's
+            // refusal.
+            if (decision.get() == ReviewVerdict.Decision.APPROVED
+                    && blockingFindingOpen(scope, intent)) {
+                return;
+            }
+            annotationStore.putVerdict(new ReviewVerdict(scope.id(), intent.id(), decision.get(),
+                    Optional.empty(), Instant.now()));
+        }
+
+        @Override
+        public void setResolved(ReviewScope scope, ReviewAnnotation finding, boolean resolved) {
+            annotationStore.mutate(finding.key(), current -> current.withStatus(
+                    resolved ? AnnotationStatus.RESOLVED : AnnotationStatus.OPEN));
+        }
+
+        @Override
+        public void postMessage(ReviewScope scope, ReviewAnnotation finding, String body) {
+            annotationStore.mutate(finding.key(), current -> current.withReply(
+                    new ReviewAnnotation.Message("You", Instant.now(), body)));
+        }
+
+        /**
+         * {@code Apply patch}. drydock does not apply the patch itself: it
+         * hands the proposal to the scope's live session, exactly as every
+         * other worktree action hands work to the agent. What it records is
+         * the hand-off, never a fabricated outcome.
+         */
+        @Override
+        public void applyPatch(ReviewScope scope, ReviewAnnotation finding) {
+            finding.patch().ifPresent(patch -> {
+                boolean handedOff = sendToBoundSession(scope,
+                        "Apply this proposed patch from the review of " + finding.file()
+                                + " (" + patch.summary() + "), then summarize what changed:\n"
+                                + patch.unified());
+                if (handedOff) {
+                    annotationStore.mutate(finding.key(),
+                            current -> current.withStatus(AnnotationStatus.SENT));
+                }
+            });
+        }
+
+        @Override
+        public void overrideSeverity(ReviewScope scope, ReviewAnnotation finding, Severity severity) {
+            annotationStore.mutate(finding.key(), current -> current.withSeverityOverride(severity));
+        }
+
+        @Override
+        public void askAgentToFix(ReviewScope scope, ReviewIntent intent,
+                                  List<ReviewAnnotation> findings) {
+            if (findings.isEmpty()) {
+                return;
+            }
+            StringBuilder prompt = new StringBuilder("Address these review findings on \"")
+                    .append(intent.title()).append("\", then summarize what you changed: ");
+            int n = 1;
+            for (ReviewAnnotation finding : findings) {
+                prompt.append('[').append(n++).append("] ").append(finding.file()).append(' ')
+                        .append(finding.startKey()).append(": ")
+                        .append(finding.displayTitle().replaceAll("\\s+", " ")).append(". ");
+            }
+            if (sendToBoundSession(scope, prompt.toString().strip())) {
+                for (ReviewAnnotation finding : findings) {
+                    annotationStore.mutate(finding.key(),
+                            current -> current.withStatus(AnnotationStatus.SENT));
+                }
+            }
+        }
+
+        /**
+         * Records the submission and hands the worktree to the Finish flow --
+         * the review is over, and merging, opening a PR or deleting the
+         * worktree is exactly what that flow already does. A scope with no
+         * bound session has nothing to finish, and simply records the
+         * submission.
+         */
+        @Override
+        public void submit(ReviewScope scope) {
+            annotationStore.markSubmitted(scope.id());
+            Optional<ManagedSessionId> session = scope.sessionId();
+            Optional<Path> worktree = scope.worktree();
+            if (session.isPresent() && worktree.isPresent()) {
+                hideReview();
+                worktreeLifecycle.finishAfterReview(session.get(), worktree.get());
+            }
+        }
+
+        /**
+         * The agents that can act as a reviewer: every provider drydock can
+         * launch. Empty leaves Review a plain diff, which it must always be
+         * able to be.
+         */
+        @Override
+        public List<String> reviewers() {
+            return agentRegistry.agents().stream()
+                    .filter(Agent::isAvailable)
+                    .map(Agent::displayName)
+                    .toList();
+        }
+
+        @Override
+        public Optional<String> selectedReviewer() {
+            return Optional.ofNullable(selectedReviewer);
+        }
+
+        @Override
+        public void selectReviewer(String reviewer) {
+            selectedReviewer = reviewer;
+        }
+
+        /**
+         * Grants the scope to its bound session and asks that session's agent
+         * to review it. The grant is what the schema calls the human pressing
+         * "Run review": it is the only way an agent may address a scope that
+         * is not its own, and it is always a human action.
+         */
+        /**
+         * The checkout gate's primary action, end to end: a worktree, the PR
+         * checked out into it, a session started on it, and the scope handle
+         * granted to that session so its agent may review it.
+         *
+         * <p>Every step runs off the FX thread and reports failure back to
+         * the gate, which is already showing progress -- a network fetch of a
+         * whole branch is not something to do behind a frozen window.</p>
+         */
+        @Override
+        public void startSessionAndReview(ReviewScope scope, Consumer<String> onCheckoutFailed) {
+            Optional<Integer> pr = scope.pr().map(ReviewScope.PullRequestRef::number);
+            if (pr.isEmpty()) {
+                onCheckoutFailed.accept("This scope is not a pull request.");
+                return;
+            }
+            Optional<Repository> repository = repositoryManager.repositories().stream()
+                    .filter(candidate -> candidate.root().equals(scope.repoRoot()))
+                    .findFirst();
+            if (repository.isEmpty()) {
+                onCheckoutFailed.accept("The repository this pull request belongs to is no longer registered.");
+                return;
+            }
+            Path worktree = WorktreeNaming.defaultDirectory(Path.of(System.getProperty("user.home")),
+                    UserConfig.load().worktreesDirectory(), repository.get().displayName(),
+                    PrCheckoutService.localBranchFor(pr.get()));
+
+            prCheckoutService.checkout(scope.repoRoot(), worktree, pr.get())
+                    .whenComplete((created, failure) -> Platform.runLater(() -> {
+                        if (failure != null) {
+                            LOG.log(Level.WARNING, "PR checkout failed for #" + pr.get(), failure);
+                            onCheckoutFailed.accept(UiErrors.unwrap(failure).getMessage());
+                            return;
+                        }
+                        openCheckedOutPr(repository.get(), scope, created, pr.get(), onCheckoutFailed);
+                    }));
+        }
+
+        @Override
+        public void readPatchOnly(ReviewScope scope, Consumer<Optional<UnifiedDiff>> onComplete) {
+            Optional<Integer> pr = scope.pr().map(ReviewScope.PullRequestRef::number);
+            if (pr.isEmpty()) {
+                onComplete.accept(Optional.empty());
+                return;
+            }
+            ghCliService.prDiff(scope.repoRoot(), pr.get())
+                    .thenApply(diff -> diff.map(DiffService::parseUnified))
+                    .whenComplete((patch, failure) -> Platform.runLater(() -> {
+                        if (failure != null) {
+                            LOG.log(Level.WARNING, "Could not read the patch for PR #" + pr.get(), failure);
+                            onComplete.accept(Optional.empty());
+                            return;
+                        }
+                        onComplete.accept(patch);
+                    }));
+        }
+
+        /**
+         * Diagnostic-only: runs the scope's real diff and reports what came
+         * back, so the visual pass can prove every queue item resolves its
+         * base rather than only the selected one.
+         */
+        @Override
+        public String diagDiffSummary(ReviewScope scope) {
+            DiffScope diffScope = scope.kind() == ReviewScope.Kind.WORKING_TREE
+                    ? DiffScope.WORKING_TREE
+                    : DiffScope.BASE;
+            try {
+                UnifiedDiff result = diffService.diff(scope.diffRoot(), diffScope, scope.base(),
+                        DiffService.REVIEW_CONTEXT_LINES).get(30, TimeUnit.SECONDS);
+                return result.files().size() + " files";
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return "INTERRUPTED";
+            } catch (ExecutionException | TimeoutException e) {
+                return "FAILED: " + UiErrors.unwrap(e).getMessage();
+            }
+        }
+
+        @Override
+        public boolean runReview(ReviewScope scope) {
+            Optional<ManagedSessionId> session = scope.sessionId();
+            if (session.isEmpty()) {
+                return false;
+            }
+            reviewScopeRegistry.grant(scope.id(), session.get());
+            return sendToBoundSession(scope,
+                    "Review the changes in this worktree with the drydock review tools. "
+                            + "Read review_scope for handle " + scope.id()
+                            + ", then post review_intents and review_finding against it. "
+                            + "Call review_state first so already-settled findings are not re-flagged.");
+        }
+    }
+
+    /**
+     * Starts a session on the freshly checked-out worktree and grants it the
+     * scope, so its agent may review the PR. The grant is the human action
+     * the MCP schema requires; it happens here because this whole flow began
+     * with a human clicking "Start session &amp; review".
+     */
+    private void openCheckedOutPr(Repository repository, ReviewScope scope, Path worktree,
+                                  int prNumber, Consumer<String> onFailure) {
+        try {
+            ManagedSessionId session = openWorktreeSession(repository,
+                    PrCheckoutService.localBranchFor(prNumber), worktree, Optional.empty(),
+                    false, AgentKind.CLAUDE, Spawn.FORBIDDEN);
+            // Re-mint so the scope now names its worktree and its session;
+            // minting is idempotent on identity, but the identity changed --
+            // it has a worktree now -- so this is a new handle, and the old
+            // PR-without-checkout handle leaves the queue on the next scan.
+            ReviewScope bound = reviewScopeRegistry.mint(ReviewScopeRegistry.spec(
+                    ReviewScope.Kind.PR, scope.repoRoot(), Optional.of(worktree),
+                    scope.base(), scope.head(), scope.pr(), Optional.of(session)));
+            reviewScopeRegistry.grant(bound.id(), session);
+            pendingReviewSelection = worktree;
+            refreshReviewQueue();
+        } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, "Could not start a session on the checked-out PR #" + prNumber, e);
+            onFailure.accept("The pull request was checked out, but the session could not start: "
+                    + UiErrors.unwrap(e).getMessage());
+        }
+    }
+
+    private boolean blockingFindingOpen(ReviewScope scope, ReviewIntent intent) {
+        return annotationStore.forScope(scope.id()).stream()
+                .filter(finding -> finding.intentId()
+                        .map(id -> id.equals(intent.id())).orElse(true))
+                .anyMatch(ReviewAnnotation::blocksApproval);
+    }
+
+    /**
+     * Sends {@code prompt} to the scope's bound session's live terminal.
+     * False when there is no session or its tab is not open -- the caller
+     * then records nothing, because the hand-off did not happen.
+     */
+    private boolean sendToBoundSession(ReviewScope scope, String prompt) {
+        OpenSessionTab open = scope.sessionId().map(openTabs::get).orElse(null);
+        if (open == null) {
+            return false;
+        }
+        open.sendPrompt(prompt);
+        return true;
     }
 
     /** ⌘⇧]: selects the next session tab (wraps around). */
@@ -616,9 +1269,21 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     /** Hides/restores every native terminal view while a modal is showing (see {@link #terminalsObscured}). */
     public void setTerminalsObscured(boolean obscured) {
         this.terminalsObscured = obscured;
+        updateTerminalVisibility();
+    }
+
+    /**
+     * The single rule for whether a tab's native terminal paints: it must be
+     * the selected tab, no modal may be up, and Review must not own the
+     * centre. Three independent conditions with one writer -- the bug this
+     * prevents is a modal closing over Review and un-hiding the terminal
+     * through it, because the native view overlays the whole scene.
+     */
+    private void updateTerminalVisibility() {
         Tab selected = tabPane.getSelectionModel().getSelectedItem();
+        boolean allowed = !terminalsObscured && !reviewShowing;
         for (OpenSessionTab open : openTabs.values()) {
-            open.setVisible(!obscured && open.tab == selected);
+            open.setVisible(allowed && open.tab == selected);
         }
     }
 
@@ -1143,7 +1808,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         placeholderTab.setDisplayName(opened.session().displayName());
         placeholderTab.setStatus(opened.session().status());
         openTabs.put(opened.session().id(), placeholderTab);
-        placeholderTab.setVisible(!terminalsObscured
+        placeholderTab.setVisible(!terminalsObscured && !reviewShowing
                 && tabPane.getSelectionModel().getSelectedItem() == placeholderTab.tab);
         opened.session().worktreeRoot().ifPresent(root ->
                 worktreeLifecycle.setupWorktreeHeader(placeholderTab, opened.session().id(), root));
@@ -1284,7 +1949,13 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     /** Called by the sidebar after {@link SessionManager#deleteSession} so any open tab disappears too. */
     @Override
     public void noteSessionDeleted(ManagedSessionId sessionId) {
-        annotationStore.removeSession(sessionId);
+        // Findings are keyed by scope handle now, so a deleted session's
+        // review data is reached through the scopes that were bound to it.
+        for (ReviewScope scope : reviewScopeRegistry.scopes()) {
+            if (scope.sessionId().filter(sessionId::equals).isPresent()) {
+                annotationStore.removeScope(scope.id());
+            }
+        }
         // A deleted session is never coming back, so its activity file would
         // otherwise linger until the next startup purge.
         forgetActivity(sessionId);
@@ -1347,12 +2018,13 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     }
 
     /**
-     * Diagnostic-only: switches the selected tab to the Review sub-tab and
-     * returns its view, so the automated visual pass can screenshot a
-     * populated Review pane -- the FX layer has no headless harness.
+     * Diagnostic-only: shows the Review destination and returns it, so the
+     * automated visual pass can screenshot a populated queue -- the FX layer
+     * has no headless harness.
      */
-    public ReviewView diagShowReview() {
-        return currentlySelected().map(OpenSessionTab::diagShowReview).orElse(null);
+    public ReviewDestinationView diagShowReview() {
+        showReview();
+        return reviewDestination;
     }
 
     // ---- Exit watcher --------------------------------------------------------
@@ -1581,13 +2253,14 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         openTab.setOnPreviousSessionTab(this::selectPreviousSessionTab);
         openTab.setOnNextSessionTab(this::selectNextSessionTab);
         openTab.setOnToggleSidebar(() -> onToggleSidebar.run());
+        openTab.setOnShowReview(this::showReviewForCurrentSession);
 
         if (repository.map(Repository::isRemote).orElse(false)) {
-            // Explorer (local file search) and Review (local diffs) have no
-            // local checkout to operate on -- spec: Feature gating. Leaving
-            // both factories unset (OpenSessionTab disables their toggle
-            // buttons for a remote tab; see its constructor) instead of
-            // wiring anything against the remote's placeholder root.
+            // The Explorer's file search has no local checkout to operate on
+            // -- spec: Feature gating. Leaving its factory unset
+            // (OpenSessionTab disables the toggle button for a remote tab;
+            // see its constructor) instead of wiring anything against the
+            // remote's placeholder root.
             repository.ifPresent(repo -> gitStatusService.getStatus(GitTarget.of(repo))
                     .whenComplete((status, failure) -> Platform.runLater(() -> {
                         if (failure == null && status.branch() instanceof GitBranchState.OnBranch onBranch) {
@@ -1603,24 +2276,6 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 openExplorers.put(openTab, explorer);
                 return explorer;
             });
-            // openTab.sessionId() rather than the constructor parameter: the
-            // factory runs lazily (first Review open), by which time a created
-            // session's tab has adopted the real id -- annotations must key on it.
-            repository.ifPresent(repo -> openTab.setReviewFactory(() -> new ReviewView(
-                    openTab.sessionId(), searchRoot, repo.root(), diffService, changedLineService, gitStatusService,
-                    annotationStore, openTab.agentName(), openTab::sendPrompt,
-                    new ReviewView.ExplorerBridge() {
-                        @Override
-                        public void openFileAtLine(Path relativeFile, int line) {
-                            openTab.openExplorerAt(relativeFile, line);
-                        }
-
-                        @Override
-                        public void searchText(String token) {
-                            openTab.searchInExplorer(token);
-                        }
-                    })));
-
             // Branch of the session's own checkout: for a worktree session the
             // search root IS the worktree, so its branch (not the main
             // checkout's) fills the header/sub-tab context lines. The main

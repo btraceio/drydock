@@ -171,6 +171,28 @@ final class WorktreeLifecycleController {
      * branch that already has one. The panel then renders the actions for
      * the reconciled state.
      */
+    /**
+     * Opens the Finish panel for {@code sessionId}, resolving its branch and
+     * base first. The entry point a <em>submitted review</em> uses: the
+     * review is over, and what follows -- merge, open a PR, delete the
+     * worktree -- is the flow that already exists for exactly that.
+     */
+    void finishAfterReview(ManagedSessionId sessionId, Path worktreeRoot) {
+        ManagedAgentSession session = sessionById(sessionId).orElse(null);
+        Repository repository = session == null ? null : repositoryFor.apply(session).orElse(null);
+        if (session == null || repository == null) {
+            return;
+        }
+        gitStatusService.getStatus(worktreeRoot).thenCombine(gitStatusService.getStatus(repository.root()),
+                        (worktreeStatus, baseStatus) ->
+                                new String[] { branchNameOf(worktreeStatus), branchNameOf(baseStatus) })
+                .whenComplete((branches, ex) -> Platform.runLater(() -> {
+                    if (ex == null) {
+                        showFinishPanel(sessionId, worktreeRoot, branches[0], branches[1]);
+                    }
+                }));
+    }
+
     private void showFinishPanel(ManagedSessionId sessionId, Path worktreeRoot, String branch, String base) {
         ManagedAgentSession session = sessionById(sessionId).orElse(null);
         if (session == null || modalLayer == null) {

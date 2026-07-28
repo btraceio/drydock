@@ -747,6 +747,13 @@
     -fx-text-fill: -drydock-text-dim;
 }
 
+.shortcut-section-label {
+    -fx-font-size: 10px;
+    -fx-font-weight: 700;
+    -fx-text-fill: -drydock-text-faint;
+    -fx-padding: 8 0 2 0;
+}
+
 /* ---- Menus / context menus ---------------------------------------------- */
 
 .context-menu {
@@ -2107,3 +2114,1104 @@
     -fx-background-color: -drydock-accent;
     -fx-background-radius: 1em;
 }
+
+/* ---- Review destination (Review handoff sections 3 & 4) ------------------
+ *
+ * Structure only, as everywhere in this sheet: every colour is a token from
+ * theme-dark.css / theme-light.css, and every font size is a px literal so
+ * UiFontScale's interface-size slider scales it (both invariants are pinned
+ * by ThemeTokenContractTest). Radii stay on the handoff's 6 / 8 / 12 ladder
+ * (control · card · pill).
+ */
+
+.review-destination {
+    -fx-background-color: -drydock-main;
+}
+
+/* Title bar -- 36px, above every rail. */
+.review-title-bar {
+    -fx-background-color: -drydock-titlebar;
+    -fx-border-color: transparent transparent -drydock-border transparent;
+    -fx-border-width: 0 0 1 0;
+    -fx-min-height: 36px;
+    -fx-max-height: 36px;
+    -fx-padding: 0 12 0 12;
+}
+.review-title-glyph {
+    -fx-text-fill: -drydock-accent;
+    -fx-font-size: 12px;
+}
+.review-title {
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 13px;
+    -fx-font-weight: 600;
+}
+.review-title-counts {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 11px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+
+/* The pill-shaped chip buttons of the title bar and the session row. */
+.review-chip-button {
+    -fx-background-color: transparent;
+    -fx-background-radius: 12px;
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 12px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 11px;
+    -fx-padding: 3 10 3 10;
+    -fx-cursor: hand;
+}
+.review-chip-button:hover {
+    -fx-text-fill: -drydock-text;
+    -fx-border-color: -drydock-text-dim;
+}
+.review-chip-button:focused {
+    -fx-border-color: -drydock-accent;
+    -fx-text-fill: -drydock-text;
+}
+
+/* Queue rail (spec 4.1) -- 236px / 206px narrow / 44px collapsed. */
+.review-queue-rail {
+    -fx-background-color: -drydock-queue-rail;
+    -fx-border-color: transparent -drydock-border transparent transparent;
+    -fx-border-width: 0 1 0 0;
+}
+.review-rail-header {
+    -fx-background-color: transparent;
+    -fx-background-radius: 0;
+    -fx-min-height: 28px;
+    -fx-max-height: 28px;
+    -fx-padding: 0 9 0 9;
+    -fx-cursor: hand;
+}
+.review-rail-header:hover {
+    -fx-background-color: -drydock-hover;
+}
+.review-rail-header:focused {
+    -fx-background-color: -drydock-accent-soft;
+}
+.review-rail-chevron {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 11px;
+}
+.review-rail-title {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10px;
+    -fx-font-weight: 600;
+}
+.review-rail-hint {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-rail-footer {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-border-color: -drydock-border transparent transparent transparent;
+    -fx-border-width: 1 0 0 0;
+    -fx-padding: 6 10 6 10;
+}
+.review-queue-scroll, .review-queue-scroll .viewport {
+    -fx-background-color: transparent;
+}
+.review-queue-items {
+    -fx-padding: 0 6 8 6;
+    -fx-spacing: 3;
+}
+.review-queue-group {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 9px;
+    -fx-font-weight: 700;
+    -fx-padding: 8 0 2 4;
+}
+.review-queue-item {
+    -fx-background-color: transparent;
+    -fx-background-radius: 6px;
+    -fx-border-color: -drydock-border;
+    -fx-border-radius: 6px;
+    -fx-padding: 7 8 7 8;
+    -fx-alignment: center-left;
+    -fx-cursor: hand;
+}
+.review-queue-item.collapsed {
+    -fx-padding: 7 0 7 0;
+    -fx-alignment: center;
+}
+.review-queue-item:hover {
+    -fx-border-color: -drydock-border-strong;
+}
+.review-queue-item:selected {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-border-color: -drydock-accent;
+}
+/* The focus ring is a real ring, not merely the selection tint: keyboard
+   focus and mouse selection are different states and must look different. */
+.review-queue-item:focused {
+    -fx-border-color: -drydock-accent;
+    -fx-effect: dropshadow(gaussian, -drydock-accent-soft, 6, 0.6, 0, 0);
+}
+.review-queue-icon-column {
+    -fx-min-width: 22px;
+    -fx-max-width: 22px;
+}
+.review-queue-icon {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 11px;
+}
+.review-queue-item:selected .review-queue-icon {
+    -fx-text-fill: -drydock-accent;
+}
+.review-queue-count {
+    -fx-font-size: 9px;
+    -fx-font-weight: 700;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-queue-count.count-open {
+    -fx-text-fill: -drydock-question;
+}
+.review-queue-count.count-blocking {
+    -fx-text-fill: -drydock-blocking;
+}
+.review-queue-dot {
+    -fx-min-width: 5px;  -fx-max-width: 5px;
+    -fx-min-height: 5px; -fx-max-height: 5px;
+    -fx-background-radius: 100px;
+    -fx-background-color: transparent;
+}
+.review-queue-dot.dot-running, .review-session-dot.dot-running {
+    -fx-background-color: -drydock-running;
+}
+.review-queue-dot.dot-idle, .review-session-dot.dot-idle {
+    -fx-background-color: -drydock-text-faint;
+}
+.review-queue-dot.dot-none, .review-session-dot.dot-none {
+    -fx-background-color: transparent;
+}
+.review-queue-title {
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 11.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-queue-item:selected .review-queue-title {
+    -fx-text-fill: -drydock-text;
+}
+.review-queue-subtitle {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10.5px;
+}
+
+/* Item header -- two rows: what is being reviewed, and its session binding. */
+.review-centre {
+    -fx-background-color: -drydock-main;
+}
+.review-item-header {
+    -fx-background-color: -drydock-chrome;
+    -fx-border-color: transparent transparent -drydock-border transparent;
+    -fx-border-width: 0 0 1 0;
+}
+.review-item-header-row {
+    -fx-padding: 7 12 7 12;
+}
+.review-item-icon {
+    -fx-text-fill: -drydock-accent;
+    -fx-font-size: 11px;
+}
+.review-item-title {
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 12.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-item-context {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 11px;
+}
+.review-session-dot {
+    -fx-min-width: 6px;  -fx-max-width: 6px;
+    -fx-min-height: 6px; -fx-max-height: 6px;
+    -fx-background-radius: 100px;
+    -fx-background-color: transparent;
+}
+.review-session-line {
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 11px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-session-hint {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10.5px;
+}
+
+/* Centre body + its placeholder states (spec section 6). */
+.review-body {
+    -fx-background-color: -drydock-main;
+}
+.review-placeholder {
+    -fx-padding: 32;
+}
+.review-placeholder-title {
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 14px;
+    -fx-font-weight: 600;
+}
+.review-placeholder-detail {
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 12px;
+}
+.review-placeholder-mono {
+    -fx-text-fill: -drydock-code-type;
+    -fx-font-size: 11.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-background-color: -drydock-code-bg;
+    -fx-background-radius: 6px;
+    -fx-border-color: -drydock-border;
+    -fx-border-radius: 6px;
+    -fx-padding: 8 10 8 10;
+}
+
+/* Sidebar destination row + the per-worktree open-findings badge. */
+.sidebar-destination {
+    -fx-background-color: transparent;
+    -fx-background-radius: 8px;
+    -fx-border-color: transparent;
+    -fx-border-radius: 8px;
+    -fx-padding: 7 10 7 10;
+    -fx-alignment: center-left;
+    -fx-cursor: hand;
+    -fx-max-width: 1000px;
+}
+.sidebar-destination:hover {
+    -fx-background-color: -drydock-hover;
+}
+.sidebar-destination:focused {
+    -fx-border-color: -drydock-accent;
+}
+.sidebar-destination.active {
+    -fx-background-color: -drydock-accent-soft;
+}
+.sidebar-destination-glyph {
+    -fx-text-fill: -drydock-accent;
+    -fx-font-size: 12px;
+}
+.sidebar-destination-label {
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 12px;
+    -fx-font-weight: 600;
+}
+.sidebar-destination-badge {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-background-radius: 12px;
+    -fx-text-fill: -drydock-accent;
+    -fx-font-size: 10px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-padding: 1 7 1 7;
+}
+.worktree-findings-badge {
+    -fx-background-color: -drydock-question-soft;
+    -fx-background-radius: 6px;
+    -fx-text-fill: -drydock-question;
+    -fx-font-size: 9.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-padding: 0 5 0 5;
+}
+
+/* ---- Review diff column (Review handoff section 4.4) --------------------
+ *
+ * Hunk cards are drawn from flat, virtualized rows: every cell carries a
+ * card-top / card-body / card-bottom class (see ReviewDiffRow.Edge) and the
+ * borders below turn those into a card. Nesting real card containers would
+ * cost the virtualization a 21-file diff depends on.
+ *
+ * NOTHING here sets a cell height. A fixed row height was the bug that hid
+ * code with no scrollbar to reveal it -- rows must keep their natural size.
+ */
+
+.review-diff-column {
+    -fx-background-color: -drydock-main;
+}
+.review-diff-header {
+    -fx-background-color: -drydock-main;
+    -fx-border-color: transparent transparent -drydock-border transparent;
+    -fx-border-width: 0 0 1 0;
+    -fx-padding: 7 12 7 12;
+}
+.review-diff-summary {
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 11.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-diff-message {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 12px;
+    -fx-padding: 12 14 12 14;
+}
+
+.review-diff-list, .review-diff-list .viewport {
+    -fx-background-color: -drydock-main;
+    -fx-padding: 0;
+}
+.review-diff-list .list-cell {
+    -fx-background-color: transparent;
+    -fx-padding: 0 12 0 12;
+}
+.review-diff-list .list-cell:filled:selected,
+.review-diff-list .list-cell:filled:hover {
+    -fx-background-color: transparent;
+}
+
+/* The card edges. The horizontal padding above is the gutter between the
+   card and the column; the borders here are the card itself. */
+.review-diff-cell.card-top .review-hunk-header {
+    -fx-background-color: -drydock-hunk-header;
+    -fx-background-radius: 8px 8px 0 0;
+    -fx-border-color: -drydock-border;
+    -fx-border-width: 1 1 1 1;
+    -fx-border-radius: 8px 8px 0 0;
+}
+.review-diff-cell.card-body > .review-code-row,
+.review-diff-cell.card-body > .review-collapsed-run {
+    -fx-border-color: transparent -drydock-border transparent -drydock-border;
+    -fx-border-width: 0 1 0 1;
+}
+.review-diff-cell.card-bottom > .review-code-row,
+.review-diff-cell.card-bottom > .review-collapsed-run {
+    -fx-border-color: transparent -drydock-border -drydock-border -drydock-border;
+    -fx-border-width: 0 1 1 1;
+    -fx-background-radius: 0 0 8px 8px;
+    -fx-border-radius: 0 0 8px 8px;
+    -fx-padding: 0 0 6 0;
+}
+/* Breathing room between one card and the next. */
+.review-diff-cell.card-top {
+    -fx-padding: 10 12 0 12;
+}
+
+.review-hunk-header {
+    -fx-padding: 6 10 6 10;
+}
+.review-hunk-file {
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 11.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-hunk-range {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 11px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-hunk-explorer {
+    -fx-background-color: transparent;
+    -fx-background-radius: 6px;
+    -fx-border-color: transparent;
+    -fx-border-radius: 6px;
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10.5px;
+    -fx-padding: 2 8 2 8;
+    -fx-cursor: hand;
+}
+.review-hunk-explorer:hover {
+    -fx-text-fill: -drydock-text;
+    -fx-background-color: -drydock-hover;
+}
+.review-hunk-explorer:focused {
+    -fx-border-color: -drydock-accent;
+    -fx-text-fill: -drydock-text;
+}
+.review-hunk-explorer:disabled {
+    -fx-opacity: 0.45;
+}
+
+/* Line rows. The add/delete tints and the gutter colour are the handoff's. */
+.review-code-row {
+    -fx-background-color: -drydock-code-bg;
+}
+.review-code-row.row-add {
+    -fx-background-color: -drydock-add-bg;
+}
+.review-code-row.row-del {
+    -fx-background-color: -drydock-del-bg;
+}
+.review-code-gutter {
+    -fx-min-width: 34px;
+    -fx-max-width: 34px;
+    -fx-alignment: center-right;
+    -fx-text-fill: -drydock-code-gutter;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-padding: 0 6 0 0;
+}
+.review-code-sign {
+    -fx-min-width: 12px;
+    -fx-max-width: 12px;
+    -fx-alignment: center;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-code-sign.sign-add { -fx-text-fill: -drydock-add-sign; }
+.review-code-sign.sign-del { -fx-text-fill: -drydock-del-sign; }
+.review-code-sign.sign-context { -fx-text-fill: -drydock-text-faint; }
+.review-code-text {
+    -fx-padding: 0 0 0 4;
+}
+.review-code-span {
+    -fx-fill: -drydock-code-text;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+/* The lexer's span classes, shared with the Explorer's code viewer. */
+.review-code-text .code-kw    { -fx-fill: -drydock-code-kw; }
+.review-code-text .code-str   { -fx-fill: -drydock-code-str; }
+.review-code-text .code-com   { -fx-fill: -drydock-code-com; }
+.review-code-text .code-num   { -fx-fill: -drydock-code-num; }
+.review-code-text .code-type  { -fx-fill: -drydock-code-type; }
+.review-code-text .code-fn    { -fx-fill: -drydock-code-fn; }
+.review-code-text .code-anno  { -fx-fill: -drydock-code-anno; }
+.review-code-text .code-punct { -fx-fill: -drydock-code-punct; }
+
+.review-collapsed-run {
+    -fx-background-color: -drydock-code-bg;
+    -fx-background-radius: 0;
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10.5px;
+    -fx-font-style: italic;
+    -fx-alignment: center-left;
+    -fx-cursor: hand;
+}
+.review-collapsed-run:hover {
+    -fx-text-fill: -drydock-text-dim;
+    -fx-background-color: -drydock-hover;
+}
+.review-collapsed-run:focused {
+    -fx-text-fill: -drydock-text;
+    -fx-border-color: -drydock-accent;
+    -fx-border-width: 0 0 0 2;
+}
+
+/* Density (spec 4.8) -- code font size and row height. The px literals are
+   what UiFontScale scales, so density stays a relative choice on top of the
+   user's absolute interface size.
+   
+   A diff row's height is font-size x line-height (1.6 / 1.42 / 1.25), which
+   is what the prototype gives its code rows; JavaFX has no line-height on a
+   single-line row, so it becomes -fx-min-height. The 8/6/4px "row padding"
+   of section 4.8 is the prototype's `ipad`, which it applies to the QUEUE
+   and INTENT cards, not to code lines -- putting it here too made every diff
+   row almost twice its intended height. Code rows take horizontal padding
+   only. */
+.density-cozy .review-code-span,
+.density-cozy .review-code-gutter,
+.density-cozy .review-code-sign {
+    -fx-font-size: 12.5px;
+}
+.density-cozy .review-code-row,
+.density-cozy .review-collapsed-run {
+    -fx-min-height: 20px;
+    -fx-padding: 0 10 0 10;
+}
+.density-compact .review-code-span,
+.density-compact .review-code-gutter,
+.density-compact .review-code-sign {
+    -fx-font-size: 11.5px;
+}
+.density-compact .review-code-row,
+.density-compact .review-collapsed-run {
+    -fx-min-height: 16px;
+    -fx-padding: 0 10 0 10;
+}
+.density-dense .review-code-span,
+.density-dense .review-code-gutter,
+.density-dense .review-code-sign {
+    -fx-font-size: 11px;
+}
+.density-dense .review-code-row,
+.density-dense .review-collapsed-run {
+    -fx-min-height: 14px;
+    -fx-padding: 0 10 0 10;
+}
+
+/* ---- Review findings margin + verdict bar (handoff sections 4.5, 4.6) ---- */
+
+.review-findings-margin {
+    -fx-background-color: -drydock-chrome;
+    -fx-border-color: transparent transparent transparent -drydock-border;
+    -fx-border-width: 0 0 0 1;
+}
+.review-margin-header {
+    -fx-min-height: 28px;
+    -fx-max-height: 28px;
+    -fx-padding: 0 9 0 6;
+}
+.review-rail-chevron-button {
+    -fx-background-color: transparent;
+    -fx-background-radius: 6px;
+    -fx-border-color: transparent;
+    -fx-border-radius: 6px;
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 11px;
+    -fx-padding: 2 5 2 5;
+    -fx-cursor: hand;
+}
+.review-rail-chevron-button:hover { -fx-text-fill: -drydock-text; }
+.review-rail-chevron-button:focused { -fx-border-color: -drydock-accent; }
+
+.review-filter-button {
+    -fx-background-color: transparent;
+    -fx-background-radius: 12px;
+    -fx-border-color: -drydock-border;
+    -fx-border-radius: 12px;
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10px;
+    -fx-padding: 2 8 2 8;
+    -fx-cursor: hand;
+}
+.review-filter-button:hover { -fx-text-fill: -drydock-text; }
+.review-filter-button:selected {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-border-color: -drydock-accent;
+    -fx-text-fill: -drydock-accent;
+}
+.review-filter-button:focused { -fx-border-color: -drydock-accent; }
+
+.review-findings-scroll, .review-findings-scroll .viewport {
+    -fx-background-color: transparent;
+}
+.review-findings-cards {
+    -fx-padding: 4 8 10 8;
+    -fx-spacing: 8;
+}
+.review-findings-empty {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 11.5px;
+    -fx-padding: 10 4 10 4;
+}
+
+/* The 30px collapsed strip: the count stays, coloured by the worst severity;
+   only the descriptions go. Collapsing never removes information about
+   whether findings exist. */
+.review-margin-collapsed {
+    -fx-padding: 8 0 0 0;
+}
+.review-margin-collapsed-count {
+    -fx-font-size: 11px;
+    -fx-font-weight: 700;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-text-fill: -drydock-text-dim;
+}
+
+.review-finding-card {
+    -fx-background-color: -drydock-code-bg;
+    -fx-background-radius: 8px;
+    -fx-border-color: -drydock-border;
+    -fx-border-radius: 8px;
+    -fx-padding: 10;
+}
+.review-finding-card:focused,
+.review-finding-card.focused {
+    -fx-border-color: -drydock-accent;
+}
+.review-finding-card.resolved {
+    -fx-opacity: 0.55;
+}
+.review-finding-card.severity-blocking { -fx-border-color: -drydock-blocking; }
+.review-finding-card.severity-question { -fx-border-color: -drydock-question; }
+.review-finding-card.severity-deviation { -fx-border-color: -drydock-deviation; }
+.review-finding-card.severity-nit { -fx-border-color: -drydock-border-strong; }
+
+.review-severity-pill {
+    -fx-background-radius: 12px;
+    -fx-font-size: 9.5px;
+    -fx-font-weight: 700;
+    -fx-padding: 1 7 1 7;
+}
+.review-severity-pill.severity-blocking {
+    -fx-background-color: -drydock-blocking-soft;
+    -fx-text-fill: -drydock-blocking;
+}
+.review-severity-pill.severity-question {
+    -fx-background-color: -drydock-question-soft;
+    -fx-text-fill: -drydock-question;
+}
+.review-severity-pill.severity-deviation {
+    -fx-background-color: -drydock-deviation-soft;
+    -fx-text-fill: -drydock-deviation;
+}
+.review-severity-pill.severity-nit {
+    -fx-background-color: -drydock-hover;
+    -fx-text-fill: -drydock-text-dim;
+}
+
+.review-finding-author {
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 11px;
+}
+.review-finding-pin {
+    -fx-font-size: 10px;
+    -fx-font-weight: 700;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-finding-pin.severity-blocking { -fx-text-fill: -drydock-blocking; }
+.review-finding-pin.severity-question { -fx-text-fill: -drydock-question; }
+.review-finding-pin.severity-deviation { -fx-text-fill: -drydock-deviation; }
+.review-finding-pin.severity-nit { -fx-text-fill: -drydock-text-faint; }
+
+.review-finding-body {
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 12px;
+}
+.review-finding-meta {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-finding-meta.deviation {
+    -fx-text-fill: -drydock-deviation;
+}
+.review-patch-block {
+    -fx-background-color: -drydock-input-bg;
+    -fx-background-radius: 6px;
+    -fx-border-color: -drydock-border;
+    -fx-border-radius: 6px;
+    -fx-padding: 8;
+}
+.review-patch-body {
+    -fx-text-fill: -drydock-code-text;
+    -fx-font-size: 10.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+
+.review-thread {
+    -fx-border-color: -drydock-border transparent transparent transparent;
+    -fx-border-width: 1 0 0 0;
+    -fx-padding: 8 0 0 0;
+}
+.review-thread-author {
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 10px;
+    -fx-font-weight: 600;
+}
+.review-thread-text {
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 11.5px;
+}
+
+.review-ask-caption {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 9px;
+    -fx-font-weight: 700;
+}
+.review-ask-chip {
+    -fx-background-color: transparent;
+    -fx-background-radius: 12px;
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 12px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 10px;
+    -fx-padding: 2 8 2 8;
+    -fx-cursor: hand;
+}
+.review-ask-chip:hover {
+    -fx-text-fill: -drydock-text;
+    -fx-border-color: -drydock-mcp;
+}
+.review-ask-chip:focused {
+    -fx-border-color: -drydock-accent;
+}
+
+.review-card-actions {
+    -fx-border-color: -drydock-border transparent transparent transparent;
+    -fx-border-width: 1 0 0 0;
+    -fx-padding: 8 0 0 0;
+}
+.review-reply-input {
+    -fx-background-color: -drydock-input-bg;
+    -fx-background-radius: 6px;
+    -fx-border-color: -drydock-border;
+    -fx-border-radius: 6px;
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 11.5px;
+}
+.review-reply-input .content { -fx-background-color: -drydock-input-bg; }
+.review-reply-input:focused { -fx-border-color: -drydock-accent; }
+.review-card-action {
+    -fx-background-color: transparent;
+    -fx-background-radius: 6px;
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 6px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 10.5px;
+    -fx-padding: 3 9 3 9;
+    -fx-cursor: hand;
+}
+.review-card-action:hover { -fx-text-fill: -drydock-text; }
+.review-card-action:focused { -fx-border-color: -drydock-accent; }
+.review-card-action.primary {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-border-color: -drydock-accent;
+    -fx-text-fill: -drydock-accent;
+}
+
+/* The ◆n pin beside a diff line. Dims -- never disappears -- when its
+   finding is filtered out: the line still carries one. */
+.review-line-pin {
+    -fx-background-color: -drydock-code-bg;
+    -fx-border-color: -drydock-border;
+    -fx-background-radius: 6px;
+    -fx-border-color: transparent;
+    -fx-border-radius: 6px;
+    -fx-font-size: 9.5px;
+    -fx-font-weight: 700;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-padding: 0 5 0 5;
+    -fx-cursor: hand;
+    -fx-background-radius: 6px;
+    -fx-border-radius: 6px;
+}
+.review-line-pin.severity-blocking { -fx-text-fill: -drydock-blocking; }
+.review-line-pin.severity-question { -fx-text-fill: -drydock-question; }
+.review-line-pin.severity-deviation { -fx-text-fill: -drydock-deviation; }
+.review-line-pin.severity-nit { -fx-text-fill: -drydock-text-faint; }
+.review-line-pin.dimmed { -fx-opacity: 0.35; }
+.review-line-pin:focused { -fx-border-color: -drydock-accent; }
+
+/* Verdict bar -- BELOW both columns and always in the layout, so collapsing
+   the margin can never take the primary action with it. */
+.review-verdict-bar {
+    -fx-background-color: -drydock-chrome;
+    -fx-border-color: -drydock-border transparent transparent transparent;
+    -fx-border-width: 1 0 0 0;
+}
+.review-verdict-actions {
+    -fx-padding: 8 12 8 12;
+}
+.review-verdict-footer {
+    -fx-background-color: -drydock-titlebar;
+    -fx-border-color: -drydock-border transparent transparent transparent;
+    -fx-border-width: 1 0 0 0;
+    -fx-min-height: 28px;
+    -fx-max-height: 28px;
+    -fx-padding: 0 12 0 12;
+}
+.review-verdict-intent {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-verdict-action {
+    -fx-background-color: transparent;
+    -fx-background-radius: 6px;
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 6px;
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 11.5px;
+    -fx-padding: 6 12 6 12;
+    -fx-cursor: hand;
+}
+.review-verdict-action:hover { -fx-border-color: -drydock-text-dim; }
+.review-verdict-action:focused { -fx-border-color: -drydock-accent; }
+.review-verdict-action.primary {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-border-color: -drydock-accent;
+    -fx-text-fill: -drydock-accent;
+}
+/* Refused, not disabled: the reason sits beside it and the way out is in
+   the margin. A greyed-out button would say neither. */
+.review-verdict-action.primary:refused {
+    -fx-background-color: transparent;
+    -fx-border-color: -drydock-blocking;
+    -fx-text-fill: -drydock-text-faint;
+}
+.review-verdict-refusal {
+    -fx-text-fill: -drydock-blocking;
+    -fx-font-size: 11px;
+}
+.review-verdict-settled {
+    -fx-font-size: 11.5px;
+    -fx-text-fill: -drydock-text-dim;
+}
+.review-verdict-settled.decision-approved { -fx-text-fill: -drydock-resolved; }
+.review-verdict-settled.decision-changes { -fx-text-fill: -drydock-question; }
+.review-verdict-settled.decision-auto-approved { -fx-text-fill: -drydock-resolved; }
+.review-verdict-hint {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10.5px;
+}
+.review-verdict-progress-label {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-progress {
+    -fx-background-color: -drydock-border;
+    -fx-background-radius: 6px;
+    -fx-min-width: 120px;
+    -fx-max-width: 120px;
+    -fx-min-height: 4px;
+    -fx-max-height: 4px;
+}
+.review-progress-fill {
+    -fx-background-color: -drydock-resolved;
+    -fx-background-radius: 6px;
+    -fx-min-height: 4px;
+    -fx-max-height: 4px;
+}
+.review-progress-track {
+    -fx-background-color: -drydock-border;
+    -fx-background-radius: 6px;
+}
+
+/* ---- Review intent rail (handoff section 4.2) ---------------------------- */
+
+.review-intent-rail {
+    -fx-background-color: -drydock-intent-rail;
+    -fx-border-color: transparent -drydock-border transparent transparent;
+    -fx-border-width: 0 1 0 0;
+}
+.review-intent-scroll, .review-intent-scroll .viewport {
+    -fx-background-color: transparent;
+}
+.review-intent-cards {
+    -fx-padding: 0 6 8 6;
+    -fx-spacing: 4;
+}
+.review-intent-card {
+    -fx-background-color: transparent;
+    -fx-background-radius: 6px;
+    -fx-border-color: -drydock-border;
+    -fx-border-radius: 6px;
+    -fx-padding: 7 8 7 8;
+    -fx-alignment: center-left;
+    -fx-cursor: hand;
+}
+.review-intent-card.collapsed {
+    -fx-padding: 7 0 7 0;
+    -fx-alignment: center;
+}
+.review-intent-card:hover { -fx-border-color: -drydock-border-strong; }
+.review-intent-card:selected {
+    -fx-background-color: -drydock-active-bg;
+    -fx-border-color: -drydock-border-strong;
+}
+.review-intent-card:focused { -fx-border-color: -drydock-accent; }
+/* Settled intents dim; the verdict below them says why. */
+.review-intent-card.settled { -fx-opacity: 0.5; }
+.review-intent-card.settled:selected { -fx-opacity: 1; }
+
+.review-intent-number {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10.5px;
+    -fx-font-weight: 700;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-intent-card:selected .review-intent-number { -fx-text-fill: -drydock-accent; }
+.review-intent-title {
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 12px;
+    -fx-font-weight: 600;
+}
+.review-intent-card:selected .review-intent-title { -fx-text-fill: -drydock-text; }
+.review-intent-tag {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 9px;
+}
+.review-intent-rationale {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10.5px;
+}
+.review-intent-collapsed-note {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10px;
+    -fx-font-style: italic;
+}
+
+/* The risk heat bar: one bar, keyed to the intent's own risk. */
+.review-intent-heat {
+    -fx-min-height: 3px;
+    -fx-max-height: 3px;
+    -fx-background-radius: 2px;
+    -fx-background-color: -drydock-border;
+}
+.review-intent-heat.risk-high { -fx-background-color: -drydock-blocking; }
+.review-intent-heat.risk-med  { -fx-background-color: -drydock-question; }
+.review-intent-heat.risk-low  { -fx-background-color: -drydock-resolved; }
+.review-intent-heat.risk-none { -fx-background-color: -drydock-border-strong; }
+
+.review-intent-settled {
+    -fx-font-size: 9.5px;
+}
+.review-intent-settled.decision-approved,
+.review-intent-settled.decision-auto-approved { -fx-text-fill: -drydock-resolved; }
+.review-intent-settled.decision-changes { -fx-text-fill: -drydock-question; }
+
+/* Collapsed: a status dot, never a clipped label. */
+.review-intent-dot {
+    -fx-min-width: 5px;  -fx-max-width: 5px;
+    -fx-min-height: 5px; -fx-max-height: 5px;
+    -fx-background-radius: 100px;
+    -fx-background-color: -drydock-text-faint;
+}
+.review-intent-dot.decision-approved,
+.review-intent-dot.decision-auto-approved { -fx-background-color: -drydock-resolved; }
+.review-intent-dot.decision-changes { -fx-background-color: -drydock-question; }
+
+/* ---- Review checkout gate (handoff section 6) ---------------------------- */
+
+.review-gate {
+    -fx-padding: 32;
+}
+.review-gate-failure {
+    -fx-text-fill: -drydock-blocking;
+    -fx-font-size: 11.5px;
+    -fx-background-color: -drydock-blocking-soft;
+    -fx-background-radius: 6px;
+    -fx-padding: 8 10 8 10;
+}
+.review-readonly-banner-row {
+    -fx-background-color: -drydock-question-soft;
+    -fx-border-color: transparent transparent -drydock-border transparent;
+    -fx-border-width: 0 0 1 0;
+    -fx-padding: 7 12 7 12;
+}
+.review-readonly-banner {
+    -fx-text-fill: -drydock-question;
+    -fx-font-size: 11px;
+}
+
+/* ---- Symbol lens + MCP activity panel (handoff sections 4.4, 4.7) -------- */
+
+/* Identifiers the local index knows: a dotted underline, and nothing else --
+   an underline on every word would mean nothing. */
+.review-code-symbol {
+    -fx-underline: true;
+    -fx-cursor: hand;
+}
+.review-lens-scroll, .review-lens-scroll .viewport {
+    -fx-background-color: -drydock-code-bg;
+}
+.review-lens {
+    -fx-background-color: -drydock-code-bg;
+    -fx-background-radius: 8px;
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 8px;
+    -fx-padding: 12;
+    -fx-max-width: 460px;
+}
+.review-lens-title {
+    -fx-text-fill: -drydock-code-fn;
+    -fx-font-size: 12.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-lens-summary {
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 11px;
+}
+.review-lens-caveat {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10px;
+}
+.review-lens-chip {
+    -fx-background-radius: 12px;
+    -fx-font-size: 9.5px;
+    -fx-padding: 1 7 1 7;
+}
+.review-lens-chip.in-diff {
+    -fx-background-color: -drydock-resolved-soft;
+    -fx-text-fill: -drydock-resolved;
+}
+.review-lens-chip.not-touched {
+    -fx-background-color: transparent;
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 12px;
+    -fx-text-fill: -drydock-text-faint;
+}
+.review-lens-where {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-lens-line {
+    -fx-background-color: transparent;
+    -fx-background-radius: 6px;
+    -fx-border-color: transparent;
+    -fx-border-radius: 6px;
+    -fx-text-fill: -drydock-code-text;
+    -fx-font-size: 10.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-alignment: center-left;
+    -fx-padding: 2 6 2 6;
+    -fx-cursor: hand;
+}
+.review-lens-line:hover { -fx-background-color: -drydock-hover; }
+.review-lens-line:focused { -fx-border-color: -drydock-accent; }
+
+.review-mcp-panel {
+    -fx-background-color: -drydock-code-bg;
+    -fx-border-color: -drydock-border transparent transparent transparent;
+    -fx-border-width: 1 0 0 0;
+}
+.review-mcp-header {
+    -fx-padding: 6 12 6 12;
+    -fx-border-color: transparent transparent -drydock-border transparent;
+    -fx-border-width: 0 0 1 0;
+}
+.review-mcp-header-label {
+    -fx-text-fill: -drydock-mcp;
+    -fx-font-size: 10px;
+    -fx-font-weight: 700;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-mcp-budget-label {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-mcp-budget {
+    -fx-background-color: -drydock-border;
+    -fx-background-radius: 6px;
+    -fx-min-width: 120px;  -fx-max-width: 120px;
+    -fx-min-height: 4px;   -fx-max-height: 4px;
+}
+.review-mcp-budget-fill {
+    -fx-background-color: -drydock-mcp;
+    -fx-background-radius: 6px;
+    -fx-min-height: 4px;   -fx-max-height: 4px;
+}
+.review-mcp-list, .review-mcp-list .viewport {
+    -fx-background-color: -drydock-code-bg;
+}
+.review-mcp-list .list-cell {
+    -fx-background-color: transparent;
+    -fx-padding: 2 10 2 10;
+}
+.review-mcp-list .list-cell:filled:selected {
+    -fx-background-color: -drydock-active-bg;
+}
+.review-mcp-list .list-cell.failed .review-mcp-tool {
+    -fx-text-fill: -drydock-blocking;
+}
+.review-mcp-time {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-mcp-direction {
+    -fx-text-fill: -drydock-mcp;
+    -fx-font-size: 10px;
+}
+.review-mcp-tool {
+    -fx-text-fill: -drydock-code-type;
+    -fx-font-size: 10.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-mcp-detail {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-mcp-payload {
+    -fx-background-color: -drydock-input-bg;
+    -fx-text-fill: -drydock-code-text;
+    -fx-font-size: 10.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-border-color: transparent transparent transparent -drydock-border;
+    -fx-border-width: 0 0 0 1;
+}
+.review-mcp-payload .content { -fx-background-color: -drydock-input-bg; }

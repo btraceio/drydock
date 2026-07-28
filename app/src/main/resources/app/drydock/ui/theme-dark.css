@@ -56,6 +56,27 @@
     -drydock-sel-bg: rgba(217, 119, 87, 0.14);
     -drydock-changed-gutter: #6cc07a;
 
+    /* Review destination (Review handoff section 3). The three chrome
+     * surfaces are the only greys the Review spec adds; everything else it
+     * needs already exists above and is reused under its own semantic name,
+     * because the meanings genuinely differ (a MED-risk intent is not a
+     * dirty worktree, even though both are amber). */
+    -drydock-queue-rail: #1a1918;
+    -drydock-intent-rail: #181716;
+    -drydock-hunk-header: #1c1b1a;
+
+    /* Semantic severities/risks (Review handoff section 3, table). */
+    -drydock-blocking: #e06c6c;
+    -drydock-blocking-soft: rgba(224, 108, 108, 0.18);
+    -drydock-question: #d9a03a;
+    -drydock-question-soft: rgba(217, 160, 58, 0.18);
+    -drydock-deviation: #b07ad9;
+    -drydock-deviation-soft: rgba(176, 122, 217, 0.18);
+    -drydock-resolved: #6cc07a;
+    -drydock-resolved-soft: rgba(108, 192, 122, 0.18);
+    -drydock-mcp: #61afef;
+    -drydock-mcp-soft: rgba(97, 175, 239, 0.16);
+
     /* Read-only code viewer palette. */
     -drydock-code-text: #c9ccd3;
     -drydock-code-kw: #c678dd;

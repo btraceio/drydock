@@ -1,7 +1,11 @@
 package app.drydock.mcp;
 
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.git.UnifiedDiff;
 import app.drydock.review.ReviewAnnotation;
+import app.drydock.review.ReviewIntent;
+import app.drydock.review.ReviewScope;
+import app.drydock.review.ReviewVerdict;
 
 import java.nio.file.Path;
 import java.util.List;
@@ -43,13 +47,16 @@ public interface McpSessionContext {
     /** Base branch the caller's Review scope diffs against, for {@code review_comments}. */
     Optional<String> baseBranch(ManagedSessionId caller);
 
-    /** The calling session's annotations, unfiltered. */
+    /**
+     * Every finding of every review scope the caller may address: the scopes
+     * bound to its session, plus any the human granted it. Unfiltered.
+     */
     List<ReviewAnnotation> annotations(ManagedSessionId caller);
 
     /**
-     * Atomically re-reads the annotation with {@code id}, applies {@code
+     * Atomically re-reads the finding under {@code key}, applies {@code
      * transform} and stores the result, then flushes so the human's view sees
-     * it. Empty when no annotation has that id.
+     * it. Empty when nothing is stored under that key.
      *
      * <p>A transform rather than a plain "replace this value": the human's
      * Review tab writes the same threads from the FX thread, so a caller that
@@ -58,7 +65,51 @@ public interface McpSessionContext {
      * so a decision made inside it (including refusing by throwing) is made
      * against what is actually there.</p>
      */
-    Optional<ReviewAnnotation> mutateAnnotation(String id, UnaryOperator<ReviewAnnotation> transform);
+    Optional<ReviewAnnotation> mutateAnnotation(ReviewAnnotation.Key key,
+                                                UnaryOperator<ReviewAnnotation> transform);
+
+    // ---- review scopes (Review MCP schema) ----------------------------------
+
+    /**
+     * The review scope {@code scopeId} names, if the caller may address it:
+     * its own session's scopes plus any the human granted with "Run review".
+     * Empty for an unknown scope <em>and</em> for one the caller may not
+     * touch -- the two are deliberately indistinguishable, so probing scope
+     * ids tells an agent nothing.
+     */
+    Optional<ReviewScope> reviewScope(String scopeId, ManagedSessionId caller);
+
+    /**
+     * The display name of the agent behind {@code caller}, for attributing
+     * what it writes. A finding says who found it, and a Codex session's
+     * findings must not be signed "Claude".
+     */
+    String reviewerName(ManagedSessionId caller);
+
+    /** The diff of a scope, already parsed. Runs git, so never on the FX thread. */
+    UnifiedDiff reviewDiff(ReviewScope scope) throws McpToolException;
+
+    /** Replaces a scope's intent grouping ({@code review_intents}). */
+    void putIntents(String scopeId, List<ReviewIntent> intents);
+
+    /** Upserts findings on {@code finding.id}, so a re-run keeps existing threads. */
+    void upsertFindings(List<ReviewAnnotation> findings);
+
+    /** Every finding of one scope, whatever its state. */
+    List<ReviewAnnotation> findingsOf(String scopeId);
+
+    /** The verdicts recorded on one scope's intents. */
+    List<ReviewVerdict> verdictsOf(String scopeId);
+
+    /** Whether the human has submitted this scope's review. */
+    boolean reviewSubmitted(String scopeId);
+
+    /** The agent's own turns in the bound session, for the step timeline. */
+    List<PromptStep> promptHistory(ReviewScope scope);
+
+    /** One turn of the bound session's transcript ({@code review_scope.promptHistory}). */
+    record PromptStep(int step, java.time.Instant at, String prompt, String tool, List<String> files) {
+    }
 
     /**
      * Reads {@code line} of {@code file} in the caller's worktree, with up to

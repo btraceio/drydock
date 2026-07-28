@@ -21,7 +21,7 @@ import java.util.function.Consumer;
 /**
  * One open file's save state machine (spec: "Editable Explorer files with
  * auto-save"). Owns every byte this feature reads or writes; holds no
- * JavaFX types, so it is unit-testable the way {@link SyntaxHighlighter}
+ * JavaFX types, so it is unit-testable the way {@link app.drydock.ui.code.SyntaxHighlighter}
  * is, and the viewer stays a thin layer over it.
  *
  * <p><b>Concurrency.</b> Every write, stamp capture and {@link #poll()} runs

@@ -1,8 +1,9 @@
-package app.drydock.ui.explorer;
+package app.drydock.ui.code;
 
 import org.fxmisc.richtext.model.StyleSpans;
 import org.fxmisc.richtext.model.StyleSpansBuilder;
 
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Locale;
@@ -10,19 +11,35 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Lightweight per-language lexer for the read-only code viewer (design
- * handoff "Session Explorer": keyword/string/comment/number/type/function/
- * annotation/punctuation spans, styled via the {@code -drydock-code-*} theme
- * tokens in app.css). Pure and FX-toolkit-free so it is unit-testable; the
- * output {@link StyleSpans} feed {@code CodeArea.setStyleSpans}.
+ * Lightweight per-language lexer shared by every surface that renders code
+ * (design handoff "Session Explorer" and the Review diff column):
+ * keyword/string/comment/number/type/function/annotation/punctuation spans,
+ * styled via the {@code -drydock-code-*} theme tokens in app.css. Pure and
+ * FX-toolkit-free so it is unit-testable.
+ *
+ * <p>Two output shapes over one lexer, because the two consumers need
+ * different things and a second lexer would be a second set of language
+ * rules to keep in step: {@link #spans} returns plain data for callers that
+ * build their own nodes (the diff column's per-line {@code TextFlow}), and
+ * {@link #computeHighlighting} wraps the same result in the RichTextFX
+ * {@link StyleSpans} the {@code CodeArea} viewer consumes.</p>
  */
-final class SyntaxHighlighter {
+public final class SyntaxHighlighter {
+
+    /** One styled run of the input: {@code [start, start + length)} carries {@code styleClass}. */
+    public record Span(int start, int length, String styleClass) {
+        public Span {
+            if (start < 0 || length < 0) {
+                throw new IllegalArgumentException("span must be non-negative: " + start + "+" + length);
+            }
+        }
+    }
 
     /** The handful of languages the viewer distinguishes; everything else renders as plain text. */
-    enum Language {
+    public enum Language {
         JAVA, KOTLIN_GRADLE, CSS, MARKDOWN, JSON, PLAIN;
 
-        static Language fromFileName(String fileName) {
+        public static Language fromFileName(String fileName) {
             String lower = fileName.toLowerCase(Locale.ROOT);
             if (lower.endsWith(".java")) {
                 return JAVA;
@@ -98,9 +115,40 @@ final class SyntaxHighlighter {
     private SyntaxHighlighter() {
     }
 
+    /**
+     * The styled runs of {@code text}, in order and non-overlapping. Only
+     * the styled runs are returned -- the gaps between them are unstyled, so
+     * a caller emitting nodes walks the list and fills the gaps itself.
+     * Span classes are the app.css {@code code-*} rules.
+     */
+    public static List<Span> spans(String text, Language language) {
+        Pattern pattern = patternFor(language);
+        if (pattern == null || text.isEmpty()) {
+            return List.of();
+        }
+        List<Span> spans = new ArrayList<>();
+        Matcher matcher = pattern.matcher(text);
+        while (matcher.find()) {
+            spans.add(new Span(matcher.start(), matcher.end() - matcher.start(), styleClassOf(matcher)));
+        }
+        return List.copyOf(spans);
+    }
+
     /** Computes the style-class spans of {@code text}; span classes are the app.css {@code code-*} rules. */
-    static StyleSpans<Collection<String>> computeHighlighting(String text, Language language) {
-        Pattern pattern = switch (language) {
+    public static StyleSpans<Collection<String>> computeHighlighting(String text, Language language) {
+        StyleSpansBuilder<Collection<String>> builder = new StyleSpansBuilder<>();
+        int lastEnd = 0;
+        for (Span span : spans(text, language)) {
+            builder.add(List.of(), span.start() - lastEnd);
+            builder.add(List.of(span.styleClass()), span.length());
+            lastEnd = span.start() + span.length();
+        }
+        builder.add(List.of(), text.length() - lastEnd);
+        return builder.create();
+    }
+
+    private static Pattern patternFor(Language language) {
+        return switch (language) {
             case JAVA -> JAVA_PATTERN;
             case KOTLIN_GRADLE -> KOTLIN_PATTERN;
             case CSS -> CSS_PATTERN;
@@ -108,21 +156,6 @@ final class SyntaxHighlighter {
             case MARKDOWN -> MARKDOWN_PATTERN;
             case PLAIN -> null;
         };
-        StyleSpansBuilder<Collection<String>> builder = new StyleSpansBuilder<>();
-        if (pattern == null || text.isEmpty()) {
-            builder.add(List.of(), text.length());
-            return builder.create();
-        }
-        Matcher matcher = pattern.matcher(text);
-        int lastEnd = 0;
-        while (matcher.find()) {
-            String styleClass = styleClassOf(matcher);
-            builder.add(List.of(), matcher.start() - lastEnd);
-            builder.add(List.of(styleClass), matcher.end() - matcher.start());
-            lastEnd = matcher.end();
-        }
-        builder.add(List.of(), text.length() - lastEnd);
-        return builder.create();
     }
 
     private static String styleClassOf(Matcher matcher) {

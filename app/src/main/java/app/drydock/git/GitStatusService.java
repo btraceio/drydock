@@ -361,6 +361,62 @@ public final class GitStatusService implements AutoCloseable {
      * {@link BranchCatalog#merge}, which composes this with
      * {@link WorktreeService#list}.
      */
+    /**
+     * The repository's default branch -- what a review diffs against.
+     *
+     * <p>Resolved from {@code refs/remotes/origin/HEAD} when it exists,
+     * otherwise the first of {@code main} / {@code master} / {@code trunk}
+     * / {@code develop} that does, otherwise empty.
+     *
+     * <p>Deliberately <em>not</em> the main checkout's current branch. That
+     * is what Review used to use, and it made the base -- and therefore every
+     * queue item's diff -- follow whatever branch the user happened to have
+     * checked out, so a {@code git switch} in another terminal silently
+     * recomputed every review against the wrong thing.</p>
+     */
+    public CompletableFuture<Optional<String>> defaultBranch(Path repositoryRoot) {
+        return CompletableFuture.supplyAsync(() -> defaultBranchBlocking(repositoryRoot), executor);
+    }
+
+    /** Synchronous form of {@link #defaultBranch}, package-private for tests. */
+    Optional<String> defaultBranchBlocking(Path repositoryRoot) {
+        Path git = locator.locate()
+                .orElseThrow(() -> new GitExecutableNotFoundException(locator.describeSearched()));
+
+        // origin/HEAD is the repository's own statement of its default. A
+        // missing one is an ANSWER, not a failure -- a local-only repository
+        // simply has none -- so this probe tolerates the non-zero exit that
+        // runLines would otherwise throw on.
+        for (String line : runLinesAllowingFailure(git, repositoryRoot, List.of(
+                "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"))) {
+            String head = line.strip();
+            if (!head.startsWith("origin/")) {
+                continue;
+            }
+            String name = head.substring("origin/".length());
+            // The LOCAL branch when there is one, otherwise the
+            // remote-tracking ref. `git clone -b feat/x` (and deleting a
+            // local main after a merge) leaves origin/HEAD pointing at a
+            // branch with no local counterpart, and returning the bare name
+            // there would hand every diff a revision git cannot resolve.
+            return Optional.of(resolves(git, repositoryRoot, "refs/heads/" + name) ? name : head);
+        }
+        // No origin/HEAD (a local-only repository, or one never cloned): fall
+        // back to the conventional names, and only to ones that exist.
+        for (String candidate : List.of("main", "master", "trunk", "develop")) {
+            if (resolves(git, repositoryRoot, "refs/heads/" + candidate)) {
+                return Optional.of(candidate);
+            }
+        }
+        return Optional.empty();
+    }
+
+    /** Whether {@code ref} exists in {@code repositoryRoot}. */
+    private boolean resolves(Path git, Path repositoryRoot, String ref) {
+        return !runLines(git, repositoryRoot, List.of(
+                "for-each-ref", "--format=%(refname:short)", ref)).isEmpty();
+    }
+
     public CompletableFuture<BranchListing> listBranches(Path repositoryRoot) {
         return CompletableFuture.supplyAsync(() -> listBranchesBlocking(repositoryRoot), executor);
     }
@@ -392,6 +448,21 @@ public final class GitStatusService implements AutoCloseable {
             }
         }
         return new BranchListing(List.copyOf(branches), remotes);
+    }
+
+    /**
+     * As {@link #runLines}, but a non-zero exit yields no lines instead of
+     * throwing. Only for probes where "the thing is not there" is a normal
+     * answer the caller has a plan for.
+     */
+    private List<String> runLinesAllowingFailure(Path git, Path repositoryRoot, List<String> arguments) {
+        List<String> command = new ArrayList<>(List.of(git.toString(), "-C", repositoryRoot.toString()));
+        command.addAll(arguments);
+        ProcessResult result = run(command);
+        if (result.exitCode() != 0) {
+            return List.of();
+        }
+        return result.stdout().lines().map(String::strip).filter(s -> !s.isEmpty()).toList();
     }
 
     /** Runs a read-only git subcommand in {@code repositoryRoot}, returning its non-blank stdout lines. */

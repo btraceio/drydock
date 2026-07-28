@@ -2,9 +2,12 @@ package app.drydock.review;
 
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.git.DiffScope;
+import app.drydock.state.json.JsonParser;
+import app.drydock.state.json.JsonWriter;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
@@ -15,306 +18,458 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * The review store: {@code (scopeId, id)} keying, verdicts, persistence and
+ * the concurrency contract between its two writers (the FX Review
+ * destination and the MCP tool router).
+ */
 class AnnotationStoreTest {
 
-    private static final Instant AT = Instant.parse("2026-07-19T12:00:00Z");
+    private static final Instant AT = Instant.parse("2026-01-01T00:00:00Z");
 
-    private static ReviewAnnotation sample(ManagedSessionId sessionId) {
-        return ReviewAnnotation.create(sessionId, DiffScope.BASE, "src/SessionStore.java",
-                "n14", "n16", new ReviewAnnotation.Message("You", AT, "The UncheckedIOException escapes here."));
+    private static ReviewAnnotation finding(String scopeId, String id) {
+        return finding(scopeId, id, Severity.QUESTION);
+    }
+
+    private static ReviewAnnotation finding(String scopeId, String id, Severity severity) {
+        return new ReviewAnnotation(scopeId, id, Optional.of("i1"), "src/Main.java", "n42", "n42",
+                severity, Confidence.HIGH, Optional.of("Title"), "Claude", AT,
+                List.of(), Optional.empty(), Optional.empty(), List.of(),
+                List.of(new ReviewAnnotation.Message("Claude", AT, "body")),
+                Optional.empty(), AnnotationStatus.OPEN);
     }
 
     @Test
-    void annotationsRoundTripThroughJson(@TempDir Path dir) {
-        ManagedSessionId sessionId = ManagedSessionId.newId();
-        ReviewAnnotation annotation = sample(sessionId)
-                .withReply(new ReviewAnnotation.Message("Claude", AT.plusSeconds(60), "Wrapped it in a catch."))
-                .withStatus(AnnotationStatus.FIXED);
-
-        List<ReviewAnnotation> decoded = AnnotationStore.fromJson(AnnotationStore.toJson(List.of(annotation)));
-
-        assertEquals(List.of(annotation), decoded);
-    }
-
-    @Test
-    void storePersistsAcrossReload(@TempDir Path dir) throws Exception {
+    void persistsTheSecretUsedForRestartStableScopeIds(@TempDir Path dir) {
         Path file = dir.resolve("annotations.json");
-        ManagedSessionId sessionId = ManagedSessionId.newId();
+        byte[] original;
+        try (AnnotationStore store = new AnnotationStore(file)) {
+            original = store.scopeIdSecret();
+            store.upsert(finding("rs_scope", "f1"));
+        }
 
-        AnnotationStore store = new AnnotationStore(file);
-        ReviewAnnotation annotation = sample(sessionId);
-        store.add(annotation);
-        store.flushPendingSaves();
+        try (AnnotationStore reopened = new AnnotationStore(file)) {
+            assertArrayEquals(original, reopened.scopeIdSecret());
+        }
+    }
+
+    // ---- the keying bug -----------------------------------------------------
+
+    /**
+     * The regression test for the bug the scoped key exists to prevent:
+     * finding ids are agent-chosen and stable across re-runs, so the SAME id
+     * genuinely appears in two worktrees at once. Resolving one must not
+     * resolve the other.
+     */
+    @Test
+    void resolvingAFindingInOneScopeLeavesTheSameIdInAnotherAlone(@TempDir Path dir) {
+        try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
+            store.upsert(finding("rs_left", "f_leak_1"));
+            store.upsert(finding("rs_right", "f_leak_1"));
+
+            store.mutate(new ReviewAnnotation.Key("rs_left", "f_leak_1"),
+                    current -> current.withStatus(AnnotationStatus.RESOLVED));
+
+            assertTrue(store.byId("rs_left", "f_leak_1").orElseThrow().resolved());
+            assertFalse(store.byId("rs_right", "f_leak_1").orElseThrow().resolved(),
+                    "resolving a finding in one worktree must not resolve the same id in another");
+        }
+    }
+
+    @Test
+    void theSameIdInTwoScopesIsTwoFindings(@TempDir Path dir) {
+        try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
+            store.upsert(finding("rs_left", "f1"));
+            store.upsert(finding("rs_right", "f1"));
+
+            assertEquals(1, store.forScope("rs_left").size());
+            assertEquals(1, store.forScope("rs_right").size());
+        }
+    }
+
+    @Test
+    void removingAScopeLeavesTheOtherScopesIntact(@TempDir Path dir) {
+        try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
+            store.upsert(finding("rs_left", "f1"));
+            store.upsert(finding("rs_right", "f1"));
+            store.putVerdict(new ReviewVerdict("rs_left", "i1", ReviewVerdict.Decision.APPROVED,
+                    Optional.empty(), AT));
+
+            store.removeScope("rs_left");
+
+            assertTrue(store.forScope("rs_left").isEmpty());
+            assertTrue(store.verdict("rs_left", "i1").isEmpty());
+            assertEquals(1, store.forScope("rs_right").size());
+        }
+    }
+
+    @Test
+    void aTransformMayNotMoveAFindingToAnotherScope(@TempDir Path dir) {
+        try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
+            store.upsert(finding("rs_a", "f1"));
+
+            assertThrows(IllegalArgumentException.class, () ->
+                    store.mutate(new ReviewAnnotation.Key("rs_a", "f1"),
+                            current -> current.withScopeId("rs_b")));
+        }
+    }
+
+    // ---- upsert / queries ---------------------------------------------------
+
+    /** A reviewer re-run upserts on the same id, so the thread survives. */
+    @Test
+    void upsertReplacesTheFindingUnderTheSameKey(@TempDir Path dir) {
+        try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
+            store.upsert(finding("rs_a", "f1", Severity.NIT));
+            store.upsert(finding("rs_a", "f1", Severity.BLOCKING));
+
+            assertEquals(1, store.forScope("rs_a").size());
+            assertEquals(Severity.BLOCKING, store.byId("rs_a", "f1").orElseThrow().severity());
+        }
+    }
+
+    @Test
+    void openCountIgnoresResolvedFindings(@TempDir Path dir) {
+        try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
+            store.upsert(finding("rs_a", "f1"));
+            store.upsert(finding("rs_a", "f2"));
+            store.mutate(new ReviewAnnotation.Key("rs_a", "f2"),
+                    current -> current.withStatus(AnnotationStatus.RESOLVED));
+
+            assertEquals(1, store.openCount("rs_a"));
+        }
+    }
+
+    @Test
+    void aResolvedBlockingFindingNoLongerBlocks(@TempDir Path dir) {
+        try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
+            store.upsert(finding("rs_a", "f1", Severity.BLOCKING));
+            assertTrue(store.hasOpenBlockingFinding("rs_a", "i1"));
+
+            store.mutate(new ReviewAnnotation.Key("rs_a", "f1"),
+                    current -> current.withStatus(AnnotationStatus.RESOLVED));
+
+            assertFalse(store.hasOpenBlockingFinding("rs_a", "i1"));
+        }
+    }
+
+    /** A human downgrade must actually unblock approval; the agent's original opinion is kept. */
+    @Test
+    void aSeverityOverrideDecidesWhetherAFindingBlocks(@TempDir Path dir) {
+        try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
+            store.upsert(finding("rs_a", "f1", Severity.BLOCKING));
+
+            store.mutate(new ReviewAnnotation.Key("rs_a", "f1"),
+                    current -> current.withSeverityOverride(Severity.QUESTION));
+
+            assertFalse(store.hasOpenBlockingFinding("rs_a", "i1"));
+            ReviewAnnotation stored = store.byId("rs_a", "f1").orElseThrow();
+            assertEquals(Severity.BLOCKING, stored.severity(), "the reviewer's opinion is kept");
+            assertEquals(Severity.QUESTION, stored.effectiveSeverity());
+        }
+    }
+
+    @Test
+    void forIntentFiltersWithinOneScope(@TempDir Path dir) {
+        try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
+            store.upsert(finding("rs_a", "f1"));
+            ReviewAnnotation other = new ReviewAnnotation("rs_a", "f2", Optional.of("i2"),
+                    "src/Other.java", "n1", "n1", Severity.NIT, Confidence.HIGH, Optional.empty(),
+                    "Claude", AT, List.of(), Optional.empty(), Optional.empty(), List.of(),
+                    List.of(), Optional.empty(), AnnotationStatus.OPEN);
+            store.upsert(other);
+
+            assertEquals(List.of("f1"), store.forIntent("rs_a", "i1").stream()
+                    .map(ReviewAnnotation::id).toList());
+        }
+    }
+
+    // ---- verdicts -----------------------------------------------------------
+
+    @Test
+    void verdictsAreKeyedByScopeAndIntent(@TempDir Path dir) {
+        try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
+            store.putVerdict(new ReviewVerdict("rs_a", "i1", ReviewVerdict.Decision.APPROVED,
+                    Optional.empty(), AT));
+            store.putVerdict(new ReviewVerdict("rs_b", "i1", ReviewVerdict.Decision.CHANGES,
+                    Optional.of("needs a test"), AT));
+
+            assertEquals(ReviewVerdict.Decision.APPROVED,
+                    store.verdict("rs_a", "i1").orElseThrow().decision());
+            assertEquals(ReviewVerdict.Decision.CHANGES,
+                    store.verdict("rs_b", "i1").orElseThrow().decision());
+        }
+    }
+
+    @Test
+    void clearingAVerdictOnlyClearsThatOne(@TempDir Path dir) {
+        try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
+            store.putVerdict(new ReviewVerdict("rs_a", "i1", ReviewVerdict.Decision.APPROVED,
+                    Optional.empty(), AT));
+            store.putVerdict(new ReviewVerdict("rs_a", "i2", ReviewVerdict.Decision.APPROVED,
+                    Optional.empty(), AT));
+
+            store.clearVerdict("rs_a", "i1");
+
+            assertTrue(store.verdict("rs_a", "i1").isEmpty());
+            assertTrue(store.verdict("rs_a", "i2").isPresent());
+        }
+    }
+
+    @Test
+    void submissionIsRecordedPerScope(@TempDir Path dir) {
+        try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
+            store.markSubmitted("rs_a");
+
+            assertTrue(store.isSubmitted("rs_a"));
+            assertFalse(store.isSubmitted("rs_b"));
+        }
+    }
+
+    // ---- persistence --------------------------------------------------------
+
+    @Test
+    void findingsRoundTripThroughJson() {
+        ReviewAnnotation rich = new ReviewAnnotation("rs_a", "f1", Optional.of("i1"),
+                "src/Main.java", "n42", "n45", Severity.BLOCKING, Confidence.UNSURE,
+                Optional.of("Event filter never detached"), "Claude", AT,
+                List.of(new ReviewAnnotation.Evidence("leak", "addEventFilter(...)", "java")),
+                Optional.of(new ReviewAnnotation.Patch("--- a\n+++ b\n", "one line in onRelease")),
+                Optional.of(new ReviewAnnotation.DeviatesFrom("min width 240", Optional.of(9))),
+                List.of(new ReviewAnnotation.Ask("Why is it a leak?", "Explain the leak.")),
+                List.of(new ReviewAnnotation.Message("Claude", AT, "body",
+                        Optional.of(new ReviewAnnotation.Evidence("here", "code", "java")))),
+                Optional.of(Severity.QUESTION), AnnotationStatus.ADDRESSED);
+
+        List<ReviewAnnotation> decoded = AnnotationStore.fromJson(JsonParser.parse(
+                JsonWriter.write(AnnotationStore.toJson(List.of(rich), List.of(), List.of()))));
+
+        assertEquals(List.of(rich), decoded);
+    }
+
+    @Test
+    void verdictsAndSubmissionsRoundTripThroughJson() {
+        ReviewVerdict verdict = new ReviewVerdict("rs_a", "i1", ReviewVerdict.Decision.CHANGES,
+                Optional.of("please add a test"), AT);
+
+        String json = JsonWriter.write(AnnotationStore.toJson(List.of(), List.of(verdict), List.of("rs_a")));
+
+        assertEquals(List.of(verdict), AnnotationStore.verdictsFromJson(JsonParser.parse(json)));
+        assertEquals(List.of("rs_a"), AnnotationStore.submittedFromJson(JsonParser.parse(json)));
+    }
+
+    @Test
+    void everythingPersistsAcrossAReload(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("annotations.json");
+        try (AnnotationStore store = new AnnotationStore(file)) {
+            store.upsert(finding("rs_a", "f1"));
+            store.putVerdict(new ReviewVerdict("rs_a", "i1", ReviewVerdict.Decision.APPROVED,
+                    Optional.empty(), AT));
+            store.markSubmitted("rs_a");
+            store.flushPendingSaves();
+        }
         waitForFile(file);
 
-        AnnotationStore reloaded = new AnnotationStore(file);
-        assertEquals(List.of(annotation), reloaded.forSession(sessionId));
-    }
-
-    @Test
-    void mutateReplacesById(@TempDir Path dir) {
-        AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"));
-        ManagedSessionId sessionId = ManagedSessionId.newId();
-        ReviewAnnotation annotation = sample(sessionId);
-        store.add(annotation);
-
-        store.mutate(annotation.id(), current -> current.withStatus(AnnotationStatus.RESOLVED));
-
-        assertEquals(AnnotationStatus.RESOLVED, store.forSession(sessionId).get(0).status());
-        store.flushPendingSaves();
-    }
-
-    @Test
-    void forScopeFiltersBySessionAndScope(@TempDir Path dir) {
-        AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"));
-        ManagedSessionId sessionA = ManagedSessionId.newId();
-        ManagedSessionId sessionB = ManagedSessionId.newId();
-        store.add(sample(sessionA));
-        store.add(ReviewAnnotation.create(sessionA, DiffScope.WORKING_TREE, "x", "n1", "n1",
-                new ReviewAnnotation.Message("You", AT, "wt note")));
-        store.add(sample(sessionB));
-
-        assertEquals(1, store.forScope(sessionA, DiffScope.BASE).size());
-        assertEquals(1, store.forScope(sessionA, DiffScope.WORKING_TREE).size());
-        assertEquals(2, store.forSession(sessionA).size());
-        store.flushPendingSaves();
-    }
-
-    @Test
-    void removeSessionDropsAllItsAnnotations(@TempDir Path dir) {
-        AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"));
-        ManagedSessionId sessionId = ManagedSessionId.newId();
-        store.add(sample(sessionId));
-        store.add(sample(sessionId));
-
-        store.removeSession(sessionId);
-
-        assertTrue(store.forSession(sessionId).isEmpty());
-        store.flushPendingSaves();
-    }
-
-    @Test
-    void sentStatusRoundTripsThroughJson() {
-        ReviewAnnotation sent = sample(ManagedSessionId.newId()).withStatus(AnnotationStatus.SENT);
-
-        List<ReviewAnnotation> decoded = AnnotationStore.fromJson(AnnotationStore.toJson(List.of(sent)));
-
-        assertEquals(List.of(sent), decoded);
-        assertEquals(AnnotationStatus.SENT, decoded.get(0).status());
-    }
-
-    @Test
-    void statusDecodeIsLenient() {
-        assertEquals(AnnotationStatus.SENT, AnnotationStatus.fromPersisted(" sent "));
-        assertEquals(AnnotationStatus.FIXED, AnnotationStatus.fromPersisted("FIXED"));
-        assertEquals(AnnotationStatus.OPEN, AnnotationStatus.fromPersisted("no-such-status"));
-    }
-
-    @Test
-    void malformedFileYieldsEmptyStore(@TempDir Path dir) throws Exception {
-        Path file = dir.resolve("annotations.json");
-        Files.writeString(file, "{not json at all");
-
-        AnnotationStore store = new AnnotationStore(file);
-
-        assertTrue(store.forSession(ManagedSessionId.newId()).isEmpty());
+        try (AnnotationStore reloaded = new AnnotationStore(file)) {
+            assertEquals(1, reloaded.forScope("rs_a").size());
+            assertTrue(reloaded.verdict("rs_a", "i1").isPresent());
+            assertTrue(reloaded.isSubmitted("rs_a"));
+        }
     }
 
     /**
-     * Documents the store-level contract {@code ReviewView.sendToClaude()}
-     * relies on for its fix: a caller that lists annotations, then hands off
-     * to something that can take a while (there: a synchronous post into the
-     * live terminal), must re-read by id via {@link AnnotationStore#byId}
-     * before writing a status change -- not compute it from the list entry
-     * it captured before the hand-off. This proves the store returns the
-     * up-to-date value (with the concurrent reply) when read that way, so a
-     * write built from it does not clobber the other writer's change.
+     * A pre-scope-handle file must not lose the user's comments on upgrade.
+     * Its entries are parked under a deterministic placeholder and adopted by
+     * the matching scope the first time one is minted.
      */
     @Test
-    void byIdReflectsAConcurrentUpdateMadeAfterAnEarlierListRead(@TempDir Path dir) {
-        AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"));
-        ReviewAnnotation annotation = sample(ManagedSessionId.newId());
-        store.add(annotation);
+    void aSchemaVersionOneFileIsMigratedRatherThanDropped(@TempDir Path dir) throws Exception {
+        ManagedSessionId session = ManagedSessionId.newId();
+        Path file = dir.resolve("annotations.json");
+        Files.writeString(file, """
+                {"schemaVersion":1,"annotations":[{
+                  "id":"a1","sessionId":"%s","scope":"BASE","file":"src/Main.java",
+                  "startKey":"n42","endKey":"n42","status":"OPEN",
+                  "thread":[{"author":"You","at":"2026-01-01T00:00:00Z","text":"look at this"}]
+                }]}
+                """.formatted(session), StandardCharsets.UTF_8);
 
-        // Simulate the caller's initial list read (e.g. sendToClaude's
-        // `forScope` snapshot) capturing the pre-reply value...
-        ReviewAnnotation captured = store.forSession(annotation.sessionId()).get(0);
+        try (AnnotationStore store = new AnnotationStore(file)) {
+            String legacy = AnnotationStore.legacyScopeId(session, DiffScope.BASE);
+            assertEquals(1, store.forScope(legacy).size(), "a v1 entry must survive the upgrade");
+            assertEquals("You", store.forScope(legacy).get(0).author());
 
-        // ...while another writer appends a reply during the hand-off window.
-        store.mutate(annotation.id(), current -> current.withReply(
-                new ReviewAnnotation.Message("Claude", AT.plusSeconds(5), "already on it")));
+            int adopted = store.adoptLegacy(session, DiffScope.BASE, "rs_new");
 
-        // A write computed from the freshly re-read value keeps the reply;
-        // one computed from `captured` would silently drop it.
-        ReviewAnnotation fresh = store.byId(annotation.id()).orElseThrow();
-        assertEquals(2, fresh.thread().size());
-        ReviewAnnotation correctlyComputed = fresh.withStatus(AnnotationStatus.SENT);
-        assertEquals(2, correctlyComputed.thread().size(), "re-reading before writing preserves the concurrent reply");
-
-        ReviewAnnotation staleComputed = captured.withStatus(AnnotationStatus.SENT);
-        assertEquals(1, staleComputed.thread().size(),
-                "computing from the captured value would have discarded the concurrent reply");
-        store.flushPendingSaves();
+            assertEquals(1, adopted);
+            assertTrue(store.forScope(legacy).isEmpty());
+            assertEquals("look at this",
+                    store.byId("rs_new", "a1").orElseThrow().thread().get(0).text());
+        }
     }
 
+    /** The live review is the truth: an adopted legacy copy must never overwrite it. */
     @Test
-    void changeListenerFiresOnAddMutateAndRemove(@TempDir Path dir) throws Exception {
-        try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
-            List<String> events = new ArrayList<>();
-            store.addChangeListener(events::add);
+    void adoptionNeverOverwritesAFindingTheLiveScopeAlreadyHas(@TempDir Path dir) throws Exception {
+        ManagedSessionId session = ManagedSessionId.newId();
+        Path file = dir.resolve("annotations.json");
+        Files.writeString(file, """
+                {"schemaVersion":1,"annotations":[{
+                  "id":"a1","sessionId":"%s","scope":"BASE","file":"old.java",
+                  "startKey":"n1","endKey":"n1","status":"OPEN","thread":[]
+                }]}
+                """.formatted(session), StandardCharsets.UTF_8);
 
-            ReviewAnnotation annotation = ReviewAnnotation.create(ManagedSessionId.newId(), DiffScope.BASE,
-                    "src/Main.java", "n1", "n1",
-                    new ReviewAnnotation.Message("You", Instant.EPOCH, "look here"));
+        try (AnnotationStore store = new AnnotationStore(file)) {
+            store.upsert(finding("rs_new", "a1"));
 
-            store.add(annotation);
-            store.mutate(annotation.id(), current -> current.withStatus(AnnotationStatus.SENT));
-            store.remove(annotation.id());
+            store.adoptLegacy(session, DiffScope.BASE, "rs_new");
 
-            assertEquals(List.of(annotation.id(), annotation.id(), annotation.id()), events);
+            assertEquals("src/Main.java", store.byId("rs_new", "a1").orElseThrow().file());
         }
     }
 
     @Test
-    void removingASessionFiresOneBulkChange(@TempDir Path dir) throws Exception {
-        try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
-            ManagedSessionId session = ManagedSessionId.newId();
-            store.add(ReviewAnnotation.create(session, DiffScope.BASE, "a.java", "n1", "n1",
-                    new ReviewAnnotation.Message("You", Instant.EPOCH, "one")));
-            store.add(ReviewAnnotation.create(session, DiffScope.BASE, "b.java", "n2", "n2",
-                    new ReviewAnnotation.Message("You", Instant.EPOCH, "two")));
+    void aMalformedFileYieldsAnEmptyStore(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("annotations.json");
+        Files.writeString(file, "{ not json", StandardCharsets.UTF_8);
 
-            List<String> events = new ArrayList<>();
-            store.addChangeListener(events::add);
-            store.removeSession(session);
-
-            assertEquals(1, events.size());
-            assertNull(events.get(0), "a bulk change reports a null id");
+        try (AnnotationStore store = new AnnotationStore(file)) {
+            assertTrue(store.forScope("rs_a").isEmpty());
         }
     }
 
     @Test
-    void unsubscribingStopsDelivery(@TempDir Path dir) throws Exception {
+    void oneMalformedEntryNeverDiscardsTheRest(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("annotations.json");
+        Files.writeString(file, """
+                {"schemaVersion":2,"annotations":[
+                  {"scopeId":"rs_a","id":"broken"},
+                  {"scopeId":"rs_a","id":"good","file":"a.java","startKey":"n1","endKey":"n1",
+                   "status":"OPEN","author":"You","at":"2026-01-01T00:00:00Z","thread":[]}
+                ]}
+                """, StandardCharsets.UTF_8);
+
+        try (AnnotationStore store = new AnnotationStore(file)) {
+            assertEquals(List.of("good"),
+                    store.forScope("rs_a").stream().map(ReviewAnnotation::id).toList());
+        }
+    }
+
+    // ---- change notification ------------------------------------------------
+
+    @Test
+    void changeListenersSeeTheAffectedKey(@TempDir Path dir) {
         try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
-            List<String> events = new ArrayList<>();
-            Runnable unsubscribe = store.addChangeListener(events::add);
+            List<ReviewAnnotation.Key> seen = new ArrayList<>();
+            store.addChangeListener(seen::add);
+
+            store.upsert(finding("rs_a", "f1"));
+            store.mutate(new ReviewAnnotation.Key("rs_a", "f1"),
+                    current -> current.withStatus(AnnotationStatus.RESOLVED));
+            store.remove(new ReviewAnnotation.Key("rs_a", "f1"));
+
+            ReviewAnnotation.Key key = new ReviewAnnotation.Key("rs_a", "f1");
+            assertEquals(List.of(key, key, key), seen);
+        }
+    }
+
+    @Test
+    void removingAScopeFiresOneBulkChange(@TempDir Path dir) {
+        try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
+            store.upsert(finding("rs_a", "f1"));
+            store.upsert(finding("rs_a", "f2"));
+            List<ReviewAnnotation.Key> seen = new ArrayList<>();
+            store.addChangeListener(seen::add);
+
+            store.removeScope("rs_a");
+
+            assertEquals(1, seen.size());
+            assertEquals(java.util.Collections.singletonList(null), seen);
+        }
+    }
+
+    @Test
+    void aThrowingListenerDoesNotBreakTheWrite(@TempDir Path dir) {
+        try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
+            store.addChangeListener(key -> {
+                throw new IllegalStateException("boom");
+            });
+            List<ReviewAnnotation.Key> seen = new ArrayList<>();
+            store.addChangeListener(seen::add);
+
+            store.upsert(finding("rs_a", "f1"));
+
+            assertTrue(store.byId("rs_a", "f1").isPresent());
+            assertEquals(1, seen.size());
+        }
+    }
+
+    @Test
+    void unsubscribingStopsDelivery(@TempDir Path dir) {
+        try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
+            List<ReviewAnnotation.Key> seen = new ArrayList<>();
+            Runnable unsubscribe = store.addChangeListener(seen::add);
             unsubscribe.run();
 
-            store.add(ReviewAnnotation.create(ManagedSessionId.newId(), DiffScope.BASE, "a.java", "n1", "n1",
-                    new ReviewAnnotation.Message("You", Instant.EPOCH, "one")));
+            store.upsert(finding("rs_a", "f1"));
 
-            assertTrue(events.isEmpty());
+            assertTrue(seen.isEmpty());
         }
     }
 
     @Test
-    void aThrowingListenerDoesNotBreakTheWrite(@TempDir Path dir) throws Exception {
+    void aThrowingTransformWritesNothingAndNotifiesNobody(@TempDir Path dir) {
         try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
-            store.addChangeListener(id -> {
-                throw new IllegalStateException("listener blew up");
-            });
+            store.upsert(finding("rs_a", "f1"));
+            List<ReviewAnnotation.Key> seen = new ArrayList<>();
+            store.addChangeListener(seen::add);
 
-            ReviewAnnotation annotation = ReviewAnnotation.create(ManagedSessionId.newId(), DiffScope.BASE,
-                    "a.java", "n1", "n1", new ReviewAnnotation.Message("You", Instant.EPOCH, "one"));
-            store.add(annotation);
+            assertThrows(IllegalStateException.class, () ->
+                    store.mutate(new ReviewAnnotation.Key("rs_a", "f1"), current -> {
+                        throw new IllegalStateException("refused");
+                    }));
 
-            assertTrue(store.byId(annotation.id()).isPresent(), "the write must survive a bad listener");
-        }
-    }
-
-    // ---- mutate: the atomic read-modify-write --------------------------------
-
-    @Test
-    void mutateAppliesTheTransformToTheStoredValue(@TempDir Path dir) throws Exception {
-        try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
-            ReviewAnnotation annotation = sample(ManagedSessionId.newId());
-            store.add(annotation);
-
-            Optional<ReviewAnnotation> updated =
-                    store.mutate(annotation.id(), current -> current.withStatus(AnnotationStatus.RESOLVED));
-
-            assertEquals(AnnotationStatus.RESOLVED, updated.orElseThrow().status());
-            assertEquals(AnnotationStatus.RESOLVED, store.byId(annotation.id()).orElseThrow().status());
+            assertEquals(AnnotationStatus.OPEN, store.byId("rs_a", "f1").orElseThrow().status());
+            assertTrue(seen.isEmpty());
         }
     }
 
     @Test
-    void mutateIsEmptyAndCallsNothingForAnUnknownId(@TempDir Path dir) throws Exception {
+    void mutateIsEmptyForAnUnknownKey(@TempDir Path dir) {
         try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
-            List<String> applied = new ArrayList<>();
-
-            Optional<ReviewAnnotation> updated = store.mutate("no-such-id", current -> {
-                applied.add(current.id());
-                return current;
-            });
-
-            assertTrue(updated.isEmpty());
-            assertTrue(applied.isEmpty(), "the transform must not run for an id that is not stored");
+            assertTrue(store.mutate(new ReviewAnnotation.Key("rs_a", "nope"),
+                    current -> current).isEmpty());
         }
     }
 
-    @Test
-    void mutateNotifiesListeners(@TempDir Path dir) throws Exception {
-        try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
-            ReviewAnnotation annotation = sample(ManagedSessionId.newId());
-            store.add(annotation);
-            List<String> events = new ArrayList<>();
-            store.addChangeListener(events::add);
-
-            store.mutate(annotation.id(), current -> current.withStatus(AnnotationStatus.SENT));
-
-            assertEquals(List.of(annotation.id()), events);
-        }
-    }
+    // ---- concurrency --------------------------------------------------------
 
     /**
-     * A transform that refuses by throwing leaves the store untouched and fires
-     * nothing: that is how {@code McpToolRouter.review_reply} declines a thread
-     * the human has already resolved, deciding against the stored value while
-     * holding the lock that makes the decision meaningful.
-     */
-    @Test
-    void aThrowingTransformWritesNothingAndNotifiesNobody(@TempDir Path dir) throws Exception {
-        try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
-            ReviewAnnotation annotation = sample(ManagedSessionId.newId());
-            store.add(annotation);
-            List<String> events = new ArrayList<>();
-            store.addChangeListener(events::add);
-
-            assertThrows(IllegalStateException.class, () -> store.mutate(annotation.id(), current -> {
-                throw new IllegalStateException("refused");
-            }));
-
-            assertEquals(annotation, store.byId(annotation.id()).orElseThrow());
-            assertTrue(events.isEmpty());
-        }
-    }
-
-    /**
-     * The two-thread case the whole method exists for: while one thread is
-     * inside its transform, a second thread mutates the same annotation. Both
+     * Two writers race on one finding: while a slow transform is parked
+     * inside its transform, a second thread mutates the same finding. Both
      * replies must survive.
      *
-     * <p>A read-then-write pair loses one of them -- the slow thread
-     * writes a value derived from what it read before the other thread's write
-     * landed. This is the FX-tab-versus-MCP-router race, with the latch
+     * <p>A read-then-write pair loses one of them -- the slow thread writes a
+     * value derived from what it read before the other thread's write landed.
+     * This is the FX-destination-versus-MCP-router race, with the latch
      * standing in for the arbitrary scheduling that makes it rare in the
      * field and impossible to reproduce by hand.</p>
      */
     @Test
     void aConcurrentMutationIsNotLostWhileATransformIsRunning(@TempDir Path dir) throws Exception {
         try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
-            ReviewAnnotation annotation = sample(ManagedSessionId.newId());
-            store.add(annotation);
+            ReviewAnnotation.Key key = new ReviewAnnotation.Key("rs_a", "f1");
+            store.upsert(finding("rs_a", "f1"));
             CountDownLatch inTransform = new CountDownLatch(1);
             CountDownLatch release = new CountDownLatch(1);
 
-            Thread slow = new Thread(() -> store.mutate(annotation.id(), current -> {
+            Thread slow = new Thread(() -> store.mutate(key, current -> {
                 inTransform.countDown();
                 awaitOrFail(release);
                 return current.withReply(new ReviewAnnotation.Message("You", AT, "slow"));
@@ -322,7 +477,7 @@ class AnnotationStoreTest {
             slow.start();
             assertTrue(inTransform.await(5, TimeUnit.SECONDS), "the first transform never started");
 
-            Thread other = new Thread(() -> store.mutate(annotation.id(),
+            Thread other = new Thread(() -> store.mutate(key,
                     current -> current.withReply(new ReviewAnnotation.Message("Claude", AT, "fast"))));
             other.start();
             // Long enough that a store applying transforms outside its lock
@@ -332,7 +487,7 @@ class AnnotationStoreTest {
             slow.join(5_000);
             other.join(5_000);
 
-            List<String> texts = store.byId(annotation.id()).orElseThrow().thread().stream()
+            List<String> texts = store.byKey(key).orElseThrow().thread().stream()
                     .map(ReviewAnnotation.Message::text)
                     .toList();
             assertTrue(texts.contains("slow") && texts.contains("fast"),
@@ -342,29 +497,29 @@ class AnnotationStoreTest {
 
     /**
      * Listeners fire outside the monitor, so a listener that blocks -- an FX
-     * tab rebuilding its cards, say -- must not stop another thread from
+     * view rebuilding its cards, say -- must not stop another thread from
      * mutating, and must not cost that mutation.
      */
     @Test
     void aBlockingListenerNeitherDeadlocksNorLosesTheNextMutation(@TempDir Path dir) throws Exception {
         try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
-            ReviewAnnotation annotation = sample(ManagedSessionId.newId());
-            store.add(annotation);
+            ReviewAnnotation.Key key = new ReviewAnnotation.Key("rs_a", "f1");
+            store.upsert(finding("rs_a", "f1"));
             CountDownLatch inListener = new CountDownLatch(1);
             CountDownLatch release = new CountDownLatch(1);
-            store.addChangeListener(id -> {
+            store.addChangeListener(changed -> {
                 if (inListener.getCount() > 0) {
                     inListener.countDown();
                     awaitOrFail(release);
                 }
             });
 
-            Thread first = new Thread(() -> store.mutate(annotation.id(),
+            Thread first = new Thread(() -> store.mutate(key,
                     current -> current.withReply(new ReviewAnnotation.Message("You", AT, "first"))));
             first.start();
             assertTrue(inListener.await(5, TimeUnit.SECONDS), "the listener never ran");
 
-            Thread second = new Thread(() -> store.mutate(annotation.id(),
+            Thread second = new Thread(() -> store.mutate(key,
                     current -> current.withReply(new ReviewAnnotation.Message("Claude", AT, "second"))));
             second.start();
             second.join(5_000);
@@ -373,7 +528,7 @@ class AnnotationStoreTest {
             release.countDown();
             first.join(5_000);
 
-            List<String> texts = store.byId(annotation.id()).orElseThrow().thread().stream()
+            List<String> texts = store.byKey(key).orElseThrow().thread().stream()
                     .map(ReviewAnnotation.Message::text)
                     .toList();
             assertTrue(texts.contains("first") && texts.contains("second"), String.valueOf(texts));

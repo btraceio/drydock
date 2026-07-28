@@ -1,6 +1,6 @@
-package app.drydock.ui.explorer;
+package app.drydock.ui.code;
 
-import app.drydock.ui.explorer.SyntaxHighlighter.Language;
+import app.drydock.ui.code.SyntaxHighlighter.Language;
 import org.fxmisc.richtext.model.StyleSpans;
 import org.junit.jupiter.api.Test;
 

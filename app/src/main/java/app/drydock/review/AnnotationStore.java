@@ -17,11 +17,15 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.security.SecureRandom;
 import java.time.DateTimeException;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -35,10 +39,17 @@ import java.util.function.Consumer;
 import java.util.function.UnaryOperator;
 
 /**
- * The per-session store of Review annotations (design handoff section C):
- * in-memory, mutated on the FX thread by the Review tab, persisted as a
- * JSON file <em>alongside</em> the application state file
- * ({@code annotations.json} in the same directory as {@code state.json}).
+ * The store of Review findings and verdicts: in-memory, mutated on the FX
+ * thread by the Review destination and on its own executor by the MCP tool
+ * router, persisted as a JSON file <em>alongside</em> the application state
+ * file ({@code annotations.json} beside {@code state.json}).
+ *
+ * <p><strong>Everything is keyed by {@code (scopeId, id)}.</strong> Finding
+ * and intent ids are agent-chosen and repeat across scopes -- a reviewer
+ * re-run against two worktrees produces {@code f_leak_1} in both -- so
+ * keying on the id alone made resolving a finding in one worktree resolve it
+ * in another. That was a real bug; {@link ReviewAnnotation.Key} is the fix,
+ * and {@code AnnotationStoreTest} keeps it fixed.</p>
  *
  * <p>Persisting to a sibling file -- rather than adding a member to
  * {@code state.json} -- keeps this store the single writer of its file:
@@ -46,39 +57,68 @@ import java.util.function.UnaryOperator;
  * wholesale, so a second writer there would race it. Saves run on a
  * single background thread (writes are serialized; the newest snapshot
  * wins) with the same temp-file-and-atomic-rename pattern as the state
- * repository. Rapid mutations coalesce: only the newest snapshot is
- * written, not one full-file rewrite per mutation. Loading is lenient: a
- * missing or malformed file yields an empty store.</p>
+ * repository. Rapid mutations coalesce. Loading is lenient: a missing or
+ * malformed file yields an empty store, and one malformed entry never
+ * discards the rest.</p>
  */
 public final class AnnotationStore implements AutoCloseable {
 
     private static final Logger LOG = System.getLogger(AnnotationStore.class.getName());
 
-    private static final int SCHEMA_VERSION = 1;
+    /**
+     * 1 keyed findings by {@code (sessionId, DiffScope)}; 2 keys them by
+     * scope handle; 3 adds the secret used to derive restart-stable scope
+     * handles. A v1 file is migrated on read rather than dropped -- see
+     * {@link #legacyScopeId}.
+     */
+    private static final int SCHEMA_VERSION = 3;
+    private static final SecureRandom RANDOM = new SecureRandom();
+
+    /**
+     * The scope id a pre-scope-handle finding is parked under. Scope handles
+     * are minted per process, so a v1 entry cannot name the handle it now
+     * belongs to; it keeps a deterministic placeholder instead, and {@link
+     * #adoptLegacy} moves it across the first time the matching scope is
+     * minted. The alternative -- dropping v1 entries -- would silently throw
+     * away real review comments on upgrade.
+     */
+    static String legacyScopeId(ManagedSessionId sessionId, DiffScope scope) {
+        return "legacy:" + sessionId.value() + ":" + scope.name();
+    }
 
     private final Path file;
     private final ExecutorService saveExecutor =
             Executors.newSingleThreadExecutor(runnable -> Thread.ofVirtual().unstarted(runnable));
-    private final List<ReviewAnnotation> annotations = new ArrayList<>();
+
+    /** Findings by their composite key, in insertion order (the margin renders in this order). */
+    private final Map<ReviewAnnotation.Key, ReviewAnnotation> findings = new LinkedHashMap<>();
+
+    /** Verdicts by {@code (scopeId, intentId)}. */
+    private final Map<ReviewVerdict.Key, ReviewVerdict> verdicts = new LinkedHashMap<>();
+
+    /** Scopes whose review has been submitted. */
+    private final List<String> submitted = new ArrayList<>();
+
+    /** Persisted per-profile secret used to derive opaque, restart-stable scope ids. */
+    private String scopeIdSecret = newScopeIdSecret();
+
+    private final AtomicReference<Snapshot> pendingSnapshot = new AtomicReference<>();
 
     /**
-     * Newest-wins pending snapshot: mutations replace it, and at most one
-     * writer task is queued to consume it, so a burst of edits produces a
-     * single file write of the latest state.
-     */
-    private final AtomicReference<List<ReviewAnnotation>> pendingSnapshot = new AtomicReference<>();
-
-    /**
-     * Change listeners, notified after every mutation with the affected
-     * annotation's id (or {@code null} for a bulk change).
+     * Change listeners, notified after every mutation with the affected key
+     * (or {@code null} for a bulk change).
      *
-     * <p>Exists because this store now has more than one writer: the Review
-     * tab on the FX thread, and the MCP tool router on its own executor. A
-     * view that caches annotation values must be told to re-read them, or a
+     * <p>Exists because this store has more than one writer: the Review
+     * destination on the FX thread, and the MCP tool router on its own
+     * executor. A view that caches a finding must be told to re-read it, or a
      * later read-modify-write from the stale value silently discards the
      * other writer's change (AGENTS.md, "One writer for persistent state").</p>
      */
-    private final List<Consumer<String>> changeListeners = new CopyOnWriteArrayList<>();
+    private final List<Consumer<ReviewAnnotation.Key>> changeListeners = new CopyOnWriteArrayList<>();
+
+    private record Snapshot(List<ReviewAnnotation> findings, List<ReviewVerdict> verdicts,
+                            List<String> submitted, String scopeIdSecret) {
+    }
 
     public AnnotationStore(Path file) {
         this.file = file.toAbsolutePath().normalize();
@@ -90,26 +130,66 @@ public final class AnnotationStore implements AutoCloseable {
         return stateFile.toAbsolutePath().normalize().resolveSibling("annotations.json");
     }
 
-    // ---- queries ----
-
-    public synchronized List<ReviewAnnotation> forSession(ManagedSessionId sessionId) {
-        return annotations.stream().filter(a -> a.sessionId().equals(sessionId)).toList();
+    /** A defensive copy of the profile secret used by {@link ReviewScopeRegistry}. */
+    public synchronized byte[] scopeIdSecret() {
+        return Base64.getUrlDecoder().decode(scopeIdSecret);
     }
 
-    public synchronized List<ReviewAnnotation> forScope(ManagedSessionId sessionId, DiffScope scope) {
-        return annotations.stream()
-                .filter(a -> a.sessionId().equals(sessionId) && a.scope() == scope)
+    // ---- queries ------------------------------------------------------------
+
+    /** Every finding of one scope, in the order they were added. */
+    public synchronized List<ReviewAnnotation> forScope(String scopeId) {
+        return findings.values().stream().filter(f -> f.scopeId().equals(scopeId)).toList();
+    }
+
+    /** Every finding of one intent within one scope. */
+    public synchronized List<ReviewAnnotation> forIntent(String scopeId, String intentId) {
+        return findings.values().stream()
+                .filter(f -> f.scopeId().equals(scopeId))
+                .filter(f -> f.intentId().filter(intentId::equals).isPresent())
                 .toList();
     }
 
-    public synchronized Optional<ReviewAnnotation> byId(String id) {
-        return annotations.stream().filter(a -> a.id().equals(id)).findFirst();
+    public synchronized Optional<ReviewAnnotation> byKey(ReviewAnnotation.Key key) {
+        return Optional.ofNullable(findings.get(key));
     }
 
-    // ---- change notification ----
+    public Optional<ReviewAnnotation> byId(String scopeId, String id) {
+        return byKey(new ReviewAnnotation.Key(scopeId, id));
+    }
+
+    /** Open (unresolved) findings of a scope -- what the queue badge and the margin count. */
+    public synchronized long openCount(String scopeId) {
+        return findings.values().stream()
+                .filter(f -> f.scopeId().equals(scopeId))
+                .filter(f -> !f.resolved())
+                .count();
+    }
+
+    /** Whether any unresolved finding of {@code intentId} refuses approval. */
+    public synchronized boolean hasOpenBlockingFinding(String scopeId, String intentId) {
+        return findings.values().stream()
+                .filter(f -> f.scopeId().equals(scopeId))
+                .filter(f -> intentId == null || f.intentId().filter(intentId::equals).isPresent())
+                .anyMatch(ReviewAnnotation::blocksApproval);
+    }
+
+    public synchronized Optional<ReviewVerdict> verdict(String scopeId, String intentId) {
+        return Optional.ofNullable(verdicts.get(new ReviewVerdict.Key(scopeId, intentId)));
+    }
+
+    public synchronized List<ReviewVerdict> verdictsFor(String scopeId) {
+        return verdicts.values().stream().filter(v -> v.scopeId().equals(scopeId)).toList();
+    }
+
+    public synchronized boolean isSubmitted(String scopeId) {
+        return submitted.contains(scopeId);
+    }
+
+    // ---- change notification ------------------------------------------------
 
     /** Registers a listener; returns a handle that unregisters it. */
-    public Runnable addChangeListener(Consumer<String> listener) {
+    public Runnable addChangeListener(Consumer<ReviewAnnotation.Key> listener) {
         Objects.requireNonNull(listener, "listener");
         changeListeners.add(listener);
         return () -> changeListeners.remove(listener);
@@ -120,102 +200,184 @@ public final class AnnotationStore implements AutoCloseable {
      * logged and skipped: notification is cosmetic next to the write that just
      * succeeded, and one bad subscriber must not fail the others.
      */
-    private void fireChanged(String annotationId) {
-        for (Consumer<String> listener : changeListeners) {
+    private void fireChanged(ReviewAnnotation.Key key) {
+        for (Consumer<ReviewAnnotation.Key> listener : changeListeners) {
             try {
-                listener.accept(annotationId);
+                listener.accept(key);
             } catch (RuntimeException e) {
                 LOG.log(Level.WARNING, "Annotation change listener failed", e);
             }
         }
     }
 
-    // ---- mutations (each persists asynchronously) ----
+    // ---- mutations (each persists asynchronously) ---------------------------
 
-    public void add(ReviewAnnotation annotation) {
-        addInternal(annotation);
-        fireChanged(annotation.id());
+    /** Adds a finding, or replaces the one already stored under its key (idempotent upsert). */
+    public void upsert(ReviewAnnotation finding) {
+        upsertInternal(finding);
+        fireChanged(finding.key());
     }
 
-    private synchronized void addInternal(ReviewAnnotation annotation) {
-        annotations.add(annotation);
+    private synchronized void upsertInternal(ReviewAnnotation finding) {
+        findings.put(finding.key(), finding);
         persistAsync();
     }
 
     /**
-     * The atomic read-modify-write: re-reads the annotation with {@code id}
-     * under this store's monitor, applies {@code transform} to it, stores the
-     * result and returns it. Empty when no annotation has that id.
+     * The atomic read-modify-write: re-reads the finding under this store's
+     * monitor, applies {@code transform}, stores the result and returns it.
+     * Empty when no finding has that key.
      *
-     * <p>The only way to change a stored annotation, deliberately: a
-     * replace-by-id mutator alongside it would let a caller read, decide, and
-     * then write, giving the other writer -- the FX Review tab or the MCP tool
-     * router -- a window in which to land a change that the write then
-     * overwrites (AGENTS.md: "One writer for persistent state" names this
-     * read-modify-write pattern as a past data-loss bug).</p>
+     * <p>The only way to change a stored finding, deliberately: a
+     * replace-by-key mutator alongside it would let a caller read, decide, and
+     * then write, giving the other writer -- the FX Review destination or the
+     * MCP tool router -- a window in which to land a change that the write then
+     * overwrites (AGENTS.md names this read-modify-write pattern as a past
+     * data-loss bug).</p>
      *
      * <p>{@code transform} runs while the monitor is held, so it must be short
      * and must not call back into this store. It may throw: an exception
-     * propagates to the caller with nothing written and no listener fired,
-     * which is how a caller refuses the mutation based on the value it was
-     * handed (see {@code McpToolRouter}'s {@code review_reply}). Listeners fire
-     * after the monitor is released, never while it is held.</p>
+     * propagates with nothing written and no listener fired, which is how a
+     * caller refuses a mutation based on the value it was handed. Listeners
+     * fire after the monitor is released, never while it is held.</p>
      */
-    public Optional<ReviewAnnotation> mutate(String id, UnaryOperator<ReviewAnnotation> transform) {
-        Optional<ReviewAnnotation> updated = mutateInternal(id, transform);
-        updated.ifPresent(annotation -> fireChanged(annotation.id()));
+    public Optional<ReviewAnnotation> mutate(ReviewAnnotation.Key key,
+                                             UnaryOperator<ReviewAnnotation> transform) {
+        Optional<ReviewAnnotation> updated = mutateInternal(key, transform);
+        updated.ifPresent(finding -> fireChanged(finding.key()));
         return updated;
     }
 
-    private synchronized Optional<ReviewAnnotation> mutateInternal(String id,
-                                                                   UnaryOperator<ReviewAnnotation> transform) {
-        Objects.requireNonNull(id, "id");
+    private synchronized Optional<ReviewAnnotation> mutateInternal(
+            ReviewAnnotation.Key key, UnaryOperator<ReviewAnnotation> transform) {
+        Objects.requireNonNull(key, "key");
         Objects.requireNonNull(transform, "transform");
-        for (int i = 0; i < annotations.size(); i++) {
-            if (annotations.get(i).id().equals(id)) {
-                ReviewAnnotation updated = Objects.requireNonNull(transform.apply(annotations.get(i)),
-                        "transform must not return null");
-                if (!updated.id().equals(id)) {
-                    throw new IllegalArgumentException("transform must not change the annotation id");
-                }
-                annotations.set(i, updated);
-                persistAsync();
-                return Optional.of(updated);
-            }
+        ReviewAnnotation current = findings.get(key);
+        if (current == null) {
+            return Optional.empty();
         }
-        return Optional.empty();
+        ReviewAnnotation updated = Objects.requireNonNull(transform.apply(current),
+                "transform must not return null");
+        if (!updated.key().equals(key)) {
+            throw new IllegalArgumentException("transform must not change the (scopeId, id) key");
+        }
+        findings.put(key, updated);
+        persistAsync();
+        return Optional.of(updated);
     }
 
-    public void remove(String id) {
-        if (removeInternal(id)) {
-            fireChanged(id);
+    public void remove(ReviewAnnotation.Key key) {
+        if (removeInternal(key)) {
+            fireChanged(key);
         }
     }
 
-    private synchronized boolean removeInternal(String id) {
-        if (annotations.removeIf(a -> a.id().equals(id))) {
+    private synchronized boolean removeInternal(ReviewAnnotation.Key key) {
+        if (findings.remove(key) != null) {
             persistAsync();
             return true;
         }
         return false;
     }
 
-    /** Drops every annotation of a deleted session. */
-    public void removeSession(ManagedSessionId sessionId) {
-        if (removeSessionInternal(sessionId)) {
+    /** Drops every finding and verdict of a scope that has left the queue for good. */
+    public void removeScope(String scopeId) {
+        if (removeScopeInternal(scopeId)) {
             fireChanged(null);
         }
     }
 
-    private synchronized boolean removeSessionInternal(ManagedSessionId sessionId) {
-        if (annotations.removeIf(a -> a.sessionId().equals(sessionId))) {
+    private synchronized boolean removeScopeInternal(String scopeId) {
+        boolean changed = findings.keySet().removeIf(key -> key.scopeId().equals(scopeId));
+        changed |= verdicts.keySet().removeIf(key -> key.scopeId().equals(scopeId));
+        changed |= submitted.remove(scopeId);
+        if (changed) {
+            persistAsync();
+        }
+        return changed;
+    }
+
+    /** Records a per-intent verdict, replacing any previous one. */
+    public void putVerdict(ReviewVerdict verdict) {
+        putVerdictInternal(verdict);
+        fireChanged(null);
+    }
+
+    private synchronized void putVerdictInternal(ReviewVerdict verdict) {
+        verdicts.put(verdict.key(), verdict);
+        persistAsync();
+    }
+
+    /** {@code u}: undoes the verdict on one intent. */
+    public void clearVerdict(String scopeId, String intentId) {
+        if (clearVerdictInternal(scopeId, intentId)) {
+            fireChanged(null);
+        }
+    }
+
+    private synchronized boolean clearVerdictInternal(String scopeId, String intentId) {
+        if (verdicts.remove(new ReviewVerdict.Key(scopeId, intentId)) != null) {
             persistAsync();
             return true;
         }
         return false;
     }
 
-    // ---- persistence ----
+    /** Marks a scope's review as submitted. */
+    public void markSubmitted(String scopeId) {
+        if (markSubmittedInternal(scopeId)) {
+            fireChanged(null);
+        }
+    }
+
+    private synchronized boolean markSubmittedInternal(String scopeId) {
+        if (submitted.contains(scopeId)) {
+            return false;
+        }
+        submitted.add(scopeId);
+        persistAsync();
+        return true;
+    }
+
+    /**
+     * Moves findings parked under a pre-scope-handle key onto {@code scopeId}
+     * (see {@link #legacyScopeId}). Called when a scope is minted for a
+     * checkout whose session used to own those annotations, so a user's
+     * comments from before scope handles existed reappear against the right
+     * review rather than being lost.
+     *
+     * @return how many findings were adopted
+     */
+    public int adoptLegacy(ManagedSessionId sessionId, DiffScope diffScope, String scopeId) {
+        int adopted = adoptLegacyInternal(legacyScopeId(sessionId, diffScope), scopeId);
+        if (adopted > 0) {
+            fireChanged(null);
+        }
+        return adopted;
+    }
+
+    private synchronized int adoptLegacyInternal(String from, String to) {
+        List<ReviewAnnotation> moving = findings.values().stream()
+                .filter(f -> f.scopeId().equals(from))
+                .toList();
+        if (moving.isEmpty()) {
+            return 0;
+        }
+        for (ReviewAnnotation finding : moving) {
+            findings.remove(finding.key());
+        }
+        for (ReviewAnnotation finding : moving) {
+            ReviewAnnotation moved = finding.withScopeId(to);
+            // An id that already exists on the target scope keeps the target's
+            // value: the live review is the truth, and a stale legacy copy
+            // must never overwrite it.
+            findings.putIfAbsent(moved.key(), moved);
+        }
+        persistAsync();
+        return moving.size();
+    }
+
+    // ---- persistence --------------------------------------------------------
 
     /**
      * Blocks until every save queued so far has finished writing. For
@@ -248,12 +410,13 @@ public final class AnnotationStore implements AutoCloseable {
     }
 
     private void persistAsync() {
-        List<ReviewAnnotation> snapshot = List.copyOf(annotations);
+        Snapshot snapshot = new Snapshot(List.copyOf(findings.values()),
+                List.copyOf(verdicts.values()), List.copyOf(submitted), scopeIdSecret);
         // Queue a writer task only when there is no snapshot already
         // pending; otherwise the queued task picks up this newer one.
         if (pendingSnapshot.getAndSet(snapshot) == null) {
             saveExecutor.execute(() -> {
-                List<ReviewAnnotation> latest = pendingSnapshot.getAndSet(null);
+                Snapshot latest = pendingSnapshot.getAndSet(null);
                 if (latest != null) {
                     saveSnapshot(latest);
                 }
@@ -261,11 +424,12 @@ public final class AnnotationStore implements AutoCloseable {
         }
     }
 
-    private void saveSnapshot(List<ReviewAnnotation> snapshot) {
+    private void saveSnapshot(Snapshot snapshot) {
         try {
             Path directory = file.getParent();
             Files.createDirectories(directory);
-            String text = JsonWriter.write(toJson(snapshot));
+            String text = JsonWriter.write(toJson(snapshot.findings(), snapshot.verdicts(),
+                    snapshot.submitted(), snapshot.scopeIdSecret()));
             Path tempFile = Files.createTempFile(directory, file.getFileName().toString() + ".", ".tmp");
             try {
                 Files.writeString(tempFile, text, StandardCharsets.UTF_8);
@@ -284,40 +448,139 @@ public final class AnnotationStore implements AutoCloseable {
         }
         try {
             String text = Files.readString(file, StandardCharsets.UTF_8);
-            annotations.addAll(fromJson(JsonParser.parse(text)));
+            JsonValue parsed = JsonParser.parse(text);
+            scopeIdSecretFromJson(parsed).ifPresent(secret -> scopeIdSecret = secret);
+            for (ReviewAnnotation finding : fromJson(parsed)) {
+                findings.put(finding.key(), finding);
+            }
+            for (ReviewVerdict verdict : verdictsFromJson(parsed)) {
+                verdicts.put(verdict.key(), verdict);
+            }
+            submitted.addAll(submittedFromJson(parsed));
         } catch (IOException | RuntimeException e) {
             LOG.log(Level.WARNING, "Annotations file " + file + " is malformed; starting empty", e);
         }
     }
 
-    // ---- codec (package-private for tests) ----
+    // ---- codec (package-private for tests) ----------------------------------
 
-    static JsonValue toJson(List<ReviewAnnotation> annotations) {
+    static JsonValue toJson(List<ReviewAnnotation> findings, List<ReviewVerdict> verdicts,
+                            List<String> submitted) {
+        return toJson(findings, verdicts, submitted, newScopeIdSecret());
+    }
+
+    private static JsonValue toJson(List<ReviewAnnotation> findings, List<ReviewVerdict> verdicts,
+                                    List<String> submitted, String scopeIdSecret) {
         JsonObject root = JsonObject.empty();
         root.put("schemaVersion", JsonNumber.of(SCHEMA_VERSION));
+        root.put("scopeIdSecret", new JsonString(scopeIdSecret));
+
         List<JsonValue> entries = new ArrayList<>();
-        for (ReviewAnnotation annotation : annotations) {
-            JsonObject obj = JsonObject.empty();
-            obj.put("id", new JsonString(annotation.id()));
-            obj.put("sessionId", new JsonString(annotation.sessionId().value().toString()));
-            obj.put("scope", new JsonString(annotation.scope().name()));
-            obj.put("file", new JsonString(annotation.file()));
-            obj.put("startKey", new JsonString(annotation.startKey()));
-            obj.put("endKey", new JsonString(annotation.endKey()));
-            obj.put("status", new JsonString(annotation.status().name()));
-            List<JsonValue> thread = new ArrayList<>();
-            for (ReviewAnnotation.Message message : annotation.thread()) {
-                JsonObject messageObj = JsonObject.empty();
-                messageObj.put("author", new JsonString(message.author()));
-                messageObj.put("at", new JsonString(message.at().toString()));
-                messageObj.put("text", new JsonString(message.text()));
-                thread.add(messageObj);
-            }
-            obj.put("thread", new JsonArray(thread));
-            entries.add(obj);
+        for (ReviewAnnotation finding : findings) {
+            entries.add(findingToJson(finding));
         }
         root.put("annotations", new JsonArray(entries));
+
+        List<JsonValue> verdictEntries = new ArrayList<>();
+        for (ReviewVerdict verdict : verdicts) {
+            JsonObject obj = JsonObject.empty();
+            obj.put("scopeId", new JsonString(verdict.scopeId()));
+            obj.put("intentId", new JsonString(verdict.intentId()));
+            obj.put("verdict", new JsonString(verdict.decision().wireName()));
+            verdict.note().ifPresent(note -> obj.put("note", new JsonString(note)));
+            obj.put("at", new JsonString(verdict.at().toString()));
+            verdictEntries.add(obj);
+        }
+        root.put("verdicts", new JsonArray(verdictEntries));
+
+        List<JsonValue> submittedEntries = new ArrayList<>();
+        for (String scopeId : submitted) {
+            submittedEntries.add(new JsonString(scopeId));
+        }
+        root.put("submitted", new JsonArray(submittedEntries));
         return root;
+    }
+
+    private static Optional<String> scopeIdSecretFromJson(JsonValue value) {
+        if (!(value instanceof JsonObject root) || !(root.get("scopeIdSecret") instanceof JsonString secret)) {
+            return Optional.empty();
+        }
+        try {
+            byte[] decoded = Base64.getUrlDecoder().decode(secret.value());
+            return decoded.length >= 16 ? Optional.of(secret.value()) : Optional.empty();
+        } catch (IllegalArgumentException ignored) {
+            return Optional.empty();
+        }
+    }
+
+    private static String newScopeIdSecret() {
+        byte[] secret = new byte[32];
+        RANDOM.nextBytes(secret);
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(secret);
+    }
+
+    private static JsonObject findingToJson(ReviewAnnotation finding) {
+        JsonObject obj = JsonObject.empty();
+        obj.put("scopeId", new JsonString(finding.scopeId()));
+        obj.put("id", new JsonString(finding.id()));
+        finding.intentId().ifPresent(value -> obj.put("intentId", new JsonString(value)));
+        obj.put("file", new JsonString(finding.file()));
+        obj.put("startKey", new JsonString(finding.startKey()));
+        obj.put("endKey", new JsonString(finding.endKey()));
+        obj.put("severity", new JsonString(finding.severity().wireName()));
+        obj.put("confidence", new JsonString(finding.confidence().wireName()));
+        finding.title().ifPresent(value -> obj.put("title", new JsonString(value)));
+        obj.put("author", new JsonString(finding.author()));
+        obj.put("at", new JsonString(finding.at().toString()));
+        obj.put("status", new JsonString(finding.status().name()));
+        finding.severityOverride().ifPresent(value ->
+                obj.put("severityOverride", new JsonString(value.wireName())));
+
+        if (!finding.evidence().isEmpty()) {
+            obj.put("evidence", new JsonArray(finding.evidence().stream()
+                    .map(evidence -> (JsonValue) evidenceToJson(evidence)).toList()));
+        }
+        finding.patch().ifPresent(patch -> {
+            JsonObject patchObj = JsonObject.empty();
+            patchObj.put("unified", new JsonString(patch.unified()));
+            patchObj.put("summary", new JsonString(patch.summary()));
+            obj.put("patch", patchObj);
+        });
+        finding.deviatesFrom().ifPresent(deviation -> {
+            JsonObject deviationObj = JsonObject.empty();
+            deviationObj.put("prompt", new JsonString(deviation.prompt()));
+            deviation.step().ifPresent(step -> deviationObj.put("step", JsonNumber.of(step)));
+            obj.put("deviatesFrom", deviationObj);
+        });
+        if (!finding.asks().isEmpty()) {
+            List<JsonValue> asks = new ArrayList<>();
+            for (ReviewAnnotation.Ask ask : finding.asks()) {
+                JsonObject askObj = JsonObject.empty();
+                askObj.put("label", new JsonString(ask.label()));
+                askObj.put("question", new JsonString(ask.question()));
+                asks.add(askObj);
+            }
+            obj.put("asks", new JsonArray(asks));
+        }
+        List<JsonValue> thread = new ArrayList<>();
+        for (ReviewAnnotation.Message message : finding.thread()) {
+            JsonObject messageObj = JsonObject.empty();
+            messageObj.put("author", new JsonString(message.author()));
+            messageObj.put("at", new JsonString(message.at().toString()));
+            messageObj.put("text", new JsonString(message.text()));
+            message.code().ifPresent(code -> messageObj.put("code", evidenceToJson(code)));
+            thread.add(messageObj);
+        }
+        obj.put("thread", new JsonArray(thread));
+        return obj;
+    }
+
+    private static JsonObject evidenceToJson(ReviewAnnotation.Evidence evidence) {
+        JsonObject obj = JsonObject.empty();
+        obj.put("label", new JsonString(evidence.label()));
+        obj.put("code", new JsonString(evidence.code()));
+        obj.put("language", new JsonString(evidence.language()));
+        return obj;
     }
 
     static List<ReviewAnnotation> fromJson(JsonValue value) {
@@ -330,29 +593,158 @@ public final class AnnotationStore implements AutoCloseable {
                 continue;
             }
             try {
-                List<ReviewAnnotation.Message> thread = new ArrayList<>();
-                if (obj.get("thread") instanceof JsonArray messages) {
-                    for (JsonValue messageValue : messages.elements()) {
-                        if (messageValue instanceof JsonObject messageObj) {
-                            thread.add(new ReviewAnnotation.Message(
-                                    requireString(messageObj, "author"),
-                                    Instant.parse(requireString(messageObj, "at")),
-                                    requireString(messageObj, "text")));
-                        }
-                    }
-                }
-                result.add(new ReviewAnnotation(
-                        requireString(obj, "id"),
-                        ManagedSessionId.of(requireString(obj, "sessionId")),
-                        DiffScope.valueOf(requireString(obj, "scope").toUpperCase(Locale.ROOT)),
-                        requireString(obj, "file"),
-                        requireString(obj, "startKey"),
-                        requireString(obj, "endKey"),
-                        AnnotationStatus.fromPersisted(requireString(obj, "status")),
-                        thread));
+                result.add(findingFromJson(obj));
             } catch (IllegalArgumentException | DateTimeException e) {
                 // One malformed entry never discards the rest.
                 LOG.log(Level.WARNING, "Skipping malformed annotation entry: " + e.getMessage());
+            }
+        }
+        return result;
+    }
+
+    private static ReviewAnnotation findingFromJson(JsonObject obj) {
+        List<ReviewAnnotation.Message> thread = new ArrayList<>();
+        if (obj.get("thread") instanceof JsonArray messages) {
+            for (JsonValue messageValue : messages.elements()) {
+                if (messageValue instanceof JsonObject messageObj) {
+                    thread.add(new ReviewAnnotation.Message(
+                            requireString(messageObj, "author"),
+                            Instant.parse(requireString(messageObj, "at")),
+                            requireString(messageObj, "text"),
+                            messageObj.get("code") instanceof JsonObject code
+                                    ? Optional.of(evidenceFromJson(code))
+                                    : Optional.empty()));
+                }
+            }
+        }
+        Instant at = obj.get("at") instanceof JsonString value
+                ? Instant.parse(value.value())
+                : thread.stream().map(ReviewAnnotation.Message::at).findFirst().orElse(Instant.EPOCH);
+
+        return new ReviewAnnotation(
+                scopeIdFromJson(obj),
+                requireString(obj, "id"),
+                optionalString(obj, "intentId"),
+                requireString(obj, "file"),
+                requireString(obj, "startKey"),
+                requireString(obj, "endKey"),
+                optionalString(obj, "severity").flatMap(Severity::fromWire).orElse(Severity.QUESTION),
+                optionalString(obj, "confidence").flatMap(Confidence::fromWire).orElse(Confidence.HIGH),
+                optionalString(obj, "title"),
+                optionalString(obj, "author").orElseGet(() ->
+                        thread.isEmpty() ? "You" : thread.get(0).author()),
+                at,
+                evidenceListFromJson(obj),
+                patchFromJson(obj),
+                deviatesFromJson(obj),
+                asksFromJson(obj),
+                thread,
+                optionalString(obj, "severityOverride").flatMap(Severity::fromWire),
+                AnnotationStatus.fromPersisted(requireString(obj, "status")));
+    }
+
+    /**
+     * A v2 entry names its scope handle. A v1 entry predates handles and
+     * names a session and a diff scope instead; it is parked under a
+     * deterministic placeholder rather than discarded (see {@link
+     * #legacyScopeId}).
+     */
+    private static String scopeIdFromJson(JsonObject obj) {
+        Optional<String> scopeId = optionalString(obj, "scopeId");
+        if (scopeId.isPresent()) {
+            return scopeId.get();
+        }
+        String sessionId = requireString(obj, "sessionId");
+        DiffScope diffScope = DiffScope.valueOf(requireString(obj, "scope").toUpperCase(Locale.ROOT));
+        return legacyScopeId(ManagedSessionId.of(sessionId), diffScope);
+    }
+
+    private static List<ReviewAnnotation.Evidence> evidenceListFromJson(JsonObject obj) {
+        if (!(obj.get("evidence") instanceof JsonArray array)) {
+            return List.of();
+        }
+        List<ReviewAnnotation.Evidence> evidence = new ArrayList<>();
+        for (JsonValue element : array.elements()) {
+            if (element instanceof JsonObject entry) {
+                evidence.add(evidenceFromJson(entry));
+            }
+        }
+        return evidence;
+    }
+
+    private static ReviewAnnotation.Evidence evidenceFromJson(JsonObject obj) {
+        return new ReviewAnnotation.Evidence(
+                optionalString(obj, "label").orElse(""),
+                requireString(obj, "code"),
+                optionalString(obj, "language").orElse("text"));
+    }
+
+    private static Optional<ReviewAnnotation.Patch> patchFromJson(JsonObject obj) {
+        if (!(obj.get("patch") instanceof JsonObject patch)) {
+            return Optional.empty();
+        }
+        return Optional.of(new ReviewAnnotation.Patch(
+                requireString(patch, "unified"),
+                optionalString(patch, "summary").orElse("")));
+    }
+
+    private static Optional<ReviewAnnotation.DeviatesFrom> deviatesFromJson(JsonObject obj) {
+        if (!(obj.get("deviatesFrom") instanceof JsonObject deviation)) {
+            return Optional.empty();
+        }
+        Optional<Integer> step = deviation.get("step") instanceof JsonNumber number
+                ? Optional.of(number.asInt())
+                : Optional.empty();
+        return Optional.of(new ReviewAnnotation.DeviatesFrom(requireString(deviation, "prompt"), step));
+    }
+
+    private static List<ReviewAnnotation.Ask> asksFromJson(JsonObject obj) {
+        if (!(obj.get("asks") instanceof JsonArray array)) {
+            return List.of();
+        }
+        List<ReviewAnnotation.Ask> asks = new ArrayList<>();
+        for (JsonValue element : array.elements()) {
+            if (element instanceof JsonObject entry) {
+                asks.add(new ReviewAnnotation.Ask(
+                        optionalString(entry, "label").orElse("Ask"),
+                        requireString(entry, "question")));
+            }
+        }
+        return asks;
+    }
+
+    static List<ReviewVerdict> verdictsFromJson(JsonValue value) {
+        if (!(value instanceof JsonObject root) || !(root.get("verdicts") instanceof JsonArray entries)) {
+            return List.of();
+        }
+        List<ReviewVerdict> result = new ArrayList<>();
+        for (JsonValue entryValue : entries.elements()) {
+            if (!(entryValue instanceof JsonObject obj)) {
+                continue;
+            }
+            try {
+                result.add(new ReviewVerdict(
+                        requireString(obj, "scopeId"),
+                        requireString(obj, "intentId"),
+                        ReviewVerdict.Decision.fromWire(requireString(obj, "verdict"))
+                                .orElseThrow(() -> new IllegalArgumentException("unknown verdict")),
+                        optionalString(obj, "note"),
+                        Instant.parse(requireString(obj, "at"))));
+            } catch (IllegalArgumentException | DateTimeException e) {
+                LOG.log(Level.WARNING, "Skipping malformed verdict entry: " + e.getMessage());
+            }
+        }
+        return result;
+    }
+
+    static List<String> submittedFromJson(JsonValue value) {
+        if (!(value instanceof JsonObject root) || !(root.get("submitted") instanceof JsonArray entries)) {
+            return List.of();
+        }
+        List<String> result = new ArrayList<>();
+        for (JsonValue element : entries.elements()) {
+            if (element instanceof JsonString scopeId) {
+                result.add(scopeId.value());
             }
         }
         return result;
@@ -363,5 +755,9 @@ public final class AnnotationStore implements AutoCloseable {
             return s.value();
         }
         throw new IllegalArgumentException("Missing or non-string field: " + key);
+    }
+
+    private static Optional<String> optionalString(JsonObject obj, String key) {
+        return obj.get(key) instanceof JsonString s ? Optional.of(s.value()) : Optional.empty();
     }
 }

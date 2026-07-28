@@ -39,13 +39,23 @@ class McpToolRouterReadTest {
         context.worktreePath = Optional.of(Path.of("/repos/drydock"));
         registry = new McpSessionRegistry();
         registry.mint(caller, Spawn.ALLOWED);
+        context.grant(caller, SCOPE);
         router = new McpToolRouter(context, registry);
     }
 
+    /** The one review scope this caller may address; findings are keyed by it. */
+    private static final String SCOPE = "rs_test";
+
     private ReviewAnnotation annotation(String file, String key, AnnotationStatus status) {
-        ReviewAnnotation created = ReviewAnnotation.create(caller, DiffScope.BASE, file, key, key,
-                new ReviewAnnotation.Message("You", Instant.parse("2026-07-25T10:00:00Z"), "needs a null check"));
-        return created.withStatus(status);
+        return annotation(SCOPE, file, key, status);
+    }
+
+    private static ReviewAnnotation annotation(String scopeId, String file, String key,
+                                               AnnotationStatus status) {
+        return ReviewAnnotation.human(scopeId, file, key, key,
+                        new ReviewAnnotation.Message("You", Instant.parse("2026-07-25T10:00:00Z"),
+                                "needs a null check"))
+                .withStatus(status);
     }
 
     @Test
@@ -54,7 +64,8 @@ class McpToolRouterReadTest {
                 .map(descriptor -> str(descriptor, "name"))
                 .toList();
 
-        assertEquals(List.of("review_comments", "review_reply", "worktree_create",
+        assertEquals(List.of("review_comments", "review_reply", "review_scope", "review_intents",
+                "review_finding", "review_answer", "review_state", "worktree_create",
                 "session_start", "repos_list", "sessions_list"), names);
     }
 
@@ -76,13 +87,18 @@ class McpToolRouterReadTest {
      */
     @Test
     void toolDescriptorsDeclareTheirRequiredArguments() {
-        Map<String, List<String>> expected = Map.of(
-                "review_comments", List.of(),
-                "review_reply", List.of("id", "note"),
-                "worktree_create", List.of("branch"),
-                "session_start", List.of("worktree_path"),
-                "repos_list", List.of(),
-                "sessions_list", List.of());
+        Map<String, List<String>> expected = Map.ofEntries(
+                Map.entry("review_comments", List.of()),
+                Map.entry("review_reply", List.of("id", "note")),
+                Map.entry("review_scope", List.of("scopeId")),
+                Map.entry("review_intents", List.of("scopeId", "intents")),
+                Map.entry("review_finding", List.of("scopeId", "findings")),
+                Map.entry("review_answer", List.of("scopeId", "findingId", "body")),
+                Map.entry("review_state", List.of("scopeId")),
+                Map.entry("worktree_create", List.of("branch")),
+                Map.entry("session_start", List.of("worktree_path")),
+                Map.entry("repos_list", List.of()),
+                Map.entry("sessions_list", List.of()));
 
         for (JsonValue descriptor : router.toolDescriptors()) {
             String name = str(descriptor, "name");
@@ -201,25 +217,28 @@ class McpToolRouterReadTest {
 
     @Test
     void reviewCommentsFiltersByScopeWhenAsked() throws Exception {
-        ReviewAnnotation working = ReviewAnnotation.create(caller, DiffScope.WORKING_TREE, "w.java", "n1", "n1",
-                new ReviewAnnotation.Message("You", Instant.EPOCH, "uncommitted"));
+        context.grant(caller, "rs_other");
         context.annotations.add(annotation("base.java", "n1", AnnotationStatus.OPEN));
-        context.annotations.add(working);
+        context.annotations.add(annotation("rs_other", "w.java", "n1", AnnotationStatus.OPEN));
 
-        JsonValue result = router.call(caller, "review_comments", args("scope", "WORKING_TREE"));
+        JsonValue result = router.call(caller, "review_comments", args("scopeId", "rs_other"));
 
         List<JsonValue> comments = array(result, "comments");
         assertEquals(1, comments.size());
         assertEquals("w.java", str(comments.get(0), "file"));
     }
 
+    /** A scope this session was never granted is not merely filtered out -- it is invisible. */
     @Test
-    void reviewCommentsRejectsAnUnknownScope() {
-        McpToolException failure = assertThrows(McpToolException.class,
-                () -> router.call(caller, "review_comments", args("scope", "SIDEWAYS")));
+    void reviewCommentsNeverLeaksAScopeTheSessionCannotAddress() throws Exception {
+        context.annotations.add(annotation("mine.java", "n1", AnnotationStatus.OPEN));
+        context.annotations.add(annotation("rs_forbidden", "theirs.java", "n1", AnnotationStatus.OPEN));
 
-        assertTrue(failure.getMessage().contains("WORKING_TREE"),
-                "should list the valid scopes: " + failure.getMessage());
+        JsonValue result = router.call(caller, "review_comments", noArgs());
+
+        assertEquals(List.of("mine.java"), array(result, "comments").stream()
+                .map(comment -> str(comment, "file"))
+                .toList());
     }
 
     @Test

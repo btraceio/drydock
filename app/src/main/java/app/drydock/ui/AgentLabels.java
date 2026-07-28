@@ -12,7 +12,7 @@ import app.drydock.domain.SessionStatus;
  * wrong -- so every such label is derived from the session's {@link
  * AgentKind} here instead of being written out at a call site.
  */
-final class AgentLabels {
+public final class AgentLabels {
 
     /** Sub-tab mark for the agent surface, matching the ❯_/▤/◨ of its neighbours. */
     private static final String AGENT_GLYPH = "✳";
@@ -27,7 +27,7 @@ final class AgentLabels {
      * name when no provider for {@code kind} is registered -- a session
      * persisted with an agent this build didn't discover still has to name it.
      */
-    static String displayName(AgentRegistry registry, AgentKind kind) {
+    public static String displayName(AgentRegistry registry, AgentKind kind) {
         return registry.provider(kind)
                 .map(AgentProvider::displayName)
                 .orElseGet(() -> titleCase(kind.persistedName()));

@@ -18,11 +18,17 @@ import app.drydock.git.WorktreeService;
 import app.drydock.github.GitHubService;
 import app.drydock.launcher.DockIcon;
 import app.drydock.mcp.McpConfigWriter;
+import app.drydock.mcp.McpActivityLog;
 import app.drydock.mcp.McpServer;
 import app.drydock.mcp.McpSessionRegistry;
 import app.drydock.mcp.McpToolRouter;
 import app.drydock.mcp.WorkspaceMcpSessionContext;
+import app.drydock.review.AnnotationStatus;
 import app.drydock.review.AnnotationStore;
+import app.drydock.review.Confidence;
+import app.drydock.review.ReviewAnnotation;
+import app.drydock.review.Severity;
+import app.drydock.review.ReviewScopeRegistry;
 import app.drydock.search.SessionSearchService;
 import app.drydock.state.JsonApplicationStateRepository;
 import app.drydock.ui.AppShell;
@@ -30,10 +36,10 @@ import app.drydock.ui.GitHubCloneModal;
 import app.drydock.ui.MainWorkspace;
 import app.drydock.ui.RemoteRepositoryModal;
 import app.drydock.ui.RepositorySidebar;
+import app.drydock.ui.review.ReviewDestinationView;
 import app.drydock.ui.SettingsModal;
 import app.drydock.ui.SizeSetting;
 import app.drydock.ui.model.WorkspaceViewModel;
-import app.drydock.ui.review.ReviewView;
 import javafx.application.Application;
 import javafx.application.Platform;
 import javafx.scene.control.Alert;
@@ -64,6 +70,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.Base64;
+import java.util.List;
 import java.util.Optional;
 import java.util.function.Supplier;
 
@@ -125,6 +132,10 @@ public final class DrydockApplication extends Application {
     private AppShell appShell;
     private GitHubService gitHubService;
     private AnnotationStore annotationStore;
+    /** Cross-repo review scope handles, shared by the Review destination and the MCP tool router. */
+    private ReviewScopeRegistry reviewScopeRegistry;
+    /** Shared by the MCP server (writer) and the Review activity panel (reader). */
+    private McpActivityLog mcpActivityLog;
     private McpServer mcpServer;
 
     private boolean shutdownConfirmed;
@@ -197,12 +208,23 @@ public final class DrydockApplication extends Application {
         WorkspaceViewModel viewModel = new WorkspaceViewModel();
         viewModel.setSessions(sessionManager.sessions());
 
+        // Cross-repo review scope handles. Owned here rather than by the
+        // workspace because the MCP tool router addresses scopes too, and
+        // both must resolve the same handle to the same review.
+        reviewScopeRegistry = new ReviewScopeRegistry(annotationStore.scopeIdSecret());
+        // Created before both readers: the Review view is built now, the MCP
+        // server starts below, and they must share one log.
+        mcpActivityLog = new McpActivityLog();
+
         mainWorkspace = new MainWorkspace(sessionManager, agentRegistry, repositoryManager, gitStatusService,
                 searchService, ghCliService, worktreeService, diffService, changedLineService, annotationStore,
-                viewModel, primaryStage);
+                reviewScopeRegistry, mcpActivityLog, viewModel, primaryStage);
         RepositorySidebar sidebar =
                 new RepositorySidebar(repositoryManager, gitStatusService, worktreeService, sessionManager,
                         agentRegistry, mainWorkspace, viewModel);
+        sidebar.setReviewQueueSize(mainWorkspace::reviewQueueSize);
+        sidebar.setOpenFindingsAt(mainWorkspace::openFindingsAt);
+        mainWorkspace.setOnReviewQueueChanged(sidebar::refreshReviewBadges);
 
         installSessionActivityHooks(activityDir);
         startMcpServer(stateDir);
@@ -217,9 +239,12 @@ public final class DrydockApplication extends Application {
                     // ghostty surface in place (no session restart needed).
                     mainWorkspace.applyTerminalTheme(theme);
                 },
-                DEFAULT_SCENE_WIDTH, DEFAULT_SCENE_HEIGHT);
+                sceneWidth(), sceneHeight());
 
         mainWorkspace.setThemeProvider(() -> appShell.themeManager().theme());
+        // Review's ? button shares the one overlay, so the table stays in
+        // one place and cannot drift from what is actually bound.
+        mainWorkspace.setOnShowShortcuts(appShell::showShortcutsOverlay);
         mainWorkspace.setTerminalFontSizeProvider(
                 () -> repositoryManager.state().ui().terminalFontSize());
         // Warms the ghostty config cache for the pair the FIRST opened
@@ -496,28 +521,50 @@ public final class DrydockApplication extends Application {
             driver.start();
         }
 
-        // Diagnostic hook for the Review tab's visual pass: switches the
-        // selected tab to Review and shows the working-tree diff (the only
-        // non-empty scope for a session opened in a repository root) after
-        // <delaySeconds>. Inert unless -Dapp.drydock.diag.openReview is set.
+        // Diagnostic hook for the Review destination's visual pass: shows
+        // Review and lets its queue assemble, after <delaySeconds>. Inert
+        // unless -Dapp.drydock.diag.openReview is set.
         String openReview = System.getProperty("app.drydock.diag.openReview");
         if (openReview != null) {
             long reviewDelayMillis = (long) (Double.parseDouble(openReview.strip()) * 1000);
             Thread reviewOpener = new Thread(() -> {
                 try {
                     Thread.sleep(reviewDelayMillis);
-                    ReviewView review = onFx(mainWorkspace::diagShowReview);
-                    if (review == null) {
-                        System.out.println("[diag] openReview: no Review view on the selected tab");
-                        return;
+                    ReviewDestinationView review = onFx(mainWorkspace::diagShowReview);
+                    // The queue assembles off-thread (git + gh per repo).
+                    Thread.sleep(3_000);
+                    System.out.println("[diag] review opened with "
+                            + onFx(() -> review.diagItems().size()) + " queue items");
+                    // The diff of the selected item lands a moment later.
+                    Thread.sleep(3_000);
+                    System.out.println("[diag] diff column: " + onFx(review::diagDiffSummary));
+                    for (String line : onFx(review::diagAllItemDiffs)) {
+                        System.out.println("[diag] item: " + line);
                     }
-                    // The sub-tab switch and first diff render need a few pulses.
-                    Thread.sleep(2_000);
-                    onFx(() -> {
-                        review.diagSelectWorkingTree();
-                        return null;
-                    });
-                    System.out.println("[diag] review opened on the working-tree scope");
+                    // Renders the scene graph to a PNG from inside the
+                    // process. Unlike a screen capture this needs no OS
+                    // screen-recording permission and cannot pick up another
+                    // window, so it is the only visual evidence that is both
+                    // available headlessly and guaranteed to be OUR UI.
+                    String item = System.getProperty("app.drydock.diag.reviewItem");
+                    if (item != null) {
+                        int index = Integer.parseInt(item.strip());
+                        onFx(() -> {
+                            review.diagSelectItem(index);
+                            return null;
+                        });
+                        // The selected item's diff is a git process.
+                        Thread.sleep(3_000);
+                        System.out.println("[diag] selected item " + index);
+                    }
+                    if (Boolean.getBoolean("app.drydock.diag.seedFindings")) {
+                        System.out.println("[diag] seeded: " + onFx(() -> seedFindings(review)));
+                        Thread.sleep(1_500);
+                    }
+                    String shot = System.getProperty("app.drydock.diag.screenshot");
+                    if (shot != null) {
+                        System.out.println("[diag] screenshot: " + onFx(() -> snapshotScene(shot)));
+                    }
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                 } catch (RuntimeException e) {
@@ -661,8 +708,17 @@ public final class DrydockApplication extends Application {
             boolean cmd = event.isShortcutDown();
 
             if (event.getCode() == KeyCode.ESCAPE) {
+                // Topmost-first (Review spec section 5): the modal, then the
+                // Review destination, then the tab selection.
                 if (appShell.modalLayer().isShowingModal()) {
                     appShell.modalLayer().close();
+                    event.consume();
+                } else if (!inTextInput && mainWorkspace.unwindReviewOverlay()) {
+                    // Review had something open (the symbol lens, the MCP
+                    // panel); that closes first and Review stays.
+                    event.consume();
+                } else if (!inTextInput && mainWorkspace.isReviewShowing()) {
+                    mainWorkspace.hideReview();
                     event.consume();
                 } else if (!inTextInput) {
                     mainWorkspace.showPicker();
@@ -711,7 +767,7 @@ public final class DrydockApplication extends Application {
                 mainWorkspace.showExplorerSubTab();
                 event.consume();
             } else if (cmd && event.getCode() == KeyCode.DIGIT4) {
-                mainWorkspace.showReviewSubTab();
+                mainWorkspace.showReviewForCurrentSession();
                 event.consume();
             } else if (cmd && event.getCode() == KeyCode.R) {
                 mainWorkspace.activeSessionId().flatMap(id -> sessionManager.sessions().stream()
@@ -733,6 +789,137 @@ public final class DrydockApplication extends Application {
                 event.consume();
             }
         });
+    }
+
+    /**
+     * Window size for this launch. Overridable only for the visual pass
+     * (-Dapp.drydock.diag.windowSize=1800x1000): Review's rails collapse at
+     * documented widths, so photographing them expanded means being able to
+     * ask for a window wide enough.
+     */
+    private static double sceneWidth() {
+        return diagWindowSize().map(size -> size[0]).orElse(DEFAULT_SCENE_WIDTH);
+    }
+
+    private static double sceneHeight() {
+        return diagWindowSize().map(size -> size[1]).orElse(DEFAULT_SCENE_HEIGHT);
+    }
+
+    private static Optional<double[]> diagWindowSize() {
+        String raw = System.getProperty("app.drydock.diag.windowSize");
+        if (raw == null) {
+            return Optional.empty();
+        }
+        String[] parts = raw.toLowerCase(java.util.Locale.ROOT).split("x");
+        if (parts.length != 2) {
+            return Optional.empty();
+        }
+        try {
+            return Optional.of(new double[] {
+                    Double.parseDouble(parts[0].strip()), Double.parseDouble(parts[1].strip()) });
+        } catch (NumberFormatException e) {
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * Seeds representative findings against the selected scope, anchored to
+     * lines that are actually in the diff. Diagnostic-only: the findings
+     * margin renders severity pills, pins, patches and ASK chips, and none of
+     * that can be seen -- or shown to a reviewer -- without findings to
+     * render.
+     */
+    private String seedFindings(ReviewDestinationView review) {
+        Optional<String> scopeId = review.diagSelectedScopeId();
+        if (scopeId.isEmpty()) {
+            return "no scope selected";
+        }
+        List<String[]> anchors = review.diagAnchors(4);
+        if (anchors.isEmpty()) {
+            return "no changed lines to anchor to";
+        }
+        java.time.Instant now = java.time.Instant.now();
+        String[] a0 = anchors.get(0);
+        String[] a1 = anchors.get(Math.min(1, anchors.size() - 1));
+        String[] a2 = anchors.get(Math.min(2, anchors.size() - 1));
+        String[] a3 = anchors.get(Math.min(3, anchors.size() - 1));
+
+        annotationStore.upsert(new ReviewAnnotation(scopeId.get(), "f_leak_1", Optional.empty(),
+                a0[0], a0[1], a0[1], Severity.BLOCKING, Confidence.HIGH,
+                Optional.of("Event filter never detached"), "Claude", now,
+                List.of(), Optional.of(new ReviewAnnotation.Patch(
+                        "-        scene.addEventFilter(MOUSE_DRAGGED, tracker);\n"
+                                + "+        scene.removeEventFilter(MOUSE_DRAGGED, tracker);",
+                        "one line in onRelease")),
+                Optional.empty(),
+                List.of(new ReviewAnnotation.Ask("Why is it a leak?", "Explain why this leaks."),
+                        new ReviewAnnotation.Ask("What breaks?", "What breaks in practice?")),
+                List.of(new ReviewAnnotation.Message("Claude", now,
+                        "The filter is added on every press and never removed on release -- one "
+                                + "leaked listener per drag. After a few minutes of resizing, every "
+                                + "mouse move runs dozens of stale trackers.")),
+                Optional.empty(), AnnotationStatus.OPEN));
+
+        annotationStore.upsert(new ReviewAnnotation(scopeId.get(), "f_clamp_2", Optional.empty(),
+                a1[0], a1[1], a1[1], Severity.QUESTION, Confidence.MEDIUM,
+                Optional.of("Width is committed unclamped"), "Claude", now,
+                List.of(), Optional.empty(), Optional.empty(), List.of(),
+                List.of(new ReviewAnnotation.Message("Claude", now,
+                                "This commits the raw width before the clamp runs. Deliberate?"),
+                        new ReviewAnnotation.Message("You", now, "No -- good catch, I will fix it.")),
+                Optional.empty(), AnnotationStatus.OPEN));
+
+        annotationStore.upsert(new ReviewAnnotation(scopeId.get(), "f_dev_3", Optional.empty(),
+                a2[0], a2[1], a2[1], Severity.DEVIATION, Confidence.HIGH,
+                Optional.of("Minimum width is 220, you asked for 240"), "Claude", now,
+                List.of(), Optional.empty(),
+                Optional.of(new ReviewAnnotation.DeviatesFrom("min width 240", Optional.of(9))),
+                List.of(),
+                List.of(new ReviewAnnotation.Message("Claude", now,
+                        "Step 5 set the clamp to 240; step 7 reverted it to 220.")),
+                Optional.empty(), AnnotationStatus.OPEN));
+
+        annotationStore.upsert(new ReviewAnnotation(scopeId.get(), "f_nit_4", Optional.empty(),
+                a3[0], a3[1], a3[1], Severity.NIT, Confidence.UNSURE,
+                Optional.of("Spelling in a comment"), "Claude", now,
+                List.of(), Optional.empty(), Optional.empty(), List.of(),
+                List.of(new ReviewAnnotation.Message("Claude", now, "\"recieve\" -> \"receive\".")),
+                Optional.empty(), AnnotationStatus.RESOLVED));
+
+        return "4 findings against " + scopeId.get();
+    }
+
+    /**
+     * Writes the current scene to {@code path} as a PNG, on the FX thread.
+     * Diagnostic-only: the visual pass has no other way to see the real UI,
+     * because the FX layer has no headless harness inside the running app
+     * (docs/architecture.md).
+     */
+    private String snapshotScene(String path) {
+        try {
+            javafx.scene.image.WritableImage image = appShell.scene().snapshot(null);
+            int width = (int) image.getWidth();
+            int height = (int) image.getHeight();
+            // Pixels are copied by hand rather than through SwingFXUtils: that
+            // lives in javafx.swing, which the runtime image does not carry.
+            // java.desktop (BufferedImage/ImageIO) is already on the module
+            // list, so this adds no module to the packaged app.
+            int[] argb = new int[width * height];
+            image.getPixelReader().getPixels(0, 0, width, height,
+                    javafx.scene.image.PixelFormat.getIntArgbInstance(), argb, 0, width);
+            java.awt.image.BufferedImage out = new java.awt.image.BufferedImage(
+                    width, height, java.awt.image.BufferedImage.TYPE_INT_ARGB);
+            out.setRGB(0, 0, width, height, argb, 0, width);
+            java.io.File file = new java.io.File(path);
+            java.io.File parent = file.getParentFile();
+            if (parent != null) {
+                parent.mkdirs();
+            }
+            javax.imageio.ImageIO.write(out, "png", file);
+            return path + " (" + width + "x" + height + ")";
+        } catch (Exception e) {
+            return "FAILED: " + e;
+        }
     }
 
     /** ⌘N target: the active tab's repository, else the first registered one. */
@@ -801,6 +988,9 @@ public final class DrydockApplication extends Application {
             if (sidebarWidth > 0) {
                 closeQuietly("sidebar-width persistence", () -> repositoryManager.updateSidebarWidth(sidebarWidth));
             }
+        }
+        if (mainWorkspace != null) {
+            closeQuietly("Review services", mainWorkspace::closeReviewServices);
         }
         closeQuietly("UserConfig saves", UserConfig::flushPendingSaves);
         if (gitHubService != null) {
@@ -910,11 +1100,15 @@ public final class DrydockApplication extends Application {
                 sessionManager::sessions,
                 repositoryManager::repositories,
                 annotationStore,
+                reviewScopeRegistry,
+                agentRegistry,
+                mainWorkspace.intentGrouping(),
+                diffService,
                 gitStatusService,
                 worktreeService,
                 UserConfig::load,
                 (worktree, prompt) -> mainWorkspace.startAgentSession(worktree, prompt));
-        McpServer server = new McpServer(registry, new McpToolRouter(context, registry));
+        McpServer server = new McpServer(registry, new McpToolRouter(context, registry), mcpActivityLog);
         // Published before start() so a shutdown racing startup still reaches
         // it. Publication alone would not be enough -- a close() that wins the
         // race would find nothing bound yet and no-op -- which is why
