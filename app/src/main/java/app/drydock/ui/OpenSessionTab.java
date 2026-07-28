@@ -16,6 +16,7 @@ import javafx.application.Platform;
 import javafx.css.PseudoClass;
 import javafx.geometry.Pos;
 import javafx.scene.control.Button;
+import javafx.scene.control.ContentDisplay;
 import javafx.scene.control.Label;
 import javafx.scene.control.ProgressIndicator;
 import javafx.scene.control.Tab;
@@ -321,6 +322,16 @@ final class OpenSessionTab {
             reviewSubTabButton.setTooltip(new Tooltip("Review (⌘4)"));
         }
 
+        // The shortcut is spelled out ON the button, not only in its tooltip:
+        // a tooltip is only found by someone who already suspects there is a
+        // shortcut. Disabled sub-tabs get none -- their key does nothing.
+        showKeyHint(claudeSubTabButton, "⌘1");
+        showKeyHint(terminalSubTabButton, "⌘2");
+        if (!isRemote) {
+            showKeyHint(explorerSubTabButton, "⌘3");
+            showKeyHint(reviewSubTabButton, "⌘4");
+        }
+
         subTabContext.getStyleClass().add("session-subtab-context");
 
         Region spacer = new Region();
@@ -449,6 +460,19 @@ final class OpenSessionTab {
         if (active != null) {
             Platform.runLater(active::updateGeometry);
         }
+    }
+
+    /**
+     * Puts the sub-tab's keyboard shortcut on the button itself, right of its
+     * label, in the dimmer key style. A graphic (rather than more text) keeps
+     * the label's own styling -- selected/{@code :keys} colouring -- untouched.
+     */
+    private static void showKeyHint(ToggleButton button, String shortcut) {
+        Label hint = new Label(shortcut);
+        hint.getStyleClass().add("session-subtab-key");
+        button.setGraphic(hint);
+        button.setContentDisplay(ContentDisplay.RIGHT);
+        button.setGraphicTextGap(8);
     }
 
     /** Refocuses whichever native terminal (Claude or shell) the active sub-tab shows, if any. */
@@ -751,15 +775,36 @@ final class OpenSessionTab {
         int index = tabLabels.getChildren().indexOf(renameField);
         if (index >= 0) {
             tabLabels.getChildren().set(index, tabTitleLabel);
-            // Rename over: give the terminal its key routing back (no-op
-            // when another sub-tab is showing).
-            bridge.applyVisibility();
+            // Rename over: give the showing terminal its key routing back
+            // (no-op when Explorer/Review is the active sub-tab).
+            restoreTerminalFocus();
         }
     }
 
-    /** Releases the terminal's AppKit first-responder status so JavaFX text inputs receive keys. */
+    /**
+     * Releases the terminal's AppKit first-responder status so JavaFX text
+     * inputs receive keys.
+     *
+     * <p>BOTH native surfaces are released, not just the agent's: the shell
+     * sub-tab has its own bridge, and while it was showing it kept the
+     * responder through a rename or a sidebar-filter click -- every keystroke
+     * went into the shell and nothing could be typed anywhere else.</p>
+     */
     void releaseTerminalFocus() {
         bridge.releaseFocus();
+        if (shellBridge != null) {
+            shellBridge.releaseFocus();
+        }
+    }
+
+    /** Undoes {@link #releaseTerminalFocus}: gives the showing native surface its key routing back. */
+    private void restoreTerminalFocus() {
+        // applyVisibility is a no-op for a bridge whose sub-tab isn't showing,
+        // so this refocuses the active surface and only that one.
+        bridge.applyVisibility();
+        if (shellBridge != null) {
+            shellBridge.applyVisibility();
+        }
     }
 
     // ---- Wiring from MainWorkspace ------------------------------------------

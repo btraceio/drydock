@@ -12,9 +12,15 @@ import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdDiscovery;
 import app.drydock.agent.api.SessionIdStrategy;
 import app.drydock.agent.spi.AgentProvider;
+import app.drydock.domain.ManagedAgentSession;
+import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.PrState;
+import app.drydock.domain.RepositoryId;
+import app.drydock.domain.SessionStatus;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ForkJoinPool;
@@ -61,6 +67,23 @@ class AgentLabelsTest {
     void fallsBackToThePersistedNameWhenNoProviderIsRegistered() {
         // A session persisted with an agent this build didn't discover must
         // still name it -- never the previous hard-coded "Claude".
-        assertEquals("✳  pi", AgentLabels.subTabLabel(registry(), AgentKind.PI));
+        assertEquals("✳  Pi", AgentLabels.subTabLabel(registry(), AgentKind.PI));
+    }
+
+    @Test
+    void anUnsupportedAgentIsNamedUnknownRatherThanItsPlaceholderKind() {
+        // The state decoder gives a session whose persisted agent name this
+        // build doesn't know a placeholder agentKind() of CLAUDE. Rendering
+        // that placeholder is the one thing this class must never do.
+        assertEquals("Unknown agent",
+                AgentLabels.displayName(registry(), session(AgentKind.CLAUDE, SessionStatus.UNSUPPORTED_AGENT)));
+        assertEquals("Codex",
+                AgentLabels.displayName(registry(), session(AgentKind.CODEX, SessionStatus.INACTIVE)));
+    }
+
+    private static ManagedAgentSession session(AgentKind kind, SessionStatus status) {
+        return new ManagedAgentSession(ManagedSessionId.newId(), RepositoryId.newId(), kind, "work",
+                Optional.empty(), Optional.empty(), Path.of("/tmp"), Optional.empty(), status,
+                Instant.EPOCH, Instant.EPOCH, Optional.empty(), PrState.NONE, Optional.empty(), false);
     }
 }

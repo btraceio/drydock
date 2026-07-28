@@ -1160,7 +1160,7 @@ public final class RepositorySidebar extends VBox {
         confirm.setTitle("Delete session");
         confirm.setHeaderText("Delete session \"" + session.displayName() + "\"?");
         confirm.setContentText("This removes the session from the manager (stopping it first if running). "
-                + AgentLabels.displayName(agentRegistry, session.agentKind())
+                + AgentLabels.displayName(agentRegistry, session)
                 + "'s own conversation history on disk is not deleted.");
         confirm.showAndWait().filter(button -> button == ButtonType.OK).ifPresent(button ->
                 sessionManager.deleteSession(session.id()).whenComplete((v, ex) -> Platform.runLater(() -> {
@@ -1463,7 +1463,7 @@ public final class RepositorySidebar extends VBox {
                     : session.workingDirectory().toString();
             rowTip.setText("Status: " + session.status()
                     + (activity == SessionActivity.UNKNOWN ? ""
-                            : "\n" + AgentLabels.displayName(agentRegistry, session.agentKind()) + ": "
+                            : "\n" + AgentLabels.displayName(agentRegistry, session) + ": "
                                     + activityLabel(activity))
                     + "\nLast opened: " + session.lastOpenedAt()
                     + "\nWorking directory: " + workingDirectoryText);
