@@ -3,6 +3,7 @@ package app.drydock.ui;
 import app.drydock.agent.api.Agent;
 import app.drydock.agent.api.AgentKind;
 import app.drydock.agent.api.AgentRegistry;
+import app.drydock.agent.api.CreateContext;
 import app.drydock.app.RepositoryManager;
 import app.drydock.app.SessionManager;
 import app.drydock.app.SessionOpenResult;
@@ -97,6 +98,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
@@ -1132,6 +1134,42 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                     }));
         }
 
+        /**
+         * The gate's third command line. Resolved through the SAME call the
+         * launch itself makes, so the preview and the launch cannot disagree
+         * about which agent runs; the registry's preview build can touch the
+         * filesystem (locating the executable), hence the virtual thread and
+         * the hop back to FX.
+         */
+        @Override
+        public void launchCommandPreview(ReviewScope scope, Consumer<String> onReady) {
+            Optional<Repository> repository = repositoryManager.repositories().stream()
+                    .filter(candidate -> candidate.root().equals(scope.repoRoot()))
+                    .findFirst();
+            Optional<AgentKind> agent = repository.flatMap(repo ->
+                    agentRegistry.resolveDefault(repo.settings().lastUsedAgent(), repo.isRemote()));
+            if (agent.isEmpty()) {
+                onReady.accept("(no agent CLI available)");
+                return;
+            }
+            Thread.ofVirtual().name("drydock-review-preview").start(() -> {
+                String command;
+                try {
+                    // No MCP config: a preview must not mint a token or write
+                    // the per-session file the real launch then replaces
+                    // (same reasoning as StartSessionModal's preview).
+                    command = agentRegistry.previewCreateCommand(agent.get(),
+                            new CreateContext(scope.pr().map(pr -> "pr-" + pr.number()).orElse("review"),
+                                    UUID.randomUUID().toString(), scope.repoRoot(),
+                                    remoteOf(repository.get()), Optional.empty()));
+                } catch (RuntimeException e) {
+                    command = "(preview unavailable)";
+                }
+                String resolved = command;
+                Platform.runLater(() -> onReady.accept(resolved));
+            });
+        }
+
         @Override
         public void readPatchOnly(ReviewScope scope, Consumer<Optional<UnifiedDiff>> onComplete) {
             Optional<Integer> pr = scope.pr().map(ReviewScope.PullRequestRef::number);
@@ -1193,13 +1231,36 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * scope, so its agent may review the PR. The grant is the human action
      * the MCP schema requires; it happens here because this whole flow began
      * with a human clicking "Start session &amp; review".
+     *
+     * <p>The session runs the REPOSITORY'S agent, not a hard-coded one. What
+     * that costs is worth stating: the {@code review_*} MCP surface reaches
+     * an agent only through the per-session MCP config, which today only
+     * Claude consumes ({@code AgentProvider.supportsMcpConfig}). A session on
+     * another agent still reviews -- it reads the diff, answers questions,
+     * and takes the "ask the agent to fix it" hand-off, all of which go
+     * through its terminal -- but it cannot post findings back into the
+     * queue. Silently starting a different agent than the user chose is not
+     * the fix for that; see the gate's command preview, which now shows
+     * whichever agent will actually run.</p>
      */
     private void openCheckedOutPr(Repository repository, ReviewScope scope, Path worktree,
                                   int prNumber, Consumer<String> onFailure) {
+        // The repository's own agent, resolved exactly as every other
+        // session-opening entry point resolves it. Reviewing a PR is not a
+        // reason to overrule the agent the user picked for this repository.
+        Optional<AgentKind> agent = agentRegistry.resolveDefault(repository.settings().lastUsedAgent(),
+                repository.isRemote());
+        if (agent.isEmpty()) {
+            onFailure.accept("The pull request was checked out, but no agent CLI is available to review it. "
+                    + "Searched: " + agentRegistry.agents().stream()
+                            .map(a -> a.displayName() + " (" + a.describeSearched() + ")")
+                            .collect(Collectors.joining("; ")));
+            return;
+        }
         try {
             ManagedSessionId session = openWorktreeSession(repository,
                     PrCheckoutService.localBranchFor(prNumber), worktree, Optional.empty(),
-                    false, AgentKind.CLAUDE, Spawn.FORBIDDEN);
+                    false, agent.get(), Spawn.FORBIDDEN);
             // Re-mint so the scope now names its worktree and its session;
             // minting is idempotent on identity, but the identity changed --
             // it has a worktree now -- so this is a new handle, and the old

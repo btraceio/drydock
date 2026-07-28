@@ -150,6 +150,13 @@ public final class ReviewDestinationView extends BorderPane {
          */
         void readPatchOnly(ReviewScope scope,
                            Consumer<Optional<app.drydock.git.UnifiedDiff>> onComplete);
+
+        /**
+         * The agent-launch command the gate previews for {@code scope} -- the
+         * repository's own agent, so the preview cannot claim an agent the
+         * launch will not run. Answers on the FX thread.
+         */
+        void launchCommandPreview(ReviewScope scope, Consumer<String> onReady);
     }
 
     private final Host host;
@@ -693,6 +700,11 @@ public final class ReviewDestinationView extends BorderPane {
         @Override
         public void startSessionAndReview(ReviewScope scope) {
             host.startSessionAndReview(scope, checkoutGate::showFailure);
+        }
+
+        @Override
+        public void launchCommandPreview(ReviewScope scope, Consumer<String> onReady) {
+            host.launchCommandPreview(scope, onReady);
         }
 
         @Override

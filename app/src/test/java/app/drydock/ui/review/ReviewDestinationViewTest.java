@@ -221,6 +221,26 @@ class ReviewDestinationViewTest extends ApplicationTest {
                 "must not advertise a flag gh does not have: " + commands);
     }
 
+    @Test
+    void theGatePreviewsTheAgentThatWillActuallyRun() {
+        // The launch line used to be a hard-coded "claude --cwd <worktree>",
+        // which lied to every repository whose agent is not Claude -- and the
+        // launch itself pinned AgentKind.CLAUDE to match. Both now come from
+        // the repository's own agent, so the gate prints what the host says.
+        host.launchCommand = "codex --cd /wt/pr-412";
+        ReviewScopeRegistry registry = new ReviewScopeRegistry();
+        ReviewScope scope = registry.mint(ReviewScopeRegistry.spec(
+                ReviewScope.Kind.PR, Path.of("/repo"), Optional.empty(), "main", "feat/gateway",
+                Optional.of(new ReviewScope.PullRequestRef(412, Optional.empty())), Optional.empty()));
+        interact(() -> view.setItems(
+                List.of(new ReviewItem(scope, ReviewItem.Group.REQUESTED, "PR #412 feat/gateway",
+                        "drydock · not checked out")), 1));
+
+        String commands = ((Label) lookup(".review-placeholder-mono").query()).getText();
+        assertTrue(commands.contains("codex --cd /wt/pr-412"), commands);
+        assertFalse(commands.contains("claude"), "must not name an agent it will not run: " + commands);
+    }
+
     // ---- fixtures -----------------------------------------------------------
 
     private void seedQueue() {

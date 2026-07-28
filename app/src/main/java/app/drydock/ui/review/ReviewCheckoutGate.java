@@ -11,6 +11,8 @@ import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
 import javafx.scene.layout.VBox;
 
+import java.util.function.Consumer;
+
 /**
  * The checkout gate (spec §6): what a pull request with no session shows
  * instead of a board.
@@ -35,6 +37,15 @@ final class ReviewCheckoutGate extends VBox {
 
         /** {@code Read the patch only}: the PR's diff, with no worktree and no agent. */
         void readPatchOnly(ReviewScope scope);
+
+        /**
+         * The agent-launch line for {@code scope}'s repository -- the command
+         * {@code Start session & review ▸} will really run, which is the
+         * repository's own agent and not necessarily Claude. Answers on the FX
+         * thread; building it can touch the filesystem (locating the
+         * executable), so it is a callback rather than a return value.
+         */
+        void launchCommandPreview(ReviewScope scope, Consumer<String> onReady);
     }
 
     private final Host host;
@@ -96,10 +107,20 @@ final class ReviewCheckoutGate extends VBox {
         detail.setText("Reviewing it starts a worktree and a session, so an agent can read the diff "
                 + "and answer questions about it. Reading the patch needs neither, but the agent "
                 + "actions stay unavailable.");
-        commands.setText("git worktree add --detach <worktree>\n"
+        // The launch line names whichever agent this repository uses, so it
+        // is filled in asynchronously -- a hard-coded "claude" here was wrong
+        // for every repository whose agent is not Claude.
+        String checkoutLines = "git worktree add --detach <worktree>\n"
                 + "gh pr checkout " + (number > 0 ? number : "<n>") + " --branch pr-"
-                + (number > 0 ? number : "<n>") + "   (run inside the worktree)\n"
-                + "claude --cwd <worktree>");
+                + (number > 0 ? number : "<n>") + "   (run inside the worktree)\n";
+        commands.setText(checkoutLines + "…");
+        host.launchCommandPreview(newScope, command -> {
+            // Late answers for a scope the gate has moved on from must not
+            // overwrite the line it is showing now.
+            if (newScope.equals(scope)) {
+                commands.setText(checkoutLines + command);
+            }
+        });
         setProgressVisible(false);
         clearFailure();
         startButton.setDisable(false);

@@ -171,6 +171,9 @@ final class FakeReviewHost implements ReviewDestinationView.Host {
         store.markSubmitted(scope.id());
     }
 
+    /** What {@link #launchCommandPreview} answers -- a non-Claude agent by default, since that is the case that regressed. */
+    String launchCommand = "codex --cd <worktree>";
+
     /** Reviewers this fake offers; empty models "no reviewer configured". */
     final List<String> reviewers = new ArrayList<>();
     String selectedReviewer;
@@ -208,6 +211,12 @@ final class FakeReviewHost implements ReviewDestinationView.Host {
     @Override
     public void readPatchOnly(ReviewScope scope, java.util.function.Consumer<Optional<UnifiedDiff>> onComplete) {
         onComplete.accept(patch);
+    }
+
+    /** The launch line the gate previews; tests set {@link #launchCommand} to whichever agent they model. */
+    @Override
+    public void launchCommandPreview(ReviewScope scope, java.util.function.Consumer<String> onReady) {
+        onReady.accept(launchCommand);
     }
 
     @Override
