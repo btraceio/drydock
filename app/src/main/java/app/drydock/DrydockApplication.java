@@ -206,7 +206,7 @@ public final class DrydockApplication extends Application {
         reviewScopeRegistry = new ReviewScopeRegistry();
 
         mainWorkspace = new MainWorkspace(sessionManager, agentRegistry, repositoryManager, gitStatusService,
-                searchService, ghCliService, worktreeService, changedLineService, annotationStore,
+                searchService, ghCliService, worktreeService, diffService, changedLineService, annotationStore,
                 reviewScopeRegistry, viewModel, primaryStage);
         RepositorySidebar sidebar =
                 new RepositorySidebar(repositoryManager, gitStatusService, worktreeService, sessionManager,
@@ -524,6 +524,9 @@ public final class DrydockApplication extends Application {
                     Thread.sleep(3_000);
                     System.out.println("[diag] review opened with "
                             + onFx(() -> review.diagItems().size()) + " queue items");
+                    // The diff of the selected item lands a moment later.
+                    Thread.sleep(3_000);
+                    System.out.println("[diag] diff column: " + onFx(review::diagDiffSummary));
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                 } catch (RuntimeException e) {

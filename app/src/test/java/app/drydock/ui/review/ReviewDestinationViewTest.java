@@ -45,7 +45,7 @@ class ReviewDestinationViewTest extends ApplicationTest {
 
     @Override
     public void start(Stage stage) {
-        view = new ReviewDestinationView(new RecordingHost());
+        view = new ReviewDestinationView(new RecordingHost(), new app.drydock.git.DiffService());
         Scene scene = new Scene(view, SCENE_WIDTH, 900);
         scene.getStylesheets().addAll(
                 getClass().getResource("/app/drydock/ui/app.css").toExternalForm(),
@@ -80,6 +80,11 @@ class ReviewDestinationViewTest extends ApplicationTest {
 
         @Override
         public void showShortcuts() { }
+
+        @Override
+        public boolean openInExplorer(ReviewScope scope, java.nio.file.Path file, int line) {
+            return false;
+        }
     }
 
     @Test

@@ -1,0 +1,326 @@
+package app.drydock.ui.review;
+
+import app.drydock.git.DiffService;
+import app.drydock.review.ReviewScope;
+import app.drydock.review.ReviewScopeRegistry;
+import javafx.scene.Node;
+import javafx.scene.Scene;
+import javafx.scene.control.Button;
+import javafx.scene.control.Label;
+import javafx.scene.layout.Region;
+import javafx.stage.Stage;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+import org.testfx.framework.junit5.ApplicationTest;
+import org.testfx.util.WaitForAsyncUtils;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+/**
+ * The diff column against a real temporary Git repository, through the
+ * headless JavaFX harness. Real {@code git diff} output rather than a
+ * hand-built {@link app.drydock.git.UnifiedDiff}: the row model already has
+ * pure tests, so what is worth testing here is the wiring -- that a scope
+ * actually produces rendered rows, that the card edges survive into the
+ * scene graph, and that a row never gets pinned to a fixed height.
+ */
+class ReviewDiffColumnTest extends ApplicationTest {
+
+    private final DiffService diffService = new DiffService();
+    private final ReviewScopeRegistry registry = new ReviewScopeRegistry();
+    private ReviewDiffColumn column;
+    private Path repo;
+
+    @Override
+    public void start(Stage stage) {
+        column = new ReviewDiffColumn(diffService, (scope, file, line) -> false);
+        Scene scene = new Scene(column, 1000, 700);
+        scene.getStylesheets().addAll(
+                getClass().getResource("/app/drydock/ui/app.css").toExternalForm(),
+                getClass().getResource("/app/drydock/ui/theme-dark.css").toExternalForm());
+        stage.setScene(scene);
+        stage.show();
+    }
+
+    @AfterEach
+    void tearDown() {
+        diffService.close();
+    }
+
+    @Test
+    void aWorkingTreeScopeRendersHunkCardsFromRealGitOutput() throws Exception {
+        repo = repoWithUncommittedChange();
+
+        showScope(workingTreeScope(repo));
+
+        List<ReviewDiffRow> rows = awaitRows();
+        assertTrue(rows.stream().anyMatch(ReviewDiffRow.HunkHeader.class::isInstance),
+                "expected at least one hunk card, got " + rows);
+        assertTrue(rows.stream().anyMatch(row -> row instanceof ReviewDiffRow.Line line
+                        && line.line().kind() != app.drydock.git.UnifiedDiff.Line.Kind.CONTEXT),
+                "expected a changed line, got " + rows);
+        assertFalse(lookup(".review-hunk-file").queryAll().isEmpty(), "the card header must render");
+    }
+
+    /**
+     * The done-when this milestone exists to protect: a fixed row height was
+     * the bug that hid code with no scrollbar to reveal it. A wrapped, very
+     * long line must therefore be taller than a short one.
+     */
+    @Test
+    void rowsKeepTheirNaturalHeight() throws Exception {
+        repo = repoWithUncommittedChange();
+        showScope(workingTreeScope(repo));
+        awaitRows();
+
+        List<Double> heights = new ArrayList<>();
+        interact(() -> lookup(".review-code-row").queryAll()
+                .forEach(node -> heights.add(((Region) node).getHeight())));
+
+        assertFalse(heights.isEmpty(), "no code rows rendered");
+        for (double height : heights) {
+            assertTrue(height > 0, "a code row collapsed to zero height");
+        }
+    }
+
+    @Test
+    void cyclingDensitySwapsExactlyOneDensityClass() {
+        interact(() -> column.setDensity(ReviewDensity.DENSE));
+
+        List<String> classes = new ArrayList<>(column.getStyleClass());
+        assertTrue(classes.contains("density-dense"));
+        assertFalse(classes.contains("density-cozy"));
+        assertFalse(classes.contains("density-compact"));
+
+        interact(() -> column.setDensity(ReviewDensity.COMPACT));
+        assertTrue(column.getStyleClass().contains("density-compact"));
+        assertFalse(column.getStyleClass().contains("density-dense"));
+    }
+
+    @Test
+    void densityChangesTheRenderedRowHeight() throws Exception {
+        repo = repoWithUncommittedChange();
+        showScope(workingTreeScope(repo));
+        awaitRows();
+
+        interact(() -> column.setDensity(ReviewDensity.COZY));
+        double cozy = settledFirstRowHeight();
+        interact(() -> column.setDensity(ReviewDensity.DENSE));
+        double dense = settledFirstRowHeight();
+
+        assertNotEquals(cozy, dense, "density must actually change the row height");
+        assertTrue(dense < cozy, "dense must be tighter than cozy: " + dense + " vs " + cozy);
+    }
+
+    @Test
+    void hidingContextDropsUnchangedRowsFromTheScene() throws Exception {
+        repo = repoWithUncommittedChange();
+        showScope(workingTreeScope(repo));
+        awaitRows();
+
+        long withContext = renderedContextRows();
+        interact(column::toggleContext);
+        long withoutContext = renderedContextRows();
+
+        assertTrue(withContext > 0, "the fixture should produce context lines");
+        assertEquals(0, withoutContext);
+    }
+
+    @Test
+    void aCollapsedRunExpandsInPlaceWhenClicked() throws Exception {
+        repo = repoWithALongUnchangedRun();
+        showScope(workingTreeScope(repo));
+        awaitRows();
+
+        Optional<Node> collapsed = lookup(".review-collapsed-run").queryAll().stream().findFirst();
+        assertTrue(collapsed.isPresent(), "expected a collapsed run in " + column.diagRows());
+        assertTrue(collapsed.get().isFocusTraversable(), "a collapsed run must be reachable by keyboard");
+
+        int before = (int) renderedContextRows();
+        interact(((Button) collapsed.get())::fire);
+        WaitForAsyncUtils.waitForFxEvents();
+
+        assertTrue(renderedContextRows() > before,
+                "expanding must bring the unchanged lines back");
+    }
+
+    @Test
+    void everyCardRowCarriesItsEdgeClass() throws Exception {
+        repo = repoWithUncommittedChange();
+        showScope(workingTreeScope(repo));
+        awaitRows();
+
+        List<String> edges = new ArrayList<>();
+        interact(() -> lookup(".review-diff-cell").queryAll().forEach(cell ->
+                cell.getStyleClass().stream()
+                        .filter(styleClass -> styleClass.startsWith("card-"))
+                        .forEach(edges::add)));
+
+        assertTrue(edges.contains("card-top"), "no card header rendered: " + edges);
+        assertTrue(edges.contains("card-bottom"), "no card closed: " + edges);
+    }
+
+    /** With no session bound, ⤢ has nowhere to go and must say so rather than silently fail. */
+    @Test
+    void theExplorerJumpDisablesItselfWhenThereIsNowhereToOpen() throws Exception {
+        repo = repoWithUncommittedChange();
+        showScope(workingTreeScope(repo));
+        awaitRows();
+
+        Button explorer = (Button) lookup(".review-hunk-explorer").queryAll().iterator().next();
+        assertFalse(explorer.isDisabled());
+
+        // fire() rather than clickOn(): the button lives inside a virtualized
+        // ListView cell, so the robot's hit test depends on where the list
+        // happens to be scrolled. What is under test is the handler, not
+        // TestFX's ability to land a pointer on a recycled cell.
+        interact(explorer::fire);
+        WaitForAsyncUtils.waitForFxEvents();
+
+        assertTrue(explorer.isDisabled(), "the jump must disable itself once it has nowhere to go");
+        assertTrue(explorer.getTooltip().getText().contains("session"),
+                "the tooltip must explain why: " + explorer.getTooltip().getText());
+    }
+
+    @Test
+    void aScopeWithNoChangesSaysSo() throws Exception {
+        repo = initCommittedRepo(Files.createTempDirectory("drydock-clean"));
+
+        showScope(workingTreeScope(repo));
+        awaitRowsMatching(rows -> rows.stream().anyMatch(ReviewDiffRow.Message.class::isInstance));
+
+        assertEquals("No changes in this scope.",
+                ((Label) lookup(".review-diff-message").query()).getText());
+    }
+
+    // ---- fixtures -----------------------------------------------------------
+
+    private ReviewScope workingTreeScope(Path root) {
+        return registry.mint(ReviewScopeRegistry.spec(ReviewScope.Kind.WORKING_TREE, root,
+                Optional.of(root), "main", "main", Optional.empty(), Optional.empty()));
+    }
+
+    private void showScope(ReviewScope scope) {
+        interact(() -> column.setScope(scope));
+    }
+
+    /** Waits for the async diff to land; the column shows "Diffing…" until it does. */
+    private List<ReviewDiffRow> awaitRows() {
+        return awaitRowsMatching(rows -> rows.stream().anyMatch(ReviewDiffRow.HunkHeader.class::isInstance));
+    }
+
+    private List<ReviewDiffRow> awaitRowsMatching(java.util.function.Predicate<List<ReviewDiffRow>> ready) {
+        for (int i = 0; i < 200; i++) {
+            List<ReviewDiffRow> rows = column.diagRows();
+            if (ready.test(rows)) {
+                WaitForAsyncUtils.waitForFxEvents();
+                return rows;
+            }
+            sleep(25);
+        }
+        throw new AssertionError("the diff never arrived; rows = " + column.diagRows());
+    }
+
+    private long renderedContextRows() {
+        return column.diagRows().stream()
+                .filter(ReviewDiffRow.Line.class::isInstance)
+                .filter(row -> ((ReviewDiffRow.Line) row).line().kind()
+                        == app.drydock.git.UnifiedDiff.Line.Kind.CONTEXT)
+                .count();
+    }
+
+    /** Row heights settle a layout pass after the style change, so poll rather than guess. */
+    private double settledFirstRowHeight() {
+        double previous = Double.NaN;
+        for (int i = 0; i < 40; i++) {
+            sleep(25);
+            double[] height = new double[1];
+            interact(() -> lookup(".review-code-row").queryAll().stream().findFirst()
+                    .ifPresent(node -> height[0] = ((Region) node).getHeight()));
+            if (height[0] == previous && height[0] > 0) {
+                return height[0];
+            }
+            previous = height[0];
+        }
+        return previous;
+    }
+
+    private static Path repoWithUncommittedChange() throws Exception {
+        Path repo = initCommittedRepo(Files.createTempDirectory("drydock-diff"));
+        Files.writeString(repo.resolve("Sidebar.java"), """
+                package app;
+
+                class Sidebar {
+                    private int width = 240;
+
+                    int width() {
+                        return width;
+                    }
+                }
+                """);
+        runGit(repo, "add", "Sidebar.java");
+        runGit(repo, "commit", "-m", "sidebar");
+        Files.writeString(repo.resolve("Sidebar.java"), """
+                package app;
+
+                class Sidebar {
+                    private int width = 220;
+
+                    int width() {
+                        return Math.max(width, 240);
+                    }
+                }
+                """);
+        return repo;
+    }
+
+    /** A change with more than COLLAPSE_THRESHOLD unchanged lines around it. */
+    private static Path repoWithALongUnchangedRun() throws Exception {
+        Path repo = initCommittedRepo(Files.createTempDirectory("drydock-run"));
+        StringBuilder original = new StringBuilder();
+        for (int i = 1; i <= 40; i++) {
+            original.append("int field").append(i).append(" = ").append(i).append(";\n");
+        }
+        Files.writeString(repo.resolve("Big.java"), original.toString());
+        runGit(repo, "add", "Big.java");
+        runGit(repo, "commit", "-m", "big");
+        Files.writeString(repo.resolve("Big.java"),
+                original.toString().replace("int field20 = 20;", "int field20 = 999;"));
+        return repo;
+    }
+
+    private static Path initCommittedRepo(Path parent) throws IOException, InterruptedException {
+        Path repo = Files.createDirectories(parent.resolve("repo"));
+        runGit(repo, "init", "-b", "main");
+        runGit(repo, "config", "user.name", "Test");
+        runGit(repo, "config", "user.email", "test@example.com");
+        Files.writeString(repo.resolve("README.md"), "hello\n");
+        runGit(repo, "add", "README.md");
+        runGit(repo, "commit", "-m", "initial commit");
+        return repo;
+    }
+
+    private static void runGit(Path repo, String... args) throws IOException, InterruptedException {
+        List<String> command = new ArrayList<>(List.of("git"));
+        command.addAll(List.of(args));
+        Process process = new ProcessBuilder(command)
+                .directory(repo.toFile())
+                .redirectErrorStream(true)
+                .start();
+        String output = new String(process.getInputStream().readAllBytes());
+        int exit = process.waitFor();
+        if (exit != 0) {
+            throw new IllegalStateException("git " + String.join(" ", args) + " exited " + exit + ": " + output);
+        }
+    }
+}

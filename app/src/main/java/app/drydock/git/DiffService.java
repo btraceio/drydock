@@ -28,6 +28,15 @@ import java.util.concurrent.Executors;
  */
 public final class DiffService implements AutoCloseable {
 
+    /** git's own default: three unchanged lines either side of a change. */
+    public static final int DEFAULT_CONTEXT_LINES = 3;
+
+    /**
+     * What the Review diff column asks for. Wide enough that a fold is worth
+     * making -- see {@link #diff(Path, DiffScope, String, int)}.
+     */
+    public static final int REVIEW_CONTEXT_LINES = 12;
+
     /** Every command here is a quick read-only query; a hung git must not park futures forever. */
     private static final Duration PROCESS_TIMEOUT = Duration.ofSeconds(15);
 
@@ -62,7 +71,23 @@ public final class DiffService implements AutoCloseable {
      * {@link java.util.concurrent.CompletionException}) on any failure.
      */
     public CompletableFuture<UnifiedDiff> diff(Path checkoutRoot, DiffScope scope, String baseBranch) {
-        return CompletableFuture.supplyAsync(() -> diffBlocking(checkoutRoot, scope, baseBranch), executor);
+        return diff(checkoutRoot, scope, baseBranch, DEFAULT_CONTEXT_LINES);
+    }
+
+    /**
+     * As {@link #diff(Path, DiffScope, String)}, with an explicit number of
+     * unchanged lines around each change ({@code git diff -U}).
+     *
+     * <p>Review asks for {@link #REVIEW_CONTEXT_LINES} rather than git's
+     * default three: its diff column folds long unchanged runs into a single
+     * {@code ⋯ N unchanged} row, and with a three-line window there is never
+     * a run long enough to be worth folding -- the feature would render, and
+     * simply never appear. Showing more and folding it is the point.</p>
+     */
+    public CompletableFuture<UnifiedDiff> diff(Path checkoutRoot, DiffScope scope, String baseBranch,
+                                               int contextLines) {
+        return CompletableFuture.supplyAsync(
+                () -> diffBlocking(checkoutRoot, scope, baseBranch, contextLines), executor);
     }
 
     /**
@@ -72,6 +97,13 @@ public final class DiffService implements AutoCloseable {
      * application thread.
      */
     UnifiedDiff diffBlocking(Path checkoutRoot, DiffScope scope, String baseBranch) {
+        return diffBlocking(checkoutRoot, scope, baseBranch, DEFAULT_CONTEXT_LINES);
+    }
+
+    UnifiedDiff diffBlocking(Path checkoutRoot, DiffScope scope, String baseBranch, int contextLines) {
+        if (contextLines < 0) {
+            throw new IllegalArgumentException("contextLines must be non-negative: " + contextLines);
+        }
         Path git = locator.locate()
                 .orElseThrow(() -> new GitExecutableNotFoundException(locator.describeSearched()));
 
@@ -84,7 +116,8 @@ public final class DiffService implements AutoCloseable {
         // reach git as a revision, never be parsed as a flag.
         List<String> command = List.of(
                 git.toString(), "-C", checkoutRoot.toString(),
-                "diff", "--no-color", "--no-ext-diff", "--end-of-options", range);
+                "diff", "--no-color", "--no-ext-diff", "-U" + contextLines,
+                "--end-of-options", range);
 
         ProcessResult result = run(command);
         if (result.exitCode() != 0) {

@@ -63,10 +63,18 @@ public final class ReviewDestinationView extends BorderPane {
 
         /** The {@code ?} button -- shows the shared shortcuts overlay. */
         void showShortcuts();
+
+        /**
+         * {@code ⤢} -- opens {@code file} at a 1-based line in the Explorer of
+         * the session bound to {@code scope}. False when there is nowhere to
+         * open it (no session, or its tab is closed).
+         */
+        boolean openInExplorer(ReviewScope scope, java.nio.file.Path file, int line);
     }
 
     private final Host host;
     private final ReviewQueueRail queue = new ReviewQueueRail();
+    private final ReviewDiffColumn diffColumn;
 
     private final Label countsLabel = new Label();
     private final Label headerIcon = new Label();
@@ -76,13 +84,17 @@ public final class ReviewDestinationView extends BorderPane {
     private final Label sessionLine = new Label();
     private final Button openSessionButton = new Button("Open session");
     private final Label returnHint = new Label("⌘4 from that session returns here");
+    private final Button densityButton = new Button();
     private final VBox body = new VBox();
+
+    private ReviewDensity density = ReviewDensity.COZY;
 
     /** Set by {@code q}/{@code f}; remembered independently of the responsive collapse (spec §4.9). */
     private boolean queueCollapsedByUser;
 
-    public ReviewDestinationView(Host host) {
+    public ReviewDestinationView(Host host, app.drydock.git.DiffService diffService) {
         this.host = host;
+        this.diffColumn = new ReviewDiffColumn(diffService, host::openInExplorer);
         getStyleClass().add("review-destination");
 
         setTop(buildTitleBar());
@@ -112,12 +124,17 @@ public final class ReviewDestinationView extends BorderPane {
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
 
+        densityButton.getStyleClass().add("review-chip-button");
+        densityButton.setTooltip(new Tooltip("Density: cozy · compact · dense (d)"));
+        densityButton.setOnAction(e -> cycleDensity());
+        applyDensity(density);
+
         Button shortcuts = new Button("?");
         shortcuts.getStyleClass().add("review-chip-button");
         shortcuts.setTooltip(new Tooltip("Shortcuts (?)"));
         shortcuts.setOnAction(e -> host.showShortcuts());
 
-        HBox bar = new HBox(8, glyph, title, countsLabel, spacer, shortcuts);
+        HBox bar = new HBox(8, glyph, title, countsLabel, spacer, densityButton, shortcuts);
         bar.setAlignment(Pos.CENTER_LEFT);
         bar.getStyleClass().add("review-title-bar");
         return bar;
@@ -212,7 +229,26 @@ public final class ReviewDestinationView extends BorderPane {
         headerTitle.setText(item.title());
         headerContext.setText(item.subtitle() + "  ·  vs " + scope.base());
         setSessionRow(scope, sessionLineFor(scope), scope.sessionId().isPresent());
-        body.getChildren().setAll(host.bodyFor(scope).orElseGet(() -> bodyPlaceholderFor(item)));
+        body.getChildren().setAll(bodyFor(item));
+    }
+
+    /**
+     * The centre body: the diff column for anything with a checkout, the
+     * checkout gate for a PR that has none (spec §6), and whatever the host
+     * supplies ahead of both -- that override is the seam the findings
+     * margin and intent rail arrive through.
+     */
+    private Region bodyFor(ReviewItem item) {
+        Optional<Region> supplied = host.bodyFor(item.scope());
+        if (supplied.isPresent()) {
+            return supplied.get();
+        }
+        if (item.scope().worktree().isEmpty()) {
+            return checkoutGate(item.scope());
+        }
+        diffColumn.setScope(item.scope());
+        VBox.setVgrow(diffColumn, Priority.ALWAYS);
+        return diffColumn;
     }
 
     private String sessionLineFor(ReviewScope scope) {
@@ -240,22 +276,21 @@ public final class ReviewDestinationView extends BorderPane {
     }
 
     /**
-     * The M1 body. A not-checked-out PR gets the checkout gate's copy (spec
-     * §6); everything else says where the diff will come from, naming the
-     * scope handle so the wiring is inspectable before the diff exists.
+     * The checkout gate (spec §6). A PR with no worktree has no session, and
+     * therefore no agent -- which is why this is a gate rather than a
+     * convenience. The buttons arrive with the checkout flow.
      */
-    private Region bodyPlaceholderFor(ReviewItem item) {
-        ReviewScope scope = item.scope();
-        if (scope.kind() == ReviewScope.Kind.PR && scope.worktree().isEmpty()) {
-            return placeholder("PR #" + scope.pr().orElseThrow().number() + " has no session yet",
-                    "Reviewing it starts a worktree and a session, so an agent can read the diff "
-                            + "and answer questions about it.",
-                    "gh pr checkout " + scope.pr().orElseThrow().number() + " --worktree");
-        }
-        return placeholder("No diff yet",
-                "This scope is ready: " + scope.base() + " … " + scope.head()
-                        + ". The diff column renders here.",
-                scope.diffRoot().toString());
+    private Region checkoutGate(ReviewScope scope) {
+        String title = scope.pr()
+                .map(pr -> "PR #" + pr.number() + " has no session yet")
+                .orElse("This scope has no checkout yet");
+        String command = scope.pr()
+                .map(pr -> "gh pr checkout " + pr.number() + " --worktree")
+                .orElse("git worktree add");
+        return placeholder(title,
+                "Reviewing it starts a worktree and a session, so an agent can read the diff "
+                        + "and answer questions about it.",
+                command);
     }
 
     private static Region placeholder(String title, String detail, String mono) {
@@ -295,6 +330,16 @@ public final class ReviewDestinationView extends BorderPane {
         applyResponsiveLayout(getWidth());
     }
 
+    private void cycleDensity() {
+        applyDensity(density.next());
+    }
+
+    private void applyDensity(ReviewDensity newDensity) {
+        density = newDensity;
+        densityButton.setText(newDensity.label());
+        diffColumn.setDensity(newDensity);
+    }
+
     private void openBoundSession() {
         selectedScope().flatMap(ReviewScope::sessionId).ifPresent(host::openSession);
     }
@@ -323,6 +368,8 @@ public final class ReviewDestinationView extends BorderPane {
             // make f a dead key on its second press.
             case F -> { setQueueCollapsed(!queueCollapsedByUser); yield true; }
             case O -> { openBoundSession(); yield true; }
+            case D -> { cycleDensity(); yield true; }
+            case C -> { diffColumn.toggleContext(); yield true; }
             default -> false;
         };
         if (handled) {
@@ -345,5 +392,20 @@ public final class ReviewDestinationView extends BorderPane {
     /** Diagnostic-only: the queue rows currently rendered (visual verification harness). */
     public List<ReviewItem> diagItems() {
         return queue.items();
+    }
+
+    /**
+     * Diagnostic-only: a one-line summary of what the diff column rendered
+     * for the selected item. The FX layer has no headless harness inside the
+     * running app, so this is the machine-checkable evidence that a real
+     * scope produced a real diff (see docs/architecture.md).
+     */
+    public String diagDiffSummary() {
+        List<ReviewDiffRow> rows = diffColumn.diagRows();
+        long cards = rows.stream().filter(ReviewDiffRow.HunkHeader.class::isInstance).count();
+        long lines = rows.stream().filter(ReviewDiffRow.Line.class::isInstance).count();
+        long folded = rows.stream().filter(ReviewDiffRow.CollapsedRun.class::isInstance).count();
+        return rows.size() + " rows · " + cards + " hunk cards · " + lines + " lines · "
+                + folded + " folded runs";
     }
 }

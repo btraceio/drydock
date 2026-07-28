@@ -2405,3 +2405,208 @@
     -fx-font-family: "JetBrains Mono", "Menlo", monospace;
     -fx-padding: 0 5 0 5;
 }
+
+/* ---- Review diff column (Review handoff section 4.4) --------------------
+ *
+ * Hunk cards are drawn from flat, virtualized rows: every cell carries a
+ * card-top / card-body / card-bottom class (see ReviewDiffRow.Edge) and the
+ * borders below turn those into a card. Nesting real card containers would
+ * cost the virtualization a 21-file diff depends on.
+ *
+ * NOTHING here sets a cell height. A fixed row height was the bug that hid
+ * code with no scrollbar to reveal it -- rows must keep their natural size.
+ */
+
+.review-diff-column {
+    -fx-background-color: -drydock-main;
+}
+.review-diff-header {
+    -fx-background-color: -drydock-main;
+    -fx-border-color: transparent transparent -drydock-border transparent;
+    -fx-border-width: 0 0 1 0;
+    -fx-padding: 7 12 7 12;
+}
+.review-diff-summary {
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 11.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-diff-message {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 12px;
+    -fx-padding: 12 14 12 14;
+}
+
+.review-diff-list, .review-diff-list .viewport {
+    -fx-background-color: -drydock-main;
+    -fx-padding: 0;
+}
+.review-diff-list .list-cell {
+    -fx-background-color: transparent;
+    -fx-padding: 0 12 0 12;
+}
+.review-diff-list .list-cell:filled:selected,
+.review-diff-list .list-cell:filled:hover {
+    -fx-background-color: transparent;
+}
+
+/* The card edges. The horizontal padding above is the gutter between the
+   card and the column; the borders here are the card itself. */
+.review-diff-cell.card-top .review-hunk-header {
+    -fx-background-color: -drydock-hunk-header;
+    -fx-background-radius: 8px 8px 0 0;
+    -fx-border-color: -drydock-border;
+    -fx-border-width: 1 1 1 1;
+    -fx-border-radius: 8px 8px 0 0;
+}
+.review-diff-cell.card-body > .review-code-row,
+.review-diff-cell.card-body > .review-collapsed-run {
+    -fx-border-color: transparent -drydock-border transparent -drydock-border;
+    -fx-border-width: 0 1 0 1;
+}
+.review-diff-cell.card-bottom > .review-code-row,
+.review-diff-cell.card-bottom > .review-collapsed-run {
+    -fx-border-color: transparent -drydock-border -drydock-border -drydock-border;
+    -fx-border-width: 0 1 1 1;
+    -fx-background-radius: 0 0 8px 8px;
+    -fx-border-radius: 0 0 8px 8px;
+    -fx-padding: 0 0 6 0;
+}
+/* Breathing room between one card and the next. */
+.review-diff-cell.card-top {
+    -fx-padding: 10 12 0 12;
+}
+
+.review-hunk-header {
+    -fx-padding: 6 10 6 10;
+}
+.review-hunk-file {
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 11.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-hunk-range {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 11px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-hunk-explorer {
+    -fx-background-color: transparent;
+    -fx-background-radius: 6px;
+    -fx-border-color: transparent;
+    -fx-border-radius: 6px;
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10.5px;
+    -fx-padding: 2 8 2 8;
+    -fx-cursor: hand;
+}
+.review-hunk-explorer:hover {
+    -fx-text-fill: -drydock-text;
+    -fx-background-color: -drydock-hover;
+}
+.review-hunk-explorer:focused {
+    -fx-border-color: -drydock-accent;
+    -fx-text-fill: -drydock-text;
+}
+.review-hunk-explorer:disabled {
+    -fx-opacity: 0.45;
+}
+
+/* Line rows. The add/delete tints and the gutter colour are the handoff's. */
+.review-code-row {
+    -fx-background-color: -drydock-code-bg;
+}
+.review-code-row.row-add {
+    -fx-background-color: -drydock-add-bg;
+}
+.review-code-row.row-del {
+    -fx-background-color: -drydock-del-bg;
+}
+.review-code-gutter {
+    -fx-min-width: 34px;
+    -fx-max-width: 34px;
+    -fx-alignment: center-right;
+    -fx-text-fill: -drydock-code-gutter;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-padding: 0 6 0 0;
+}
+.review-code-sign {
+    -fx-min-width: 12px;
+    -fx-max-width: 12px;
+    -fx-alignment: center;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-code-sign.sign-add { -fx-text-fill: -drydock-add-sign; }
+.review-code-sign.sign-del { -fx-text-fill: -drydock-del-sign; }
+.review-code-sign.sign-context { -fx-text-fill: -drydock-text-faint; }
+.review-code-text {
+    -fx-padding: 0 0 0 4;
+}
+.review-code-span {
+    -fx-fill: -drydock-code-text;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+/* The lexer's span classes, shared with the Explorer's code viewer. */
+.review-code-text .code-kw    { -fx-fill: -drydock-code-kw; }
+.review-code-text .code-str   { -fx-fill: -drydock-code-str; }
+.review-code-text .code-com   { -fx-fill: -drydock-code-com; }
+.review-code-text .code-num   { -fx-fill: -drydock-code-num; }
+.review-code-text .code-type  { -fx-fill: -drydock-code-type; }
+.review-code-text .code-fn    { -fx-fill: -drydock-code-fn; }
+.review-code-text .code-anno  { -fx-fill: -drydock-code-anno; }
+.review-code-text .code-punct { -fx-fill: -drydock-code-punct; }
+
+.review-collapsed-run {
+    -fx-background-color: -drydock-code-bg;
+    -fx-background-radius: 0;
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10.5px;
+    -fx-font-style: italic;
+    -fx-alignment: center-left;
+    -fx-cursor: hand;
+}
+.review-collapsed-run:hover {
+    -fx-text-fill: -drydock-text-dim;
+    -fx-background-color: -drydock-hover;
+}
+.review-collapsed-run:focused {
+    -fx-text-fill: -drydock-text;
+    -fx-border-color: -drydock-accent;
+    -fx-border-width: 0 0 0 2;
+}
+
+/* Density (spec 4.8) -- code font, row height and row padding. The px
+   literals are what UiFontScale scales, so density stays a relative choice
+   on top of the user's absolute interface size. Row height carries the
+   handoff's line-height ratios (font x 1.6 / 1.42 / 1.25), because JavaFX
+   has no line-height on a single-line row. */
+.density-cozy .review-code-span,
+.density-cozy .review-code-gutter,
+.density-cozy .review-code-sign {
+    -fx-font-size: 12.5px;
+}
+.density-cozy .review-code-row,
+.density-cozy .review-collapsed-run {
+    -fx-min-height: 20px;
+    -fx-padding: 8 10 8 10;
+}
+.density-compact .review-code-span,
+.density-compact .review-code-gutter,
+.density-compact .review-code-sign {
+    -fx-font-size: 11.5px;
+}
+.density-compact .review-code-row,
+.density-compact .review-collapsed-run {
+    -fx-min-height: 16px;
+    -fx-padding: 6 10 6 10;
+}
+.density-dense .review-code-span,
+.density-dense .review-code-gutter,
+.density-dense .review-code-sign {
+    -fx-font-size: 11px;
+}
+.density-dense .review-code-row,
+.density-dense .review-collapsed-run {
+    -fx-min-height: 14px;
+    -fx-padding: 4 10 4 10;
+}

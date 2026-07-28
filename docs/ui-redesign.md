@@ -31,6 +31,9 @@ session's checkout.
 | Queue assembly | `ReviewQueueService` | `WorktreeService.list` + `GitStatusService` + `gh pr list --search "review-requested:@me"`, grouped MINE / AGENTS / REQUESTED / STACK. A repository whose git fails, or a missing `gh`, contributes nothing and is logged — the rest of the queue still assembles. |
 | `gh` review requests | `GhCliService.listReviewRequests` | Read-only, per repository, bounded; a malformed row is skipped rather than emptying the group. |
 | Destination view | `app.drydock.ui.review.ReviewDestinationView` | 36px title bar, queue rail, two-row item header (what is being reviewed; its session binding), and a body supplied by its `Host`. |
+| Diff column | `ReviewDiffColumn` + `ReviewDiffRows` / `ReviewDiffRow` | Virtualized `ListView` over a pure row model. Hunk cards are drawn from a per-row `Edge` (top/body/bottom) rather than nested containers, so the column stays virtualized on a 21-file diff. Nothing sets a cell height — a fixed row height was the bug that hid code with no scrollbar. |
+| Code lexer | `app.drydock.ui.code.SyntaxHighlighter` | Moved out of `ui.explorer` now that two surfaces render code. One lexer, two output shapes: `spans` (plain data, for the diff column's per-line `TextFlow`) and `computeHighlighting` (RichTextFX, for the Explorer's `CodeArea`). |
+| Density | `ReviewDensity` | `d` cycles cozy/compact/dense by swapping one style class; the measurements are `px` literals in `app.css`, so density stays relative to the user's absolute interface size. |
 | Queue rail | `ReviewQueueRail` | 236 / 206 narrow / 44 collapsed, animated the way `SessionExplorerView` animates its search rail. Every row is a real focusable `Button`. |
 | Terminal swap | `MainWorkspace.setReviewShowing` | Review is a scene-graph view, so showing it hides every native terminal — one writer (`updateTerminalVisibility`) over three independent conditions (selected tab, modal up, Review showing), and `updateGeometryNow()` on the way back. |
 | Sidebar entry | `RepositorySidebar` | Focusable `◨ Review` row above the tree with an item-count badge, plus a `◨n` badge on worktree rows that jumps into Review scoped to that worktree. |
@@ -91,6 +94,31 @@ need a look before the next milestone builds on them.
 - **`OpenSessionTab.openExplorerAt` / `searchInExplorer` are currently
   unreferenced.** They are the `⤢` bridge the diff column consumes; they
   were left in place rather than deleted and recreated one milestone later.
+
+### Review — M2 (diff column)
+
+- **Review asks git for a wider context window.** `DiffService` gained an
+  explicit `contextLines` parameter and Review passes 12 rather than git's
+  default 3. Found by testing: with a three-line window no unchanged run is
+  ever longer than the fold threshold, so `⋯ N unchanged` would have
+  rendered correctly and simply never appeared. Showing more context and
+  folding it is the point of the feature. Other callers keep git's default.
+- **Line height is approximated by row height.** The handoff specifies line
+  heights of 1.6 / 1.42 / 1.25; JavaFX has no line-height on a single-line
+  row, so each density sets `-fx-min-height` to the font size times that
+  ratio instead.
+- **Collapsed runs are expandable.** The spec only says unchanged runs
+  collapse to `⋯ N unchanged`. Making the row a focusable `Button` that
+  expands its own run costs nothing and follows the hard rule about
+  interactive elements; runs are keyed by (file, hunk index, run index) so
+  an expansion survives a re-diff that shifts the lines.
+- **`⤢` disables itself when there is nowhere to go.** The Explorer lives
+  inside a session's tab, so a scope with no bound session (or a closed tab)
+  cannot open one. The button reports that and explains why in its tooltip,
+  rather than appearing to do nothing.
+- **`hot path` tags are not rendered.** The spec lists them on hunk cards,
+  but their only source is `review_intents` over MCP; nothing was invented
+  for them ahead of that.
 
 ### Open decisions carried forward
 

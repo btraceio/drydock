@@ -1,6 +1,7 @@
 package app.drydock.ui.explorer;
 
 import app.drydock.ui.UiFormats;
+import app.drydock.ui.code.SyntaxHighlighter;
 import javafx.animation.PauseTransition;
 import javafx.application.Platform;
 import javafx.event.Event;

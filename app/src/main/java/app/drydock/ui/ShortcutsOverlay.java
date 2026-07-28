@@ -44,6 +44,8 @@ final class ShortcutsOverlay {
                     {"Collapse the queue", "q"},
                     {"Focus mode — collapse every rail", "f"},
                     {"Open the bound session", "o"},
+                    {"Cycle density: cozy · compact · dense", "d"},
+                    {"Show or hide unchanged lines", "c"},
             }),
     };
 

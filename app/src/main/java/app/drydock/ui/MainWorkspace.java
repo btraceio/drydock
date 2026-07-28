@@ -17,6 +17,7 @@ import app.drydock.domain.SshRemote;
 import app.drydock.domain.UiTheme;
 import app.drydock.domain.WorkspaceUiState;
 import app.drydock.git.ChangedLineService;
+import app.drydock.git.DiffService;
 import app.drydock.git.GhCliService;
 import app.drydock.git.GitBranchState;
 import app.drydock.git.GitStatusService;
@@ -137,6 +138,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     private final WorktreeService worktreeService;
     private final SessionSearchService searchService;
     private final GhCliService ghCliService;
+    private final DiffService diffService;
     private final ChangedLineService changedLineService;
     private final AnnotationStore annotationStore;
     private final WorkspaceViewModel viewModel;
@@ -279,7 +281,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     public MainWorkspace(SessionManager sessionManager, AgentRegistry agentRegistry,
                           RepositoryManager repositoryManager,
                           GitStatusService gitStatusService, SessionSearchService searchService,
-                          GhCliService ghCliService, WorktreeService worktreeService,
+                          GhCliService ghCliService, WorktreeService worktreeService, DiffService diffService,
                           ChangedLineService changedLineService, AnnotationStore annotationStore,
                           ReviewScopeRegistry reviewScopeRegistry, WorkspaceViewModel viewModel, Stage stage) {
         this.sessionManager = sessionManager;
@@ -289,6 +291,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         this.worktreeService = worktreeService;
         this.searchService = searchService;
         this.ghCliService = ghCliService;
+        this.diffService = diffService;
         this.changedLineService = changedLineService;
         this.annotationStore = annotationStore;
         this.reviewScopeRegistry = reviewScopeRegistry;
@@ -319,7 +322,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             }
         });
 
-        reviewDestination = new ReviewDestinationView(new ReviewHost());
+        reviewDestination = new ReviewDestinationView(new ReviewHost(), diffService);
         reviewDestination.setVisible(false);
         reviewDestination.setManaged(false);
 
@@ -850,6 +853,24 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         @Override
         public void showShortcuts() {
             onShowShortcuts.run();
+        }
+
+        /**
+         * The Explorer lives inside a session's tab, so this can only work
+         * for a scope whose session is open. Reports that rather than
+         * pretending, which is what lets the diff column disable the button
+         * with an explanation instead of silently doing nothing.
+         */
+        @Override
+        public boolean openInExplorer(ReviewScope scope, Path file, int line) {
+            OpenSessionTab open = scope.sessionId().map(openTabs::get).orElse(null);
+            if (open == null) {
+                return false;
+            }
+            hideReview();
+            tabPane.getSelectionModel().select(open.tab);
+            open.openExplorerAt(file, line);
+            return true;
         }
     }
 
