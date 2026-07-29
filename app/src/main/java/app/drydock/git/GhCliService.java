@@ -76,6 +76,23 @@ public final class GhCliService implements AutoCloseable {
         }
     }
 
+    /**
+     * An open pull request, as reached from a local branch: what it merges
+     * into and what it is called.
+     *
+     * <p>Enough to recognise a worktree as the PR it holds. The review queue
+     * needs that for every open PR, not only the ones review-requested of
+     * this user -- your own PR checked out to look over before merging is
+     * still a pull request, and a row reading {@code pr-40} tells nobody
+     * which.</p>
+     */
+    public record OpenPullRequest(int number, String headRefName, String baseRefName) {
+        public OpenPullRequest {
+            Objects.requireNonNull(headRefName, "headRefName");
+            Objects.requireNonNull(baseRefName, "baseRefName");
+        }
+    }
+
     /** How many review-requested PRs one {@code gh pr list} call may return. */
     private static final int REVIEW_REQUEST_LIMIT = 50;
 
@@ -235,17 +252,20 @@ public final class GhCliService implements AutoCloseable {
     }
 
     /**
-     * The base branch of every open pull request in {@code root}'s
-     * repository, keyed by every local branch name that PR can appear
-     * under -- what a checked-out branch is actually meant to merge into.
+     * Every open pull request in {@code root}'s repository, keyed by every
+     * local branch name it can appear under.
      *
      * <p>That is two keys per PR: its own {@code headRefName}, and the
-     * {@code pr-<number>} branch {@link PrCheckoutService} checks it out
-     * as. Keying by head alone was the bug -- reviewing a PR from inside
-     * Drydock renames its branch, so the lookup missed and the base fell
-     * back to a local guess that can only ever name an integration branch.
-     * A PR based on anything else (a {@code gh-pages} docs branch, a
-     * stacked PR) then diffed against the wrong thing entirely.</p>
+     * {@code pr-<number>} branch {@link PrCheckoutService} checks it out as.
+     * Keying by head alone was the bug -- reviewing a PR from inside Drydock
+     * renames its branch, so the lookup missed and the base fell back to a
+     * local guess that can only ever name an integration branch. A PR based
+     * on anything else (a {@code gh-pages} docs branch, a stacked PR) then
+     * diffed against the wrong thing entirely.</p>
+     *
+     * <p>Every open PR, not only those review-requested of this user: your
+     * own PR checked out to look over before merging is still a pull
+     * request, and the queue has to be able to say which one.</p>
      *
      * <p>One list call rather than a {@code gh pr view} per worktree: a
      * repository with a dozen agent worktrees would otherwise make a dozen
@@ -255,11 +275,11 @@ public final class GhCliService implements AutoCloseable {
      * missing, unauthenticated, no GitHub remote and genuinely no open PRs
      * alike -- the caller falls back to resolving the base locally.</p>
      */
-    public CompletableFuture<Map<String, String>> listPullRequestBases(Path root) {
-        return CompletableFuture.supplyAsync(() -> listPullRequestBasesBlocking(root), executor);
+    public CompletableFuture<Map<String, OpenPullRequest>> listOpenPullRequests(Path root) {
+        return CompletableFuture.supplyAsync(() -> listOpenPullRequestsBlocking(root), executor);
     }
 
-    Map<String, String> listPullRequestBasesBlocking(Path root) {
+    Map<String, OpenPullRequest> listOpenPullRequestsBlocking(Path root) {
         Path gh = locate().orElse(null);
         if (gh == null) {
             return Map.of();
@@ -280,21 +300,21 @@ public final class GhCliService implements AutoCloseable {
             if (!(JsonParser.parse(result.stdout()) instanceof JsonArray array)) {
                 return Map.of();
             }
-            Map<String, String> bases = new LinkedHashMap<>();
+            Map<String, OpenPullRequest> bases = new LinkedHashMap<>();
             for (JsonValue element : array.elements()) {
                 if (element instanceof JsonObject obj
+                        && obj.get("number") instanceof JsonNumber number
                         && obj.get("headRefName") instanceof JsonString head
                         && obj.get("baseRefName") instanceof JsonString base
                         && !head.value().isBlank() && !base.value().isBlank()) {
+                    OpenPullRequest pr =
+                            new OpenPullRequest(number.asInt(), head.value(), base.value());
                     // First wins: two open PRs from one branch is unusual, and
                     // the newer one is not obviously the one being reviewed.
-                    bases.putIfAbsent(head.value(), base.value());
-                    // The same base under the name a Drydock checkout gives
-                    // it, so reviewing the PR here does not lose its base.
-                    if (obj.get("number") instanceof JsonNumber number) {
-                        bases.putIfAbsent(
-                                PrCheckoutService.localBranchFor(number.asInt()), base.value());
-                    }
+                    bases.putIfAbsent(head.value(), pr);
+                    // The same PR under the name a Drydock checkout gives it,
+                    // so reviewing it here does not lose which PR it is.
+                    bases.putIfAbsent(PrCheckoutService.localBranchFor(pr.number()), pr);
                 }
             }
             return Map.copyOf(bases);

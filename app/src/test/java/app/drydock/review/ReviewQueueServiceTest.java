@@ -51,8 +51,16 @@ class ReviewQueueServiceTest {
     }
 
     private ReviewQueueService serviceWithBases(java.util.Map<String, String> bases) {
+        // Head branch -> base, as gh reports it; the PR numbers are
+        // incidental here, so they are handed out in listing order.
+        java.util.Map<String, GhCliService.OpenPullRequest> prs = new java.util.LinkedHashMap<>();
+        int number = 1;
+        for (java.util.Map.Entry<String, String> entry : bases.entrySet()) {
+            prs.put(entry.getKey(),
+                    new GhCliService.OpenPullRequest(number++, entry.getKey(), entry.getValue()));
+        }
         return new ReviewQueueService(worktreeService, gitStatusService, NO_REQUESTS,
-                root -> CompletableFuture.completedFuture(bases), registry);
+                root -> CompletableFuture.completedFuture(java.util.Map.copyOf(prs)), registry);
     }
 
     /**
@@ -428,7 +436,8 @@ class ReviewQueueServiceTest {
                 // Exactly what GhCliService now publishes: the head branch and
                 // the pr-<n> name Drydock checks it out under.
                 root -> CompletableFuture.completedFuture(java.util.Map.of(
-                        "renovate/all-minor-patch", "gh-pages", "pr-854", "gh-pages")),
+                        "renovate/all-minor-patch", openPr(854, "renovate/all-minor-patch", "gh-pages"),
+                        "pr-854", openPr(854, "renovate/all-minor-patch", "gh-pages"))),
                 registry)
                 .assemble(List.of(target(repo)), sessionsIn(checkout)).get();
 
@@ -465,7 +474,40 @@ class ReviewQueueServiceTest {
                 "no scope may point at the detached worktree: " + items);
     }
 
+    /**
+     * Your own PR, checked out to look over before merging. It is not
+     * review-requested of you, so it does not belong in REQUESTED -- but it
+     * is still PR #40, and a row reading "pr-40" says nothing about which
+     * PR that is or what it merges into.
+     */
+    @Test
+    void yourOwnPullRequestCheckedOutIsNamedAndBasedLikeThePullRequestItIs(
+            @TempDir Path dir, @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(dir);
+        runGit(repo, "branch", "release/1.x");
+        gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "pr-40").get();
+
+        List<ReviewItem> items = new ReviewQueueService(worktreeService, gitStatusService,
+                // Nobody asked you for a review -- it is your PR.
+                NO_REQUESTS,
+                root -> CompletableFuture.completedFuture(java.util.Map.of(
+                        "jb/sessions", openPr(40, "jb/sessions", "release/1.x"),
+                        "pr-40", openPr(40, "jb/sessions", "release/1.x"))),
+                registry)
+                .assemble(List.of(target(repo)), checkout -> Optional.empty()).get();
+
+        ReviewItem item = itemTitled(items, "PR #40 jb/sessions");
+        assertEquals("release/1.x", item.scope().base(), "the PR's own base");
+        assertEquals(ReviewItem.Group.MINE, item.group(),
+                "REQUESTED means somebody asked you; your own PR is yours");
+        assertTrue(item.scope().pr().isPresent(), "the scope must know which PR it holds");
+    }
+
     // ---- fixtures -----------------------------------------------------------
+
+    private static GhCliService.OpenPullRequest openPr(int number, String head, String base) {
+        return new GhCliService.OpenPullRequest(number, head, base);
+    }
 
     private static ReviewQueueService.RepositoryTarget target(Path repo) {
         return new ReviewQueueService.RepositoryTarget(repo, "drydock");

@@ -320,7 +320,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         this.annotationStore = annotationStore;
         this.reviewScopeRegistry = reviewScopeRegistry;
         this.reviewQueueService = new ReviewQueueService(worktreeService, gitStatusService,
-                ghCliService::listReviewRequests, ghCliService::listPullRequestBases,
+                ghCliService::listReviewRequests, ghCliService::listOpenPullRequests,
                 reviewScopeRegistry);
         this.viewModel = viewModel;
         this.stage = stage;

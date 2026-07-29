@@ -75,18 +75,23 @@ public final class ReviewQueueService {
     }
 
     /**
-     * The base branch of each open PR, keyed by head branch -- in the app,
-     * {@code GhCliService::listPullRequestBases}. A separate seam from
-     * {@link ReviewRequestSource} for the same reason: "{@code gh} is absent
-     * or failing" is a state the queue must survive, and therefore one tests
-     * have to be able to produce.
+     * Every open PR, keyed by each local branch name it can appear under --
+     * in the app, {@code GhCliService::listOpenPullRequests}. A separate
+     * seam from {@link ReviewRequestSource} for the same reason: "{@code gh}
+     * is absent or failing" is a state the queue must survive, and therefore
+     * one tests have to be able to produce.
+     *
+     * <p>Distinct from {@link ReviewRequestSource} in what it covers, too:
+     * that one is the PRs asking <em>this user</em> for a review, this one
+     * is all of them. A PR you opened yourself and checked out to look over
+     * is in the second and not the first.</p>
      */
     @FunctionalInterface
     public interface PullRequestBaseSource {
-        CompletableFuture<Map<String, String>> forRepository(Path repositoryRoot);
+        CompletableFuture<Map<String, GhCliService.OpenPullRequest>> forRepository(Path repositoryRoot);
     }
 
-    /** Stands in for a workspace with no {@code gh}: no branch declares a base. */
+    /** Stands in for a workspace with no {@code gh}: no branch declares a PR. */
     public static final PullRequestBaseSource NO_PULL_REQUEST_BASES =
             root -> CompletableFuture.completedFuture(Map.of());
 
@@ -187,14 +192,14 @@ public final class ReviewQueueService {
                 });
         // What each branch actually merges into. A failure here is no
         // information, not an error: the base then resolves locally.
-        CompletableFuture<Map<String, String>> prBases =
+        CompletableFuture<Map<String, GhCliService.OpenPullRequest>> prBases =
                 pullRequestBases.forRepository(repository.root()).handle((value, failure) -> {
                     if (failure == null) {
                         return value;
                     }
-                    LOG.log(Level.DEBUG, "Could not list pull request bases for "
+                    LOG.log(Level.DEBUG, "Could not list pull requests for "
                             + repository.root(), failure);
-                    return Map.<String, String>of();
+                    return Map.<String, GhCliService.OpenPullRequest>of();
                 });
 
         return worktrees.thenCombine(status, (trees, mainStatus) ->
@@ -232,7 +237,8 @@ public final class ReviewQueueService {
             }
             Optional<String> declared = worktree.branch()
                     .map(scan.pullRequestBases()::get)
-                    .filter(Objects::nonNull);
+                    .filter(Objects::nonNull)
+                    .map(GhCliService.OpenPullRequest::baseRefName);
             pending.put(worktree.path(), gitStatusService
                     .reviewBase(worktree.path(), declared, fallback)
                     .handle((value, failure) -> {
@@ -271,7 +277,8 @@ public final class ReviewQueueService {
     private record Fetch<T>(T value, boolean complete) { }
 
     private record PartialScan(List<WorktreeService.Worktree> worktrees, Optional<GitStatus> status,
-                               Optional<String> defaultBranch, Map<String, String> pullRequestBases,
+                               Optional<String> defaultBranch,
+                               Map<String, GhCliService.OpenPullRequest> pullRequestBases,
                                boolean localComplete) { }
 
     private record RepositoryScan(RepositoryTarget repository, List<ReviewItem> items,
@@ -311,24 +318,32 @@ public final class ReviewQueueService {
             String worktreeBase = worktreeBases.getOrDefault(worktree.path(), base);
             Optional<ManagedSessionId> session = sessions.sessionAt(worktree.path());
             // Reviewing a PR from inside Drydock checks it out as pr-<n>, so
-            // the worktree IS that PR -- not an agent's branch that happens
-            // to have a session on it, which is what the session test alone
-            // would call it.
-            Optional<GhCliService.ReviewRequest> pullRequest = PrCheckoutService
+            // the worktree IS that PR. Resolved against every open PR rather
+            // than the review-requested ones alone: a PR you opened yourself
+            // and checked out to look over before merging is still a pull
+            // request, and a row reading "pr-40" tells nobody which.
+            Optional<GhCliService.OpenPullRequest> pullRequest = PrCheckoutService
                     .pullRequestNumberOf(head)
-                    .map(requestsByNumber::get)
+                    .map(number -> scan.pullRequestBases().get(PrCheckoutService.localBranchFor(number)))
                     .filter(Objects::nonNull);
-            pullRequest.ifPresent(request -> checkedOutPrs.add(request.number()));
+            pullRequest.ifPresent(pr -> checkedOutPrs.add(pr.number()));
+            // ...but REQUESTED means "asking you for a review", so only a PR
+            // that actually does belongs there. Your own goes where any
+            // branch of yours goes.
+            Optional<GhCliService.ReviewRequest> asked =
+                    pullRequest.map(pr -> requestsByNumber.get(pr.number())).filter(Objects::nonNull);
             ReviewScope scope = scopeRegistry.mint(ReviewScopeRegistry.spec(
                     ReviewScope.Kind.WORKTREE, repository.root(), Optional.of(worktree.path()),
                     worktreeBase, head,
-                    pullRequest.map(request ->
-                            new ReviewScope.PullRequestRef(request.number(), request.url())),
+                    pullRequest.map(pr -> new ReviewScope.PullRequestRef(pr.number(),
+                            asked.flatMap(GhCliService.ReviewRequest::url))),
                     session));
             if (pullRequest.isPresent()) {
-                GhCliService.ReviewRequest request = pullRequest.get();
-                items.add(new ReviewItem(scope, ReviewItem.Group.REQUESTED,
-                        "PR #" + request.number() + " " + request.headRefName(),
+                GhCliService.OpenPullRequest pr = pullRequest.get();
+                items.add(new ReviewItem(scope,
+                        asked.isPresent() ? ReviewItem.Group.REQUESTED
+                                : session.isPresent() ? ReviewItem.Group.AGENTS : ReviewItem.Group.MINE,
+                        "PR #" + pr.number() + " " + pr.headRefName(),
                         repository.displayName() + " · vs " + worktreeBase));
             } else {
                 items.add(new ReviewItem(scope,
