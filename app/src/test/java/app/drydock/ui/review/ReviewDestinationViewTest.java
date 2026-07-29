@@ -22,6 +22,7 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -307,6 +308,70 @@ class ReviewDestinationViewTest extends ApplicationTest {
         assertTrue(lookup(".review-queue-filter").query().isVisible());
     }
 
+    /**
+     * The centre panel never moves on a keystroke -- a selection is a real
+     * git diff -- so a query that hides the selected row leaves both the
+     * selection and the rendered diff alone.
+     */
+    @Test
+    void aQueryThatHidesTheSelectionLeavesTheSelectionAlone() {
+        seedMixedQueue();
+        type(KeyCode.J);
+        assertEquals("agent/issue-919", selectedTitle());
+        String selected = view.diagSelectedScopeId().orElseThrow();
+
+        typeQuery("feat");
+
+        assertEquals(List.of("feat/a"), renderedTitles());
+        assertNull(selectedTitle(), "the selected row is filtered out, so no rendered row is selected");
+        assertEquals(Optional.of(selected), view.diagSelectedScopeId(),
+                "the selection itself, and the diff it drives, must survive the filter");
+    }
+
+    @Test
+    void jAndKWalkTheVisibleListWhenTheSelectionIsHidden() {
+        seedMixedQueue();
+        type(KeyCode.J);
+        assertEquals("agent/issue-919", selectedTitle());
+
+        // "feat" hides the selection. "agent" would NOT -- it matches both
+        // AGENTS rows, so the selection would still be visible and the test
+        // would exercise nothing.
+        typeQuery("feat");
+        type(KeyCode.J);
+
+        assertEquals("feat/a", selectedTitle(),
+                "j must enter the visible list, not step from the hidden row");
+
+        typeQuery("920");
+        type(KeyCode.K);
+
+        assertEquals("agent/issue-920", selectedTitle(),
+                "k must enter the visible list from its own end");
+    }
+
+    /**
+     * A targeted navigation (⌘4, the sidebar's badge) must never land on a
+     * row the user cannot see. A reassembly restoring its own selection must
+     * never clear what the user typed.
+     */
+    @Test
+    void revealAndSelectClearsTheQueryButAPlainSelectDoesNot() {
+        seedMixedQueue();
+        typeQuery("feat");
+        String hidden = view.diagItems().get(1).scope().id();
+
+        interact(() -> view.selectScope(hidden));
+
+        assertEquals("", queryText(), "a targeted navigation clears the query");
+        assertEquals("agent/issue-919", selectedTitle());
+
+        typeQuery("feat");
+        interact(() -> view.setItems(view.diagItems(), 1));
+
+        assertEquals("feat", queryText(), "a reassembly must leave the query alone");
+    }
+
     // ---- fixtures -----------------------------------------------------------
 
     private void seedQueue() {
@@ -368,6 +433,10 @@ class ReviewDestinationViewTest extends ApplicationTest {
 
     private String footerText() {
         return ((Label) lookup(".review-queue-rail .review-rail-footer").query()).getText();
+    }
+
+    private String queryText() {
+        return ((javafx.scene.control.TextField) lookup(".review-queue-filter").query()).getText();
     }
 
     private void type(KeyCode key) {

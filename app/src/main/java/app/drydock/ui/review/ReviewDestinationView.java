@@ -363,7 +363,7 @@ public final class ReviewDestinationView extends BorderPane {
 
     /** Selects the item for {@code scopeId} ({@code ⌘4} and the sidebar's {@code ◨n} badge). */
     public void selectScope(String scopeId) {
-        queue.select(scopeId);
+        queue.revealAndSelect(scopeId);
     }
 
     /** The scope currently being reviewed, if the queue is not empty. */
@@ -1038,7 +1038,7 @@ public final class ReviewDestinationView extends BorderPane {
         return anchors;
     }
 
-    /** Diagnostic-only: the queue rows currently rendered (visual verification harness). */
+    /** Diagnostic-only: every queue item, filtered or not (visual verification harness). */
     public List<ReviewItem> diagItems() {
         return queue.items();
     }

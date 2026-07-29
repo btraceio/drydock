@@ -169,17 +169,42 @@ final class ReviewQueueRail extends VBox {
         onSelected.accept(match.get());
     }
 
-    /** {@code j} / {@code k}: moves the selection by {@code delta} through the flat item list. */
+    /**
+     * Clears any query, then selects -- for a navigation arriving from
+     * outside the rail ({@code ⌘4}, the sidebar's {@code ◨n} badge), which
+     * must never land on a row the query is hiding: a badge that appears to
+     * do nothing is worse than a cleared query.
+     *
+     * <p>Deliberately not folded into {@link #select}. That method is also
+     * what {@code j}/{@code k}, a row's own click handler, and the
+     * reassembly that restores the previous selection all call, and none of
+     * those may touch what the user typed.</p>
+     */
+    void revealAndSelect(String scopeId) {
+        if (!query().isEmpty()) {
+            filterField.clear();
+        }
+        select(scopeId);
+    }
+
+    /**
+     * {@code j} / {@code k}: moves the selection by {@code delta} through the
+     * rows the rail is actually showing. A selection the query has hidden is
+     * not in that list, so it reports {@code -1} and {@link #nextIndex}'s
+     * existing "nothing selected" branch enters the visible list from
+     * whichever end the key came from.
+     */
     void moveSelection(int delta) {
-        int next = nextIndex(indexOfSelection(), items.size(), delta);
+        List<ReviewItem> visible = visibleItems();
+        int next = nextIndex(indexOfSelection(visible), visible.size(), delta);
         if (next >= 0) {
-            select(items.get(next).scope().id());
+            select(visible.get(next).scope().id());
         }
     }
 
-    private int indexOfSelection() {
-        for (int i = 0; i < items.size(); i++) {
-            if (items.get(i).scope().id().equals(selectedScopeId)) {
+    private int indexOfSelection(List<ReviewItem> visible) {
+        for (int i = 0; i < visible.size(); i++) {
+            if (visible.get(i).scope().id().equals(selectedScopeId)) {
                 return i;
             }
         }
