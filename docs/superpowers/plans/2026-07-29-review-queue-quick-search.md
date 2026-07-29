@@ -277,7 +277,9 @@ Append these to `ReviewDestinationViewTest.java`, before the private helper bloc
 
         type(KeyCode.Q);
         settledRailWidth();
-        assertEquals(3, renderedTitles().size(), "a collapsed rail must render every item");
+        // Count rows, not titles: a collapsed row is an icon column with no
+        // title label, so renderedTitles() is empty by construction there.
+        assertEquals(3, renderedRows(), "a collapsed rail must render every item");
         assertFalse(lookup(".review-queue-filter").query().isVisible());
 
         type(KeyCode.Q);
@@ -318,6 +320,11 @@ And append these helpers to the private helper block at the end of the class:
                 .flatMap(graphic -> graphic.lookupAll(".review-queue-title").stream().findFirst().stream())
                 .map(label -> ((Label) label).getText())
                 .toList();
+    }
+
+    /** Rows regardless of collapse: a collapsed row renders an icon, not a title. */
+    private int renderedRows() {
+        return lookup(".review-queue-item").queryAll().size();
     }
 
     private List<String> renderedGroups() {
@@ -538,11 +545,20 @@ Append to `ReviewDestinationViewTest.java`, alongside the Task 2 tests:
         type(KeyCode.J);
         assertEquals("agent/issue-919", selectedTitle());
 
-        typeQuery("agent");
+        // "feat" hides the selection. "agent" would NOT -- it matches both
+        // AGENTS rows, so the selection would still be visible and the test
+        // would exercise nothing.
+        typeQuery("feat");
         type(KeyCode.J);
 
-        assertEquals("agent/issue-919", selectedTitle(),
-                "j must land inside the visible list, not step from the hidden row");
+        assertEquals("feat/a", selectedTitle(),
+                "j must enter the visible list, not step from the hidden row");
+
+        typeQuery("920");
+        type(KeyCode.K);
+
+        assertEquals("agent/issue-920", selectedTitle(),
+                "k must enter the visible list from its own end");
     }
 
     /**
@@ -595,7 +611,9 @@ While you are here, tighten `diagItems()`'s Javadoc: it says "the queue rows cur
 ./gradlew :app:test --tests 'app.drydock.ui.review.ReviewDestinationViewTest'
 ```
 
-Expected: `jAndKWalkTheVisibleListWhenTheSelectionIsHidden` fails (`j` steps to `agent/issue-920` off the hidden index), and `revealAndSelectClearsTheQueryButAPlainSelectDoesNot` fails on the first assertion (the query is not cleared).
+Expected two failures:
+- `jAndKWalkTheVisibleListWhenTheSelectionIsHidden` — today's `moveSelection` steps through the **full** list onto a row the query is not rendering, so no rendered row carries the `selected` pseudo-class and `selectedTitle()` returns `null` rather than `"feat/a"`.
+- `revealAndSelectClearsTheQueryButAPlainSelectDoesNot` — fails on the first assertion, because nothing clears the query.
 
 - [ ] **Step 3: Point `j`/`k` at the visible list**
 
@@ -718,16 +736,22 @@ Append to `ReviewDestinationViewTest.java`:
     @Test
     void slashFocusesTheFilterAndTypingIntoItDoesNotFireTheKeyTable() {
         seedMixedQueue();
+        Optional<String> before = view.diagSelectedScopeId();
 
         type(KeyCode.SLASH);
 
         Node field = lookup(".review-queue-filter").query();
         assertTrue(field.isFocused(), "/ must focus the quick-search field");
+        assertEquals("", queryText(), "/ must not type itself into the field it just focused");
 
         // j into the field is a j, not a selection move: Review's key table
-        // returns early while a text input has focus.
+        // returns early while a text input has focus. "j" matches nothing, so
+        // no row renders -- read the selection through diagSelectedScopeId,
+        // which sees the full list; selectedTitle() only sees rendered rows.
         press(KeyCode.J).release(KeyCode.J);
-        assertEquals("feat/a", selectedTitle(), "typing must never move the centre panel");
+        assertEquals("j", queryText(), "j must land in the field as a character");
+        assertEquals(before, view.diagSelectedScopeId(),
+                "typing must never move the centre panel");
     }
 
     @Test
@@ -777,6 +801,8 @@ Append to `ReviewDestinationViewTest.java`:
     }
 ```
 
+**If the headless robot does not synthesise typed characters:** `assertEquals("j", queryText(), …)` depends on Monocle delivering a `KEY_TYPED` for `press(KeyCode.J)`. It should. If it turns out not to, that assertion is the only one to drop — keep the two that carry the real invariants (the field is focused, and `diagSelectedScopeId()` did not move), and note the omission in the commit message. Do **not** "fix" it by typing through `typeQuery`, which sets text directly and would prove nothing about where the keystroke went.
+
 **Note on `⌘F`:** its routing lives in `DrydockApplication`'s scene filter, which this harness does not build — `ReviewDestinationViewTest` mounts the view standalone. `queueFilterAvailable()` is the seam that carries the decision, so asserting on it is the honest test. The one-line branch in `DrydockApplication` is verified by hand in Step 8.
 
 - [ ] **Step 2: Run them and confirm they fail**
@@ -785,7 +811,7 @@ Append to `ReviewDestinationViewTest.java`:
 ./gradlew :app:test --tests 'app.drydock.ui.review.ReviewDestinationViewTest'
 ```
 
-Expected: all four fail — `SLASH` is not in the key table, the field has no key handler, and `queueFilterAvailable()` does not compile.
+Expected: the class does not compile, because `queueFilterAvailable()` does not exist yet. Once Step 3 and Step 4 land it compiles, and the four tests are red for their own reasons: `SLASH` is not in the key table, the field has no key handler, and `/` types itself into the field it focuses.
 
 - [ ] **Step 3: Add `focusFilter` and the field's key handler**
 
@@ -793,15 +819,25 @@ In `ReviewQueueRail.java`, add after `setCollapsed`:
 
 ```java
     /**
-     * Focuses the quick-search field and selects what is in it ({@code /},
-     * {@code ⌘F}). A no-op while collapsed: the field is hidden and
-     * unmanaged there, so it cannot take focus, and neither key expands the
-     * rail -- {@code q} owns this rail's width.
+     * Focuses the quick-search field and selects what is in it ({@code ⌘F}).
+     * A no-op while collapsed: the field is hidden and unmanaged there, so it
+     * cannot take focus, and neither key expands the rail -- {@code q} owns
+     * this rail's width.
      */
     void focusFilter() {
+        focusFilter(false);
+    }
+
+    /**
+     * As {@link #focusFilter()}, but discards the one typed slash still in
+     * flight -- so {@code /} opens the field rather than pre-loading it with
+     * a {@code "/"}.
+     */
+    void focusFilter(boolean swallowTypedSlash) {
         if (collapsed) {
             return;
         }
+        swallowNextTypedSlash = swallowTypedSlash;
         filterField.requestFocus();
         filterField.selectAll();
     }
@@ -811,6 +847,28 @@ And in the constructor, after the `textProperty()` listener:
 
 ```java
         filterField.setOnKeyPressed(this::onFilterKeyPressed);
+        filterField.addEventFilter(KeyEvent.KEY_TYPED, event -> {
+            if (swallowNextTypedSlash) {
+                swallowNextTypedSlash = false;
+                if ("/".equals(event.getCharacter())) {
+                    event.consume();
+                }
+            }
+        });
+```
+
+And declare the flag next to `filterField`:
+
+```java
+    /**
+     * Set when {@code /} focuses this field. Consuming that key's {@code
+     * KEY_PRESSED} in Review's table does not stop the separate {@code
+     * KEY_TYPED} from arriving, and by the time it does, this field owns
+     * focus -- so the key that opens the filter would otherwise type itself
+     * into it. Never set for {@code ⌘F}: a shortcut-modified press produces
+     * no character, and swallowing there would eat a real keystroke.
+     */
+    private boolean swallowNextTypedSlash;
 ```
 
 Then add the handler next to `focusFilter`:
@@ -869,8 +927,10 @@ import javafx.scene.input.KeyEvent;
 In `ReviewDestinationView.java`, add one arm to the `switch` in `onKeyPressed`, next to `case Q`:
 
 ```java
-            case SLASH -> { queue.focusFilter(); yield true; }
+            case SLASH -> { queue.focusFilter(true); yield true; }
 ```
+
+The `true` is what stops the slash typing itself into the field it just opened. `focusQueueFilter()` (⌘F) keeps calling the no-arg `queue.focusFilter()`.
 
 The method's existing early return (`event.getTarget() instanceof TextInputControl`) already means a slash typed *into* the field is a slash, not a re-focus.
 
@@ -956,7 +1016,7 @@ Check, in order:
 1. Open Review (`⌘4`). The field sits under the `QUEUE` header. Type — rows narrow, the footer reads `N of M items`.
 2. Type something that matches nothing: the `No queue item matches "…"` row appears, not an empty rail.
 3. `Esc` in the field: query cleared, every row back, and `j` then moves the selection (proving focus left the field).
-4. `/` focuses the field; `j` typed into it inserts a `j` instead of moving the selection.
+4. `/` focuses the field and the field is **empty** — no stray `/` in it. Then `j` typed into it inserts a `j` instead of moving the selection.
 5. `⌘F` with Review showing focuses the queue filter; `⌘F` on a session tab still focuses the sidebar filter.
 6. Press `q` to collapse: every row is back at 44px, no field. `/` and `⌘F` there — `⌘F` must focus the **sidebar** filter. Press `q` again: the query is back and applied.
 7. Drag the window under 1180px with a query typed: the rail auto-collapses and shows every row.
