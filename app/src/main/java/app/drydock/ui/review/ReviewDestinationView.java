@@ -240,6 +240,7 @@ public final class ReviewDestinationView extends BorderPane {
             if (index >= 0) {
                 intentIndex = index;
                 refreshReviewState();
+                revealCurrentIntent();
             }
         });
         margin.setOnFilterChanged(filter -> refreshReviewState());
@@ -343,8 +344,10 @@ public final class ReviewDestinationView extends BorderPane {
 
     /**
      * Replaces the queue's contents. The previous selection survives when
-     * its scope is still present; otherwise the first item is selected, and
-     * an empty queue shows the zero state.
+     * its scope is still present; otherwise the first item the rail is
+     * actually showing is selected -- falling back to the first item
+     * outright only when a query has hidden every row. An empty queue shows
+     * the zero state.
      */
     public void setItems(List<ReviewItem> items, int repositoryCount) {
         String previous = queue.selected().map(item -> item.scope().id()).orElse(null);
@@ -357,12 +360,36 @@ public final class ReviewDestinationView extends BorderPane {
         }
         boolean stillThere = previous != null
                 && items.stream().anyMatch(item -> item.scope().id().equals(previous));
-        queue.select(stillThere ? previous : items.get(0).scope().id());
+        if (stillThere) {
+            queue.select(previous);
+            return;
+        }
+        // The fallback must be a row the query still shows -- items.get(0)
+        // can be filtered out, which would select something the rail is not
+        // even rendering. Only an over-narrow query (nothing visible at all)
+        // falls back to items.get(0), so a reassembly still leaves something
+        // selected rather than nothing.
+        queue.select(queue.firstVisible().map(item -> item.scope().id()).orElse(items.get(0).scope().id()));
     }
 
     /** Selects the item for {@code scopeId} ({@code ⌘4} and the sidebar's {@code ◨n} badge). */
     public void selectScope(String scopeId) {
-        queue.select(scopeId);
+        queue.revealAndSelect(scopeId);
+    }
+
+    /**
+     * Whether {@code ⌘F} should reach the queue's quick-search field. False
+     * while the rail is collapsed, where the field does not exist -- the
+     * scene filter then keeps its existing route to the sidebar's filter
+     * rather than focusing something invisible.
+     */
+    public boolean queueFilterAvailable() {
+        return !queue.collapsed();
+    }
+
+    /** Focuses the queue's quick-search field ({@code ⌘F}). */
+    public void focusQueueFilter() {
+        queue.focusFilter();
     }
 
     /** The scope currently being reviewed, if the queue is not empty. */
@@ -453,6 +480,16 @@ public final class ReviewDestinationView extends BorderPane {
                 (int) settled, counted.size());
     }
 
+    /**
+     * Brings the current intent's code into view. Selecting an intent that
+     * left the diff where it was is the bug this fixes: the rail said one
+     * thing and the centre showed another, so the rail read as decoration.
+     */
+    private void revealCurrentIntent() {
+        currentIntent().flatMap(ReviewIntent::anchor)
+                .ifPresent(anchor -> diffColumn.revealHunk(anchor.file(), anchor.hunkIndex()));
+    }
+
     /** {@code [} / {@code ]}: moves the intent the verdict bar is settling. */
     private void moveIntent(int delta) {
         List<ReviewIntent> intents = intents();
@@ -461,6 +498,7 @@ public final class ReviewDestinationView extends BorderPane {
         }
         intentIndex = (int) Math.clamp((long) intentIndex + delta, 0, intents.size() - 1);
         refreshReviewState();
+        revealCurrentIntent();
     }
 
     /** {@code n}: jumps to the next intent with no verdict yet. */
@@ -476,6 +514,7 @@ public final class ReviewDestinationView extends BorderPane {
             if (intent.countsTowardProgress() && host.verdict(scope.get(), intent).isEmpty()) {
                 intentIndex = candidate;
                 refreshReviewState();
+                revealCurrentIntent();
                 return;
             }
         }
@@ -604,6 +643,7 @@ public final class ReviewDestinationView extends BorderPane {
             if (host.verdict(scope.get(), counted.get(i)).isEmpty()) {
                 intentIndex = intents().indexOf(counted.get(i));
                 refreshReviewState();
+                revealCurrentIntent();
                 return;
             }
         }
@@ -626,11 +666,31 @@ public final class ReviewDestinationView extends BorderPane {
         ReviewScope scope = item.scope();
         headerIcon.setText(item.icon());
         headerTitle.setText(item.title());
-        headerContext.setText(item.subtitle() + "  ·  vs " + scope.base());
+        headerContext.setText(contextLine(item));
         setSessionRow(scope, sessionLineFor(scope), scope.sessionId().isPresent());
         body.getChildren().setAll(bodyFor(item));
         intentIndex = 0;
         refreshReviewState();
+    }
+
+    /**
+     * The item header's second line: what this is, and what it is compared
+     * against.
+     *
+     * <p>A working tree is diffed against its own {@code HEAD}, never against
+     * the base branch, so naming the branch there claimed a comparison the
+     * column was not making. And the comparison is stated once: a worktree
+     * item's subtitle already carries it for the queue rail, and repeating it
+     * here read as "vs develop · vs develop".</p>
+     */
+    private static String contextLine(ReviewItem item) {
+        String against = item.scope().kind() == ReviewScope.Kind.WORKING_TREE
+                ? "HEAD"
+                : item.scope().base();
+        String comparison = "vs " + against;
+        return item.subtitle().endsWith(comparison)
+                ? item.subtitle()
+                : item.subtitle() + "  ·  " + comparison;
     }
 
     /**
@@ -885,6 +945,7 @@ public final class ReviewDestinationView extends BorderPane {
             case J -> { queue.moveSelection(1); yield true; }
             case K -> { queue.moveSelection(-1); yield true; }
             case Q -> { setQueueCollapsed(!queue.collapsed()); yield true; }
+            case SLASH -> { queue.focusFilter(true); yield true; }
             case O -> { openBoundSession(); yield true; }
             case D -> { cycleDensity(); yield true; }
             case C -> { diffColumn.toggleContext(); yield true; }
@@ -1004,7 +1065,7 @@ public final class ReviewDestinationView extends BorderPane {
         return anchors;
     }
 
-    /** Diagnostic-only: the queue rows currently rendered (visual verification harness). */
+    /** Diagnostic-only: every queue item, filtered or not (visual verification harness). */
     public List<ReviewItem> diagItems() {
         return queue.items();
     }

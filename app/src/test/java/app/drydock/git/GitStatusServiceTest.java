@@ -241,6 +241,96 @@ class GitStatusServiceTest {
         assertTrue(Files.exists(created.resolve("develop-only.txt")));
     }
 
+    /**
+     * The btrace regression: {@code origin/HEAD} says {@code master} while
+     * every branch is cut from {@code develop}, so a six-file branch used to
+     * render as the whole of {@code develop} plus the branch -- over a
+     * thousand files. The base must be the branch this checkout forked from,
+     * not the repository's nominal default.
+     */
+    @Test
+    void theReviewBaseIsTheIntegrationBranchTheCheckoutForkedFrom(@TempDir Path repo) throws Exception {
+        initRepo(repo, "master");
+        writeFile(repo, "README.md", "hello\n");
+        runGit(repo, "add", "README.md");
+        commit(repo, "initial commit");
+        runGit(repo, "checkout", "-b", "develop");
+        for (int i = 0; i < 3; i++) {
+            writeFile(repo, "develop-" + i + ".txt", "d\n");
+            runGit(repo, "add", "develop-" + i + ".txt");
+            commit(repo, "develop commit " + i);
+        }
+        runGit(repo, "checkout", "-b", "feat/x");
+        writeFile(repo, "feature.txt", "f\n");
+        runGit(repo, "add", "feature.txt");
+        commit(repo, "the one commit under review");
+
+        assertEquals("develop", service.reviewBase(repo, Optional.empty(), "master").get());
+    }
+
+    /** A branch cut from the default branch keeps it, even with a develop around. */
+    @Test
+    void theReviewBaseStaysTheDefaultBranchWhenNothingElseIsCloser(@TempDir Path repo) throws Exception {
+        initRepo(repo, "main");
+        writeFile(repo, "README.md", "hello\n");
+        runGit(repo, "add", "README.md");
+        commit(repo, "initial commit");
+        runGit(repo, "branch", "develop");
+        runGit(repo, "checkout", "-b", "feat/x");
+        writeFile(repo, "feature.txt", "f\n");
+        runGit(repo, "add", "feature.txt");
+        commit(repo, "the one commit under review");
+
+        assertEquals("main", service.reviewBase(repo, Optional.empty(), "main").get());
+    }
+
+    /** What GitHub says the branch merges into outranks anything derived locally. */
+    @Test
+    void aDeclaredPullRequestBaseWinsOverTheLocalGuess(@TempDir Path repo) throws Exception {
+        initRepo(repo, "main");
+        writeFile(repo, "README.md", "hello\n");
+        runGit(repo, "add", "README.md");
+        commit(repo, "initial commit");
+        runGit(repo, "branch", "release/2.0");
+        runGit(repo, "checkout", "-b", "feat/x");
+        writeFile(repo, "feature.txt", "f\n");
+        runGit(repo, "add", "feature.txt");
+        commit(repo, "the one commit under review");
+
+        assertEquals("release/2.0", service.reviewBase(repo, Optional.of("release/2.0"), "main").get());
+    }
+
+    /**
+     * A PR base with no local branch (the usual case for someone else's
+     * repository) resolves to its remote-tracking ref -- a bare name that
+     * resolves to nothing would fail the diff outright.
+     */
+    @Test
+    void aPullRequestBaseWithNoLocalBranchResolvesToTheRemoteRef(@TempDir Path tmp) throws Exception {
+        Path upstream = tmp.resolve("upstream");
+        Files.createDirectory(upstream);
+        initRepo(upstream, "main");
+        writeFile(upstream, "README.md", "hello\n");
+        runGit(upstream, "add", "README.md");
+        commit(upstream, "initial commit");
+        runGit(upstream, "branch", "develop");
+        Path clone = tmp.resolve("clone");
+        runGitIn(tmp, "clone", "--quiet", upstream.toString(), clone.toString());
+
+        assertEquals("origin/develop", service.reviewBase(clone, Optional.of("develop"), "main").get());
+    }
+
+    /** An unresolvable declared base falls through to the local answer rather than failing the diff. */
+    @Test
+    void anUnknownPullRequestBaseFallsBackToTheLocalGuess(@TempDir Path repo) throws Exception {
+        initRepo(repo, "main");
+        writeFile(repo, "README.md", "hello\n");
+        runGit(repo, "add", "README.md");
+        commit(repo, "initial commit");
+
+        assertEquals("main", service.reviewBase(repo, Optional.of("no-such-branch"), "main").get());
+    }
+
     @Test
     void listBranchesReportsEveryLocalBranch(@TempDir Path repo) throws Exception {
         initRepo(repo, "main");

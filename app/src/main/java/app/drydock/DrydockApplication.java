@@ -326,6 +326,7 @@ public final class DrydockApplication extends Application {
 
         mainWorkspace.setModalLayer(appShell.modalLayer());
         mainWorkspace.setOnToggleSidebar(appShell::toggleSidebar);
+        sidebar.setOnToggleSidebar(appShell::toggleSidebar);
         // The native ghostty view paints over in-scene modals; hide it while
         // any modal is showing (see MainWorkspace.setTerminalsObscured).
         appShell.modalLayer().setOnShowingChanged(mainWorkspace::setTerminalsObscured);
@@ -801,7 +802,14 @@ public final class DrydockApplication extends Application {
                 appShell.toggleSidebar();
                 event.consume();
             } else if (cmd && event.getCode() == KeyCode.F) {
-                sidebar.focusFilter();
+                // Review's queue owns ⌘F while it is showing and its rail is
+                // expanded; otherwise the key keeps its sidebar meaning
+                // rather than becoming a dead key.
+                if (mainWorkspace.isReviewQueueFilterable()) {
+                    mainWorkspace.focusReviewQueueFilter();
+                } else {
+                    sidebar.focusFilter();
+                }
                 event.consume();
             } else if (cmd && event.getCode() == KeyCode.N) {
                 activeOrFirstRepository().ifPresent(mainWorkspace::openNewSession);

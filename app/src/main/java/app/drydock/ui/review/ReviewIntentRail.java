@@ -2,6 +2,7 @@ package app.drydock.ui.review;
 
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewVerdict;
+import app.drydock.ui.PanelHeader;
 
 import javafx.animation.KeyFrame;
 import javafx.animation.KeyValue;
@@ -41,10 +42,10 @@ final class ReviewIntentRail extends VBox {
     static final double COLLAPSED_WIDTH = 40;
     private static final Duration COLLAPSE_ANIMATION = Duration.millis(160);
 
-    private final Button headerButton = new Button();
-    private final Label headerChevron = new Label("‹");
-    private final Label headerTitle = new Label("INTENTS");
-    private final Label headerHint = new Label();
+    // The handler is read at click time, so it can be installed after construction.
+    private final PanelHeader header = PanelHeader.left(
+            "INTENTS", "", "Collapse or expand the intents (i)",
+            () -> this.onToggleCollapse.run());
     private final VBox cards = new VBox();
     private final ScrollPane scroll = new ScrollPane(cards);
 
@@ -65,26 +66,13 @@ final class ReviewIntentRail extends VBox {
         setPrefWidth(EXPANDED_WIDTH);
         setMaxWidth(EXPANDED_WIDTH);
 
-        headerChevron.getStyleClass().add("review-rail-chevron");
-        headerTitle.getStyleClass().add("review-rail-title");
-        headerHint.getStyleClass().add("review-rail-hint");
-        Region spacer = new Region();
-        HBox.setHgrow(spacer, Priority.ALWAYS);
-        HBox headerRow = new HBox(6, headerChevron, headerTitle, spacer, headerHint);
-        headerRow.setAlignment(Pos.CENTER_LEFT);
-        headerButton.setGraphic(headerRow);
-        headerButton.getStyleClass().add("review-rail-header");
-        headerButton.setMaxWidth(Double.MAX_VALUE);
-        headerButton.setTooltip(new Tooltip("Collapse or expand the intents (i)"));
-        headerButton.setOnAction(e -> onToggleCollapse.run());
-
         cards.getStyleClass().add("review-intent-cards");
         scroll.setFitToWidth(true);
         scroll.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
         scroll.getStyleClass().add("review-intent-scroll");
         VBox.setVgrow(scroll, Priority.ALWAYS);
 
-        getChildren().setAll(headerButton, scroll);
+        getChildren().setAll(header.node(), scroll);
     }
 
     void setOnSelected(Consumer<ReviewIntent> handler) {
@@ -144,18 +132,16 @@ final class ReviewIntentRail extends VBox {
     }
 
     private void rebuild() {
-        headerChevron.setText(collapsed ? "›" : "‹");
-        headerTitle.setVisible(!collapsed);
-        headerTitle.setManaged(!collapsed);
-        headerHint.setVisible(!collapsed);
-        headerHint.setManaged(!collapsed);
+        header.showCollapsed(collapsed);
+        header.setTitleVisible(!collapsed);
+        header.setHintVisible(!collapsed);
 
         long counted = intents.stream().filter(ReviewIntent::countsTowardProgress).count();
         long settled = intents.stream()
                 .filter(ReviewIntent::countsTowardProgress)
                 .filter(intent -> verdictLookup.apply(intent).isPresent())
                 .count();
-        headerHint.setText(settled + "/" + counted + " · i");
+        header.setHint(settled + "/" + counted + " · i");
 
         buttonsByIntentId.clear();
         List<Node> nodes = new ArrayList<>();

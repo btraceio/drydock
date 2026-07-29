@@ -2178,7 +2178,7 @@
     -fx-border-color: transparent -drydock-border transparent transparent;
     -fx-border-width: 0 1 0 0;
 }
-.review-rail-header {
+.panel-header {
     -fx-background-color: transparent;
     -fx-background-radius: 0;
     -fx-min-height: 28px;
@@ -2186,22 +2186,22 @@
     -fx-padding: 0 9 0 9;
     -fx-cursor: hand;
 }
-.review-rail-header:hover {
+.panel-header:hover {
     -fx-background-color: -drydock-hover;
 }
-.review-rail-header:focused {
+.panel-header:focused {
     -fx-background-color: -drydock-accent-soft;
 }
-.review-rail-chevron {
+.panel-header-chevron {
     -fx-text-fill: -drydock-text-faint;
     -fx-font-size: 11px;
 }
-.review-rail-title {
+.panel-header-title {
     -fx-text-fill: -drydock-text-faint;
     -fx-font-size: 10px;
     -fx-font-weight: 600;
 }
-.review-rail-hint {
+.panel-header-hint {
     -fx-text-fill: -drydock-text-faint;
     -fx-font-size: 10px;
     -fx-font-family: "JetBrains Mono", "Menlo", monospace;
@@ -2226,6 +2226,18 @@
     -fx-font-size: 9px;
     -fx-font-weight: 700;
     -fx-padding: 8 0 2 4;
+}
+/* The queue's quick-search field: the sidebar's filter, sized for a 236px
+ * rail. Hidden and unmanaged while the rail is collapsed. */
+.review-queue-filter {
+    -fx-min-height: 26px; -fx-max-height: 26px;
+    -fx-font-size: 11px;
+    -fx-padding: 0 8 0 8;
+}
+.review-queue-no-match {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 11px;
+    -fx-padding: 10 4 0 4;
 }
 .review-queue-item {
     -fx-background-color: transparent;
@@ -2640,7 +2652,7 @@
     -fx-max-height: 28px;
     -fx-padding: 0 9 0 6;
 }
-.review-rail-chevron-button {
+.panel-header-chevron-button {
     -fx-background-color: transparent;
     -fx-background-radius: 6px;
     -fx-border-color: transparent;
@@ -2650,8 +2662,8 @@
     -fx-padding: 2 5 2 5;
     -fx-cursor: hand;
 }
-.review-rail-chevron-button:hover { -fx-text-fill: -drydock-text; }
-.review-rail-chevron-button:focused { -fx-border-color: -drydock-accent; }
+.panel-header-chevron-button:hover { -fx-text-fill: -drydock-text; }
+.panel-header-chevron-button:focused { -fx-border-color: -drydock-accent; }
 
 .review-filter-button {
     -fx-background-color: transparent;

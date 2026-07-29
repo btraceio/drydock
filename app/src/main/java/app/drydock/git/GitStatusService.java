@@ -411,6 +411,115 @@ public final class GitStatusService implements AutoCloseable {
         return Optional.empty();
     }
 
+    /**
+     * The branches a review base is looked for among when no pull request
+     * declares one, after the repository's own default. {@code develop}
+     * before {@code trunk} because a repository that has both almost always
+     * integrates on the former.
+     */
+    private static final List<String> INTEGRATION_BRANCHES = List.of("main", "master", "develop", "trunk");
+
+    /**
+     * The branch {@code checkoutRoot}'s work should be diffed against.
+     *
+     * <p>The repository's default branch is the <em>last</em> answer, not the
+     * first. A repository whose {@code origin/HEAD} is {@code master} while
+     * every branch is cut from {@code develop} (btrace is one) diffed every
+     * review against {@code master}, so a six-file branch rendered as
+     * fifteen hundred files -- the whole of {@code develop} plus the branch.
+     * The base is therefore resolved per checkout, in descending order of
+     * authority:</p>
+     *
+     * <ol>
+     *   <li>{@code pullRequestBase} -- the PR's own {@code baseRefName}. If
+     *       GitHub says what this branch merges into, nothing local can know
+     *       better.</li>
+     *   <li>the integration branch that already contains the most of this
+     *       checkout's history -- the one it was forked from.</li>
+     *   <li>{@code defaultBranch}, when neither of those resolves.</li>
+     * </ol>
+     *
+     * <p>Every answer is a revision git can resolve here: a name with no
+     * local branch falls back to its {@code origin/} counterpart, because a
+     * bare name that resolves to nothing fails the diff outright.</p>
+     */
+    public CompletableFuture<String> reviewBase(Path checkoutRoot, Optional<String> pullRequestBase,
+                                                String defaultBranch) {
+        return CompletableFuture.supplyAsync(
+                () -> reviewBaseBlocking(checkoutRoot, pullRequestBase, defaultBranch), executor);
+    }
+
+    /** Synchronous form of {@link #reviewBase}, package-private for tests. */
+    String reviewBaseBlocking(Path checkoutRoot, Optional<String> pullRequestBase, String defaultBranch) {
+        Path git = locator.locate()
+                .orElseThrow(() -> new GitExecutableNotFoundException(locator.describeSearched()));
+
+        Optional<String> declared = pullRequestBase.flatMap(name -> resolveBranch(git, checkoutRoot, name));
+        if (declared.isPresent()) {
+            return declared.get();
+        }
+
+        // Preference order doubles as the tie-break: a branch cut from the
+        // default branch scores identically against every integration branch
+        // that has not moved since, and the default is then the right answer.
+        List<String> candidates = new ArrayList<>();
+        candidates.add(defaultBranch);
+        for (String name : INTEGRATION_BRANCHES) {
+            resolveBranch(git, checkoutRoot, name)
+                    .filter(resolved -> !candidates.contains(resolved))
+                    .ifPresent(candidates::add);
+        }
+
+        String best = defaultBranch;
+        long fewest = Long.MAX_VALUE;
+        for (String candidate : candidates) {
+            long ahead = commitsAhead(git, checkoutRoot, candidate);
+            if (ahead >= 0 && ahead < fewest) {
+                fewest = ahead;
+                best = candidate;
+            }
+        }
+        return best;
+    }
+
+    /**
+     * The local branch {@code name} when it exists, otherwise {@code
+     * origin/name} when that does, otherwise empty -- the same local-then-
+     * remote rule {@link #defaultBranchBlocking} applies, and for the same
+     * reason: a PR base branch is often not checked out locally at all.
+     */
+    private Optional<String> resolveBranch(Path git, Path repositoryRoot, String name) {
+        if (name.isBlank() || name.startsWith("-")) {
+            return Optional.empty();
+        }
+        if (resolves(git, repositoryRoot, "refs/heads/" + name)) {
+            return Optional.of(name);
+        }
+        if (resolves(git, repositoryRoot, "refs/remotes/origin/" + name)) {
+            return Optional.of("origin/" + name);
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * How many commits {@code HEAD} has that {@code base} does not -- the
+     * size of the {@code base...HEAD} range the diff would render. Negative
+     * when the range cannot be resolved (an unborn or detached HEAD, a base
+     * that is not a ref here), which the caller reads as "not a candidate".
+     */
+    private long commitsAhead(Path git, Path checkoutRoot, String base) {
+        List<String> lines = runLinesAllowingFailure(git, checkoutRoot, List.of(
+                "rev-list", "--count", "--end-of-options", base + "..HEAD"));
+        if (lines.isEmpty()) {
+            return -1;
+        }
+        try {
+            return Long.parseLong(lines.get(0));
+        } catch (NumberFormatException e) {
+            return -1;
+        }
+    }
+
     /** Whether {@code ref} exists in {@code repositoryRoot}. */
     private boolean resolves(Path git, Path repositoryRoot, String ref) {
         return !runLines(git, repositoryRoot, List.of(

@@ -1,17 +1,21 @@
 package app.drydock.ui.review;
 
 import app.drydock.review.ReviewItem;
+import app.drydock.ui.PanelHeader;
 
 import javafx.animation.KeyFrame;
 import javafx.animation.KeyValue;
 import javafx.animation.Timeline;
 import javafx.css.PseudoClass;
+import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.Node;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
 import javafx.scene.control.ScrollPane;
+import javafx.scene.control.TextField;
 import javafx.scene.control.Tooltip;
+import javafx.scene.input.KeyEvent;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
@@ -63,13 +67,14 @@ final class ReviewQueueRail extends VBox {
         Optional<String> stateOf(ReviewItem item);
     }
 
-    private final Button headerButton = new Button();
-    private final Label headerChevron = new Label("‹");
-    private final Label headerTitle = new Label("QUEUE");
-    private final Label headerHint = new Label("j k · q");
+    // The handler is read at click time, so it can be installed after construction.
+    private final PanelHeader header = PanelHeader.left(
+            "QUEUE", "j k · q", "Collapse or expand the queue (q)",
+            () -> this.onToggleCollapse.run());
     private final VBox rows = new VBox();
     private final ScrollPane scroll = new ScrollPane(rows);
     private final Label footer = new Label();
+    private final TextField filterField = new TextField();
 
     private final Map<String, Button> buttonsByScopeId = new LinkedHashMap<>();
     private final List<ReviewItem> items = new ArrayList<>();
@@ -83,24 +88,21 @@ final class ReviewQueueRail extends VBox {
     private boolean narrow;
     private String selectedScopeId;
 
+    /**
+     * Set when {@code /} focuses this field. Consuming that key's {@code
+     * KEY_PRESSED} in Review's table does not stop the separate {@code
+     * KEY_TYPED} from arriving, and by the time it does, this field owns
+     * focus -- so the key that opens the filter would otherwise type itself
+     * into it. Never set for {@code ⌘F}: a shortcut-modified press produces
+     * no character, and swallowing there would eat a real keystroke.
+     */
+    private boolean swallowNextTypedSlash;
+
     ReviewQueueRail() {
         getStyleClass().add("review-queue-rail");
         setMinWidth(EXPANDED_WIDTH);
         setPrefWidth(EXPANDED_WIDTH);
         setMaxWidth(EXPANDED_WIDTH);
-
-        headerChevron.getStyleClass().add("review-rail-chevron");
-        headerTitle.getStyleClass().add("review-rail-title");
-        headerHint.getStyleClass().add("review-rail-hint");
-        Region headerSpacer = new Region();
-        HBox.setHgrow(headerSpacer, Priority.ALWAYS);
-        HBox headerRow = new HBox(6, headerChevron, headerTitle, headerSpacer, headerHint);
-        headerRow.setAlignment(Pos.CENTER_LEFT);
-        headerButton.setGraphic(headerRow);
-        headerButton.getStyleClass().add("review-rail-header");
-        headerButton.setMaxWidth(Double.MAX_VALUE);
-        headerButton.setTooltip(new Tooltip("Collapse or expand the queue (q)"));
-        headerButton.setOnAction(e -> onToggleCollapse.run());
 
         rows.getStyleClass().add("review-queue-items");
         scroll.setFitToWidth(true);
@@ -111,7 +113,23 @@ final class ReviewQueueRail extends VBox {
         footer.getStyleClass().add("review-rail-footer");
         footer.setMaxWidth(Double.MAX_VALUE);
 
-        getChildren().setAll(headerButton, scroll, footer);
+        filterField.getStyleClass().addAll("filter-field", "review-queue-filter");
+        filterField.setPromptText("⌕  Filter the queue…");
+        // No debounce: this rebuild is tens of buttons over in-memory
+        // lookups, so a timer would only add latency (spec §Rendering).
+        filterField.textProperty().addListener((observable, old, text) -> rebuild());
+        filterField.setOnKeyPressed(this::onFilterKeyPressed);
+        filterField.addEventFilter(KeyEvent.KEY_TYPED, event -> {
+            if (swallowNextTypedSlash) {
+                swallowNextTypedSlash = false;
+                if ("/".equals(event.getCharacter())) {
+                    event.consume();
+                }
+            }
+        });
+        VBox.setMargin(filterField, new Insets(0, 8, 6, 8));
+
+        getChildren().setAll(header.node(), filterField, scroll, footer);
     }
 
     void setOnSelected(Consumer<ReviewItem> handler) {
@@ -151,6 +169,17 @@ final class ReviewQueueRail extends VBox {
     }
 
     /**
+     * The first item the query is actually showing -- what a reassembly that
+     * drops the current selection should fall back to. Falling back to
+     * {@code items.get(0)} instead can select a row the query hides, leaving
+     * the rail reading "no match" while the centre panel renders something
+     * unrelated.
+     */
+    Optional<ReviewItem> firstVisible() {
+        return visibleItems().stream().findFirst();
+    }
+
+    /**
      * Selects {@code scopeId} and fires the selection callback, scrolling the
      * row into view. Selecting an id the rail does not hold is a no-op:
      * the queue is reassembled asynchronously, so a stale id from a keyboard
@@ -171,17 +200,47 @@ final class ReviewQueueRail extends VBox {
         onSelected.accept(match.get());
     }
 
-    /** {@code j} / {@code k}: moves the selection by {@code delta} through the flat item list. */
+    /**
+     * Clears any query, then selects -- for a navigation arriving from
+     * outside the rail ({@code ⌘4}, the sidebar's {@code ◨n} badge), which
+     * must never land on a row the query is hiding: a badge that appears to
+     * do nothing is worse than a cleared query.
+     *
+     * <p>Deliberately not folded into {@link #select}. That method is also
+     * what {@code j}/{@code k}, a row's own click handler, and the
+     * reassembly that restores the previous selection all call, and none of
+     * those may touch what the user typed.</p>
+     */
+    void revealAndSelect(String scopeId) {
+        boolean present = items.stream().anyMatch(item -> item.scope().id().equals(scopeId));
+        // A stale id -- a worktree removed since the navigation was queued --
+        // must not clear what the user typed either. select() already no-ops
+        // on it; clearing the query too would be strictly worse than doing
+        // neither.
+        if (present && !query().isEmpty()) {
+            filterField.clear();
+        }
+        select(scopeId);
+    }
+
+    /**
+     * {@code j} / {@code k}: moves the selection by {@code delta} through the
+     * rows the rail is actually showing. A selection the query has hidden is
+     * not in that list, so it reports {@code -1} and {@link #nextIndex}'s
+     * existing "nothing selected" branch enters the visible list from
+     * whichever end the key came from.
+     */
     void moveSelection(int delta) {
-        int next = nextIndex(indexOfSelection(), items.size(), delta);
+        List<ReviewItem> visible = visibleItems();
+        int next = nextIndex(indexOfSelection(visible), visible.size(), delta);
         if (next >= 0) {
-            select(items.get(next).scope().id());
+            select(visible.get(next).scope().id());
         }
     }
 
-    private int indexOfSelection() {
-        for (int i = 0; i < items.size(); i++) {
-            if (items.get(i).scope().id().equals(selectedScopeId)) {
+    private int indexOfSelection(List<ReviewItem> visible) {
+        for (int i = 0; i < visible.size(); i++) {
+            if (visible.get(i).scope().id().equals(selectedScopeId)) {
                 return i;
             }
         }
@@ -209,6 +268,28 @@ final class ReviewQueueRail extends VBox {
         return (int) Math.clamp((long) current + delta, 0, size - 1);
     }
 
+    /**
+     * Whether {@code item} survives the quick-search {@code query}.
+     *
+     * <p>The haystack is the row's whole visible text: the group label the
+     * rail prints at the head of the second line, then the title, then the
+     * subtitle. They are joined by separators so a query cannot match the
+     * artifact where one field's tail meets the next one's head -- what you
+     * can read in the row is what you can search for, and nothing else. A
+     * blank query matches everything.</p>
+     *
+     * <p>Package-private and static for the same reason {@link #nextIndex}
+     * is: the rule is then testable without a running toolkit.</p>
+     */
+    static boolean matches(ReviewItem item, String query) {
+        String needle = query == null ? "" : query.strip().toLowerCase(Locale.ROOT);
+        if (needle.isEmpty()) {
+            return true;
+        }
+        String haystack = item.group().label() + " " + item.title() + " " + item.subtitle();
+        return haystack.toLowerCase(Locale.ROOT).contains(needle);
+    }
+
     boolean collapsed() {
         return collapsed;
     }
@@ -221,6 +302,71 @@ final class ReviewQueueRail extends VBox {
         collapsed = newCollapsed;
         animateTo(targetWidth());
         rebuild();
+    }
+
+    /**
+     * Focuses the quick-search field and selects what is in it ({@code ⌘F}).
+     * A no-op while collapsed: the field is hidden and unmanaged there, so it
+     * cannot take focus, and neither key expands the rail -- {@code q} owns
+     * this rail's width.
+     */
+    void focusFilter() {
+        focusFilter(false);
+    }
+
+    /**
+     * As {@link #focusFilter()}, but discards the one typed slash still in
+     * flight -- so {@code /} opens the field rather than pre-loading it with
+     * a {@code "/"}.
+     */
+    void focusFilter(boolean swallowTypedSlash) {
+        if (collapsed) {
+            return;
+        }
+        swallowNextTypedSlash = swallowTypedSlash;
+        filterField.requestFocus();
+        filterField.selectAll();
+    }
+
+    /**
+     * The field's own {@code Enter} and {@code Esc}.
+     *
+     * <p>Esc has to live here rather than in Review's unwind: the
+     * scene-level Escape branch gates that unwind behind "no text input has
+     * focus", so it never reaches Review while this field is focused -- but
+     * it does not consume the event either, so the key arrives at the
+     * focused node. A blank query is not ours to swallow; leaving it
+     * unconsumed lets the ordinary unwind resume once focus is off the
+     * field.</p>
+     */
+    private void onFilterKeyPressed(KeyEvent event) {
+        switch (event.getCode()) {
+            case ENTER -> {
+                // One selection, one git diff -- Enter is what commits the
+                // filter, never a keystroke.
+                visibleItems().stream().findFirst()
+                        .ifPresent(item -> select(item.scope().id()));
+                event.consume();
+            }
+            case ESCAPE -> {
+                if (!query().isEmpty()) {
+                    filterField.clear();
+                    returnFocusToRail();
+                    event.consume();
+                }
+            }
+            default -> { }
+        }
+    }
+
+    /** Moves focus off the field so Review's key table stops returning early. */
+    private void returnFocusToRail() {
+        Button selected = buttonsByScopeId.get(selectedScopeId);
+        if (selected != null) {
+            selected.requestFocus();
+        } else {
+            scroll.requestFocus();
+        }
     }
 
     /**
@@ -252,19 +398,42 @@ final class ReviewQueueRail extends VBox {
                 new KeyValue(maxWidthProperty(), target))).play();
     }
 
+    /**
+     * What the rail is actually rendering: the query's survivors while
+     * expanded, and every item while collapsed.
+     *
+     * <p>A collapse suppresses the filtering as well as the field. The 44px
+     * rail still draws one row per item, so a collapsed rail that kept
+     * filtering would show three icons where thirteen exist -- with no
+     * field, no footer count and nothing on screen to explain the gap. The
+     * query is kept rather than cleared, because a collapse can come from a
+     * window resize rather than from the user.</p>
+     */
+    private List<ReviewItem> visibleItems() {
+        if (collapsed) {
+            return List.copyOf(items);
+        }
+        return items.stream().filter(item -> matches(item, query())).toList();
+    }
+
+    private String query() {
+        return filterField.getText() == null ? "" : filterField.getText();
+    }
+
     private void rebuild() {
-        headerChevron.setText(collapsed ? "›" : "‹");
-        headerTitle.setVisible(!collapsed);
-        headerTitle.setManaged(!collapsed);
-        headerHint.setVisible(!collapsed);
-        headerHint.setManaged(!collapsed);
+        header.showCollapsed(collapsed);
+        header.setTitleVisible(!collapsed);
+        header.setHintVisible(!collapsed);
+        filterField.setVisible(!collapsed);
+        filterField.setManaged(!collapsed);
         footer.setVisible(!collapsed);
         footer.setManaged(!collapsed);
 
+        List<ReviewItem> visible = visibleItems();
         buttonsByScopeId.clear();
         List<Node> children = new ArrayList<>();
         ReviewItem.Group lastGroup = null;
-        for (ReviewItem item : items) {
+        for (ReviewItem item : visible) {
             if (item.group() != lastGroup) {
                 lastGroup = item.group();
                 if (!collapsed) {
@@ -277,9 +446,23 @@ final class ReviewQueueRail extends VBox {
             buttonsByScopeId.put(item.scope().id(), row);
             children.add(row);
         }
+        // An empty rail reads as a broken queue. Say what actually happened:
+        // the queue is fine and the query is too narrow.
+        if (visible.isEmpty() && !items.isEmpty() && !collapsed) {
+            Label noMatch = new Label("No queue item matches \"" + query().strip() + "\"");
+            noMatch.getStyleClass().add("review-queue-no-match");
+            noMatch.setWrapText(true);
+            children.add(noMatch);
+        }
         rows.getChildren().setAll(children);
         applySelectionStyles();
-        footer.setText(items.size() + (items.size() == 1 ? " item" : " items"));
+        footer.setText(footerText(visible.size(), items.size()));
+    }
+
+    /** {@code 13 items}, or {@code 3 of 13 items} while a query is narrowing the rail. */
+    private static String footerText(int shown, int total) {
+        String noun = total == 1 ? " item" : " items";
+        return shown == total ? total + noun : shown + " of " + total + noun;
     }
 
     private Button buildRow(ReviewItem item) {

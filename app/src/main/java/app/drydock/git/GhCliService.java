@@ -19,8 +19,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -76,6 +78,9 @@ public final class GhCliService implements AutoCloseable {
 
     /** How many review-requested PRs one {@code gh pr list} call may return. */
     private static final int REVIEW_REQUEST_LIMIT = 50;
+
+    /** How many open PRs the base lookup reads; one row per branch, so it can be generous. */
+    private static final int PR_BASE_LIMIT = 100;
 
     private final ExecutorService executor;
     private final boolean ownsExecutor;
@@ -227,6 +232,62 @@ public final class GhCliService implements AutoCloseable {
         boolean draft = obj.get("isDraft") instanceof JsonValue.JsonBoolean d && d.value();
         return Optional.of(new ReviewRequest(prNumber, title, head.value(), base.value(),
                 author, url, changedFiles, draft));
+    }
+
+    /**
+     * The base branch of every open pull request in {@code root}'s
+     * repository, keyed by head branch -- what a checked-out branch is
+     * actually meant to merge into.
+     *
+     * <p>One list call rather than a {@code gh pr view} per worktree: a
+     * repository with a dozen agent worktrees would otherwise make a dozen
+     * network round trips every time Review reassembles its queue.</p>
+     *
+     * <p>An empty map means "nothing to tell you" and covers {@code gh}
+     * missing, unauthenticated, no GitHub remote and genuinely no open PRs
+     * alike -- the caller falls back to resolving the base locally.</p>
+     */
+    public CompletableFuture<Map<String, String>> listPullRequestBases(Path root) {
+        return CompletableFuture.supplyAsync(() -> listPullRequestBasesBlocking(root), executor);
+    }
+
+    Map<String, String> listPullRequestBasesBlocking(Path root) {
+        Path gh = locate().orElse(null);
+        if (gh == null) {
+            return Map.of();
+        }
+        ProcessResult result = runIn(root, List.of(gh.toString(), "pr", "list",
+                "--state", "open",
+                "--limit", String.valueOf(PR_BASE_LIMIT),
+                "--json", "headRefName,baseRefName"));
+        if (result == null) {
+            return Map.of();
+        }
+        if (result.exitCode() != 0) {
+            LOG.log(Level.DEBUG, "gh pr list (bases) in " + root + " exited " + result.exitCode()
+                    + (result.stderr().isBlank() ? "" : ": " + ProcessRunner.excerpt(result.stderr())));
+            return Map.of();
+        }
+        try {
+            if (!(JsonParser.parse(result.stdout()) instanceof JsonArray array)) {
+                return Map.of();
+            }
+            Map<String, String> bases = new LinkedHashMap<>();
+            for (JsonValue element : array.elements()) {
+                if (element instanceof JsonObject obj
+                        && obj.get("headRefName") instanceof JsonString head
+                        && obj.get("baseRefName") instanceof JsonString base
+                        && !head.value().isBlank() && !base.value().isBlank()) {
+                    // First wins: two open PRs from one branch is unusual, and
+                    // the newer one is not obviously the one being reviewed.
+                    bases.putIfAbsent(head.value(), base.value());
+                }
+            }
+            return Map.copyOf(bases);
+        } catch (JsonParseException | NumberFormatException e) {
+            LOG.log(Level.DEBUG, "Unparseable gh pr list output", e);
+            return Map.of();
+        }
     }
 
     /**

@@ -50,6 +50,11 @@ class ReviewQueueServiceTest {
         return new ReviewQueueService(worktreeService, gitStatusService, requests, registry);
     }
 
+    private ReviewQueueService serviceWithBases(java.util.Map<String, String> bases) {
+        return new ReviewQueueService(worktreeService, gitStatusService, NO_REQUESTS,
+                root -> CompletableFuture.completedFuture(bases), registry);
+    }
+
     /**
      * Matches on the real path: {@code git worktree list} reports the
      * resolved directory, while {@code createWorktree} hands back the path
@@ -204,6 +209,65 @@ class ReviewQueueServiceTest {
 
         assertEquals("main", itemTitled(items, "feat/x").scope().base());
         assertDiffsResolve(items);
+    }
+
+    /**
+     * The reported bug, end to end: a repository whose default branch is
+     * {@code master} while work is cut from {@code develop} showed a
+     * six-file branch as the whole of {@code develop} plus the branch. The
+     * base is resolved per worktree, so each item diffs against what it was
+     * actually forked from.
+     */
+    @Test
+    void aWorktreeCutFromDevelopIsReviewedAgainstDevelopNotTheDefaultBranch(
+            @TempDir Path dir, @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepoOn(dir, "master");
+        runGit(repo, "checkout", "-b", "develop");
+        for (int i = 0; i < 3; i++) {
+            Files.writeString(repo.resolve("develop-" + i + ".txt"), "d\n");
+            runGit(repo, "add", "develop-" + i + ".txt");
+            runGit(repo, "commit", "-m", "develop commit " + i);
+        }
+        runGit(repo, "checkout", "master");
+        Path worktree = gitStatusService
+                .createWorktree(repo, worktreeParent.resolve("wt"), "feat/x", Optional.of("develop")).get();
+        Files.writeString(worktree.resolve("feature.txt"), "f\n");
+        runGit(worktree, "add", "feature.txt");
+        runGit(worktree, "commit", "-m", "the one commit under review");
+
+        List<ReviewItem> items = serviceWith(NO_REQUESTS)
+                .assemble(List.of(target(repo)), checkout -> Optional.empty()).get();
+
+        ReviewItem item = itemTitled(items, "feat/x");
+        assertEquals("develop", item.scope().base());
+        assertTrue(item.subtitle().endsWith("vs develop"), item.subtitle());
+        assertEquals(List.of("feature.txt"), changedPaths(item),
+                "the review must show the branch's own change, not all of develop");
+        assertDiffsResolve(items);
+    }
+
+    /** The PR's declared base outranks the local guess, per worktree. */
+    @Test
+    void aBranchWithAPullRequestIsReviewedAgainstThatPullRequestsBase(
+            @TempDir Path dir, @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(dir);
+        runGit(repo, "branch", "release/2.0");
+        gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/x").get();
+
+        List<ReviewItem> items = serviceWithBases(java.util.Map.of("feat/x", "release/2.0"))
+                .assemble(List.of(target(repo)), checkout -> Optional.empty()).get();
+
+        assertEquals("release/2.0", itemTitled(items, "feat/x").scope().base());
+        assertDiffsResolve(items);
+    }
+
+    /** The changed paths of an item's real diff -- what the reviewer would see. */
+    private List<String> changedPaths(ReviewItem item) throws Exception {
+        try (app.drydock.git.DiffService diffService = new app.drydock.git.DiffService()) {
+            return diffService.diff(item.scope().diffRoot(), app.drydock.git.DiffScope.BASE,
+                            item.scope().base()).get()
+                    .files().stream().map(app.drydock.git.UnifiedDiff.FileDiff::path).toList();
+        }
     }
 
     /**
@@ -362,8 +426,13 @@ class ReviewQueueServiceTest {
     }
 
     private static Path initCommittedRepo(Path parent) throws IOException, InterruptedException {
+        return initCommittedRepoOn(parent, "main");
+    }
+
+    private static Path initCommittedRepoOn(Path parent, String branch)
+            throws IOException, InterruptedException {
         Path repo = Files.createDirectories(parent.resolve("repo"));
-        runGit(repo, "init", "-b", "main");
+        runGit(repo, "init", "-b", branch);
         runGit(repo, "config", "user.name", "Test");
         runGit(repo, "config", "user.email", "test@example.com");
         Files.writeString(repo.resolve("README.md"), "hello\n");

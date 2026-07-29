@@ -320,7 +320,8 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         this.annotationStore = annotationStore;
         this.reviewScopeRegistry = reviewScopeRegistry;
         this.reviewQueueService = new ReviewQueueService(worktreeService, gitStatusService,
-                ghCliService::listReviewRequests, reviewScopeRegistry);
+                ghCliService::listReviewRequests, ghCliService::listPullRequestBases,
+                reviewScopeRegistry);
         this.viewModel = viewModel;
         this.stage = stage;
         this.worktreeLifecycle = new WorktreeLifecycleController(sessionManager, gitStatusService,
@@ -720,6 +721,16 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     /** Whether Review currently owns the centre (the Esc unwind order asks). */
     public boolean isReviewShowing() {
         return reviewShowing;
+    }
+
+    /** Whether {@code ⌘F} belongs to the Review queue's filter rather than the sidebar's. */
+    public boolean isReviewQueueFilterable() {
+        return reviewShowing && reviewDestination.queueFilterAvailable();
+    }
+
+    /** Focuses the Review queue's quick-search field ({@code ⌘F}). */
+    public void focusReviewQueueFilter() {
+        reviewDestination.focusQueueFilter();
     }
 
     /**

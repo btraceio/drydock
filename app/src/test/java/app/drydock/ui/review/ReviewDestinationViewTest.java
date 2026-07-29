@@ -9,6 +9,7 @@ import javafx.scene.Parent;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
+import javafx.scene.control.TextField;
 import javafx.scene.input.KeyCode;
 import javafx.scene.layout.Region;
 import javafx.stage.Stage;
@@ -22,6 +23,7 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -143,7 +145,7 @@ class ReviewDestinationViewTest extends ApplicationTest {
             assertTrue(row instanceof Button, "queue rows must be real Buttons, got " + row.getClass());
             assertTrue(row.isFocusTraversable(), "queue row is not focus-traversable: " + row);
         }
-        assertTrue(lookup(".review-rail-header").query().isFocusTraversable(),
+        assertTrue(lookup(".panel-header").query().isFocusTraversable(),
                 "the rail's collapse control is not focus-traversable");
     }
 
@@ -241,6 +243,253 @@ class ReviewDestinationViewTest extends ApplicationTest {
         assertFalse(commands.contains("claude"), "must not name an agent it will not run: " + commands);
     }
 
+    @Test
+    void typingNarrowsTheRailAndDropsAnEmptiedGroupHeading() {
+        seedMixedQueue();
+        assertEquals(List.of("feat/a", "agent/issue-919", "agent/issue-920"), renderedTitles());
+        assertEquals(List.of("MINE", "AGENTS"), renderedGroups());
+
+        typeQuery("919");
+
+        assertEquals(List.of("agent/issue-919"), renderedTitles());
+        assertEquals(List.of("AGENTS"), renderedGroups(),
+                "a group whose every row was filtered out must not keep its heading");
+    }
+
+    @Test
+    void theFooterCountsWhatIsShownAgainstWhatExists() {
+        seedMixedQueue();
+        assertEquals("3 items", footerText());
+
+        typeQuery("919");
+        assertEquals("1 of 3 items", footerText());
+
+        typeQuery("zzz");
+        assertEquals("0 of 3 items", footerText());
+
+        typeQuery("");
+        assertEquals("3 items", footerText());
+    }
+
+    /**
+     * An empty rail reads as a broken queue. The queue is fine; the query is
+     * too narrow, and the rail has to say so.
+     */
+    @Test
+    void noMatchesExplainsItselfInsteadOfShowingAnEmptyRail() {
+        seedMixedQueue();
+        typeQuery("zzz");
+
+        assertTrue(renderedTitles().isEmpty());
+        assertEquals("No queue item matches \"zzz\"",
+                ((Label) lookup(".review-queue-no-match").query()).getText());
+    }
+
+    /**
+     * A collapse can come from a window resize, so it cannot silently hide
+     * rows: the 44px rail has no field and no footer to explain a gap, so it
+     * shows everything and re-applies the query on the way back out.
+     */
+    @Test
+    void collapsingSuspendsTheQueryAndExpandingRestoresIt() {
+        seedMixedQueue();
+        typeQuery("919");
+        assertEquals(1, renderedTitles().size());
+
+        type(KeyCode.Q);
+        settledRailWidth();
+        // Count rows, not titles: a collapsed row is an icon column with no
+        // title label, so renderedTitles() is empty by construction there.
+        assertEquals(3, renderedRows(), "a collapsed rail must render every item");
+        assertFalse(lookup(".review-queue-filter").query().isVisible());
+
+        type(KeyCode.Q);
+        settledRailWidth();
+        assertEquals(1, renderedTitles().size(), "the query returns with the rail");
+        assertTrue(lookup(".review-queue-filter").query().isVisible());
+    }
+
+    /**
+     * The centre panel never moves on a keystroke -- a selection is a real
+     * git diff -- so a query that hides the selected row leaves both the
+     * selection and the rendered diff alone.
+     */
+    @Test
+    void aQueryThatHidesTheSelectionLeavesTheSelectionAlone() {
+        seedMixedQueue();
+        type(KeyCode.J);
+        assertEquals("agent/issue-919", selectedTitle());
+        String selected = view.diagSelectedScopeId().orElseThrow();
+
+        typeQuery("feat");
+
+        assertEquals(List.of("feat/a"), renderedTitles());
+        assertNull(selectedTitle(), "the selected row is filtered out, so no rendered row is selected");
+        assertEquals(Optional.of(selected), view.diagSelectedScopeId(),
+                "the selection itself, and the diff it drives, must survive the filter");
+    }
+
+    @Test
+    void jAndKWalkTheVisibleListWhenTheSelectionIsHidden() {
+        seedMixedQueue();
+        type(KeyCode.J);
+        assertEquals("agent/issue-919", selectedTitle());
+
+        // "feat" hides the selection. "agent" would NOT -- it matches both
+        // AGENTS rows, so the selection would still be visible and the test
+        // would exercise nothing.
+        typeQuery("feat");
+        type(KeyCode.J);
+
+        assertEquals("feat/a", selectedTitle(),
+                "j must enter the visible list, not step from the hidden row");
+
+        typeQuery("920");
+        type(KeyCode.K);
+
+        assertEquals("agent/issue-920", selectedTitle(),
+                "k must enter the visible list from its own end");
+    }
+
+    /**
+     * A targeted navigation (⌘4, the sidebar's badge) must never land on a
+     * row the user cannot see. A reassembly restoring its own selection must
+     * never clear what the user typed.
+     */
+    @Test
+    void revealAndSelectClearsTheQueryButAPlainSelectDoesNot() {
+        seedMixedQueue();
+        typeQuery("feat");
+        String hidden = view.diagItems().get(1).scope().id();
+
+        interact(() -> view.selectScope(hidden));
+
+        assertEquals("", queryText(), "a targeted navigation clears the query");
+        assertEquals("agent/issue-919", selectedTitle());
+
+        typeQuery("feat");
+        interact(() -> view.setItems(view.diagItems(), 1));
+
+        assertEquals("feat", queryText(), "a reassembly must leave the query alone");
+    }
+
+    /**
+     * A reassembly that drops the selected item must fall back to a row the
+     * query still shows, not to {@code items.get(0)} -- an over-eager
+     * fallback can land the centre panel on a completely unrelated item
+     * while the rail still reads "No queue item matches ...".
+     */
+    @Test
+    void aReassemblyThatDropsTheSelectionFallsBackToTheFirstVisibleItem() {
+        seedMixedQueue();
+        typeQuery("issue-9");
+        assertEquals(List.of("agent/issue-919", "agent/issue-920"), renderedTitles());
+        type(KeyCode.J);
+        assertEquals("agent/issue-919", selectedTitle());
+
+        // Reassembly: agent/issue-919's worktree is gone. feat/a is still
+        // first in list order, but the query hides it -- the fallback must
+        // not select a row the reviewer cannot even see.
+        List<ReviewItem> withoutTheSelection = view.diagItems().stream()
+                .filter(it -> !it.title().equals("agent/issue-919"))
+                .toList();
+        interact(() -> view.setItems(withoutTheSelection, 1));
+
+        assertEquals("agent/issue-920", selectedTitle(),
+                "fallback must be the first VISIBLE item, not items.get(0)");
+    }
+
+    /**
+     * {@code revealAndSelect} exists so a targeted navigation never lands the
+     * reviewer nowhere -- but a stale id (a worktree removed since the
+     * navigation was queued) must leave the query untouched too, not just
+     * the selection. Clearing the query while still selecting nothing is
+     * strictly worse than doing neither.
+     */
+    @Test
+    void revealAndSelectLeavesTheQueryAloneWhenTheTargetIsGone() {
+        seedMixedQueue();
+        typeQuery("feat");
+        assertEquals("feat/a", selectedTitle());
+
+        ReviewScopeRegistry registry = new ReviewScopeRegistry();
+        ReviewScope goneScope = registry.mint(ReviewScopeRegistry.spec(
+                ReviewScope.Kind.WORKTREE, Path.of("/repo"), Optional.of(Path.of("/wt/gone")),
+                "master", "gone", Optional.empty(), Optional.empty()));
+
+        interact(() -> view.selectScope(goneScope.id()));
+
+        assertEquals("feat", queryText(), "a stale id must not clear the query it cannot honour");
+        assertEquals("feat/a", selectedTitle(), "the selection must be unchanged");
+    }
+
+    @Test
+    void slashFocusesTheFilterAndTypingIntoItDoesNotFireTheKeyTable() {
+        seedMixedQueue();
+        Optional<String> before = view.diagSelectedScopeId();
+
+        type(KeyCode.SLASH);
+
+        Node field = lookup(".review-queue-filter").query();
+        assertTrue(field.isFocused(), "/ must focus the quick-search field");
+        assertEquals("", queryText(), "/ must not type itself into the field it just focused");
+
+        // j into the field is a j, not a selection move: Review's key table
+        // returns early while a text input has focus. "j" matches nothing, so
+        // no row renders -- read the selection through diagSelectedScopeId,
+        // which sees the full list; selectedTitle() only sees rendered rows.
+        press(KeyCode.J).release(KeyCode.J);
+        assertEquals("j", queryText(), "j must land in the field as a character");
+        assertEquals(before, view.diagSelectedScopeId(),
+                "typing must never move the centre panel");
+    }
+
+    @Test
+    void enterInTheFieldSelectsTheFirstMatch() {
+        seedMixedQueue();
+        assertEquals("feat/a", selectedTitle());
+
+        typeQuery("agent");
+        interact(() -> lookup(".review-queue-filter").query().requestFocus());
+        press(KeyCode.ENTER).release(KeyCode.ENTER);
+
+        assertEquals("agent/issue-919", selectedTitle());
+    }
+
+    @Test
+    void escInTheFieldClearsTheQueryAndRestoresEveryRow() {
+        seedMixedQueue();
+        type(KeyCode.SLASH);
+        typeQuery("919");
+        assertEquals(1, renderedTitles().size());
+
+        interact(() -> lookup(".review-queue-filter").query().requestFocus());
+        press(KeyCode.ESCAPE).release(KeyCode.ESCAPE);
+
+        assertEquals("", queryText());
+        assertEquals(3, renderedTitles().size());
+        assertFalse(lookup(".review-queue-filter").query().isFocused(),
+                "Esc returns focus to the rail so the key table works again");
+    }
+
+    /**
+     * The field does not exist while the rail is collapsed, so / must be
+     * inert there -- and ⌘F must keep routing to the sidebar rather than
+     * focusing something invisible.
+     */
+    @Test
+    void withTheRailCollapsedSlashIsInertAndTheFilterIsUnavailable() {
+        seedMixedQueue();
+        type(KeyCode.Q);
+        settledRailWidth();
+
+        type(KeyCode.SLASH);
+
+        assertFalse(lookup(".review-queue-filter").query().isFocused());
+        assertFalse(view.queueFilterAvailable(),
+                "⌘F must fall back to the sidebar while the rail is collapsed");
+    }
+
     // ---- fixtures -----------------------------------------------------------
 
     private void seedQueue() {
@@ -257,6 +506,55 @@ class ReviewDestinationViewTest extends ApplicationTest {
                 ReviewScope.Kind.WORKTREE, Path.of("/repo"), Optional.of(Path.of("/wt/" + head)),
                 "master", head, Optional.empty(), session));
         return new ReviewItem(scope, ReviewItem.Group.MINE, head, "drydock · vs master");
+    }
+
+    /** Three items across two groups, so a query can empty a whole group. */
+    private void seedMixedQueue() {
+        ReviewScopeRegistry registry = new ReviewScopeRegistry();
+        interact(() -> view.setItems(List.of(
+                item(registry, "feat/a", Optional.empty()),
+                agentItem(registry, "agent/issue-919"),
+                agentItem(registry, "agent/issue-920")), 1));
+    }
+
+    private static ReviewItem agentItem(ReviewScopeRegistry registry, String head) {
+        ReviewScope scope = registry.mint(ReviewScopeRegistry.spec(
+                ReviewScope.Kind.WORKTREE, Path.of("/repo"), Optional.of(Path.of("/wt/" + head)),
+                "master", head, Optional.empty(), Optional.empty()));
+        return new ReviewItem(scope, ReviewItem.Group.AGENTS, head, "drydock · vs master");
+    }
+
+    /** Replaces the filter field's text on the FX thread, as typing would. */
+    private void typeQuery(String query) {
+        interact(() -> ((TextField) lookup(".review-queue-filter").query())
+                .setText(query));
+    }
+
+    private List<String> renderedTitles() {
+        return lookup(".review-queue-item").queryAll().stream()
+                .map(node -> (Parent) ((Button) node).getGraphic())
+                .flatMap(graphic -> graphic.lookupAll(".review-queue-title").stream().findFirst().stream())
+                .map(label -> ((Label) label).getText())
+                .toList();
+    }
+
+    /** Rows regardless of collapse: a collapsed row renders an icon, not a title. */
+    private int renderedRows() {
+        return lookup(".review-queue-item").queryAll().size();
+    }
+
+    private List<String> renderedGroups() {
+        return lookup(".review-queue-group").queryAll().stream()
+                .map(node -> ((Label) node).getText())
+                .toList();
+    }
+
+    private String footerText() {
+        return ((Label) lookup(".review-queue-rail .review-rail-footer").query()).getText();
+    }
+
+    private String queryText() {
+        return ((TextField) lookup(".review-queue-filter").query()).getText();
     }
 
     private void type(KeyCode key) {

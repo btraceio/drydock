@@ -208,6 +208,50 @@ class ReviewDiffColumnTest extends ApplicationTest {
                 ((Label) lookup(".review-diff-message").query()).getText());
     }
 
+    /**
+     * Selecting an intent has to move the code, not just the rail. The bug
+     * this covers: the intent rail was a list of labels -- clicking one
+     * changed which intent the verdict bar settled and left the diff exactly
+     * where it was, so the rail read as decoration.
+     */
+    @Test
+    void revealingAHunkScrollsItIntoTheScene() throws Exception {
+        repo = repoWithTwoFilesFarApart();
+        showScope(workingTreeScope(repo));
+        awaitRows();
+
+        assertFalse(renderedHunkFiles().contains("Zulu.java"),
+                "the fixture must start with the second file below the fold");
+
+        interact(() -> column.revealHunk("Zulu.java", 0));
+        WaitForAsyncUtils.waitForFxEvents();
+
+        assertTrue(renderedHunkFiles().contains("Zulu.java"),
+                "reveal must bring the intent's file into view; rendered " + renderedHunkFiles());
+    }
+
+    /** A file that is not in this diff must leave the column where it is, not throw. */
+    @Test
+    void revealingAFileThatIsNotInTheDiffDoesNothing() throws Exception {
+        repo = repoWithTwoFilesFarApart();
+        showScope(workingTreeScope(repo));
+        awaitRows();
+
+        List<String> before = renderedHunkFiles();
+        interact(() -> column.revealHunk("Nowhere.java", 3));
+        WaitForAsyncUtils.waitForFxEvents();
+
+        assertEquals(before, renderedHunkFiles());
+    }
+
+    /** The hunk-header file labels currently in the scene graph. */
+    private List<String> renderedHunkFiles() {
+        List<String> files = new ArrayList<>();
+        interact(() -> lookup(".review-hunk-file").queryAll()
+                .forEach(node -> files.add(((Label) node).getText())));
+        return files;
+    }
+
     // ---- fixtures -----------------------------------------------------------
 
     private ReviewScope workingTreeScope(Path root) {
@@ -258,6 +302,32 @@ class ReviewDiffColumnTest extends ApplicationTest {
             previous = height[0];
         }
         return previous;
+    }
+
+    /**
+     * Two changed files with enough between them that the second one starts
+     * well below a 700px viewport -- otherwise "scrolled into view" is true
+     * before anything scrolls and the test proves nothing.
+     */
+    private static Path repoWithTwoFilesFarApart() throws Exception {
+        Path repo = initCommittedRepo(Files.createTempDirectory("drydock-reveal"));
+        for (String name : List.of("Alpha.java", "Zulu.java")) {
+            StringBuilder original = new StringBuilder();
+            for (int i = 1; i <= 120; i++) {
+                original.append("int field").append(i).append(" = ").append(i).append(";\n");
+            }
+            Files.writeString(repo.resolve(name), original.toString());
+        }
+        runGit(repo, "add", ".");
+        runGit(repo, "commit", "-m", "two files");
+        for (String name : List.of("Alpha.java", "Zulu.java")) {
+            StringBuilder changed = new StringBuilder();
+            for (int i = 1; i <= 120; i++) {
+                changed.append("int field").append(i).append(" = ").append(i * 2).append(";\n");
+            }
+            Files.writeString(repo.resolve(name), changed.toString());
+        }
+        return repo;
     }
 
     private static Path repoWithUncommittedChange() throws Exception {
