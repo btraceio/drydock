@@ -37,7 +37,16 @@ AGENTS
 Always visible when the rail is expanded — a control the reader can see is
 one they do not have to be told about, which is the same reasoning that put
 a chevron in every panel header. Hidden and `unmanaged` when the rail is
-collapsed to 44px, where there is no room for it and no rows to filter.
+collapsed to 44px, where there is no room for it.
+
+A collapse suppresses the *filtering* as well as the field. The collapsed
+rail still renders one row per item — `rebuild()` only swaps in the icon-only
+graphic — so a collapsed rail that kept filtering would show three icons
+where thirteen exist, with no field, no footer count (the footer is hidden
+while collapsed) and nothing on screen to explain the gap. The query itself
+is retained rather than cleared: a collapse can come from a window resize
+(`ReviewDestinationView` collapses the queue below 1180px), which is not an
+act of the user's. It takes effect again the moment the rail expands.
 
 ## Where the filtering lives
 
@@ -57,15 +66,26 @@ fight the filter's own.
 
 ## Matching
 
-Case-insensitive substring over the row's own visible text: `title()` and
-`subtitle()`, joined by a space so a query cannot match across the boundary
-by accident.
+Case-insensitive substring over the row's own visible text — all of it. The
+rail renders a row as `title()` above `group().label()` lowercased + ` · ` +
+`subtitle()` (`ReviewQueueRail.rebuild()`), so the group label is on screen
+even though it is not part of `subtitle()`. The haystack is therefore all
+three joined by spaces, lowercased:
+
+```java
+group().label() + " " + title() + " " + subtitle()
+```
+
+The separators are there so a query cannot match a concatenation artifact
+across a field boundary.
 
 ```
 query: 919       → agent/issue-919-metadata-consistency-test
 query: btrace    → every btrace item (subtitle carries the repo name)
 query: renovate  → PR #854 renovate/all-minor-patch
 query: develop   → every item whose subtitle says "vs develop"
+query: agents    → every agent worktree (the group label starts the row's
+                   second line, so it must be searchable)
 ```
 
 What you can read in the row is what you can search for. Fuzzy subsequence
@@ -88,7 +108,8 @@ A blank or whitespace-only query matches everything.
 
 ## Rendering
 
-`rebuild()` iterates `items.stream().filter(item -> matches(item, query))`.
+`rebuild()` iterates `items.stream().filter(item -> matches(item, query))`
+while expanded, and the full `items` while collapsed (see Placement).
 
 Group headings (`MINE` · `AGENTS` · `REQUESTED` · `STACK`) fall out for
 free: the existing loop emits a heading only when a *rendered* item changes
@@ -109,7 +130,8 @@ No queue item matches "renovate"
 
 Not an empty rail. An empty rail reads as a broken queue, which is exactly
 the wrong thing to say when the queue is fine and the query is simply too
-narrow.
+narrow. Emitted only while the rail is expanded — a collapsed rail does not
+filter, so it never has nothing to show.
 
 ### Footer
 
@@ -120,6 +142,7 @@ The rail footer counts what is shown against what exists:
 | No query | `13 items` |
 | Query matching 3 | `3 of 13 items` |
 | Query matching 0 | `0 of 13 items` |
+| Rail collapsed | footer hidden, as today — and no filtering, so no count to reconcile |
 
 ## Selection
 
@@ -167,7 +190,18 @@ semantics.
 | `/` | Focus the field, select its contents |
 | `⌘F` | Focus the field (when Review is showing) |
 | `Enter` | Select the first match |
-| `Esc` | Clear the query, return focus to the rail |
+| `Esc` (in the field) | Clear the query, return focus to the rail |
+
+Both focus keys require an expanded rail: the field does not exist while the
+rail is collapsed, and the rail is collapsed after `q`, in focus mode, or in
+any window under 1180px — `queue.setCollapsed(queueCollapsedByUser || width
+< QUEUE_COLLAPSE_WIDTH)` (`ReviewDestinationView:791`). In that state `/`
+does nothing and `⌘F`'s new branch does not apply, so `⌘F` keeps today's
+`sidebar.focusFilter()` rather than becoming a dead key.
+
+Neither key expands the rail. That `||` means clearing `queueCollapsedByUser`
+cannot override a responsive collapse, and `q` is the one key that owns this
+rail's width.
 
 `/` is added to `ReviewDestinationView`'s key table. That table already
 returns early when the event target is a `TextInputControl`, so a slash
@@ -176,15 +210,28 @@ return is what stops `j` / `k` / `q` / `a` / `r` from firing while the
 reviewer types a branch name.
 
 `⌘F` is owned by the scene-level filter in `DrydockApplication`, which today
-unconditionally routes it to `sidebar.focusFilter()`. It gains one branch:
-when Review is showing, focus the queue filter instead. A scene filter runs
-before a node filter, so this cannot be done from Review's own table.
+unconditionally routes it to `sidebar.focusFilter()` and consumes. It gains
+one branch: focus the queue filter instead when Review is showing **and the
+queue rail is expanded**. A scene filter runs before a node filter, so this
+cannot be done from Review's own table — which means the rail's collapse
+state has to be readable from there, through `ReviewDestinationView` and
+`MainWorkspace` (which today exposes only `isReviewShowing()`).
 
-`Esc` joins `ReviewDestinationView.unwindOne()` as its new **first** step,
-ahead of the symbol lens and the MCP activity panel. Escape unwinds
-topmost-first (spec §5), and a focused text field with something typed in it
-is the topmost thing there is. With a blank query it does nothing and the
-unwind continues to the lens.
+`Esc` is handled by the field itself, **not** by `unwindOne()`. The
+scene-level Escape branch gates Review's whole unwind — `unwindReviewOverlay`,
+`hideReview`, `showPicker` — behind `!inTextInput`, where `inTextInput` is
+`scene().getFocusOwner() instanceof TextInputControl`. The filter field is
+one, so with focus in it `unwindOne()` is never reached and a step added
+there would be dead code. That branch also never calls `event.consume()`, so
+Escape still propagates to the focused node — the route the inline
+tab-rename field already relies on. The field therefore installs its own
+`KEY_PRESSED` handler: clear the query, return focus to the rail, consume.
+`unwindOne()` and the `!inTextInput` gate are both unchanged.
+
+With a blank query the handler consumes nothing and leaves focus alone.
+Escape while focus is in the *rail rows* keeps exactly today's meaning — the
+lens, then the MCP panel, then hide Review — even with a query typed:
+clearing the query is something you do to the field you are typing in.
 
 `ShortcutsOverlay` gains a `Filter the review queue` / `/` row.
 
@@ -196,8 +243,10 @@ unwind continues to the lens.
 - a subtitle substring matches (repo name, base branch, PR author)
 - matching is case-insensitive
 - a blank / whitespace-only query matches everything
-- a query matching neither field does not match
-- a query spanning the title/subtitle boundary does not match
+- a group-label query (`agents`) matches every row in that group and no other
+- a query matching none of the three fields does not match
+- a query concatenating the end of one field with the start of the next
+  (`patchbtrace`) does not match
 
 **TestFX** (`ReviewDestinationViewTest`, the existing harness):
 
@@ -205,7 +254,9 @@ unwind continues to the lens.
   disappear
 - `Enter` selects the first match and fires the selection callback exactly
   once
-- `Esc` clears the query and restores every row
+- `Esc` with focus in the field clears the query and restores every row —
+  asserted against the field's own handler, since the scene filter never
+  routes Escape into Review while a text input has focus
 - a query that filters out the selected item leaves the centre panel showing
   that item's diff
 - `j` / `k` with the selection filtered out of view move within the visible
@@ -215,6 +266,9 @@ unwind continues to the lens.
   leaves the query alone
 - the footer reads `N of M items` while filtering and `M items` otherwise
 - no matches renders the explanatory row, not an empty rail
+- collapsing the rail with a query active renders every row again, and
+  expanding re-applies the query
+- with the rail collapsed, `/` is inert and `⌘F` focuses the sidebar filter
 
 ## Out of scope
 
