@@ -185,6 +185,8 @@ public final class RepositorySidebar extends VBox {
 
     private Runnable onCloneFromGitHub = () -> { };
     private Runnable onAddRemote = () -> { };
+    /** The sidebar's own collapse control; the shell owns the actual folding. */
+    private Runnable onToggleSidebar = () -> { };
     private Consumer<Repository> onNewWorktree = repository -> { };
 
     // -- Per-row cached popups (context menus and tooltips are not part of
@@ -244,6 +246,13 @@ public final class RepositorySidebar extends VBox {
         VBox header = new VBox(addButton, filterField);
         header.getStyleClass().add("sidebar-header");
 
+        // The same collapse control the Review rails wear, in the same place.
+        // Before this, the only way to fold the sidebar was a glyph up in the
+        // window title bar -- a different shape, nowhere near the thing it
+        // acted on, and nothing a first-time reader could generalize from.
+        PanelHeader collapseHeader = PanelHeader.left("SESSIONS", "⌘0",
+                "Collapse or expand the sidebar (⌘0)", () -> onToggleSidebar.run());
+
         // -- Review destination, above the tree ------------------------------
         Label reviewGlyph = new Label("◨");
         reviewGlyph.getStyleClass().add("sidebar-destination-glyph");
@@ -285,7 +294,7 @@ public final class RepositorySidebar extends VBox {
         HBox footer = new HBox(footerDot, footerLabel);
         footer.getStyleClass().add("sidebar-footer");
 
-        getChildren().addAll(header, reviewDestinationButton, tree, footer);
+        getChildren().addAll(collapseHeader.node(), header, reviewDestinationButton, tree, footer);
 
         // Keep the displayed list in sync with EVERY repository mutation,
         // not just the ones initiated by this sidebar's own handlers. The
@@ -366,6 +375,11 @@ public final class RepositorySidebar extends VBox {
     /** Wired by the application shell to open the Add-remote-repository modal (spec: SSH remote repositories). */
     public void setOnAddRemote(Runnable handler) {
         this.onAddRemote = handler == null ? () -> { } : handler;
+    }
+
+    /** Wired by the application shell to the same fold {@code ⌘0} and the title-bar glyph perform. */
+    public void setOnToggleSidebar(Runnable handler) {
+        this.onToggleSidebar = handler == null ? () -> { } : handler;
     }
 
     /** Wired by the application shell to open the create-worktree modal (worktree handoff, section B). */

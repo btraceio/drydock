@@ -240,6 +240,7 @@ public final class ReviewDestinationView extends BorderPane {
             if (index >= 0) {
                 intentIndex = index;
                 refreshReviewState();
+                revealCurrentIntent();
             }
         });
         margin.setOnFilterChanged(filter -> refreshReviewState());
@@ -453,6 +454,16 @@ public final class ReviewDestinationView extends BorderPane {
                 (int) settled, counted.size());
     }
 
+    /**
+     * Brings the current intent's code into view. Selecting an intent that
+     * left the diff where it was is the bug this fixes: the rail said one
+     * thing and the centre showed another, so the rail read as decoration.
+     */
+    private void revealCurrentIntent() {
+        currentIntent().flatMap(ReviewIntent::anchor)
+                .ifPresent(anchor -> diffColumn.revealHunk(anchor.file(), anchor.hunkIndex()));
+    }
+
     /** {@code [} / {@code ]}: moves the intent the verdict bar is settling. */
     private void moveIntent(int delta) {
         List<ReviewIntent> intents = intents();
@@ -461,6 +472,7 @@ public final class ReviewDestinationView extends BorderPane {
         }
         intentIndex = (int) Math.clamp((long) intentIndex + delta, 0, intents.size() - 1);
         refreshReviewState();
+        revealCurrentIntent();
     }
 
     /** {@code n}: jumps to the next intent with no verdict yet. */
@@ -476,6 +488,7 @@ public final class ReviewDestinationView extends BorderPane {
             if (intent.countsTowardProgress() && host.verdict(scope.get(), intent).isEmpty()) {
                 intentIndex = candidate;
                 refreshReviewState();
+                revealCurrentIntent();
                 return;
             }
         }
@@ -604,6 +617,7 @@ public final class ReviewDestinationView extends BorderPane {
             if (host.verdict(scope.get(), counted.get(i)).isEmpty()) {
                 intentIndex = intents().indexOf(counted.get(i));
                 refreshReviewState();
+                revealCurrentIntent();
                 return;
             }
         }
@@ -626,11 +640,31 @@ public final class ReviewDestinationView extends BorderPane {
         ReviewScope scope = item.scope();
         headerIcon.setText(item.icon());
         headerTitle.setText(item.title());
-        headerContext.setText(item.subtitle() + "  ·  vs " + scope.base());
+        headerContext.setText(contextLine(item));
         setSessionRow(scope, sessionLineFor(scope), scope.sessionId().isPresent());
         body.getChildren().setAll(bodyFor(item));
         intentIndex = 0;
         refreshReviewState();
+    }
+
+    /**
+     * The item header's second line: what this is, and what it is compared
+     * against.
+     *
+     * <p>A working tree is diffed against its own {@code HEAD}, never against
+     * the base branch, so naming the branch there claimed a comparison the
+     * column was not making. And the comparison is stated once: a worktree
+     * item's subtitle already carries it for the queue rail, and repeating it
+     * here read as "vs develop · vs develop".</p>
+     */
+    private static String contextLine(ReviewItem item) {
+        String against = item.scope().kind() == ReviewScope.Kind.WORKING_TREE
+                ? "HEAD"
+                : item.scope().base();
+        String comparison = "vs " + against;
+        return item.subtitle().endsWith(comparison)
+                ? item.subtitle()
+                : item.subtitle() + "  ·  " + comparison;
     }
 
     /**

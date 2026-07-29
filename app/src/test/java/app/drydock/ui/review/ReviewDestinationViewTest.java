@@ -143,7 +143,7 @@ class ReviewDestinationViewTest extends ApplicationTest {
             assertTrue(row instanceof Button, "queue rows must be real Buttons, got " + row.getClass());
             assertTrue(row.isFocusTraversable(), "queue row is not focus-traversable: " + row);
         }
-        assertTrue(lookup(".review-rail-header").query().isFocusTraversable(),
+        assertTrue(lookup(".panel-header").query().isFocusTraversable(),
                 "the rail's collapse control is not focus-traversable");
     }
 

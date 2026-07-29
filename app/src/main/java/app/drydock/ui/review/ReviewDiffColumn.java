@@ -241,6 +241,34 @@ final class ReviewDiffColumn extends BorderPane {
     }
 
     /**
+     * Scrolls to the {@code hunkIndex}-th hunk card of {@code file} -- what
+     * selecting an intent brings into view. Falls back to the file's first
+     * card when it has fewer hunks than that (the diff was re-read and the
+     * grouping is one generation behind), and does nothing when the file is
+     * not in this diff at all.
+     */
+    void revealHunk(String file, int hunkIndex) {
+        int firstCard = -1;
+        int seen = 0;
+        for (int i = 0; i < rows.size(); i++) {
+            if (!(rows.get(i) instanceof ReviewDiffRow.HunkHeader header)
+                    || !header.file().equals(file)) {
+                continue;
+            }
+            if (firstCard < 0) {
+                firstCard = i;
+            }
+            if (seen++ == hunkIndex) {
+                list.scrollTo(i);
+                return;
+            }
+        }
+        if (firstCard >= 0) {
+            list.scrollTo(firstCard);
+        }
+    }
+
+    /**
      * Renders a diff that did not come from this column's own git call --
      * {@code gh pr diff} for the "Read the patch only" path, which has no
      * checkout to run git in. Clears the scope so a later reload cannot

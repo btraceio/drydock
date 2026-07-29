@@ -114,7 +114,7 @@ final class ReviewToolCodec {
     /** A hunk plus the file it came from and the stable id the cursor uses. */
     private record HunkRef(String file, int index, UnifiedDiff.Hunk hunk) {
         String id() {
-            return "h_" + file + "_" + index;
+            return app.drydock.review.ReviewIntent.hunkId(file, index);
         }
     }
 

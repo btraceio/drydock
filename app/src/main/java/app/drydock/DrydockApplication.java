@@ -326,6 +326,7 @@ public final class DrydockApplication extends Application {
 
         mainWorkspace.setModalLayer(appShell.modalLayer());
         mainWorkspace.setOnToggleSidebar(appShell::toggleSidebar);
+        sidebar.setOnToggleSidebar(appShell::toggleSidebar);
         // The native ghostty view paints over in-scene modals; hide it while
         // any modal is showing (see MainWorkspace.setTerminalsObscured).
         appShell.modalLayer().setOnShowingChanged(mainWorkspace::setTerminalsObscured);

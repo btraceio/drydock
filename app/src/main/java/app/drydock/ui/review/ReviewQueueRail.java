@@ -1,6 +1,7 @@
 package app.drydock.ui.review;
 
 import app.drydock.review.ReviewItem;
+import app.drydock.ui.PanelHeader;
 
 import javafx.animation.KeyFrame;
 import javafx.animation.KeyValue;
@@ -63,10 +64,10 @@ final class ReviewQueueRail extends VBox {
         Optional<String> stateOf(ReviewItem item);
     }
 
-    private final Button headerButton = new Button();
-    private final Label headerChevron = new Label("‹");
-    private final Label headerTitle = new Label("QUEUE");
-    private final Label headerHint = new Label("j k · q");
+    // The handler is read at click time, so it can be installed after construction.
+    private final PanelHeader header = PanelHeader.left(
+            "QUEUE", "j k · q", "Collapse or expand the queue (q)",
+            () -> this.onToggleCollapse.run());
     private final VBox rows = new VBox();
     private final ScrollPane scroll = new ScrollPane(rows);
     private final Label footer = new Label();
@@ -89,19 +90,6 @@ final class ReviewQueueRail extends VBox {
         setPrefWidth(EXPANDED_WIDTH);
         setMaxWidth(EXPANDED_WIDTH);
 
-        headerChevron.getStyleClass().add("review-rail-chevron");
-        headerTitle.getStyleClass().add("review-rail-title");
-        headerHint.getStyleClass().add("review-rail-hint");
-        Region headerSpacer = new Region();
-        HBox.setHgrow(headerSpacer, Priority.ALWAYS);
-        HBox headerRow = new HBox(6, headerChevron, headerTitle, headerSpacer, headerHint);
-        headerRow.setAlignment(Pos.CENTER_LEFT);
-        headerButton.setGraphic(headerRow);
-        headerButton.getStyleClass().add("review-rail-header");
-        headerButton.setMaxWidth(Double.MAX_VALUE);
-        headerButton.setTooltip(new Tooltip("Collapse or expand the queue (q)"));
-        headerButton.setOnAction(e -> onToggleCollapse.run());
-
         rows.getStyleClass().add("review-queue-items");
         scroll.setFitToWidth(true);
         scroll.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
@@ -111,7 +99,7 @@ final class ReviewQueueRail extends VBox {
         footer.getStyleClass().add("review-rail-footer");
         footer.setMaxWidth(Double.MAX_VALUE);
 
-        getChildren().setAll(headerButton, scroll, footer);
+        getChildren().setAll(header.node(), scroll, footer);
     }
 
     void setOnSelected(Consumer<ReviewItem> handler) {
@@ -253,11 +241,9 @@ final class ReviewQueueRail extends VBox {
     }
 
     private void rebuild() {
-        headerChevron.setText(collapsed ? "›" : "‹");
-        headerTitle.setVisible(!collapsed);
-        headerTitle.setManaged(!collapsed);
-        headerHint.setVisible(!collapsed);
-        headerHint.setManaged(!collapsed);
+        header.showCollapsed(collapsed);
+        header.setTitleVisible(!collapsed);
+        header.setHintVisible(!collapsed);
         footer.setVisible(!collapsed);
         footer.setManaged(!collapsed);
 

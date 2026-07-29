@@ -116,14 +116,17 @@ final class ReviewFindingsMargin extends VBox {
         setPrefWidth(EXPANDED_WIDTH);
         setMaxWidth(EXPANDED_WIDTH);
 
+        // On the RIGHT edge, because this panel folds right: every collapse
+        // control in the app sits on the side its panel moves toward, so the
+        // glyph is the instruction rather than something to be learnt.
         collapseButton.setText("›");
-        collapseButton.getStyleClass().add("review-rail-chevron-button");
+        collapseButton.getStyleClass().add("panel-header-chevron-button");
         collapseButton.setTooltip(new Tooltip("Collapse or expand the findings margin (m)"));
         collapseButton.setOnAction(e -> onToggleCollapse.run());
 
         Label title = new Label("FINDINGS");
-        title.getStyleClass().add("review-rail-title");
-        headerCount.getStyleClass().add("review-rail-hint");
+        title.getStyleClass().add("panel-header-title");
+        headerCount.getStyleClass().add("panel-header-hint");
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
 
@@ -134,7 +137,7 @@ final class ReviewFindingsMargin extends VBox {
         openFilter.setTooltip(new Tooltip("Hide resolved findings"));
         openFilter.setOnAction(e -> setFilter(filter == Filter.OPEN ? Filter.ALL : Filter.OPEN));
 
-        header.getChildren().setAll(collapseButton, title, headerCount, spacer, allFilter, openFilter);
+        header.getChildren().setAll(title, headerCount, spacer, allFilter, openFilter, collapseButton);
         header.setAlignment(Pos.CENTER_LEFT);
         header.getStyleClass().add("review-margin-header");
 

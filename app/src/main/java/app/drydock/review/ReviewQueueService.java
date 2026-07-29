@@ -12,7 +12,9 @@ import java.lang.System.Logger.Level;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -70,16 +72,40 @@ public final class ReviewQueueService {
         CompletableFuture<List<GhCliService.ReviewRequest>> forRepository(Path repositoryRoot);
     }
 
+    /**
+     * The base branch of each open PR, keyed by head branch -- in the app,
+     * {@code GhCliService::listPullRequestBases}. A separate seam from
+     * {@link ReviewRequestSource} for the same reason: "{@code gh} is absent
+     * or failing" is a state the queue must survive, and therefore one tests
+     * have to be able to produce.
+     */
+    @FunctionalInterface
+    public interface PullRequestBaseSource {
+        CompletableFuture<Map<String, String>> forRepository(Path repositoryRoot);
+    }
+
+    /** Stands in for a workspace with no {@code gh}: no branch declares a base. */
+    public static final PullRequestBaseSource NO_PULL_REQUEST_BASES =
+            root -> CompletableFuture.completedFuture(Map.of());
+
     private final WorktreeService worktreeService;
     private final GitStatusService gitStatusService;
     private final ReviewRequestSource reviewRequests;
+    private final PullRequestBaseSource pullRequestBases;
     private final ReviewScopeRegistry scopeRegistry;
 
     public ReviewQueueService(WorktreeService worktreeService, GitStatusService gitStatusService,
                               ReviewRequestSource reviewRequests, ReviewScopeRegistry scopeRegistry) {
+        this(worktreeService, gitStatusService, reviewRequests, NO_PULL_REQUEST_BASES, scopeRegistry);
+    }
+
+    public ReviewQueueService(WorktreeService worktreeService, GitStatusService gitStatusService,
+                              ReviewRequestSource reviewRequests, PullRequestBaseSource pullRequestBases,
+                              ReviewScopeRegistry scopeRegistry) {
         this.worktreeService = Objects.requireNonNull(worktreeService, "worktreeService");
         this.gitStatusService = Objects.requireNonNull(gitStatusService, "gitStatusService");
         this.reviewRequests = Objects.requireNonNull(reviewRequests, "reviewRequests");
+        this.pullRequestBases = Objects.requireNonNull(pullRequestBases, "pullRequestBases");
         this.scopeRegistry = Objects.requireNonNull(scopeRegistry, "scopeRegistry");
     }
 
@@ -157,31 +183,91 @@ public final class ReviewQueueService {
                     LOG.log(Level.DEBUG, "Could not list review requests for " + repository.root(), failure);
                     return new Fetch<>(List.of(), false);
                 });
+        // What each branch actually merges into. A failure here is no
+        // information, not an error: the base then resolves locally.
+        CompletableFuture<Map<String, String>> prBases =
+                pullRequestBases.forRepository(repository.root()).handle((value, failure) -> {
+                    if (failure == null) {
+                        return value;
+                    }
+                    LOG.log(Level.DEBUG, "Could not list pull request bases for "
+                            + repository.root(), failure);
+                    return Map.<String, String>of();
+                });
 
         return worktrees.thenCombine(status, (trees, mainStatus) ->
                         new PartialScan(trees.value(), mainStatus.value(), Optional.<String>empty(),
-                                trees.complete() && mainStatus.complete()))
+                                Map.of(), trees.complete() && mainStatus.complete()))
                 .thenCombine(defaultBranch, (scan, branch) ->
-                        new PartialScan(scan.worktrees(), scan.status(), branch.value(),
+                        new PartialScan(scan.worktrees(), scan.status(), branch.value(), Map.of(),
                                 scan.localComplete() && branch.complete()))
-                .thenCombine(requests, (scan, prs) -> new RepositoryScan(repository,
-                        build(repository, sessions, scan, prs.value()), scan.localComplete(), prs.complete()));
+                .thenCombine(prBases, (scan, bases) ->
+                        new PartialScan(scan.worktrees(), scan.status(), scan.defaultBranch(), bases,
+                                scan.localComplete()))
+                .thenCompose(scan -> resolveBases(repository, scan)
+                        .thenCombine(requests, (bases, prs) -> new RepositoryScan(repository,
+                                build(repository, sessions, scan, bases, prs.value()),
+                                scan.localComplete(), prs.complete())));
+    }
+
+    /**
+     * The base each worktree is reviewed against, keyed by checkout path.
+     *
+     * <p>Resolved per worktree rather than once per repository, and off this
+     * thread: the branch's own PR base when GitHub declares one, otherwise
+     * the integration branch it was forked from. One repo-wide default was
+     * the bug -- a repository whose {@code origin/HEAD} is {@code master}
+     * while every branch is cut from {@code develop} showed each review as
+     * the whole of {@code develop} plus the branch.</p>
+     */
+    private CompletableFuture<Map<Path, String>> resolveBases(RepositoryTarget repository,
+                                                              PartialScan scan) {
+        String fallback = baseBranchOf(scan.defaultBranch(), scan.status());
+        Map<Path, CompletableFuture<String>> pending = new LinkedHashMap<>();
+        for (WorktreeService.Worktree worktree : scan.worktrees()) {
+            if (worktree.mainCheckout() || worktree.prunable()) {
+                continue;
+            }
+            Optional<String> declared = worktree.branch()
+                    .map(scan.pullRequestBases()::get)
+                    .filter(Objects::nonNull);
+            pending.put(worktree.path(), gitStatusService
+                    .reviewBase(worktree.path(), declared, fallback)
+                    .handle((value, failure) -> {
+                        if (failure == null) {
+                            return value;
+                        }
+                        LOG.log(Level.DEBUG, "Could not resolve the review base of "
+                                + worktree.path(), failure);
+                        return fallback;
+                    }));
+        }
+        return CompletableFuture.allOf(pending.values().toArray(CompletableFuture[]::new))
+                .thenApply(ignored -> {
+                    Map<Path, String> bases = new LinkedHashMap<>();
+                    pending.forEach((path, future) -> bases.put(path, future.join()));
+                    return Map.copyOf(bases);
+                });
     }
 
     private record Fetch<T>(T value, boolean complete) { }
 
     private record PartialScan(List<WorktreeService.Worktree> worktrees, Optional<GitStatus> status,
-                               Optional<String> defaultBranch, boolean localComplete) { }
+                               Optional<String> defaultBranch, Map<String, String> pullRequestBases,
+                               boolean localComplete) { }
 
     private record RepositoryScan(RepositoryTarget repository, List<ReviewItem> items,
                                   boolean localComplete, boolean requestsComplete) { }
 
     private List<ReviewItem> build(RepositoryTarget repository, SessionLookup sessions,
-                                   PartialScan scan, List<GhCliService.ReviewRequest> requests) {
+                                   PartialScan scan, Map<Path, String> worktreeBases,
+                                   List<GhCliService.ReviewRequest> requests) {
         String base = baseBranchOf(scan.defaultBranch(), scan.status());
         List<ReviewItem> items = new ArrayList<>();
 
         // MINE -- the main checkout's uncommitted work, when there is any.
+        // Its diff is `git diff HEAD`, so the base is a label here, not a
+        // revision the diff resolves.
         if (scan.status().map(GitStatus::dirty).orElse(false)) {
             ReviewScope scope = scopeRegistry.mint(ReviewScopeRegistry.spec(
                     ReviewScope.Kind.WORKING_TREE, repository.root(), Optional.of(repository.root()),
@@ -197,13 +283,14 @@ public final class ReviewQueueService {
                 continue;
             }
             String head = worktree.branch().orElse(worktree.detached() ? "(detached)" : "(no branch)");
+            String worktreeBase = worktreeBases.getOrDefault(worktree.path(), base);
             Optional<ManagedSessionId> session = sessions.sessionAt(worktree.path());
             ReviewScope scope = scopeRegistry.mint(ReviewScopeRegistry.spec(
                     ReviewScope.Kind.WORKTREE, repository.root(), Optional.of(worktree.path()),
-                    base, head, Optional.empty(), session));
+                    worktreeBase, head, Optional.empty(), session));
             items.add(new ReviewItem(scope,
                     session.isPresent() ? ReviewItem.Group.AGENTS : ReviewItem.Group.MINE,
-                    head, repository.displayName() + " · vs " + base));
+                    head, repository.displayName() + " · vs " + worktreeBase));
         }
 
         // REQUESTED -- PRs asking this user for a review. A PR whose head

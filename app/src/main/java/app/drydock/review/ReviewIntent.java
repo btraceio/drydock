@@ -106,9 +106,68 @@ public record ReviewIntent(
 
     /** The by-file fallback used when no reviewer has supplied a grouping. */
     public static ReviewIntent forFile(int number, String path) {
-        return new ReviewIntent("file:" + path, number, path, Kind.CHANGE, Risk.NONE,
+        return new ReviewIntent(FILE_ID_PREFIX + path, number, path, Kind.CHANGE, Risk.NONE,
                 "Grouped by file — no reviewer has proposed intents for this scope.",
                 List.of(), Optional.empty(), false);
+    }
+
+    private static final String FILE_ID_PREFIX = "file:";
+    private static final String HUNK_ID_PREFIX = "h_";
+
+    /**
+     * The id a reviewer addresses one hunk by: {@code h_<file>_<index>},
+     * where {@code index} counts hunks within that file. Defined here rather
+     * than at the MCP boundary because the UI has to read the same ids back
+     * to know where in the diff an intent begins.
+     */
+    public static String hunkId(String file, int index) {
+        return HUNK_ID_PREFIX + file + "_" + index;
+    }
+
+    /** Where in the diff an intent begins: a file, and which of its hunks. */
+    public record Anchor(String file, int hunkIndex) {
+        public Anchor {
+            Objects.requireNonNull(file, "file");
+        }
+    }
+
+    /**
+     * The place in the diff this intent starts, so selecting it can bring the
+     * code into view. Taken from the first hunk the reviewer assigned to it,
+     * or from the file the by-file fallback named. Empty when neither is
+     * recognisable -- an intent may legitimately name no hunks at all.
+     */
+    public Optional<Anchor> anchor() {
+        if (id.startsWith(FILE_ID_PREFIX)) {
+            String file = id.substring(FILE_ID_PREFIX.length());
+            return file.isBlank() ? Optional.empty() : Optional.of(new Anchor(file, 0));
+        }
+        for (String hunkId : hunkIds) {
+            Optional<Anchor> parsed = parseHunkId(hunkId);
+            if (parsed.isPresent()) {
+                return parsed;
+            }
+        }
+        return Optional.empty();
+    }
+
+    private static Optional<Anchor> parseHunkId(String hunkId) {
+        if (hunkId == null || !hunkId.startsWith(HUNK_ID_PREFIX)) {
+            return Optional.empty();
+        }
+        // The file path may itself contain '_', so the index is what follows
+        // the LAST one; anything else is part of the path.
+        int separator = hunkId.lastIndexOf('_');
+        if (separator <= HUNK_ID_PREFIX.length() - 1) {
+            return Optional.empty();
+        }
+        String file = hunkId.substring(HUNK_ID_PREFIX.length(), separator);
+        try {
+            int index = Integer.parseInt(hunkId.substring(separator + 1));
+            return file.isBlank() || index < 0 ? Optional.empty() : Optional.of(new Anchor(file, index));
+        } catch (NumberFormatException e) {
+            return Optional.empty();
+        }
     }
 
     private static <E extends Enum<E>> Optional<E> lookup(E[] values,

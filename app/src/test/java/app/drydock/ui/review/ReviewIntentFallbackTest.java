@@ -20,7 +20,9 @@ import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * The by-file intent fallback against a REAL asynchronous diff.
@@ -78,6 +80,69 @@ class ReviewIntentFallbackTest extends ApplicationTest {
 
         assertEquals("intent 1", awaitIntentLabel(),
                 "the verdict bar must re-render when the diff arrives, not stay on 'no intent'");
+    }
+
+    /**
+     * The reported bug: clicking an intent moved the verdict bar and left the
+     * code exactly where it was, so the rail looked ornamental and there was
+     * no way to read the change an intent describes.
+     */
+    @Test
+    void clickingAnIntentBringsItsFileIntoTheCodeColumn() throws Exception {
+        Path repo = repoWithTwoFilesFarApart();
+        ReviewScope scope = registry.mint(ReviewScopeRegistry.spec(
+                ReviewScope.Kind.WORKING_TREE, repo, Optional.of(repo), "main", "main",
+                Optional.empty(), Optional.empty()));
+
+        interact(() -> view.setItems(List.of(new ReviewItem(scope, ReviewItem.Group.MINE,
+                "Working tree", "drydock · uncommitted changes")), 1));
+        assertEquals("intent 1", awaitIntentLabel());
+
+        assertFalse(renderedHunkFiles().contains("Zulu.java"),
+                "the fixture must start with the second file below the fold");
+
+        // fire() rather than clickOn(): what is under test is the handler, not
+        // TestFX's ability to land a pointer on a rail card.
+        List<javafx.scene.Node> cards = new ArrayList<>(lookup(".review-intent-card").queryAll());
+        assertEquals(2, cards.size(), "expected one intent per changed file");
+        interact(((javafx.scene.control.Button) cards.get(1))::fire);
+        org.testfx.util.WaitForAsyncUtils.waitForFxEvents();
+
+        assertTrue(renderedHunkFiles().contains("Zulu.java"),
+                "selecting the second intent must scroll to its file; rendered " + renderedHunkFiles());
+    }
+
+    private List<String> renderedHunkFiles() {
+        List<String> files = new ArrayList<>();
+        interact(() -> lookup(".review-hunk-file").queryAll()
+                .forEach(node -> files.add(((Label) node).getText())));
+        return files;
+    }
+
+    /** Two changed files far enough apart that the second starts below the viewport. */
+    private static Path repoWithTwoFilesFarApart() throws Exception {
+        Path repo = Files.createDirectories(
+                Files.createTempDirectory("drydock-intent-reveal").resolve("repo"));
+        runGit(repo, "init", "-b", "main");
+        runGit(repo, "config", "user.name", "Test");
+        runGit(repo, "config", "user.email", "test@example.com");
+        for (String name : List.of("Alpha.java", "Zulu.java")) {
+            StringBuilder original = new StringBuilder();
+            for (int i = 1; i <= 120; i++) {
+                original.append("int field").append(i).append(" = ").append(i).append(";\n");
+            }
+            Files.writeString(repo.resolve(name), original.toString());
+        }
+        runGit(repo, "add", ".");
+        runGit(repo, "commit", "-m", "two files");
+        for (String name : List.of("Alpha.java", "Zulu.java")) {
+            StringBuilder changed = new StringBuilder();
+            for (int i = 1; i <= 120; i++) {
+                changed.append("int field").append(i).append(" = ").append(i * 2).append(";\n");
+            }
+            Files.writeString(repo.resolve(name), changed.toString());
+        }
+        return repo;
     }
 
     /** Polls the label; the diff is a real git process, so its arrival is not instant. */
