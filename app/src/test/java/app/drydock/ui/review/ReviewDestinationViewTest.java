@@ -241,6 +241,72 @@ class ReviewDestinationViewTest extends ApplicationTest {
         assertFalse(commands.contains("claude"), "must not name an agent it will not run: " + commands);
     }
 
+    @Test
+    void typingNarrowsTheRailAndDropsAnEmptiedGroupHeading() {
+        seedMixedQueue();
+        assertEquals(List.of("feat/a", "agent/issue-919", "agent/issue-920"), renderedTitles());
+        assertEquals(List.of("MINE", "AGENTS"), renderedGroups());
+
+        typeQuery("919");
+
+        assertEquals(List.of("agent/issue-919"), renderedTitles());
+        assertEquals(List.of("AGENTS"), renderedGroups(),
+                "a group whose every row was filtered out must not keep its heading");
+    }
+
+    @Test
+    void theFooterCountsWhatIsShownAgainstWhatExists() {
+        seedMixedQueue();
+        assertEquals("3 items", footerText());
+
+        typeQuery("919");
+        assertEquals("1 of 3 items", footerText());
+
+        typeQuery("zzz");
+        assertEquals("0 of 3 items", footerText());
+
+        typeQuery("");
+        assertEquals("3 items", footerText());
+    }
+
+    /**
+     * An empty rail reads as a broken queue. The queue is fine; the query is
+     * too narrow, and the rail has to say so.
+     */
+    @Test
+    void noMatchesExplainsItselfInsteadOfShowingAnEmptyRail() {
+        seedMixedQueue();
+        typeQuery("zzz");
+
+        assertTrue(renderedTitles().isEmpty());
+        assertEquals("No queue item matches \"zzz\"",
+                ((Label) lookup(".review-queue-no-match").query()).getText());
+    }
+
+    /**
+     * A collapse can come from a window resize, so it cannot silently hide
+     * rows: the 44px rail has no field and no footer to explain a gap, so it
+     * shows everything and re-applies the query on the way back out.
+     */
+    @Test
+    void collapsingSuspendsTheQueryAndExpandingRestoresIt() {
+        seedMixedQueue();
+        typeQuery("919");
+        assertEquals(1, renderedTitles().size());
+
+        type(KeyCode.Q);
+        settledRailWidth();
+        // Count rows, not titles: a collapsed row is an icon column with no
+        // title label, so renderedTitles() is empty by construction there.
+        assertEquals(3, renderedRows(), "a collapsed rail must render every item");
+        assertFalse(lookup(".review-queue-filter").query().isVisible());
+
+        type(KeyCode.Q);
+        settledRailWidth();
+        assertEquals(1, renderedTitles().size(), "the query returns with the rail");
+        assertTrue(lookup(".review-queue-filter").query().isVisible());
+    }
+
     // ---- fixtures -----------------------------------------------------------
 
     private void seedQueue() {
@@ -257,6 +323,51 @@ class ReviewDestinationViewTest extends ApplicationTest {
                 ReviewScope.Kind.WORKTREE, Path.of("/repo"), Optional.of(Path.of("/wt/" + head)),
                 "master", head, Optional.empty(), session));
         return new ReviewItem(scope, ReviewItem.Group.MINE, head, "drydock · vs master");
+    }
+
+    /** Three items across two groups, so a query can empty a whole group. */
+    private void seedMixedQueue() {
+        ReviewScopeRegistry registry = new ReviewScopeRegistry();
+        interact(() -> view.setItems(List.of(
+                item(registry, "feat/a", Optional.empty()),
+                agentItem(registry, "agent/issue-919"),
+                agentItem(registry, "agent/issue-920")), 1));
+    }
+
+    private static ReviewItem agentItem(ReviewScopeRegistry registry, String head) {
+        ReviewScope scope = registry.mint(ReviewScopeRegistry.spec(
+                ReviewScope.Kind.WORKTREE, Path.of("/repo"), Optional.of(Path.of("/wt/" + head)),
+                "master", head, Optional.empty(), Optional.empty()));
+        return new ReviewItem(scope, ReviewItem.Group.AGENTS, head, "drydock · vs master");
+    }
+
+    /** Replaces the filter field's text on the FX thread, as typing would. */
+    private void typeQuery(String query) {
+        interact(() -> ((javafx.scene.control.TextField) lookup(".review-queue-filter").query())
+                .setText(query));
+    }
+
+    private List<String> renderedTitles() {
+        return lookup(".review-queue-item").queryAll().stream()
+                .map(node -> (Parent) ((Button) node).getGraphic())
+                .flatMap(graphic -> graphic.lookupAll(".review-queue-title").stream().findFirst().stream())
+                .map(label -> ((Label) label).getText())
+                .toList();
+    }
+
+    /** Rows regardless of collapse: a collapsed row renders an icon, not a title. */
+    private int renderedRows() {
+        return lookup(".review-queue-item").queryAll().size();
+    }
+
+    private List<String> renderedGroups() {
+        return lookup(".review-queue-group").queryAll().stream()
+                .map(node -> ((Label) node).getText())
+                .toList();
+    }
+
+    private String footerText() {
+        return ((Label) lookup(".review-queue-rail .review-rail-footer").query()).getText();
     }
 
     private void type(KeyCode key) {

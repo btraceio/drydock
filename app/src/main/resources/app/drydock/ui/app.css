@@ -2227,6 +2227,18 @@
     -fx-font-weight: 700;
     -fx-padding: 8 0 2 4;
 }
+/* The queue's quick-search field: the sidebar's filter, sized for a 236px
+ * rail. Hidden and unmanaged while the rail is collapsed. */
+.review-queue-filter {
+    -fx-min-height: 26px; -fx-max-height: 26px;
+    -fx-font-size: 11px;
+    -fx-padding: 0 8 0 8;
+}
+.review-queue-no-match {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 11px;
+    -fx-padding: 10 4 0 4;
+}
 .review-queue-item {
     -fx-background-color: transparent;
     -fx-background-radius: 6px;

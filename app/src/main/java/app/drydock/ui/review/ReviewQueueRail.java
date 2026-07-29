@@ -7,11 +7,13 @@ import javafx.animation.KeyFrame;
 import javafx.animation.KeyValue;
 import javafx.animation.Timeline;
 import javafx.css.PseudoClass;
+import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.Node;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
 import javafx.scene.control.ScrollPane;
+import javafx.scene.control.TextField;
 import javafx.scene.control.Tooltip;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
@@ -71,6 +73,7 @@ final class ReviewQueueRail extends VBox {
     private final VBox rows = new VBox();
     private final ScrollPane scroll = new ScrollPane(rows);
     private final Label footer = new Label();
+    private final TextField filterField = new TextField();
 
     private final Map<String, Button> buttonsByScopeId = new LinkedHashMap<>();
     private final List<ReviewItem> items = new ArrayList<>();
@@ -99,7 +102,14 @@ final class ReviewQueueRail extends VBox {
         footer.getStyleClass().add("review-rail-footer");
         footer.setMaxWidth(Double.MAX_VALUE);
 
-        getChildren().setAll(header.node(), scroll, footer);
+        filterField.getStyleClass().addAll("filter-field", "review-queue-filter");
+        filterField.setPromptText("⌕  Filter the queue…");
+        // No debounce: this rebuild is tens of buttons over in-memory
+        // lookups, so a timer would only add latency (spec §Rendering).
+        filterField.textProperty().addListener((observable, old, text) -> rebuild());
+        VBox.setMargin(filterField, new Insets(0, 8, 6, 8));
+
+        getChildren().setAll(header.node(), filterField, scroll, footer);
     }
 
     void setOnSelected(Consumer<ReviewItem> handler) {
@@ -262,17 +272,42 @@ final class ReviewQueueRail extends VBox {
                 new KeyValue(maxWidthProperty(), target))).play();
     }
 
+    /**
+     * What the rail is actually rendering: the query's survivors while
+     * expanded, and every item while collapsed.
+     *
+     * <p>A collapse suppresses the filtering as well as the field. The 44px
+     * rail still draws one row per item, so a collapsed rail that kept
+     * filtering would show three icons where thirteen exist -- with no
+     * field, no footer count and nothing on screen to explain the gap. The
+     * query is kept rather than cleared, because a collapse can come from a
+     * window resize rather than from the user.</p>
+     */
+    private List<ReviewItem> visibleItems() {
+        if (collapsed) {
+            return List.copyOf(items);
+        }
+        return items.stream().filter(item -> matches(item, query())).toList();
+    }
+
+    private String query() {
+        return filterField.getText() == null ? "" : filterField.getText();
+    }
+
     private void rebuild() {
         header.showCollapsed(collapsed);
         header.setTitleVisible(!collapsed);
         header.setHintVisible(!collapsed);
+        filterField.setVisible(!collapsed);
+        filterField.setManaged(!collapsed);
         footer.setVisible(!collapsed);
         footer.setManaged(!collapsed);
 
+        List<ReviewItem> visible = visibleItems();
         buttonsByScopeId.clear();
         List<Node> children = new ArrayList<>();
         ReviewItem.Group lastGroup = null;
-        for (ReviewItem item : items) {
+        for (ReviewItem item : visible) {
             if (item.group() != lastGroup) {
                 lastGroup = item.group();
                 if (!collapsed) {
@@ -285,9 +320,23 @@ final class ReviewQueueRail extends VBox {
             buttonsByScopeId.put(item.scope().id(), row);
             children.add(row);
         }
+        // An empty rail reads as a broken queue. Say what actually happened:
+        // the queue is fine and the query is too narrow.
+        if (visible.isEmpty() && !items.isEmpty() && !collapsed) {
+            Label noMatch = new Label("No queue item matches \"" + query().strip() + "\"");
+            noMatch.getStyleClass().add("review-queue-no-match");
+            noMatch.setWrapText(true);
+            children.add(noMatch);
+        }
         rows.getChildren().setAll(children);
         applySelectionStyles();
-        footer.setText(items.size() + (items.size() == 1 ? " item" : " items"));
+        footer.setText(footerText(visible.size(), items.size()));
+    }
+
+    /** {@code 13 items}, or {@code 3 of 13 items} while a query is narrowing the rail. */
+    private static String footerText(int shown, int total) {
+        String noun = total == 1 ? " item" : " items";
+        return shown == total ? total + noun : shown + " of " + total + noun;
     }
 
     private Button buildRow(ReviewItem item) {
