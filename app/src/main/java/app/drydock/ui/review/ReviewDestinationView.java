@@ -344,8 +344,10 @@ public final class ReviewDestinationView extends BorderPane {
 
     /**
      * Replaces the queue's contents. The previous selection survives when
-     * its scope is still present; otherwise the first item is selected, and
-     * an empty queue shows the zero state.
+     * its scope is still present; otherwise the first item the rail is
+     * actually showing is selected -- falling back to the first item
+     * outright only when a query has hidden every row. An empty queue shows
+     * the zero state.
      */
     public void setItems(List<ReviewItem> items, int repositoryCount) {
         String previous = queue.selected().map(item -> item.scope().id()).orElse(null);
