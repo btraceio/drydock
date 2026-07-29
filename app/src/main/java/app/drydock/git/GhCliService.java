@@ -236,8 +236,16 @@ public final class GhCliService implements AutoCloseable {
 
     /**
      * The base branch of every open pull request in {@code root}'s
-     * repository, keyed by head branch -- what a checked-out branch is
-     * actually meant to merge into.
+     * repository, keyed by every local branch name that PR can appear
+     * under -- what a checked-out branch is actually meant to merge into.
+     *
+     * <p>That is two keys per PR: its own {@code headRefName}, and the
+     * {@code pr-<number>} branch {@link PrCheckoutService} checks it out
+     * as. Keying by head alone was the bug -- reviewing a PR from inside
+     * Drydock renames its branch, so the lookup missed and the base fell
+     * back to a local guess that can only ever name an integration branch.
+     * A PR based on anything else (a {@code gh-pages} docs branch, a
+     * stacked PR) then diffed against the wrong thing entirely.</p>
      *
      * <p>One list call rather than a {@code gh pr view} per worktree: a
      * repository with a dozen agent worktrees would otherwise make a dozen
@@ -259,7 +267,7 @@ public final class GhCliService implements AutoCloseable {
         ProcessResult result = runIn(root, List.of(gh.toString(), "pr", "list",
                 "--state", "open",
                 "--limit", String.valueOf(PR_BASE_LIMIT),
-                "--json", "headRefName,baseRefName"));
+                "--json", "number,headRefName,baseRefName"));
         if (result == null) {
             return Map.of();
         }
@@ -281,6 +289,12 @@ public final class GhCliService implements AutoCloseable {
                     // First wins: two open PRs from one branch is unusual, and
                     // the newer one is not obviously the one being reviewed.
                     bases.putIfAbsent(head.value(), base.value());
+                    // The same base under the name a Drydock checkout gives
+                    // it, so reviewing the PR here does not lose its base.
+                    if (obj.get("number") instanceof JsonNumber number) {
+                        bases.putIfAbsent(
+                                PrCheckoutService.localBranchFor(number.asInt()), base.value());
+                    }
                 }
             }
             return Map.copyOf(bases);

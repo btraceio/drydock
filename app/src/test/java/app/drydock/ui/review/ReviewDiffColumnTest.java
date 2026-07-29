@@ -238,10 +238,80 @@ class ReviewDiffColumnTest extends ApplicationTest {
         awaitRows();
 
         List<String> before = renderedHunkFiles();
-        interact(() -> column.revealHunk("Nowhere.java", 3));
+        boolean[] reached = new boolean[1];
+        interact(() -> reached[0] = column.revealHunk("Nowhere.java", 3));
         WaitForAsyncUtils.waitForFxEvents();
 
         assertEquals(before, renderedHunkFiles());
+        assertFalse(reached[0], "a file that is not in the diff was not reached");
+    }
+
+    /**
+     * The intent rail is built from the whole diff while these rows stop at
+     * the row cap, so in a large diff an intent can name a file that has no
+     * card to scroll to. Reported as "clicking an intent does nothing": it
+     * returned silently, which is indistinguishable from a dead click. The
+     * truncation notice is the one row that explains the absence, so that is
+     * where the column goes.
+     */
+    @Test
+    void revealingAFileCutOffByTheRowCapLandsOnTheTruncationNotice() throws Exception {
+        repo = repoWithADiffPastTheRowCap();
+        showScope(workingTreeScope(repo));
+        List<ReviewDiffRow> rows = awaitRowsMatching(current ->
+                current.stream().anyMatch(ReviewDiffRow.Truncation.class::isInstance));
+
+        assertFalse(rows.stream().anyMatch(row -> row instanceof ReviewDiffRow.HunkHeader header
+                        && header.file().equals("Zulu.java")),
+                "the fixture must truncate before the second file");
+
+        boolean[] reached = new boolean[1];
+        interact(() -> reached[0] = column.revealHunk("Zulu.java", 0));
+        WaitForAsyncUtils.waitForFxEvents();
+
+        // The return value is the contract the caller acts on, and the one
+        // thing that changed: this used to be an indistinguishable silent
+        // no-op. The scroll target itself is not asserted -- this headless
+        // ListView materialises every cell, so cell presence says nothing
+        // about the viewport.
+        assertFalse(reached[0], "a file past the cut cannot be reached, and must say so");
+        assertTrue(renderedMessages().stream().anyMatch(text -> text.contains("truncated")),
+                "there must be a truncation notice to land on; rendered " + renderedMessages());
+    }
+
+    /** The message-row texts currently in the scene graph. */
+    private List<String> renderedMessages() {
+        List<String> texts = new ArrayList<>();
+        interact(() -> lookup(".review-diff-message").queryAll()
+                .forEach(node -> texts.add(((Label) node).getText())));
+        return texts;
+    }
+
+    /**
+     * One file whose changed lines alone exceed the row cap, followed by a
+     * second the renderer therefore never reaches.
+     */
+    private static Path repoWithADiffPastTheRowCap() throws Exception {
+        Path repo = initCommittedRepo(Files.createTempDirectory("drydock-truncated"));
+        // Every changed line renders as two rows (the old and the new), so
+        // this clears the cap on its own with room to spare.
+        int lines = 2600;
+        StringBuilder original = new StringBuilder();
+        for (int i = 1; i <= lines; i++) {
+            original.append("int field").append(i).append(" = ").append(i).append(";\n");
+        }
+        Files.writeString(repo.resolve("Alpha.java"), original.toString());
+        Files.writeString(repo.resolve("Zulu.java"), "int only = 1;\n");
+        runGit(repo, "add", ".");
+        runGit(repo, "commit", "-m", "a large file and a small one");
+
+        StringBuilder changed = new StringBuilder();
+        for (int i = 1; i <= lines; i++) {
+            changed.append("int field").append(i).append(" = ").append(i * 2).append(";\n");
+        }
+        Files.writeString(repo.resolve("Alpha.java"), changed.toString());
+        Files.writeString(repo.resolve("Zulu.java"), "int only = 2;\n");
+        return repo;
     }
 
     /** The hunk-header file labels currently in the scene graph. */

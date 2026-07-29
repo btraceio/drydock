@@ -244,10 +244,17 @@ final class ReviewDiffColumn extends BorderPane {
      * Scrolls to the {@code hunkIndex}-th hunk card of {@code file} -- what
      * selecting an intent brings into view. Falls back to the file's first
      * card when it has fewer hunks than that (the diff was re-read and the
-     * grouping is one generation behind), and does nothing when the file is
-     * not in this diff at all.
+     * grouping is one generation behind).
+     *
+     * <p>Returns whether the file was reached. It can genuinely be absent:
+     * the intent rail is built from the whole diff while these rows stop at
+     * {@link #MAX_RENDERED_ROWS}, so in a large diff every intent past the
+     * cut has no card to scroll to. That used to return silently, which
+     * read as a dead click -- selecting an intent appeared to do nothing at
+     * all. Now the truncation notice is scrolled into view instead, because
+     * it is the one row that explains why the file is not there.</p>
      */
-    void revealHunk(String file, int hunkIndex) {
+    boolean revealHunk(String file, int hunkIndex) {
         int firstCard = -1;
         int seen = 0;
         for (int i = 0; i < rows.size(); i++) {
@@ -260,12 +267,20 @@ final class ReviewDiffColumn extends BorderPane {
             }
             if (seen++ == hunkIndex) {
                 list.scrollTo(i);
-                return;
+                return true;
             }
         }
         if (firstCard >= 0) {
             list.scrollTo(firstCard);
+            return true;
         }
+        for (int i = rows.size() - 1; i >= 0; i--) {
+            if (rows.get(i) instanceof ReviewDiffRow.Truncation) {
+                list.scrollTo(i);
+                return false;
+            }
+        }
+        return false;
     }
 
     /**

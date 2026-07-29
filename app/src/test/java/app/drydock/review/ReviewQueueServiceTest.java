@@ -406,6 +406,65 @@ class ReviewQueueServiceTest {
                 items.stream().map(ReviewItem::group).toList());
     }
 
+    /**
+     * Reviewing a PR from inside Drydock checks it out as {@code pr-<n>}
+     * (PrCheckoutService), which used to lose the PR on both counts: the
+     * base lookup missed, so it fell back to a guess that can only name an
+     * integration branch, and the session bound to the new worktree filed it
+     * under AGENTS. A PR based on anything else -- here a docs branch --
+     * then diffed against the wrong thing entirely.
+     */
+    @Test
+    void aPullRequestCheckedOutAsPrNumberKeepsItsBaseAndStaysRequested(
+            @TempDir Path dir, @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(dir);
+        runGit(repo, "branch", "gh-pages");
+        Path checkout = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "pr-854").get();
+        GhCliService.ReviewRequest request = new GhCliService.ReviewRequest(854, "Docs",
+                "renovate/all-minor-patch", "gh-pages", Optional.empty(), Optional.empty(), 0, false);
+
+        List<ReviewItem> items = new ReviewQueueService(worktreeService, gitStatusService,
+                root -> CompletableFuture.completedFuture(List.of(request)),
+                // Exactly what GhCliService now publishes: the head branch and
+                // the pr-<n> name Drydock checks it out under.
+                root -> CompletableFuture.completedFuture(java.util.Map.of(
+                        "renovate/all-minor-patch", "gh-pages", "pr-854", "gh-pages")),
+                registry)
+                .assemble(List.of(target(repo)), sessionsIn(checkout)).get();
+
+        ReviewItem item = itemTitled(items, "PR #854 renovate/all-minor-patch");
+        assertEquals("gh-pages", item.scope().base(),
+                "the PR's own base, not a locally guessed integration branch");
+        assertEquals(ReviewItem.Group.REQUESTED, item.group(),
+                "a PR you checked out to review is still a review request, not an agent's branch");
+        assertEquals(1, items.stream()
+                        .filter(candidate -> candidate.title().contains("854")).count(),
+                "the checked-out worktree and the PR must be one row, not two: " + items);
+    }
+
+    /**
+     * A detached worktree has no branch, so nothing says what it merges into
+     * and there is nothing to approve. PrCheckoutService creates one with
+     * {@code git worktree add --detach} before {@code gh} puts a branch on
+     * it, so an interrupted checkout left a permanent "(detached)" row.
+     */
+    @Test
+    void aDetachedWorktreeIsNotAReviewItem(@TempDir Path dir, @TempDir Path worktreeParent)
+            throws Exception {
+        Path repo = initCommittedRepo(dir);
+        Path detached = worktreeParent.resolve("detached");
+        runGit(repo, "worktree", "add", "--detach", detached.toString());
+
+        List<ReviewItem> items = serviceWith(NO_REQUESTS)
+                .assemble(List.of(target(repo)), checkout -> Optional.empty()).get();
+
+        assertTrue(items.stream().noneMatch(item -> item.title().equals("(detached)")),
+                "a detached worktree must not reach the queue: " + items);
+        assertTrue(items.stream().noneMatch(item ->
+                        item.scope().worktree().map(detached::equals).orElse(false)),
+                "no scope may point at the detached worktree: " + items);
+    }
+
     // ---- fixtures -----------------------------------------------------------
 
     private static ReviewQueueService.RepositoryTarget target(Path repo) {

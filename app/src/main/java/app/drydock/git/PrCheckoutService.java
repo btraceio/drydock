@@ -95,6 +95,31 @@ public final class PrCheckoutService implements AutoCloseable {
     }
 
     /**
+     * The PR number {@code branch} was checked out for, if it is one of
+     * ours. The inverse of {@link #localBranchFor(int)}, so a worktree can
+     * be recognised as the pull request it holds rather than as a branch
+     * that merely happens to be named {@code pr-something} -- a review
+     * queue that could not tell the difference filed a checked-out PR under
+     * AGENTS and diffed it against a guessed base.
+     */
+    public static Optional<Integer> pullRequestNumberOf(String branch) {
+        if (branch == null || !branch.startsWith("pr-")) {
+            return Optional.empty();
+        }
+        String digits = branch.substring(3);
+        // Digits only: a hand-made "pr-fix-login" is somebody's branch, not
+        // PR #fix-login, and Integer.parseInt would happily take "+7".
+        if (digits.isEmpty() || !digits.chars().allMatch(Character::isDigit)) {
+            return Optional.empty();
+        }
+        try {
+            return Optional.of(Integer.parseInt(digits));
+        } catch (NumberFormatException e) {
+            return Optional.empty();
+        }
+    }
+
+    /**
      * Checks PR {@code prNumber} of the repository at {@code repositoryRoot}
      * out into {@code worktreeDirectory}, on this service's background
      * executor.

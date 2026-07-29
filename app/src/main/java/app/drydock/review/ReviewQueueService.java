@@ -5,6 +5,7 @@ import app.drydock.git.GhCliService;
 import app.drydock.git.GitBranchState;
 import app.drydock.git.GitStatus;
 import app.drydock.git.GitStatusService;
+import app.drydock.git.PrCheckoutService;
 import app.drydock.git.WorktreeService;
 
 import java.lang.System.Logger;
@@ -13,6 +14,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -225,7 +227,7 @@ public final class ReviewQueueService {
         String fallback = baseBranchOf(scan.defaultBranch(), scan.status());
         Map<Path, CompletableFuture<String>> pending = new LinkedHashMap<>();
         for (WorktreeService.Worktree worktree : scan.worktrees()) {
-            if (worktree.mainCheckout() || worktree.prunable()) {
+            if (skipForReview(worktree)) {
                 continue;
             }
             Optional<String> declared = worktree.branch()
@@ -248,6 +250,22 @@ public final class ReviewQueueService {
                     pending.forEach((path, future) -> bases.put(path, future.join()));
                     return Map.copyOf(bases);
                 });
+    }
+
+    /**
+     * Whether a worktree has no place in the review queue at all.
+     *
+     * <p>The main checkout is the working-tree item's job, and a prunable
+     * one no longer exists. A <em>detached</em> one is the addition: it has
+     * no branch, so there is nothing to say it merges into, no PR to look
+     * its base up by, and nothing a reviewer can approve. It also arrives
+     * by the back door -- {@link app.drydock.git.PrCheckoutService} makes
+     * its worktree with {@code git worktree add --detach} before {@code gh}
+     * puts a branch on it, so an interrupted checkout leaves one behind and
+     * every reassembly listed it as a row reading "(detached)".</p>
+     */
+    private static boolean skipForReview(WorktreeService.Worktree worktree) {
+        return worktree.mainCheckout() || worktree.prunable() || worktree.detached();
     }
 
     private record Fetch<T>(T value, boolean complete) { }
@@ -276,32 +294,60 @@ public final class ReviewQueueService {
                     repository.displayName() + " · uncommitted changes"));
         }
 
-        // MINE / AGENTS -- one item per non-main worktree. A worktree with a
-        // bound session is an agent's; one without is the human's own.
+        // MINE / AGENTS / REQUESTED -- one item per non-main worktree. A
+        // worktree holding a PR this user was asked to review stays in
+        // REQUESTED; of the rest, one with a bound session is an agent's and
+        // one without is the human's own.
+        Map<Integer, GhCliService.ReviewRequest> requestsByNumber = new LinkedHashMap<>();
+        for (GhCliService.ReviewRequest request : requests) {
+            requestsByNumber.putIfAbsent(request.number(), request);
+        }
+        Set<Integer> checkedOutPrs = new LinkedHashSet<>();
         for (WorktreeService.Worktree worktree : scan.worktrees()) {
-            if (worktree.mainCheckout() || worktree.prunable()) {
+            if (skipForReview(worktree)) {
                 continue;
             }
-            String head = worktree.branch().orElse(worktree.detached() ? "(detached)" : "(no branch)");
+            String head = worktree.branch().orElse("(no branch)");
             String worktreeBase = worktreeBases.getOrDefault(worktree.path(), base);
             Optional<ManagedSessionId> session = sessions.sessionAt(worktree.path());
+            // Reviewing a PR from inside Drydock checks it out as pr-<n>, so
+            // the worktree IS that PR -- not an agent's branch that happens
+            // to have a session on it, which is what the session test alone
+            // would call it.
+            Optional<GhCliService.ReviewRequest> pullRequest = PrCheckoutService
+                    .pullRequestNumberOf(head)
+                    .map(requestsByNumber::get)
+                    .filter(Objects::nonNull);
+            pullRequest.ifPresent(request -> checkedOutPrs.add(request.number()));
             ReviewScope scope = scopeRegistry.mint(ReviewScopeRegistry.spec(
                     ReviewScope.Kind.WORKTREE, repository.root(), Optional.of(worktree.path()),
-                    worktreeBase, head, Optional.empty(), session));
-            items.add(new ReviewItem(scope,
-                    session.isPresent() ? ReviewItem.Group.AGENTS : ReviewItem.Group.MINE,
-                    head, repository.displayName() + " · vs " + worktreeBase));
+                    worktreeBase, head,
+                    pullRequest.map(request ->
+                            new ReviewScope.PullRequestRef(request.number(), request.url())),
+                    session));
+            if (pullRequest.isPresent()) {
+                GhCliService.ReviewRequest request = pullRequest.get();
+                items.add(new ReviewItem(scope, ReviewItem.Group.REQUESTED,
+                        "PR #" + request.number() + " " + request.headRefName(),
+                        repository.displayName() + " · vs " + worktreeBase));
+            } else {
+                items.add(new ReviewItem(scope,
+                        session.isPresent() ? ReviewItem.Group.AGENTS : ReviewItem.Group.MINE,
+                        head, repository.displayName() + " · vs " + worktreeBase));
+            }
         }
 
-        // REQUESTED -- PRs asking this user for a review. A PR whose head
-        // branch is already checked out in a worktree is that worktree's
-        // item; listing it twice would split its findings across two scopes.
+        // REQUESTED -- PRs asking this user for a review that are not checked
+        // out anywhere. One already checked out is the worktree's item above;
+        // listing it twice would split its findings across two scopes.
         Set<String> checkedOutBranches = scan.worktrees().stream()
+                .filter(worktree -> !skipForReview(worktree))
                 .map(WorktreeService.Worktree::branch)
                 .flatMap(Optional::stream)
                 .collect(Collectors.toUnmodifiableSet());
         for (GhCliService.ReviewRequest request : requests) {
-            if (checkedOutBranches.contains(request.headRefName())) {
+            if (checkedOutBranches.contains(request.headRefName())
+                    || checkedOutPrs.contains(request.number())) {
                 continue;
             }
             ReviewScope scope = scopeRegistry.mint(ReviewScopeRegistry.spec(
