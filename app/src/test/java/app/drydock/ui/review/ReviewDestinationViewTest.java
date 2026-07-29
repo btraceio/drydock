@@ -372,6 +372,73 @@ class ReviewDestinationViewTest extends ApplicationTest {
         assertEquals("feat", queryText(), "a reassembly must leave the query alone");
     }
 
+    @Test
+    void slashFocusesTheFilterAndTypingIntoItDoesNotFireTheKeyTable() {
+        seedMixedQueue();
+        Optional<String> before = view.diagSelectedScopeId();
+
+        type(KeyCode.SLASH);
+
+        Node field = lookup(".review-queue-filter").query();
+        assertTrue(field.isFocused(), "/ must focus the quick-search field");
+        assertEquals("", queryText(), "/ must not type itself into the field it just focused");
+
+        // j into the field is a j, not a selection move: Review's key table
+        // returns early while a text input has focus. "j" matches nothing, so
+        // no row renders -- read the selection through diagSelectedScopeId,
+        // which sees the full list; selectedTitle() only sees rendered rows.
+        press(KeyCode.J).release(KeyCode.J);
+        assertEquals("j", queryText(), "j must land in the field as a character");
+        assertEquals(before, view.diagSelectedScopeId(),
+                "typing must never move the centre panel");
+    }
+
+    @Test
+    void enterInTheFieldSelectsTheFirstMatch() {
+        seedMixedQueue();
+        assertEquals("feat/a", selectedTitle());
+
+        typeQuery("agent");
+        interact(() -> lookup(".review-queue-filter").query().requestFocus());
+        press(KeyCode.ENTER).release(KeyCode.ENTER);
+
+        assertEquals("agent/issue-919", selectedTitle());
+    }
+
+    @Test
+    void escInTheFieldClearsTheQueryAndRestoresEveryRow() {
+        seedMixedQueue();
+        type(KeyCode.SLASH);
+        typeQuery("919");
+        assertEquals(1, renderedTitles().size());
+
+        interact(() -> lookup(".review-queue-filter").query().requestFocus());
+        press(KeyCode.ESCAPE).release(KeyCode.ESCAPE);
+
+        assertEquals("", queryText());
+        assertEquals(3, renderedTitles().size());
+        assertFalse(lookup(".review-queue-filter").query().isFocused(),
+                "Esc returns focus to the rail so the key table works again");
+    }
+
+    /**
+     * The field does not exist while the rail is collapsed, so / must be
+     * inert there -- and ⌘F must keep routing to the sidebar rather than
+     * focusing something invisible.
+     */
+    @Test
+    void withTheRailCollapsedSlashIsInertAndTheFilterIsUnavailable() {
+        seedMixedQueue();
+        type(KeyCode.Q);
+        settledRailWidth();
+
+        type(KeyCode.SLASH);
+
+        assertFalse(lookup(".review-queue-filter").query().isFocused());
+        assertFalse(view.queueFilterAvailable(),
+                "⌘F must fall back to the sidebar while the rail is collapsed");
+    }
+
     // ---- fixtures -----------------------------------------------------------
 
     private void seedQueue() {

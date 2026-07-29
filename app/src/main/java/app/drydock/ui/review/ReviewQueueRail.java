@@ -15,6 +15,7 @@ import javafx.scene.control.Label;
 import javafx.scene.control.ScrollPane;
 import javafx.scene.control.TextField;
 import javafx.scene.control.Tooltip;
+import javafx.scene.input.KeyEvent;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
@@ -87,6 +88,16 @@ final class ReviewQueueRail extends VBox {
     private boolean narrow;
     private String selectedScopeId;
 
+    /**
+     * Set when {@code /} focuses this field. Consuming that key's {@code
+     * KEY_PRESSED} in Review's table does not stop the separate {@code
+     * KEY_TYPED} from arriving, and by the time it does, this field owns
+     * focus -- so the key that opens the filter would otherwise type itself
+     * into it. Never set for {@code ⌘F}: a shortcut-modified press produces
+     * no character, and swallowing there would eat a real keystroke.
+     */
+    private boolean swallowNextTypedSlash;
+
     ReviewQueueRail() {
         getStyleClass().add("review-queue-rail");
         setMinWidth(EXPANDED_WIDTH);
@@ -107,6 +118,15 @@ final class ReviewQueueRail extends VBox {
         // No debounce: this rebuild is tens of buttons over in-memory
         // lookups, so a timer would only add latency (spec §Rendering).
         filterField.textProperty().addListener((observable, old, text) -> rebuild());
+        filterField.setOnKeyPressed(this::onFilterKeyPressed);
+        filterField.addEventFilter(KeyEvent.KEY_TYPED, event -> {
+            if (swallowNextTypedSlash) {
+                swallowNextTypedSlash = false;
+                if ("/".equals(event.getCharacter())) {
+                    event.consume();
+                }
+            }
+        });
         VBox.setMargin(filterField, new Insets(0, 8, 6, 8));
 
         getChildren().setAll(header.node(), filterField, scroll, footer);
@@ -266,6 +286,71 @@ final class ReviewQueueRail extends VBox {
         collapsed = newCollapsed;
         animateTo(targetWidth());
         rebuild();
+    }
+
+    /**
+     * Focuses the quick-search field and selects what is in it ({@code ⌘F}).
+     * A no-op while collapsed: the field is hidden and unmanaged there, so it
+     * cannot take focus, and neither key expands the rail -- {@code q} owns
+     * this rail's width.
+     */
+    void focusFilter() {
+        focusFilter(false);
+    }
+
+    /**
+     * As {@link #focusFilter()}, but discards the one typed slash still in
+     * flight -- so {@code /} opens the field rather than pre-loading it with
+     * a {@code "/"}.
+     */
+    void focusFilter(boolean swallowTypedSlash) {
+        if (collapsed) {
+            return;
+        }
+        swallowNextTypedSlash = swallowTypedSlash;
+        filterField.requestFocus();
+        filterField.selectAll();
+    }
+
+    /**
+     * The field's own {@code Enter} and {@code Esc}.
+     *
+     * <p>Esc has to live here rather than in Review's unwind: the
+     * scene-level Escape branch gates that unwind behind "no text input has
+     * focus", so it never reaches Review while this field is focused -- but
+     * it does not consume the event either, so the key arrives at the
+     * focused node. A blank query is not ours to swallow; leaving it
+     * unconsumed lets the ordinary unwind resume once focus is off the
+     * field.</p>
+     */
+    private void onFilterKeyPressed(KeyEvent event) {
+        switch (event.getCode()) {
+            case ENTER -> {
+                // One selection, one git diff -- Enter is what commits the
+                // filter, never a keystroke.
+                visibleItems().stream().findFirst()
+                        .ifPresent(item -> select(item.scope().id()));
+                event.consume();
+            }
+            case ESCAPE -> {
+                if (!query().isEmpty()) {
+                    filterField.clear();
+                    returnFocusToRail();
+                    event.consume();
+                }
+            }
+            default -> { }
+        }
+    }
+
+    /** Moves focus off the field so Review's key table stops returning early. */
+    private void returnFocusToRail() {
+        Button selected = buttonsByScopeId.get(selectedScopeId);
+        if (selected != null) {
+            selected.requestFocus();
+        } else {
+            scroll.requestFocus();
+        }
     }
 
     /**

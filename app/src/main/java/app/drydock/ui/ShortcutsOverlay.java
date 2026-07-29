@@ -42,6 +42,7 @@ final class ShortcutsOverlay {
             new Section("IN REVIEW", new String[][] {
                     {"Previous / next review item", "j / k"},
                     {"Collapse the queue", "q"},
+                    {"Filter the queue", "/"},
                     {"Focus mode — collapse every rail", "f"},
                     {"Open the bound session", "o"},
                     {"Cycle density: cozy · compact · dense", "d"},

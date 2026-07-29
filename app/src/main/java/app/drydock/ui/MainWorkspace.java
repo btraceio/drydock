@@ -723,6 +723,16 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         return reviewShowing;
     }
 
+    /** Whether {@code ⌘F} belongs to the Review queue's filter rather than the sidebar's. */
+    public boolean isReviewQueueFilterable() {
+        return reviewShowing && reviewDestination.queueFilterAvailable();
+    }
+
+    /** Focuses the Review queue's quick-search field ({@code ⌘F}). */
+    public void focusReviewQueueFilter() {
+        reviewDestination.focusQueueFilter();
+    }
+
     /**
      * Closes the topmost thing Review has open -- the symbol lens, then the
      * MCP panel -- and reports whether it closed anything. False means Esc

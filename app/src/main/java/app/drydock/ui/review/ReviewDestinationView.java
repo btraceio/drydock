@@ -366,6 +366,21 @@ public final class ReviewDestinationView extends BorderPane {
         queue.revealAndSelect(scopeId);
     }
 
+    /**
+     * Whether {@code ⌘F} should reach the queue's quick-search field. False
+     * while the rail is collapsed, where the field does not exist -- the
+     * scene filter then keeps its existing route to the sidebar's filter
+     * rather than focusing something invisible.
+     */
+    public boolean queueFilterAvailable() {
+        return !queue.collapsed();
+    }
+
+    /** Focuses the queue's quick-search field ({@code ⌘F}). */
+    public void focusQueueFilter() {
+        queue.focusFilter();
+    }
+
     /** The scope currently being reviewed, if the queue is not empty. */
     private Optional<ReviewScope> selectedScope() {
         return queue.selected().map(ReviewItem::scope);
@@ -919,6 +934,7 @@ public final class ReviewDestinationView extends BorderPane {
             case J -> { queue.moveSelection(1); yield true; }
             case K -> { queue.moveSelection(-1); yield true; }
             case Q -> { setQueueCollapsed(!queue.collapsed()); yield true; }
+            case SLASH -> { queue.focusFilter(true); yield true; }
             case O -> { openBoundSession(); yield true; }
             case D -> { cycleDensity(); yield true; }
             case C -> { diffColumn.toggleContext(); yield true; }
