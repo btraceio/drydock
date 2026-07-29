@@ -9,6 +9,7 @@ import javafx.scene.Parent;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
+import javafx.scene.control.TextField;
 import javafx.scene.input.KeyCode;
 import javafx.scene.layout.Region;
 import javafx.stage.Stage;
@@ -372,6 +373,56 @@ class ReviewDestinationViewTest extends ApplicationTest {
         assertEquals("feat", queryText(), "a reassembly must leave the query alone");
     }
 
+    /**
+     * A reassembly that drops the selected item must fall back to a row the
+     * query still shows, not to {@code items.get(0)} -- an over-eager
+     * fallback can land the centre panel on a completely unrelated item
+     * while the rail still reads "No queue item matches ...".
+     */
+    @Test
+    void aReassemblyThatDropsTheSelectionFallsBackToTheFirstVisibleItem() {
+        seedMixedQueue();
+        typeQuery("issue-9");
+        assertEquals(List.of("agent/issue-919", "agent/issue-920"), renderedTitles());
+        type(KeyCode.J);
+        assertEquals("agent/issue-919", selectedTitle());
+
+        // Reassembly: agent/issue-919's worktree is gone. feat/a is still
+        // first in list order, but the query hides it -- the fallback must
+        // not select a row the reviewer cannot even see.
+        List<ReviewItem> withoutTheSelection = view.diagItems().stream()
+                .filter(it -> !it.title().equals("agent/issue-919"))
+                .toList();
+        interact(() -> view.setItems(withoutTheSelection, 1));
+
+        assertEquals("agent/issue-920", selectedTitle(),
+                "fallback must be the first VISIBLE item, not items.get(0)");
+    }
+
+    /**
+     * {@code revealAndSelect} exists so a targeted navigation never lands the
+     * reviewer nowhere -- but a stale id (a worktree removed since the
+     * navigation was queued) must leave the query untouched too, not just
+     * the selection. Clearing the query while still selecting nothing is
+     * strictly worse than doing neither.
+     */
+    @Test
+    void revealAndSelectLeavesTheQueryAloneWhenTheTargetIsGone() {
+        seedMixedQueue();
+        typeQuery("feat");
+        assertEquals("feat/a", selectedTitle());
+
+        ReviewScopeRegistry registry = new ReviewScopeRegistry();
+        ReviewScope goneScope = registry.mint(ReviewScopeRegistry.spec(
+                ReviewScope.Kind.WORKTREE, Path.of("/repo"), Optional.of(Path.of("/wt/gone")),
+                "master", "gone", Optional.empty(), Optional.empty()));
+
+        interact(() -> view.selectScope(goneScope.id()));
+
+        assertEquals("feat", queryText(), "a stale id must not clear the query it cannot honour");
+        assertEquals("feat/a", selectedTitle(), "the selection must be unchanged");
+    }
+
     @Test
     void slashFocusesTheFilterAndTypingIntoItDoesNotFireTheKeyTable() {
         seedMixedQueue();
@@ -475,7 +526,7 @@ class ReviewDestinationViewTest extends ApplicationTest {
 
     /** Replaces the filter field's text on the FX thread, as typing would. */
     private void typeQuery(String query) {
-        interact(() -> ((javafx.scene.control.TextField) lookup(".review-queue-filter").query())
+        interact(() -> ((TextField) lookup(".review-queue-filter").query())
                 .setText(query));
     }
 
@@ -503,7 +554,7 @@ class ReviewDestinationViewTest extends ApplicationTest {
     }
 
     private String queryText() {
-        return ((javafx.scene.control.TextField) lookup(".review-queue-filter").query()).getText();
+        return ((TextField) lookup(".review-queue-filter").query()).getText();
     }
 
     private void type(KeyCode key) {

@@ -358,7 +358,16 @@ public final class ReviewDestinationView extends BorderPane {
         }
         boolean stillThere = previous != null
                 && items.stream().anyMatch(item -> item.scope().id().equals(previous));
-        queue.select(stillThere ? previous : items.get(0).scope().id());
+        if (stillThere) {
+            queue.select(previous);
+            return;
+        }
+        // The fallback must be a row the query still shows -- items.get(0)
+        // can be filtered out, which would select something the rail is not
+        // even rendering. Only an over-narrow query (nothing visible at all)
+        // falls back to items.get(0), so a reassembly still leaves something
+        // selected rather than nothing.
+        queue.select(queue.firstVisible().map(item -> item.scope().id()).orElse(items.get(0).scope().id()));
     }
 
     /** Selects the item for {@code scopeId} ({@code ⌘4} and the sidebar's {@code ◨n} badge). */

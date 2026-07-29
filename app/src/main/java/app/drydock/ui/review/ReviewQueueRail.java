@@ -169,6 +169,17 @@ final class ReviewQueueRail extends VBox {
     }
 
     /**
+     * The first item the query is actually showing -- what a reassembly that
+     * drops the current selection should fall back to. Falling back to
+     * {@code items.get(0)} instead can select a row the query hides, leaving
+     * the rail reading "no match" while the centre panel renders something
+     * unrelated.
+     */
+    Optional<ReviewItem> firstVisible() {
+        return visibleItems().stream().findFirst();
+    }
+
+    /**
      * Selects {@code scopeId} and fires the selection callback, scrolling the
      * row into view. Selecting an id the rail does not hold is a no-op:
      * the queue is reassembled asynchronously, so a stale id from a keyboard
@@ -201,7 +212,12 @@ final class ReviewQueueRail extends VBox {
      * those may touch what the user typed.</p>
      */
     void revealAndSelect(String scopeId) {
-        if (!query().isEmpty()) {
+        boolean present = items.stream().anyMatch(item -> item.scope().id().equals(scopeId));
+        // A stale id -- a worktree removed since the navigation was queued --
+        // must not clear what the user typed either. select() already no-ops
+        // on it; clearing the query too would be strictly worse than doing
+        // neither.
+        if (present && !query().isEmpty()) {
             filterField.clear();
         }
         select(scopeId);
