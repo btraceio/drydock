@@ -197,6 +197,28 @@ final class ReviewQueueRail extends VBox {
         return (int) Math.clamp((long) current + delta, 0, size - 1);
     }
 
+    /**
+     * Whether {@code item} survives the quick-search {@code query}.
+     *
+     * <p>The haystack is the row's whole visible text: the group label the
+     * rail prints at the head of the second line, then the title, then the
+     * subtitle. They are joined by separators so a query cannot match the
+     * artifact where one field's tail meets the next one's head -- what you
+     * can read in the row is what you can search for, and nothing else. A
+     * blank query matches everything.</p>
+     *
+     * <p>Package-private and static for the same reason {@link #nextIndex}
+     * is: the rule is then testable without a running toolkit.</p>
+     */
+    static boolean matches(ReviewItem item, String query) {
+        String needle = query == null ? "" : query.strip().toLowerCase(Locale.ROOT);
+        if (needle.isEmpty()) {
+            return true;
+        }
+        String haystack = item.group().label() + " " + item.title() + " " + item.subtitle();
+        return haystack.toLowerCase(Locale.ROOT).contains(needle);
+    }
+
     boolean collapsed() {
         return collapsed;
     }
