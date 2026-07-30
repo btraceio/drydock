@@ -136,15 +136,22 @@ abstract class RuntimeImageTask @Inject constructor(
     abstract val extraModulePath: ConfigurableFileCollection
 
     /**
-     * Cross-architecture only: when present, the produced
-     * `runtime/bin/java` is verified with `file(1)` to report this
-     * architecture token (e.g. `"arm64"`), hard-failing otherwise --
-     * mirrors `scripts/build-native-host.sh`'s existing file(1)-based
-     * acceptance gate. Also gates a host-JDK-vs-pinned-jmods-build
-     * consistency check (see [assemble]). This is the only verification
-     * possible for a cross-linked, non-host architecture: actually
-     * executing it is not possible on the build machine and is deferred
-     * to CI. Absent by default (no check for the host build).
+     * When present, the produced `runtime/bin/java` is verified with
+     * `file(1)` to report this architecture token (e.g. `"arm64"`),
+     * hard-failing otherwise -- mirrors `scripts/build-native-host.sh`'s
+     * existing file(1)-based acceptance gate.
+     *
+     * Set by every task instance, host and cross alike. For a cross-linked
+     * architecture this is the *only* verification possible: actually
+     * executing that image is not possible on the build machine and is
+     * deferred to CI. For the host build it is a cheap guard against a
+     * toolchain mix-up -- jlink emits an image for whatever architecture
+     * the JDK running it happens to be, and `java { toolchain {} }` pins
+     * only a language version, not an architecture, so an x86_64 JDK 26 on
+     * an arm64 machine would otherwise silently ship a wrong-arch bundle.
+     *
+     * Still `@Optional`: absent means no check, keeping the task usable
+     * without an expectation rather than forcing every caller to have one.
      */
     @get:Input
     @get:Optional
@@ -180,7 +187,14 @@ abstract class RuntimeImageTask @Inject constructor(
         // links a mismatched module graph. Checked via the JDK's own
         // `release` file (a standard, stable file in every JDK
         // distribution) rather than any Gradle-internal API.
-        if (expectedMachOArch.isPresent) {
+        //
+        // Gated on extraModulePath (the actual cross-link signal -- those
+        // downloaded jmods ARE the thing being version-matched) rather than
+        // on expectedMachOArch, which the host build also sets now purely to
+        // verify its own output's architecture. Keying this off the arch
+        // token would fail every host `dmg` built on a JDK 26 other than the
+        // pinned one, citing a cross-link that isn't happening.
+        if (!extraModulePath.isEmpty) {
             val pinnedJmodsBuild = "26.0.1+8"
             val hostRuntimeVersion = readJavaRuntimeVersion(javaHome)
             if (hostRuntimeVersion != pinnedJmodsBuild) {
@@ -253,7 +267,10 @@ abstract class RuntimeImageTask @Inject constructor(
             if (!description.contains(expected)) {
                 throw GradleException(
                     "$javaBin is not tagged as $expected (file(1) reported: " +
-                        "${description.trim()}); cross-linked jlink output is wrong."
+                        "${description.trim()}); jlink output is the wrong architecture. " +
+                        "jlink builds a runtime for the architecture of the JDK that runs " +
+                        "it, so check that the JDK 26 toolchain resolved for this build is " +
+                        "$expected (./gradlew -q javaToolchains)."
                 )
             }
         }

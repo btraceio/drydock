@@ -32,6 +32,28 @@ plugins {
 
 val packagingDir = layout.projectDirectory.dir("packaging")
 
+// Host architecture, used both by the host runtimeImage's own output-arch
+// check below and by the cross-arch tasks further down (which cross-link
+// whichever architecture this machine is NOT). Declared here rather than
+// beside the cross-arch block so the host task can reference it without
+// depending on lazy task-configuration ordering to outrun a later `val`.
+//
+// os.arch is the architecture of the Gradle *daemon* JVM (JDK 17 --
+// gradle/gradle-daemon-jvm.properties), deliberately a different JVM from
+// the JDK 26 toolchain that runs jlink. That independence is the whole
+// point for the host check: an expectation derived from the jlinking JDK
+// itself would be a tautology, since jlink always emits that JDK's own
+// architecture.
+val hostOsArch = System.getProperty("os.arch", "").lowercase()
+val hostArchLabel = when (hostOsArch) {
+    "x86_64", "amd64" -> "macos-x86_64"
+    "aarch64", "arm64" -> "macos-arm64"
+    else -> throw org.gradle.api.GradleException(
+        "Unrecognized host os.arch '$hostOsArch' (expected x86_64/amd64 or aarch64/arm64)."
+    )
+}
+val machOArchToken = mapOf("macos-x86_64" to "x86_64", "macos-arm64" to "arm64")
+
 tasks.register<RuntimeImageTask>("runtimeImage") {
     group = "distribution"
     description = "Gate 0F: builds a self-contained jlink runtime image at build/image."
@@ -56,6 +78,10 @@ tasks.register<RuntimeImageTask>("runtimeImage") {
             .map { it.metadata.installationPath.asFile.absolutePath }
     )
     imageDir.set(rootProject.layout.buildDirectory.dir("image"))
+    // Fail the build if jlink produced an image for an architecture other
+    // than this machine's, rather than shipping a silently wrong-arch
+    // bundle (see RuntimeImageTask.expectedMachOArch).
+    expectedMachOArch.set(machOArchToken.getValue(hostArchLabel))
 }
 
 tasks.register<AppBundleTask>("appImage") {
@@ -109,14 +135,6 @@ fun RuntimeImageTask.configureCommonRuntimeImageInputs() {
     )
 }
 
-val hostOsArch = System.getProperty("os.arch", "").lowercase()
-val hostArchLabel = when (hostOsArch) {
-    "x86_64", "amd64" -> "macos-x86_64"
-    "aarch64", "arm64" -> "macos-arm64"
-    else -> throw org.gradle.api.GradleException(
-        "Unrecognized host os.arch '$hostOsArch' (expected x86_64/amd64 or aarch64/arm64)."
-    )
-}
 val allMacosArches = listOf("macos-x86_64", "macos-arm64")
 val crossArchLabel = allMacosArches.first { it != hostArchLabel }
 
@@ -157,8 +175,6 @@ crossFxConfiguration.attributes {
         )
     )
 }
-
-val machOArchToken = mapOf("macos-x86_64" to "x86_64", "macos-arm64" to "arm64")
 
 val runtimeImageMacosX8664 = tasks.register<RuntimeImageTask>("runtimeImageMacosX8664") {
     group = "distribution"
