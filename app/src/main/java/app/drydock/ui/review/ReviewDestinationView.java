@@ -317,7 +317,7 @@ public final class ReviewDestinationView extends BorderPane {
         // arrives asynchronously -- so the verdict bar has to be re-rendered
         // when it lands, or it stays on the "no intent" it correctly computed
         // from an empty diff and never recovers.
-        diffColumn.setOnDiffLoaded(this::refreshReviewState);
+        diffColumn.setOnDiffResolved((scopeId, outcome) -> refreshReviewState());
 
         widthProperty().addListener((obs, old, width) -> applyResponsiveLayout(width.doubleValue()));
         // The Browse split follows the rails' own width on every layout pass,
@@ -842,7 +842,7 @@ public final class ReviewDestinationView extends BorderPane {
      * reader must not be left guessing why.
      */
     private Region patchOnlyBody(ReviewScope scope) {
-        diffColumn.showDiff(patchOnlyDiffs.get(scope.id()));
+        diffColumn.showDiff(scope, patchOnlyDiffs.get(scope.id()));
         VBox.setVgrow(diffColumn, Priority.ALWAYS);
         VBox box = new VBox(ReviewCheckoutGate.readOnlyBanner(
                 scope.pr().map(ReviewScope.PullRequestRef::number).orElse(0)), diffColumn);

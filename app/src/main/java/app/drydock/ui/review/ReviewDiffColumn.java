@@ -103,12 +103,13 @@ final class ReviewDiffColumn extends BorderPane {
     private final ListView<ReviewDiffRow> list = new ListView<>(rows);
 
     /**
-     * Fired once a diff has landed. Intents fall back to one-per-file, so
-     * they are derived FROM the diff -- without this the verdict bar renders
-     * before the diff exists, concludes there are no intents, and stays that
-     * way.
+     * Notified when a diff resolves, with the scope it resolved for.
+     *
+     * <p>The scope id is the point: a bare "a diff landed" signal left every
+     * consumer reading whatever diff happened to be current, which is how an
+     * intent rail came to show one scope's files beside another's header.</p>
      */
-    private Runnable onDiffLoaded = () -> { };
+    private java.util.function.BiConsumer<String, DiffOutcome> onDiffResolved = (scopeId, outcome) -> { };
 
     private ReviewScope scope;
     private UnifiedDiff diff = new UnifiedDiff(List.of());
@@ -173,6 +174,7 @@ final class ReviewDiffColumn extends BorderPane {
             showMessage("Nothing selected.");
             return;
         }
+        onDiffResolved.accept(newScope.id(), new DiffOutcome.Diffing());
         reload();
     }
 
@@ -196,21 +198,29 @@ final class ReviewDiffColumn extends BorderPane {
                     if (failure != null) {
                         LOG.log(Level.DEBUG, "Diff failed for " + requested.diffRoot(), failure);
                         diff = new UnifiedDiff(List.of());
-                        showMessage("Could not diff: " + UiErrors.unwrap(failure).getMessage());
+                        String message = UiErrors.unwrap(failure).getMessage();
+                        showMessage("Could not diff: " + message);
+                        onDiffResolved.accept(requested.id(), new DiffOutcome.Failed(message));
                         return;
                     }
                     diff = result;
                     symbolIndex = SymbolIndex.of(diff);
                     rebuild();
-                    onDiffLoaded.run();
+                    onDiffResolved.accept(requested.id(), new DiffOutcome.Loaded(result));
                 }));
     }
 
     // ---- presentation state -------------------------------------------------
 
-    /** Notified when a diff has landed, so anything derived from it can re-render. */
-    void setOnDiffLoaded(Runnable handler) {
-        this.onDiffLoaded = handler == null ? () -> { } : handler;
+    /**
+     * Notified when a diff resolves, with the scope it resolved for.
+     *
+     * <p>The scope id is the point: a bare "a diff landed" signal left every
+     * consumer reading whatever diff happened to be current, which is how an
+     * intent rail came to show one scope's files beside another's header.</p>
+     */
+    void setOnDiffResolved(java.util.function.BiConsumer<String, DiffOutcome> handler) {
+        this.onDiffResolved = handler == null ? (scopeId, outcome) -> { } : handler;
     }
 
     /** Supplies the {@code ◆n} pins; set once by the destination. */
@@ -287,16 +297,18 @@ final class ReviewDiffColumn extends BorderPane {
      * Renders a diff that did not come from this column's own git call --
      * {@code gh pr diff} for the "Read the patch only" path, which has no
      * checkout to run git in. Clears the scope so a later reload cannot
-     * overwrite it with a local diff of the wrong tree.
+     * overwrite it with a local diff of the wrong tree, and publishes under
+     * the scope it was read FOR, which is not the same thing as adopting
+     * that scope as the column's live one.
      */
-    void showDiff(UnifiedDiff supplied) {
+    void showDiff(ReviewScope forScope, UnifiedDiff supplied) {
         scope = null;
         requestToken++;
         diff = supplied;
         symbolIndex = SymbolIndex.of(diff);
         expandedRuns.clear();
         rebuild();
-        onDiffLoaded.run();
+        onDiffResolved.accept(forScope.id(), new DiffOutcome.Loaded(supplied));
     }
 
     /** {@code d}: applies a density by swapping the root's style class (spec §4.8). */
