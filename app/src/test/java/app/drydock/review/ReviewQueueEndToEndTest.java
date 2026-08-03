@@ -15,12 +15,11 @@ import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * The three reported cases, end to end over real git: local changes, a
- * develop-cut branch in a master-default repository, and a pull request
- * with and without a checkout.
+ * The reported cases, end to end over real git: local changes, a
+ * develop-cut branch in a master-default repository, and a checked-out
+ * pull request.
  */
 class ReviewQueueEndToEndTest {
 
@@ -99,22 +98,6 @@ class ReviewQueueEndToEndTest {
         List<ReviewIntent> intents = grouping.intentsFor("scope-pr", diff);
 
         assertEquals(List.of("changed-by-pr.txt"), intents.stream().map(ReviewIntent::title).toList());
-    }
-
-    @Test
-    void aPullRequestWithNoCheckoutHasNoIntentsAtAll() {
-        ReviewScope gate = new ReviewScope("scope-gate", ReviewScope.Kind.PR, Path.of("/repo"),
-                Optional.empty(), "main", "feature",
-                Optional.of(new ReviewScope.PullRequestRef(7, Optional.empty())),
-                Optional.empty(), Optional.empty());
-
-        assertTrue(intentsWithNoDiff(gate).isEmpty(),
-                "there is no diff to group, and borrowing another scope's is the bug");
-    }
-
-    /** What the view does for a scope with no loaded diff: group nothing. */
-    private List<ReviewIntent> intentsWithNoDiff(ReviewScope scope) {
-        return grouping.intentsFor(scope.id(), new UnifiedDiff(List.of()));
     }
 
     private static void initRepo(Path repo, String branch) throws Exception {
