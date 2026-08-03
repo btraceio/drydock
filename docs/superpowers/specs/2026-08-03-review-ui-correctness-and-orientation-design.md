@@ -69,9 +69,13 @@ belonging to whichever scope most recently loaded one. Nothing ties it to
 The diff a scope's intents are derived from is **that scope's diff, or
 nothing**.
 
-1. `ReviewDiffColumn` publishes `(scopeId, diff)` when a diff lands, rather
-   than notifying that *a* diff landed. `showDiff` (the patch-only path)
-   publishes on the same channel with the scope it was read for.
+1. `ReviewDiffColumn` publishes `(scopeId, outcome)` when a diff resolves,
+   rather than notifying that *a* diff landed. `showDiff` (the patch-only
+   path) publishes on the same channel with the scope it was read for. The
+   outcome carries failure as well as success: today the failure branch
+   returns without calling `onDiffLoaded` at all
+   (`ReviewDiffColumn.java:196-201`), which is what would otherwise leave a
+   failed scope indistinguishable from one still loading.
 2. The workspace holds the per-scope diffs. `intents(scope)` looks up that
    scope's entry. A scope with no entry has no diff, and there is no global
    to fall back to.
@@ -80,8 +84,20 @@ nothing**.
    diff; otherwise **empty**. It never returns another scope's grouping and
    never sees another scope's diff.
 4. `ReviewIntentRail` renders the empty case honestly rather than as a blank
-   rail: `Diffing…` while a diff is in flight, and
-   `Not checked out — check out to group changes` for a gate item.
+   rail. "Empty" is four situations, and the rail must not render one as
+   another:
+
+   | situation | rail says |
+   |---|---|
+   | a diff is in flight | `Diffing…` |
+   | gate item, no diff will ever run | `Not checked out — check out to group changes` |
+   | the diff failed | `Could not diff — see the message beside this` |
+   | the diff succeeded with no files | `No changes` |
+
+   The last two are why the rail cannot infer its state from "no entry in
+   the per-scope map". A failed diff is not in flight, and a successful
+   empty diff *does* publish an entry -- with zero files. The rail is told
+   which situation it is in; it does not deduce it from an absence.
 
 The point is structural: after this, "the rail shows a different scope's
 files" is not a bug that was fixed, it is a state that cannot be
@@ -199,18 +215,37 @@ no item there is no session to describe, so the row is not rendered. With an
 item, the line describes *that item's* session and says so, never the
 session Review was opened from.
 
-**c. Empty when it should not be.** `refreshReviewQueue` logs an assembly
-failure and returns without touching the view (`MainWorkspace.java:796`), so
-a failed or slow `gh` leaves "Nothing to review" on screen indefinitely with
-the reason in a log file. The empty surface becomes four distinguishable
-states:
+**c. Empty when it should not be.** A failed or slow `gh` leaves "Nothing to
+review" on screen indefinitely with the reason in a log file.
+
+The seam matters here, because the obvious one is the wrong one.
+`refreshReviewQueue` does log an assembly failure and return without touching
+the view (`MainWorkspace.java:796`) -- but that branch is very nearly dead:
+`ReviewQueueService.assemble` absorbs every underlying failure into
+`Fetch(value, complete = false)` (`ReviewQueueService.java:154-191`), so the
+future almost never completes exceptionally. A `gh` that is missing, slow or
+unauthenticated produces a *successful* assembly with fewer items and
+`requestsComplete = false`.
+
+That completeness is the real signal, and today it never leaves the service:
+`assemble` returns a bare `List<ReviewItem>`, and `localComplete` /
+`requestsComplete` are consumed internally to decide scope revocation
+(`ReviewQueueService.java:432`). So `assemble` returns them alongside the
+items, and the view drives its state from them. The `failure != null` branch
+stays as a backstop and stops being silent, but it is not the mechanism.
+
+The empty surface becomes four distinguishable states:
 
 | state | what it says |
 |---|---|
 | scanning | which repositories are being scanned |
 | nothing reviewable | what was scanned, and that it found nothing |
-| scan failed | the failure, and a Retry |
+| scan incomplete | which source did not answer, and a Retry |
 | no repositories | that none is configured, and how to add one |
+
+*Scan incomplete* is the `complete = false` case -- "git answered, `gh` did
+not; PRs may be missing" -- not only the outright exception. It is reachable
+in normal use, which the exception is not.
 
 **d. Unclear what Review is for.** The *nothing reviewable* state names what
 lands in the queue -- uncommitted changes, agent worktrees, your branches,
@@ -218,11 +253,12 @@ PRs that ask you for a review -- and how to produce one.
 
 ### Tests
 
-The four-state machine is testable through `FakeReviewHost`: an assembly
-failure reaches the view as the failure state rather than being swallowed;
-Retry re-runs the assembly; an empty successful scan is distinguishable from
-one that never completed. The session row's absence with no item selected is
-a view assertion. Appearance goes through the `shot:` harness.
+The four-state machine is testable through `FakeReviewHost`: an incomplete
+scan (`gh` did not answer) reaches the view as the incomplete state rather
+than as "nothing to review"; an outright assembly failure does too; Retry
+re-runs the assembly; an empty successful scan is distinguishable from one
+that never completed. The session row's absence with no item selected is a
+view assertion. Appearance goes through the `shot:` harness.
 
 ## Out of scope
 
