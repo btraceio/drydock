@@ -142,6 +142,12 @@ public final class SessionExplorerView extends HBox {
         // The blue minimap ticks are the rail's own query, so they can never
         // disagree with what the rail is showing.
         rail.setOnQueryChanged(viewer::setSearchQuery);
+        // The rail's diff half and the viewer's green gutter read the SAME
+        // changed-line map, so a file cannot be in the change for one and out
+        // of it for the other.
+        rail.setChangedLines(viewer::changedLines);
+        viewer.setOnOverlayRefreshed(rail::refresh);
+        viewer.setOnFileShown(rail::setOpenFile);
         installShortcuts();
         if (overlay != null) {
             viewer.setDiffOverlay(overlay);
@@ -210,9 +216,20 @@ public final class SessionExplorerView extends HBox {
         viewer.toggleSkim();
     }
 
+    /** {@code d}: this change ⇄ the whole worktree, in the rail. */
+    public void toggleScope() {
+        rail.toggleScope();
+    }
+
+    /** {@code s}: cycles the rail's sort. */
+    public void cycleSort() {
+        rail.cycleSort();
+    }
+
     /** Findings anchored in this session's files (skim chips, red minimap ticks). */
     public void setFindingsProvider(java.util.function.Function<Path, java.util.List<ExplorerFinding>> provider) {
         viewer.setFindingsProvider(provider);
+        rail.setFindings(provider);
     }
 
     /** Diagnostic- and test-only: how many peek cards are stacked. */
@@ -263,6 +280,18 @@ public final class SessionExplorerView extends HBox {
                 return;
             }
             switch (event.getCode()) {
+                case SLASH -> {
+                    rail.focusSearch();
+                    event.consume();
+                }
+                case D -> {
+                    rail.toggleScope();
+                    event.consume();
+                }
+                case S -> {
+                    rail.cycleSort();
+                    event.consume();
+                }
                 case Z -> {
                     viewer.toggleSkim();
                     event.consume();

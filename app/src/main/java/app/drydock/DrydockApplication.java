@@ -543,6 +543,34 @@ public final class DrydockApplication extends Application {
                             }
                             case "reviewkey" -> System.out.println("[diag] reviewkey " + arg + " -> "
                                     + mainWorkspace.diagReviewKey(arg));
+                            case "peek" -> {
+                                mainWorkspace.diagExplorerPeek(arg);
+                                System.out.println("[diag] explorer peeking " + arg);
+                            }
+                            case "skim" -> {
+                                mainWorkspace.diagExplorerToggleSkim();
+                                System.out.println("[diag] explorer toggled skim");
+                            }
+                            case "scope" -> {
+                                mainWorkspace.diagExplorerToggleScope();
+                                System.out.println("[diag] explorer toggled diff/repo scope");
+                            }
+                            case "sort" -> {
+                                mainWorkspace.diagExplorerCycleSort();
+                                System.out.println("[diag] explorer cycled the sort");
+                            }
+                            case "search" -> {
+                                mainWorkspace.diagExplorerSearch(arg);
+                                System.out.println("[diag] explorer searching " + arg);
+                            }
+                            case "trail" -> {
+                                boolean moved = mainWorkspace.navigateExplorerTrail(
+                                        arg.startsWith("-") ? -1 : 1);
+                                System.out.println("[diag] explorer trail " + arg + " -> " + moved
+                                        + " " + mainWorkspace.diagExplorerTrail());
+                            }
+                            case "unwind" -> System.out.println("[diag] explorer unwind -> "
+                                    + mainWorkspace.unwindExplorerOverlay());
                             default -> System.out.println("[diag] mark " + arg + " · review "
                                     + mainWorkspace.diagReviewLayout());
                         }

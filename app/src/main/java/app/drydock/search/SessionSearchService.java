@@ -83,6 +83,15 @@ public final class SessionSearchService implements AutoCloseable {
         return CompletableFuture.supplyAsync(() -> searchFilesBlocking(root, query), executor);
     }
 
+    /**
+     * The session's whole file set, relative to {@code root} -- what the
+     * Explorer rail's {@code repo} scope lists. Bounded by {@code MAX_FILES}
+     * like every other walk here.
+     */
+    public CompletableFuture<List<Path>> listFiles(Path root) {
+        return CompletableFuture.supplyAsync(() -> listFiles0(root), executor);
+    }
+
     /** Fixed-string, case-insensitive text search, grouped by file. */
     public CompletableFuture<List<FileMatches>> searchText(Path root, String query) {
         return CompletableFuture.supplyAsync(() -> searchTextBlocking(root, query), executor);
@@ -93,7 +102,7 @@ public final class SessionSearchService implements AutoCloseable {
         if (needle.isEmpty()) {
             return List.of();
         }
-        List<Path> files = listFiles(root);
+        List<Path> files = listFiles0(root);
         List<FileHit> hits = new ArrayList<>();
         for (Path relative : files) {
             Path name = relative.getFileName();
@@ -122,7 +131,7 @@ public final class SessionSearchService implements AutoCloseable {
     // ---- git-backed paths ---------------------------------------------------
 
     /** The session's file set: {@code git ls-files} when possible, else a bounded walk. Paths relative to root. */
-    private List<Path> listFiles(Path root) {
+    private List<Path> listFiles0(Path root) {
         Path git = gitLocator.locate().orElse(null);
         if (git != null) {
             ProcessResult result = run(List.of(git.toString(), "-C", root.toString(),

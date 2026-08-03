@@ -108,6 +108,16 @@ final class SkimView extends ScrollPane {
             expansion.put(member.startLine(), true);
             onMemberRead.accept(member.startLine());
             rebuild();
+            // rebuild() replaced every row, so until a layout pass runs they
+            // all report bounds of zero -- and the target below would come out
+            // as 0, i.e. "scroll to the top", every single time. Forcing the
+            // pass here rather than deferring keeps the scroll in the same
+            // frame as the expansion, so `z` round-trips without a visible
+            // jump to the top and back.
+            applyCss();
+            layout();
+            rows.applyCss();
+            rows.layout();
             for (javafx.scene.Node node : rows.getChildren()) {
                 if (Integer.valueOf(member.startLine()).equals(node.getProperties().get("drydock.line"))) {
                     double target = node.getBoundsInParent().getMinY()

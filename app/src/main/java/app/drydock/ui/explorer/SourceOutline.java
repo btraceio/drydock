@@ -120,10 +120,21 @@ public record SourceOutline(List<Member> members, int lineCount) {
             }
 
             if (memberStart < 0 && pendingStart >= 0) {
-                if (opened && depthBefore == bodyDepth) {
+                if (opened && depthBefore == bodyDepth && depth > bodyDepth) {
                     // A block member (method, nested type): it runs until the
                     // brace it just opened closes again.
                     memberStart = pendingStart;
+                } else if (opened && depthBefore == bodyDepth) {
+                    // Opened AND closed on the same line -- `String name() {
+                    // return name; }`. The loop above could not emit it
+                    // (memberStart was still unset when the `}` came round),
+                    // and leaving it pending would make it adopt the NEXT
+                    // member's closing brace: the one-liner would swallow its
+                    // neighbour, and that neighbour would lose its row.
+                    members.add(new Member(pendingSignature.toString(), pendingStart, lineNumber,
+                            isPrivate(pendingSignature.toString())));
+                    pendingStart = -1;
+                    pendingSignature.setLength(0);
                 } else if (line.endsWith(";") && depth == bodyDepth) {
                     // A one-line member: a field, a constant, an abstract
                     // signature.

@@ -110,6 +110,12 @@ final class FileViewer extends BorderPane {
     /** Notified whenever the trail changes, so the owner can persist it. */
     private Runnable onTrailChanged = () -> { };
 
+    /** Notified when the changed-line map is re-fetched (the rail's funnel counts move with it). */
+    private Runnable onOverlayRefreshed = () -> { };
+
+    /** Notified with the file now on screen (the rail marks its row, and never hides it). */
+    private java.util.function.Consumer<Path> onFileShown = path -> { };
+
     // -- Diff overlay (design handoff section C "Explorer integration") ----
     private final HBox diffBanner = new HBox(8);
     private final Label diffBannerLabel = new Label();
@@ -324,6 +330,13 @@ final class FileViewer extends BorderPane {
             updateEmptyState();
             updateDiffBanner();
             updateSkimToggle();
+            // setSearchQuery only refreshes the tab on screen, so a tab
+            // arriving from the background catches up on the current query
+            // here -- otherwise its ticks would show a stale search.
+            if (newTab != null) {
+                refreshMinimap(newTab);
+            }
+            onFileShown.accept(newTab == null ? null : (Path) newTab.getProperties().get("drydock.relative"));
         });
         updateBreadcrumb(null);
         updateEmptyState();
@@ -357,6 +370,21 @@ final class FileViewer extends BorderPane {
         refreshDiffOverlay();
     }
 
+    /** The overlay's current changed-line map, shared with the rail's diff scope. */
+    Map<Path, Set<Integer>> changedLines() {
+        return changedLines;
+    }
+
+    /** Called whenever the changed-line map is re-fetched, so the rail can repaint its funnel. */
+    void setOnOverlayRefreshed(Runnable handler) {
+        this.onOverlayRefreshed = handler == null ? () -> { } : handler;
+    }
+
+    /** Called with the relative path of whatever file the viewer is now showing. */
+    void setOnFileShown(java.util.function.Consumer<Path> handler) {
+        this.onFileShown = handler == null ? path -> { } : handler;
+    }
+
     /** Whether the overlay's current scope touches {@code relativePath} (drives the rail's {@code diff} chip). */
     boolean hasDiffLines(Path relativePath) {
         return changedLines.containsKey(relativePath);
@@ -383,6 +411,7 @@ final class FileViewer extends BorderPane {
                 refreshMinimap(tab);
             }
             updateDiffBanner();
+            onOverlayRefreshed.run();
         }));
     }
 
@@ -423,8 +452,14 @@ final class FileViewer extends BorderPane {
     /** The query whose hits the blue minimap ticks show; set by the rail's search. */
     void setSearchQuery(String query) {
         this.searchQuery = query == null ? "" : query.strip();
-        for (Tab tab : fileTabs.getTabs()) {
-            refreshMinimap(tab);
+        // Only the tab on screen, not every open one. Each refresh does a
+        // full toLowerCase + split of the file's whole text, and this runs on
+        // the FX thread for every debounced keystroke -- across a few large
+        // open files that is megabytes of allocation per character typed.
+        // The background tabs pick the new query up when they are selected.
+        Tab selected = fileTabs.getSelectionModel().getSelectedItem();
+        if (selected != null) {
+            refreshMinimap(selected);
         }
     }
 

@@ -3504,3 +3504,105 @@
 .minimap-tick.finding { -fx-background-color: -drydock-blocking; }
 .minimap-tick.search-hit { -fx-background-color: -drydock-mcp; }
 .minimap-tick.read { -fx-background-color: -drydock-text-faint; -fx-opacity: 0.5; }
+
+/* --- Explorer: the scope funnel rail (delta part 3) ------------------- */
+.scope-toggle {
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 10px;
+    -fx-background-radius: 10px;
+}
+.scope-toggle-button {
+    -fx-background-color: transparent;
+    -fx-background-radius: 10px;
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 9.5px;
+    -fx-padding: 1 8 1 8;
+    -fx-cursor: hand;
+}
+.scope-toggle-button:hover { -fx-text-fill: -drydock-text; }
+.scope-toggle-button:focused { -fx-border-color: -drydock-accent; -fx-border-radius: 10px; }
+.scope-toggle-button:selected {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-text-fill: -drydock-accent;
+}
+.rail-key-hint {
+    -fx-text-fill: -drydock-code-gutter;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 9.5px;
+}
+.rail-sort-button {
+    -fx-background-color: transparent;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 10px;
+    -fx-padding: 2 4 2 4;
+    -fx-cursor: hand;
+}
+.rail-sort-button:hover { -fx-text-fill: -drydock-text; }
+.rail-sort-button:focused { -fx-border-color: -drydock-accent; -fx-border-radius: 6px; }
+.rail-file-row {
+    -fx-background-color: transparent;
+    -fx-background-radius: 6px;
+    -fx-border-color: -drydock-border;
+    -fx-border-radius: 6px;
+    -fx-padding: 6 8 6 8;
+    -fx-alignment: center-left;
+    -fx-cursor: hand;
+}
+.rail-file-row:hover { -fx-border-color: -drydock-border-strong; }
+.rail-file-row:focused { -fx-border-color: -drydock-accent; }
+.rail-file-row:selected {
+    -fx-background-color: -drydock-active-bg;
+    -fx-border-color: -drydock-border-strong;
+}
+/* Dimmed, never hidden: the funnel must always show what it narrowed away. */
+.rail-file-row:out-of-change { -fx-opacity: 0.5; }
+.rail-change-dot {
+    -fx-background-color: -drydock-changed-gutter;
+    -fx-background-radius: 3px;
+    -fx-min-width: 6px;
+    -fx-min-height: 6px;
+    -fx-max-width: 6px;
+    -fx-max-height: 6px;
+}
+.rail-finding-chip {
+    -fx-text-fill: -drydock-blocking;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 9.5px;
+}
+.rail-stat {
+    -fx-text-fill: -drydock-code-gutter;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 10px;
+}
+.rail-heat {
+    -fx-min-height: 2px;
+    -fx-max-height: 2px;
+    -fx-background-radius: 2px;
+    -fx-background-color: -drydock-border;
+}
+.rail-heat.churn-high { -fx-background-color: linear-gradient(to right, -drydock-error, -drydock-dirty 60%, -drydock-border); }
+.rail-heat.churn-med { -fx-background-color: linear-gradient(to right, -drydock-dirty, -drydock-border 70%); }
+.rail-heat.churn-low { -fx-background-color: linear-gradient(to right, -drydock-running, -drydock-border 45%); }
+.rail-heat.churn-none { -fx-background-color: -drydock-border; }
+.rail-funnel-footer {
+    -fx-background-color: transparent;
+    -fx-border-color: -drydock-border transparent transparent transparent;
+    -fx-border-width: 1 0 0 0;
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 10px;
+    -fx-padding: 6 10 6 10;
+    -fx-alignment: center-left;
+}
+.rail-funnel-footer:actionable {
+    -fx-text-fill: -drydock-mcp;
+    -fx-cursor: hand;
+}
+.rail-funnel-footer:actionable:hover { -fx-text-fill: -drydock-text; }
+.rail-funnel-footer:focused { -fx-border-color: -drydock-accent; -fx-border-width: 1; }
+.rail-empty {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 11px;
+    -fx-padding: 10 8 10 8;
+}

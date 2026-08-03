@@ -2321,6 +2321,45 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         currentlySelected().ifPresent(open -> open.openExplorerAt(relativeFile, 1));
     }
 
+    /**
+     * Diagnostic-only Explorer drivers for the visual pass. Peeking,
+     * skimming and the scope funnel are all gestures the screenshot harness
+     * cannot aim by hand -- a peek needs a hit test against laid-out glyphs,
+     * and the keys are only bound while the Explorer has focus.
+     */
+    public void diagExplorerPeek(String symbol) {
+        withExplorer(explorer -> explorer.diagPeek(symbol));
+    }
+
+    public void diagExplorerToggleSkim() {
+        withExplorer(SessionExplorerView::toggleSkim);
+    }
+
+    public void diagExplorerToggleScope() {
+        withExplorer(SessionExplorerView::toggleScope);
+    }
+
+    public void diagExplorerCycleSort() {
+        withExplorer(SessionExplorerView::cycleSort);
+    }
+
+    public void diagExplorerSearch(String query) {
+        withExplorer(explorer -> explorer.searchText(query));
+    }
+
+    /** Diagnostic-only: the trail as its chips read, for the harness's log. */
+    public List<String> diagExplorerTrail() {
+        List<String> trail = new ArrayList<>();
+        withExplorer(explorer -> trail.addAll(explorer.diagTrail()));
+        return trail;
+    }
+
+    private void withExplorer(java.util.function.Consumer<SessionExplorerView> action) {
+        currentlySelected()
+                .map(openExplorers::get)
+                .ifPresent(action);
+    }
+
     /** Diagnostic-only: focuses the Explorer's code area and types {@code text} into it as real edits. */
     public void diagTypeInExplorer(String text) {
         currentlySelected().ifPresent(open -> open.diagTypeInExplorer(text));

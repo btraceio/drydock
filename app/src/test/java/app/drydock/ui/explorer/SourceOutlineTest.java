@@ -35,6 +35,28 @@ class SourceOutlineTest {
             """;
 
     @Test
+    void aMemberOpenedAndClosedOnOneLineDoesNotSwallowTheNextOne() {
+        SourceOutline outline = SourceOutline.parse("""
+                final class Compact {
+                    @Override public String toString() { return "x"; }
+
+                    void afterTheOneLiner() {
+                        doWork();
+                    }
+                }
+                """);
+        // The one-liner used to stay "pending" past its own closing brace and
+        // then claim the NEXT member's, so afterTheOneLiner lost its row
+        // entirely -- invisible in skim mode and in the minimap.
+        assertEquals(List.of("@Override public String toString() { return \"x\"; }",
+                        "void afterTheOneLiner() {"),
+                outline.members().stream().map(SourceOutline.Member::signature).toList());
+        assertEquals(2, outline.members().get(0).startLine());
+        assertEquals(2, outline.members().get(0).endLine());
+        assertEquals(4, outline.members().get(1).startLine());
+    }
+
+    @Test
     void membersAreTheTopLevelDeclarationsOfTheType() {
         SourceOutline outline = SourceOutline.parse(SIDEBAR);
         assertEquals(List.of("private static final int MIN_W = 220;", "int width() {",

@@ -49,7 +49,12 @@ class SkimViewTest extends ApplicationTest {
     @Override
     public void start(Stage stage) {
         skim = new SkimView();
-        Scene scene = new Scene(skim, 900, 600);
+        // A wrapper root, so a test can size the view itself. Resizing the
+        // stage instead would leak: TestFX shares one primary stage across
+        // every test class, and a stage left short made a dozen assertions
+        // fail over in the review package.
+        javafx.scene.layout.StackPane wrapper = new javafx.scene.layout.StackPane(skim);
+        Scene scene = new Scene(wrapper, 900, 600);
         scene.getStylesheets().addAll(
                 SkimView.class.getResource("/app/drydock/ui/theme-dark.css").toExternalForm(),
                 SkimView.class.getResource("/app/drydock/ui/app.css").toExternalForm());
@@ -144,6 +149,33 @@ class SkimViewTest extends ApplicationTest {
         org.testfx.util.WaitForAsyncUtils.waitForFxEvents();
 
         assertEquals(List.of("void onRelease(MouseEvent e) {"), openRowSignatures());
+    }
+
+    /**
+     * Revealing has to scroll to the member, not to the top. The rows are
+     * rebuilt first, so their bounds are all zero until a layout pass runs --
+     * reading them too early makes every reveal compute a target of 0, which
+     * is exactly "jump to the top of the file" and defeats the round-trip
+     * that {@code z} and a minimap tick both depend on.
+     */
+    @Test
+    void revealingScrollsToTheMemberRatherThanTheTopOfTheFile() {
+        show(Set.of(), Map.of());
+        // Short enough that the outline cannot fit: with no overflow there is
+        // nowhere to scroll and the bug cannot show itself. The VIEW is sized,
+        // never the shared stage.
+        interact(() -> {
+            skim.setMinHeight(140);
+            skim.setPrefHeight(140);
+            skim.setMaxHeight(140);
+        });
+        org.testfx.util.WaitForAsyncUtils.waitForFxEvents();
+
+        interact(() -> skim.revealLine(8));
+        org.testfx.util.WaitForAsyncUtils.waitForFxEvents();
+
+        assertTrue(skim.getVvalue() > 0.0,
+                "scrolled to the revealed member, not to the top: vvalue=" + skim.getVvalue());
     }
 
     @Test

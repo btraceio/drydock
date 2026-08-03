@@ -1,7 +1,6 @@
 package app.drydock.ui.explorer;
 
 import app.drydock.search.SessionSearchService;
-import app.drydock.search.SessionSearchService.FileHit;
 import app.drydock.search.SessionSearchService.FileMatches;
 import app.drydock.search.SessionSearchService.TextMatch;
 import javafx.animation.PauseTransition;
@@ -19,7 +18,6 @@ import javafx.scene.control.Label;
 import javafx.scene.control.ScrollPane;
 import javafx.scene.control.TextField;
 import javafx.scene.control.ToggleButton;
-import javafx.scene.control.ToggleGroup;
 import javafx.scene.control.Tooltip;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
@@ -36,20 +34,31 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.OptionalInt;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
 
 /**
- * The Session Explorer's search rail (design handoff section A): a
- * Files/Text segmented toggle, a live search field, and results grouped by
- * file — each row a selection checkbox, disclosure caret, filetype badge
- * and name; Text mode adds an accent match-count pill and expandable
- * highlighted match lines. Checked rows drive an "Open N files" footer.
- * The rail itself collapses to a 46px strip ({@link SessionExplorerView}
- * owns the width animation; this class just swaps its content).
+ * The Explorer's file rail (design handoff section A; Explorer delta part 3,
+ * "scope funnel: repo → diff").
+ *
+ * <p>The rail is a list of files narrowed two ways at once: a
+ * <strong>scope</strong> -- this change, or the whole worktree -- and a
+ * <strong>query</strong> matching names, paths and file <em>content</em>. The
+ * rule the delta sets is that it must always show HOW the list was narrowed
+ * and never dead-end, so the footer is the funnel's escape hatch: in diff
+ * scope with a query it becomes the button that widens to the repo, and repo
+ * scope dims out-of-change files rather than hiding them.</p>
+ *
+ * <p>Content matches stay expandable under their file, and checking rows
+ * still opens several files at once -- both predate the delta and neither is
+ * something it asked to remove.</p>
  */
 final class SearchRail extends VBox {
 
@@ -63,21 +72,21 @@ final class SearchRail extends VBox {
         void open(Path file, Path relativePath, OptionalInt line, String highlightQuery);
     }
 
-    private enum Mode { FILES, TEXT }
-
     private final Path searchRoot;
     private final SessionSearchService searchService;
     private final FileOpener opener;
 
     private final TextField searchField = new TextField();
-    private final ToggleButton filesToggle = new ToggleButton("Files");
-    private final ToggleButton textToggle = new ToggleButton("Text");
-    private final VBox resultsBox = new VBox(2);
+    private final Button scopeDiff = new Button("diff");
+    private final Button scopeRepo = new Button("repo");
+    private final Button sortButton = new Button();
+    private final VBox resultsBox = new VBox(3);
     private final Label selectedCount = new Label();
     private final Button openSelected = new Button();
     private final HBox footer = new HBox(8);
+    private final Button funnelFooter = new Button();
 
-    private final VBox expandedContent = new VBox(10);
+    private final VBox expandedContent = new VBox(8);
     private final VBox collapsedContent = new VBox(10);
 
     /** Checked file rows (multi-select), independent of row expansion. */
@@ -89,14 +98,46 @@ final class SearchRail extends VBox {
     private final AtomicLong generation = new AtomicLong();
 
     private final PauseTransition debounce = new PauseTransition(SEARCH_DEBOUNCE);
-    private Mode mode = Mode.TEXT;
+
+    private FileRailModel.Scope scope = FileRailModel.Scope.DIFF;
+    private FileRailModel.Sort sort = FileRailModel.Sort.CHURN;
+
+    /** The most rows the rail will build at once; past this it says what it is holding back. */
+    private static final int MAX_ROWS = 200;
+
+    /** Every file in the worktree, loaded once and refreshed on demand. */
+    private List<Path> repoFiles = List.of();
+    private boolean repoFilesLoading;
+    /** Whether the listing failed, so repo scope says so instead of reading as an empty worktree. */
+    private boolean repoListingFailed;
+
+    /**
+     * Findings counts per file, memoised across rebuilds.
+     *
+     * <p>The provider behind {@link #findings} scans every review scope's
+     * annotations linearly, and {@code entries()} asks it about every file in
+     * the worktree -- so without this a single keystroke costs thousands of
+     * full annotation scans on the FX thread. Cleared wherever findings can
+     * actually have changed ({@link #setFindings}, {@link #refresh},
+     * {@link #setChangedLines}), never merely because the query moved.</p>
+     */
+    private final Map<Path, Integer> findingsCounts = new java.util.HashMap<>();
+
+    /** The last query's content matches, by relative path. */
+    private Map<Path, List<TextMatch>> contentHits = Map.of();
+    private String query = "";
+
     private Runnable onCollapseRequested = () -> { };
     private Runnable onExpandRequested = () -> { };
-    /** Notified with every query the rail runs (the viewer's blue minimap ticks). */
-    private java.util.function.Consumer<String> onQueryChanged = query -> { };
-
-    /** Whether a file (by relative path) carries diff lines in the active overlay scope (`diff` chip). */
+    private Consumer<String> onQueryChanged = text -> { };
+    /** Whether a file (by relative path) carries diff lines in the active overlay scope. */
     private Predicate<Path> diffFileTest = relativePath -> false;
+    /** Changed lines per file for the overlay's current scope: the diff half of the funnel. */
+    private Supplier<Map<Path, Set<Integer>>> changedLines = Map::of;
+    /** Open findings per file (the ◆N chip). */
+    private Function<Path, List<ExplorerFinding>> findings = path -> List.of();
+    /** The file the viewer is showing, which diff scope never hides. */
+    private Path openFile;
 
     SearchRail(Path searchRoot, SessionSearchService searchService, FileOpener opener) {
         this.searchRoot = searchRoot;
@@ -114,6 +155,8 @@ final class SearchRail extends VBox {
         searchField.textProperty().addListener((obs, oldText, newText) -> debounce.playFromStart());
         checkedFiles.addListener((SetChangeListener<Path>) change -> updateFooter());
         updateFooter();
+        loadRepoFiles();
+        rebuild();
     }
 
     void setOnCollapseRequested(Runnable handler) {
@@ -125,21 +168,71 @@ final class SearchRail extends VBox {
     }
 
     /** Wires the listener that keeps the viewer's search-hit ticks in step with this rail. */
-    void setOnQueryChanged(java.util.function.Consumer<String> handler) {
-        this.onQueryChanged = handler == null ? query -> { } : handler;
+    void setOnQueryChanged(Consumer<String> handler) {
+        this.onQueryChanged = handler == null ? text -> { } : handler;
     }
 
-    /** Wires the diff-overlay test tagging Text-search files that carry diff lines (handoff section C). */
+    /** Wires the diff-overlay test tagging files that carry diff lines (handoff section C). */
     void setDiffFileTest(Predicate<Path> test) {
         this.diffFileTest = test == null ? relativePath -> false : test;
     }
 
-    /** Programmatic Text-mode search (the Review tab's "Search in Explorer" chip). */
-    void setSearch(String query) {
-        textToggle.setSelected(true);
-        searchField.setText(query);
+    /** The diff half of the funnel: which files the current review scope touches, and by how much. */
+    void setChangedLines(Supplier<Map<Path, Set<Integer>>> supplier) {
+        this.changedLines = supplier == null ? Map::of : supplier;
+        findingsCounts.clear();
+        rebuild();
+    }
+
+    /** Open findings per file, for the ◆N chip and the findings sort. */
+    void setFindings(Function<Path, List<ExplorerFinding>> provider) {
+        this.findings = provider == null ? path -> List.of() : provider;
+        findingsCounts.clear();
+        rebuild();
+    }
+
+    /** The file the viewer is showing: diff scope keeps its row even when it is out of the change. */
+    void setOpenFile(Path relativePath) {
+        this.openFile = relativePath;
+        rebuild();
+    }
+
+    /** Programmatic search (the Review tab's "Search in Explorer" chip). */
+    void setSearch(String text) {
+        searchField.setText(text);
         searchField.requestFocus();
-        searchField.positionCaret(query == null ? 0 : query.length());
+        searchField.positionCaret(text == null ? 0 : text.length());
+    }
+
+    /** {@code /}: focuses the query field. */
+    void focusSearch() {
+        searchField.requestFocus();
+        searchField.selectAll();
+    }
+
+    /** {@code d}: this change ⇄ the whole worktree. */
+    void toggleScope() {
+        setScope(scope == FileRailModel.Scope.DIFF ? FileRailModel.Scope.REPO : FileRailModel.Scope.DIFF);
+    }
+
+    /** {@code s}: churn → findings → a-z. */
+    void cycleSort() {
+        sort = sort.next();
+        sortButton.setText("⇅ " + sort.label());
+        rebuild();
+    }
+
+    /** Repaints against a changed diff overlay or a new finding. */
+    void refresh() {
+        // This is the "a finding may have changed" signal, so it is also
+        // where the memoised counts have to go.
+        findingsCounts.clear();
+        // A worktree listing that failed earlier gets another chance here,
+        // rather than leaving repo scope empty for the rest of the session.
+        if (repoListingFailed) {
+            loadRepoFiles();
+        }
+        rebuild();
     }
 
     /** Swaps to the full rail content (SessionExplorerView animates the width). */
@@ -147,52 +240,74 @@ final class SearchRail extends VBox {
         getChildren().setAll(expandedContent);
     }
 
-    /** Swaps to the 46px collapsed strip: a ⌕ expand button + vertical SEARCH label. */
+    /** Swaps to the 46px collapsed strip: a ⌕ expand button + vertical FILES label. */
     void showCollapsed() {
         getChildren().setAll(collapsedContent);
     }
 
+    private void setScope(FileRailModel.Scope newScope) {
+        if (scope == newScope) {
+            return;
+        }
+        scope = newScope;
+        scopeDiff.pseudoClassStateChanged(SELECTED, scope == FileRailModel.Scope.DIFF);
+        scopeRepo.pseudoClassStateChanged(SELECTED, scope == FileRailModel.Scope.REPO);
+        rebuild();
+    }
+
+    private static final javafx.css.PseudoClass SELECTED =
+            javafx.css.PseudoClass.getPseudoClass("selected");
+    private static final javafx.css.PseudoClass ACTIONABLE =
+            javafx.css.PseudoClass.getPseudoClass("actionable");
+    private static final javafx.css.PseudoClass OUT_OF_CHANGE =
+            javafx.css.PseudoClass.getPseudoClass("out-of-change");
+
     private void buildExpandedContent() {
-        Label header = new Label("SEARCH · THIS SESSION");
+        Label header = new Label("FILES");
         header.getStyleClass().add("search-rail-title");
+
+        scopeDiff.getStyleClass().add("scope-toggle-button");
+        scopeRepo.getStyleClass().add("scope-toggle-button");
+        scopeDiff.setTooltip(new Tooltip("Only files in the current change (d)"));
+        scopeRepo.setTooltip(new Tooltip("Every file in the worktree (d)"));
+        scopeDiff.setOnAction(e -> setScope(FileRailModel.Scope.DIFF));
+        scopeRepo.setOnAction(e -> setScope(FileRailModel.Scope.REPO));
+        scopeDiff.pseudoClassStateChanged(SELECTED, true);
+        HBox scopeSegment = new HBox(0, scopeDiff, scopeRepo);
+        scopeSegment.getStyleClass().add("scope-toggle");
+        scopeSegment.setAlignment(Pos.CENTER_LEFT);
+
+        Label scopeKey = new Label("d");
+        scopeKey.getStyleClass().add("rail-key-hint");
+
+        sortButton.setText("⇅ " + sort.label());
+        sortButton.getStyleClass().add("rail-sort-button");
+        sortButton.setTooltip(new Tooltip("Sort: churn · findings · a-z (s)"));
+        sortButton.setOnAction(e -> cycleSort());
+
         Button collapse = new Button("«");
         collapse.getStyleClass().add("rail-collapse-button");
         collapse.setFocusTraversable(false);
         collapse.setOnAction(e -> onCollapseRequested.run());
+
         Region headerSpacer = new Region();
         HBox.setHgrow(headerSpacer, Priority.ALWAYS);
-        HBox headerRow = new HBox(6, header, headerSpacer, collapse);
+        HBox headerRow = new HBox(6, header, scopeSegment, scopeKey, headerSpacer, sortButton, collapse);
         headerRow.setAlignment(Pos.CENTER_LEFT);
         headerRow.getStyleClass().add("search-rail-header");
 
-        ToggleGroup modeGroup = new ToggleGroup();
-        filesToggle.setToggleGroup(modeGroup);
-        textToggle.setToggleGroup(modeGroup);
-        filesToggle.getStyleClass().add("seg-toggle-button");
-        textToggle.getStyleClass().add("seg-toggle-button");
-        filesToggle.setFocusTraversable(false);
-        textToggle.setFocusTraversable(false);
-        textToggle.setSelected(true);
-        modeGroup.selectedToggleProperty().addListener((obs, oldToggle, newToggle) -> {
-            if (newToggle == null) {
-                // Never allow an empty selection: re-select the previous mode.
-                (mode == Mode.FILES ? filesToggle : textToggle).setSelected(true);
-                return;
-            }
-            mode = newToggle == filesToggle ? Mode.FILES : Mode.TEXT;
-            searchField.setPromptText(mode == Mode.FILES
-                    ? "Search files in this session…"
-                    : "Search text in this session…");
-            runSearch();
-        });
-        HBox modeRow = new HBox(0, filesToggle, textToggle);
-        modeRow.getStyleClass().add("seg-toggle");
-        modeRow.setAlignment(Pos.CENTER_LEFT);
-
         Label magnifier = new Label("⌕");
         magnifier.getStyleClass().add("search-field-icon");
-        searchField.setPromptText("Search text in this session…");
+        searchField.setPromptText("files · symbols · text   /");
         searchField.getStyleClass().add("explorer-search-field");
+        // Enter hands the keyboard back to the shortcuts (delta: "⏎ blurs
+        // back to shortcuts"), so d or s work straight after typing without
+        // reaching for the mouse.
+        // requestFocus() works on a non-traversable node -- focusTraversable
+        // only governs Tab traversal -- so focus really does leave the field
+        // here and d/s/z fire instead of being typed. Pinned by
+        // enterHandsTheKeyboardBackOutOfTheQueryField.
+        searchField.setOnAction(e -> resultsBox.requestFocus());
         HBox.setHgrow(searchField, Priority.ALWAYS);
         HBox fieldRow = new HBox(6, magnifier, searchField);
         fieldRow.setAlignment(Pos.CENTER_LEFT);
@@ -215,7 +330,21 @@ final class SearchRail extends VBox {
         footer.setAlignment(Pos.CENTER_LEFT);
         footer.getStyleClass().add("open-selected-bar");
 
-        expandedContent.getChildren().setAll(headerRow, modeRow, fieldRow, scroll, footer);
+        funnelFooter.getStyleClass().add("rail-funnel-footer");
+        funnelFooter.setMaxWidth(Double.MAX_VALUE);
+        funnelFooter.setWrapText(true);
+        // A long query result expands into enough match lines that the rail's
+        // children want more height than it has, and the VBox then shrinks
+        // this button to a Labeled's default single-line MINIMUM. wrapText
+        // still wraps, but only the first line has room, so the text renders
+        // ellipsized and the "— show" that IS the escape hatch falls off the
+        // end. Pinning min to pref makes the scroll pane above give up the
+        // pixels instead. Invisible to any assertion on the model's string.
+        funnelFooter.setMinHeight(Region.USE_PREF_SIZE);
+        funnelFooter.setAlignment(Pos.CENTER_LEFT);
+        funnelFooter.setOnAction(e -> setScope(FileRailModel.Scope.REPO));
+
+        expandedContent.getChildren().setAll(headerRow, fieldRow, scroll, footer, funnelFooter);
         expandedContent.getStyleClass().add("search-rail-content");
         VBox.setVgrow(expandedContent, Priority.ALWAYS);
         VBox.setVgrow(scroll, Priority.ALWAYS);
@@ -227,7 +356,7 @@ final class SearchRail extends VBox {
         expand.setFocusTraversable(false);
         expand.setOnAction(e -> onExpandRequested.run());
 
-        Label vertical = new Label("SEARCH");
+        Label vertical = new Label("FILES");
         vertical.getStyleClass().add("rail-vertical-label");
         vertical.setRotate(90);
         Group rotated = new Group(vertical);
@@ -239,67 +368,150 @@ final class SearchRail extends VBox {
 
     // ---- Searching ----------------------------------------------------------
 
-    private void runSearch() {
-        String query = searchField.getText() == null ? "" : searchField.getText().strip();
-        onQueryChanged.accept(query);
-        long myGeneration = generation.incrementAndGet();
-        if (query.isEmpty()) {
-            resultsBox.getChildren().clear();
-            knownRelative.clear();
-            checkedFiles.clear();
+    /** Loads the worktree's file list once, so repo scope has something to show. */
+    private void loadRepoFiles() {
+        if (repoFilesLoading) {
             return;
         }
-        if (mode == Mode.FILES) {
-            searchService.searchFiles(searchRoot, query)
-                    .whenComplete((hits, ex) -> Platform.runLater(() -> {
-                        if (generation.get() != myGeneration) {
-                            return;
-                        }
-                        if (ex != null) {
-                            LOG.log(Level.DEBUG, "File search failed", ex);
-                            return;
-                        }
-                        renderFileHits(hits, query);
-                    }));
-        } else {
-            searchService.searchText(searchRoot, query)
-                    .whenComplete((matches, ex) -> Platform.runLater(() -> {
-                        if (generation.get() != myGeneration) {
-                            return;
-                        }
-                        if (ex != null) {
-                            LOG.log(Level.DEBUG, "Text search failed", ex);
-                            return;
-                        }
-                        renderTextMatches(matches, query);
-                    }));
-        }
+        repoFilesLoading = true;
+        searchService.listFiles(searchRoot).whenComplete((files, failure) -> Platform.runLater(() -> {
+            repoFilesLoading = false;
+            if (failure != null) {
+                // Not silent: repo scope would otherwise look like an empty
+                // worktree, which is a very different statement. Held as
+                // state rather than written straight into the footer, because
+                // the very next rebuild() overwrites the footer's text -- so
+                // a message put there directly survives only until the next
+                // keystroke and the rail then quietly claims 0 files.
+                LOG.log(Level.WARNING, "Could not list the session's files", failure);
+                repoListingFailed = true;
+                rebuild();
+                return;
+            }
+            repoListingFailed = false;
+            repoFiles = files;
+            rebuild();
+        }));
     }
 
-    private void renderFileHits(List<FileHit> hits, String query) {
-        resultsBox.getChildren().clear();
-        knownRelative.clear();
-        for (FileHit hit : hits) {
-            knownRelative.put(hit.file(), hit.relativePath());
-            resultsBox.getChildren().add(buildFileRow(hit.file(), hit.relativePath(), -1, List.of(), query));
+    private void runSearch() {
+        String newQuery = searchField.getText() == null ? "" : searchField.getText().strip();
+        query = newQuery;
+        onQueryChanged.accept(newQuery);
+        long myGeneration = generation.incrementAndGet();
+        if (newQuery.isEmpty()) {
+            contentHits = Map.of();
+            rebuild();
+            return;
         }
+        searchService.searchText(searchRoot, newQuery)
+                .whenComplete((matches, ex) -> Platform.runLater(() -> {
+                    if (generation.get() != myGeneration) {
+                        return;
+                    }
+                    if (ex != null) {
+                        LOG.log(Level.WARNING, "Text search failed", ex);
+                        contentHits = Map.of();
+                        rebuild();
+                        return;
+                    }
+                    Map<Path, List<TextMatch>> hits = new LinkedHashMap<>();
+                    for (FileMatches file : matches) {
+                        hits.put(file.relativePath(), file.matches());
+                    }
+                    contentHits = hits;
+                    rebuild();
+                }));
+        // The name/path half of the query needs no subprocess: show it now,
+        // rather than leaving the rail on the previous query's rows while git
+        // grep runs.
+        rebuild();
     }
 
-    private void renderTextMatches(List<FileMatches> files, String query) {
+    private int findingsCount(Path relative) {
+        return findingsCounts.computeIfAbsent(relative, path -> findings.apply(path).size());
+    }
+
+    /** Every candidate row: the change's files, the worktree's files, and whatever the query matched. */
+    private List<FileRailModel.Entry> entries() {
+        Map<Path, Set<Integer>> changed = changedLines.get();
+        Set<Path> all = new LinkedHashSet<>(changed.keySet());
+        all.addAll(repoFiles);
+        all.addAll(contentHits.keySet());
+        if (openFile != null) {
+            all.add(openFile);
+        }
+        List<FileRailModel.Entry> entries = new ArrayList<>(all.size());
+        for (Path relative : all) {
+            entries.add(new FileRailModel.Entry(relative,
+                    changed.getOrDefault(relative, Set.of()).size(),
+                    findingsCount(relative),
+                    contentHits.containsKey(relative)));
+        }
+        return entries;
+    }
+
+    private void rebuild() {
+        List<FileRailModel.Entry> all = entries();
+        List<FileRailModel.Entry> shown = FileRailModel.visible(all, scope, sort, query, openFile);
+
         resultsBox.getChildren().clear();
         knownRelative.clear();
-        for (FileMatches file : files) {
-            knownRelative.put(file.file(), file.relativePath());
-            resultsBox.getChildren().add(
-                    buildFileRow(file.file(), file.relativePath(), file.matches().size(), file.matches(), query));
+        // Repo scope with no query matches the whole worktree -- up to
+        // SessionSearchService.MAX_FILES of it. Each row is a Button wrapping
+        // the better part of a dozen nodes, and this is a plain ScrollPane
+        // with no virtualisation, so building them all would freeze the FX
+        // thread for seconds every time `d` is pressed. Cap it and SAY so:
+        // a silently truncated list reads as "this is the whole worktree".
+        List<FileRailModel.Entry> rendered = shown.size() > MAX_ROWS ? shown.subList(0, MAX_ROWS) : shown;
+        for (FileRailModel.Entry entry : rendered) {
+            Path absolute = searchRoot.resolve(entry.relative()).normalize();
+            knownRelative.put(absolute, entry.relative());
+            resultsBox.getChildren().add(buildFileRow(absolute, entry,
+                    contentHits.getOrDefault(entry.relative(), List.of())));
         }
+        // A row that is gone can no longer be unchecked, and openCheckedFiles
+        // falls back to the BARE FILENAME as the relative path for anything
+        // it cannot resolve -- which then misses on changed lines, waypoints
+        // and findings alike. So the selection only keeps what is on screen.
+        checkedFiles.retainAll(knownRelative.keySet());
+        if (shown.size() > rendered.size()) {
+            Label more = new Label("+" + (shown.size() - rendered.size())
+                    + " more not shown — narrow with a query");
+            more.getStyleClass().add("rail-empty");
+            more.setWrapText(true);
+            resultsBox.getChildren().add(more);
+        }
+        if (shown.isEmpty()) {
+            Label empty = new Label(query.isBlank()
+                    ? "nothing in this scope yet"
+                    : "no file here matches \"" + query + "\"");
+            empty.getStyleClass().add("rail-empty");
+            empty.setWrapText(true);
+            resultsBox.getChildren().add(empty);
+        }
+
+        int repoCount = Math.max(repoFiles.size(), shown.size());
+        // A failed listing must not read as a small repo: "repo has 0 files"
+        // and "we could not look" are very different statements, and only one
+        // of them is true.
+        funnelFooter.setText(repoListingFailed
+                ? "could not list this worktree's files — search still works"
+                : FileRailModel.footer(all, scope, sort, query, openFile, repoCount));
+        boolean action = !repoListingFailed && FileRailModel.footerIsAction(scope, query, all, openFile);
+        funnelFooter.pseudoClassStateChanged(ACTIONABLE, action);
+        // Not an action means the footer is a statement about what the reader
+        // is looking at: still readable, just not a button that goes anywhere.
+        funnelFooter.setFocusTraversable(action);
+        funnelFooter.setMouseTransparent(!action);
     }
 
     /**
-     * One grouped result row: checkbox + caret + badge + name (+ count pill
-     * in Text mode), with the match lines as expandable children.
+     * One rail row: the change dot, the name, its findings chip, the module
+     * and stat line, and the churn heat bar -- with the query's content
+     * matches as expandable children.
      */
-    private Region buildFileRow(Path file, Path relativePath, int matchCount, List<TextMatch> matches, String query) {
+    private Region buildFileRow(Path file, FileRailModel.Entry entry, List<TextMatch> matches) {
         CheckBox check = new CheckBox();
         check.getStyleClass().add("result-check");
         check.setFocusTraversable(false);
@@ -320,43 +532,61 @@ final class SearchRail extends VBox {
         caret.setVisible(hasChildren);
         caret.setManaged(hasChildren);
 
-        Label badge = new Label(FileViewer.FileTypeBadges.badgeFor(file.getFileName().toString()));
-        badge.getStyleClass().add("filetype-badge");
+        Region dot = new Region();
+        dot.getStyleClass().add("rail-change-dot");
+        dot.setVisible(entry.inDiff());
 
-        Label name = new Label(file.getFileName().toString());
+        Label name = new Label(entry.name());
         name.getStyleClass().add("result-file-name");
+        HBox.setHgrow(name, Priority.ALWAYS);
+        name.setMaxWidth(Double.MAX_VALUE);
 
-        Region spacer = new Region();
-        HBox.setHgrow(spacer, Priority.ALWAYS);
-
-        HBox row = new HBox(6, check, caret, badge, name, spacer);
-        row.setAlignment(Pos.CENTER_LEFT);
-        row.getStyleClass().add("result-file-row");
-
-        // The bare name is ambiguous across modules, and Text mode shows no
-        // path at all. On the row, not the group, so the match lines below
-        // stay uncovered. Deliberately uncached, unlike RepositorySidebar's
-        // tooltips: install() hangs it off the node's own property map, so a
-        // discarded row takes its tooltip with it and a cache would only buy
-        // one allocation per row against a pruning lifecycle to get wrong.
-        Tooltip pathTip = new Tooltip(relativePath.toString());
-        pathTip.setShowDelay(Duration.millis(400));
-        Tooltip.install(row, pathTip);
-
-        if (matchCount >= 0) {
-            if (diffFileTest.test(relativePath)) {
-                Label diffChip = new Label("diff");
-                diffChip.getStyleClass().add("diff-chip");
-                row.getChildren().add(diffChip);
-            }
-            Label pill = new Label(Integer.toString(matchCount));
-            pill.getStyleClass().add("match-count-pill");
-            row.getChildren().add(pill);
-        } else {
-            Label pathLabel = new Label(relativePath.toString());
-            pathLabel.getStyleClass().add("result-file-path");
-            row.getChildren().add(row.getChildren().indexOf(spacer), pathLabel);
+        HBox titleRow = new HBox(6, check, caret, dot, name);
+        titleRow.setAlignment(Pos.CENTER_LEFT);
+        if (entry.findings() > 0) {
+            Label findingChip = new Label("◆" + entry.findings());
+            findingChip.getStyleClass().add("rail-finding-chip");
+            titleRow.getChildren().add(findingChip);
         }
+        if (!entry.inDiff() && diffFileTest.test(entry.relative())) {
+            // The overlay knows about a file the current scope's changed-line
+            // map does not carry: say so rather than showing it as untouched.
+            Label diffChip = new Label("diff");
+            diffChip.getStyleClass().add("diff-chip");
+            titleRow.getChildren().add(diffChip);
+        }
+
+        Label module = new Label(entry.module());
+        module.getStyleClass().add("result-file-path");
+        HBox.setHgrow(module, Priority.ALWAYS);
+        module.setMaxWidth(Double.MAX_VALUE);
+        Label stat = new Label(entry.stat());
+        stat.getStyleClass().add("rail-stat");
+        HBox metaRow = new HBox(6, module, stat);
+        metaRow.setAlignment(Pos.CENTER_LEFT);
+
+        Region heat = new Region();
+        heat.getStyleClass().addAll("rail-heat",
+                "churn-" + entry.churn().name().toLowerCase(Locale.ROOT));
+
+        VBox rowContent = new VBox(2, titleRow, metaRow, heat);
+        rowContent.setFillWidth(true);
+        Button row = new Button();
+        row.setGraphic(rowContent);
+        row.setMaxWidth(Double.MAX_VALUE);
+        row.getStyleClass().add("rail-file-row");
+        // Out-of-change files are DIMMED, never hidden (delta part 3).
+        row.pseudoClassStateChanged(OUT_OF_CHANGE, !entry.inDiff());
+        row.pseudoClassStateChanged(SELECTED, entry.relative().equals(openFile));
+        row.setOnAction(e -> opener.open(file, entry.relative(), OptionalInt.empty(),
+                query.isBlank() ? null : query));
+
+        // setTooltip, not Tooltip.install: the row IS a Control, and
+        // install() hangs the tooltip off the node's property map where
+        // nothing (including a test) can find it through getTooltip().
+        Tooltip pathTip = new Tooltip(entry.relative().toString());
+        pathTip.setShowDelay(Duration.millis(400));
+        row.setTooltip(pathTip);
 
         VBox group = new VBox(1, row);
         group.getStyleClass().add("result-file-group");
@@ -365,7 +595,7 @@ final class SearchRail extends VBox {
             VBox lines = new VBox(1);
             lines.getStyleClass().add("result-match-lines");
             for (TextMatch match : matches) {
-                lines.getChildren().add(buildMatchLine(file, relativePath, match, query));
+                lines.getChildren().add(buildMatchLine(file, entry.relative(), match, query));
             }
             group.getChildren().add(lines);
 
@@ -378,18 +608,10 @@ final class SearchRail extends VBox {
             });
             caret.setRotate(90); // default expanded
         }
-
-        // Clicking the row (not the checkbox/caret) opens the file.
-        row.setOnMouseClicked(e -> {
-            if (e.getTarget() == check || e.getTarget() == caret) {
-                return;
-            }
-            opener.open(file, relativePath, OptionalInt.empty(), mode == Mode.TEXT ? query : null);
-        });
         return group;
     }
 
-    private Region buildMatchLine(Path file, Path relativePath, TextMatch match, String query) {
+    private Region buildMatchLine(Path file, Path relativePath, TextMatch match, String matchQuery) {
         Label lineNumber = new Label(Integer.toString(match.lineNumber()));
         lineNumber.getStyleClass().add("match-line-number");
 
@@ -420,7 +642,7 @@ final class SearchRail extends VBox {
         line.setAlignment(Pos.CENTER_LEFT);
         line.getStyleClass().add("result-match-line");
         line.setOnMouseClicked(e ->
-                opener.open(file, relativePath, OptionalInt.of(match.lineNumber()), query));
+                opener.open(file, relativePath, OptionalInt.of(match.lineNumber()), matchQuery));
         return line;
     }
 
@@ -444,8 +666,7 @@ final class SearchRail extends VBox {
     private void openCheckedFiles() {
         for (Path file : new ArrayList<>(checkedFiles)) {
             Path relative = knownRelative.getOrDefault(file, file.getFileName());
-            opener.open(file, relative, OptionalInt.empty(),
-                    mode == Mode.TEXT ? searchField.getText() : null);
+            opener.open(file, relative, OptionalInt.empty(), query.isBlank() ? null : query);
         }
     }
 }
