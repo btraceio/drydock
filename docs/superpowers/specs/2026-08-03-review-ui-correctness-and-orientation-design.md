@@ -181,8 +181,17 @@ Four distinct causes behind one impression.
 **a. It looks like a session tab.** It is not one -- `setReviewShowing`
 hides the tab pane outright -- but it is reached with `⌘4` from a session
 and the chrome does not mark the transition. The title bar states what it is
-showing across which repositories, and carries a visible way out (`⌘4` /
-`Esc`), so Review is a place entered rather than a tab occupied.
+showing across which repositories, and carries a visible way out, so Review
+is a place entered rather than a tab occupied.
+
+The way out is `Esc`, and only `Esc`. `⌘4` is the way *in*:
+`DrydockApplication.java:826` routes it unconditionally to
+`showReviewForCurrentSession()`, and pressed while Review is already showing
+it re-enters and re-selects the origin session's scope
+(`MainWorkspace.java:758-764`). Labelling it as an exit would advertise a key
+that does nothing, two rows above the existing hint that correctly calls it
+the way back in (`ReviewDestinationView.java:192`). Making `⌘4` a toggle is
+a defensible separate change; this spec does not make it.
 
 **b. The header claims a session you are not in.** `showItem(null)` still
 renders the session row, dot and all, reading "no items in the queue". With
