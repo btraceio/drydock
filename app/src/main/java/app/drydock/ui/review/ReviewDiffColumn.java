@@ -628,11 +628,6 @@ final class ReviewDiffColumn extends BorderPane {
         return box;
     }
 
-    /** The diff currently rendered (the intent fallback groups by its files). */
-    UnifiedDiff currentDiff() {
-        return diff;
-    }
-
     /** Diagnostic/test-only: the rows currently rendered. */
     List<ReviewDiffRow> diagRows() {
         return List.copyOf(rows);

@@ -1290,15 +1290,6 @@ public final class ReviewDestinationView extends BorderPane {
     }
 
     /**
-     * The diff currently rendered. The intent fallback groups by file, so it
-     * needs the same diff the column is showing rather than a second one -- a
-     * grouping derived from a re-read would drift from what is on screen.
-     */
-    public app.drydock.git.UnifiedDiff currentDiff() {
-        return diffColumn.currentDiff();
-    }
-
-    /**
      * Diagnostic-only: walks EVERY queue item and reports what its diff
      * produced. The base a review diffs against is derived, so "the queue
      * assembled" is not evidence that each item can actually resolve it --
