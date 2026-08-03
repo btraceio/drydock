@@ -36,6 +36,7 @@ import app.drydock.mcp.WorkspaceMcpSessionContext;
 import app.drydock.process.SshCommandBuilder;
 import app.drydock.review.AnnotationStore;
 import app.drydock.review.IntentGrouping;
+import app.drydock.review.QueueAssembly;
 import app.drydock.review.ReviewItem;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewIntent;
@@ -993,15 +994,22 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 .map(repository -> new ReviewQueueService.RepositoryTarget(
                         repository.root(), repository.displayName()))
                 .toList();
+        if (reviewDestination.diagItems().isEmpty()) {
+            reviewDestination.showScanning();
+        }
         reviewQueueService.assemble(targets, this::sessionAtCheckout)
                 .whenComplete((assembly, failure) -> Platform.runLater(() -> {
                     if (failure != null) {
                         LOG.log(Level.WARNING, "Could not assemble the Review queue", failure);
+                        // A backstop, not the mechanism: assemble absorbs its
+                        // own fetch failures, so this fires only for something
+                        // unforeseen -- which is all the more reason to show it.
+                        reviewDestination.setItems(new QueueAssembly(List.of(), false, false),
+                                local.size());
                         return;
                     }
-                    List<ReviewItem> items = assembly.items();
-                    adoptLegacyAnnotations(items);
-                    reviewDestination.setItems(items, local.size());
+                    adoptLegacyAnnotations(assembly.items());
+                    reviewDestination.setItems(assembly, local.size());
                     if (pendingReviewSelection != null) {
                         selectReviewScopeFor(pendingReviewSelection);
                         pendingReviewSelection = null;
@@ -1112,6 +1120,11 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
         @Override
         public void refreshQueue() {
+            refreshReviewQueue();
+        }
+
+        @Override
+        public void retryQueueScan() {
             refreshReviewQueue();
         }
 

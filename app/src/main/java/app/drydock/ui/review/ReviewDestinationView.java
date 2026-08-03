@@ -2,6 +2,7 @@ package app.drydock.ui.review;
 
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.git.ReviewBase;
+import app.drydock.review.QueueAssembly;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewItem;
@@ -77,6 +78,9 @@ public final class ReviewDestinationView extends BorderPane {
     public interface Host {
         /** Reassembles the queue (called when Review is shown). */
         void refreshQueue();
+
+        /** The empty surface's Retry button -- asks for the scan to run again. */
+        void retryQueueScan();
 
         /** {@code o} -- brings the scope's bound session's tab to the front. */
         void openSession(ManagedSessionId sessionId);
@@ -465,22 +469,25 @@ public final class ReviewDestinationView extends BorderPane {
     // ---- queue --------------------------------------------------------------
 
     /**
-     * Replaces the queue's contents. The previous selection survives when
-     * its scope is still present; otherwise the first item the rail is
-     * actually showing is selected -- falling back to the first item
-     * outright only when a query has hidden every row. An empty queue shows
-     * the zero state.
+     * Replaces the queue's contents. The previous selection survives when its
+     * scope is still present; otherwise the first item the rail is actually
+     * showing is selected. An assembly with no items shows whichever empty
+     * state the assembly's own completeness implies.
      */
-    public void setItems(List<ReviewItem> items, int repositoryCount) {
+    public void setItems(QueueAssembly assembly, int repositoryCount) {
+        List<ReviewItem> items = assembly.items();
         String previous = queue.selected().map(item -> item.scope().id()).orElse(null);
         queue.setItems(items);
-        java.util.Set<String> present = items.stream().map(item -> item.scope().id())
-                .collect(java.util.stream.Collectors.toUnmodifiableSet());
-        outcomeByScope.keySet().retainAll(present);
+        outcomeByScope.keySet().retainAll(items.stream().map(item -> item.scope().id())
+                .collect(java.util.stream.Collectors.toUnmodifiableSet()));
         countsLabel.setText(items.size() + (items.size() == 1 ? " item · " : " items · ")
                 + repositoryCount + (repositoryCount == 1 ? " repo" : " repos"));
         if (items.isEmpty()) {
-            showItem(null);
+            showEmpty(repositoryCount == 0
+                    ? ReviewEmptyState.NO_REPOSITORIES
+                    : assembly.complete()
+                            ? ReviewEmptyState.NOTHING_REVIEWABLE
+                            : ReviewEmptyState.SCAN_INCOMPLETE);
             return;
         }
         boolean stillThere = previous != null
@@ -495,6 +502,51 @@ public final class ReviewDestinationView extends BorderPane {
         // falls back to items.get(0), so a reassembly still leaves something
         // selected rather than nothing.
         queue.select(queue.firstVisible().map(item -> item.scope().id()).orElse(items.get(0).scope().id()));
+    }
+
+    /** Called when Review is shown and a scan is in flight. */
+    public void showScanning() {
+        showEmpty(ReviewEmptyState.SCANNING);
+    }
+
+    /**
+     * The empty surface. The session row is not rendered at all here: with no
+     * item there is no session to describe, and a row reading "no items in
+     * the queue" beside a session dot read as a claim about the session
+     * Review was opened from.
+     */
+    private void showEmpty(ReviewEmptyState state) {
+        headerIcon.setText("◨");
+        headerTitle.setText(state.title());
+        headerContext.setText("");
+        setSessionRowVisible(false);
+        Region placeholder = placeholder(state.title(), state.detail(), "");
+        if (state == ReviewEmptyState.SCAN_INCOMPLETE) {
+            Button retry = new Button("Retry the scan");
+            retry.getStyleClass().addAll("review-chip-button", "review-empty-retry");
+            retry.setOnAction(e -> {
+                retry.setDisable(true);
+                retry.setText("Scanning…");
+                host.retryQueueScan();
+            });
+            ((VBox) placeholder).getChildren().add(retry);
+        }
+        body.getChildren().setAll(placeholder);
+        refreshReviewState();
+    }
+
+    /** Hides the whole session row -- dot, line, button and hint. */
+    private void setSessionRowVisible(boolean visible) {
+        sessionDot.setVisible(visible);
+        sessionDot.setManaged(visible);
+        sessionLine.setVisible(visible);
+        sessionLine.setManaged(visible);
+        if (!visible) {
+            openSessionButton.setVisible(false);
+            openSessionButton.setManaged(false);
+            returnHint.setVisible(false);
+            returnHint.setManaged(false);
+        }
     }
 
     /** Selects the item for {@code scopeId} ({@code ⌘4} and the sidebar's {@code ◨n} badge). */
@@ -817,19 +869,17 @@ public final class ReviewDestinationView extends BorderPane {
 
     private void showItem(ReviewItem item) {
         if (item == null) {
-            headerIcon.setText("◨");
-            headerTitle.setText("Nothing to review");
-            headerContext.setText("");
-            setSessionRow(null, "no items in the queue", false);
-            body.getChildren().setAll(placeholder("Nothing to review",
-                    "Worktrees, uncommitted changes and PRs that ask you for a review all land here.",
-                    ""));
+            // Reached only before the first queue assembly lands (the
+            // constructor's initial call); once a scan has run, setItems
+            // renders the empty surface itself and never routes through here.
+            showEmpty(ReviewEmptyState.NOTHING_REVIEWABLE);
             return;
         }
         ReviewScope scope = item.scope();
         headerIcon.setText(item.icon());
         headerTitle.setText(item.title());
         headerContext.setText(contextLine(item));
+        setSessionRowVisible(true);
         setSessionRow(scope, sessionLineFor(scope), scope.sessionId().isPresent());
         body.getChildren().setAll(bodyFor(item));
         intentIndex = 0;

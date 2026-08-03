@@ -1,6 +1,7 @@
 package app.drydock.ui.review;
 
 import app.drydock.git.DiffService;
+import app.drydock.review.QueueAssembly;
 import app.drydock.review.ReviewItem;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
@@ -72,8 +73,8 @@ class ReviewIntentFallbackTest extends ApplicationTest {
                 ReviewScope.Kind.WORKING_TREE, repo, Optional.of(repo), "main", "main",
                 Optional.empty(), Optional.empty()));
 
-        interact(() -> view.setItems(List.of(new ReviewItem(scope, ReviewItem.Group.MINE,
-                "Working tree", "drydock · uncommitted changes")), 1));
+        interact(() -> view.setItems(new QueueAssembly(List.of(new ReviewItem(scope, ReviewItem.Group.MINE,
+                "Working tree", "drydock · uncommitted changes")), true, true), 1));
 
         assertEquals("intent 1", awaitIntentLabel(),
                 "the verdict bar must re-render when the diff arrives, not stay on 'no intent'");
@@ -91,8 +92,8 @@ class ReviewIntentFallbackTest extends ApplicationTest {
                 ReviewScope.Kind.WORKING_TREE, repo, Optional.of(repo), "main", "main",
                 Optional.empty(), Optional.empty()));
 
-        interact(() -> view.setItems(List.of(new ReviewItem(scope, ReviewItem.Group.MINE,
-                "Working tree", "drydock · uncommitted changes")), 1));
+        interact(() -> view.setItems(new QueueAssembly(List.of(new ReviewItem(scope, ReviewItem.Group.MINE,
+                "Working tree", "drydock · uncommitted changes")), true, true), 1));
         assertEquals("intent 1", awaitIntentLabel());
 
         assertFalse(renderedHunkFiles().contains("Zulu.java"),

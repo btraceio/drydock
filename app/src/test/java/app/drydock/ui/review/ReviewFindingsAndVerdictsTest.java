@@ -4,6 +4,7 @@ import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.Confidence;
+import app.drydock.review.QueueAssembly;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewItem;
@@ -379,8 +380,8 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
         }
         // The view renders the diff column for a worktree scope; the fake's
         // diff is what the by-file intent fallback groups.
-        interact(() -> view.setItems(List.of(new ReviewItem(minted, ReviewItem.Group.AGENTS,
-                "feat", "drydock · vs master")), 1));
+        interact(() -> view.setItems(new QueueAssembly(List.of(new ReviewItem(minted, ReviewItem.Group.AGENTS,
+                "feat", "drydock · vs master")), true, true), 1));
         interact(() -> view.diagPublishOutcome(minted.id(),
                 new DiffOutcome.Loaded(host.diff)));
         interact(view::refreshReviewState);

@@ -51,8 +51,16 @@ final class FakeReviewHost implements ReviewDestinationView.Host {
         this.store = new AnnotationStore(storeFile);
     }
 
+    /** How many times the empty state's Retry asked for a rescan. */
+    int queueRetries;
+
     @Override
     public void refreshQueue() {
+    }
+
+    @Override
+    public void retryQueueScan() {
+        queueRetries++;
     }
 
     @Override

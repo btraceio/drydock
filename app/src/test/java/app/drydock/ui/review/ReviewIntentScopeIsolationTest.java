@@ -1,6 +1,7 @@
 package app.drydock.ui.review;
 
 import app.drydock.git.DiffService;
+import app.drydock.review.QueueAssembly;
 import app.drydock.review.ReviewItem;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
@@ -69,9 +70,10 @@ class ReviewIntentScopeIsolationTest extends ApplicationTest {
                 Optional.of(new ReviewScope.PullRequestRef(7, Optional.empty())),
                 Optional.empty()));
 
-        interact(() -> view.setItems(List.of(
+        interact(() -> view.setItems(new QueueAssembly(List.of(
                 new ReviewItem(worktree, ReviewItem.Group.MINE, "Working tree", "repo · uncommitted"),
-                new ReviewItem(gate, ReviewItem.Group.REQUESTED, "PR #7 feature", "repo · not checked out")), 1));
+                new ReviewItem(gate, ReviewItem.Group.REQUESTED, "PR #7 feature", "repo · not checked out")),
+                true, true), 1));
 
         awaitCardCount(2);
 
@@ -94,9 +96,10 @@ class ReviewIntentScopeIsolationTest extends ApplicationTest {
                 Optional.of(new ReviewScope.PullRequestRef(7, Optional.empty())),
                 Optional.empty()));
 
-        interact(() -> view.setItems(List.of(
+        interact(() -> view.setItems(new QueueAssembly(List.of(
                 new ReviewItem(worktree, ReviewItem.Group.MINE, "Working tree", "repo · uncommitted"),
-                new ReviewItem(gate, ReviewItem.Group.REQUESTED, "PR #7 feature", "repo · not checked out")), 1));
+                new ReviewItem(gate, ReviewItem.Group.REQUESTED, "PR #7 feature", "repo · not checked out")),
+                true, true), 1));
         awaitCardCount(2);
 
         interact(() -> view.selectScope(gate.id()));

@@ -1,6 +1,7 @@
 package app.drydock.ui.review;
 
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.review.QueueAssembly;
 import app.drydock.review.ReviewItem;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
@@ -117,9 +118,9 @@ class ReviewDestinationViewTest extends ApplicationTest {
     void oOpensTheBoundSessionAndDoesNothingWithoutOne() {
         ManagedSessionId session = ManagedSessionId.newId();
         ReviewScopeRegistry registry = new ReviewScopeRegistry();
-        interact(() -> view.setItems(List.of(
+        interact(() -> view.setItems(new QueueAssembly(List.of(
                 item(registry, "feat/a", Optional.empty()),
-                item(registry, "feat/b", Optional.of(session))), 1));
+                item(registry, "feat/b", Optional.of(session))), true, true), 1));
 
         type(KeyCode.O);
         assertTrue(host.openedSessions.isEmpty(), "an item with no session must not open one");
@@ -161,7 +162,7 @@ class ReviewDestinationViewTest extends ApplicationTest {
         ReviewItem b = item(registry, "feat/b", Optional.empty());
         host.store.upsert(finding(b.scope().id(), "f1"));
         host.store.upsert(finding(b.scope().id(), "f2"));
-        interact(() -> view.setItems(List.of(a, b), 1));
+        interact(() -> view.setItems(new QueueAssembly(List.of(a, b), true, true), 1));
 
         List<String> badges = lookup(".review-queue-count").queryAll().stream()
                 .map(node -> ((Label) node).getText())
@@ -187,7 +188,10 @@ class ReviewDestinationViewTest extends ApplicationTest {
 
     @Test
     void anEmptyQueueShowsTheZeroStateInsteadOfCrashing() {
-        interact(() -> view.setItems(List.of(), 0));
+        // A complete scan with repositories configured is the case that
+        // already existed before the four-way empty state split: an empty
+        // queue still reads as "nothing to review", not as "no repositories".
+        interact(() -> view.setItems(new QueueAssembly(List.of(), true, true), 1));
 
         assertTrue(lookup(".review-queue-item").queryAll().isEmpty());
         assertFalse(lookup(".review-placeholder-title").queryAll().isEmpty());
@@ -204,9 +208,9 @@ class ReviewDestinationViewTest extends ApplicationTest {
         ReviewScope scope = registry.mint(ReviewScopeRegistry.spec(
                 ReviewScope.Kind.PR, Path.of("/repo"), Optional.empty(), "main", "feat/gateway",
                 Optional.of(new ReviewScope.PullRequestRef(412, Optional.empty())), Optional.empty()));
-        interact(() -> view.setItems(
+        interact(() -> view.setItems(new QueueAssembly(
                 List.of(new ReviewItem(scope, ReviewItem.Group.REQUESTED, "PR #412 feat/gateway",
-                        "drydock · not checked out")), 1));
+                        "drydock · not checked out")), true, true), 1));
 
         assertEquals("PR #412 has no session yet",
                 ((Label) lookup(".review-placeholder-title").query()).getText());
@@ -234,9 +238,9 @@ class ReviewDestinationViewTest extends ApplicationTest {
         ReviewScope scope = registry.mint(ReviewScopeRegistry.spec(
                 ReviewScope.Kind.PR, Path.of("/repo"), Optional.empty(), "main", "feat/gateway",
                 Optional.of(new ReviewScope.PullRequestRef(412, Optional.empty())), Optional.empty()));
-        interact(() -> view.setItems(
+        interact(() -> view.setItems(new QueueAssembly(
                 List.of(new ReviewItem(scope, ReviewItem.Group.REQUESTED, "PR #412 feat/gateway",
-                        "drydock · not checked out")), 1));
+                        "drydock · not checked out")), true, true), 1));
 
         String commands = ((Label) lookup(".review-placeholder-mono").query()).getText();
         assertTrue(commands.contains("codex --cd /wt/pr-412"), commands);
@@ -368,7 +372,7 @@ class ReviewDestinationViewTest extends ApplicationTest {
         assertEquals("agent/issue-919", selectedTitle());
 
         typeQuery("feat");
-        interact(() -> view.setItems(view.diagItems(), 1));
+        interact(() -> view.setItems(new QueueAssembly(view.diagItems(), true, true), 1));
 
         assertEquals("feat", queryText(), "a reassembly must leave the query alone");
     }
@@ -393,7 +397,7 @@ class ReviewDestinationViewTest extends ApplicationTest {
         List<ReviewItem> withoutTheSelection = view.diagItems().stream()
                 .filter(it -> !it.title().equals("agent/issue-919"))
                 .toList();
-        interact(() -> view.setItems(withoutTheSelection, 1));
+        interact(() -> view.setItems(new QueueAssembly(withoutTheSelection, true, true), 1));
 
         assertEquals("agent/issue-920", selectedTitle(),
                 "fallback must be the first VISIBLE item, not items.get(0)");
@@ -494,10 +498,10 @@ class ReviewDestinationViewTest extends ApplicationTest {
 
     private void seedQueue() {
         ReviewScopeRegistry registry = new ReviewScopeRegistry();
-        interact(() -> view.setItems(List.of(
+        interact(() -> view.setItems(new QueueAssembly(List.of(
                 item(registry, "feat/a", Optional.empty()),
                 item(registry, "feat/b", Optional.empty()),
-                item(registry, "feat/c", Optional.empty())), 1));
+                item(registry, "feat/c", Optional.empty())), true, true), 1));
     }
 
     private static ReviewItem item(ReviewScopeRegistry registry, String head,
@@ -511,10 +515,10 @@ class ReviewDestinationViewTest extends ApplicationTest {
     /** Three items across two groups, so a query can empty a whole group. */
     private void seedMixedQueue() {
         ReviewScopeRegistry registry = new ReviewScopeRegistry();
-        interact(() -> view.setItems(List.of(
+        interact(() -> view.setItems(new QueueAssembly(List.of(
                 item(registry, "feat/a", Optional.empty()),
                 agentItem(registry, "agent/issue-919"),
-                agentItem(registry, "agent/issue-920")), 1));
+                agentItem(registry, "agent/issue-920")), true, true), 1));
     }
 
     private static ReviewItem agentItem(ReviewScopeRegistry registry, String head) {
