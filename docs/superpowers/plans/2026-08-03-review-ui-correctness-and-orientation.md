@@ -310,19 +310,30 @@ In `showDiff` (the patch-only path), take the scope it was read for and publish 
 
 ```java
     /**
-     * Renders a diff that was supplied rather than run ("Read the patch
-     * only"). It publishes on the same channel as a diff of our own: a
-     * consumer must not have to know which route a scope's diff arrived by.
+     * Renders a diff that did not come from this column's own git call --
+     * {@code gh pr diff} for the "Read the patch only" path, which has no
+     * checkout to run git in. Clears the scope so a later reload cannot
+     * overwrite it with a local diff of the wrong tree, and publishes under
+     * the scope it was read FOR, which is not the same thing as adopting
+     * that scope as the column's live one.
      */
     void showDiff(ReviewScope forScope, UnifiedDiff supplied) {
-        scope = forScope;
-        expandedRuns.clear();
+        scope = null;
+        requestToken++;
         diff = supplied;
         symbolIndex = SymbolIndex.of(diff);
+        expandedRuns.clear();
         rebuild();
         onDiffResolved.accept(forScope.id(), new DiffOutcome.Loaded(supplied));
     }
 ```
+
+**Do not drop `scope = null` or `requestToken++`.** They are why a
+patch-only diff survives: the scope belongs to a PR with no checkout, so
+adopting it would let a subsequent `reload()` run git in the *main checkout*
+and overwrite the PR's patch with a local diff of the wrong tree — and after
+Task 5 it would additionally throw. The only change here is the added
+parameter and the publish.
 
 Delete `setOnDiffLoaded` and the `onDiffLoaded` field. Update the two existing call sites in `ReviewDestinationView` (`setOnDiffLoaded` at :252, `showDiff` at :750) to compile — the real wiring lands in Task 2; for now:
 
@@ -535,10 +546,25 @@ class ReviewIntentScopeIsolationTest extends ApplicationTest {
 }
 ```
 
+Add one line to the test's `start(Stage)`, directly after constructing the
+view, so the red run reproduces what the app does today:
+
+```java
+        // Today's wiring, verbatim from MainWorkspace: the fallback groups
+        // whatever diff the column last rendered. Deleted in Step 3 along
+        // with the field itself -- it exists here only so the red run shows
+        // the real defect instead of an empty fixture.
+        host.diffSource = view::currentDiff;
+```
+
+Without it `FakeReviewHost.diff` defaults to `new UnifiedDiff(List.of())`
+(`FakeReviewHost.java:42`), every scope yields zero intents, and the red run
+would fail for a reason that has nothing to do with the bug.
+
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `./gradlew :app:test --tests 'app.drydock.ui.review.ReviewIntentScopeIsolationTest'`
-Expected: FAIL — `aGateItemDoesNotInheritThePreviousItemsFiles` sees 2 cards (the worktree's files) where it expects 0. This failure *is* the reported bug; confirm the message says 2 before proceeding.
+Expected: FAIL — `aGateItemDoesNotInheritThePreviousItemsFiles` reaches 2 cards for the worktree, and **still shows 2 after selecting the gate item**, where it expects 0. That persistence *is* the reported bug. If instead you see `expected 2 intent cards, saw 0`, the `diffSource` line above is missing — fix that before going on, because the rest of this task is unverifiable without a genuine red.
 
 - [ ] **Step 3: Widen the Host interface**
 
@@ -628,6 +654,40 @@ Replace `intents()`:
     }
 ```
 
+**A test seam, and the one existing test that needs it.** Gating on
+`DiffOutcome.Loaded` means a fake host can no longer supply a diff at all —
+`FakeReviewHost.diffSource` was the only route and it is gone. Add a
+package-private seam beside the existing `diag*` methods:
+
+```java
+    /**
+     * Test-only: records an outcome for a scope without running git. The
+     * view derives everything from these outcomes now, so a test with a
+     * synthetic diff and no real checkout has no other way in.
+     */
+    void diagPublishOutcome(String scopeId, DiffOutcome outcome) {
+        outcomeByScope.put(scopeId, outcome);
+        refreshReviewState();
+    }
+```
+
+`ReviewFindingsAndVerdictsTest` needs it. Its scope's worktree is
+`Path.of("/wt/feat")` (`ReviewFindingsAndVerdictsTest.java:367-368`), which
+does not exist, so git fails there and Task 1's channel publishes `Failed` —
+leaving every intent-dependent case in that class with zero intents. In its
+`seed(...)` helper (`:375-383`), after the `view.setItems(...)` call:
+
+```java
+        interact(() -> view.diagPublishOutcome(minted.scope().id(),
+                new DiffOutcome.Loaded(host.diff)));
+```
+
+Ten cases in that class depend on the two fallback intents — the verdict
+round-trips, the `[` / `]` / `n` handlers, both submit cases and
+`theVerdictBarSurvivesFocusMode` — plus `shiftFWidensTheMarginToTheWholeReview`,
+which counts margin cards and changes answer when `currentIntent()` is empty.
+Run that class specifically after this step.
+
 Add the empty-reason derivation, and drop the outcome when an item leaves the queue so a re-minted scope does not resurrect a stale diff. In `setItems`, after `queue.setItems(items)`:
 
 ```java
@@ -638,8 +698,16 @@ Add the empty-reason derivation, and drop the outcome when an item leaves the qu
 
 - [ ] **Step 5: Run the test to verify it passes**
 
-Run: `./gradlew :app:test --tests 'app.drydock.ui.review.ReviewIntentScopeIsolationTest'`
-Expected: `comingBackToTheWorktreeRestoresItsOwnIntents` PASSES. `aGateItemDoesNotInheritThePreviousItemsFiles` passes its card-count assertion but still FAILS on `railMessage()` — the `.review-intent-empty` label lands in Task 3. That is the expected intermediate state.
+Run: `./gradlew :app:test --tests 'app.drydock.ui.review.*'`
+Expected: `comingBackToTheWorktreeRestoresItsOwnIntents` PASSES, and
+`ReviewFindingsAndVerdictsTest` passes in full — if its verdict and
+`[`/`]`/`n` cases fail with "no intent", the `diagPublishOutcome` call is
+missing from `seed(...)`.
+
+`aGateItemDoesNotInheritThePreviousItemsFiles` passes its card-count
+assertion but still FAILS on `railMessage()` — the `.review-intent-empty`
+label lands in Task 3. That one failure is the expected intermediate state;
+nothing else may be red at this commit.
 
 - [ ] **Step 6: Commit**
 
@@ -648,6 +716,7 @@ git add app/src/main/java/app/drydock/ui/review/ReviewDestinationView.java \
         app/src/main/java/app/drydock/ui/MainWorkspace.java \
         app/src/test/java/app/drydock/ui/review/FakeReviewHost.java \
         app/src/test/java/app/drydock/ui/review/ReviewIntentFallbackTest.java \
+        app/src/test/java/app/drydock/ui/review/ReviewFindingsAndVerdictsTest.java \
         app/src/test/java/app/drydock/ui/review/ReviewIntentScopeIsolationTest.java
 git commit -m "A scope's intents come from that scope's diff, or from nothing"
 ```
@@ -758,12 +827,15 @@ In `app.css`, beside the existing `.review-intent-rationale` rule:
 
 ```css
 .review-intent-empty {
-    -fx-text-fill: -dd-text-muted;
+    -fx-text-fill: -drydock-text-faint;
     -fx-font-size: 11px;
     -fx-padding: 8 10 8 10;
-    -fx-wrap-text: true;
 }
 ```
+
+`-drydock-text-faint` is the project's muted-text variable, used by the
+adjacent `.review-intent-rationale` rule (`app.css:3027-3030`). Wrapping is
+set in Java (`message.setWrapText(true)`), not in CSS.
 
 - [ ] **Step 4: Derive the reason in the view**
 
@@ -1048,7 +1120,48 @@ and use `worktreeBase.ref()` where a revision is needed (the `ReviewScope` base,
                 worktreeBase.ref(), head, ...));
 ```
 
-`ReviewScope` gains one component, `Optional<ReviewBase.Origin> baseOrigin`, defaulted to `Optional.empty()` by `ReviewScopeRegistry.spec`. **Do not** add it to `ReviewScopeRegistry.Identity` — the identity must stay stable across rescans, or every finding is orphaned when a base is re-measured (`ReviewScopeRegistry.java:33-36, 61-65`).
+`ReviewScope` gains one component, `Optional<ReviewBase.Origin> baseOrigin`.
+It is a record, so **every** construction site must be updated in this same
+step or nothing compiles. There are exactly five, and they are all of them:
+
+1. `ReviewScopeRegistry.spec(...)` (`ReviewScopeRegistry.java:135-138`) —
+   passes `Optional.empty()`. Add an overload taking the origin rather than
+   widening the existing seven-argument signature, so the callers that do not
+   know a base origin stay unchanged:
+
+```java
+    public static ReviewScope spec(ReviewScope.Kind kind, Path repoRoot, Optional<Path> worktree,
+                                   String base, String head, Optional<ReviewScope.PullRequestRef> pr,
+                                   Optional<ManagedSessionId> sessionId) {
+        return spec(kind, repoRoot, worktree, base, head, pr, sessionId, Optional.empty());
+    }
+
+    /** As above, recording how {@code base} was chosen (see {@link ReviewBase}). */
+    public static ReviewScope spec(ReviewScope.Kind kind, Path repoRoot, Optional<Path> worktree,
+                                   String base, String head, Optional<ReviewScope.PullRequestRef> pr,
+                                   Optional<ManagedSessionId> sessionId,
+                                   Optional<ReviewBase.Origin> baseOrigin) {
+        return new ReviewScope("rs_pending", kind, repoRoot, worktree, base, head, pr, sessionId,
+                baseOrigin);
+    }
+```
+
+2. `ReviewScopeRegistry.mint(...)` (`ReviewScopeRegistry.java:122-123`) —
+   carry `spec.baseOrigin()` through.
+3. `ReviewScope.withSession(...)` (`ReviewScope.java:86-89`).
+4. `ReviewScope.withWorktree(...)` (`ReviewScope.java:92-95`).
+5. `app/src/test/java/app/drydock/mcp/McpToolRouterReviewTest.java` — the one
+   test that calls the canonical constructor directly.
+
+Verify none was missed before moving on:
+
+```bash
+grep -rn "new ReviewScope(" app/src
+```
+
+**Do not** add `baseOrigin` to `ReviewScopeRegistry.Identity` — the identity
+must stay stable across rescans, or every finding is orphaned when a base is
+re-measured (`ReviewScopeRegistry.java:33-36, 61-65`).
 
 In `ReviewDestinationView.contextLine`, append the provenance when it is not the confident case:
 
@@ -1063,20 +1176,40 @@ In `ReviewDestinationView.contextLine`, append the provenance when it is not the
                 : item.subtitle() + "  ·  " + comparison) + provenance;
 ```
 
-- [ ] **Step 6: Run the tests**
+- [ ] **Step 6: Update the five existing `reviewBase` assertions**
+
+`GitStatusServiceTest` asserts on the old `String` return at five sites —
+lines **268, 284, 300, 320 and 331**. Each is
+`assertEquals("<branch>", service.reviewBase(...).get())`; each becomes
+`.get().ref()`:
+
+```java
+        assertEquals("develop", service.reviewBase(repo, Optional.empty(), "master").get().ref());
+```
+
+Leave the expected branch names exactly as they are — they encode
+behaviour this task must not change. Confirm none was missed:
+
+```bash
+grep -rn "reviewBase" app/src/test/java
+```
+
+- [ ] **Step 7: Run the tests**
 
 Run: `./gradlew :app:test --tests 'app.drydock.git.*' --tests 'app.drydock.review.*'`
 Expected: PASS. `ReviewScopeRegistryTest` guards the identity rule; if it fails, `baseOrigin` leaked into `Identity`.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add app/src/main/java/app/drydock/git/ReviewBase.java \
+        app/src/test/java/app/drydock/git/GitStatusServiceTest.java \
         app/src/main/java/app/drydock/git/GitStatusService.java \
         app/src/main/java/app/drydock/review/ReviewQueueService.java \
         app/src/main/java/app/drydock/review/ReviewScope.java \
         app/src/main/java/app/drydock/review/ReviewScopeRegistry.java \
         app/src/main/java/app/drydock/ui/review/ReviewDestinationView.java \
+        app/src/test/java/app/drydock/mcp/McpToolRouterReviewTest.java \
         app/src/test/java/app/drydock/git/GitStatusServiceReviewBaseTest.java
 git commit -m "A review base says how it was chosen, and stops guessing quietly"
 ```
@@ -1974,18 +2107,31 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class RailLayoutTest {
 
     @Test
-    void aWideWindowCollapsesNothing() {
+    void aWideWindowCollapsesNothingAndStaysFullWidth() {
+        // Expanded rails are 236 + 232 + 336 = 804; 1800 leaves 996 for code.
         RailLayout.Layout layout = RailLayout.solve(1800, false, false, false);
 
         assertFalse(layout.queueCollapsed());
         assertFalse(layout.intentsCollapsed());
         assertFalse(layout.marginCollapsed());
+        assertFalse(layout.narrow());
+    }
+
+    @Test
+    void narrowingTheRailsIsTriedBeforeCollapsingAnything() {
+        // Expanded would leave 1300 - 804 = 496, under the floor. Narrow rails
+        // are 206 + 196 + 286 = 688, leaving 612 -- so nothing has to go.
+        RailLayout.Layout layout = RailLayout.solve(1300, false, false, false);
+
+        assertTrue(layout.narrow());
+        assertFalse(layout.marginCollapsed(), "narrowing bought enough width on its own");
     }
 
     @Test
     void theMarginIsTheFirstToGo() {
-        // 236 + 232 + 336 = 804 of rails; 1300 leaves 496 for code, below the floor.
-        RailLayout.Layout layout = RailLayout.solve(1300, false, false, false);
+        // Narrow rails 688 leave 1200 - 688 = 512, under the floor. Collapsing
+        // the margin gives 206 + 196 + 30 = 432, leaving 768.
+        RailLayout.Layout layout = RailLayout.solve(1200, false, false, false);
 
         assertTrue(layout.marginCollapsed(), "the margin collapses first");
         assertFalse(layout.intentsCollapsed());
@@ -1994,12 +2140,15 @@ class RailLayoutTest {
 
     @Test
     void thenTheIntentsAndOnlyThenTheQueue() {
-        RailLayout.Layout narrow = RailLayout.solve(1000, false, false, false);
-        assertTrue(narrow.marginCollapsed());
-        assertTrue(narrow.intentsCollapsed());
+        // 950 - 432 = 518, under the floor; collapsing intents gives 276.
+        RailLayout.Layout intents = RailLayout.solve(950, false, false, false);
+        assertTrue(intents.marginCollapsed());
+        assertTrue(intents.intentsCollapsed());
+        assertFalse(intents.queueCollapsed(), "the queue still has room here");
 
-        RailLayout.Layout narrower = RailLayout.solve(700, false, false, false);
-        assertTrue(narrower.queueCollapsed(), "the queue is the last to give up its width");
+        // 800 - 276 = 524, under the floor; the queue is the last to go.
+        RailLayout.Layout all = RailLayout.solve(800, false, false, false);
+        assertTrue(all.queueCollapsed(), "the queue is the last to give up its width");
     }
 
     @Test
@@ -2021,10 +2170,22 @@ class RailLayoutTest {
     }
 
     @Test
-    void expansionIsTheExactReverseOfCollapse() {
-        assertFalse(RailLayout.solve(1900, false, false, false).marginCollapsed());
-        assertTrue(RailLayout.solve(1300, false, false, false).marginCollapsed());
-        assertFalse(RailLayout.solve(1900, false, false, false).intentsCollapsed());
+    void collapseIsMonotonicInWidth() {
+        // A wider window may never be more collapsed than a narrower one.
+        // The rule this pins down: narrowing is tried before collapsing, so
+        // there is no width at which widening the window loses you a rail.
+        RailLayout.Layout previous = RailLayout.solve(600, false, false, false);
+        for (double width = 610; width <= 2000; width += 10) {
+            RailLayout.Layout layout = RailLayout.solve(width, false, false, false);
+            assertTrue(collapsedCount(layout) <= collapsedCount(previous),
+                    "widening to " + width + "px collapsed something that was open");
+            previous = layout;
+        }
+    }
+
+    private static int collapsedCount(RailLayout.Layout layout) {
+        return (layout.queueCollapsed() ? 1 : 0) + (layout.intentsCollapsed() ? 1 : 0)
+                + (layout.marginCollapsed() ? 1 : 0);
     }
 
     private static boolean allCollapsed(RailLayout.Layout layout) {
@@ -2061,9 +2222,6 @@ public final class RailLayout {
      */
     public static final double CODE_MIN_WIDTH = 560;
 
-    /** Below this the rails take their narrow sizes (unchanged from before). */
-    private static final double NARROW_WIDTH = 1320;
-
     private RailLayout() {
     }
 
@@ -2072,27 +2230,43 @@ public final class RailLayout {
                          boolean marginCollapsed, boolean narrow) { }
 
     /**
-     * Collapses in priority order -- margin, intents, queue -- until the code
-     * column clears its floor. A rail the user collapsed by hand starts
+     * Gives up rail width in escalating steps until the code column clears
+     * its floor: narrow the rails first, then collapse the margin, then the
+     * intents, then the queue. A rail the user collapsed by hand starts
      * collapsed and stays that way however wide the window is.
+     *
+     * <p>Narrowing comes before any collapse, and that ordering is what makes
+     * the result monotonic in width. The previous design took narrow mode
+     * from its own fixed threshold, which produced the absurd case of
+     * widening the window from 1300px to 1320px and <em>losing</em> the
+     * findings margin -- the rails jumped from their narrow widths to their
+     * expanded ones and no longer fitted.</p>
      */
     public static Layout solve(double width, boolean queueForced, boolean intentsForced,
                                boolean marginForced) {
-        boolean narrow = width < NARROW_WIDTH;
         boolean margin = marginForced;
         boolean intents = intentsForced;
         boolean queue = queueForced;
 
-        if (codeWidth(width, new Layout(queue, intents, margin, narrow)) < CODE_MIN_WIDTH) {
-            margin = true;
+        if (fits(width, queue, intents, margin, false)) {
+            return new Layout(queue, intents, margin, false);
         }
-        if (codeWidth(width, new Layout(queue, intents, margin, narrow)) < CODE_MIN_WIDTH) {
+        if (fits(width, queue, intents, margin, true)) {
+            return new Layout(queue, intents, margin, true);
+        }
+        margin = true;
+        if (!fits(width, queue, intents, margin, true)) {
             intents = true;
         }
-        if (codeWidth(width, new Layout(queue, intents, margin, narrow)) < CODE_MIN_WIDTH) {
+        if (!fits(width, queue, intents, margin, true)) {
             queue = true;
         }
-        return new Layout(queue, intents, margin, narrow);
+        return new Layout(queue, intents, margin, true);
+    }
+
+    private static boolean fits(double width, boolean queue, boolean intents, boolean margin,
+                                boolean narrow) {
+        return width - railsWidth(new Layout(queue, intents, margin, narrow)) >= CODE_MIN_WIDTH;
     }
 
     /** The total width the rails occupy under {@code layout}. */
@@ -2106,10 +2280,6 @@ public final class RailLayout {
                 + railWidth(layout.marginCollapsed(), layout.narrow(),
                         ReviewFindingsMargin.COLLAPSED_WIDTH, ReviewFindingsMargin.NARROW_WIDTH,
                         ReviewFindingsMargin.EXPANDED_WIDTH);
-    }
-
-    private static double codeWidth(double width, Layout layout) {
-        return width - railsWidth(layout);
     }
 
     private static double railWidth(boolean collapsed, boolean narrow, double collapsedWidth,
@@ -2237,18 +2407,39 @@ class ReviewLandsOnFirstIntentTest extends ApplicationTest {
     }
 
     @Test
-    void theFirstIntentsCodeIsOnScreenWithoutAClick() throws Exception {
-        Path repo = repoWithTwoChangedFiles();
+    void comingBackToAnItemLandsOnItsFirstIntentNotWhereYouLeftIt() throws Exception {
+        Path repo = repoWithTwoFilesFarApart();
         ReviewScope scope = registry.mint(ReviewScopeRegistry.spec(
                 ReviewScope.Kind.WORKING_TREE, repo, Optional.of(repo), "main", "main",
                 Optional.empty(), Optional.empty()));
 
-        interact(() -> view.setItems(new QueueAssembly(List.of(new ReviewItem(scope,
-                ReviewItem.Group.MINE, "Working tree", "repo · uncommitted")), true, true), 1));
+        Path otherRepo = repoWithTwoFilesFarApart();
+        ReviewScope other = registry.mint(ReviewScopeRegistry.spec(
+                ReviewScope.Kind.WORKING_TREE, otherRepo, Optional.of(otherRepo), "main", "main",
+                Optional.empty(), Optional.empty()));
 
-        awaitIntentLabel("intent 1");
-        assertTrue(renderedHunkFiles().contains("A.java"),
-                "the first intent's file must be on screen; rendered " + renderedHunkFiles());
+        interact(() -> view.setItems(new QueueAssembly(List.of(
+                new ReviewItem(scope, ReviewItem.Group.MINE, "Working tree", "repo · uncommitted"),
+                new ReviewItem(other, ReviewItem.Group.MINE, "Other tree", "other · uncommitted")),
+                true, true), 2));
+        awaitCardCount(2);
+
+        // Walk to the second intent, which scrolls the column to Zulu.java.
+        List<javafx.scene.Node> cards = new ArrayList<>(lookup(".review-intent-card").queryAll());
+        interact(((javafx.scene.control.Button) cards.get(1))::fire);
+        org.testfx.util.WaitForAsyncUtils.waitForFxEvents();
+        assertTrue(renderedHunkFiles().contains("Zulu.java"), "precondition: moved off intent 1");
+
+        // Leave for another item and come back. Selecting an item must land
+        // on its first intent, not leave the column where the last read of
+        // it happened to stop.
+        interact(() -> view.selectScope(other.id()));
+        org.testfx.util.WaitForAsyncUtils.waitForFxEvents();
+        interact(() -> view.selectScope(scope.id()));
+        awaitCardCount(2);
+
+        assertTrue(renderedHunkFiles().contains("Alpha.java"),
+                "coming back lands on the first intent; rendered " + renderedHunkFiles());
     }
 
     private List<String> renderedHunkFiles() {
@@ -2258,30 +2449,45 @@ class ReviewLandsOnFirstIntentTest extends ApplicationTest {
         return files;
     }
 
-    private void awaitIntentLabel(String expected) {
+    private void awaitCardCount(int expected) {
         for (int i = 0; i < 200; i++) {
-            String[] text = new String[1];
-            interact(() -> text[0] = ((Label) lookup(".review-verdict-intent").query()).getText());
-            if (expected.equals(text[0])) {
+            int[] count = new int[1];
+            interact(() -> count[0] = lookup(".review-intent-card").queryAll().size());
+            if (count[0] == expected) {
                 return;
             }
             sleep(25);
         }
-        throw new AssertionError("verdict bar never reached " + expected);
+        throw new AssertionError("never reached " + expected + " intent cards");
     }
 
-    private static Path repoWithTwoChangedFiles() throws Exception {
+    /**
+     * Two changed files far enough apart that the second starts below the
+     * viewport -- the same fixture shape ReviewIntentFallbackTest uses, and
+     * the reason it can tell "scrolled to Alpha" from "scrolled to Zulu".
+     */
+    private static Path repoWithTwoFilesFarApart() throws Exception {
         Path repo = Files.createDirectories(
                 Files.createTempDirectory("drydock-land-repo").resolve("repo"));
         runGit(repo, "init", "-b", "main");
         runGit(repo, "config", "user.name", "Test");
         runGit(repo, "config", "user.email", "test@example.com");
-        Files.writeString(repo.resolve("A.java"), "class A { int x = 1; }\n");
-        Files.writeString(repo.resolve("B.java"), "class B { int y = 1; }\n");
+        for (String name : List.of("Alpha.java", "Zulu.java")) {
+            StringBuilder original = new StringBuilder();
+            for (int i = 1; i <= 120; i++) {
+                original.append("int field").append(i).append(" = ").append(i).append(";\n");
+            }
+            Files.writeString(repo.resolve(name), original.toString());
+        }
         runGit(repo, "add", ".");
-        runGit(repo, "commit", "-m", "initial");
-        Files.writeString(repo.resolve("A.java"), "class A { int x = 2; }\n");
-        Files.writeString(repo.resolve("B.java"), "class B { int y = 2; }\n");
+        runGit(repo, "commit", "-m", "two files");
+        for (String name : List.of("Alpha.java", "Zulu.java")) {
+            StringBuilder changed = new StringBuilder();
+            for (int i = 1; i <= 120; i++) {
+                changed.append("int field").append(i).append(" = ").append(i * 2).append(";\n");
+            }
+            Files.writeString(repo.resolve(name), changed.toString());
+        }
         return repo;
     }
 
@@ -2301,7 +2507,7 @@ class ReviewLandsOnFirstIntentTest extends ApplicationTest {
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `./gradlew :app:test --tests 'app.drydock.ui.review.ReviewLandsOnFirstIntentTest'`
-Expected: FAIL — the centre has not been scrolled to intent 1's hunk.
+Expected: FAIL — after coming back, the column is still showing `Zulu.java`, because `showItem` resets `intentIndex` to 0 without moving the code. A test that merely asserted "intent 1's file is on screen for a freshly opened item" would pass *before* the fix (a new column starts at the top), which is why this one deliberately scrolls away first.
 
 - [ ] **Step 3: Reveal on selection**
 
@@ -2464,14 +2670,57 @@ wired in the constructor:
         nextButton.setOnAction(e -> host.nextIntent());
 ```
 
-In `update`, name the intent and gate the controls:
+**The change goes in `render()`, not `update()`, and the buttons must be
+added to all three child lists.** `update(...)` ends by calling `render()`
+(`ReviewVerdictBar.java:143`), and `render()` rebuilds `actionRow` from
+scratch with three exhaustive `setAll(...)` calls — so anything set in
+`update` is overwritten, and any node not named in a `setAll` list never
+enters the scene graph at all.
+
+In `render()`, the null-intent branch (`:147-153`) becomes:
 
 ```java
-        boolean hasIntent = intent != null;
-        intentLabel.setText(hasIntent ? intent.number() + " · " + intent.title() : "no intent");
-        previousButton.setDisable(!hasIntent);
-        nextButton.setDisable(!hasIntent);
+        if (intent == null) {
+            intentLabel.setText("no intent");
+            previousButton.setDisable(true);
+            nextButton.setDisable(true);
+            actionRow.getChildren().setAll(previousButton, nextButton, intentLabel);
+            progressLabel.setText("");
+            progressFill.setPrefWidth(0);
+            submitButton.setDisable(true);
+            return;
+        }
+        intentLabel.setText(intent.number() + " · " + intent.title());
+        previousButton.setDisable(false);
+        nextButton.setDisable(false);
 ```
+
+and both remaining `setAll` calls (`:168` and `:175-176`) gain the two
+buttons at the front:
+
+```java
+            actionRow.getChildren().setAll(previousButton, nextButton, intentLabel,
+                    settledLabel, undoButton, spacer, right);
+```
+
+```java
+            actionRow.getChildren().setAll(previousButton, nextButton, intentLabel,
+                    approveButton, requestChangesButton, askAgentButton, refusalLabel,
+                    spacer, right);
+```
+
+**The label format change breaks nine existing assertions.** The bar used to
+render `"intent " + intent.number()`; it now renders `number · title`. Update
+every site — `ReviewFindingsAndVerdictsTest` (seven), `ReviewIntentFallbackTest`
+(two) — and Task 11's `ReviewLandsOnFirstIntentTest` if it still asserts on
+the label. Find them all:
+
+```bash
+grep -rn '"intent ' app/src/test/java
+```
+
+The fallback intents are titled after their file, so
+`ReviewIntentFallbackTest`'s `"intent 1"` becomes `"1 · A.java"`.
 
 In `app.css`:
 
@@ -2509,7 +2758,9 @@ git add app/src/main/java/app/drydock/ui/review/ReviewVerdictBar.java \
         app/src/main/java/app/drydock/ui/review/ReviewDestinationView.java \
         app/src/main/resources/app/drydock/ui/app.css \
         app/src/test/java/app/drydock/ui/review/ReviewVerdictBarNavigationTest.java \
-        app/src/test/java/app/drydock/ui/review/ReviewFindingsAndVerdictsTest.java
+        app/src/test/java/app/drydock/ui/review/ReviewFindingsAndVerdictsTest.java \
+        app/src/test/java/app/drydock/ui/review/ReviewIntentFallbackTest.java \
+        app/src/test/java/app/drydock/ui/review/ReviewLandsOnFirstIntentTest.java
 git commit -m "The verdict bar is a review loop on its own"
 ```
 
