@@ -74,6 +74,7 @@ import javafx.scene.control.TextInputControl;
 import javafx.scene.control.TextInputDialog;
 import javafx.scene.control.Tooltip;
 import javafx.scene.layout.BorderPane;
+import javafx.scene.layout.HBox;
 import javafx.scene.layout.Region;
 import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
@@ -174,23 +175,33 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
     /**
      * The Review destination (Review handoff §1). A scene-graph view like
-     * the Explorer, so showing it hides every native terminal -- see {@link
-     * #setReviewShowing}. Built once and kept in {@link #centerStack};
-     * rebuilding it per visit would drop the queue selection and the
-     * remembered rail-collapse state.
+     * the Explorer, so while its tab is selected every native terminal is
+     * hidden -- see {@link #updateTerminalVisibility}. Built once and kept as
+     * {@link #reviewTab}'s content; rebuilding it per visit would drop the
+     * queue selection and the remembered rail-collapse state.
      */
     private final ReviewDestinationView reviewDestination;
+
+    /**
+     * Review's own tab: pinned leftmost, never closable (nav §2). A tab
+     * rather than an overlay over the strip, so leaving Review is an ordinary
+     * tab switch and the sessions never go away underneath it.
+     */
+    private final Tab reviewTab = new Tab();
+    private final Label reviewTabBadge = new Label();
+
+    /**
+     * The tab {@code ⌘4} was pressed in, so the same key (and top-level Esc,
+     * and the header's {@code ‹}) returns to exactly that tab rather than to
+     * whatever happens to sort first (nav §4). Cleared when that tab closes:
+     * a stale origin would either resurrect a dead tab or silently do
+     * nothing.
+     */
+    private Tab reviewOriginTab;
     private final PrCheckoutService prCheckoutService = new PrCheckoutService();
     private final ReviewScopeRegistry reviewScopeRegistry;
     private final ReviewQueueService reviewQueueService;
     private final IntentGrouping intentGrouping = new IntentGrouping();
-
-    /**
-     * True while the Review destination owns the centre. Tracked separately
-     * from {@link #terminalsObscured}: a modal opening and closing over
-     * Review must not un-hide the terminals underneath it.
-     */
-    private boolean reviewShowing;
 
     /** Fires when the Review queue changes, so the sidebar can restyle its badge. */
     private Runnable onReviewQueueChanged = () -> { };
@@ -352,10 +363,10 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         });
 
         reviewDestination = new ReviewDestinationView(new ReviewHost(), diffService, activityLog);
-        reviewDestination.setVisible(false);
-        reviewDestination.setManaged(false);
+        reviewDestination.setBackTarget(Optional.empty(), null);
+        buildReviewTab();
 
-        centerStack = new StackPane(tabPane, emptyState, newTabButton, reviewDestination);
+        centerStack = new StackPane(tabPane, emptyState, newTabButton);
         StackPane.setAlignment(newTabButton, Pos.TOP_RIGHT);
         StackPane.setMargin(newTabButton, new Insets(10, 10, 0, 0));
         setCenter(centerStack);
@@ -366,6 +377,24 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             }
             updateTerminalVisibility();
             updatePickerVisibility();
+            if (newTab == reviewTab) {
+                // Recorded HERE rather than in enterReview, so every way into
+                // Review remembers where it came from -- ⌘4, the sidebar's
+                // ◨n badge, ⌘] cycling into the tab, and a plain click on the
+                // tab header. Recording it only in enterReview left the last
+                // two with no way back but the mouse.
+                if (oldTab != null) {
+                    reviewOriginTab = oldTab;
+                }
+                updateReviewBackTarget();
+                reviewDestination.onShown();
+            } else if (oldTab == reviewTab) {
+                // Leaving Review: the centre swap only invalidates the
+                // placeholder's bounds at the next layout pass, so the native
+                // frame would otherwise track stale bounds (the same ordering
+                // OpenSessionTab.showSubTab relies on).
+                Platform.runLater(() -> currentlySelected().ifPresent(OpenSessionTab::updateGeometryNow));
+            }
             // Tab selection only moves the active-row highlight; the model
             // turns this into activeSessionChanged, never a tree rebuild.
             viewModel.setActiveSession(activeSessionId());
@@ -373,7 +402,10 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             // place a "needs you" badge has to be cleared.
             acknowledgeActivity(activeSessionId());
         });
-        tabPane.getTabs().addListener((ListChangeListener<Tab>) change -> updatePickerVisibility());
+        tabPane.getTabs().addListener((ListChangeListener<Tab>) change -> {
+            pinReviewTabLeftmost();
+            updatePickerVisibility();
+        });
         stage.focusedProperty().addListener((obs, wasFocused, isFocused) -> {
             if (isFocused) {
                 currentlySelected().ifPresent(OpenSessionTab::focus);
@@ -421,7 +453,120 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     private void refreshReviewCounts() {
         reviewDestination.refreshCounts();
         reviewDestination.refreshReviewState();
+        refreshReviewTabBadge();
         onReviewQueueChanged.run();
+    }
+
+    /**
+     * Builds the pinned Review tab (nav §2). It carries no close button --
+     * the strip's close buttons are per-tab graphics, so "not closable" here
+     * simply means not drawing one -- and it is added before any session tab
+     * exists, which is what makes it leftmost from the first frame.
+     */
+    private void buildReviewTab() {
+        Label glyph = new Label("◨");
+        glyph.getStyleClass().add("review-tab-glyph");
+        Label title = new Label("Review");
+        title.getStyleClass().add("review-tab-label");
+        reviewTabBadge.getStyleClass().add("review-tab-badge");
+        HBox graphic = new HBox(7, glyph, title, reviewTabBadge);
+        graphic.setAlignment(Pos.CENTER_LEFT);
+
+        reviewTab.setGraphic(graphic);
+        reviewTab.setClosable(false);
+        reviewTab.setTooltip(new Tooltip("Review — local changes, agent worktrees and PRs (⌘4)"));
+        reviewTab.setContent(reviewDestination);
+        reviewTab.getStyleClass().add("review-tab");
+        // A TabPane keeps the last selected tab's content in its skin and
+        // goes on painting it when the selection is cleared, so with nothing
+        // selected the top of Review's title bar showed through the gap above
+        // the no-session panel (confirmed against a control run without this
+        // tab). Tying the content's own visibility to the tab settles it at
+        // the source instead of relying on the panel to mask it pixel for
+        // pixel. A listener, not a binding: the skin writes to this property
+        // too, and writing to a bound property throws.
+        reviewDestination.setVisible(false);
+        reviewTab.selectedProperty().addListener((obs, was, isSelected) ->
+                reviewDestination.setVisible(isSelected));
+        refreshReviewTabBadge();
+        tabPane.getTabs().add(reviewTab);
+        // A TabPane selects the first tab added to it, and its skin selects
+        // one again when it is created -- which would open the app IN Review.
+        // Review is a destination the user navigates to, so the cold start
+        // stays the ordinary no-session empty state. Clearing once here is
+        // not enough (the skin has not been built yet); the deferred pass is
+        // guarded so it cannot steal the selection from a session that
+        // auto-opened in the meantime.
+        tabPane.getSelectionModel().clearSelection();
+        Platform.runLater(() -> {
+            if (isReviewShowing() && openTabs.isEmpty() && pendingTabs.isEmpty()) {
+                tabPane.getSelectionModel().clearSelection();
+            }
+        });
+    }
+
+    /**
+     * The tab strip is drag-reorderable (it is the user's own ordering of the
+     * sessions they juggle), but Review is a fixed landmark: a destination
+     * that moves is one the eye has to hunt for. A drag that displaces it is
+     * undone rather than prevented -- JavaFX offers no per-tab drag veto.
+     *
+     * <p>Deferred to the next pulse because the only caller is the tab list's
+     * own change listener, and re-ordering a list from inside its change
+     * notification is how you get a {@code ConcurrentModificationException}
+     * out of JavaFX. {@link #repinScheduled} keeps a burst of changes to one
+     * deferred pass.</p>
+     */
+    private void pinReviewTabLeftmost() {
+        if (repinScheduled || tabPane.getTabs().indexOf(reviewTab) <= 0) {
+            return;
+        }
+        repinScheduled = true;
+        Platform.runLater(() -> {
+            repinScheduled = false;
+            var tabs = tabPane.getTabs();
+            int index = tabs.indexOf(reviewTab);
+            if (index <= 0) {
+                return;
+            }
+            Tab selected = tabPane.getSelectionModel().getSelectedItem();
+            tabs.remove(index);
+            tabs.add(0, reviewTab);
+            if (selected != null) {
+                tabPane.getSelectionModel().select(selected);
+            }
+        });
+    }
+
+    /** Guards {@link #pinReviewTabLeftmost} against stacking one deferred pass per change event. */
+    private boolean repinScheduled;
+
+    /** The count badge on the Review tab: how many items the queue is holding (nav §2). */
+    private void refreshReviewTabBadge() {
+        int items = reviewQueueSize();
+        reviewTabBadge.setText(items == 0 ? "" : String.valueOf(items));
+        reviewTabBadge.setVisible(items > 0);
+        reviewTabBadge.setManaged(items > 0);
+    }
+
+    /**
+     * Names the origin tab in Review's header, so the {@code ‹} affordance
+     * says where it goes (nav §3). An origin whose tab has since closed
+     * leaves no affordance at all rather than a button that goes nowhere.
+     */
+    private void updateReviewBackTarget() {
+        Tab origin = reviewOriginTab;
+        if (origin == null || !tabPane.getTabs().contains(origin)) {
+            reviewOriginTab = null;
+            reviewDestination.setBackTarget(Optional.empty(), null);
+            return;
+        }
+        String label = openTabs.values().stream()
+                .filter(open -> open.tab == origin)
+                .map(OpenSessionTab::displayName)
+                .findFirst()
+                .orElse("session");
+        reviewDestination.setBackTarget(Optional.of(label), this::hideReview);
     }
 
     /** Pushes the manager's current session snapshot into the view model (FX thread; no-op if unchanged). */
@@ -441,6 +586,10 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             open.setNeedsAttention(viewModel.activityOf(sessionId) == SessionActivity.NEEDS_ATTENTION);
             open.updatePrChip(session.prState(), session.prNumber());
         });
+        if (reviewOriginTab == open.tab) {
+            // A rename must not leave the ‹ affordance naming the old title.
+            updateReviewBackTarget();
+        }
     }
 
     /** The no-session-selected placeholder (the design's resume picker is parked; see constructor). */
@@ -455,6 +604,12 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         VBox box = new VBox(8, glyph, title, hint);
         box.setAlignment(Pos.CENTER);
         box.getStyleClass().add("main-pane");
+        // A StackPane only stretches a child up to its MAX size, and a VBox's
+        // max defaults to its preferred size -- so this opaque panel was being
+        // centred at content size, leaving the rest of the stack showing
+        // through. Harmless while nothing was underneath; now the pinned
+        // Review tab's content is, and it bled around the edges.
+        box.setMaxSize(Double.MAX_VALUE, Double.MAX_VALUE);
         return box;
     }
 
@@ -478,21 +633,36 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     }
 
     /**
+     * Where the tab strip actually ends, which is where the placeholder has
+     * to begin. {@link #TAB_STRIP_HEIGHT} is the design's figure and is a
+     * couple of pixels below the rendered header, which used to be invisible:
+     * with no tabs there was nothing underneath to show through the seam.
+     * The pinned Review tab put content there, and the top of its title bar
+     * appeared in the gap. Falls back to the design figure before the skin
+     * exists.
+     */
+    private double tabStripHeight() {
+        return tabPane.lookup(".tab-header-area") instanceof Region header && header.getHeight() > 0
+                ? header.getHeight()
+                : TAB_STRIP_HEIGHT;
+    }
+
+    /**
      * The empty state shows whenever no tab is selected. While tabs exist
      * it starts below the tab strip (so the strip stays clickable); with no
      * tabs at all it fills the pane.
      */
     private void updatePickerVisibility() {
-        // Review owns the whole centre while it is showing; the no-session
-        // placeholder underneath must not paint through the gaps.
-        boolean show = !reviewShowing && tabPane.getSelectionModel().getSelectedItem() == null;
+        boolean show = tabPane.getSelectionModel().getSelectedItem() == null;
+        // The pinned Review tab means the strip is never empty, so the
+        // placeholder always starts below it.
         boolean hasTabs = !tabPane.getTabs().isEmpty();
-        StackPane.setMargin(emptyState, new Insets(hasTabs ? TAB_STRIP_HEIGHT : 0, 0, 0, 0));
+        StackPane.setMargin(emptyState, new Insets(hasTabs ? tabStripHeight() : 0, 0, 0, 0));
         boolean unopenedShowing = show && unopenedWorktreeState != null;
         emptyState.setVisible(show && !unopenedShowing);
         emptyState.setManaged(show && !unopenedShowing);
         if (unopenedWorktreeState != null) {
-            StackPane.setMargin(unopenedWorktreeState, new Insets(hasTabs ? TAB_STRIP_HEIGHT : 0, 0, 0, 0));
+            StackPane.setMargin(unopenedWorktreeState, new Insets(hasTabs ? tabStripHeight() : 0, 0, 0, 0));
             unopenedWorktreeState.setVisible(unopenedShowing);
             unopenedWorktreeState.setManaged(unopenedShowing);
         }
@@ -525,6 +695,9 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         VBox box = new VBox(8, glyph, title, target, hint, start);
         box.setAlignment(Pos.CENTER);
         box.getStyleClass().add("main-pane");
+        // Fills the stack rather than being centred at content size; see
+        // buildEmptyState, which had the same defect for the same reason.
+        box.setMaxSize(Double.MAX_VALUE, Double.MAX_VALUE);
 
         unopenedWorktreeState = box;
         centerStack.getChildren().add(centerStack.getChildren().indexOf(newTabButton), box);
@@ -672,12 +845,16 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     }
 
     /**
-     * {@code ⌘4} from anywhere: navigates to the Review destination, scoped
-     * to the selected session's checkout when there is one (Review handoff
-     * §2). A navigation command, not a view switch -- Review spans
-     * repositories, so it cannot live inside one session's tab.
+     * {@code ⌘4}, a toggle (nav §4): from a session it opens Review scoped to
+     * that session's checkout and remembers the tab; from Review it returns
+     * to exactly that tab. A navigation command, not a view switch -- Review
+     * spans repositories, so it cannot live inside one session's tab.
      */
     public void showReviewForCurrentSession() {
+        if (isReviewShowing()) {
+            hideReview();
+            return;
+        }
         Optional<Path> checkout = currentlySelected()
                 .map(OpenSessionTab::sessionId)
                 .flatMap(id -> sessionManager.sessions().stream()
@@ -693,14 +870,14 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
     /**
      * Shows the Review destination, keeping whatever the queue already had
-     * selected. Review is a scene-graph view stacked over the tab pane, so
-     * this must hide every native terminal exactly as the Explorer swap does
-     * -- the ghostty surfaces paint above the whole JavaFX scene and would
-     * otherwise sit on top of it.
+     * selected. Selecting the tab is the whole navigation: the session tabs
+     * stay in the strip behind it, and the ghostty surfaces -- which paint
+     * above the whole JavaFX scene -- go hidden because none of their tabs is
+     * the selected one any more (see {@link #updateTerminalVisibility}).
      */
     @Override
     public void showReview() {
-        setReviewShowing(true);
+        enterReview();
     }
 
     /**
@@ -714,18 +891,18 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         // Recorded before the refresh is kicked off, so the completion
         // handler cannot land on a null request.
         pendingReviewSelection = checkoutRoot;
-        setReviewShowing(true);
+        enterReview();
         selectReviewScopeFor(checkoutRoot);
     }
 
     /** Whether Review currently owns the centre (the Esc unwind order asks). */
     public boolean isReviewShowing() {
-        return reviewShowing;
+        return tabPane.getSelectionModel().getSelectedItem() == reviewTab;
     }
 
     /** Whether {@code ⌘F} belongs to the Review queue's filter rather than the sidebar's. */
     public boolean isReviewQueueFilterable() {
-        return reviewShowing && reviewDestination.queueFilterAvailable();
+        return isReviewShowing() && reviewDestination.queueFilterAvailable();
     }
 
     /** Focuses the Review queue's quick-search field ({@code ⌘F}). */
@@ -739,42 +916,38 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * should move on and leave Review altogether.
      */
     public boolean unwindReviewOverlay() {
-        return reviewShowing && reviewDestination.unwindOne();
-    }
-
-    /** Leaves Review, restoring the tab pane and the selected tab's terminal. */
-    public void hideReview() {
-        setReviewShowing(false);
+        return isReviewShowing() && reviewDestination.unwindOne();
     }
 
     /**
-     * The one writer of {@link #reviewShowing}. Restoring the terminals goes
-     * through {@link #updateTerminalVisibility} and then re-runs geometry on
-     * the next pulse: the centre swap only invalidates the placeholder's
-     * bounds at the next layout pass, so the native frame would otherwise
-     * track stale bounds (the same ordering {@code OpenSessionTab.showSubTab}
-     * relies on).
+     * Returns to the tab Review was entered from (nav §4): {@code ⌘4} again,
+     * top-level Esc, and the header's {@code ‹}. With no live origin the
+     * selection is simply cleared, which shows the ordinary empty state --
+     * guessing at another tab would move the user somewhere they never were.
      */
-    private void setReviewShowing(boolean showing) {
-        if (reviewShowing == showing) {
-            if (showing) {
-                reviewDestination.onShown();
-            }
+    public void hideReview() {
+        if (!isReviewShowing()) {
             return;
         }
-        reviewShowing = showing;
-        reviewDestination.setVisible(showing);
-        reviewDestination.setManaged(showing);
-        tabPane.setVisible(!showing);
-        newTabButton.setVisible(!showing);
-        newTabButton.setManaged(!showing);
-        updatePickerVisibility();
-        updateTerminalVisibility();
-        if (showing) {
-            reviewDestination.onShown();
+        if (reviewOriginTab != null && tabPane.getTabs().contains(reviewOriginTab)) {
+            tabPane.getSelectionModel().select(reviewOriginTab);
         } else {
-            Platform.runLater(() -> currentlySelected().ifPresent(OpenSessionTab::updateGeometryNow));
+            tabPane.getSelectionModel().clearSelection();
         }
+    }
+
+    /**
+     * Selects the Review tab. The origin is recorded by the selection
+     * listener, not here, so that every route into Review remembers it.
+     */
+    private void enterReview() {
+        if (isReviewShowing()) {
+            // Already here: the selection listener will not fire, so the
+            // queue refresh it normally triggers has to happen explicitly.
+            reviewDestination.onShown();
+            return;
+        }
+        tabPane.getSelectionModel().select(reviewTab);
     }
 
     /**
@@ -803,6 +976,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                         selectReviewScopeFor(pendingReviewSelection);
                         pendingReviewSelection = null;
                     }
+                    refreshReviewTabBadge();
                     onReviewQueueChanged.run();
                 }));
     }
@@ -1347,16 +1521,16 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
     /**
      * The single rule for whether a tab's native terminal paints: it must be
-     * the selected tab, no modal may be up, and Review must not own the
-     * centre. Three independent conditions with one writer -- the bug this
-     * prevents is a modal closing over Review and un-hiding the terminal
-     * through it, because the native view overlays the whole scene.
+     * the selected tab and no modal may be up. Review needs no clause of its
+     * own now that it is a tab -- while it is selected no session tab is, so
+     * every surface is already hidden. The bug this prevents is a modal
+     * closing over Review and un-hiding a terminal through it, because the
+     * native view overlays the whole scene.
      */
     private void updateTerminalVisibility() {
         Tab selected = tabPane.getSelectionModel().getSelectedItem();
-        boolean allowed = !terminalsObscured && !reviewShowing;
         for (OpenSessionTab open : openTabs.values()) {
-            open.setVisible(allowed && open.tab == selected);
+            open.setVisible(!terminalsObscured && open.tab == selected);
         }
     }
 
@@ -1881,7 +2055,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         placeholderTab.setDisplayName(opened.session().displayName());
         placeholderTab.setStatus(opened.session().status());
         openTabs.put(opened.session().id(), placeholderTab);
-        placeholderTab.setVisible(!terminalsObscured && !reviewShowing
+        placeholderTab.setVisible(!terminalsObscured
                 && tabPane.getSelectionModel().getSelectedItem() == placeholderTab.tab);
         opened.session().worktreeRoot().ifPresent(root ->
                 worktreeLifecycle.setupWorktreeHeader(placeholderTab, opened.session().id(), root));
@@ -2090,6 +2264,35 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         currentlySelected().ifPresent(open -> open.diagTypeInExplorer(text));
     }
 
+    /** Diagnostic-only: the widths Review's drill-in resolved to (visual verification harness). */
+    public String diagReviewLayout() {
+        return reviewDestination.diagLayoutWidths();
+    }
+
+    /**
+     * Diagnostic-only: delivers one key to the Review view, so the visual
+     * pass can drive the narrow drill-in's {@code ⏎} / {@code esc} page
+     * transitions -- which is the only way to photograph the Detail page.
+     * Reports the page Review is on afterwards.
+     */
+    public String diagReviewKey(String keyCode) {
+        javafx.scene.input.KeyCode code;
+        try {
+            code = javafx.scene.input.KeyCode.valueOf(keyCode.strip().toUpperCase(java.util.Locale.ROOT));
+        } catch (IllegalArgumentException e) {
+            return "unknown key " + keyCode;
+        }
+        if (code == javafx.scene.input.KeyCode.ESCAPE) {
+            // Esc is owned by the scene filter, not by Review's key table, so
+            // firing it at the view would prove nothing about the real chain.
+            return unwindReviewOverlay() ? reviewDestination.diagNarrowPage() : "would leave review";
+        }
+        reviewDestination.fireEvent(new javafx.scene.input.KeyEvent(
+                javafx.scene.input.KeyEvent.KEY_PRESSED, "", "", code,
+                false, false, false, false));
+        return reviewDestination.diagNarrowPage();
+    }
+
     /**
      * Diagnostic-only: shows the Review destination and returns it, so the
      * automated visual pass can screenshot a populated queue -- the FX layer
@@ -2250,6 +2453,11 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         // has (in the closing case) already closed by this point -- see
         // OpenSessionTab.markSurfaceClosing()'s Javadoc.
         openTab.markSurfaceClosing();
+        if (reviewOriginTab == openTab.tab) {
+            // The way back just closed; Review must not offer to return to it.
+            reviewOriginTab = null;
+            reviewDestination.setBackTarget(Optional.empty(), null);
+        }
         tabPane.getTabs().remove(openTab.tab);
         openTabs.remove(openTab.sessionId(), openTab);
         pendingTabs.remove(openTab.sessionId(), openTab);

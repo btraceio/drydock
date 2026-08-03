@@ -361,6 +361,29 @@
     -fx-padding: 0;
 }
 
+/* The pinned Review tab (nav 2): a landmark, so it reads as a destination
+ * rather than as one more session -- accent glyph, no repo line, no close. */
+.review-tab-glyph {
+    -fx-text-fill: -drydock-accent;
+    -fx-font-size: 12px;
+}
+.review-tab-label {
+    -fx-font-size: 12.5px;
+    -fx-font-weight: 600;
+    -fx-text-fill: -drydock-text-dim;
+}
+.tab:selected .review-tab-label {
+    -fx-text-fill: -drydock-text;
+}
+.review-tab-badge {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-background-radius: 12px;
+    -fx-text-fill: -drydock-accent;
+    -fx-font-size: 10px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-padding: 1 7 1 7;
+}
+
 .tab-repo-label {
     -fx-font-family: "JetBrains Mono", "Menlo", monospace;
     -fx-font-size: 9.5px;
@@ -2153,6 +2176,26 @@
 }
 
 /* The pill-shaped chip buttons of the title bar and the session row. */
+/* The ‹ affordance back to the tab Review was entered from (nav 3). */
+.review-back-button {
+    -fx-background-color: transparent;
+    -fx-background-radius: 6px;
+    -fx-border-color: transparent;
+    -fx-border-radius: 6px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 11px;
+    -fx-padding: 3 8 3 6;
+    -fx-cursor: hand;
+}
+.review-back-button:hover {
+    -fx-background-color: -drydock-hover;
+    -fx-text-fill: -drydock-text;
+}
+.review-back-button:focused {
+    -fx-border-color: -drydock-accent;
+    -fx-text-fill: -drydock-text;
+}
+
 .review-chip-button {
     -fx-background-color: transparent;
     -fx-background-radius: 12px;
@@ -2383,43 +2426,7 @@
     -fx-padding: 8 10 8 10;
 }
 
-/* Sidebar destination row + the per-worktree open-findings badge. */
-.sidebar-destination {
-    -fx-background-color: transparent;
-    -fx-background-radius: 8px;
-    -fx-border-color: transparent;
-    -fx-border-radius: 8px;
-    -fx-padding: 7 10 7 10;
-    -fx-alignment: center-left;
-    -fx-cursor: hand;
-    -fx-max-width: 1000px;
-}
-.sidebar-destination:hover {
-    -fx-background-color: -drydock-hover;
-}
-.sidebar-destination:focused {
-    -fx-border-color: -drydock-accent;
-}
-.sidebar-destination.active {
-    -fx-background-color: -drydock-accent-soft;
-}
-.sidebar-destination-glyph {
-    -fx-text-fill: -drydock-accent;
-    -fx-font-size: 12px;
-}
-.sidebar-destination-label {
-    -fx-text-fill: -drydock-text;
-    -fx-font-size: 12px;
-    -fx-font-weight: 600;
-}
-.sidebar-destination-badge {
-    -fx-background-color: -drydock-accent-soft;
-    -fx-background-radius: 12px;
-    -fx-text-fill: -drydock-accent;
-    -fx-font-size: 10px;
-    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
-    -fx-padding: 1 7 1 7;
-}
+/* The per-worktree open-findings badge (Review handoff 2). */
 .worktree-findings-badge {
     -fx-background-color: -drydock-question-soft;
     -fx-background-radius: 6px;

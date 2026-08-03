@@ -52,6 +52,26 @@ public final class ReviewDestinationView extends BorderPane {
     private static final double INTENT_COLLAPSE_WIDTH = 1040;
     private static final double MARGIN_COLLAPSE_WIDTH = 880;
 
+    /**
+     * Below this width the three-column layout is replaced by two alternating
+     * pages (spec §4.9). The auto-collapse thresholds above only ever shrink a
+     * rail; below 980px shrinking them further produced 44/40px slivers that
+     * could not be expanded, so the whole tab became unusable. Two full-width
+     * pages is the answer, not a fourth threshold.
+     */
+    private static final double DRILL_IN_WIDTH = 980;
+
+    /** The share of the Browse page each rail takes; the rest is the intent rail. */
+    private static final double BROWSE_QUEUE_FRACTION = 0.44;
+
+    /** Which of the two narrow pages is showing. Meaningless at or above {@link #DRILL_IN_WIDTH}. */
+    private enum NarrowPage {
+        /** Queue and intents side by side, full width. */
+        BROWSE,
+        /** The diff column and findings margin own the window. */
+        DETAIL
+    }
+
     /** What the view needs from the workspace. All calls happen on the FX thread. */
     public interface Host {
         /** Reassembles the queue (called when Review is shown). */
@@ -179,10 +199,31 @@ public final class ReviewDestinationView extends BorderPane {
     /** Set by {@code m}/{@code f}; remembered independently of the responsive collapse. */
     private boolean marginCollapsedByUser;
 
+    /**
+     * The findings margin's state on the narrow Detail page, remembered
+     * independently of {@link #marginCollapsedByUser} the same way every
+     * other rail's manual state is. Starts collapsed: Detail exists to give
+     * the code the window.
+     */
+    private boolean narrowMarginCollapsed = true;
+
     /** Set by {@code i}/{@code f}; remembered independently of the responsive collapse. */
     private boolean intentsCollapsedByUser;
 
     private final Label countsLabel = new Label();
+
+    /**
+     * The {@code ‹} affordance naming the tab Review was entered from
+     * (nav §3). Review is a pinned tab beside the sessions, so this is a
+     * convenience, not the only way back -- clicking the session's own tab
+     * works too. Hidden when nothing set an origin.
+     */
+    private final Button backButton = new Button();
+    private Runnable onBack = () -> { };
+
+    /** The narrow Detail page's {@code ‹ queue} chip (spec §4.9). */
+    private final Button queueBackChip = new Button("‹ queue");
+
     private final Label headerIcon = new Label();
     private final Label headerTitle = new Label();
     private final Label headerContext = new Label();
@@ -199,6 +240,20 @@ public final class ReviewDestinationView extends BorderPane {
 
     /** Set by {@code q}/{@code f}; remembered independently of the responsive collapse (spec §4.9). */
     private boolean queueCollapsedByUser;
+
+    /** The two halves of the layout, swapped between {@code left}/{@code centre} by the drill-in. */
+    private final HBox rails = new HBox(queue, intentRail);
+    private Region centre;
+
+    /** True while the window is below {@link #DRILL_IN_WIDTH}. */
+    private boolean drilledIn;
+
+    /**
+     * Which narrow page to show. Remembered across resizes so shrinking the
+     * window mid-review lands on the diff being read rather than back at the
+     * queue (spec §4.9).
+     */
+    private NarrowPage narrowPage = NarrowPage.BROWSE;
 
     public ReviewDestinationView(Host host, app.drydock.git.DiffService diffService) {
         this(host, diffService, null);
@@ -218,13 +273,22 @@ public final class ReviewDestinationView extends BorderPane {
         this.checkoutGate = new ReviewCheckoutGate(new GateHost());
         this.verdictBar = new ReviewVerdictBar(new VerdictHost());
         getStyleClass().add("review-destination");
+        // Review must never hold the window open. Its computed minimum is the
+        // sum of the rails' and the margin's own minimums (236 + 232 + 336 +
+        // the code column), around 900px -- so below that the content pane
+        // stopped shrinking and simply overflowed the right edge of the
+        // window, taking the intent rail off-screen with it. That is the
+        // "unusable at narrow widths" this drill-in exists to fix, and no
+        // amount of re-splitting the rails would have fixed it: the view has
+        // to be allowed to be as narrow as the slot it is given.
+        setMinWidth(0);
 
         setTop(buildTitleBar());
         // Queue then intents, left to right, exactly as the anatomy lays them
         // out; the centre carries the code, the margin and the verdict bar.
-        HBox rails = new HBox(queue, intentRail);
+        centre = buildCenter();
         setLeft(rails);
-        setCenter(buildCenter());
+        setCenter(centre);
 
         queue.setOnSelected(this::showItem);
         queue.setOnToggleCollapse(() -> setQueueCollapsed(!queue.collapsed()));
@@ -241,6 +305,10 @@ public final class ReviewDestinationView extends BorderPane {
                 intentIndex = index;
                 refreshReviewState();
                 revealCurrentIntent();
+                // Picking an intent IS the drill-in gesture (spec §4.9), and
+                // recording it wide is what makes a later shrink land on the
+                // diff being read rather than back at the queue.
+                showNarrowPage(NarrowPage.DETAIL);
             }
         });
         margin.setOnFilterChanged(filter -> refreshReviewState());
@@ -252,6 +320,9 @@ public final class ReviewDestinationView extends BorderPane {
         diffColumn.setOnDiffLoaded(this::refreshReviewState);
 
         widthProperty().addListener((obs, old, width) -> applyResponsiveLayout(width.doubleValue()));
+        // The Browse split follows the rails' own width on every layout pass,
+        // not just on the pass that crossed the threshold -- see applyBrowseSpans.
+        rails.widthProperty().addListener((obs, old, width) -> applyBrowseSpans());
         addEventFilter(KeyEvent.KEY_PRESSED, this::onKeyPressed);
         setFocusTraversable(true);
         showItem(null);
@@ -260,6 +331,10 @@ public final class ReviewDestinationView extends BorderPane {
     // ---- title bar ----------------------------------------------------------
 
     private Region buildTitleBar() {
+        backButton.getStyleClass().add("review-back-button");
+        backButton.setOnAction(e -> onBack.run());
+        setBackTarget(Optional.empty(), null);
+
         Label glyph = new Label("◨");
         glyph.getStyleClass().add("review-title-glyph");
         Label title = new Label("Review");
@@ -284,11 +359,25 @@ public final class ReviewDestinationView extends BorderPane {
         shortcuts.setTooltip(new Tooltip("Shortcuts (?)"));
         shortcuts.setOnAction(e -> host.showShortcuts());
 
-        HBox bar = new HBox(8, glyph, title, countsLabel, spacer, reviewerButton, densityButton,
-                shortcuts);
+        HBox bar = new HBox(8, backButton, glyph, title, countsLabel, spacer, reviewerButton,
+                densityButton, shortcuts);
         bar.setAlignment(Pos.CENTER_LEFT);
         bar.getStyleClass().add("review-title-bar");
         return bar;
+    }
+
+    /**
+     * Names the tab Review was entered from, and what clicking {@code ‹}
+     * should do (nav §3). An empty label hides the affordance outright: a
+     * back button that goes nowhere is worse than no back button.
+     */
+    public void setBackTarget(Optional<String> label, Runnable handler) {
+        this.onBack = handler == null ? () -> { } : handler;
+        boolean present = label.isPresent() && handler != null;
+        backButton.setText(label.map(text -> "‹  " + text).orElse("‹"));
+        backButton.setTooltip(label.map(text -> new Tooltip("Back to " + text + " (⌘4)")).orElse(null));
+        backButton.setVisible(present);
+        backButton.setManaged(present);
     }
 
     // ---- centre -------------------------------------------------------------
@@ -297,9 +386,15 @@ public final class ReviewDestinationView extends BorderPane {
         headerIcon.getStyleClass().add("review-item-icon");
         headerTitle.getStyleClass().add("review-item-title");
         headerContext.getStyleClass().add("review-item-context");
+        queueBackChip.getStyleClass().add("review-chip-button");
+        queueBackChip.setTooltip(new Tooltip("Back to the queue (esc)"));
+        queueBackChip.setOnAction(e -> showNarrowPage(NarrowPage.BROWSE));
+        queueBackChip.setVisible(false);
+        queueBackChip.setManaged(false);
+
         Region row1Spacer = new Region();
         HBox.setHgrow(row1Spacer, Priority.ALWAYS);
-        HBox row1 = new HBox(9, headerIcon, headerTitle, headerContext, row1Spacer);
+        HBox row1 = new HBox(9, queueBackChip, headerIcon, headerTitle, headerContext, row1Spacer);
         row1.setAlignment(Pos.CENTER_LEFT);
         row1.getStyleClass().add("review-item-header-row");
 
@@ -811,8 +906,34 @@ public final class ReviewDestinationView extends BorderPane {
      * crushed (spec §4.9). A manual collapse is remembered separately: a
      * user who collapsed the queue keeps it collapsed when the window grows
      * back, and one who did not gets it back.
+     *
+     * <p>Below {@link #DRILL_IN_WIDTH} that trade stops working -- there is
+     * no width left to trade -- and the layout becomes two alternating
+     * full-width pages instead. The user's collapse flags are read, never
+     * written, here, so crossing the threshold in either direction restores
+     * exactly what they chose.</p>
      */
     private void applyResponsiveLayout(double width) {
+        // A width of 0 is the pre-layout state, not a narrow window; drilling
+        // in there would flash the Browse page on every first show.
+        boolean narrowNow = width > 0 && width < DRILL_IN_WIDTH;
+        if (narrowNow) {
+            applyDrillInLayout(width);
+            return;
+        }
+        if (drilledIn) {
+            drilledIn = false;
+            queue.setSpanWidth(0);
+            intentRail.setSpanWidth(0);
+            queueBackChip.setVisible(false);
+            queueBackChip.setManaged(false);
+            // Centre first: coming back from Browse the rails ARE the centre,
+            // and a BorderPane rejects the same node in two slots at once.
+            setCenter(centre);
+            setLeft(rails);
+        }
+        rails.setVisible(true);
+        rails.setManaged(true);
         queue.setNarrow(width < NARROW_WIDTH);
         queue.setCollapsed(queueCollapsedByUser || width < QUEUE_COLLAPSE_WIDTH);
         intentRail.setNarrow(width < NARROW_WIDTH);
@@ -821,17 +942,113 @@ public final class ReviewDestinationView extends BorderPane {
         margin.setCollapsed(marginCollapsedByUser || width < MARGIN_COLLAPSE_WIDTH);
     }
 
+    /**
+     * The narrow drill-in (spec §4.9). Browse gives the two rails the whole
+     * window; Detail gives it to the diff and its margin and hides the rails
+     * outright -- hidden, not collapsed, because a collapsed rail here is the
+     * unusable sliver the drill-in exists to remove.
+     */
+    private void applyDrillInLayout(double width) {
+        drilledIn = true;
+        boolean browsing = narrowPage == NarrowPage.BROWSE;
+
+        // Both rails must be readable on Browse regardless of what the user
+        // collapsed at a wider size; those flags are left untouched so the
+        // wide layout gets them back.
+        queue.setCollapsed(false);
+        intentRail.setCollapsed(false);
+        queue.setNarrow(true);
+        intentRail.setNarrow(true);
+        margin.setNarrow(true);
+        // The Detail page's margin has its own remembered state, defaulting
+        // to collapsed: at 610px an expanded 286px margin leaves the code
+        // column ~300px, which is the crushed diff this drill-in exists to
+        // prevent. Reusing the wide layout's auto-collapse threshold instead
+        // would have made `m` a dead key here -- the threshold would just
+        // re-collapse whatever the user expanded.
+        margin.setCollapsed(narrowMarginCollapsed);
+
+        rails.setVisible(browsing);
+        rails.setManaged(browsing);
+        queueBackChip.setVisible(!browsing);
+        queueBackChip.setManaged(!browsing);
+
+        if (browsing) {
+            setLeft(null);
+            setCenter(rails);
+            applyBrowseSpans();
+        } else {
+            queue.setSpanWidth(0);
+            intentRail.setSpanWidth(0);
+            setLeft(null);
+            setCenter(centre);
+        }
+    }
+
+    /**
+     * Splits the Browse page between the two rails, from the width the rails
+     * container ACTUALLY has.
+     *
+     * <p>Deriving it from this view's width instead was wrong in the way only
+     * the real app shows: after a window resize the view keeps its old width
+     * for several layout passes (measured: 896px inside a 610px slot, with
+     * the sidebar still to be subtracted), so the intent rail was sized from
+     * the whole window and ran off the right edge. The rails container is a
+     * BorderPane slot -- its width is handed down by the parent and never
+     * depends on these children -- so reading it here cannot feed back.</p>
+     */
+    private void applyBrowseSpans() {
+        if (!drilledIn || narrowPage != NarrowPage.BROWSE) {
+            return;
+        }
+        double available = rails.getWidth();
+        if (available <= 0) {
+            return;
+        }
+        double queueWidth = Math.floor(available * BROWSE_QUEUE_FRACTION);
+        queue.setSpanWidth(queueWidth);
+        intentRail.setSpanWidth(Math.max(0, available - queueWidth));
+    }
+
+    /**
+     * Switches narrow pages. A no-op wide, where both halves are already on
+     * screen -- but the page is still recorded, so shrinking afterwards lands
+     * where the user last was.
+     */
+    private void showNarrowPage(NarrowPage page) {
+        narrowPage = page;
+        applyResponsiveLayout(getWidth());
+    }
+
+    /**
+     * {@code q} / {@code i} collapse a rail -- and are inert while drilled
+     * in, where the rails are whole pages rather than columns. Flipping the
+     * flag there would have looked like a dead key and then taken effect
+     * minutes later, when the window was widened again.
+     */
     private void setQueueCollapsed(boolean collapsed) {
+        if (drilledIn) {
+            return;
+        }
         queueCollapsedByUser = collapsed;
         applyResponsiveLayout(getWidth());
     }
 
+    /** {@code m}: writes whichever remembered state the current layout reads. */
     private void setMarginCollapsed(boolean collapsed) {
-        marginCollapsedByUser = collapsed;
+        if (drilledIn) {
+            narrowMarginCollapsed = collapsed;
+        } else {
+            marginCollapsedByUser = collapsed;
+        }
         applyResponsiveLayout(getWidth());
     }
 
+    /** See {@link #setQueueCollapsed} -- inert while drilled in, for the same reason. */
     private void setIntentsCollapsed(boolean collapsed) {
+        if (drilledIn) {
+            return;
+        }
         intentsCollapsedByUser = collapsed;
         applyResponsiveLayout(getWidth());
     }
@@ -842,6 +1059,12 @@ public final class ReviewDestinationView extends BorderPane {
      * one-way collapse, or the second press would be a dead key.
      */
     private void setFocusMode(boolean on) {
+        if (drilledIn) {
+            // Detail already IS focus mode -- code and findings own the whole
+            // window there -- and Browse has no code to focus on. Writing the
+            // flags anyway would ambush the user the next time they widened.
+            return;
+        }
         queueCollapsedByUser = on;
         intentsCollapsedByUser = on;
         marginCollapsedByUser = on;
@@ -958,7 +1181,17 @@ public final class ReviewDestinationView extends BorderPane {
             case A -> { verdictAction(ReviewVerdict.Decision.APPROVED); yield true; }
             case R -> { verdictAction(ReviewVerdict.Decision.CHANGES); yield true; }
             case U -> { undoVerdict(); yield true; }
-            case ENTER -> { submitReview(); yield true; }
+            // Narrow Browse has no verdict bar and nothing to submit, so
+            // Enter is the drill-in there instead (spec §4.9); everywhere
+            // else it stays Submit.
+            case ENTER -> {
+                if (drilledIn && narrowPage == NarrowPage.BROWSE) {
+                    showNarrowPage(NarrowPage.DETAIL);
+                } else {
+                    submitReview();
+                }
+                yield true;
+            }
             // Shift+F is the whole-review filter; plain f is focus mode.
             case F -> {
                 if (event.isShiftDown()) {
@@ -978,9 +1211,13 @@ public final class ReviewDestinationView extends BorderPane {
 
     /**
      * Escape's unwind, topmost-first (spec §5): the symbol-lens popover,
-     * then the MCP activity panel, then Review itself. Returns whether
-     * something was closed, so the scene filter knows whether to keep
-     * unwinding.
+     * then the MCP activity panel, then the narrow Detail page, then Review
+     * itself. Returns whether something was closed, so the scene filter knows
+     * whether to keep unwinding.
+     *
+     * <p>The Detail page is the last step before leaving: only from Browse
+     * does Escape return to the origin tab (spec §4.9), so a reader deep in a
+     * diff cannot lose the whole surface to one keystroke.</p>
      */
     public boolean unwindOne() {
         if (diffColumn.lensOpen()) {
@@ -989,6 +1226,10 @@ public final class ReviewDestinationView extends BorderPane {
         }
         if (mcpPanel.filter(javafx.scene.Node::isVisible).isPresent()) {
             toggleMcpPanel();
+            return true;
+        }
+        if (drilledIn && narrowPage == NarrowPage.DETAIL) {
+            showNarrowPage(NarrowPage.BROWSE);
             return true;
         }
         return false;
@@ -1063,6 +1304,22 @@ public final class ReviewDestinationView extends BorderPane {
             }
         }
         return anchors;
+    }
+
+    /**
+     * Diagnostic-only: which narrow page is showing, or {@code "wide"} above
+     * {@link #DRILL_IN_WIDTH}. The drill-in has no other observable output --
+     * it only moves nodes between the layout's slots -- so this is what the
+     * tests and the visual pass assert against.
+     */
+    public String diagNarrowPage() {
+        return drilledIn ? narrowPage.name().toLowerCase(java.util.Locale.ROOT) : "wide";
+    }
+
+    /** Diagnostic-only: the widths the drill-in actually resolved to, for the visual pass. */
+    public String diagLayoutWidths() {
+        return diagNarrowPage() + " view=" + (int) getWidth() + " rails=" + (int) rails.getWidth()
+                + " queue=" + (int) queue.getWidth() + " intents=" + (int) intentRail.getWidth();
     }
 
     /** Diagnostic-only: every queue item, filtered or not (visual verification harness). */

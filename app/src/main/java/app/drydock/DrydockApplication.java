@@ -228,7 +228,6 @@ public final class DrydockApplication extends Application {
         RepositorySidebar sidebar =
                 new RepositorySidebar(repositoryManager, gitStatusService, worktreeService, sessionManager,
                         agentRegistry, mainWorkspace, viewModel);
-        sidebar.setReviewQueueSize(mainWorkspace::reviewQueueSize);
         sidebar.setOpenFindingsAt(mainWorkspace::openFindingsAt);
         mainWorkspace.setOnReviewQueueChanged(sidebar::refreshReviewBadges);
 
@@ -487,8 +486,12 @@ public final class DrydockApplication extends Application {
         // comma-separated script of "<delaySeconds>:<verb>[:<arg>]" steps,
         // e.g. "14:open:src/notes.txt,17:type:XX,21:mark:saved". Verbs:
         // open (switch to the Explorer and open a repo-relative file), type
-        // (insert text through the real textProperty listener), mark (just
-        // print a marker so the screenshotting harness can synchronise).
+        // (insert text through the real textProperty listener), shot (write a
+        // scene snapshot), resize (WxH -- the only way to photograph Review's
+        // narrow drill-in, whose whole behaviour is a width threshold),
+        // reviewkey (deliver one KeyCode to the Review view, so the ⏎/esc
+        // page transitions can be driven), mark (just print a marker so the
+        // screenshotting harness can synchronise).
         // Each step's delay is measured from startup. Inert unless
         // -Dapp.drydock.diag.explorerScript is set.
         String explorerScript = System.getProperty("app.drydock.diag.explorerScript");
@@ -519,7 +522,17 @@ public final class DrydockApplication extends Application {
                                 System.out.println("[diag] explorer typed " + arg.length() + " chars");
                             }
                             case "shot" -> diagSnapshot(primaryStage, Path.of(arg));
-                            default -> System.out.println("[diag] mark " + arg);
+                            case "resize" -> {
+                                diagWindowSize(arg).ifPresent(size -> {
+                                    primaryStage.setWidth(size[0]);
+                                    primaryStage.setHeight(size[1]);
+                                });
+                                System.out.println("[diag] resized to " + arg);
+                            }
+                            case "reviewkey" -> System.out.println("[diag] reviewkey " + arg + " -> "
+                                    + mainWorkspace.diagReviewKey(arg));
+                            default -> System.out.println("[diag] mark " + arg + " · review "
+                                    + mainWorkspace.diagReviewLayout());
                         }
                     });
                 }
@@ -863,8 +876,12 @@ public final class DrydockApplication extends Application {
     }
 
     private static Optional<double[]> diagWindowSize() {
-        String raw = System.getProperty("app.drydock.diag.windowSize");
-        if (raw == null) {
+        return diagWindowSize(System.getProperty("app.drydock.diag.windowSize"));
+    }
+
+    /** Parses a {@code WxH} size; empty for null or anything unparseable. */
+    private static Optional<double[]> diagWindowSize(String raw) {
+        if (raw == null || raw.isBlank()) {
             return Optional.empty();
         }
         String[] parts = raw.toLowerCase(java.util.Locale.ROOT).split("x");
