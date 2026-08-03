@@ -1176,8 +1176,8 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         }
 
         @Override
-        public List<ReviewIntent> intents(ReviewScope scope) {
-            return intentGrouping.intentsFor(scope.id(), reviewDestination.currentDiff());
+        public List<ReviewIntent> intents(ReviewScope scope, UnifiedDiff diff) {
+            return intentGrouping.intentsFor(scope.id(), diff);
         }
 
         @Override

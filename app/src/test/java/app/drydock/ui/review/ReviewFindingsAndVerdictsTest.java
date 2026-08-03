@@ -381,6 +381,8 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
         // diff is what the by-file intent fallback groups.
         interact(() -> view.setItems(List.of(new ReviewItem(minted, ReviewItem.Group.AGENTS,
                 "feat", "drydock · vs master")), 1));
+        interact(() -> view.diagPublishOutcome(minted.id(),
+                new DiffOutcome.Loaded(host.diff)));
         interact(view::refreshReviewState);
         WaitForAsyncUtils.waitForFxEvents();
     }

@@ -51,9 +51,6 @@ class ReviewIntentFallbackTest extends ApplicationTest {
             throw new UncheckedIOException(e);
         }
         view = new ReviewDestinationView(host, diffService);
-        // Exactly what MainWorkspace does: the fallback groups the diff the
-        // column is actually showing, not a second one read elsewhere.
-        host.diffSource = view::currentDiff;
         Scene scene = new Scene(view, 1400, 900);
         scene.getStylesheets().addAll(
                 getClass().getResource("/app/drydock/ui/app.css").toExternalForm(),

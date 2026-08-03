@@ -105,8 +105,18 @@ public final class ReviewDestinationView extends BorderPane {
         /** Every finding of {@code scope}, newest state (the store is the truth). */
         List<ReviewAnnotation> findings(ReviewScope scope);
 
-        /** The intents of {@code scope}: the reviewer's grouping, or the by-file fallback. */
-        List<ReviewIntent> intents(ReviewScope scope);
+        /**
+         * The intents of {@code scope}, grouping {@code diff}: the reviewer's
+         * grouping when one was supplied, otherwise one intent per changed
+         * file of the diff handed in.
+         *
+         * <p>The diff is a parameter rather than something the host fetches,
+         * because the only correct diff here is the one the caller has
+         * already established belongs to {@code scope}. A host that looked it
+         * up would be free to look up the wrong one, which is exactly the
+         * defect this shape removes.</p>
+         */
+        List<ReviewIntent> intents(ReviewScope scope, app.drydock.git.UnifiedDiff diff);
 
         /** The verdict recorded on one intent, if any. */
         Optional<ReviewVerdict> verdict(ReviewScope scope, ReviewIntent intent);
@@ -192,6 +202,13 @@ public final class ReviewDestinationView extends BorderPane {
 
     /** Scopes the human chose to read without a checkout ({@code Read the patch only}). */
     private final java.util.Map<String, app.drydock.git.UnifiedDiff> patchOnlyDiffs = new java.util.HashMap<>();
+
+    /**
+     * What each scope's diff attempt produced, keyed by scope id. A scope
+     * absent from this map has no diff -- which is a state, not a reason to
+     * reach for someone else's.
+     */
+    private final java.util.Map<String, DiffOutcome> outcomeByScope = new java.util.HashMap<>();
 
     /** The intent the verdict bar is settling; {@code [} / {@code ]} / {@code n} move it. */
     private int intentIndex;
@@ -317,7 +334,16 @@ public final class ReviewDestinationView extends BorderPane {
         // arrives asynchronously -- so the verdict bar has to be re-rendered
         // when it lands, or it stays on the "no intent" it correctly computed
         // from an empty diff and never recovers.
-        diffColumn.setOnDiffResolved((scopeId, outcome) -> refreshReviewState());
+        diffColumn.setOnDiffResolved((scopeId, outcome) -> {
+            outcomeByScope.put(scopeId, outcome);
+            // Only the selected scope's arrival changes what is on screen;
+            // a superseded one still records its outcome, so coming back to
+            // it does not re-run git.
+            if (selectedScope().map(scope -> scope.id().equals(scopeId)).orElse(false)) {
+                refreshReviewState();
+                revealCurrentIntent();
+            }
+        });
 
         widthProperty().addListener((obs, old, width) -> applyResponsiveLayout(width.doubleValue()));
         // The Browse split follows the rails' own width on every layout pass,
@@ -447,6 +473,9 @@ public final class ReviewDestinationView extends BorderPane {
     public void setItems(List<ReviewItem> items, int repositoryCount) {
         String previous = queue.selected().map(item -> item.scope().id()).orElse(null);
         queue.setItems(items);
+        java.util.Set<String> present = items.stream().map(item -> item.scope().id())
+                .collect(java.util.stream.Collectors.toUnmodifiableSet());
+        outcomeByScope.keySet().retainAll(present);
         countsLabel.setText(items.size() + (items.size() == 1 ? " item · " : " items · ")
                 + repositoryCount + (repositoryCount == 1 ? " repo" : " repos"));
         if (items.isEmpty()) {
@@ -539,8 +568,21 @@ public final class ReviewDestinationView extends BorderPane {
                 .toList();
     }
 
+    /**
+     * The selected scope's intents. A scope whose diff has not loaded -- or
+     * never will, because it has no checkout -- has none, and says so
+     * through {@link #emptyReason()} rather than borrowing another's.
+     */
     private List<ReviewIntent> intents() {
-        return selectedScope().map(host::intents).orElse(List.of());
+        Optional<ReviewScope> scope = selectedScope();
+        if (scope.isEmpty()) {
+            return List.of();
+        }
+        DiffOutcome outcome = outcomeByScope.get(scope.get().id());
+        if (outcome instanceof DiffOutcome.Loaded loaded) {
+            return host.intents(scope.get(), loaded.diff());
+        }
+        return List.of();
     }
 
     private Optional<ReviewIntent> currentIntent() {
@@ -1271,6 +1313,16 @@ public final class ReviewDestinationView extends BorderPane {
                     + host.diagDiffSummary(itemScope));
         }
         return report;
+    }
+
+    /**
+     * Test-only: records an outcome for a scope without running git. The
+     * view derives everything from these outcomes now, so a test with a
+     * synthetic diff and no real checkout has no other way in.
+     */
+    void diagPublishOutcome(String scopeId, DiffOutcome outcome) {
+        outcomeByScope.put(scopeId, outcome);
+        refreshReviewState();
     }
 
     /** Diagnostic-only: selects the {@code index}-th queue item, for the visual pass. */
