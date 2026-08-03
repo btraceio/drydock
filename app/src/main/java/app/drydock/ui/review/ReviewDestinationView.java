@@ -1,6 +1,7 @@
 package app.drydock.ui.review;
 
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.git.ReviewBase;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewItem;
@@ -850,9 +851,13 @@ public final class ReviewDestinationView extends BorderPane {
                 ? "HEAD"
                 : item.scope().base();
         String comparison = "vs " + against;
-        return item.subtitle().endsWith(comparison)
+        String provenance = item.scope().baseOrigin()
+                .filter(origin -> origin == ReviewBase.Origin.DEFAULT_UNMEASURED)
+                .map(origin -> "  ·  " + origin.description())
+                .orElse("");
+        return (item.subtitle().endsWith(comparison)
                 ? item.subtitle()
-                : item.subtitle() + "  ·  " + comparison;
+                : item.subtitle() + "  ·  " + comparison) + provenance;
     }
 
     /**

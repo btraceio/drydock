@@ -52,7 +52,7 @@ class McpToolRouterReviewTest {
         context.grant(caller, SCOPE);
         context.reviewScopes.put(SCOPE, new ReviewScope(SCOPE, ReviewScope.Kind.WORKTREE,
                 Path.of("/repos/drydock"), Optional.of(Path.of("/wt/feat")), "master", "feat",
-                Optional.empty(), Optional.empty()));
+                Optional.empty(), Optional.empty(), Optional.empty()));
         context.reviewDiff = diff(12);
     }
 

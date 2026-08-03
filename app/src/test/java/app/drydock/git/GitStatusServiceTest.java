@@ -265,7 +265,7 @@ class GitStatusServiceTest {
         runGit(repo, "add", "feature.txt");
         commit(repo, "the one commit under review");
 
-        assertEquals("develop", service.reviewBase(repo, Optional.empty(), "master").get());
+        assertEquals("develop", service.reviewBase(repo, Optional.empty(), "master").get().ref());
     }
 
     /** A branch cut from the default branch keeps it, even with a develop around. */
@@ -281,7 +281,7 @@ class GitStatusServiceTest {
         runGit(repo, "add", "feature.txt");
         commit(repo, "the one commit under review");
 
-        assertEquals("main", service.reviewBase(repo, Optional.empty(), "main").get());
+        assertEquals("main", service.reviewBase(repo, Optional.empty(), "main").get().ref());
     }
 
     /** What GitHub says the branch merges into outranks anything derived locally. */
@@ -297,7 +297,7 @@ class GitStatusServiceTest {
         runGit(repo, "add", "feature.txt");
         commit(repo, "the one commit under review");
 
-        assertEquals("release/2.0", service.reviewBase(repo, Optional.of("release/2.0"), "main").get());
+        assertEquals("release/2.0", service.reviewBase(repo, Optional.of("release/2.0"), "main").get().ref());
     }
 
     /**
@@ -317,7 +317,7 @@ class GitStatusServiceTest {
         Path clone = tmp.resolve("clone");
         runGitIn(tmp, "clone", "--quiet", upstream.toString(), clone.toString());
 
-        assertEquals("origin/develop", service.reviewBase(clone, Optional.of("develop"), "main").get());
+        assertEquals("origin/develop", service.reviewBase(clone, Optional.of("develop"), "main").get().ref());
     }
 
     /** An unresolvable declared base falls through to the local answer rather than failing the diff. */
@@ -328,7 +328,7 @@ class GitStatusServiceTest {
         runGit(repo, "add", "README.md");
         commit(repo, "initial commit");
 
-        assertEquals("main", service.reviewBase(repo, Optional.of("no-such-branch"), "main").get());
+        assertEquals("main", service.reviewBase(repo, Optional.of("no-such-branch"), "main").get().ref());
     }
 
     @Test

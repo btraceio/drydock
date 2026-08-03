@@ -1,6 +1,7 @@
 package app.drydock.review;
 
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.git.ReviewBase;
 
 import java.nio.file.Path;
 import java.util.Objects;
@@ -29,7 +30,8 @@ public record ReviewScope(
         String base,
         String head,
         Optional<PullRequestRef> pr,
-        Optional<ManagedSessionId> sessionId) {
+        Optional<ManagedSessionId> sessionId,
+        Optional<ReviewBase.Origin> baseOrigin) {
 
     /** What is being reviewed; drives the queue icon and how the diff is resolved. */
     public enum Kind {
@@ -64,6 +66,7 @@ public record ReviewScope(
         Objects.requireNonNull(head, "head");
         Objects.requireNonNull(pr, "pr");
         Objects.requireNonNull(sessionId, "sessionId");
+        Objects.requireNonNull(baseOrigin, "baseOrigin");
         if (id.isBlank()) {
             throw new IllegalArgumentException("scope id must not be blank");
         }
@@ -85,12 +88,12 @@ public record ReviewScope(
     /** This scope with {@code session} bound (the checkout gate's result, M5). */
     public ReviewScope withSession(ManagedSessionId session) {
         return new ReviewScope(id, kind, repoRoot, worktree, base, head, pr,
-                Optional.ofNullable(session));
+                Optional.ofNullable(session), baseOrigin);
     }
 
     /** This scope with {@code newWorktree} as its checkout. */
     public ReviewScope withWorktree(Path newWorktree) {
         return new ReviewScope(id, kind, repoRoot, Optional.ofNullable(newWorktree), base, head, pr,
-                sessionId);
+                sessionId, baseOrigin);
     }
 }

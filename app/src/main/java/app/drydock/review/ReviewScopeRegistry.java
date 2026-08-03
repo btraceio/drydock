@@ -1,6 +1,7 @@
 package app.drydock.review;
 
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.git.ReviewBase;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
@@ -120,7 +121,7 @@ public final class ReviewScopeRegistry {
         Identity identity = Identity.of(spec);
         String id = idByIdentity.computeIfAbsent(identity, this::newId);
         ReviewScope scope = new ReviewScope(id, spec.kind(), spec.repoRoot(), spec.worktree(),
-                spec.base(), spec.head(), spec.pr(), spec.sessionId());
+                spec.base(), spec.head(), spec.pr(), spec.sessionId(), spec.baseOrigin());
         ReviewScope previous = byId.put(id, scope);
         if (!scope.equals(previous)) {
             notifyChanged(id);
@@ -135,7 +136,16 @@ public final class ReviewScopeRegistry {
     public static ReviewScope spec(ReviewScope.Kind kind, Path repoRoot, Optional<Path> worktree,
                                    String base, String head, Optional<ReviewScope.PullRequestRef> pr,
                                    Optional<ManagedSessionId> sessionId) {
-        return new ReviewScope("rs_pending", kind, repoRoot, worktree, base, head, pr, sessionId);
+        return spec(kind, repoRoot, worktree, base, head, pr, sessionId, Optional.empty());
+    }
+
+    /** As above, recording how {@code base} was chosen (see {@link ReviewBase}). */
+    public static ReviewScope spec(ReviewScope.Kind kind, Path repoRoot, Optional<Path> worktree,
+                                   String base, String head, Optional<ReviewScope.PullRequestRef> pr,
+                                   Optional<ManagedSessionId> sessionId,
+                                   Optional<ReviewBase.Origin> baseOrigin) {
+        return new ReviewScope("rs_pending", kind, repoRoot, worktree, base, head, pr, sessionId,
+                baseOrigin);
     }
 
     public Optional<ReviewScope> byId(String id) {
