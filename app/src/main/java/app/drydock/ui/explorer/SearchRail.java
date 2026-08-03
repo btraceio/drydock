@@ -92,6 +92,9 @@ final class SearchRail extends VBox {
     private Mode mode = Mode.TEXT;
     private Runnable onCollapseRequested = () -> { };
     private Runnable onExpandRequested = () -> { };
+    /** Notified with every query the rail runs (the viewer's blue minimap ticks). */
+    private java.util.function.Consumer<String> onQueryChanged = query -> { };
+
     /** Whether a file (by relative path) carries diff lines in the active overlay scope (`diff` chip). */
     private Predicate<Path> diffFileTest = relativePath -> false;
 
@@ -119,6 +122,11 @@ final class SearchRail extends VBox {
 
     void setOnExpandRequested(Runnable handler) {
         this.onExpandRequested = handler == null ? () -> { } : handler;
+    }
+
+    /** Wires the listener that keeps the viewer's search-hit ticks in step with this rail. */
+    void setOnQueryChanged(java.util.function.Consumer<String> handler) {
+        this.onQueryChanged = handler == null ? query -> { } : handler;
     }
 
     /** Wires the diff-overlay test tagging Text-search files that carry diff lines (handoff section C). */
@@ -233,6 +241,7 @@ final class SearchRail extends VBox {
 
     private void runSearch() {
         String query = searchField.getText() == null ? "" : searchField.getText().strip();
+        onQueryChanged.accept(query);
         long myGeneration = generation.incrementAndGet();
         if (query.isEmpty()) {
             resultsBox.getChildren().clear();

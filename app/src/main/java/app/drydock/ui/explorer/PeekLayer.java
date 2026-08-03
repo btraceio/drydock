@@ -45,6 +45,9 @@ final class PeekLayer extends Pane {
     /** Each card below the top peeks out by this much, so the stack is visibly a stack. */
     private static final double STACK_OFFSET = 18;
 
+    /** Usage rows shown before the list says how many more there are. */
+    static final int MAX_USAGES_SHOWN = 30;
+
     private final List<SymbolPeek> stack = new ArrayList<>();
     private final List<Region> cards = new ArrayList<>();
 
@@ -57,9 +60,14 @@ final class PeekLayer extends Pane {
 
     PeekLayer() {
         getStyleClass().add("peek-layer");
+        // Managed, or the StackPane above never resizes it and every card
+        // lays out against a 0x0 layer -- in the top-left corner, at its
+        // minimum width. Max size is explicit for the same reason: a
+        // Region's max defaults to its PREFERRED size, and this layer's
+        // preferred size is the 0 its unmanaged children compute.
         setPickOnBounds(false);
+        setMaxSize(Double.MAX_VALUE, Double.MAX_VALUE);
         setVisible(false);
-        setManaged(false);
     }
 
     void setOnPromote(Consumer<SymbolPeek> handler) {
@@ -161,7 +169,6 @@ final class PeekLayer extends Pane {
         getChildren().clear();
         boolean open = !stack.isEmpty();
         setVisible(open);
-        setManaged(false);
         if (open) {
             // Only the top card is built in full: the ones below are ghosts,
             // there to say "there is a stack", and building five live
@@ -214,11 +221,8 @@ final class PeekLayer extends Pane {
         header.setAlignment(Pos.CENTER_LEFT);
         header.getStyleClass().add("peek-header");
 
-        VBox body = new VBox(buildCode(peek));
+        VBox body = new VBox(buildCode(peek, usagesOpen ? buildUsages(peek) : null));
         body.getStyleClass().add("peek-body");
-        if (usagesOpen) {
-            body.getChildren().add(buildUsages(peek));
-        }
 
         HBox footer = new HBox(10);
         footer.setAlignment(Pos.CENTER_LEFT);
@@ -226,7 +230,7 @@ final class PeekLayer extends Pane {
         Button promote = new Button("⏎ open for real");
         promote.getStyleClass().addAll("peek-action", "primary");
         promote.setOnAction(e -> onPromote.accept(peek));
-        Button usages = new Button("u occurrences · " + peek.occurrences().size());
+        Button usages = new Button("u usages · " + peek.occurrences().size());
         usages.getStyleClass().add("peek-action");
         usages.setOnAction(e -> toggleUsages());
         footer.getChildren().setAll(promote, usages);
@@ -243,7 +247,7 @@ final class PeekLayer extends Pane {
         return card;
     }
 
-    private Node buildCode(SymbolPeek peek) {
+    private Node buildCode(SymbolPeek peek, Node usages) {
         CodeArea area = new CodeArea();
         area.getStyleClass().addAll("code-area", "peek-code");
         area.setEditable(false);
@@ -269,19 +273,38 @@ final class PeekLayer extends Pane {
             return box;
         });
         VirtualizedScrollPane<CodeArea> scroll = new VirtualizedScrollPane<>(area);
-        scroll.setMaxHeight(CARD_MAX_BODY_HEIGHT);
-        scroll.setPrefHeight(Math.min(CARD_MAX_BODY_HEIGHT, 20 + peek.lines().size() * 17.0));
-        return scroll;
+        double codeHeight = Math.min(CARD_MAX_BODY_HEIGHT, 20 + peek.lines().size() * 17.0);
+        scroll.setPrefHeight(codeHeight);
+        scroll.setMinHeight(codeHeight);
+        if (usages == null) {
+            scroll.setMaxHeight(CARD_MAX_BODY_HEIGHT);
+            return scroll;
+        }
+        // The usage list lives INSIDE the card's bounded, scrollable body:
+        // a common identifier has hundreds of occurrences, and appending
+        // them under the body would grow the card off the top of the screen
+        // and take the footer's actions with it.
+        VBox stacked = new VBox(scroll, usages);
+        javafx.scene.control.ScrollPane outer = new javafx.scene.control.ScrollPane(stacked);
+        outer.setFitToWidth(true);
+        outer.getStyleClass().add("peek-scroll");
+        outer.setPrefHeight(CARD_MAX_BODY_HEIGHT);
+        outer.setMaxHeight(CARD_MAX_BODY_HEIGHT);
+        return outer;
     }
 
     private Node buildUsages(SymbolPeek peek) {
         VBox list = new VBox(2);
         list.getStyleClass().add("peek-usages");
-        Label heading = new Label("OCCURRENCES · " + peek.occurrences().size()
+        Label heading = new Label("USAGES · " + peek.occurrences().size()
+                + " (lexical occurrences)"
                 + (peek.resolvedDeclaration() ? "" : " · no declaration found"));
         heading.getStyleClass().add("peek-usages-title");
         list.getChildren().add(heading);
-        for (SymbolPeek.Occurrence occurrence : peek.occurrences()) {
+        List<SymbolPeek.Occurrence> shown = peek.occurrences().size() > MAX_USAGES_SHOWN
+                ? peek.occurrences().subList(0, MAX_USAGES_SHOWN)
+                : peek.occurrences();
+        for (SymbolPeek.Occurrence occurrence : shown) {
             Label where = new Label(occurrence.label());
             where.getStyleClass().add("peek-usage-loc");
             HBox.setHgrow(where, Priority.ALWAYS);
@@ -295,6 +318,14 @@ final class PeekLayer extends Pane {
                 row.getStyleClass().add("untouched");
             }
             list.getChildren().add(row);
+        }
+        if (shown.size() < peek.occurrences().size()) {
+            // Said, not silently truncated: a capped list that does not say
+            // so reads as "this is all of them".
+            Label more = new Label("… " + (peek.occurrences().size() - shown.size())
+                    + " more — search for it in the rail");
+            more.getStyleClass().add("peek-usages-more");
+            list.getChildren().add(more);
         }
         return list;
     }

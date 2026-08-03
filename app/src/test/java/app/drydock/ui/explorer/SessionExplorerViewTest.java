@@ -77,13 +77,31 @@ class SessionExplorerViewTest extends ApplicationTest {
     }
 
     @AfterEach
-    void tearDown() {
+    void tearDown() throws IOException {
         interact(() -> view.dispose());
         searchService.close();
+        deleteTempTree();
     }
 
     private void openFile(String relative) {
         interact(() -> view.openFileAtLine(Path.of(relative), 1));
+        waitForFxEvents();
+    }
+
+    /**
+     * Peeks {@code symbol} and waits for the card, rather than sleeping a
+     * fixed interval: resolution is a repository text search whose latency is
+     * the machine's, not ours.
+     */
+    private void peek(String symbol) {
+        int before = onFx(() -> view.diagPeekDepth());
+        interact(() -> view.diagPeek(symbol));
+        try {
+            org.testfx.util.WaitForAsyncUtils.waitFor(10, java.util.concurrent.TimeUnit.SECONDS,
+                    () -> onFx(() -> view.diagPeekDepth()) > before);
+        } catch (java.util.concurrent.TimeoutException e) {
+            throw new AssertionError("no peek card appeared for " + symbol, e);
+        }
         waitForFxEvents();
     }
 
@@ -165,19 +183,13 @@ class SessionExplorerViewTest extends ApplicationTest {
     @Test
     void aPeekOpensOverTheViewerAndEscClosesExactlyOne() {
         openFile("ui/Sidebar.java");
-        interact(() -> view.diagPeek("clamp"));
-        waitForFxEvents();
-        org.testfx.util.WaitForAsyncUtils.sleep(1500, java.util.concurrent.TimeUnit.MILLISECONDS);
-        waitForFxEvents();
+        peek("clamp");
 
         assertEquals(1, lookup(".peek-card").queryAll().size());
         Label title = lookup(".peek-title").query();
         assertTrue(title.getText().startsWith("clamp"), title.getText());
 
-        interact(() -> view.diagPeek("width"));
-        waitForFxEvents();
-        org.testfx.util.WaitForAsyncUtils.sleep(1500, java.util.concurrent.TimeUnit.MILLISECONDS);
-        waitForFxEvents();
+        peek("width");
         assertEquals(1, lookup(".peek-card").queryAll().size(), "only the top card is built in full");
         assertEquals(1, lookup(".peek-card-ghost").queryAll().size(), "the card below it shows as a ghost");
 
@@ -194,12 +206,28 @@ class SessionExplorerViewTest extends ApplicationTest {
     }
 
     @Test
+    void thePeekCardIsLaidOutOverTheBottomRightOfTheViewer() {
+        openFile("ui/Sidebar.java");
+        peek("clamp");
+
+        javafx.scene.layout.Region card = lookup(".peek-card").query();
+        javafx.geometry.Bounds card_ = card.localToScene(card.getBoundsInLocal());
+        javafx.scene.Node viewer = lookup(".file-viewer").query();
+        javafx.geometry.Bounds viewerBounds = viewer.localToScene(viewer.getBoundsInLocal());
+
+        assertTrue(card_.getWidth() > 300,
+                "the card is a card, not a collapsed minimum: " + card_.getWidth());
+        assertTrue(card_.getMaxX() <= viewerBounds.getMaxX() + 1
+                        && card_.getMinX() > viewerBounds.getMinX() + viewerBounds.getWidth() / 3,
+                "the card sits against the viewer's right edge: " + card_ + " in " + viewerBounds);
+        assertTrue(card_.getMinY() > viewerBounds.getMinY() + viewerBounds.getHeight() / 3,
+                "…and its lower half: " + card_ + " in " + viewerBounds);
+    }
+
+    @Test
     void theAskActionIsAbsentWithoutASession() {
         openFile("ui/Sidebar.java");
-        interact(() -> view.diagPeek("clamp"));
-        waitForFxEvents();
-        org.testfx.util.WaitForAsyncUtils.sleep(1500, java.util.concurrent.TimeUnit.MILLISECONDS);
-        waitForFxEvents();
+        peek("clamp");
 
         List<String> actions = lookup(".peek-action").queryAll().stream()
                 .map(node -> ((Button) node).getText())
@@ -213,21 +241,19 @@ class SessionExplorerViewTest extends ApplicationTest {
     @Test
     void thePeekStackIsCappedAndSaysSo() {
         openFile("ui/Sidebar.java");
-        for (int i = 0; i < PeekLayer.MAX_DEPTH + 1; i++) {
-            String symbol = i % 2 == 0 ? "clamp" : "width";
-            interact(() -> view.diagPeek(symbol));
-            waitForFxEvents();
-            org.testfx.util.WaitForAsyncUtils.sleep(1200, java.util.concurrent.TimeUnit.MILLISECONDS);
-            waitForFxEvents();
+        for (int i = 0; i < PeekLayer.MAX_DEPTH; i++) {
+            peek(i % 2 == 0 ? "clamp" : "width");
         }
+        // One more than the cap allows: refused, and said so.
+        interact(() -> view.diagPeek("clamp"));
+        waitForFxEvents();
         assertEquals(PeekLayer.MAX_DEPTH, onFx(() -> view.diagPeekDepth()));
         Label toast = lookup(".explorer-toast").query();
         assertTrue(toast.isVisible() && toast.getText().contains("esc to unwind"), toast.getText());
     }
 
     /** Keeps the temp tree out of the developer's working copy. */
-    @AfterEach
-    void deleteTempTree() throws IOException {
+    private void deleteTempTree() throws IOException {
         if (root != null && Files.exists(root)) {
             try (var walk = Files.walk(root)) {
                 walk.sorted(java.util.Comparator.reverseOrder()).forEach(path -> {

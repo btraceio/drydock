@@ -29,33 +29,50 @@ final class SymbolLens {
     /** Files past this many characters get no lens: the scan is linear, but so is the reader's patience. */
     private static final int MAX_SCANNED_CHARS = 1_500_000;
 
-    private static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z_$][A-Za-z0-9_$]*");
+    private static final Pattern IDENTIFIER = app.drydock.review.SymbolWords.IDENTIFIER;
 
     private SymbolLens() {
     }
 
-    /** The identifiers {@code text} uses more than once, keywords and short names excluded. */
+    /**
+     * The identifiers in {@code text} worth following: those it uses more
+     * than once, plus those that <em>lead somewhere else</em> -- a
+     * capitalised name (a type) or a name applied to an argument list (a
+     * call).
+     *
+     * <p>The "more than once" rule alone is Review's rule, and it is wrong
+     * for a file: a type or method mentioned here exactly once is the single
+     * most valuable thing to follow when hopping into unfamiliar code, and
+     * an underline it never gets is a hop the reader cannot make. Locals
+     * ({@code w}, {@code raw}, {@code delta}) still get nothing, which is
+     * what keeps the underline meaningful.</p>
+     */
     static Set<String> symbolsIn(String text) {
         if (text == null || text.isEmpty() || text.length() > MAX_SCANNED_CHARS) {
             return Set.of();
         }
         Map<String, Integer> counts = new HashMap<>();
+        Set<String> followable = new LinkedHashSet<>();
         Matcher matcher = IDENTIFIER.matcher(text);
         while (matcher.find()) {
             String word = matcher.group();
-            if (word.length() < SymbolPeekService.MIN_SYMBOL_LENGTH
-                    || SymbolPeekService.KEYWORDS.contains(word.toLowerCase(java.util.Locale.ROOT))) {
+            if (!app.drydock.review.SymbolWords.isSymbol(word)) {
                 continue;
             }
             counts.merge(word, 1, Integer::sum);
+            boolean typeLike = Character.isUpperCase(word.charAt(0));
+            boolean callLike = matcher.end() < text.length() && text.charAt(matcher.end()) == '(';
+            if (typeLike || callLike) {
+                followable.add(word);
+            }
         }
-        Set<String> repeated = new LinkedHashSet<>();
+        Set<String> lens = new LinkedHashSet<>(followable);
         counts.forEach((word, count) -> {
             if (count > 1) {
-                repeated.add(word);
+                lens.add(word);
             }
         });
-        return repeated;
+        return lens;
     }
 
     /**

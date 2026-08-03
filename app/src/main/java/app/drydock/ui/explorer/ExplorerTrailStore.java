@@ -58,6 +58,9 @@ public final class ExplorerTrailStore implements AutoCloseable {
     private final ExecutorService saveExecutor =
             Executors.newSingleThreadExecutor(runnable -> Thread.ofVirtual().unstarted(runnable));
 
+    /** Set by {@link #close()}; a save after it writes inline rather than throwing. */
+    private volatile boolean closed;
+
     public ExplorerTrailStore(Path file) {
         this.file = file.toAbsolutePath().normalize();
         load();
@@ -76,8 +79,54 @@ public final class ExplorerTrailStore implements AutoCloseable {
     public synchronized void save(String sessionKey, Trail trail) {
         trails.put(sessionKey, trail);
         Map<String, Trail> snapshot = new LinkedHashMap<>(trails);
-        if (pending.getAndSet(snapshot) == null) {
+        if (pending.getAndSet(snapshot) != null) {
+            return;
+        }
+        if (closed) {
+            // A trail arriving during shutdown (a last flush moving the
+            // cursor) must not throw RejectedExecutionException out of an FX
+            // handler -- the same failure mode AnnotationStore's close
+            // ordering exists to avoid. Write it here instead.
+            writePending();
+            return;
+        }
+        try {
             saveExecutor.execute(this::writePending);
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            writePending();
+        }
+    }
+
+    /**
+     * Writes any pending trail out now, blocking briefly. The shape AGENTS.md
+     * names ({@code AnnotationStore.flushPendingSaves}): tests and the
+     * shutdown path must not race a background write.
+     */
+    public void flushPendingSaves() {
+        if (pending.get() == null) {
+            return;
+        }
+        try {
+            if (closed) {
+                writePending();
+            } else {
+                saveExecutor.submit(this::writePending).get(2, TimeUnit.SECONDS);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (java.util.concurrent.ExecutionException | java.util.concurrent.TimeoutException
+                 | java.util.concurrent.RejectedExecutionException e) {
+            LOG.log(System.Logger.Level.WARNING, "Explorer trails were not flushed", e);
+        }
+    }
+
+    /** Drops trails for sessions that no longer exist, so the file cannot grow forever. */
+    public synchronized void retain(java.util.Collection<String> liveSessionKeys) {
+        if (trails.keySet().retainAll(java.util.Set.copyOf(liveSessionKeys))) {
+            Map<String, Trail> snapshot = new LinkedHashMap<>(trails);
+            if (pending.getAndSet(snapshot) == null && !closed) {
+                saveExecutor.execute(this::writePending);
+            }
         }
     }
 
@@ -168,6 +217,7 @@ public final class ExplorerTrailStore implements AutoCloseable {
     @Override
     public void close() {
         saveExecutor.execute(this::writePending);
+        closed = true;
         saveExecutor.shutdown();
         try {
             if (!saveExecutor.awaitTermination(2, TimeUnit.SECONDS)) {

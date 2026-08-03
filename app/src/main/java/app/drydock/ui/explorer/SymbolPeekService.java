@@ -1,5 +1,6 @@
 package app.drydock.ui.explorer;
 
+import app.drydock.review.SymbolWords;
 import app.drydock.search.SessionSearchService;
 import app.drydock.search.SessionSearchService.FileMatches;
 import app.drydock.search.SessionSearchService.TextMatch;
@@ -39,8 +40,8 @@ import java.util.regex.Pattern;
  */
 public final class SymbolPeekService {
 
-    /** Identifiers this short are noise; matches the Review lens's threshold. */
-    static final int MIN_SYMBOL_LENGTH = 3;
+    /** Identifiers this short are noise; the Review lens's own threshold. */
+    static final int MIN_SYMBOL_LENGTH = SymbolWords.MIN_LENGTH;
 
     /** Excerpt cap: enough to see a small method whole, short enough to stay a card. */
     static final int MAX_EXCERPT_LINES = 14;
@@ -50,6 +51,15 @@ public final class SymbolPeekService {
 
     private final Path searchRoot;
     private final SessionSearchService searchService;
+
+    /**
+     * Where {@link #resolve} runs. Load-bearing, not decorative: the search
+     * future can already be complete when {@code peek()} chains onto it (a
+     * warm cache, an empty result), and a plain {@code thenApply} would then
+     * run the file read and the scoring inline on the FX thread.
+     */
+    private final java.util.concurrent.Executor resolveExecutor =
+            runnable -> Thread.ofVirtual().start(runnable);
 
     public SymbolPeekService(Path searchRoot, SessionSearchService searchService) {
         this.searchRoot = searchRoot;
@@ -71,11 +81,14 @@ public final class SymbolPeekService {
         }
         Map<Path, Set<Integer>> changed = Map.copyOf(changedLines);
         return searchService.searchText(searchRoot, symbol)
-                .thenApply(matches -> resolve(symbol, matches, changed));
+                .thenApplyAsync(matches -> resolve(symbol, matches, changed), resolveExecutor);
     }
 
     private Optional<SymbolPeek> resolve(String symbol, List<FileMatches> files, Map<Path, Set<Integer>> changed) {
         List<Candidate> candidates = new ArrayList<>();
+        // Compiled once per peek, not once per matching line: a common
+        // identifier comes back with up to MAX_MATCHES of them.
+        DeclarationPatterns patterns = DeclarationPatterns.forSymbol(symbol);
         for (FileMatches file : files) {
             for (TextMatch match : file.matches()) {
                 if (!isWholeWord(match.lineText(), symbol)) {
@@ -83,7 +96,7 @@ public final class SymbolPeekService {
                 }
                 candidates.add(new Candidate(file.file(), file.relativePath(), match.lineNumber(),
                         match.lineText().strip(),
-                        scoreDeclaration(file.relativePath(), match.lineText(), symbol)));
+                        patterns.score(file.relativePath(), match.lineText(), symbol)));
             }
         }
         if (candidates.isEmpty()) {
@@ -185,6 +198,30 @@ public final class SymbolPeekService {
      * definition it did not find.
      */
     static int scoreDeclaration(Path relativePath, String rawLine, String symbol) {
+        return DeclarationPatterns.forSymbol(symbol).score(relativePath, rawLine, symbol);
+    }
+
+    /** One symbol's declaration patterns, compiled once and reused across every candidate line. */
+    private record DeclarationPatterns(Pattern type, Pattern function, Pattern signature,
+                                       Pattern assignment, Pattern modifier) {
+
+        static DeclarationPatterns forSymbol(String symbol) {
+            String quoted = Pattern.quote(symbol);
+            return new DeclarationPatterns(
+                    Pattern.compile("\\b(class|interface|record|enum|trait|struct|type)\\s+" + quoted + "\\b"),
+                    Pattern.compile("\\b(fun|def|func|function|sub)\\s+" + quoted + "\\s*\\("),
+                    Pattern.compile("^[\\w@<>\\[\\],.?&\\s]*\\b" + quoted + "\\s*\\([^;]*\\)\\s*"
+                            + "(throws [\\w,.\\s]+)?\\{?$"),
+                    Pattern.compile("\\b" + quoted + "\\s*=[^=]"),
+                    Pattern.compile("^(private|public|protected|static|final|const|let|var|val)\\b"));
+        }
+
+        int score(Path relativePath, String rawLine, String symbol) {
+            return scoreWith(this, relativePath, rawLine, symbol);
+        }
+    }
+
+    private static int scoreWith(DeclarationPatterns patterns, Path relativePath, String rawLine, String symbol) {
         String line = rawLine.strip();
         if (line.startsWith("import ") || line.startsWith("//") || line.startsWith("*")
                 || line.startsWith("#include")) {
@@ -197,25 +234,19 @@ public final class SymbolPeekService {
             // Foo lives in Foo.java far more often than it does not.
             score += 6;
         }
-        String quoted = Pattern.quote(symbol);
-        if (Pattern.compile("\\b(class|interface|record|enum|trait|struct|type)\\s+" + quoted + "\\b")
-                .matcher(line).find()) {
+        if (patterns.type().matcher(line).find()) {
             score += 6;
         }
-        if (Pattern.compile("\\b(fun|def|func|function|sub)\\s+" + quoted + "\\s*\\(")
-                .matcher(line).find()) {
+        if (patterns.function().matcher(line).find()) {
             score += 5;
         }
-        if (Pattern.compile("^[\\w@<>\\[\\],.?&\\s]*\\b" + quoted + "\\s*\\([^;]*\\)\\s*"
-                        + "(throws [\\w,.\\s]+)?\\{?$").matcher(line).find()
+        if (patterns.signature().matcher(line).find()
                 && !line.startsWith("return ") && !line.contains("=")) {
             // A method signature: the symbol applied to a parameter list, at
             // the head of the line, not inside an expression.
             score += 4;
         }
-        if (Pattern.compile("\\b" + quoted + "\\s*=[^=]").matcher(line).find()
-                && Pattern.compile("^(private|public|protected|static|final|const|let|var|val)\\b")
-                        .matcher(line).find()) {
+        if (patterns.assignment().matcher(line).find() && patterns.modifier().matcher(line).find()) {
             score += 3;
         }
         return score;
@@ -229,26 +260,14 @@ public final class SymbolPeekService {
         if (line == null || caret < 0 || caret > line.length()) {
             return Optional.empty();
         }
-        Matcher matcher = Pattern.compile("[A-Za-z_$][A-Za-z0-9_$]*").matcher(line);
+        Matcher matcher = SymbolWords.IDENTIFIER.matcher(line);
         while (matcher.find()) {
             if (caret >= matcher.start() && caret <= matcher.end()) {
                 String word = matcher.group();
-                return word.length() >= MIN_SYMBOL_LENGTH && !KEYWORDS.contains(word.toLowerCase(Locale.ROOT))
-                        ? Optional.of(word)
-                        : Optional.empty();
+                return SymbolWords.isSymbol(word) ? Optional.of(word) : Optional.empty();
             }
         }
         return Optional.empty();
     }
 
-    /** Keywords are not symbols; underlining {@code return} teaches the reader the underline means nothing. */
-    static final Set<String> KEYWORDS = Set.of(
-            "abstract", "assert", "boolean", "break", "byte", "case", "catch", "char", "class",
-            "const", "continue", "default", "double", "else", "enum", "extends", "final",
-            "finally", "float", "for", "goto", "if", "implements", "import", "instanceof",
-            "int", "interface", "long", "native", "new", "package", "private", "protected",
-            "public", "record", "return", "sealed", "short", "static", "super", "switch",
-            "synchronized", "this", "throw", "throws", "transient", "try", "var", "void",
-            "volatile", "while", "yield", "true", "false", "null",
-            "fun", "val", "let", "function", "def", "self", "from", "with", "and", "not");
 }

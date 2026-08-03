@@ -34,6 +34,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -73,6 +74,22 @@ final class FileViewer extends BorderPane {
     private final Label emptyState = new Label("Open a file from search to view it.");
     private final StackPane centerStack = new StackPane();
     private final Button gutterToggle = new Button("#");
+
+    // -- Skim mode & minimap (Explorer delta, part 2) ----------------------
+    private final Button skimToggle = new Button("skim");
+    private final Button fullToggle = new Button("full");
+    private final HBox skimSegment = new HBox(0);
+
+    /** Findings anchored in the open files; empty without a review scope. */
+    private java.util.function.Function<Path, List<ExplorerFinding>> findingsProvider = path -> List.of();
+
+    /** The rail's current query, whose per-line hits are the blue minimap ticks. */
+    private String searchQuery = "";
+
+    /** Samples what is on screen so a member the reader dwelt on goes grey (see {@link #sampleDwell}). */
+    private javafx.animation.Timeline dwellSampler;
+
+    private static final Duration DWELL_SAMPLE = Duration.ofSeconds(1);
 
     // -- Trail & peek (Explorer delta, part 1) -----------------------------
     private final NavigationTrail trail = new NavigationTrail();
@@ -214,6 +231,16 @@ final class FileViewer extends BorderPane {
 
         emptyState.getStyleClass().add("viewer-empty");
 
+        skimToggle.getStyleClass().add("skim-toggle-button");
+        fullToggle.getStyleClass().add("skim-toggle-button");
+        skimToggle.setTooltip(new Tooltip("Signatures only, changed members open (z)"));
+        fullToggle.setTooltip(new Tooltip("The whole file (z)"));
+        skimToggle.setOnAction(e -> setSkimForSelected(true));
+        fullToggle.setOnAction(e -> setSkimForSelected(false));
+        skimSegment.getChildren().setAll(skimToggle, fullToggle);
+        skimSegment.getStyleClass().add("skim-toggle");
+        skimSegment.setAlignment(Pos.CENTER_LEFT);
+
         diffBannerLabel.getStyleClass().add("viewer-diff-banner-label");
         diffBaseSwitch.getStyleClass().add("viewer-diff-base-switch");
         diffBaseSwitch.setFocusTraversable(false);
@@ -271,7 +298,6 @@ final class FileViewer extends BorderPane {
 
         peekLayer.setOnStackFull(() -> flashToast("Peek stack is full — esc to unwind"));
         peekLayer.setOnPromote(this::promotePeek);
-        peekLayer.setOnChanged(this::updateEmptyState);
 
         fileTabs.getSelectionModel().selectedItemProperty().addListener((obs, oldTab, newTab) -> {
             flushSession(oldTab);
@@ -280,7 +306,11 @@ final class FileViewer extends BorderPane {
             // stack across to another file would leave cards over code they
             // have nothing to do with.
             peekLayer.clear();
-            if (!navigatingTrail && newTab != null) {
+            // A tab CLOSING moves the selection too, and that is not a
+            // navigation: pushing a waypoint for it would truncate the
+            // forward branch the reader is halfway through walking back.
+            boolean tabClosed = oldTab != null && !fileTabs.getTabs().contains(oldTab);
+            if (!navigatingTrail && !tabClosed && newTab != null) {
                 pushWaypoint(newTab);
             }
             // The edit banner is bound to one tab; showing another tab's
@@ -293,6 +323,7 @@ final class FileViewer extends BorderPane {
             updateBreadcrumb(newTab);
             updateEmptyState();
             updateDiffBanner();
+            updateSkimToggle();
         });
         updateBreadcrumb(null);
         updateEmptyState();
@@ -309,6 +340,7 @@ final class FileViewer extends BorderPane {
                 stopTransitions();
             } else {
                 startPolling();
+                startDwellSampler();
                 // The chip is not repainted while detached, so a save that
                 // landed (or failed) in the meantime would leave it showing
                 // whatever was true when the user left the Explorer.
@@ -343,10 +375,12 @@ final class FileViewer extends BorderPane {
                 changedLines = map;
             }
             for (Tab tab : fileTabs.getTabs()) {
-                if (tab.getContent() instanceof VirtualizedScrollPane<?> pane
-                        && pane.getContent() instanceof CodeArea area) {
+                CodeArea area = areaOf(tab);
+                if (area != null) {
                     applyGutter(area, changedLinesFor(tab));
                 }
+                refreshSkim(tab);
+                refreshMinimap(tab);
             }
             updateDiffBanner();
         }));
@@ -368,6 +402,187 @@ final class FileViewer extends BorderPane {
         }
         diffBanner.setVisible(show);
         diffBanner.setManaged(show);
+    }
+
+    // ---- Skim mode & minimap (Explorer delta, part 2) --------------------
+
+    /** The code area of {@code tab}, or null before its content is built. */
+    private static CodeArea areaOf(Tab tab) {
+        return tab != null && tab.getProperties().get("drydock.area") instanceof CodeArea area ? area : null;
+    }
+
+    private static boolean isSkimming(Tab tab) {
+        return Boolean.TRUE.equals(tab.getProperties().get("drydock.skimOn"));
+    }
+
+    /** Findings anchored in a file, for the skim chips and the minimap's red ticks. */
+    void setFindingsProvider(java.util.function.Function<Path, List<ExplorerFinding>> provider) {
+        this.findingsProvider = provider == null ? path -> List.of() : provider;
+    }
+
+    /** The query whose hits the blue minimap ticks show; set by the rail's search. */
+    void setSearchQuery(String query) {
+        this.searchQuery = query == null ? "" : query.strip();
+        for (Tab tab : fileTabs.getTabs()) {
+            refreshMinimap(tab);
+        }
+    }
+
+    /** {@code z} and the skim/full segmented toggle: per file, and remembered per file. */
+    void toggleSkim() {
+        Tab tab = fileTabs.getSelectionModel().getSelectedItem();
+        if (tab != null) {
+            setSkim(tab, !isSkimming(tab));
+        }
+    }
+
+    /**
+     * Switches {@code tab} between the folded outline and the full text,
+     * carrying the reader's place across in both directions -- which is the
+     * whole of "z round-trips losslessly with scroll preserved".
+     */
+    private void setSkim(Tab tab, boolean skimming) {
+        if (!(tab.getProperties().get("drydock.skim") instanceof SkimView skim)) {
+            return;
+        }
+        CodeArea area = areaOf(tab);
+        int anchor = currentLineOf(tab);
+        tab.getProperties().put("drydock.skimOn", skimming);
+        skim.setVisible(skimming);
+        skim.setManaged(skimming);
+        if (area != null) {
+            // The full-text area stays in the scene under the skim view, so
+            // it keeps its undo history, its selection and its edit session.
+            area.getParent().setVisible(!skimming);
+            area.getParent().setManaged(!skimming);
+        }
+        if (skimming) {
+            skim.revealLine(anchor);
+        } else if (area != null) {
+            scrollTo(tab, anchor);
+        }
+        updateSkimToggle();
+        refreshMinimap(tab);
+    }
+
+    private void setSkimForSelected(boolean skimming) {
+        Tab tab = fileTabs.getSelectionModel().getSelectedItem();
+        if (tab != null && isSkimming(tab) != skimming) {
+            setSkim(tab, skimming);
+        }
+    }
+
+    /** Paints the segmented control from the selected tab's own mode (it is per file). */
+    private void updateSkimToggle() {
+        Tab tab = fileTabs.getSelectionModel().getSelectedItem();
+        boolean skimming = tab != null && isSkimming(tab);
+        skimToggle.pseudoClassStateChanged(SELECTED, skimming);
+        fullToggle.pseudoClassStateChanged(SELECTED, !skimming);
+    }
+
+    private static final javafx.css.PseudoClass SELECTED =
+            javafx.css.PseudoClass.getPseudoClass("selected");
+
+    /** Rebuilds {@code tab}'s outline rows against the current diff scope and findings. */
+    private void refreshSkim(Tab tab) {
+        if (tab.getProperties().get("drydock.skim") instanceof SkimView skim
+                && tab.getProperties().get("drydock.outline") instanceof SourceOutline) {
+            skim.refresh(changedLinesFor(tab), findingLabelsFor(tab));
+        }
+    }
+
+    private Map<Integer, String> findingLabelsFor(Tab tab) {
+        Map<Integer, String> labels = new LinkedHashMap<>();
+        for (ExplorerFinding mark : findingsFor(tab)) {
+            labels.putIfAbsent(mark.line(), mark.label());
+        }
+        return labels;
+    }
+
+    private List<ExplorerFinding> findingsFor(Tab tab) {
+        Path relative = (Path) tab.getProperties().get("drydock.relative");
+        return relative == null ? List.of() : findingsProvider.apply(relative);
+    }
+
+    /** Recomputes the minimap's ticks; every kind is derived, never stored twice. */
+    private void refreshMinimap(Tab tab) {
+        if (!(tab.getProperties().get("drydock.minimap") instanceof Minimap minimap)
+                || !(tab.getProperties().get("drydock.outline") instanceof SourceOutline outline)) {
+            return;
+        }
+        CodeArea area = areaOf(tab);
+        Set<Integer> hits = area == null || searchQuery.isEmpty()
+                ? Set.of()
+                : MinimapTicks.searchHits(area.getText(), searchQuery);
+        @SuppressWarnings("unchecked")
+        Set<Integer> read = tab.getProperties().get("drydock.read") instanceof Set<?> stored
+                ? (Set<Integer>) stored
+                : Set.of();
+        minimap.setTicks(MinimapTicks.compute(outline, changedLinesFor(tab), findingsFor(tab), hits, read));
+    }
+
+    /**
+     * Marks the member starting at {@code line} as read (a grey tick). Called
+     * when the reader opens it in skim mode, and by the dwell sampler for
+     * whatever is on screen in full text.
+     */
+    @SuppressWarnings("unchecked")
+    private void markRead(Tab tab, int line) {
+        Set<Integer> read = tab.getProperties().get("drydock.read") instanceof Set<?> stored
+                ? (Set<Integer>) stored
+                : new LinkedHashSet<Integer>();
+        if (read.add(line)) {
+            tab.getProperties().put("drydock.read", read);
+            refreshMinimap(tab);
+        }
+    }
+
+    /**
+     * One sampler for "the reader has actually looked at this".
+     *
+     * <p>A member counts as read once it has been on screen across two
+     * consecutive samples -- roughly the delta's ~2s dwell -- rather than the
+     * instant it scrolls past. Tied to the scene: it is started on attach and
+     * stopped on detach and dispose with every other timer this viewer owns,
+     * because a 1s tick left running against a detached viewer is exactly the
+     * leak AGENTS.md forbids.</p>
+     */
+    private void sampleDwell() {
+        Tab tab = fileTabs.getSelectionModel().getSelectedItem();
+        if (tab == null || isSkimming(tab)) {
+            // Skim mode records a read when a member is opened, which is a
+            // stronger signal than "was on screen".
+            return;
+        }
+        CodeArea area = areaOf(tab);
+        if (area == null || !(tab.getProperties().get("drydock.outline") instanceof SourceOutline outline)
+                || area.getParagraphs().isEmpty()) {
+            return;
+        }
+        int first;
+        int last;
+        try {
+            first = area.firstVisibleParToAllParIndex() + 1;
+            last = area.lastVisibleParToAllParIndex() + 1;
+        } catch (RuntimeException e) {
+            return;
+        }
+        Set<Integer> onScreen = new LinkedHashSet<>();
+        for (SourceOutline.Member member : outline.members()) {
+            if (member.startLine() <= last && member.endLine() >= first) {
+                onScreen.add(member.startLine());
+            }
+        }
+        @SuppressWarnings("unchecked")
+        Set<Integer> previous = tab.getProperties().get("drydock.onScreen") instanceof Set<?> stored
+                ? (Set<Integer>) stored
+                : Set.<Integer>of();
+        for (int start : onScreen) {
+            if (previous.contains(start)) {
+                markRead(tab, start);
+            }
+        }
+        tab.getProperties().put("drydock.onScreen", onScreen);
     }
 
     // ---- Trail & peek (Explorer delta, part 1) ---------------------------
@@ -472,9 +687,11 @@ final class FileViewer extends BorderPane {
 
     /** The line a return to this tab should restore: the top of its viewport. */
     private int currentLineOf(Tab tab) {
-        if (tab.getContent() instanceof VirtualizedScrollPane<?> pane
-                && pane.getContent() instanceof CodeArea area
-                && !area.getParagraphs().isEmpty()) {
+        if (isSkimming(tab) && tab.getProperties().get("drydock.skim") instanceof SkimView skim) {
+            return skim.topLine();
+        }
+        CodeArea area = areaOf(tab);
+        if (area != null && !area.getParagraphs().isEmpty()) {
             try {
                 return area.firstVisibleParToAllParIndex() + 1;
             } catch (RuntimeException e) {
@@ -527,21 +744,37 @@ final class FileViewer extends BorderPane {
      * card appears when it lands.
      */
     private void peekAt(Tab tab, String symbol) {
-        if (peekService == null || peekLayer.depth() >= PeekLayer.MAX_DEPTH) {
-            if (peekLayer.depth() >= PeekLayer.MAX_DEPTH) {
-                flashToast("Peek stack is full — esc to unwind");
-            }
+        if (peekService == null) {
             return;
         }
+        if (peekLayer.depth() >= PeekLayer.MAX_DEPTH) {
+            flashToast("Peek stack is full — esc to unwind");
+            return;
+        }
+        // The resolution is a repository-wide text search: it can take a
+        // moment, and a click that does nothing visible for a second reads as
+        // a click that missed.
+        flashToast("Looking for " + symbol + "…");
         Map<Path, Set<Integer>> changed = changedLines;
         peekService.peek(symbol, changed).whenComplete((peek, failure) -> Platform.runLater(() -> {
+            if (disposed || getScene() == null) {
+                return;
+            }
             if (failure != null) {
-                LOG.log(Level.DEBUG, "Peek failed for " + symbol, failure);
+                LOG.log(Level.WARNING, "Could not resolve " + symbol, failure);
+                flashToast("Could not search for " + symbol);
                 return;
             }
             if (fileTabs.getSelectionModel().getSelectedItem() != tab) {
                 // The reader moved on while the search ran; a card over a
                 // different file is worse than no card.
+                return;
+            }
+            if (peek.isEmpty()) {
+                // Not the same as "nothing happened": the symbol really does
+                // occur nowhere the session's search can see (a generated or
+                // ignored file, or a word inside a string).
+                flashToast("No occurrence of " + symbol + " found in this session");
                 return;
             }
             peek.ifPresent(peekLayer::push);
@@ -551,24 +784,23 @@ final class FileViewer extends BorderPane {
     /**
      * The click that opens a peek.
      *
-     * <p>Deliberately not the same gesture in both kinds of tab. This
-     * viewer's code area is a real, auto-saving <em>editor</em> -- unlike the
-     * prototype's, which is read-only -- and in an editable file a plain
-     * click is how the reader places the caret. Stealing it would make every
-     * edit near a repeated identifier open a card. So: plain click on a
-     * read-only file, {@code ⌘}-click on an editable one, both advertised in
-     * the shortcuts overlay and on the underlined symbol's tooltip.</p>
+     * <p>A plain primary click, in editable files too. The handler is a
+     * {@code MOUSE_CLICKED} filter and RichTextFX places the caret on
+     * {@code MOUSE_PRESSED}, so peeking cannot take caret placement away
+     * from someone editing -- the card opens beside the caret they just
+     * placed. Only underlined symbols react, which is what keeps an ordinary
+     * click in ordinary code an ordinary click.</p>
      */
-    private void peekClick(Tab tab, CodeArea area, javafx.scene.input.MouseEvent event) {
+    private void peekClickIn(Tab tab, CodeArea area, javafx.scene.input.MouseEvent event) {
         if (event.getButton() != javafx.scene.input.MouseButton.PRIMARY || event.getClickCount() != 1) {
             return;
         }
-        if (area.isEditable() != event.isShortcutDown()) {
-            // Editable tab without ⌘, or read-only tab with it: not the peek
-            // gesture for this tab.
-            return;
-        }
-        if (!(tab.getProperties().get("drydock.lens") instanceof Set<?> lens)) {
+        // A skim body carries its own lens (it holds a slice of the file);
+        // the full-text area's lives on the tab.
+        Object lensSource = area.getProperties().get("drydock.lens") != null
+                ? area.getProperties().get("drydock.lens")
+                : tab.getProperties().get("drydock.lens");
+        if (!(lensSource instanceof Set<?> lens)) {
             return;
         }
         var hit = area.hit(event.getX(), event.getY());
@@ -600,17 +832,24 @@ final class FileViewer extends BorderPane {
         return peekLayer.depth();
     }
 
+    /** A short-lived message over the viewer, for callers outside it (the ask action). */
+    void toast(String message) {
+        flashToast(message);
+    }
+
     /** A short-lived message over the viewer (peek-stack cap, promote, pin). */
     private void flashToast(String message) {
-        toast.setText(message);
-        toast.setVisible(true);
-        toast.setManaged(true);
         if (toastTimer != null) {
             toastTimer.stop();
         }
         if (getScene() == null) {
+            // No scene means no timer to hide it again, and a toast nothing
+            // can clear is a permanent banner.
             return;
         }
+        toast.setText(message);
+        toast.setVisible(true);
+        toast.setManaged(true);
         toastTimer = new PauseTransition(javafx.util.Duration.seconds(2.6));
         toastTimer.setOnFinished(e -> {
             toast.setVisible(false);
@@ -661,6 +900,30 @@ final class FileViewer extends BorderPane {
             toastTimer.stop();
             toastTimer = null;
         }
+        if (dwellSampler != null) {
+            dwellSampler.stop();
+            dwellSampler = null;
+        }
+        // Hidden, not just un-timed: stopping the timer alone would leave
+        // whatever was on screen at detach sitting there for good.
+        toast.setVisible(false);
+        toast.setManaged(false);
+    }
+
+    /**
+     * Starts the read-dwell sampler. Indefinite by nature -- "what is on
+     * screen" is a question with no end -- so it is created only while the
+     * viewer is in the scene and stopped by {@link #stopTransitions()} on
+     * every detach and on dispose.
+     */
+    private void startDwellSampler() {
+        if (disposed || dwellSampler != null) {
+            return;
+        }
+        dwellSampler = new javafx.animation.Timeline(new javafx.animation.KeyFrame(
+                javafx.util.Duration.millis(DWELL_SAMPLE.toMillis()), e -> sampleDwell()));
+        dwellSampler.setCycleCount(javafx.animation.Animation.INDEFINITE);
+        dwellSampler.play();
     }
 
     /**
@@ -815,8 +1078,8 @@ final class FileViewer extends BorderPane {
             // CLEAN before it calls back in here, so it is unaffected.)
             return;
         }
-        if (!(tab.getContent() instanceof VirtualizedScrollPane<?> pane)
-                || !(pane.getContent() instanceof CodeArea area)) {
+        CodeArea area = areaOf(tab);
+        if (area == null) {
             // The session has already adopted the disk text, so silently
             // returning would leave buffer and session diverged with no signal.
             LOG.log(Level.WARNING, "Cannot reload " + fileNameOf(tab)
@@ -1104,12 +1367,32 @@ final class FileViewer extends BorderPane {
         area.setEditable(false);
         applyGutter(area, changedLines.getOrDefault(relativePath, Set.of()));
 
+        // The tab's content is the full-text area, the skim view over it, and
+        // the minimap strip beside them. The code area is kept in the tab's
+        // property map rather than dug back out of the node tree, so this
+        // layout can change without every caller learning about it.
+        SkimView skimView = new SkimView();
+        skimView.setVisible(false);
+        skimView.setManaged(false);
+        StackPane tabContent = new StackPane(new VirtualizedScrollPane<>(area), skimView);
+        Minimap minimap = new Minimap();
+        BorderPane wrapper = new BorderPane(tabContent);
+        wrapper.setRight(minimap);
+
         Tab tab = new Tab();
         tab.setGraphic(buildFileTabGraphic(file));
-        tab.setContent(new VirtualizedScrollPane<>(area));
+        tab.setContent(wrapper);
+        tab.getProperties().put("drydock.area", area);
+        tab.getProperties().put("drydock.skim", skimView);
+        tab.getProperties().put("drydock.minimap", minimap);
+        minimap.setOnGoToLine(line -> scrollTo(tab, line));
+        skimView.setOnMemberRead(line -> markRead(tab, line));
+        skimView.setOnBodyBuilt((bodyArea, startLine) -> bodyArea.addEventFilter(
+                javafx.scene.input.MouseEvent.MOUSE_CLICKED, event -> peekClickIn(tab, bodyArea, event)));
         tab.getProperties().put("drydock.file", file);
         tab.getProperties().put("drydock.relative", relativePath);
-        area.addEventFilter(javafx.scene.input.MouseEvent.MOUSE_CLICKED, event -> peekClick(tab, area, event));
+        area.addEventFilter(javafx.scene.input.MouseEvent.MOUSE_CLICKED,
+                event -> peekClickIn(tab, area, event));
         tab.setOnCloseRequest(event -> vetoCloseOfUnresolvedConflict(tab, event));
         tab.setOnClosed(e -> closeTab(tab, true));
 
@@ -1151,9 +1434,13 @@ final class FileViewer extends BorderPane {
                 merged.addAll(lens);
                 return merged;
             });
+            // The file's shape, for skim mode and the minimap. Parsed here,
+            // off the FX thread, with everything else this load computes.
+            SourceOutline outline = SourceOutline.parse(text);
             var styled = spans;
             Platform.runLater(() -> {
                 tab.getProperties().put("drydock.lens", lensSymbols);
+                tab.getProperties().put("drydock.outline", outline);
                 // Text first, editing second: a failure attaching editing
                 // (the session constructor's IllegalArgumentException, a
                 // RejectedExecutionException) must degrade to a working
@@ -1180,6 +1467,16 @@ final class FileViewer extends BorderPane {
                     }
                 }
                 updateStatusChip();
+                skimView.show(file, text, outline, changedLinesFor(tab), findingLabelsFor(tab));
+                // Default skim when the file is in the current review scope
+                // (delta part 2): a changed file is opened to be read for its
+                // change, and its shape is the fastest way in. Everything
+                // else opens as text, because that is what "open a file"
+                // means everywhere else in the app.
+                if (!changedLinesFor(tab).isEmpty()) {
+                    setSkim(tab, true);
+                }
+                refreshMinimap(tab);
                 jumpToLine.ifPresent(line -> scrollTo(tab, line));
             });
         });
@@ -1644,8 +1941,14 @@ final class FileViewer extends BorderPane {
     }
 
     private void scrollTo(Tab tab, int oneBasedLine) {
-        if (tab.getContent() instanceof VirtualizedScrollPane<?> pane
-                && pane.getContent() instanceof CodeArea area) {
+        if (isSkimming(tab) && tab.getProperties().get("drydock.skim") instanceof SkimView skim) {
+            // In skim mode the line may be inside a folded member; revealing
+            // it is what "go to this line" means there.
+            skim.revealLine(oneBasedLine);
+            return;
+        }
+        CodeArea area = areaOf(tab);
+        if (area != null) {
             int paragraph = Math.max(0, Math.min(oneBasedLine - 1, area.getParagraphs().size() - 1));
             area.moveTo(paragraph, 0);
             area.showParagraphAtCenter(paragraph);
@@ -1676,7 +1979,8 @@ final class FileViewer extends BorderPane {
         breadcrumb.getChildren().addAll(UiFormats.breadcrumbSegments(shown));
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
-        breadcrumb.getChildren().addAll(spacer, statusChip, gutterToggle);
+        breadcrumb.getChildren().addAll(spacer, skimSegment, statusChip, gutterToggle);
+        updateSkimToggle();
         updateStatusChip();
     }
 
@@ -1697,9 +2001,8 @@ final class FileViewer extends BorderPane {
      */
     public void diagType(String text) {
         Tab selected = fileTabs.getSelectionModel().getSelectedItem();
-        if (selected != null
-                && selected.getContent() instanceof VirtualizedScrollPane<?> pane
-                && pane.getContent() instanceof CodeArea area) {
+        CodeArea area = selected == null ? null : areaOf(selected);
+        if (area != null) {
             area.requestFocus();
             area.insertText(0, text);
         }
@@ -1815,8 +2118,8 @@ final class FileViewer extends BorderPane {
     private void toggleGutter() {
         gutterVisible = !gutterVisible;
         for (Tab tab : fileTabs.getTabs()) {
-            if (tab.getContent() instanceof VirtualizedScrollPane<?> pane
-                    && pane.getContent() instanceof CodeArea area) {
+            CodeArea area = areaOf(tab);
+            if (area != null) {
                 applyGutter(area, changedLinesFor(tab));
             }
         }

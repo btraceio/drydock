@@ -215,6 +215,11 @@ public final class DrydockApplication extends Application {
         // state that must not land inside a worktree.
         explorerTrailStore = new ExplorerTrailStore(
                 ExplorerTrailStore.siblingOf(stateRepository.stateFile()));
+        // A trail belongs to a session; when the session is gone so is the
+        // trail, or the file grows for the life of the profile.
+        explorerTrailStore.retain(sessionManager.sessions().stream()
+                .map(session -> session.id().value().toString())
+                .toList());
 
         // The observable store both the sidebar and the tab headers render
         // from; seeded before any UI reads it.

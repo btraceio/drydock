@@ -3405,9 +3405,102 @@
     -fx-padding: 7 14 7 14;
     -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.5), 20, 0.2, 0, 8);
 }
-/* The symbol lens's underline. JavaFX Text has no dotted underline, so this
- * is the prototype's dotted rule rendered solid in the same colour. */
+/* The symbol lens's underline. Underline ONLY: this layer is overlaid on the
+ * lexer's spans, and re-filling would repaint identifiers inside comments and
+ * strings the function colour -- a regression of the viewer's highlighting.
+ * (JavaFX Text has no dotted underline, so the prototype's dotted rule is
+ * rendered solid.) */
 .code-area .symbol-lens {
-    -fx-fill: -drydock-code-fn;
     -fx-underline: true;
 }
+.peek-scroll { -fx-background-color: transparent; -fx-background: transparent; }
+.peek-scroll .viewport { -fx-background-color: transparent; }
+.peek-usages-more { -fx-text-fill: -drydock-text-faint; -fx-font-size: 10px; -fx-padding: 3 0 0 0; }
+
+/* --- Explorer: skim mode & minimap (delta part 2) --------------------- */
+.skim-toggle {
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 12px;
+    -fx-background-radius: 12px;
+    -fx-padding: 0;
+}
+.skim-toggle-button {
+    -fx-background-color: transparent;
+    -fx-background-radius: 12px;
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10.5px;
+    -fx-padding: 2 10 2 10;
+    -fx-cursor: hand;
+}
+.skim-toggle-button:hover { -fx-text-fill: -drydock-text; }
+.skim-toggle-button:focused { -fx-border-color: -drydock-accent; -fx-border-radius: 12px; }
+.skim-toggle-button:selected {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-text-fill: -drydock-accent;
+}
+.explorer-skim {
+    -fx-background-color: -drydock-code-bg;
+    -fx-background: -drydock-code-bg;
+    -fx-padding: 0;
+}
+.explorer-skim .viewport { -fx-background-color: -drydock-code-bg; }
+.skim-rows { -fx-padding: 6 0 12 0; }
+.skim-header {
+    -fx-background-color: transparent;
+    -fx-background-radius: 0;
+    -fx-padding: 3 12 3 12;
+    -fx-alignment: center-left;
+    -fx-cursor: hand;
+}
+.skim-header:hover { -fx-background-color: -drydock-hover; }
+.skim-header:focused { -fx-background-color: -drydock-accent-soft; }
+.skim-header.has-finding { -fx-background-color: -drydock-blocking-soft; }
+.skim-lineno {
+    -fx-text-fill: -drydock-code-gutter;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 10px;
+    -fx-min-width: 34px;
+    -fx-alignment: center-right;
+}
+.skim-caret { -fx-text-fill: -drydock-text-faint; -fx-font-size: 10px; }
+.skim-signature {
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 12px;
+}
+.skim-signature-open {
+    -fx-text-fill: -drydock-text;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 12px;
+}
+.skim-group-signature {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 12px;
+}
+.skim-tag { -fx-text-fill: -drydock-code-gutter; -fx-font-size: 10px; }
+.skim-changed-tag { -fx-text-fill: -drydock-changed-gutter; -fx-font-size: 10px; }
+.skim-finding-tag { -fx-text-fill: -drydock-blocking; -fx-font-size: 10px; }
+.skim-helper { -fx-padding: 0 0 0 16; }
+.skim-code { -fx-background-color: transparent; -fx-font-size: 11.5px; -fx-padding: 0 0 0 12; }
+.skim-body-lineno {
+    -fx-text-fill: -drydock-code-gutter;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 10px;
+    -fx-padding: 0 6 0 4;
+}
+.explorer-minimap {
+    -fx-background-color: -drydock-row-bg;
+    -fx-border-color: transparent transparent transparent -drydock-border;
+    -fx-border-width: 0 0 0 1;
+}
+.minimap-tick {
+    -fx-background-radius: 2px;
+    -fx-padding: 0;
+    -fx-cursor: hand;
+}
+.minimap-tick:focused { -fx-border-color: -drydock-accent; -fx-border-width: 1; }
+.minimap-tick.changed { -fx-background-color: -drydock-changed-gutter; }
+.minimap-tick.finding { -fx-background-color: -drydock-blocking; }
+.minimap-tick.search-hit { -fx-background-color: -drydock-mcp; }
+.minimap-tick.read { -fx-background-color: -drydock-text-faint; -fx-opacity: 0.5; }

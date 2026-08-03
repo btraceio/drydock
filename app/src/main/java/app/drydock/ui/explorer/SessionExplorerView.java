@@ -5,7 +5,9 @@ import javafx.animation.KeyFrame;
 import javafx.animation.KeyValue;
 import javafx.animation.Timeline;
 import javafx.scene.Node;
+import javafx.scene.control.ButtonBase;
 import javafx.scene.control.TextInputControl;
+import javafx.scene.input.KeyCode;
 import javafx.scene.input.KeyEvent;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
@@ -76,6 +78,10 @@ public final class SessionExplorerView extends HBox {
                 return;
             }
             sendPrompt.accept(askPrompt(peek));
+            // The session's terminal is hidden behind the Explorer, so
+            // without this the question looks like it went nowhere.
+            viewer.toast("Asked the session about " + peek.symbol()
+                    + " — the answer is in the agent view");
         });
     }
 
@@ -133,6 +139,9 @@ public final class SessionExplorerView extends HBox {
         viewer.setPeekService(new SymbolPeekService(searchRoot, searchService));
         viewer.setOnTrailChanged(this::persistTrail);
         rail = new SearchRail(searchRoot, searchService, viewer::openFile);
+        // The blue minimap ticks are the rail's own query, so they can never
+        // disagree with what the rail is showing.
+        rail.setOnQueryChanged(viewer::setSearchQuery);
         installShortcuts();
         if (overlay != null) {
             viewer.setDiffOverlay(overlay);
@@ -196,6 +205,16 @@ public final class SessionExplorerView extends HBox {
         viewer.diagPeek(symbol);
     }
 
+    /** {@code z}: skim ⇄ full text for the open file. */
+    public void toggleSkim() {
+        viewer.toggleSkim();
+    }
+
+    /** Findings anchored in this session's files (skim chips, red minimap ticks). */
+    public void setFindingsProvider(java.util.function.Function<Path, java.util.List<ExplorerFinding>> provider) {
+        viewer.setFindingsProvider(provider);
+    }
+
     /** Diagnostic- and test-only: how many peek cards are stacked. */
     public int diagPeekDepth() {
         return viewer.diagPeekDepth();
@@ -236,7 +255,18 @@ public final class SessionExplorerView extends HBox {
             if (typingSomewhere()) {
                 return;
             }
+            if (event.getCode() == KeyCode.ENTER
+                    && getScene() != null && getScene().getFocusOwner() instanceof ButtonBase) {
+                // Enter belongs to whatever button has focus. Swallowing it
+                // here would break every trail chip, peek action and rail row
+                // for keyboard users the moment a peek was open.
+                return;
+            }
             switch (event.getCode()) {
+                case Z -> {
+                    viewer.toggleSkim();
+                    event.consume();
+                }
                 case ENTER -> {
                     if (viewer.isPeekOpen()) {
                         viewer.promoteTopPeek();

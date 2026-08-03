@@ -47,6 +47,7 @@ import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
 import app.drydock.search.SessionSearchService;
 import app.drydock.ui.explorer.DiffOverlay;
+import app.drydock.ui.explorer.ExplorerFinding;
 import app.drydock.ui.explorer.ExplorerTrailStore;
 import app.drydock.ui.explorer.SessionExplorerView;
 import app.drydock.ui.review.ReviewDestinationView;
@@ -1534,6 +1535,39 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         tabPane.getSelectionModel().select(next);
     }
 
+    /**
+     * The findings anchored in {@code relative} for the scopes bound to
+     * {@code tab}'s session.
+     *
+     * <p>Anchors that only exist in the pre-image ({@code o123} -- a deleted
+     * line) are dropped: the Explorer shows the file as it is now, and there
+     * is no row for a line that is no longer there. Resolved findings are
+     * dropped too; a chip for something already settled is noise.</p>
+     */
+    private List<ExplorerFinding> explorerFindings(OpenSessionTab tab, Path relative) {
+        String path = relative.toString();
+        List<ExplorerFinding> marks = new ArrayList<>();
+        for (ReviewScope scope : reviewScopeRegistry.scopes()) {
+            if (!scope.sessionId().map(id -> id.equals(tab.sessionId())).orElse(false)) {
+                continue;
+            }
+            for (ReviewAnnotation finding : annotationStore.forScope(scope.id())) {
+                if (!finding.file().equals(path) || finding.resolved()) {
+                    continue;
+                }
+                ExplorerFinding.lineOfKey(finding.startKey()).ifPresent(line ->
+                        marks.add(new ExplorerFinding(line, shortFindingLabel(finding))));
+            }
+        }
+        return marks;
+    }
+
+    /** A few words, not a sentence: the chip sits at the end of a signature row. */
+    private static String shortFindingLabel(ReviewAnnotation finding) {
+        String title = finding.displayTitle().replaceAll("\\s+", " ").strip();
+        return title.length() <= 22 ? title : title.substring(0, 21) + "…";
+    }
+
     /** Wires the sidebar-collapse toggle (⌘0 pressed while the terminal is focused reaches tabs, not the scene filter). */
     public void setOnToggleSidebar(Runnable handler) {
         this.onToggleSidebar = handler == null ? () -> { } : handler;
@@ -2619,6 +2653,11 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 // The peek card's "ask the agent" is absent unless this tab's
                 // own process is alive to be asked (delta hard rules).
                 explorer.setAgentBridge(() -> !openTab.isProcessExited(), openTab::sendPrompt);
+                // Findings for the file being read, so skim rows carry their
+                // ◆ chip and the minimap its red ticks. Read live from the
+                // store rather than snapshotted: the reviewer writes findings
+                // over MCP while the reader is reading.
+                explorer.setFindingsProvider(relative -> explorerFindings(openTab, relative));
                 openExplorers.put(openTab, explorer);
                 return explorer;
             });
