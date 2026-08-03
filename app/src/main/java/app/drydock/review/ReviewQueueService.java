@@ -126,8 +126,8 @@ public final class ReviewQueueService {
      * a worktree that was removed stops being addressable over MCP. A failed
      * scan is not evidence that an existing scope departed.</p>
      */
-    public CompletableFuture<List<ReviewItem>> assemble(List<RepositoryTarget> repositories,
-                                                        SessionLookup sessions) {
+    public CompletableFuture<QueueAssembly> assemble(List<RepositoryTarget> repositories,
+                                                     SessionLookup sessions) {
         Objects.requireNonNull(sessions, "sessions");
         List<CompletableFuture<RepositoryScan>> perRepository = repositories.stream()
                 .map(repository -> assembleRepository(repository, sessions))
@@ -140,7 +140,12 @@ public final class ReviewQueueService {
                             .sorted(Comparator.comparingInt(item -> item.group().ordinal()))
                             .toList();
                     revokeDepartedScopes(scans);
-                    return items;
+                    // One repository's failed gh makes the whole queue partial:
+                    // the reader cannot be told "complete" about a list that is
+                    // missing another repository's pull requests.
+                    return new QueueAssembly(items,
+                            scans.stream().allMatch(RepositoryScan::localComplete),
+                            scans.stream().allMatch(RepositoryScan::requestsComplete));
                 });
     }
 

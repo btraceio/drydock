@@ -994,11 +994,12 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                         repository.root(), repository.displayName()))
                 .toList();
         reviewQueueService.assemble(targets, this::sessionAtCheckout)
-                .whenComplete((items, failure) -> Platform.runLater(() -> {
+                .whenComplete((assembly, failure) -> Platform.runLater(() -> {
                     if (failure != null) {
                         LOG.log(Level.WARNING, "Could not assemble the Review queue", failure);
                         return;
                     }
+                    List<ReviewItem> items = assembly.items();
                     adoptLegacyAnnotations(items);
                     reviewDestination.setItems(items, local.size());
                     if (pendingReviewSelection != null) {
