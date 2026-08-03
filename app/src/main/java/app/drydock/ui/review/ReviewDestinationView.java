@@ -541,7 +541,8 @@ public final class ReviewDestinationView extends BorderPane {
         margin.invalidate(null);
         margin.setFindings(findingsForMargin(scope.get()));
         diffColumn.refreshPins();
-        intentRail.setIntents(intents(), currentIntent().map(ReviewIntent::id).orElse(null));
+        intentRail.setIntents(intents(), currentIntent().map(ReviewIntent::id).orElse(null),
+                emptyReason());
         mcpPanel.filter(javafx.scene.Node::isVisible)
                 .ifPresent(panel -> panel.setScope(scope.get()));
         renderVerdictBar(scope.get());
@@ -583,6 +584,30 @@ public final class ReviewDestinationView extends BorderPane {
             return host.intents(scope.get(), loaded.diff());
         }
         return List.of();
+    }
+
+    /**
+     * Which empty the rail is showing. A scope with a checkout whose diff has
+     * not arrived is loading; one without a checkout never will; a loaded
+     * diff with no files is a genuine "nothing changed here".
+     */
+    private ReviewIntentRail.Empty emptyReason() {
+        Optional<ReviewScope> scope = selectedScope();
+        if (scope.isEmpty()) {
+            return ReviewIntentRail.Empty.NONE;
+        }
+        DiffOutcome outcome = outcomeByScope.get(scope.get().id());
+        if (outcome instanceof DiffOutcome.Failed) {
+            return ReviewIntentRail.Empty.DIFF_FAILED;
+        }
+        if (outcome instanceof DiffOutcome.Loaded loaded) {
+            return loaded.diff().files().isEmpty()
+                    ? ReviewIntentRail.Empty.NO_CHANGES
+                    : ReviewIntentRail.Empty.NONE;
+        }
+        return scope.get().worktree().isEmpty()
+                ? ReviewIntentRail.Empty.NOT_CHECKED_OUT
+                : ReviewIntentRail.Empty.DIFFING;
     }
 
     private Optional<ReviewIntent> currentIntent() {

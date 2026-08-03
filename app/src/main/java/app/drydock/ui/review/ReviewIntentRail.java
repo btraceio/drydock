@@ -93,10 +93,37 @@ final class ReviewIntentRail extends VBox {
         this.verdictLookup = lookup == null ? intent -> Optional.empty() : lookup;
     }
 
+    /**
+     * Why a rail is showing no intents. Four situations, four sentences: the
+     * rail is told which one it is in rather than inferring it from an
+     * absence, because a failed diff and an in-flight one are both "no
+     * entry" and mean opposite things to a reader.
+     */
+    enum Empty {
+        NONE(""),
+        DIFFING("Diffing…"),
+        NOT_CHECKED_OUT("Not checked out — check out to group changes"),
+        DIFF_FAILED("Could not diff — see the message beside this"),
+        NO_CHANGES("No changes");
+
+        private final String message;
+
+        Empty(String message) {
+            this.message = message;
+        }
+
+        String message() {
+            return message;
+        }
+    }
+
+    private Empty emptyReason = Empty.NONE;
+
     /** Replaces the rail's contents and marks {@code selectedIntentId} as current. */
-    void setIntents(List<ReviewIntent> newIntents, String selectedIntentId) {
+    void setIntents(List<ReviewIntent> newIntents, String selectedIntentId, Empty reason) {
         this.intents = List.copyOf(newIntents);
         this.selectedId = selectedIntentId;
+        this.emptyReason = reason == null ? Empty.NONE : reason;
         rebuild();
     }
 
@@ -203,6 +230,12 @@ final class ReviewIntentRail extends VBox {
             nodes.add(card);
         }
         cards.getChildren().setAll(nodes);
+        if (intents.isEmpty() && emptyReason != Empty.NONE && !collapsed) {
+            Label message = new Label(emptyReason.message());
+            message.getStyleClass().add("review-intent-empty");
+            message.setWrapText(true);
+            cards.getChildren().setAll(message);
+        }
         applySelection();
     }
 

@@ -3035,6 +3035,11 @@
     -fx-text-fill: -drydock-text-faint;
     -fx-font-size: 10.5px;
 }
+.review-intent-empty {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 11px;
+    -fx-padding: 8 10 8 10;
+}
 .review-intent-collapsed-note {
     -fx-text-fill: -drydock-text-faint;
     -fx-font-size: 10px;
