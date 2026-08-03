@@ -167,6 +167,10 @@ final class ReviewDiffColumn extends BorderPane {
         if (scope != null && newScope != null && scope.id().equals(newScope.id())) {
             return;
         }
+        if (newScope != null && !newScope.diffable()) {
+            throw new IllegalArgumentException(
+                    "not diffable (no checkout): " + newScope.id());
+        }
         scope = newScope;
         expandedRuns.clear();
         if (newScope == null) {

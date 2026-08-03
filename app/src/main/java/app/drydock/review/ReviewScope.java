@@ -85,6 +85,20 @@ public record ReviewScope(
         return worktree.orElse(repoRoot);
     }
 
+    /**
+     * Whether a diff may be run for this scope at all.
+     *
+     * <p>False for a pull request with no checkout. {@link #diffRoot()} falls
+     * back to the repository's main checkout there, so the only diff
+     * obtainable would be that checkout's HEAD against the PR's base -- a
+     * real diff of the wrong thing, which is the most misleading kind. Such a
+     * scope is read through the checkout gate or the patch-only path, or not
+     * at all.</p>
+     */
+    public boolean diffable() {
+        return worktree.isPresent();
+    }
+
     /** This scope with {@code session} bound (the checkout gate's result, M5). */
     public ReviewScope withSession(ManagedSessionId session) {
         return new ReviewScope(id, kind, repoRoot, worktree, base, head, pr,
