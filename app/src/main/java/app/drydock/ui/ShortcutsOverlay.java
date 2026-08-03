@@ -30,7 +30,7 @@ final class ShortcutsOverlay {
                     {"Agent view", "⌘1"},
                     {"Terminal view", "⌘2"},
                     {"Explorer view", "⌘3"},
-                    {"Review", "⌘4"},
+                    {"Review — and back to where you were", "⌘4"},
                     {"Previous / next session tab", "⌘[ / ⌘]"},
                     {"Previous / next live session", "⌘↑ / ⌘↓"},
                     {"Toggle sidebar", "⌘0"},
@@ -57,6 +57,7 @@ final class ShortcutsOverlay {
                     {"Collapse the findings margin", "m"},
                     {"Findings from the whole review", "⇧F"},
                     {"MCP activity log", "\\"},
+                    {"Narrow: open the diff / back to the queue", "⏎ esc"},
             }),
     };
 

@@ -60,6 +60,12 @@ final class ReviewIntentRail extends VBox {
     private boolean collapsed;
     private boolean narrow;
 
+    /** Non-zero while the narrow Browse page sizes this rail; see {@link #setSpanWidth}. */
+    private double spanWidth;
+
+    /** The collapse/expand animation currently running, so a span set can cancel it. */
+    private Timeline widthAnimation;
+
     ReviewIntentRail() {
         getStyleClass().add("review-intent-rail");
         setMinWidth(EXPANDED_WIDTH);
@@ -103,7 +109,7 @@ final class ReviewIntentRail extends VBox {
             return;
         }
         collapsed = newCollapsed;
-        animateTo(targetWidth());
+        resize(true);
         rebuild();
     }
 
@@ -113,7 +119,51 @@ final class ReviewIntentRail extends VBox {
         }
         narrow = newNarrow;
         if (!collapsed) {
+            resize(true);
+        }
+    }
+
+    /**
+     * The narrow drill-in's Browse page (spec §4.9) sizes the rails as
+     * fractions of the window rather than letting them keep their own fixed
+     * width. {@code 0} hands sizing back to {@link #targetWidth()}. Never
+     * animated -- see {@code ReviewQueueRail.setSpanWidth}.
+     */
+    void setSpanWidth(double width) {
+        if (spanWidth == width) {
+            return;
+        }
+        spanWidth = width;
+        resize(false);
+    }
+
+    private void resize(boolean animate) {
+        if (spanWidth > 0) {
+            applyWidth(spanWidth);
+        } else if (animate) {
             animateTo(targetWidth());
+        } else {
+            applyWidth(targetWidth());
+        }
+    }
+
+    /**
+     * Pins the width now, cancelling any collapse animation still in flight.
+     * Without that cancel a span set moments after a collapse/expand would be
+     * silently animated back over the following 160ms -- the rail would take
+     * its span for one frame and then return to its own width.
+     */
+    private void applyWidth(double target) {
+        stopWidthAnimation();
+        setMinWidth(target);
+        setPrefWidth(target);
+        setMaxWidth(target);
+    }
+
+    private void stopWidthAnimation() {
+        if (widthAnimation != null) {
+            widthAnimation.stop();
+            widthAnimation = null;
         }
     }
 
@@ -125,10 +175,12 @@ final class ReviewIntentRail extends VBox {
     }
 
     private void animateTo(double target) {
-        new Timeline(new KeyFrame(COLLAPSE_ANIMATION,
+        stopWidthAnimation();
+        widthAnimation = new Timeline(new KeyFrame(COLLAPSE_ANIMATION,
                 new KeyValue(minWidthProperty(), target),
                 new KeyValue(prefWidthProperty(), target),
-                new KeyValue(maxWidthProperty(), target))).play();
+                new KeyValue(maxWidthProperty(), target)));
+        widthAnimation.play();
     }
 
     private void rebuild() {
