@@ -37,6 +37,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -72,6 +73,25 @@ final class FileViewer extends BorderPane {
     private final Label emptyState = new Label("Open a file from search to view it.");
     private final StackPane centerStack = new StackPane();
     private final Button gutterToggle = new Button("#");
+
+    // -- Trail & peek (Explorer delta, part 1) -----------------------------
+    private final NavigationTrail trail = new NavigationTrail();
+    private final TrailBar trailBar = new TrailBar();
+    private final PeekLayer peekLayer = new PeekLayer();
+    private final Label toast = new Label();
+    private PauseTransition toastTimer;
+    private SymbolPeekService peekService;
+
+    /**
+     * True while a trail step is driving the tab selection. Selecting a tab
+     * is itself a navigation, so without this the ⌘[ that walks back would
+     * immediately push the waypoint it just left and the trail could never
+     * move.
+     */
+    private boolean navigatingTrail;
+
+    /** Notified whenever the trail changes, so the owner can persist it. */
+    private Runnable onTrailChanged = () -> { };
 
     // -- Diff overlay (design handoff section C "Explorer integration") ----
     private final HBox diffBanner = new HBox(8);
@@ -169,7 +189,16 @@ final class FileViewer extends BorderPane {
      */
     private boolean disposed;
 
-    FileViewer() {
+    /**
+     * The session's search root. Load-bearing for the trail: a waypoint
+     * stores the repo-relative path (that is what survives persistence), so
+     * re-opening one after the tab was closed needs the root to resolve it
+     * back to a file.
+     */
+    private final Path searchRoot;
+
+    FileViewer(Path searchRoot) {
+        this.searchRoot = searchRoot;
         getStyleClass().add("file-viewer");
 
         fileTabs.getStyleClass().add("viewer-tabs");
@@ -221,11 +250,39 @@ final class FileViewer extends BorderPane {
         editBanner.setVisible(false);
         editBanner.setManaged(false);
 
-        centerStack.getChildren().setAll(fileTabs, emptyState);
+        toast.getStyleClass().add("explorer-toast");
+        toast.setVisible(false);
+        toast.setManaged(false);
+        StackPane.setAlignment(toast, Pos.BOTTOM_CENTER);
+
+        centerStack.getChildren().setAll(fileTabs, emptyState, peekLayer, toast);
         setCenter(centerStack);
+
+        trailBar.setOnStep(this::navigateTrail);
+        trailBar.setOnGoTo(this::goToWaypoint);
+        trailBar.setOnTogglePin(() -> {
+            boolean pinned = trail.togglePin();
+            trailBar.render(trail);
+            onTrailChanged.run();
+            flashToast(pinned ? "Waypoint pinned — it survives trail eviction" : "Waypoint unpinned");
+        });
+        trailBar.render(trail);
+        setBottom(trailBar);
+
+        peekLayer.setOnStackFull(() -> flashToast("Peek stack is full — esc to unwind"));
+        peekLayer.setOnPromote(this::promotePeek);
+        peekLayer.setOnChanged(this::updateEmptyState);
 
         fileTabs.getSelectionModel().selectedItemProperty().addListener((obs, oldTab, newTab) -> {
             flushSession(oldTab);
+            rememberScrollOf(oldTab);
+            // A peek is anchored to the file it was opened from; carrying the
+            // stack across to another file would leave cards over code they
+            // have nothing to do with.
+            peekLayer.clear();
+            if (!navigatingTrail && newTab != null) {
+                pushWaypoint(newTab);
+            }
             // The edit banner is bound to one tab; showing another tab's
             // conflict/error over this file -- with buttons that act on that
             // other file -- would be actively misleading.
@@ -313,6 +370,255 @@ final class FileViewer extends BorderPane {
         diffBanner.setManaged(show);
     }
 
+    // ---- Trail & peek (Explorer delta, part 1) ---------------------------
+
+    /** Wires symbol resolution; without one, clicking a symbol does nothing (no session search root). */
+    void setPeekService(SymbolPeekService service) {
+        this.peekService = service;
+    }
+
+    /** See {@link PeekLayer#setAgentAvailable}: the ask action is absent, never greyed. */
+    void setAgentAvailable(java.util.function.BooleanSupplier available) {
+        peekLayer.setAgentAvailable(available);
+    }
+
+    /** Handler for the peek card's {@code a}: hands the symbol and its occurrences to the bound session. */
+    void setOnAskAgent(java.util.function.Consumer<SymbolPeek> handler) {
+        peekLayer.setOnAsk(handler);
+    }
+
+    /** Called after every trail mutation so the owner can persist it. */
+    void setOnTrailChanged(Runnable handler) {
+        this.onTrailChanged = handler == null ? () -> { } : handler;
+    }
+
+    NavigationTrail trail() {
+        return trail;
+    }
+
+    /**
+     * Restores a persisted trail. The files are NOT opened: a session
+     * reopened after a restart would otherwise load every file the reader
+     * ever visited. The chips are there, and clicking one opens it.
+     */
+    void restoreTrail(List<NavigationTrail.Waypoint> waypoints, int cursor) {
+        trail.restore(waypoints, cursor);
+        trailBar.render(trail);
+    }
+
+    /**
+     * {@code ⌘[} / {@code ⌘]}. Returns false when the trail cannot move that
+     * way, which is what lets the global shortcut fall through to its
+     * original session-tab meaning instead of being silently swallowed.
+     */
+    boolean navigateTrail(int direction) {
+        rememberScrollOf(fileTabs.getSelectionModel().getSelectedItem());
+        Optional<NavigationTrail.Waypoint> target = direction < 0 ? trail.back() : trail.forward();
+        target.ifPresent(this::openWaypoint);
+        trailBar.render(trail);
+        if (target.isPresent()) {
+            onTrailChanged.run();
+        }
+        return target.isPresent();
+    }
+
+    private void goToWaypoint(int index) {
+        rememberScrollOf(fileTabs.getSelectionModel().getSelectedItem());
+        trail.goTo(index).ifPresent(this::openWaypoint);
+        trailBar.render(trail);
+        onTrailChanged.run();
+    }
+
+    /** Opens a waypoint's file at its remembered line without disturbing the trail. */
+    private void openWaypoint(NavigationTrail.Waypoint waypoint) {
+        Path absolute = (Path) openFiles.keySet().stream()
+                .filter(file -> file.endsWith(waypoint.file()))
+                .findFirst().orElse(null);
+        navigatingTrail = true;
+        try {
+            if (absolute != null) {
+                openFile(absolute, waypoint.file(), OptionalInt.of(waypoint.line()), null);
+            } else if (searchRoot != null) {
+                openFile(searchRoot.resolve(waypoint.file()).normalize(), waypoint.file(),
+                        OptionalInt.of(waypoint.line()), null);
+            }
+        } finally {
+            navigatingTrail = false;
+        }
+    }
+
+    /** Appends the waypoint for a real navigation to {@code tab}. */
+    private void pushWaypoint(Tab tab) {
+        Path relative = (Path) tab.getProperties().get("drydock.relative");
+        if (relative == null) {
+            return;
+        }
+        int line = currentLineOf(tab);
+        if (trail.push(relative, relative.getFileName().toString(), line)) {
+            onTrailChanged.run();
+        }
+        trailBar.render(trail);
+    }
+
+    private void rememberScrollOf(Tab tab) {
+        if (tab == null) {
+            return;
+        }
+        Path relative = (Path) tab.getProperties().get("drydock.relative");
+        if (relative != null && trail.current().map(w -> w.file().equals(relative)).orElse(false)) {
+            trail.rememberLine(currentLineOf(tab));
+        }
+    }
+
+    /** The line a return to this tab should restore: the top of its viewport. */
+    private int currentLineOf(Tab tab) {
+        if (tab.getContent() instanceof VirtualizedScrollPane<?> pane
+                && pane.getContent() instanceof CodeArea area
+                && !area.getParagraphs().isEmpty()) {
+            try {
+                return area.firstVisibleParToAllParIndex() + 1;
+            } catch (RuntimeException e) {
+                // Before the first layout there is no viewport to ask.
+                return area.getCurrentParagraph() + 1;
+            }
+        }
+        return 1;
+    }
+
+    /** Whether a peek is open (drives the Esc unwind order). */
+    boolean isPeekOpen() {
+        return peekLayer.isOpen();
+    }
+
+    /** {@code esc}: closes exactly one peek. */
+    boolean unwindPeek() {
+        return peekLayer.popOne();
+    }
+
+    /** {@code u} in a peek. */
+    void togglePeekUsages() {
+        peekLayer.toggleUsages();
+    }
+
+    /** {@code ⏎} in a peek. */
+    void promoteTopPeek() {
+        peekLayer.promoteTop();
+    }
+
+    /** {@code a} in a peek. */
+    void askTopPeek() {
+        peekLayer.askTop();
+    }
+
+    /**
+     * {@code ⏎} on a peek: opens the peeked file for real, which collapses
+     * the whole stack onto the trail -- the reader has committed, and the
+     * cards they came through are now waypoints behind them.
+     */
+    private void promotePeek(SymbolPeek peek) {
+        peekLayer.clear();
+        openFile(peek.file(), peek.relativePath(), OptionalInt.of(peek.startLine()), null);
+        flashToast("Opened for real — the peek stack collapsed onto the trail");
+    }
+
+    /**
+     * Opens a peek for the symbol clicked in {@code tab}'s code area.
+     * Resolution is off the FX thread (a text search plus a file read); the
+     * card appears when it lands.
+     */
+    private void peekAt(Tab tab, String symbol) {
+        if (peekService == null || peekLayer.depth() >= PeekLayer.MAX_DEPTH) {
+            if (peekLayer.depth() >= PeekLayer.MAX_DEPTH) {
+                flashToast("Peek stack is full — esc to unwind");
+            }
+            return;
+        }
+        Map<Path, Set<Integer>> changed = changedLines;
+        peekService.peek(symbol, changed).whenComplete((peek, failure) -> Platform.runLater(() -> {
+            if (failure != null) {
+                LOG.log(Level.DEBUG, "Peek failed for " + symbol, failure);
+                return;
+            }
+            if (fileTabs.getSelectionModel().getSelectedItem() != tab) {
+                // The reader moved on while the search ran; a card over a
+                // different file is worse than no card.
+                return;
+            }
+            peek.ifPresent(peekLayer::push);
+        }));
+    }
+
+    /**
+     * The click that opens a peek.
+     *
+     * <p>Deliberately not the same gesture in both kinds of tab. This
+     * viewer's code area is a real, auto-saving <em>editor</em> -- unlike the
+     * prototype's, which is read-only -- and in an editable file a plain
+     * click is how the reader places the caret. Stealing it would make every
+     * edit near a repeated identifier open a card. So: plain click on a
+     * read-only file, {@code ⌘}-click on an editable one, both advertised in
+     * the shortcuts overlay and on the underlined symbol's tooltip.</p>
+     */
+    private void peekClick(Tab tab, CodeArea area, javafx.scene.input.MouseEvent event) {
+        if (event.getButton() != javafx.scene.input.MouseButton.PRIMARY || event.getClickCount() != 1) {
+            return;
+        }
+        if (area.isEditable() != event.isShortcutDown()) {
+            // Editable tab without ⌘, or read-only tab with it: not the peek
+            // gesture for this tab.
+            return;
+        }
+        if (!(tab.getProperties().get("drydock.lens") instanceof Set<?> lens)) {
+            return;
+        }
+        var hit = area.hit(event.getX(), event.getY());
+        int offset = hit.getInsertionIndex();
+        var position = area.offsetToPosition(offset, org.fxmisc.richtext.model.TwoDimensional.Bias.Backward);
+        int paragraph = position.getMajor();
+        if (paragraph < 0 || paragraph >= area.getParagraphs().size()) {
+            return;
+        }
+        String line = area.getText(paragraph);
+        SymbolPeekService.identifierAt(line, position.getMinor())
+                .filter(lens::contains)
+                .ifPresent(symbol -> {
+                    event.consume();
+                    peekAt(tab, symbol);
+                });
+    }
+
+    /** Diagnostic- and test-only: peeks {@code symbol} exactly as a click on it would. */
+    void diagPeek(String symbol) {
+        Tab selected = fileTabs.getSelectionModel().getSelectedItem();
+        if (selected != null) {
+            peekAt(selected, symbol);
+        }
+    }
+
+    /** Diagnostic- and test-only: the peek stack's depth. */
+    int diagPeekDepth() {
+        return peekLayer.depth();
+    }
+
+    /** A short-lived message over the viewer (peek-stack cap, promote, pin). */
+    private void flashToast(String message) {
+        toast.setText(message);
+        toast.setVisible(true);
+        toast.setManaged(true);
+        if (toastTimer != null) {
+            toastTimer.stop();
+        }
+        if (getScene() == null) {
+            return;
+        }
+        toastTimer = new PauseTransition(javafx.util.Duration.seconds(2.6));
+        toastTimer.setOnFinished(e -> {
+            toast.setVisible(false);
+            toast.setManaged(false);
+        });
+        toastTimer.play();
+    }
+
     // ---- Disk polling / reload / conflict --------------------------------
 
     private void startPolling() {
@@ -350,6 +656,10 @@ final class FileViewer extends BorderPane {
         if (chipReset != null) {
             chipReset.stop();
             chipReset = null;
+        }
+        if (toastTimer != null) {
+            toastTimer.stop();
+            toastTimer = null;
         }
     }
 
@@ -776,8 +1086,16 @@ final class FileViewer extends BorderPane {
     void openFile(Path file, Path relativePath, OptionalInt jumpToLine, String highlightQuery) {
         Tab existing = openFiles.get(file);
         if (existing != null) {
+            boolean alreadySelected = fileTabs.getSelectionModel().getSelectedItem() == existing;
             fileTabs.getSelectionModel().select(existing);
             jumpToLine.ifPresent(line -> scrollTo(existing, line));
+            if (alreadySelected && !navigatingTrail) {
+                // Re-picking the file already on screen is not a tab-selection
+                // change, so the listener that normally pushes the waypoint
+                // never fires -- and the ⤢ that lands on the open file would
+                // leave no trace on the trail.
+                pushWaypoint(existing);
+            }
             return;
         }
 
@@ -791,6 +1109,7 @@ final class FileViewer extends BorderPane {
         tab.setContent(new VirtualizedScrollPane<>(area));
         tab.getProperties().put("drydock.file", file);
         tab.getProperties().put("drydock.relative", relativePath);
+        area.addEventFilter(javafx.scene.input.MouseEvent.MOUSE_CLICKED, event -> peekClick(tab, area, event));
         tab.setOnCloseRequest(event -> vetoCloseOfUnresolvedConflict(tab, event));
         tab.setOnClosed(e -> closeTab(tab, true));
 
@@ -819,8 +1138,22 @@ final class FileViewer extends BorderPane {
                     return merged;
                 });
             }
+            // The symbol lens (delta part 1): identifiers this file uses more
+            // than once carry an underline and open a peek. Computed here,
+            // with the lexer spans, and NOT re-derived while typing -- the
+            // same load-time-artifact rule the search-match layer follows.
+            Set<String> lensSymbols = SymbolLens.symbolsIn(text);
+            spans = spans.overlay(SymbolLens.spans(text, lensSymbols), (base, lens) -> {
+                if (lens.isEmpty()) {
+                    return base;
+                }
+                List<String> merged = new ArrayList<>(base);
+                merged.addAll(lens);
+                return merged;
+            });
             var styled = spans;
             Platform.runLater(() -> {
+                tab.getProperties().put("drydock.lens", lensSymbols);
                 // Text first, editing second: a failure attaching editing
                 // (the session constructor's IllegalArgumentException, a
                 // RejectedExecutionException) must degrade to a working

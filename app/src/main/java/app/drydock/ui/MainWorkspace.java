@@ -47,6 +47,7 @@ import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
 import app.drydock.search.SessionSearchService;
 import app.drydock.ui.explorer.DiffOverlay;
+import app.drydock.ui.explorer.ExplorerTrailStore;
 import app.drydock.ui.explorer.SessionExplorerView;
 import app.drydock.ui.review.ReviewDestinationView;
 import app.drydock.ui.model.WorkspaceViewModel;
@@ -251,6 +252,9 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      */
     private final Map<OpenSessionTab, SessionExplorerView> openExplorers = new LinkedHashMap<>();
 
+    /** Where each session's Explorer trail is persisted; null in tests that build no store. */
+    private final ExplorerTrailStore explorerTrailStore;
+
     /** Sessions whose self-exit has already been recorded, so the watcher fires once per exit. */
     private final Set<ManagedSessionId> exitRecorded = new HashSet<>();
 
@@ -318,6 +322,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                           GhCliService ghCliService, WorktreeService worktreeService, DiffService diffService,
                           ChangedLineService changedLineService, AnnotationStore annotationStore,
                           ReviewScopeRegistry reviewScopeRegistry, McpActivityLog activityLog,
+                          ExplorerTrailStore explorerTrailStore,
                           WorkspaceViewModel viewModel, Stage stage) {
         this.sessionManager = sessionManager;
         this.agentRegistry = agentRegistry;
@@ -329,6 +334,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         this.diffService = diffService;
         this.changedLineService = changedLineService;
         this.annotationStore = annotationStore;
+        this.explorerTrailStore = explorerTrailStore;
         this.reviewScopeRegistry = reviewScopeRegistry;
         this.reviewQueueService = new ReviewQueueService(worktreeService, gitStatusService,
                 ghCliService::listReviewRequests, ghCliService::listOpenPullRequests,
@@ -917,6 +923,28 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      */
     public boolean unwindReviewOverlay() {
         return isReviewShowing() && reviewDestination.unwindOne();
+    }
+
+    /**
+     * Esc inside the Explorer, before the global chain's "leave the tab"
+     * step: one peek card closes. False when there is nothing open, so Esc
+     * keeps its old meaning everywhere else.
+     */
+    public boolean unwindExplorerOverlay() {
+        return !isReviewShowing()
+                && currentlySelected().map(OpenSessionTab::unwindExplorerOverlay).orElse(false);
+    }
+
+    /**
+     * {@code ⌘[} / {@code ⌘]} while the Explorer is showing: a step along its
+     * trail. False when the Explorer is not showing or the trail cannot move
+     * that way -- and the shortcut then falls back to its original
+     * previous/next-session-tab meaning, rather than dying inside a view
+     * that had nothing to do with it.
+     */
+    public boolean navigateExplorerTrail(int direction) {
+        return !isReviewShowing()
+                && currentlySelected().map(open -> open.navigateExplorerTrail(direction)).orElse(false);
     }
 
     /**
@@ -2584,6 +2612,13 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             DiffOverlay overlay = new DiffOverlay(changedLineService, searchRoot);
             openTab.setExplorerFactory(() -> {
                 SessionExplorerView explorer = new SessionExplorerView(searchRoot, searchService, overlay);
+                // Keyed by the tab's session id, not by the worktree: two
+                // sessions on the same checkout are two readers with two
+                // trails, and the id is what survives a restart.
+                explorer.setTrailStore(explorerTrailStore, openTab.sessionId().value().toString());
+                // The peek card's "ask the agent" is absent unless this tab's
+                // own process is alive to be asked (delta hard rules).
+                explorer.setAgentBridge(() -> !openTab.isProcessExited(), openTab::sendPrompt);
                 openExplorers.put(openTab, explorer);
                 return explorer;
             });
