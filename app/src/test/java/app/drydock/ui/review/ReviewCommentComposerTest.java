@@ -142,10 +142,8 @@ class ReviewCommentComposerTest extends ApplicationTest {
     void onlyOneComposerIsEverOpen() {
         showDiff();
 
-        clickGutter();
-        interact(() -> gutters().get(2).getOnMouseClicked()
-                .handle(mouseClick(gutters().get(2))));
-        WaitForAsyncUtils.waitForFxEvents();
+        clickGutterForLine("1");
+        clickGutterForLine("2");
 
         assertEquals(1, openComposers(), "a second gutter click must move the composer, not add one");
     }
@@ -204,19 +202,35 @@ class ReviewCommentComposerTest extends ApplicationTest {
     }
 
     private void clickGutter() {
-        List<Node> gutters = gutters();
-        assertFalse(gutters.isEmpty(), "no gutter rendered to click");
-        Node gutter = gutters.get(0);
+        clickGutterForLine("1");
+    }
+
+    /**
+     * Clicks the gutter of the line numbered {@code lineNumber}.
+     *
+     * <p>Selected by its rendered number, never by position in the lookup
+     * result. {@code lookup} returns scene-graph order, and a virtualized
+     * {@code ListView} recycles and reorders its cells, so "the first gutter"
+     * is whichever row happens to own the first reused cell -- which is line 1
+     * often enough to pass locally and not on CI. That was a real green-to-red
+     * flake, and the anchor is exactly what this test is about.</p>
+     *
+     * <p>Direct handler dispatch rather than {@code clickOn}: what is under
+     * test is the handler, not TestFX's ability to land a pointer on a 34px
+     * label inside a virtualized cell.</p>
+     */
+    private void clickGutterForLine(String lineNumber) {
+        Node gutter = gutters().stream()
+                .filter(node -> lineNumber.equals(((Label) node).getText()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("no clickable gutter for line " + lineNumber
+                        + "; rendered " + gutters().stream()
+                                .map(node -> "'" + ((Label) node).getText() + "'").toList()));
         interact(() -> gutter.getOnMouseClicked().handle(mouseClick(gutter)));
         WaitForAsyncUtils.waitForFxEvents();
     }
 
-    /**
-     * The gutter labels of rendered code rows. {@code fire()}-style direct
-     * dispatch rather than {@code clickOn}: what is under test is the
-     * handler, not TestFX's ability to land a pointer on a 34px label inside
-     * a virtualized cell.
-     */
+    /** The clickable gutter labels of rendered code rows. */
     private List<Node> gutters() {
         List<Node> found = new ArrayList<>();
         interact(() -> found.addAll(lookup(".review-code-gutter").queryAll()));
