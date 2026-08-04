@@ -105,16 +105,22 @@ public record ReviewIntent(
     }
 
     /**
-     * How many distinct files this intent touches, from the hunks it names.
-     * Derived rather than stored, so it cannot drift from {@link #hunkIds}.
+     * The distinct files this intent touches, in the order its hunks name
+     * them. Derived rather than stored, so it cannot drift from
+     * {@link #hunkIds}.
      */
-    public int fileCount() {
-        return (int) hunkIds.stream()
+    public List<String> files() {
+        return hunkIds.stream()
                 .map(ReviewIntent::parseHunkId)
                 .flatMap(Optional::stream)
                 .map(Anchor::file)
                 .distinct()
-                .count();
+                .toList();
+    }
+
+    /** How many distinct files this intent touches. */
+    public int fileCount() {
+        return files().size();
     }
 
     /**

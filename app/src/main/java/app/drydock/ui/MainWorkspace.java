@@ -1192,7 +1192,15 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
         @Override
         public List<ReviewIntent> intents(ReviewScope scope, UnifiedDiff diff) {
-            return intentGrouping.intentsFor(scope.id(), diff);
+            List<ReviewIntent> grouped = intentGrouping.intentsFor(scope.id(), diff);
+            // Verdicts are keyed by intent id, and the fallback grouping's
+            // ids changed when it stopped emitting one intent per file --
+            // so an approval given before that would read as unsettled.
+            // Called here rather than once at startup because the grouping is
+            // only knowable after the scope's diff resolves; the store makes
+            // it idempotent and cheap once there is nothing left to carry.
+            annotationStore.migrateLegacyVerdicts(scope.id(), grouped);
+            return grouped;
         }
 
         @Override

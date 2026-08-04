@@ -105,7 +105,12 @@ final class FakeReviewHost implements ReviewDestinationView.Host {
 
     @Override
     public List<ReviewIntent> intents(ReviewScope scope, UnifiedDiff diff) {
-        return intents.intentsFor(scope.id(), diff);
+        List<ReviewIntent> grouped = intents.intentsFor(scope.id(), diff);
+        // The real host migrates here too. A fake that skipped it would be
+        // fine right up until the migration broke, which is the one moment a
+        // fake earns its keep.
+        store.migrateLegacyVerdicts(scope.id(), grouped);
+        return grouped;
     }
 
     @Override
