@@ -5,12 +5,17 @@ import app.drydock.process.ProcessRunner;
 import app.drydock.process.ProcessTimeoutException;
 
 import java.io.IOException;
+import java.lang.System.Logger;
+import java.lang.System.Logger.Level;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.OptionalInt;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -28,8 +33,19 @@ import java.util.concurrent.Executors;
  */
 public final class DiffService implements AutoCloseable {
 
+    private static final Logger LOG = System.getLogger(DiffService.class.getName());
+
     /** git's own default: three unchanged lines either side of a change. */
     public static final int DEFAULT_CONTEXT_LINES = 3;
+
+    /**
+     * Above this many untracked files, the intent-to-add pass is skipped
+     * rather than run: a repository with this many untracked entries is
+     * pathological (a build output directory that slipped past
+     * {@code .gitignore}, say), and diffing all of them would hang the
+     * Review diff column, which re-diffs constantly.
+     */
+    private static final int MAX_UNTRACKED = 2000;
 
     /**
      * What the Review diff column asks for. Wide enough that a fold is worth
@@ -127,6 +143,10 @@ public final class DiffService implements AutoCloseable {
             throw new GitCommandFailedException(command, result.exitCode(), ProcessRunner.excerpt(result.stderr()));
         }
 
+        if (scope == DiffScope.WORKING_TREE) {
+            result = withUntrackedFiles(git, checkoutRoot, command, result);
+        }
+
         // Working-tree scope tags each file with whether (part of) its
         // change is staged, for the staged/unstaged chip.
         Set<String> stagedPaths = scope == DiffScope.WORKING_TREE
@@ -134,6 +154,121 @@ public final class DiffService implements AutoCloseable {
                 : Set.of();
 
         return parse(result.stdout(), stagedPaths);
+    }
+
+    /**
+     * Extends a {@code git diff HEAD} result with untracked, non-ignored
+     * files as new-file additions.
+     *
+     * <p>{@code git diff HEAD} never shows untracked files -- it diffs
+     * against the index/HEAD, and an untracked path is in neither -- so a
+     * repository whose only "dirty" content is brand-new files rendered
+     * Review's working-tree diff as "No changes in this scope." with no way
+     * to see the file at all (task 14). git's own intent-to-add marker
+     * ({@code git add -N}) is what makes {@code git diff} treat a path as a
+     * new file; running that against the real index would be staging the
+     * user's files as a side effect of opening a diff, which no review tool
+     * should ever do. So this copies the real index to a throwaway one
+     * (selected via {@code GIT_INDEX_FILE}), marks the untracked paths
+     * intent-to-add there, re-runs the diff against that copy, and discards
+     * it -- the user's actual index, and therefore their next real
+     * {@code git add} or {@code git commit}, never sees this. The diff
+     * itself is still produced by git, not synthesised here, so binary
+     * detection and line handling for the new files match every other file
+     * in the diff exactly.</p>
+     */
+    private ProcessResult withUntrackedFiles(Path git, Path checkoutRoot, List<String> diffCommand,
+                                             ProcessResult trackedResult) {
+        // -z: NUL-separated raw paths, and also what lets an empty result be
+        // told apart from a single empty-named entry unambiguously.
+        List<String> lsFilesCommand = List.of(
+                git.toString(), "-C", checkoutRoot.toString(),
+                "ls-files", "--others", "--exclude-standard", "-z");
+        ProcessResult lsFiles = run(lsFilesCommand);
+        if (lsFiles.exitCode() != 0) {
+            throw new GitCommandFailedException(lsFilesCommand, lsFiles.exitCode(),
+                    ProcessRunner.excerpt(lsFiles.stderr()));
+        }
+        List<String> untracked = new ArrayList<>();
+        for (String entry : lsFiles.stdout().split("\\u0000")) {
+            if (!entry.isEmpty()) {
+                untracked.add(entry);
+            }
+        }
+        // The common case -- nothing untracked -- must not pay for a single
+        // extra process spawn beyond the ls-files probe above; Review
+        // re-diffs constantly.
+        if (untracked.isEmpty()) {
+            return trackedResult;
+        }
+        if (untracked.size() > MAX_UNTRACKED) {
+            LOG.log(Level.WARNING, "Skipping untracked-file diff pass in " + checkoutRoot + ": "
+                    + untracked.size() + " untracked files exceeds the limit of " + MAX_UNTRACKED);
+            return trackedResult;
+        }
+
+        Path tempIndex;
+        try {
+            tempIndex = Files.createTempFile("drydock-diff-index", ".tmp");
+            // Leave the reservation as a free path: git treats a missing
+            // GIT_INDEX_FILE as "start from an empty index" (the case for a
+            // fresh repository with no commits yet), but a zero-length file
+            // that exists is not a valid index and git would fail to read it.
+            Files.delete(tempIndex);
+        } catch (IOException e) {
+            throw new GitCommandFailedException(List.of("mktemp"), -1,
+                    e.getMessage() == null ? "could not create a temporary index file" : e.getMessage());
+        }
+        try {
+            // --absolute-git-dir, never a hand-built ".git/index": inside a
+            // linked worktree the real index lives at
+            // ".git/worktrees/<name>/index", and this runs in worktrees
+            // constantly.
+            List<String> gitDirCommand = List.of(
+                    git.toString(), "-C", checkoutRoot.toString(), "rev-parse", "--absolute-git-dir");
+            ProcessResult gitDirResult = run(gitDirCommand);
+            if (gitDirResult.exitCode() != 0) {
+                throw new GitCommandFailedException(gitDirCommand, gitDirResult.exitCode(),
+                        ProcessRunner.excerpt(gitDirResult.stderr()));
+            }
+            Path realIndex = Path.of(gitDirResult.stdout().strip()).resolve("index");
+            if (Files.exists(realIndex)) {
+                Files.copy(realIndex, tempIndex, StandardCopyOption.REPLACE_EXISTING);
+            }
+
+            Map<String, String> tempIndexEnv = Map.of("GIT_INDEX_FILE", tempIndex.toString());
+
+            // Pathspec "." rather than the explicit untracked-file list: an
+            // explicit list of every untracked path can blow past ARG_MAX on
+            // a large repository, and "." already respects .gitignore.
+            List<String> addCommand = List.of(
+                    git.toString(), "-C", checkoutRoot.toString(), "add", "-N", "--", ".");
+            ProcessResult addResult = run(addCommand,
+                    new ProcessRunner.Options(null, PROCESS_TIMEOUT, false, tempIndexEnv));
+            if (addResult.exitCode() != 0) {
+                throw new GitCommandFailedException(addCommand, addResult.exitCode(),
+                        ProcessRunner.excerpt(addResult.stderr()));
+            }
+
+            ProcessResult withUntracked = run(diffCommand,
+                    new ProcessRunner.Options(null, PROCESS_TIMEOUT, false, tempIndexEnv));
+            if (withUntracked.exitCode() != 0) {
+                throw new GitCommandFailedException(diffCommand, withUntracked.exitCode(),
+                        ProcessRunner.excerpt(withUntracked.stderr()));
+            }
+            return withUntracked;
+        } catch (IOException e) {
+            throw new GitCommandFailedException(List.of(git.toString(), "add", "-N"), -1,
+                    e.getMessage() == null ? "could not copy the index to a temporary file" : e.getMessage());
+        } finally {
+            // A leaked temp index is a leaked file per diff -- and Review
+            // re-diffs constantly.
+            try {
+                Files.deleteIfExists(tempIndex);
+            } catch (IOException e) {
+                LOG.log(Level.WARNING, "Could not delete temporary index " + tempIndex, e);
+            }
+        }
     }
 
     private Set<String> stagedPaths(Path git, Path checkoutRoot) {
@@ -305,6 +440,21 @@ public final class DiffService implements AutoCloseable {
         } catch (ProcessTimeoutException e) {
             throw new GitCommandFailedException(command, -1,
                     "timed out after " + PROCESS_TIMEOUT.toSeconds() + "s (killed)");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new GitCommandFailedException(command, -1, "interrupted while waiting for git");
+        }
+    }
+
+    /** As {@link #run(List)}, with explicit {@link ProcessRunner.Options} -- e.g. a {@code GIT_INDEX_FILE} override. */
+    private static ProcessResult run(List<String> command, ProcessRunner.Options options) {
+        try {
+            return ProcessRunner.run(command, options);
+        } catch (IOException e) {
+            throw new GitCommandFailedException(command, -1, e.getMessage() == null ? "" : e.getMessage());
+        } catch (ProcessTimeoutException e) {
+            throw new GitCommandFailedException(command, -1,
+                    "timed out after " + options.timeout().toSeconds() + "s (killed)");
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new GitCommandFailedException(command, -1, "interrupted while waiting for git");
