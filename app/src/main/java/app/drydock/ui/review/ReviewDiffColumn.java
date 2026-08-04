@@ -99,6 +99,7 @@ final class ReviewDiffColumn extends BorderPane {
 
     private final Label summaryLabel = new Label();
     private final Button contextToggle = new Button();
+    private final Button untrackedToggle = new Button();
     private final ObservableList<ReviewDiffRow> rows = FXCollections.observableArrayList();
     private final ListView<ReviewDiffRow> list = new ListView<>(rows);
 
@@ -112,7 +113,46 @@ final class ReviewDiffColumn extends BorderPane {
     private java.util.function.BiConsumer<String, DiffOutcome> onDiffResolved = (scopeId, outcome) -> { };
 
     private ReviewScope scope;
-    private UnifiedDiff diff = new UnifiedDiff(List.of());
+
+    /**
+     * The diff exactly as loaded (or supplied), before the untracked filter.
+     * Kept in full so toggling the filter is a re-render, not a re-diff --
+     * see {@link #publishDisplayed(String)} for why this matters beyond
+     * speed.
+     */
+    private UnifiedDiff fullDiff = new UnifiedDiff(List.of());
+
+    /**
+     * What is actually rendered and published: {@link #fullDiff} with the
+     * untracked-filter applied for the current scope. Every reader outside
+     * this class -- rows, the summary count, the symbol index, and
+     * {@link #onDiffResolved} -- must be built from this field and never
+     * from {@link #fullDiff} directly. The two diverge exactly while a
+     * toggle is off, and that is the one moment a caller reading the wrong
+     * one produces the defect this toggle exists to avoid: an intent rail
+     * listing files a column has filtered out of view. See
+     * {@link #publishDisplayed(String)}.
+     */
+    private UnifiedDiff displayedDiff = new UnifiedDiff(List.of());
+
+    /**
+     * The scope id whose diff is currently displayed -- distinct from
+     * {@link #scope}, which {@link #showDiff} deliberately leaves
+     * {@code null} while still publishing under the scope it read for. The
+     * untracked toggle needs to know whose preference to read and write
+     * even in that case.
+     */
+    private String displayedScopeId;
+
+    /**
+     * Per-scope untracked-inclusion preference, in-memory for the session
+     * only (a {@code Map<String, Boolean>}, not persisted to
+     * {@code ApplicationState}). A scope with no entry defaults to
+     * included -- see the class javadoc on why that default is not
+     * negotiable. Keyed by scope id so walking the queue with {@code j}/
+     * {@code k} does not reset a decision made on one item.
+     */
+    private final java.util.Map<String, Boolean> includeUntrackedByScope = new java.util.HashMap<>();
 
     /**
      * The symbol lens's index, rebuilt with the diff. Local, never MCP: see
@@ -141,9 +181,15 @@ final class ReviewDiffColumn extends BorderPane {
         contextToggle.getStyleClass().add("review-chip-button");
         contextToggle.setTooltip(new Tooltip("Show or hide unchanged lines (c)"));
         contextToggle.setOnAction(e -> toggleContext());
+        untrackedToggle.getStyleClass().add("review-chip-button");
+        untrackedToggle.setTooltip(new Tooltip(
+                "Show or hide files that are new and not yet git-added"));
+        untrackedToggle.setOnAction(e -> toggleUntracked());
+        untrackedToggle.setVisible(false);
+        untrackedToggle.setManaged(false);
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
-        HBox header = new HBox(9, summaryLabel, spacer, contextToggle);
+        HBox header = new HBox(9, summaryLabel, spacer, untrackedToggle, contextToggle);
         header.setAlignment(Pos.CENTER_LEFT);
         header.getStyleClass().add("review-diff-header");
         setTop(header);
@@ -173,8 +219,16 @@ final class ReviewDiffColumn extends BorderPane {
         }
         scope = newScope;
         expandedRuns.clear();
+        // Hidden for the duration of the load: its visibility reflects
+        // whether the OUTGOING scope's diff had untracked files, which says
+        // nothing about the incoming one. applyDiff() re-derives it once the
+        // new diff is actually known.
+        untrackedToggle.setVisible(false);
+        untrackedToggle.setManaged(false);
         if (newScope == null) {
-            diff = new UnifiedDiff(List.of());
+            fullDiff = new UnifiedDiff(List.of());
+            displayedScopeId = null;
+            displayedDiff = fullDiff;
             showMessage("Nothing selected.");
             return;
         }
@@ -201,16 +255,15 @@ final class ReviewDiffColumn extends BorderPane {
                     }
                     if (failure != null) {
                         LOG.log(Level.DEBUG, "Diff failed for " + requested.diffRoot(), failure);
-                        diff = new UnifiedDiff(List.of());
+                        fullDiff = new UnifiedDiff(List.of());
+                        displayedScopeId = null;
+                        displayedDiff = fullDiff;
                         String message = UiErrors.unwrap(failure).getMessage();
                         showMessage("Could not diff: " + message);
                         onDiffResolved.accept(requested.id(), new DiffOutcome.Failed(message));
                         return;
                     }
-                    diff = result;
-                    symbolIndex = SymbolIndex.of(diff);
-                    rebuild();
-                    onDiffResolved.accept(requested.id(), new DiffOutcome.Loaded(result));
+                    applyDiff(result, requested.id());
                 }));
     }
 
@@ -308,11 +361,8 @@ final class ReviewDiffColumn extends BorderPane {
     void showDiff(ReviewScope forScope, UnifiedDiff supplied) {
         scope = null;
         requestToken++;
-        diff = supplied;
-        symbolIndex = SymbolIndex.of(diff);
         expandedRuns.clear();
-        rebuild();
-        onDiffResolved.accept(forScope.id(), new DiffOutcome.Loaded(supplied));
+        applyDiff(supplied, forScope.id());
     }
 
     /** {@code d}: applies a density by swapping the root's style class (spec §4.8). */
@@ -334,10 +384,70 @@ final class ReviewDiffColumn extends BorderPane {
         contextToggle.setText(showContext ? "context" : "changed only");
     }
 
+    /**
+     * Called once a diff (git-run or supplied) is known, from both
+     * {@link #reload()} and {@link #showDiff}. Establishes the toggle's
+     * visibility -- hidden when {@code loaded} has no untracked files at all,
+     * since a dead toggle on every branch review is clutter -- and hands off
+     * to {@link #publishDisplayed(String)} to do the actual filter-render-
+     * publish.
+     */
+    private void applyDiff(UnifiedDiff loaded, String scopeId) {
+        fullDiff = loaded;
+        boolean hasUntracked = loaded.files().stream().anyMatch(UnifiedDiff.FileDiff::untracked);
+        untrackedToggle.setVisible(hasUntracked);
+        untrackedToggle.setManaged(hasUntracked);
+        untrackedToggle.setText(includeUntracked(scopeId) ? "untracked" : "no untracked");
+        publishDisplayed(scopeId);
+    }
+
+    /**
+     * {@code u}-equivalent: toggles whether untracked files are included for
+     * the currently displayed scope, then re-renders and re-publishes from
+     * the retained {@link #fullDiff} -- no git call. {@link #displayedScopeId}
+     * rather than {@link #scope} is the key, because {@link #showDiff}
+     * deliberately clears {@code scope} while still displaying a diff.
+     */
+    private void toggleUntracked() {
+        if (displayedScopeId == null) {
+            return;
+        }
+        boolean newValue = !includeUntracked(displayedScopeId);
+        includeUntrackedByScope.put(displayedScopeId, newValue);
+        untrackedToggle.setText(newValue ? "untracked" : "no untracked");
+        publishDisplayed(displayedScopeId);
+    }
+
+    /** A scope with no recorded preference includes untracked files: see the field javadoc on why. */
+    private boolean includeUntracked(String scopeId) {
+        return includeUntrackedByScope.getOrDefault(scopeId, true);
+    }
+
     // ---- rendering ----------------------------------------------------------
 
+    /**
+     * The one place {@link #displayedDiff} is assigned from {@link #fullDiff}
+     * -- filters, renders, and publishes together so the three can never
+     * drift apart. Splitting this into "filter for rendering" and "filter
+     * for publishing" as two call sites was the shape of the original "rail
+     * disagrees with column" defect: it is easy for one call site to keep up
+     * with a toggle change and the other to be forgotten. There is only one
+     * call site here on purpose.
+     */
+    private void publishDisplayed(String scopeId) {
+        displayedScopeId = scopeId;
+        displayedDiff = includeUntracked(scopeId)
+                ? fullDiff
+                : new UnifiedDiff(fullDiff.files().stream()
+                        .filter(file -> !file.untracked())
+                        .toList());
+        symbolIndex = SymbolIndex.of(displayedDiff);
+        rebuild();
+        onDiffResolved.accept(scopeId, new DiffOutcome.Loaded(displayedDiff));
+    }
+
     private void rebuild() {
-        rows.setAll(ReviewDiffRows.build(diff,
+        rows.setAll(ReviewDiffRows.build(displayedDiff,
                 new ReviewDiffRows.Options(showContext, expandedRuns, MAX_RENDERED_ROWS)));
         updateSummary();
         list.scrollTo(0);
@@ -349,9 +459,9 @@ final class ReviewDiffColumn extends BorderPane {
     }
 
     private void updateSummary() {
-        int files = diff.files().size();
-        int insertions = diff.files().stream().mapToInt(UnifiedDiff.FileDiff::insertions).sum();
-        int deletions = diff.files().stream().mapToInt(UnifiedDiff.FileDiff::deletions).sum();
+        int files = displayedDiff.files().size();
+        int insertions = displayedDiff.files().stream().mapToInt(UnifiedDiff.FileDiff::insertions).sum();
+        int deletions = displayedDiff.files().stream().mapToInt(UnifiedDiff.FileDiff::deletions).sum();
         summaryLabel.setText(files == 0
                 ? ""
                 : files + (files == 1 ? " file" : " files") + "  ·  +" + insertions + " −" + deletions);
@@ -360,7 +470,7 @@ final class ReviewDiffColumn extends BorderPane {
     /** Expands one collapsed run in place; a full rebuild is a single list swap. */
     private void expandRun(ReviewDiffRow.CollapsedRun run) {
         expandedRuns.add(run.key());
-        rows.setAll(ReviewDiffRows.build(diff,
+        rows.setAll(ReviewDiffRows.build(displayedDiff,
                 new ReviewDiffRows.Options(showContext, expandedRuns, MAX_RENDERED_ROWS)));
     }
 
