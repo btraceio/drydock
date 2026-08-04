@@ -259,7 +259,18 @@ public final class DiffService implements AutoCloseable {
             }
             Path realIndex = Path.of(gitDirResult.stdout().strip()).resolve("index");
             if (Files.exists(realIndex)) {
-                Files.copy(realIndex, tempIndex, StandardCopyOption.REPLACE_EXISTING);
+                // COPY_ATTRIBUTES is load-bearing, not tidiness: git decides
+                // whether a cached stat entry can be trusted by comparing it
+                // against the INDEX FILE'S OWN mtime ("racily clean" entries
+                // get their content re-read). A copy stamped with `now` looks
+                // far newer than every entry in it, so git trusts the stat
+                // cache outright -- and a file edited in the same second it
+                // was committed, to the same size, is then reported unchanged
+                // and silently vanishes from the diff. Preserving the real
+                // index's timestamps makes the copy behave exactly as the
+                // index it came from.
+                Files.copy(realIndex, tempIndex,
+                        StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
             }
 
             Map<String, String> tempIndexEnv = Map.of("GIT_INDEX_FILE", tempIndex.toString());

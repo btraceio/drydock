@@ -65,8 +65,10 @@ class ReviewDiffColumnUntrackedToggleTest extends ApplicationTest {
         showScope(workingTreeScope(repo));
         awaitRows();
 
-        awaitRenderedHunkFiles(Set.of("Tracked.java", "NewA.java", "NewB.java"),
-                "untracked files must render by default");
+        awaitHunkFiles(Set.of("Tracked.java", "NewA.java", "NewB.java"),
+                "untracked files must be in the diff by default");
+        assertTrue(renderedHunkFiles().contains("NewA.java"),
+                "and they must actually render, not just sit in the model");
     }
 
     @Test
@@ -79,7 +81,7 @@ class ReviewDiffColumnUntrackedToggleTest extends ApplicationTest {
         interact(toggle::fire);
         WaitForAsyncUtils.waitForFxEvents();
 
-        awaitRenderedHunkFiles(Set.of("Tracked.java"),
+        awaitHunkFiles(Set.of("Tracked.java"),
                 "toggling off must hide only the untracked files");
     }
 
@@ -95,7 +97,7 @@ class ReviewDiffColumnUntrackedToggleTest extends ApplicationTest {
         interact(toggle::fire);
         WaitForAsyncUtils.waitForFxEvents();
 
-        awaitRenderedHunkFiles(Set.of("Tracked.java", "NewA.java", "NewB.java"),
+        awaitHunkFiles(Set.of("Tracked.java", "NewA.java", "NewB.java"),
                 "toggling back on must restore the untracked files -- the full diff must have been kept");
     }
 
@@ -126,7 +128,7 @@ class ReviewDiffColumnUntrackedToggleTest extends ApplicationTest {
         // Let the filtered render settle before comparing the two, or a lagging
         // layout pulse makes this look like a publish/render disagreement when
         // it is only a not-yet-realized cell.
-        awaitRenderedHunkFiles(Set.of("Tracked.java"), "the toggle must leave only the tracked file");
+        awaitHunkFiles(Set.of("Tracked.java"), "the toggle must leave only the tracked file");
 
         DiffOutcome outcome = published.get();
         assertInstanceOf(DiffOutcome.Loaded.class, outcome);
@@ -134,7 +136,7 @@ class ReviewDiffColumnUntrackedToggleTest extends ApplicationTest {
         Set<String> publishedFiles = new TreeSet<>();
         publishedDiff.files().forEach(f -> publishedFiles.add(f.path()));
 
-        assertEquals(renderedHunkFiles(), publishedFiles,
+        assertEquals(hunkFiles(), publishedFiles,
                 "the published diff must contain exactly what is rendered -- "
                         + "otherwise the intent rail disagrees with the column");
         assertFalse(publishedFiles.contains("NewA.java"));
@@ -179,10 +181,10 @@ class ReviewDiffColumnUntrackedToggleTest extends ApplicationTest {
      * on the query directly made these tests fail intermittently, reporting a
      * subset of the files that were genuinely in the model.</p>
      */
-    private void awaitRenderedHunkFiles(Set<String> expected, String message) {
+    private void awaitHunkFiles(Set<String> expected, String message) {
         Set<String> seen = Set.of();
         for (int i = 0; i < 100; i++) {
-            seen = renderedHunkFiles();
+            seen = hunkFiles();
             if (expected.equals(seen)) {
                 return;
             }
@@ -190,6 +192,27 @@ class ReviewDiffColumnUntrackedToggleTest extends ApplicationTest {
             sleep(20);
         }
         assertEquals(expected, seen, message);
+    }
+
+    /**
+     * The files the column is showing, read from its row model rather than
+     * from the rendered labels.
+     *
+     * <p>The diff list is a virtualized {@code ListView}: only cells inside
+     * the viewport exist as nodes, and toggling leaves the scroll offset
+     * where it was, so a file that is genuinely in the diff can simply be
+     * off-screen. These tests are about WHICH FILES the toggle includes, so
+     * the model is the honest source; that the rows render at all is covered
+     * by {@code untrackedFilesAreIncludedByDefault} and by
+     * {@code ReviewDiffColumnTest}'s chip assertions.</p>
+     */
+    private Set<String> hunkFiles() {
+        Set<String> files = new TreeSet<>();
+        interact(() -> column.diagRows().stream()
+                .filter(ReviewDiffRow.HunkHeader.class::isInstance)
+                .map(ReviewDiffRow.HunkHeader.class::cast)
+                .forEach(header -> files.add(header.file())));
+        return files;
     }
 
     private List<ReviewDiffRow> awaitRows() {

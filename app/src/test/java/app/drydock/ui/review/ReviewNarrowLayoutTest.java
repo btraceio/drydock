@@ -3,6 +3,7 @@ package app.drydock.ui.review;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
+import app.drydock.review.QueueAssembly;
 import app.drydock.review.ReviewItem;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
@@ -303,7 +304,15 @@ class ReviewNarrowLayoutTest extends ApplicationTest {
     }
 
     private void seedQueue() {
-        interact(() -> view.setItems(List.of(item("feat/a"), item("feat/b")), 1));
+        List<ReviewItem> items = List.of(item("feat/a"), item("feat/b"));
+        interact(() -> view.setItems(new QueueAssembly(items, true, true), 1));
+        // Intents now come from the selected scope's OWN diff outcome rather
+        // than a globally-injected one, and these fixtures point at worktree
+        // paths that do not exist, so no real diff can ever land for them.
+        // Publish the fake host's diff for each scope through the same seam
+        // the diff column uses, or the rail is legitimately empty.
+        interact(() -> items.forEach(item -> view.diagPublishOutcome(
+                item.scope().id(), new DiffOutcome.Loaded(host.diff))));
     }
 
     private ReviewItem item(String head) {
@@ -314,7 +323,7 @@ class ReviewNarrowLayoutTest extends ApplicationTest {
     }
 
     private static UnifiedDiff.FileDiff file(String path) {
-        return new UnifiedDiff.FileDiff(path, "M", 1, 0, false,
+        return new UnifiedDiff.FileDiff(path, "M", 1, 0, false, false,
                 List.of(new UnifiedDiff.Hunk("@@", List.of(new UnifiedDiff.Line(
                         UnifiedDiff.Line.Kind.ADD, OptionalInt.empty(), OptionalInt.of(1), "x")))));
     }

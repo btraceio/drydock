@@ -98,16 +98,20 @@ class ReviewIntentRailEmptyStateTest extends ApplicationTest {
 
     @Test
     void aFailedDiffShowsTheDiffFailedMessage() {
+        settleRealDiff();
+
         interact(() -> view.diagPublishOutcome(scope.id(), new DiffOutcome.Failed("git exploded")));
 
-        assertEquals(ReviewIntentRail.Empty.DIFF_FAILED.message(), railMessage());
+        awaitRailMessage(ReviewIntentRail.Empty.DIFF_FAILED.message());
     }
 
     @Test
     void aLoadedDiffWithNoFilesShowsTheNoChangesMessage() {
+        settleRealDiff();
+
         interact(() -> view.diagPublishOutcome(scope.id(), new DiffOutcome.Loaded(new UnifiedDiff(List.of()))));
 
-        assertEquals(ReviewIntentRail.Empty.NO_CHANGES.message(), railMessage());
+        awaitRailMessage(ReviewIntentRail.Empty.NO_CHANGES.message());
     }
 
     private String railMessage() {
@@ -126,5 +130,31 @@ class ReviewIntentRailEmptyStateTest extends ApplicationTest {
         if (process.waitFor() != 0) {
             throw new IllegalStateException("git " + String.join(" ", args) + ": " + output);
         }
+    }
+
+    /**
+     * Waits for the scope's REAL diff to land before a test seeds the outcome
+     * it actually wants to assert on.
+     *
+     * <p>{@code setItems} selects the scope, which starts a genuine {@code git
+     * diff} on a clean fixture repository. That publishes {@code Loaded} with
+     * no files a moment later, and whichever outcome lands last wins -- so a
+     * seeded {@code Failed} could be silently overwritten by the real one and
+     * the rail would read "No changes" instead.</p>
+     */
+    private void settleRealDiff() {
+        awaitRailMessage(ReviewIntentRail.Empty.NO_CHANGES.message());
+    }
+
+    private void awaitRailMessage(String expected) {
+        String seen = "";
+        for (int i = 0; i < 200; i++) {
+            seen = railMessage();
+            if (expected.equals(seen)) {
+                return;
+            }
+            sleep(25);
+        }
+        assertEquals(expected, seen, "the rail never reached the expected message");
     }
 }
