@@ -229,13 +229,16 @@ final class ReviewIntentRail extends VBox {
             buttonsByIntentId.put(intent.id(), card);
             nodes.add(card);
         }
-        cards.getChildren().setAll(nodes);
-        if (intents.isEmpty() && emptyReason != Empty.NONE && !collapsed) {
+        // A collapsed rail has no width for prose, so the message is only for
+        // the expanded one; `nodes` is necessarily empty here, since the
+        // message exists precisely when there are no cards to show.
+        if (nodes.isEmpty() && emptyReason != Empty.NONE && !collapsed) {
             Label message = new Label(emptyReason.message());
             message.getStyleClass().add("review-intent-empty");
             message.setWrapText(true);
-            cards.getChildren().setAll(message);
+            nodes.add(message);
         }
+        cards.getChildren().setAll(nodes);
         applySelection();
     }
 

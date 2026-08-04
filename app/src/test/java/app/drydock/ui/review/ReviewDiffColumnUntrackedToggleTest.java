@@ -65,7 +65,7 @@ class ReviewDiffColumnUntrackedToggleTest extends ApplicationTest {
         showScope(workingTreeScope(repo));
         awaitRows();
 
-        assertEquals(Set.of("Tracked.java", "NewA.java", "NewB.java"), renderedHunkFiles(),
+        awaitRenderedHunkFiles(Set.of("Tracked.java", "NewA.java", "NewB.java"),
                 "untracked files must render by default");
     }
 
@@ -79,7 +79,7 @@ class ReviewDiffColumnUntrackedToggleTest extends ApplicationTest {
         interact(toggle::fire);
         WaitForAsyncUtils.waitForFxEvents();
 
-        assertEquals(Set.of("Tracked.java"), renderedHunkFiles(),
+        awaitRenderedHunkFiles(Set.of("Tracked.java"),
                 "toggling off must hide only the untracked files");
     }
 
@@ -95,7 +95,7 @@ class ReviewDiffColumnUntrackedToggleTest extends ApplicationTest {
         interact(toggle::fire);
         WaitForAsyncUtils.waitForFxEvents();
 
-        assertEquals(Set.of("Tracked.java", "NewA.java", "NewB.java"), renderedHunkFiles(),
+        awaitRenderedHunkFiles(Set.of("Tracked.java", "NewA.java", "NewB.java"),
                 "toggling back on must restore the untracked files -- the full diff must have been kept");
     }
 
@@ -122,6 +122,11 @@ class ReviewDiffColumnUntrackedToggleTest extends ApplicationTest {
         Button toggle = untrackedToggle();
         interact(toggle::fire);
         WaitForAsyncUtils.waitForFxEvents();
+
+        // Let the filtered render settle before comparing the two, or a lagging
+        // layout pulse makes this look like a publish/render disagreement when
+        // it is only a not-yet-realized cell.
+        awaitRenderedHunkFiles(Set.of("Tracked.java"), "the toggle must leave only the tracked file");
 
         DiffOutcome outcome = published.get();
         assertInstanceOf(DiffOutcome.Loaded.class, outcome);
@@ -163,6 +168,28 @@ class ReviewDiffColumnUntrackedToggleTest extends ApplicationTest {
 
     private void showScope(ReviewScope scope) {
         interact(() -> column.setScope(scope));
+    }
+
+    /**
+     * Polls the rendered hunk-header labels until they match {@code expected}.
+     *
+     * <p>A single {@code waitForFxEvents()} is not enough after a toggle: the
+     * diff list is a virtualized {@code ListView}, so which cells exist as
+     * nodes is decided by a layout pulse that may not have run yet. Asserting
+     * on the query directly made these tests fail intermittently, reporting a
+     * subset of the files that were genuinely in the model.</p>
+     */
+    private void awaitRenderedHunkFiles(Set<String> expected, String message) {
+        Set<String> seen = Set.of();
+        for (int i = 0; i < 100; i++) {
+            seen = renderedHunkFiles();
+            if (expected.equals(seen)) {
+                return;
+            }
+            WaitForAsyncUtils.waitForFxEvents();
+            sleep(20);
+        }
+        assertEquals(expected, seen, message);
     }
 
     private List<ReviewDiffRow> awaitRows() {

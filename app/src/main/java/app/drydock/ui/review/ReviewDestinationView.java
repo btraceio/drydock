@@ -519,7 +519,7 @@ public final class ReviewDestinationView extends BorderPane {
         headerIcon.setText("◨");
         headerTitle.setText(state.title());
         headerContext.setText("");
-        setSessionRowVisible(false);
+        hideSessionRow();
         Region placeholder = placeholder(state.title(), state.detail(), "");
         if (state == ReviewEmptyState.SCAN_INCOMPLETE) {
             Button retry = new Button("Retry the scan");
@@ -536,17 +536,33 @@ public final class ReviewDestinationView extends BorderPane {
     }
 
     /** Hides the whole session row -- dot, line, button and hint. */
-    private void setSessionRowVisible(boolean visible) {
-        sessionDot.setVisible(visible);
-        sessionDot.setManaged(visible);
-        sessionLine.setVisible(visible);
-        sessionLine.setManaged(visible);
-        if (!visible) {
-            openSessionButton.setVisible(false);
-            openSessionButton.setManaged(false);
-            returnHint.setVisible(false);
-            returnHint.setManaged(false);
-        }
+    /**
+     * Hides the whole session row -- dot, line, button and hint. With no item
+     * selected there is no session to describe, and a row reading "no items in
+     * the queue" beside a session dot read as a claim about the session Review
+     * was opened from.
+     */
+    private void hideSessionRow() {
+        sessionDot.setVisible(false);
+        sessionDot.setManaged(false);
+        sessionLine.setVisible(false);
+        sessionLine.setManaged(false);
+        openSessionButton.setVisible(false);
+        openSessionButton.setManaged(false);
+        returnHint.setVisible(false);
+        returnHint.setManaged(false);
+    }
+
+    /**
+     * Shows the dot and line. The button and hint are deliberately left alone:
+     * {@link #setSessionRow} owns them, because whether they belong on screen
+     * depends on the item having a bound session at all.
+     */
+    private void showSessionRow() {
+        sessionDot.setVisible(true);
+        sessionDot.setManaged(true);
+        sessionLine.setVisible(true);
+        sessionLine.setManaged(true);
     }
 
     /** Selects the item for {@code scopeId} ({@code ⌘4} and the sidebar's {@code ◨n} badge). */
@@ -632,13 +648,21 @@ public final class ReviewDestinationView extends BorderPane {
      * never will, because it has no checkout -- has none, and says so
      * through {@link #emptyReason()} rather than borrowing another's.
      */
+    /**
+     * What the selected scope's diff attempt produced, if there is a selected
+     * scope at all. Empty covers both "nothing selected" and "selected, but no
+     * diff has resolved for it yet" -- the callers below distinguish those.
+     */
+    private Optional<DiffOutcome> selectedOutcome() {
+        return selectedScope().map(scope -> outcomeByScope.get(scope.id()));
+    }
+
     private List<ReviewIntent> intents() {
         Optional<ReviewScope> scope = selectedScope();
         if (scope.isEmpty()) {
             return List.of();
         }
-        DiffOutcome outcome = outcomeByScope.get(scope.get().id());
-        if (outcome instanceof DiffOutcome.Loaded loaded) {
+        if (selectedOutcome().orElse(null) instanceof DiffOutcome.Loaded loaded) {
             return host.intents(scope.get(), loaded.diff());
         }
         return List.of();
@@ -654,7 +678,7 @@ public final class ReviewDestinationView extends BorderPane {
         if (scope.isEmpty()) {
             return ReviewIntentRail.Empty.NONE;
         }
-        DiffOutcome outcome = outcomeByScope.get(scope.get().id());
+        DiffOutcome outcome = selectedOutcome().orElse(null);
         if (outcome instanceof DiffOutcome.Failed) {
             return ReviewIntentRail.Empty.DIFF_FAILED;
         }
@@ -894,7 +918,7 @@ public final class ReviewDestinationView extends BorderPane {
         headerIcon.setText(item.icon());
         headerTitle.setText(item.title());
         headerContext.setText(contextLine(item));
-        setSessionRowVisible(true);
+        showSessionRow();
         setSessionRow(scope, sessionLineFor(scope), scope.sessionId().isPresent());
         body.getChildren().setAll(bodyFor(item));
         intentIndex = 0;

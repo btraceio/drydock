@@ -135,18 +135,27 @@ public final class DiffService implements AutoCloseable {
                 "diff", "--no-color", "--no-ext-diff", "-U" + contextLines,
                 "--end-of-options", range);
 
-        ProcessResult result = run(command);
-        if (result.exitCode() != 0) {
-            if (result.stderr().toLowerCase(Locale.ROOT).contains("not a git repository")) {
-                throw new NotAGitRepositoryException(checkoutRoot);
-            }
-            throw new GitCommandFailedException(command, result.exitCode(), ProcessRunner.excerpt(result.stderr()));
+        // The untracked probe runs BEFORE the tracked-only diff so that diff
+        // can be skipped outright whenever the untracked pass is going to
+        // re-run the identical command against a temporary index. Running
+        // `git diff` twice and throwing the first result away doubled the
+        // whole diff computation on every refresh of a working tree that had
+        // any untracked file in it.
+        Set<String> untrackedPaths = scope == DiffScope.WORKING_TREE
+                ? untrackedPaths(git, checkoutRoot)
+                : Set.of();
+        if (untrackedPaths.size() > MAX_UNTRACKED) {
+            LOG.log(Level.WARNING, "Skipping untracked-file diff pass in " + checkoutRoot + ": "
+                    + untrackedPaths.size() + " untracked files exceeds the limit of " + MAX_UNTRACKED);
+            untrackedPaths = Set.of();
         }
 
-        Set<String> untrackedPaths = Set.of();
-        if (scope == DiffScope.WORKING_TREE) {
-            untrackedPaths = untrackedPaths(git, checkoutRoot);
-            result = withUntrackedFiles(git, checkoutRoot, command, result, untrackedPaths);
+        ProcessResult result;
+        if (untrackedPaths.isEmpty()) {
+            result = run(command);
+            failIfFailed(command, result, checkoutRoot);
+        } else {
+            result = withUntrackedFiles(git, checkoutRoot, command, untrackedPaths);
         }
 
         // Working-tree scope tags each file with whether (part of) its
@@ -200,10 +209,7 @@ public final class DiffService implements AutoCloseable {
                 git.toString(), "-C", checkoutRoot.toString(),
                 "ls-files", "--others", "--exclude-standard", "-z");
         ProcessResult lsFiles = run(lsFilesCommand);
-        if (lsFiles.exitCode() != 0) {
-            throw new GitCommandFailedException(lsFilesCommand, lsFiles.exitCode(),
-                    ProcessRunner.excerpt(lsFiles.stderr()));
-        }
+        failIfFailed(lsFilesCommand, lsFiles, checkoutRoot);
         Set<String> untracked = new HashSet<>();
         for (String entry : lsFiles.stdout().split("\\u0000")) {
             if (!entry.isEmpty()) {
@@ -213,20 +219,18 @@ public final class DiffService implements AutoCloseable {
         return untracked;
     }
 
+    /**
+     * Runs {@code diffCommand} against a throwaway index that has every
+     * untracked file marked intent-to-add, so git emits proper new-file
+     * diffs for them.
+     *
+     * <p>Only called when there is something untracked to add and the count
+     * is within {@link #MAX_UNTRACKED} -- the caller owns both decisions,
+     * because it is the caller that skips the plain diff when this runs
+     * instead.</p>
+     */
     private ProcessResult withUntrackedFiles(Path git, Path checkoutRoot, List<String> diffCommand,
-                                             ProcessResult trackedResult, Set<String> untracked) {
-        // The common case -- nothing untracked -- must not pay for a single
-        // extra process spawn beyond the ls-files probe above; Review
-        // re-diffs constantly.
-        if (untracked.isEmpty()) {
-            return trackedResult;
-        }
-        if (untracked.size() > MAX_UNTRACKED) {
-            LOG.log(Level.WARNING, "Skipping untracked-file diff pass in " + checkoutRoot + ": "
-                    + untracked.size() + " untracked files exceeds the limit of " + MAX_UNTRACKED);
-            return trackedResult;
-        }
-
+                                             Set<String> untracked) {
         Path tempIndex;
         try {
             // Files.createTempFile is the only portable way to reserve a
@@ -458,18 +462,28 @@ public final class DiffService implements AutoCloseable {
 
     // ---- process execution (shared ProcessRunner, git-flavored failure translation) ----
 
-    private static ProcessResult run(List<String> command) {
-        try {
-            return ProcessRunner.run(command, null, PROCESS_TIMEOUT);
-        } catch (IOException e) {
-            throw new GitCommandFailedException(command, -1, e.getMessage() == null ? "" : e.getMessage());
-        } catch (ProcessTimeoutException e) {
-            throw new GitCommandFailedException(command, -1,
-                    "timed out after " + PROCESS_TIMEOUT.toSeconds() + "s (killed)");
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new GitCommandFailedException(command, -1, "interrupted while waiting for git");
+    /**
+     * Throws for a failed git invocation, mapping "not a git repository" to
+     * {@link NotAGitRepositoryException} whichever command hit it.
+     *
+     * <p>Shared rather than inlined at the diff: the untracked probe now runs
+     * <em>before</em> the diff, so in a directory that is not a repository the
+     * probe is the command that fails first, and it has to report that the
+     * same way the diff used to.</p>
+     */
+    private static void failIfFailed(List<String> command, ProcessResult result, Path checkoutRoot) {
+        if (result.exitCode() == 0) {
+            return;
         }
+        if (result.stderr().toLowerCase(Locale.ROOT).contains("not a git repository")) {
+            throw new NotAGitRepositoryException(checkoutRoot);
+        }
+        throw new GitCommandFailedException(command, result.exitCode(),
+                ProcessRunner.excerpt(result.stderr()));
+    }
+
+    private static ProcessResult run(List<String> command) {
+        return run(command, new ProcessRunner.Options(null, PROCESS_TIMEOUT, false, Map.of()));
     }
 
     /** As {@link #run(List)}, with explicit {@link ProcessRunner.Options} -- e.g. a {@code GIT_INDEX_FILE} override. */
