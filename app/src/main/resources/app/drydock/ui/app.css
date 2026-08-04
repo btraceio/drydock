@@ -2520,6 +2520,21 @@
     -fx-font-size: 11px;
     -fx-font-family: "JetBrains Mono", "Menlo", monospace;
 }
+/* Small and low-contrast on purpose -- a fact about the file, not a
+   warning, and it must not out-shout the file path beside it. */
+.review-hunk-chip {
+    -fx-background-radius: 100px;
+    -fx-font-size: 10px;
+    -fx-padding: 1 8 1 8;
+}
+.review-hunk-chip-untracked {
+    -fx-background-color: -drydock-dirty-soft;
+    -fx-text-fill: -drydock-dirty;
+}
+.review-hunk-chip-staged {
+    -fx-background-color: -drydock-running-soft;
+    -fx-text-fill: -drydock-running;
+}
 .review-hunk-explorer {
     -fx-background-color: transparent;
     -fx-background-radius: 6px;

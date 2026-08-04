@@ -143,8 +143,10 @@ public final class DiffService implements AutoCloseable {
             throw new GitCommandFailedException(command, result.exitCode(), ProcessRunner.excerpt(result.stderr()));
         }
 
+        Set<String> untrackedPaths = Set.of();
         if (scope == DiffScope.WORKING_TREE) {
-            result = withUntrackedFiles(git, checkoutRoot, command, result);
+            untrackedPaths = untrackedPaths(git, checkoutRoot);
+            result = withUntrackedFiles(git, checkoutRoot, command, result, untrackedPaths);
         }
 
         // Working-tree scope tags each file with whether (part of) its
@@ -153,7 +155,7 @@ public final class DiffService implements AutoCloseable {
                 ? stagedPaths(git, checkoutRoot)
                 : Set.of();
 
-        return parse(result.stdout(), stagedPaths);
+        return parse(result.stdout(), stagedPaths, untrackedPaths);
     }
 
     /**
@@ -183,8 +185,15 @@ public final class DiffService implements AutoCloseable {
      * synthesised here, so binary detection and line handling for the new
      * files match every other file in the diff exactly.</p>
      */
-    private ProcessResult withUntrackedFiles(Path git, Path checkoutRoot, List<String> diffCommand,
-                                             ProcessResult trackedResult) {
+    /**
+     * The {@code ls-files --others} set: paths git considers untracked and
+     * non-ignored. Computed once per working-tree diff and reused both to
+     * drive the intent-to-add pass below and to tag each resulting
+     * {@link UnifiedDiff.FileDiff#untracked()} -- the same set, compared the
+     * same way {@code stagedPaths} compares its own, so the flag cannot
+     * drift from what {@link #withUntrackedFiles} actually diffed.
+     */
+    private Set<String> untrackedPaths(Path git, Path checkoutRoot) {
         // -z: NUL-separated raw paths, and also what lets an empty result be
         // told apart from a single empty-named entry unambiguously.
         List<String> lsFilesCommand = List.of(
@@ -195,12 +204,17 @@ public final class DiffService implements AutoCloseable {
             throw new GitCommandFailedException(lsFilesCommand, lsFiles.exitCode(),
                     ProcessRunner.excerpt(lsFiles.stderr()));
         }
-        List<String> untracked = new ArrayList<>();
+        Set<String> untracked = new HashSet<>();
         for (String entry : lsFiles.stdout().split("\\u0000")) {
             if (!entry.isEmpty()) {
                 untracked.add(entry);
             }
         }
+        return untracked;
+    }
+
+    private ProcessResult withUntrackedFiles(Path git, Path checkoutRoot, List<String> diffCommand,
+                                             ProcessResult trackedResult, Set<String> untracked) {
         // The common case -- nothing untracked -- must not pay for a single
         // extra process spawn beyond the ls-files probe above; Review
         // re-diffs constantly.
@@ -325,10 +339,10 @@ public final class DiffService implements AutoCloseable {
      * read without a worktree renders exactly like one with.
      */
     public static UnifiedDiff parseUnified(String unifiedDiff) {
-        return parse(unifiedDiff, Set.of());
+        return parse(unifiedDiff, Set.of(), Set.of());
     }
 
-    static UnifiedDiff parse(String stdout, Set<String> stagedPaths) {
+    static UnifiedDiff parse(String stdout, Set<String> stagedPaths, Set<String> untrackedPaths) {
         List<UnifiedDiff.FileDiff> files = new ArrayList<>();
 
         String path = null;
@@ -349,7 +363,7 @@ public final class DiffService implements AutoCloseable {
                         hunks.add(new UnifiedDiff.Hunk(hunkHeader, List.copyOf(lines)));
                     }
                     files.add(new UnifiedDiff.FileDiff(path, kind == null ? "M" : kind, insertions, deletions,
-                            stagedPaths.contains(path), List.copyOf(hunks)));
+                            stagedPaths.contains(path), untrackedPaths.contains(path), List.copyOf(hunks)));
                 }
                 path = parseDiffGitPath(line);
                 kind = null;
@@ -399,7 +413,7 @@ public final class DiffService implements AutoCloseable {
                 hunks.add(new UnifiedDiff.Hunk(hunkHeader, List.copyOf(lines)));
             }
             files.add(new UnifiedDiff.FileDiff(path, kind == null ? "M" : kind, insertions, deletions,
-                    stagedPaths.contains(path), List.copyOf(hunks)));
+                    stagedPaths.contains(path), untrackedPaths.contains(path), List.copyOf(hunks)));
         }
         return new UnifiedDiff(List.copyOf(files));
     }

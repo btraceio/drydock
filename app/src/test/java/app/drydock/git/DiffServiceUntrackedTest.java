@@ -81,6 +81,40 @@ class DiffServiceUntrackedTest {
     }
 
     @Test
+    void anUntrackedFileIsFlaggedUntracked(@TempDir Path repoDir) throws Exception {
+        Path repo = initCommittedRepo(repoDir, "one\n");
+        Files.writeString(repo.resolve("New.java"), "class New { }\n");
+
+        UnifiedDiff diff = service.diff(repo, DiffScope.WORKING_TREE, "main").get();
+
+        UnifiedDiff.FileDiff file = fileByPath(diff, "New.java");
+        assertTrue(file.untracked(), "an untracked file must be flagged as such");
+    }
+
+    @Test
+    void aStagedNewFileIsNotFlaggedUntracked(@TempDir Path repoDir) throws Exception {
+        Path repo = initCommittedRepo(repoDir, "one\n");
+        Files.writeString(repo.resolve("Added.java"), "class Added { }\n");
+        runGit(repo, "add", "Added.java");
+
+        UnifiedDiff diff = service.diff(repo, DiffScope.WORKING_TREE, "main").get();
+
+        UnifiedDiff.FileDiff file = fileByPath(diff, "Added.java");
+        assertFalse(file.untracked(), "a staged new file is tracked, not untracked");
+        assertTrue(file.staged(), "and it is staged");
+    }
+
+    @Test
+    void aTrackedModificationIsNotFlaggedUntracked(@TempDir Path repoDir) throws Exception {
+        Path repo = initCommittedRepo(repoDir, "one\n");
+        Files.writeString(repo.resolve("README.md"), "changed\n");
+
+        UnifiedDiff diff = service.diff(repo, DiffScope.WORKING_TREE, "main").get();
+
+        assertFalse(fileByPath(diff, "README.md").untracked());
+    }
+
+    @Test
     void theUsersIndexIsNotTouched(@TempDir Path repoDir) throws Exception {
         Path repo = initCommittedRepo(repoDir, "one\n");
         Files.writeString(repo.resolve("New.java"), "class New {}\n");

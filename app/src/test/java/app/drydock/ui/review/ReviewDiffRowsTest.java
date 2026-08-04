@@ -156,7 +156,7 @@ class ReviewDiffRowsTest {
         for (int i = 0; i < 50; i++) {
             hunks.add(hunk(add(i + 1), add(i + 2)));
         }
-        UnifiedDiff diff = diff(new UnifiedDiff.FileDiff("A.java", "M", 100, 0, false, hunks));
+        UnifiedDiff diff = diff(new UnifiedDiff.FileDiff("A.java", "M", 100, 0, false, false, hunks));
 
         List<ReviewDiffRow> rows = ReviewDiffRows.build(diff, new ReviewDiffRows.Options(true, Set.of(), 12));
 
@@ -190,7 +190,7 @@ class ReviewDiffRowsTest {
     }
 
     private static UnifiedDiff.FileDiff file(String path, UnifiedDiff.Hunk... hunks) {
-        return new UnifiedDiff.FileDiff(path, "M", 0, 0, false, List.of(hunks));
+        return new UnifiedDiff.FileDiff(path, "M", 0, 0, false, false, List.of(hunks));
     }
 
     private static UnifiedDiff.Hunk hunk(UnifiedDiff.Line... lines) {

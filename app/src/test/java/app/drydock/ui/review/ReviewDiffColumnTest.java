@@ -73,6 +73,37 @@ class ReviewDiffColumnTest extends ApplicationTest {
     }
 
     /**
+     * An untracked file is new work that was never {@code git add}ed --
+     * distinct from a new file that is already staged and ready. The chip is
+     * the only thing on the header row that says so.
+     */
+    @Test
+    void anUntrackedFileRendersTheUntrackedChip() throws Exception {
+        repo = repoWithUntrackedFile();
+
+        showScope(workingTreeScope(repo));
+        awaitRows();
+
+        List<Node> chips = new ArrayList<>();
+        interact(() -> chips.addAll(lookup(".review-hunk-chip-untracked").queryAll()));
+        assertFalse(chips.isEmpty(), "expected an untracked chip to render");
+        assertTrue(chips.stream().anyMatch(node -> node instanceof Label label
+                        && "untracked".equals(label.getText())),
+                "expected the chip to read \"untracked\"");
+    }
+
+    @Test
+    void aTrackedModificationRendersNoChip() throws Exception {
+        repo = repoWithUncommittedChange();
+
+        showScope(workingTreeScope(repo));
+        awaitRows();
+
+        assertTrue(lookup(".review-hunk-chip").queryAll().isEmpty(),
+                "a tracked, unstaged modification must render no chip");
+    }
+
+    /**
      * The done-when this milestone exists to protect: a fixed row height was
      * the bug that hid code with no scrollbar to reveal it. A wrapped, very
      * long line must therefore be taller than a short one.
@@ -426,6 +457,12 @@ class ReviewDiffColumnTest extends ApplicationTest {
                     }
                 }
                 """);
+        return repo;
+    }
+
+    private static Path repoWithUntrackedFile() throws Exception {
+        Path repo = initCommittedRepo(Files.createTempDirectory("drydock-untracked"));
+        Files.writeString(repo.resolve("New.java"), "package app;\n\nclass New {}\n");
         return repo;
     }
 

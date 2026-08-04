@@ -142,7 +142,7 @@ class McpToolRouterReviewTest {
                     OptionalInt.of(i), "a very long generated line number " + i));
         }
         context.reviewDiff = new UnifiedDiff(List.of(new UnifiedDiff.FileDiff("gen.java", "A",
-                4000, 0, false, List.of(new UnifiedDiff.Hunk("@@", huge)))));
+                4000, 0, false, false, List.of(new UnifiedDiff.Hunk("@@", huge)))));
 
         JsonValue result = router.call(caller, "review_scope",
                 args("scopeId", SCOPE, "maxBytes", "2000"));
@@ -412,7 +412,7 @@ class McpToolRouterReviewTest {
             }
             list.add(new UnifiedDiff.Hunk("@@ hunk " + h + " @@", lines));
         }
-        return new UnifiedDiff(List.of(new UnifiedDiff.FileDiff("src/Main.java", "M", 1, 0, false, list)));
+        return new UnifiedDiff(List.of(new UnifiedDiff.FileDiff("src/Main.java", "M", 1, 0, false, false, list)));
     }
 
     private static JsonObject intentJson(String id, String title, String risk) {

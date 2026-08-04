@@ -89,7 +89,7 @@ class SymbolIndexTest {
     }
 
     private static UnifiedDiff.FileDiff file(String path, UnifiedDiff.Line... lines) {
-        return new UnifiedDiff.FileDiff(path, "M", 0, 0, false,
+        return new UnifiedDiff.FileDiff(path, "M", 0, 0, false, false,
                 List.of(new UnifiedDiff.Hunk("@@", List.of(lines))));
     }
 

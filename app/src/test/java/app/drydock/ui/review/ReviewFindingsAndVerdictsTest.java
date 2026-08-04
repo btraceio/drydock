@@ -398,7 +398,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
     }
 
     private static UnifiedDiff.FileDiff file(String path) {
-        return new UnifiedDiff.FileDiff(path, "M", 1, 0, false,
+        return new UnifiedDiff.FileDiff(path, "M", 1, 0, false, false,
                 List.of(new UnifiedDiff.Hunk("@@", List.of(new UnifiedDiff.Line(
                         UnifiedDiff.Line.Kind.ADD, OptionalInt.empty(), OptionalInt.of(1), "x")))));
     }

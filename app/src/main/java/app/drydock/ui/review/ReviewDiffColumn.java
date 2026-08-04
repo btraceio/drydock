@@ -413,10 +413,30 @@ final class ReviewDiffColumn extends BorderPane {
         explorer.setTooltip(new Tooltip("Open " + header.file() + " in the Explorer at line " + header.startLine()));
         explorer.setOnAction(e -> openInExplorer(header, explorer));
 
-        HBox row = new HBox(8, file, range, spacer, explorer);
+        List<Node> children = new ArrayList<>(List.of(file, range));
+        // untracked wins when both are somehow true: "never committed" is
+        // the more important fact to surface, and the combination should
+        // not be constructible anyway (an untracked file has nothing in the
+        // index to be staged).
+        Label chip = header.untracked() ? chip("untracked", "review-hunk-chip-untracked")
+                : header.staged() ? chip("staged", "review-hunk-chip-staged")
+                : null;
+        if (chip != null) {
+            children.add(chip);
+        }
+        children.add(spacer);
+        children.add(explorer);
+
+        HBox row = new HBox(8, children.toArray(Node[]::new));
         row.setAlignment(Pos.CENTER_LEFT);
         row.getStyleClass().add("review-hunk-header");
         return row;
+    }
+
+    private static Label chip(String text, String styleClass) {
+        Label chip = new Label(text);
+        chip.getStyleClass().addAll("review-hunk-chip", styleClass);
+        return chip;
     }
 
     /**
