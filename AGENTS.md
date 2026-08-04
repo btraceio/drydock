@@ -131,6 +131,99 @@ Drydock manages agentic CLIs behind an SPI. To add one (reference impl:
 6. Add provider unit tests + a registry availability/default case, and slot
    the agent into `AgentKind.preferenceOrder()`.
 
+## A commit records one change and the reasoning behind it
+
+Commits are the branch's real history — the record a PR description is allowed
+to drop. A commit therefore keeps what the PR omits: the approach that was
+tried, the constraint that ruled it out, the fix to an earlier commit on this
+same branch. Write it for someone running `git blame` in two years with no
+access to the conversation that produced it.
+
+**Subject.** One declarative sentence describing the state after the commit,
+present tense, no trailing period, no `type(scope):` prefix. A bare area prefix
+is allowed when a branch's commits share one ("Review queue: j/k walk the
+filtered rail"). Say what changed in behaviour, not what you did to the files:
+"A checked-out PR is named as the PR it is, whoever opened it", not "Update
+PrCheckoutService". Aim for one line in `git log --oneline`; a subject that
+needs a conjunction to stay honest is usually two commits.
+
+**Body**, after a blank line, wrapped at ~76 columns:
+
+- Lead with the defect or the absence, in enough detail to reproduce it — the
+  wrong output, the failing scenario, the thing that silently did nothing. A
+  fix whose bug is not stated cannot be reviewed or reverted with confidence.
+- Then what it does now, and why this design over the obvious alternative.
+  Name the constraint that forced the shape (thread affinity, a wire contract,
+  lazy Gradle task configuration, a rename that happens upstream of the read).
+- Then verification: the command run, the scenario exercised, the real
+  repository or PR it was tried against, with the concrete numbers where there
+  are any. State what was *not* covered rather than letting silence imply it.
+- Unrelated drive-by cleanups get one closing line, or their own commit.
+
+**Split by reviewability.** One commit per coherent change. A commit that
+touches an unrelated file "while in there" costs a future bisect more than the
+split costs you now. Refactor-then-change is two commits, in that order, with
+the refactor asserting no behaviour change.
+
+**Fixes to earlier commits on the same branch stay visible.** Do not rewrite
+history to make the branch look linear — say what was wrong with the earlier
+commit and why the first attempt missed it ("The first pass keyed recognition
+off the review-requested list, which meant it only worked for somebody else's
+PR"). That paragraph is exactly the material the PR description drops, which
+is why the commit has to carry it.
+
+Every commit ends with the `Co-Authored-By:` trailer for the model that wrote
+it, after a blank line, with no other trailers invented.
+
+## A pull request describes the branch as merged, not how it got there
+
+The unit of description is `git diff <base>...HEAD` — the code the reviewer
+will actually receive. The commit log is the journey; write the PR from the
+diff and use the log only as a checklist of things to look for in it.
+
+**Title.** One declarative sentence, no trailing period, naming the change
+from the reader's side — the same voice as commit subjects here ("A checked-out
+PR is named as the PR it is, whoever opened it", "The host build refuses to
+ship a wrong-architecture runtime image"). Not a task name, not a ticket
+prefix, not "Fixes and improvements", never a bare component name. If the
+branch genuinely carries two independent pieces of work, the title says so
+plainly ("Review: a filter for the queue, and a diff base that is actually the
+PR's") rather than hiding one of them behind "and more".
+
+**Body.** Every behaviour change present in the final diff gets its own
+paragraph: what was wrong or missing, what happens now, and why this way. Lead
+with the defect or the absence — a reviewer who does not already know the bug
+cannot judge the fix. Group by change, not by file or by commit. When a change
+has a non-obvious constraint (thread affinity, a wire contract, an ordering
+dependency), name it; that is the part review exists to check.
+
+**Nothing that is not in the final diff.** The branch's intermediate states are
+not part of the change and must not appear:
+
+- No plan, checkpoint, WIP, or "Task 3 of 4" commits, and no narration of the
+  order work landed in.
+- A bug introduced and fixed inside the branch never existed. Do not describe
+  the fix, and do not credit a review round-trip that produced it.
+- No approach tried and abandoned, no file created and later deleted, no rename
+  later renamed back, no dependency added and then dropped.
+- No "as discussed", "per feedback", "addressed comments" — the reviewer of the
+  merged code was not in that conversation.
+
+The test for every sentence: could a reader verify it against the diff alone?
+If it can only be verified against the commit log, cut it.
+
+**Verification is reported, not implied.** State what was actually run — the
+build/test command, the app scenario exercised, the real repository or PR it was
+tried against — and state plainly what was *not* covered ("buildSrc has no test
+infrastructure, so this guard carries no automated test"). An unqualified "tested"
+is worse than silence. Never claim a verification that was not performed.
+
+**Housekeeping.** Mechanical leftovers (a stray fully-qualified name, a stale
+javadoc, a dead import) that survive into the diff get one short closing line —
+they are in the diff, so they are in the description, but they do not get a
+section. Anything the reviewer must do at merge time (submodule re-init, a
+migration, a required Zig version) goes last, under its own heading.
+
 ## Git worktrees & submodules
 
 `third_party/ghostty` is a git **submodule**, and submodule *working trees are
