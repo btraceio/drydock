@@ -32,6 +32,7 @@ final class ShortcutsOverlay {
                     {"Explorer view", "⌘3"},
                     {"Review — and back to where you were", "⌘4"},
                     {"Previous / next session tab", "⌘[ / ⌘]"},
+                    {"  (in the Explorer: back / forward along the trail)", ""},
                     {"Previous / next live session", "⌘↑ / ⌘↓"},
                     {"Toggle sidebar", "⌘0"},
                     {"Filter repositories", "⌘F"},
@@ -58,6 +59,13 @@ final class ShortcutsOverlay {
                     {"Findings from the whole review", "⇧F"},
                     {"MCP activity log", "\\"},
                     {"Narrow: open the diff / back to the queue", "⏎ esc"},
+            }),
+            new Section("IN THE EXPLORER", new String[][] {
+                    {"Skim / full text for this file", "z"},
+                    {"Peek at a symbol in place", "click an underlined symbol"},
+                    {"In a peek: open for real / usages / ask the agent", "⏎ / u / a"},
+                    {"Back / forward along the trail", "⌘[ / ⌘]"},
+                    {"Close one peek", "Esc"},
             }),
     };
 

@@ -26,6 +26,7 @@ import app.drydock.mcp.McpToolRouter;
 import app.drydock.mcp.WorkspaceMcpSessionContext;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.AnnotationStore;
+import app.drydock.ui.explorer.ExplorerTrailStore;
 import app.drydock.review.Confidence;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.Severity;
@@ -135,6 +136,7 @@ public final class DrydockApplication extends Application {
     private AppShell appShell;
     private GitHubService gitHubService;
     private AnnotationStore annotationStore;
+    private ExplorerTrailStore explorerTrailStore;
     /** Cross-repo review scope handles, shared by the Review destination and the MCP tool router. */
     private ReviewScopeRegistry reviewScopeRegistry;
     /** Shared by the MCP server (writer) and the Review activity panel (reader). */
@@ -208,6 +210,16 @@ public final class DrydockApplication extends Application {
         sessionManager = new SessionManager(stateRepository, agentRegistry);
         ChangedLineService changedLineService = new ChangedLineService(diffService);
         annotationStore = new AnnotationStore(AnnotationStore.siblingOf(stateRepository.stateFile()));
+        // Per-session Explorer trails (Explorer delta, part 1). A sibling of
+        // the state file for the same reason the annotations are: per-profile
+        // state that must not land inside a worktree.
+        explorerTrailStore = new ExplorerTrailStore(
+                ExplorerTrailStore.siblingOf(stateRepository.stateFile()));
+        // A trail belongs to a session; when the session is gone so is the
+        // trail, or the file grows for the life of the profile.
+        explorerTrailStore.retain(sessionManager.sessions().stream()
+                .map(session -> session.id().value().toString())
+                .toList());
 
         // The observable store both the sidebar and the tab headers render
         // from; seeded before any UI reads it.
@@ -224,7 +236,7 @@ public final class DrydockApplication extends Application {
 
         mainWorkspace = new MainWorkspace(sessionManager, agentRegistry, repositoryManager, gitStatusService,
                 searchService, ghCliService, worktreeService, diffService, changedLineService, annotationStore,
-                reviewScopeRegistry, mcpActivityLog, viewModel, primaryStage);
+                reviewScopeRegistry, mcpActivityLog, explorerTrailStore, viewModel, primaryStage);
         RepositorySidebar sidebar =
                 new RepositorySidebar(repositoryManager, gitStatusService, worktreeService, sessionManager,
                         agentRegistry, mainWorkspace, viewModel);
@@ -531,6 +543,34 @@ public final class DrydockApplication extends Application {
                             }
                             case "reviewkey" -> System.out.println("[diag] reviewkey " + arg + " -> "
                                     + mainWorkspace.diagReviewKey(arg));
+                            case "peek" -> {
+                                mainWorkspace.diagExplorerPeek(arg);
+                                System.out.println("[diag] explorer peeking " + arg);
+                            }
+                            case "skim" -> {
+                                mainWorkspace.diagExplorerToggleSkim();
+                                System.out.println("[diag] explorer toggled skim");
+                            }
+                            case "scope" -> {
+                                mainWorkspace.diagExplorerToggleScope();
+                                System.out.println("[diag] explorer toggled diff/repo scope");
+                            }
+                            case "sort" -> {
+                                mainWorkspace.diagExplorerCycleSort();
+                                System.out.println("[diag] explorer cycled the sort");
+                            }
+                            case "search" -> {
+                                mainWorkspace.diagExplorerSearch(arg);
+                                System.out.println("[diag] explorer searching " + arg);
+                            }
+                            case "trail" -> {
+                                boolean moved = mainWorkspace.navigateExplorerTrail(
+                                        arg.startsWith("-") ? -1 : 1);
+                                System.out.println("[diag] explorer trail " + arg + " -> " + moved
+                                        + " " + mainWorkspace.diagExplorerTrail());
+                            }
+                            case "unwind" -> System.out.println("[diag] explorer unwind -> "
+                                    + mainWorkspace.unwindExplorerOverlay());
                             default -> System.out.println("[diag] mark " + arg + " · review "
                                     + mainWorkspace.diagReviewLayout());
                         }
@@ -776,6 +816,10 @@ public final class DrydockApplication extends Application {
                 if (appShell.modalLayer().isShowingModal()) {
                     appShell.modalLayer().close();
                     event.consume();
+                } else if (!inTextInput && mainWorkspace.unwindExplorerOverlay()) {
+                    // The Explorer had a peek card open; that closes first and
+                    // the reader stays exactly where they were reading.
+                    event.consume();
                 } else if (!inTextInput && mainWorkspace.unwindReviewOverlay()) {
                     // Review had something open (the symbol lens, the MCP
                     // panel); that closes first and Review stays.
@@ -800,10 +844,18 @@ public final class DrydockApplication extends Application {
                 }
                 event.consume();
             } else if (cmd && event.getCode() == KeyCode.OPEN_BRACKET) {
-                mainWorkspace.selectPreviousSessionTab();
+                // Inside the Explorer these are the trail's back/forward
+                // (Explorer delta, part 1). They fall through to the session
+                // tabs at the trail's ends and everywhere else, so the older
+                // meaning is only shadowed while it would be ambiguous.
+                if (!mainWorkspace.navigateExplorerTrail(-1)) {
+                    mainWorkspace.selectPreviousSessionTab();
+                }
                 event.consume();
             } else if (cmd && event.getCode() == KeyCode.CLOSE_BRACKET) {
-                mainWorkspace.selectNextSessionTab();
+                if (!mainWorkspace.navigateExplorerTrail(1)) {
+                    mainWorkspace.selectNextSessionTab();
+                }
                 event.consume();
             } else if (cmd && event.getCode() == KeyCode.DOWN) {
                 sidebar.focusAdjacentLiveSession(+1);
@@ -1083,6 +1135,9 @@ public final class DrydockApplication extends Application {
         }
         if (annotationStore != null) {
             closeQuietly("AnnotationStore", annotationStore::close);
+        }
+        if (explorerTrailStore != null) {
+            closeQuietly("ExplorerTrailStore", explorerTrailStore::close);
         }
         if (sessionManager != null) {
             closeQuietly("SessionManager", sessionManager::close);

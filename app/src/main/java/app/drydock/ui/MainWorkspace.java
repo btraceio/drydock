@@ -47,6 +47,8 @@ import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
 import app.drydock.search.SessionSearchService;
 import app.drydock.ui.explorer.DiffOverlay;
+import app.drydock.ui.explorer.ExplorerFinding;
+import app.drydock.ui.explorer.ExplorerTrailStore;
 import app.drydock.ui.explorer.SessionExplorerView;
 import app.drydock.ui.review.ReviewDestinationView;
 import app.drydock.ui.model.WorkspaceViewModel;
@@ -251,6 +253,9 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      */
     private final Map<OpenSessionTab, SessionExplorerView> openExplorers = new LinkedHashMap<>();
 
+    /** Where each session's Explorer trail is persisted; null in tests that build no store. */
+    private final ExplorerTrailStore explorerTrailStore;
+
     /** Sessions whose self-exit has already been recorded, so the watcher fires once per exit. */
     private final Set<ManagedSessionId> exitRecorded = new HashSet<>();
 
@@ -318,6 +323,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                           GhCliService ghCliService, WorktreeService worktreeService, DiffService diffService,
                           ChangedLineService changedLineService, AnnotationStore annotationStore,
                           ReviewScopeRegistry reviewScopeRegistry, McpActivityLog activityLog,
+                          ExplorerTrailStore explorerTrailStore,
                           WorkspaceViewModel viewModel, Stage stage) {
         this.sessionManager = sessionManager;
         this.agentRegistry = agentRegistry;
@@ -329,6 +335,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         this.diffService = diffService;
         this.changedLineService = changedLineService;
         this.annotationStore = annotationStore;
+        this.explorerTrailStore = explorerTrailStore;
         this.reviewScopeRegistry = reviewScopeRegistry;
         this.reviewQueueService = new ReviewQueueService(worktreeService, gitStatusService,
                 ghCliService::listReviewRequests, ghCliService::listOpenPullRequests,
@@ -920,6 +927,28 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     }
 
     /**
+     * Esc inside the Explorer, before the global chain's "leave the tab"
+     * step: one peek card closes. False when there is nothing open, so Esc
+     * keeps its old meaning everywhere else.
+     */
+    public boolean unwindExplorerOverlay() {
+        return !isReviewShowing()
+                && currentlySelected().map(OpenSessionTab::unwindExplorerOverlay).orElse(false);
+    }
+
+    /**
+     * {@code ⌘[} / {@code ⌘]} while the Explorer is showing: a step along its
+     * trail. False when the Explorer is not showing or the trail cannot move
+     * that way -- and the shortcut then falls back to its original
+     * previous/next-session-tab meaning, rather than dying inside a view
+     * that had nothing to do with it.
+     */
+    public boolean navigateExplorerTrail(int direction) {
+        return !isReviewShowing()
+                && currentlySelected().map(open -> open.navigateExplorerTrail(direction)).orElse(false);
+    }
+
+    /**
      * Returns to the tab Review was entered from (nav §4): {@code ⌘4} again,
      * top-level Esc, and the header's {@code ‹}. With no live origin the
      * selection is simply cleared, which shows the ordinary empty state --
@@ -1504,6 +1533,39 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 ? (direction > 0 ? 0 : tabs.size() - 1)
                 : Math.floorMod(selected + direction, tabs.size());
         tabPane.getSelectionModel().select(next);
+    }
+
+    /**
+     * The findings anchored in {@code relative} for the scopes bound to
+     * {@code tab}'s session.
+     *
+     * <p>Anchors that only exist in the pre-image ({@code o123} -- a deleted
+     * line) are dropped: the Explorer shows the file as it is now, and there
+     * is no row for a line that is no longer there. Resolved findings are
+     * dropped too; a chip for something already settled is noise.</p>
+     */
+    private List<ExplorerFinding> explorerFindings(OpenSessionTab tab, Path relative) {
+        String path = relative.toString();
+        List<ExplorerFinding> marks = new ArrayList<>();
+        for (ReviewScope scope : reviewScopeRegistry.scopes()) {
+            if (!scope.sessionId().map(id -> id.equals(tab.sessionId())).orElse(false)) {
+                continue;
+            }
+            for (ReviewAnnotation finding : annotationStore.forScope(scope.id())) {
+                if (!finding.file().equals(path) || finding.resolved()) {
+                    continue;
+                }
+                ExplorerFinding.lineOfKey(finding.startKey()).ifPresent(line ->
+                        marks.add(new ExplorerFinding(line, shortFindingLabel(finding))));
+            }
+        }
+        return marks;
+    }
+
+    /** A few words, not a sentence: the chip sits at the end of a signature row. */
+    private static String shortFindingLabel(ReviewAnnotation finding) {
+        String title = finding.displayTitle().replaceAll("\\s+", " ").strip();
+        return title.length() <= 22 ? title : title.substring(0, 21) + "…";
     }
 
     /** Wires the sidebar-collapse toggle (⌘0 pressed while the terminal is focused reaches tabs, not the scene filter). */
@@ -2259,6 +2321,45 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         currentlySelected().ifPresent(open -> open.openExplorerAt(relativeFile, 1));
     }
 
+    /**
+     * Diagnostic-only Explorer drivers for the visual pass. Peeking,
+     * skimming and the scope funnel are all gestures the screenshot harness
+     * cannot aim by hand -- a peek needs a hit test against laid-out glyphs,
+     * and the keys are only bound while the Explorer has focus.
+     */
+    public void diagExplorerPeek(String symbol) {
+        withExplorer(explorer -> explorer.diagPeek(symbol));
+    }
+
+    public void diagExplorerToggleSkim() {
+        withExplorer(SessionExplorerView::toggleSkim);
+    }
+
+    public void diagExplorerToggleScope() {
+        withExplorer(SessionExplorerView::toggleScope);
+    }
+
+    public void diagExplorerCycleSort() {
+        withExplorer(SessionExplorerView::cycleSort);
+    }
+
+    public void diagExplorerSearch(String query) {
+        withExplorer(explorer -> explorer.searchText(query));
+    }
+
+    /** Diagnostic-only: the trail as its chips read, for the harness's log. */
+    public List<String> diagExplorerTrail() {
+        List<String> trail = new ArrayList<>();
+        withExplorer(explorer -> trail.addAll(explorer.diagTrail()));
+        return trail;
+    }
+
+    private void withExplorer(java.util.function.Consumer<SessionExplorerView> action) {
+        currentlySelected()
+                .map(openExplorers::get)
+                .ifPresent(action);
+    }
+
     /** Diagnostic-only: focuses the Explorer's code area and types {@code text} into it as real edits. */
     public void diagTypeInExplorer(String text) {
         currentlySelected().ifPresent(open -> open.diagTypeInExplorer(text));
@@ -2584,6 +2685,18 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             DiffOverlay overlay = new DiffOverlay(changedLineService, searchRoot);
             openTab.setExplorerFactory(() -> {
                 SessionExplorerView explorer = new SessionExplorerView(searchRoot, searchService, overlay);
+                // Keyed by the tab's session id, not by the worktree: two
+                // sessions on the same checkout are two readers with two
+                // trails, and the id is what survives a restart.
+                explorer.setTrailStore(explorerTrailStore, openTab.sessionId().value().toString());
+                // The peek card's "ask the agent" is absent unless this tab's
+                // own process is alive to be asked (delta hard rules).
+                explorer.setAgentBridge(() -> !openTab.isProcessExited(), openTab::sendPrompt);
+                // Findings for the file being read, so skim rows carry their
+                // ◆ chip and the minimap its red ticks. Read live from the
+                // store rather than snapshotted: the reviewer writes findings
+                // over MCP while the reader is reading.
+                explorer.setFindingsProvider(relative -> explorerFindings(openTab, relative));
                 openExplorers.put(openTab, explorer);
                 return explorer;
             });

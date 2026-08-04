@@ -4,12 +4,20 @@ import app.drydock.search.SessionSearchService;
 import javafx.animation.KeyFrame;
 import javafx.animation.KeyValue;
 import javafx.animation.Timeline;
+import javafx.scene.Node;
+import javafx.scene.control.ButtonBase;
+import javafx.scene.control.TextInputControl;
+import javafx.scene.input.KeyCode;
+import javafx.scene.input.KeyEvent;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.util.Duration;
+import org.fxmisc.richtext.CodeArea;
 
 import java.nio.file.Path;
 import java.util.OptionalInt;
+import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 
 /**
  * The Session Explorer (design handoff section A, frame 2a): a collapsible
@@ -41,9 +49,80 @@ public final class SessionExplorerView extends HBox {
     private final FileViewer viewer;
     private final SearchRail rail;
     private boolean railCollapsed;
+    private ExplorerTrailStore trailStore;
+    private String trailKey;
 
     public SessionExplorerView(Path searchRoot, SessionSearchService searchService) {
         this(searchRoot, searchService, null);
+    }
+
+    /** Persists this session's trail; null leaves the trail in memory only. */
+    public void setTrailStore(ExplorerTrailStore store, String sessionKey) {
+        this.trailStore = store;
+        this.trailKey = sessionKey;
+        if (store != null && sessionKey != null) {
+            ExplorerTrailStore.Trail restored = store.load(sessionKey);
+            viewer.restoreTrail(restored.waypoints(), restored.cursor());
+        }
+    }
+
+    /**
+     * Wires the peek card's "ask the agent" action. Absent -- not greyed --
+     * when {@code available} says the bound session cannot be asked
+     * anything (delta hard rules).
+     */
+    public void setAgentBridge(BooleanSupplier available, Consumer<String> sendPrompt) {
+        viewer.setAgentAvailable(available == null ? () -> false : available);
+        viewer.setOnAskAgent(peek -> {
+            if (sendPrompt == null) {
+                return;
+            }
+            sendPrompt.accept(askPrompt(peek));
+            // The session's terminal is hidden behind the Explorer, so
+            // without this the question looks like it went nowhere.
+            viewer.toast("Asked the session about " + peek.symbol()
+                    + " — the answer is in the agent view");
+        });
+    }
+
+    /**
+     * The question the peek's {@code a} sends: the symbol, where it is
+     * declared, and every call site -- the same context the reader has in
+     * front of them, on one line because {@code sendPrompt} submits at the
+     * first newline.
+     */
+    static String askPrompt(SymbolPeek peek) {
+        StringBuilder prompt = new StringBuilder("In ")
+                .append(peek.relativePath()).append(" line ").append(peek.startLine())
+                .append(", explain ").append(peek.symbol()).append(". Occurrences: ");
+        int shown = 0;
+        for (SymbolPeek.Occurrence occurrence : peek.occurrences()) {
+            if (shown++ == 12) {
+                prompt.append("… (").append(peek.occurrences().size() - 12).append(" more)");
+                break;
+            }
+            prompt.append(occurrence.relativePath()).append(':').append(occurrence.line())
+                    .append(occurrence.inDiff() ? " (in diff)" : "").append("; ");
+        }
+        return prompt.toString().strip();
+    }
+
+    /**
+     * {@code ⌘[} / {@code ⌘]} along the trail. False when the trail cannot
+     * move that way, which is what lets the global shortcut fall back to its
+     * original meaning (previous/next session tab) at the trail's ends
+     * instead of the Explorer silently swallowing it.
+     */
+    public boolean navigateTrail(int direction) {
+        return viewer.navigateTrail(direction);
+    }
+
+    /**
+     * Esc, topmost first: one peek card. False when the Explorer had nothing
+     * to unwind, so the global Esc chain carries on to its next step.
+     */
+    public boolean unwindOverlay() {
+        return viewer.unwindPeek();
     }
 
     /**
@@ -56,8 +135,20 @@ public final class SessionExplorerView extends HBox {
         this.searchRoot = searchRoot;
         getStyleClass().add("explorer-root");
 
-        viewer = new FileViewer();
+        viewer = new FileViewer(searchRoot);
+        viewer.setPeekService(new SymbolPeekService(searchRoot, searchService));
+        viewer.setOnTrailChanged(this::persistTrail);
         rail = new SearchRail(searchRoot, searchService, viewer::openFile);
+        // The blue minimap ticks are the rail's own query, so they can never
+        // disagree with what the rail is showing.
+        rail.setOnQueryChanged(viewer::setSearchQuery);
+        // The rail's diff half and the viewer's green gutter read the SAME
+        // changed-line map, so a file cannot be in the change for one and out
+        // of it for the other.
+        rail.setChangedLines(viewer::changedLines);
+        viewer.setOnOverlayRefreshed(rail::refresh);
+        viewer.setOnFileShown(rail::setOpenFile);
+        installShortcuts();
         if (overlay != null) {
             viewer.setDiffOverlay(overlay);
             rail.setDiffFileTest(relativePath -> viewer.hasDiffLines(relativePath));
@@ -110,10 +201,136 @@ public final class SessionExplorerView extends HBox {
         viewer.diagType(text);
     }
 
+    /**
+     * Opens a peek for {@code symbol} through the same path a click on it
+     * takes. Diagnostic- and test-only: a real click needs a hit test
+     * against laid-out glyphs, which is exactly what neither the headless
+     * harness nor the screenshot driver can aim.
+     */
+    public void diagPeek(String symbol) {
+        viewer.diagPeek(symbol);
+    }
+
+    /** {@code z}: skim ⇄ full text for the open file. */
+    public void toggleSkim() {
+        viewer.toggleSkim();
+    }
+
+    /** {@code d}: this change ⇄ the whole worktree, in the rail. */
+    public void toggleScope() {
+        rail.toggleScope();
+    }
+
+    /** {@code s}: cycles the rail's sort. */
+    public void cycleSort() {
+        rail.cycleSort();
+    }
+
+    /** Findings anchored in this session's files (skim chips, red minimap ticks). */
+    public void setFindingsProvider(java.util.function.Function<Path, java.util.List<ExplorerFinding>> provider) {
+        viewer.setFindingsProvider(provider);
+        rail.setFindings(provider);
+    }
+
+    /** Diagnostic- and test-only: how many peek cards are stacked. */
+    public int diagPeekDepth() {
+        return viewer.diagPeekDepth();
+    }
+
+    /** Diagnostic- and test-only: the trail as its chips read, oldest first. */
+    public java.util.List<String> diagTrail() {
+        return viewer.trail().waypoints().stream().map(NavigationTrail.Waypoint::label).toList();
+    }
+
     /** Review-tab bridge: runs a Text-mode search for {@code token} (the "Search in Explorer" chip). */
     public void searchText(String token) {
         setRailCollapsed(false);
         rail.setSearch(token);
+    }
+
+    private void persistTrail() {
+        if (trailStore != null && trailKey != null) {
+            NavigationTrail trail = viewer.trail();
+            trailStore.save(trailKey, new ExplorerTrailStore.Trail(trail.waypoints(), trail.cursor()));
+        }
+    }
+
+    /**
+     * The Explorer's own keyboard layer (delta "Keyboard").
+     *
+     * <p>An event <em>filter</em> on this view, so the keys work wherever the
+     * focus is inside the Explorer -- and gated on the focus owner not being
+     * a text input, which here means the search field <em>and</em> an
+     * editable code area: single-letter shortcuts must never eat a
+     * keystroke aimed at a file the reader is editing.</p>
+     */
+    private void installShortcuts() {
+        addEventFilter(KeyEvent.KEY_PRESSED, event -> {
+            if (event.isShortcutDown() || event.isAltDown() || event.isMetaDown()) {
+                return;
+            }
+            if (typingSomewhere()) {
+                return;
+            }
+            if (event.getCode() == KeyCode.ENTER
+                    && getScene() != null && getScene().getFocusOwner() instanceof ButtonBase) {
+                // Enter belongs to whatever button has focus. Swallowing it
+                // here would break every trail chip, peek action and rail row
+                // for keyboard users the moment a peek was open.
+                return;
+            }
+            switch (event.getCode()) {
+                case SLASH -> {
+                    rail.focusSearch();
+                    event.consume();
+                }
+                case D -> {
+                    rail.toggleScope();
+                    event.consume();
+                }
+                case S -> {
+                    rail.cycleSort();
+                    event.consume();
+                }
+                case Z -> {
+                    viewer.toggleSkim();
+                    event.consume();
+                }
+                case ENTER -> {
+                    if (viewer.isPeekOpen()) {
+                        viewer.promoteTopPeek();
+                        event.consume();
+                    }
+                }
+                case U -> {
+                    if (viewer.isPeekOpen()) {
+                        viewer.togglePeekUsages();
+                        event.consume();
+                    }
+                }
+                case A -> {
+                    if (viewer.isPeekOpen()) {
+                        viewer.askTopPeek();
+                        event.consume();
+                    }
+                }
+                default -> { }
+            }
+        });
+    }
+
+    /**
+     * Whether a keystroke belongs to something the reader is typing into.
+     * {@link CodeArea} is not a {@link TextInputControl}, so the usual
+     * instance check alone would let {@code a} in an editable file open a
+     * peek action instead of typing an "a".
+     */
+    private boolean typingSomewhere() {
+        Node focused = getScene() == null ? null : getScene().getFocusOwner();
+        if (focused instanceof TextInputControl) {
+            return true;
+        }
+        return focused instanceof CodeArea area && area.isEditable();
     }
 
     private void setRailCollapsed(boolean collapsed) {

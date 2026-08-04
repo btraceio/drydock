@@ -1,13 +1,13 @@
 package app.drydock.ui.review;
 
 import app.drydock.git.UnifiedDiff;
+import app.drydock.review.SymbolWords;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -28,26 +28,13 @@ import java.util.regex.Pattern;
  */
 final class SymbolIndex {
 
-    /** Identifiers shorter than this are noise: {@code i}, {@code id}, {@code of}. */
-    private static final int MIN_LENGTH = 3;
-
-    /** Java-ish identifiers; the same shape the diff column's lexer treats as a word. */
-    private static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*");
-
     /**
-     * Words never worth a lens. Keywords are not symbols, and offering a
-     * popover on {@code return} teaches the reader that the dotted underline
-     * means nothing.
+     * What counts as a symbol lives in {@link app.drydock.review.SymbolWords},
+     * shared with the Explorer's peek underline -- the delta requires the two
+     * lenses to agree, and two copies of this list drifted the moment they
+     * existed.
      */
-    private static final Set<String> STOP_WORDS = Set.of(
-            "abstract", "assert", "boolean", "break", "byte", "case", "catch", "char", "class",
-            "const", "continue", "default", "double", "else", "enum", "extends", "final",
-            "finally", "float", "for", "goto", "if", "implements", "import", "instanceof",
-            "int", "interface", "long", "native", "new", "package", "private", "protected",
-            "public", "record", "return", "sealed", "short", "static", "super", "switch",
-            "synchronized", "this", "throw", "throws", "transient", "try", "var", "void",
-            "volatile", "while", "yield", "true", "false", "null",
-            "fun", "val", "let", "function", "def", "self", "from", "with", "and", "not");
+    private static final Pattern IDENTIFIER = SymbolWords.IDENTIFIER;
 
     /** One place a symbol appears. */
     record Occurrence(String file, int line, String text, boolean inDiff) {
@@ -83,7 +70,7 @@ final class SymbolIndex {
                     Matcher matcher = IDENTIFIER.matcher(line.text());
                     while (matcher.find()) {
                         String symbol = matcher.group();
-                        if (symbol.length() < MIN_LENGTH || STOP_WORDS.contains(symbol)) {
+                        if (!SymbolWords.isSymbol(symbol)) {
                             continue;
                         }
                         index.computeIfAbsent(symbol, key -> new ArrayList<>())

@@ -3234,3 +3234,375 @@
     -fx-border-width: 0 0 0 1;
 }
 .review-mcp-payload .content { -fx-background-color: -drydock-input-bg; }
+
+/* --- Explorer: trail bar (delta part 1) ------------------------------- */
+.explorer-trail-bar {
+    -fx-background-color: -drydock-chrome;
+    -fx-border-color: -drydock-border transparent transparent transparent;
+    -fx-border-width: 1 0 0 0;
+    -fx-padding: 0 10 0 10;
+    -fx-min-height: 30px;
+    -fx-pref-height: 30px;
+}
+.trail-step-button {
+    -fx-background-color: transparent;
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 6px;
+    -fx-background-radius: 6px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 11px;
+    -fx-min-width: 20px;
+    -fx-min-height: 20px;
+    -fx-padding: 0;
+    -fx-cursor: hand;
+}
+.trail-step-button:hover { -fx-text-fill: -drydock-text; }
+.trail-step-button:focused { -fx-border-color: -drydock-accent; }
+.trail-step-button:disabled { -fx-opacity: 0.4; }
+.trail-divider {
+    -fx-background-color: -drydock-border-strong;
+    -fx-min-width: 1px;
+    -fx-max-width: 1px;
+    -fx-min-height: 14px;
+    -fx-max-height: 14px;
+}
+.trail-chip-scroll {
+    -fx-background-color: transparent;
+    -fx-background: transparent;
+    -fx-padding: 0;
+}
+.trail-chip-scroll .viewport { -fx-background-color: transparent; }
+.trail-chip {
+    -fx-background-color: transparent;
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 10px;
+    -fx-background-radius: 10px;
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 10px;
+    -fx-padding: 1 8 1 8;
+    -fx-cursor: hand;
+}
+.trail-chip:hover { -fx-text-fill: -drydock-text; }
+.trail-chip:focused { -fx-border-color: -drydock-accent; }
+.trail-chip:current {
+    -fx-text-fill: -drydock-accent;
+    -fx-border-color: -drydock-accent;
+    -fx-background-color: -drydock-accent-soft;
+}
+.trail-empty {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10px;
+}
+.trail-pin-button {
+    -fx-background-color: transparent;
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 10px;
+    -fx-padding: 2 6 2 6;
+    -fx-cursor: hand;
+}
+.trail-pin-button:hover { -fx-text-fill: -drydock-text; }
+.trail-pin-button:focused { -fx-border-color: -drydock-accent; -fx-border-radius: 6px; }
+.trail-pin-button:pinned { -fx-text-fill: -drydock-accent; }
+
+/* --- Explorer: peek cards (delta part 1) ------------------------------ */
+.peek-card {
+    -fx-background-color: -drydock-sidebar;
+    -fx-background-radius: 8px;
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 8px;
+    -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.55), 24, 0.2, 0, 10);
+}
+.peek-card-ghost {
+    -fx-background-color: -drydock-sidebar;
+    -fx-background-radius: 8px;
+    -fx-border-color: -drydock-border;
+    -fx-border-radius: 8px;
+    -fx-opacity: 0.55;
+}
+.peek-header {
+    -fx-padding: 7 11 7 11;
+    -fx-border-color: transparent transparent -drydock-border transparent;
+    -fx-border-width: 0 0 1 0;
+}
+.peek-title {
+    -fx-text-fill: -drydock-text;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 11px;
+}
+.peek-meta {
+    -fx-text-fill: -drydock-code-gutter;
+    -fx-font-size: 9.5px;
+}
+.peek-close {
+    -fx-background-color: transparent;
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 11px;
+    -fx-padding: 0 2 0 2;
+    -fx-cursor: hand;
+}
+.peek-close:hover { -fx-text-fill: -drydock-text; }
+.peek-close:focused { -fx-text-fill: -drydock-accent; }
+.peek-body { -fx-padding: 7 0 7 0; }
+.peek-code { -fx-background-color: transparent; -fx-font-size: 11px; }
+.peek-lineno {
+    -fx-text-fill: -drydock-code-gutter;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 10px;
+    -fx-padding: 0 6 0 4;
+}
+.peek-footer {
+    -fx-padding: 6 11 6 11;
+    -fx-border-color: -drydock-border transparent transparent transparent;
+    -fx-border-width: 1 0 0 0;
+}
+.peek-action {
+    -fx-background-color: transparent;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 10px;
+    -fx-padding: 2 6 2 6;
+    -fx-background-radius: 6px;
+    -fx-cursor: hand;
+}
+.peek-action:hover { -fx-text-fill: -drydock-text; -fx-background-color: -drydock-hover; }
+.peek-action:focused { -fx-border-color: -drydock-accent; -fx-border-radius: 6px; }
+.peek-action.primary { -fx-text-fill: -drydock-accent; }
+.peek-usages { -fx-padding: 7 11 3 11; }
+.peek-usages-title {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 9px;
+    -fx-padding: 0 0 4 0;
+}
+.peek-usage-row { -fx-padding: 2 0 2 0; }
+.peek-usage-row.untouched { -fx-opacity: 0.6; }
+.peek-usage-loc {
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 10.5px;
+}
+.peek-usage-chip {
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 10px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 9.5px;
+    -fx-padding: 0 6 0 6;
+}
+.peek-usage-chip-diff {
+    -fx-background-color: -drydock-running-soft;
+    -fx-background-radius: 10px;
+    -fx-text-fill: -drydock-changed-gutter;
+    -fx-font-size: 9.5px;
+    -fx-padding: 0 6 0 6;
+}
+.explorer-toast {
+    -fx-background-color: -drydock-titlebar;
+    -fx-background-radius: 8px;
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 8px;
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 11.5px;
+    -fx-padding: 7 14 7 14;
+    -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.5), 20, 0.2, 0, 8);
+}
+/* The symbol lens's underline. Underline ONLY: this layer is overlaid on the
+ * lexer's spans, and re-filling would repaint identifiers inside comments and
+ * strings the function colour -- a regression of the viewer's highlighting.
+ * (JavaFX Text has no dotted underline, so the prototype's dotted rule is
+ * rendered solid.) */
+.code-area .symbol-lens {
+    -fx-underline: true;
+}
+.peek-scroll { -fx-background-color: transparent; -fx-background: transparent; }
+.peek-scroll .viewport { -fx-background-color: transparent; }
+.peek-usages-more { -fx-text-fill: -drydock-text-faint; -fx-font-size: 10px; -fx-padding: 3 0 0 0; }
+
+/* --- Explorer: skim mode & minimap (delta part 2) --------------------- */
+.skim-toggle {
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 12px;
+    -fx-background-radius: 12px;
+    -fx-padding: 0;
+}
+.skim-toggle-button {
+    -fx-background-color: transparent;
+    -fx-background-radius: 12px;
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10.5px;
+    -fx-padding: 2 10 2 10;
+    -fx-cursor: hand;
+}
+.skim-toggle-button:hover { -fx-text-fill: -drydock-text; }
+.skim-toggle-button:focused { -fx-border-color: -drydock-accent; -fx-border-radius: 12px; }
+.skim-toggle-button:selected {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-text-fill: -drydock-accent;
+}
+.explorer-skim {
+    -fx-background-color: -drydock-code-bg;
+    -fx-background: -drydock-code-bg;
+    -fx-padding: 0;
+}
+.explorer-skim .viewport { -fx-background-color: -drydock-code-bg; }
+.skim-rows { -fx-padding: 6 0 12 0; }
+.skim-header {
+    -fx-background-color: transparent;
+    -fx-background-radius: 0;
+    -fx-padding: 3 12 3 12;
+    -fx-alignment: center-left;
+    -fx-cursor: hand;
+}
+.skim-header:hover { -fx-background-color: -drydock-hover; }
+.skim-header:focused { -fx-background-color: -drydock-accent-soft; }
+.skim-header.has-finding { -fx-background-color: -drydock-blocking-soft; }
+.skim-lineno {
+    -fx-text-fill: -drydock-code-gutter;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 10px;
+    -fx-min-width: 34px;
+    -fx-alignment: center-right;
+}
+.skim-caret { -fx-text-fill: -drydock-text-faint; -fx-font-size: 10px; }
+.skim-signature {
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 12px;
+}
+.skim-signature-open {
+    -fx-text-fill: -drydock-text;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 12px;
+}
+.skim-group-signature {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 12px;
+}
+.skim-tag { -fx-text-fill: -drydock-code-gutter; -fx-font-size: 10px; }
+.skim-changed-tag { -fx-text-fill: -drydock-changed-gutter; -fx-font-size: 10px; }
+.skim-finding-tag { -fx-text-fill: -drydock-blocking; -fx-font-size: 10px; }
+.skim-helper { -fx-padding: 0 0 0 16; }
+.skim-code { -fx-background-color: transparent; -fx-font-size: 11.5px; -fx-padding: 0 0 0 12; }
+.skim-body-lineno {
+    -fx-text-fill: -drydock-code-gutter;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 10px;
+    -fx-padding: 0 6 0 4;
+}
+.explorer-minimap {
+    -fx-background-color: -drydock-row-bg;
+    -fx-border-color: transparent transparent transparent -drydock-border;
+    -fx-border-width: 0 0 0 1;
+}
+.minimap-tick {
+    -fx-background-radius: 2px;
+    -fx-padding: 0;
+    -fx-cursor: hand;
+}
+.minimap-tick:focused { -fx-border-color: -drydock-accent; -fx-border-width: 1; }
+.minimap-tick.changed { -fx-background-color: -drydock-changed-gutter; }
+.minimap-tick.finding { -fx-background-color: -drydock-blocking; }
+.minimap-tick.search-hit { -fx-background-color: -drydock-mcp; }
+.minimap-tick.read { -fx-background-color: -drydock-text-faint; -fx-opacity: 0.5; }
+
+/* --- Explorer: the scope funnel rail (delta part 3) ------------------- */
+.scope-toggle {
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 10px;
+    -fx-background-radius: 10px;
+}
+.scope-toggle-button {
+    -fx-background-color: transparent;
+    -fx-background-radius: 10px;
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 9.5px;
+    -fx-padding: 1 8 1 8;
+    -fx-cursor: hand;
+}
+.scope-toggle-button:hover { -fx-text-fill: -drydock-text; }
+.scope-toggle-button:focused { -fx-border-color: -drydock-accent; -fx-border-radius: 10px; }
+.scope-toggle-button:selected {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-text-fill: -drydock-accent;
+}
+.rail-key-hint {
+    -fx-text-fill: -drydock-code-gutter;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 9.5px;
+}
+.rail-sort-button {
+    -fx-background-color: transparent;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 10px;
+    -fx-padding: 2 4 2 4;
+    -fx-cursor: hand;
+}
+.rail-sort-button:hover { -fx-text-fill: -drydock-text; }
+.rail-sort-button:focused { -fx-border-color: -drydock-accent; -fx-border-radius: 6px; }
+.rail-file-row {
+    -fx-background-color: transparent;
+    -fx-background-radius: 6px;
+    -fx-border-color: -drydock-border;
+    -fx-border-radius: 6px;
+    -fx-padding: 6 8 6 8;
+    -fx-alignment: center-left;
+    -fx-cursor: hand;
+}
+.rail-file-row:hover { -fx-border-color: -drydock-border-strong; }
+.rail-file-row:focused { -fx-border-color: -drydock-accent; }
+.rail-file-row:selected {
+    -fx-background-color: -drydock-active-bg;
+    -fx-border-color: -drydock-border-strong;
+}
+/* Dimmed, never hidden: the funnel must always show what it narrowed away. */
+.rail-file-row:out-of-change { -fx-opacity: 0.5; }
+.rail-change-dot {
+    -fx-background-color: -drydock-changed-gutter;
+    -fx-background-radius: 3px;
+    -fx-min-width: 6px;
+    -fx-min-height: 6px;
+    -fx-max-width: 6px;
+    -fx-max-height: 6px;
+}
+.rail-finding-chip {
+    -fx-text-fill: -drydock-blocking;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 9.5px;
+}
+.rail-stat {
+    -fx-text-fill: -drydock-code-gutter;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 10px;
+}
+.rail-heat {
+    -fx-min-height: 2px;
+    -fx-max-height: 2px;
+    -fx-background-radius: 2px;
+    -fx-background-color: -drydock-border;
+}
+.rail-heat.churn-high { -fx-background-color: linear-gradient(to right, -drydock-error, -drydock-dirty 60%, -drydock-border); }
+.rail-heat.churn-med { -fx-background-color: linear-gradient(to right, -drydock-dirty, -drydock-border 70%); }
+.rail-heat.churn-low { -fx-background-color: linear-gradient(to right, -drydock-running, -drydock-border 45%); }
+.rail-heat.churn-none { -fx-background-color: -drydock-border; }
+.rail-funnel-footer {
+    -fx-background-color: transparent;
+    -fx-border-color: -drydock-border transparent transparent transparent;
+    -fx-border-width: 1 0 0 0;
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 10px;
+    -fx-padding: 6 10 6 10;
+    -fx-alignment: center-left;
+}
+.rail-funnel-footer:actionable {
+    -fx-text-fill: -drydock-mcp;
+    -fx-cursor: hand;
+}
+.rail-funnel-footer:actionable:hover { -fx-text-fill: -drydock-text; }
+.rail-funnel-footer:focused { -fx-border-color: -drydock-accent; -fx-border-width: 1; }
+.rail-empty {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 11px;
+    -fx-padding: 10 8 10 8;
+}

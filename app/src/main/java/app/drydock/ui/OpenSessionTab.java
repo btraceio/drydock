@@ -388,6 +388,20 @@ final class OpenSessionTab {
         }
     }
 
+    /** See {@code MainWorkspace.navigateExplorerTrail}: only while the Explorer is the active sub-tab. */
+    boolean navigateExplorerTrail(int direction) {
+        return activeSubTab == SubTab.EXPLORER
+                && explorerView instanceof SessionExplorerView explorer
+                && explorer.navigateTrail(direction);
+    }
+
+    /** See {@code MainWorkspace.unwindExplorerOverlay}: one peek card, and only in the Explorer. */
+    boolean unwindExplorerOverlay() {
+        return activeSubTab == SubTab.EXPLORER
+                && explorerView instanceof SessionExplorerView explorer
+                && explorer.unwindOverlay();
+    }
+
     SubTab activeSubTab() {
         return activeSubTab;
     }
