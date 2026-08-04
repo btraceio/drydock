@@ -171,11 +171,17 @@ public final class DiffService implements AutoCloseable {
      * should ever do. So this copies the real index to a throwaway one
      * (selected via {@code GIT_INDEX_FILE}), marks the untracked paths
      * intent-to-add there, re-runs the diff against that copy, and discards
-     * it -- the user's actual index, and therefore their next real
-     * {@code git add} or {@code git commit}, never sees this. The diff
-     * itself is still produced by git, not synthesised here, so binary
-     * detection and line handling for the new files match every other file
-     * in the diff exactly.</p>
+     * it -- the user's actual index and working tree are untouched, and
+     * their next real {@code git add} or {@code git commit} sees exactly
+     * what it would have before this ran. {@code git add -N} does still
+     * write one empty blob into the repository's object database (git
+     * always writes blob content before recording a tree/index entry that
+     * points at it) -- but it is unreachable from any ref, touches no
+     * index, status, or diff, and is identical every time regardless of how
+     * many untracked files there are, so it is gc-able noise rather than a
+     * correctness concern. The diff itself is still produced by git, not
+     * synthesised here, so binary detection and line handling for the new
+     * files match every other file in the diff exactly.</p>
      */
     private ProcessResult withUntrackedFiles(Path git, Path checkoutRoot, List<String> diffCommand,
                                              ProcessResult trackedResult) {
@@ -209,14 +215,16 @@ public final class DiffService implements AutoCloseable {
 
         Path tempIndex;
         try {
+            // Files.createTempFile is the only portable way to reserve a
+            // unique path; it creates an empty regular file to do so. That
+            // file is then deleted immediately, leaving the path reserved
+            // but absent, because a zero-length file is not a valid git
+            // index -- git would fail to read it -- whereas a copy is about
+            // to be written to this same path below.
             tempIndex = Files.createTempFile("drydock-diff-index", ".tmp");
-            // Leave the reservation as a free path: git treats a missing
-            // GIT_INDEX_FILE as "start from an empty index" (the case for a
-            // fresh repository with no commits yet), but a zero-length file
-            // that exists is not a valid index and git would fail to read it.
             Files.delete(tempIndex);
         } catch (IOException e) {
-            throw new GitCommandFailedException(List.of("mktemp"), -1,
+            throw new GitCommandFailedException(List.of("Files.createTempFile"), -1,
                     e.getMessage() == null ? "could not create a temporary index file" : e.getMessage());
         }
         try {
@@ -258,7 +266,11 @@ public final class DiffService implements AutoCloseable {
             }
             return withUntracked;
         } catch (IOException e) {
-            throw new GitCommandFailedException(List.of(git.toString(), "add", "-N"), -1,
+            // The only IOException source in this block is the Files.copy
+            // above (no git process is spawned between it and here that
+            // could throw one) -- label the failure as what it actually is,
+            // not as a git invocation that never ran.
+            throw new GitCommandFailedException(List.of("Files.copy", "->", tempIndex.toString()), -1,
                     e.getMessage() == null ? "could not copy the index to a temporary file" : e.getMessage());
         } finally {
             // A leaked temp index is a leaked file per diff -- and Review

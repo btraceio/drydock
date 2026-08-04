@@ -63,6 +63,24 @@ class DiffServiceUntrackedTest {
     }
 
     @Test
+    void anUntrackedFileInALinkedWorktreeAppearsAsANewFile(@TempDir Path repoDir, @TempDir Path worktreeParent)
+            throws Exception {
+        // The trap this design exists to avoid: in a linked worktree the
+        // real index is at ".git/worktrees/<name>/index", not
+        // "<root>/.git/index" -- only `git rev-parse --absolute-git-dir`
+        // resolves it correctly.
+        Path repo = initCommittedRepo(repoDir, "one\n");
+        Path worktree = worktreeParent.resolve("linked");
+        runGit(repo, "worktree", "add", worktree.toString(), "-b", "feat/worktree");
+        Files.writeString(worktree.resolve("New.java"), "class New {}\n");
+
+        UnifiedDiff diff = service.diff(worktree, DiffScope.WORKING_TREE, "main").get();
+
+        UnifiedDiff.FileDiff added = fileByPath(diff, "New.java");
+        assertEquals("A", added.kind());
+    }
+
+    @Test
     void theUsersIndexIsNotTouched(@TempDir Path repoDir) throws Exception {
         Path repo = initCommittedRepo(repoDir, "one\n");
         Files.writeString(repo.resolve("New.java"), "class New {}\n");
