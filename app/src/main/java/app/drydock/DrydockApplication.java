@@ -543,6 +543,8 @@ public final class DrydockApplication extends Application {
                             }
                             case "reviewkey" -> System.out.println("[diag] reviewkey " + arg + " -> "
                                     + mainWorkspace.diagReviewKey(arg));
+                            case "comment" -> System.out.println("[diag] comment -> "
+                                    + mainWorkspace.diagOpenReviewComposer());
                             case "peek" -> {
                                 mainWorkspace.diagExplorerPeek(arg);
                                 System.out.println("[diag] explorer peeking " + arg);

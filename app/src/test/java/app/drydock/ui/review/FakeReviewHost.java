@@ -105,7 +105,12 @@ final class FakeReviewHost implements ReviewDestinationView.Host {
 
     @Override
     public List<ReviewIntent> intents(ReviewScope scope, UnifiedDiff diff) {
-        return intents.intentsFor(scope.id(), diff);
+        List<ReviewIntent> grouped = intents.intentsFor(scope.id(), diff);
+        // The real host migrates here too. A fake that skipped it would be
+        // fine right up until the migration broke, which is the one moment a
+        // fake earns its keep.
+        store.migrateLegacyVerdicts(scope.id(), grouped);
+        return grouped;
     }
 
     @Override
@@ -144,6 +149,21 @@ final class FakeReviewHost implements ReviewDestinationView.Host {
         store.mutate(finding.key(), current -> current.withReply(
                 new ReviewAnnotation.Message("You", Instant.now(), body)));
     }
+
+    /** Written into the same store the real host uses, so the margin and pins pick it up. */
+    @Override
+    public void addComment(ReviewScope scope, String file, String lineKey, String body,
+                           Optional<String> intentId) {
+        Instant now = Instant.now();
+        store.upsert(new ReviewAnnotation(scope.id(), "c_" + (++commentCount), intentId,
+                file, lineKey, lineKey, Severity.NIT, app.drydock.review.Confidence.HIGH,
+                Optional.empty(), "You", now, List.of(), Optional.empty(), Optional.empty(),
+                List.of(), List.of(new ReviewAnnotation.Message("You", now, body)),
+                Optional.empty(), AnnotationStatus.OPEN));
+    }
+
+    /** Sequential rather than random, so a test can name the comment it just made. */
+    int commentCount;
 
     @Override
     public void applyPatch(ReviewScope scope, ReviewAnnotation finding) {

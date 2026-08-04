@@ -104,14 +104,47 @@ public record ReviewIntent(
         return collapse.isEmpty();
     }
 
-    /** The by-file fallback used when no reviewer has supplied a grouping. */
-    public static ReviewIntent forFile(int number, String path) {
-        return new ReviewIntent(FILE_ID_PREFIX + path, number, path, Kind.CHANGE, Risk.NONE,
-                "Grouped by file — no reviewer has proposed intents for this scope.",
-                List.of(), Optional.empty(), false);
+    /**
+     * The distinct files this intent touches, in the order its hunks name
+     * them. Derived rather than stored, so it cannot drift from
+     * {@link #hunkIds}.
+     */
+    public List<String> files() {
+        return hunkIds.stream()
+                .map(ReviewIntent::parseHunkId)
+                .flatMap(Optional::stream)
+                .map(Anchor::file)
+                .distinct()
+                .toList();
     }
 
-    private static final String FILE_ID_PREFIX = "file:";
+    /** How many distinct files this intent touches. */
+    public int fileCount() {
+        return files().size();
+    }
+
+    /**
+     * Whether {@code file}'s {@code hunkIndex}-th hunk belongs to this
+     * intent -- what the diff column filters on.
+     *
+     * <p>An intent that names no hunks at all contains everything rather than
+     * nothing. A reviewer may legitimately describe an intent without
+     * addressing individual hunks, and filtering that to an empty column
+     * would read as a broken selection; showing the whole scope is the honest
+     * answer to "this intent does not say where it is".</p>
+     */
+    public boolean containsHunk(String file, int hunkIndex) {
+        return hunkIds.isEmpty() || hunkIds.contains(hunkId(file, hunkIndex));
+    }
+
+    /** Whether any of this intent's hunks is in {@code file}. */
+    public boolean touches(String file) {
+        return hunkIds.stream()
+                .map(ReviewIntent::parseHunkId)
+                .flatMap(Optional::stream)
+                .anyMatch(anchor -> anchor.file().equals(file));
+    }
+
     private static final String HUNK_ID_PREFIX = "h_";
 
     /**
@@ -133,15 +166,11 @@ public record ReviewIntent(
 
     /**
      * The place in the diff this intent starts, so selecting it can bring the
-     * code into view. Taken from the first hunk the reviewer assigned to it,
-     * or from the file the by-file fallback named. Empty when neither is
-     * recognisable -- an intent may legitimately name no hunks at all.
+     * code into view. Taken from the first hunk assigned to it -- by a
+     * reviewer, or by {@link FallbackIntents} when none has run. Empty when
+     * no hunk id is recognisable: an intent may legitimately name none at all.
      */
     public Optional<Anchor> anchor() {
-        if (id.startsWith(FILE_ID_PREFIX)) {
-            String file = id.substring(FILE_ID_PREFIX.length());
-            return file.isBlank() ? Optional.empty() : Optional.of(new Anchor(file, 0));
-        }
         for (String hunkId : hunkIds) {
             Optional<Anchor> parsed = parseHunkId(hunkId);
             if (parsed.isPresent()) {

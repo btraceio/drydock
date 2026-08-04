@@ -35,6 +35,7 @@ import app.drydock.config.UserConfig;
 import app.drydock.mcp.WorkspaceMcpSessionContext;
 import app.drydock.process.SshCommandBuilder;
 import app.drydock.review.AnnotationStore;
+import app.drydock.review.Confidence;
 import app.drydock.review.IntentGrouping;
 import app.drydock.review.QueueAssembly;
 import app.drydock.review.ReviewItem;
@@ -1191,7 +1192,15 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
         @Override
         public List<ReviewIntent> intents(ReviewScope scope, UnifiedDiff diff) {
-            return intentGrouping.intentsFor(scope.id(), diff);
+            List<ReviewIntent> grouped = intentGrouping.intentsFor(scope.id(), diff);
+            // Verdicts are keyed by intent id, and the fallback grouping's
+            // ids changed when it stopped emitting one intent per file --
+            // so an approval given before that would read as unsettled.
+            // Called here rather than once at startup because the grouping is
+            // only knowable after the scope's diff resolves; the store makes
+            // it idempotent and cheap once there is nothing left to carry.
+            annotationStore.migrateLegacyVerdicts(scope.id(), grouped);
+            return grouped;
         }
 
         @Override
@@ -1228,6 +1237,32 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         public void postMessage(ReviewScope scope, ReviewAnnotation finding, String body) {
             annotationStore.mutate(finding.key(), current -> current.withReply(
                     new ReviewAnnotation.Message("You", Instant.now(), body)));
+        }
+
+        /**
+         * A comment the human wrote in the diff column's gutter composer.
+         *
+         * <p>Stored as a NIT: a human note is not a blocking finding, and
+         * anything that blocks approval would make leaving a remark on a line
+         * silently prevent the reviewer approving their own review. The
+         * intent is resolved from the file so the comment lands under the
+         * intent that owns that code rather than floating outside the
+         * grouping.</p>
+         */
+        @Override
+        public void addComment(ReviewScope scope, String file, String lineKey, String body,
+                               Optional<String> intentId) {
+            Instant now = Instant.now();
+            annotationStore.upsert(new ReviewAnnotation(
+                    scope.id(),
+                    "c_" + java.util.UUID.randomUUID(),
+                    intentId,
+                    file, lineKey, lineKey,
+                    Severity.NIT, Confidence.HIGH,
+                    Optional.empty(), "You", now,
+                    List.of(), Optional.empty(), Optional.empty(), List.of(),
+                    List.of(new ReviewAnnotation.Message("You", now, body)),
+                    Optional.empty(), AnnotationStatus.OPEN));
         }
 
         /**
@@ -2397,6 +2432,11 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * transitions -- which is the only way to photograph the Detail page.
      * Reports the page Review is on afterwards.
      */
+    /** Diagnostic-only: opens Review's gutter comment composer (see the verb in DrydockApplication). */
+    public String diagOpenReviewComposer() {
+        return reviewDestination.diagOpenComposer();
+    }
+
     public String diagReviewKey(String keyCode) {
         javafx.scene.input.KeyCode code;
         try {

@@ -19,17 +19,36 @@ final class ReviewDiffRows {
     /** Shorter runs of unchanged lines are cheaper to read than to collapse. */
     static final int COLLAPSE_THRESHOLD = 4;
 
+    /**
+     * Which hunks a build includes. {@link #ALL} is the whole scope; an
+     * intent's own predicate is what selecting it in the rail installs.
+     */
+    @FunctionalInterface
+    interface HunkFilter {
+
+        /** Every hunk of every file. */
+        HunkFilter ALL = (file, hunkIndex) -> true;
+
+        boolean includes(String file, int hunkIndex);
+    }
+
     /** What the column is currently showing. */
-    record Options(boolean showContext, Set<ReviewDiffRow.RunKey> expandedRuns, int maxRows) {
+    record Options(boolean showContext, Set<ReviewDiffRow.RunKey> expandedRuns, int maxRows,
+                   HunkFilter filter) {
         Options {
             expandedRuns = Set.copyOf(expandedRuns);
             if (maxRows <= 0) {
                 throw new IllegalArgumentException("maxRows must be positive: " + maxRows);
             }
+            filter = filter == null ? HunkFilter.ALL : filter;
+        }
+
+        Options(boolean showContext, Set<ReviewDiffRow.RunKey> expandedRuns, int maxRows) {
+            this(showContext, expandedRuns, maxRows, HunkFilter.ALL);
         }
 
         static Options defaults(int maxRows) {
-            return new Options(true, Set.of(), maxRows);
+            return new Options(true, Set.of(), maxRows, HunkFilter.ALL);
         }
     }
 
@@ -42,7 +61,15 @@ final class ReviewDiffRows {
         for (UnifiedDiff.FileDiff file : diff.files()) {
             int hunkIndex = 0;
             for (UnifiedDiff.Hunk hunk : file.hunks()) {
-                List<ReviewDiffRow> card = buildCard(file, hunk, hunkIndex++, options);
+                // The index still advances for a filtered-out hunk: it is the
+                // hunk's identity within its file, and renumbering what
+                // survives the filter would make an intent's hunk ids point
+                // at someone else's code.
+                int index = hunkIndex++;
+                if (!options.filter().includes(file.path(), index)) {
+                    continue;
+                }
+                List<ReviewDiffRow> card = buildCard(file, hunk, index, options);
                 if (card.isEmpty()) {
                     continue;
                 }
@@ -55,7 +82,9 @@ final class ReviewDiffRows {
             }
         }
         if (rows.isEmpty()) {
-            rows.add(new ReviewDiffRow.Message("No changes in this scope."));
+            rows.add(new ReviewDiffRow.Message(options.filter() == HunkFilter.ALL
+                    ? "No changes in this scope."
+                    : "This intent's hunks are not in the current diff — show the whole scope to look for them."));
         }
         return List.copyOf(rows);
     }

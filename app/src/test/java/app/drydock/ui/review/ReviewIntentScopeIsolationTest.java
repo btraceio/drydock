@@ -205,12 +205,17 @@ class ReviewIntentScopeIsolationTest extends ApplicationTest {
         runGit(repo, "init", "-b", "main");
         runGit(repo, "config", "user.name", "Test");
         runGit(repo, "config", "user.email", "test@example.com");
-        Files.writeString(repo.resolve("A.java"), "class A { int x = 1; }\n");
-        Files.writeString(repo.resolve("B.java"), "class B { int y = 1; }\n");
+        // Two directories, not two root-level files: the fallback grouping
+        // clusters by directory, so a pair of siblings is one card and this
+        // test needs two.
+        Files.createDirectories(repo.resolve("src"));
+        Files.createDirectories(repo.resolve("lib"));
+        Files.writeString(repo.resolve("src/A.java"), "class A { int x = 1; }\n");
+        Files.writeString(repo.resolve("lib/B.java"), "class B { int y = 1; }\n");
         runGit(repo, "add", ".");
         runGit(repo, "commit", "-m", "initial");
-        Files.writeString(repo.resolve("A.java"), "class A { int x = 2; }\n");
-        Files.writeString(repo.resolve("B.java"), "class B { int y = 2; }\n");
+        Files.writeString(repo.resolve("src/A.java"), "class A { int x = 2; }\n");
+        Files.writeString(repo.resolve("lib/B.java"), "class B { int y = 2; }\n");
         return repo;
     }
 

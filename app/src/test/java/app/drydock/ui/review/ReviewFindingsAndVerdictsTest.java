@@ -59,9 +59,12 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
-        // Two files, so the by-file intent fallback yields two intents to settle.
+        // Two files in DIFFERENT directories, so the fallback grouping yields
+        // two intents to settle: it clusters by directory, so two files under
+        // one would be a single card. src sorts before web, which is what
+        // makes Main.java intent 1.
         host.diff = new UnifiedDiff(List.of(
-                file("src/Main.java"), file("src/Other.java")));
+                file("src/Main.java"), file("web/Other.java")));
         view = new ReviewDestinationView(host, diffService);
         Scene scene = new Scene(view, 1400, 900);
         scene.getStylesheets().addAll(
@@ -221,7 +224,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
         type(KeyCode.A);
 
         assertEquals(ReviewVerdict.Decision.APPROVED,
-                host.store.verdict(scope.id(), "file:src/Main.java").orElseThrow().decision());
+                host.store.verdict(scope.id(), "auto:change:src").orElseThrow().decision());
     }
 
     /** Spec §4.6: approval is refused while a blocking finding of the intent is open. */
@@ -231,7 +234,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
 
         type(KeyCode.A);
 
-        assertTrue(host.store.verdict(scope.id(), "file:src/Main.java").isEmpty(),
+        assertTrue(host.store.verdict(scope.id(), "auto:change:src").isEmpty(),
                 "an open blocking finding must refuse approval");
         assertFalse(lookup(".review-verdict-refusal").queryAll().isEmpty(),
                 "the refusal must be visible, not silent");
@@ -241,14 +244,14 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
     void resolvingTheBlockerLetsTheApprovalThrough() {
         seed(finding("f1", Severity.BLOCKING));
         type(KeyCode.A);
-        assertTrue(host.store.verdict(scope.id(), "file:src/Main.java").isEmpty());
+        assertTrue(host.store.verdict(scope.id(), "auto:change:src").isEmpty());
 
         host.store.mutate(new ReviewAnnotation.Key(scope.id(), "f1"),
                 current -> current.withStatus(AnnotationStatus.RESOLVED));
         interact(view::refreshReviewState);
         type(KeyCode.A);
 
-        assertTrue(host.store.verdict(scope.id(), "file:src/Main.java").isPresent());
+        assertTrue(host.store.verdict(scope.id(), "auto:change:src").isPresent());
     }
 
     /** A human downgrade after a discussion is the other way past a blocker. */
@@ -259,7 +262,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
         interact(() -> fire(".review-card-action", "Downgrade"));
         type(KeyCode.A);
 
-        assertTrue(host.store.verdict(scope.id(), "file:src/Main.java").isPresent());
+        assertTrue(host.store.verdict(scope.id(), "auto:change:src").isPresent());
         assertEquals(Severity.BLOCKING, host.store.byId(scope.id(), "f1").orElseThrow().severity(),
                 "the reviewer's original opinion is kept alongside the override");
     }
@@ -270,23 +273,23 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
 
         type(KeyCode.R);
         assertEquals(ReviewVerdict.Decision.CHANGES,
-                host.store.verdict(scope.id(), "file:src/Main.java").orElseThrow().decision());
+                host.store.verdict(scope.id(), "auto:change:src").orElseThrow().decision());
 
         type(KeyCode.U);
-        assertTrue(host.store.verdict(scope.id(), "file:src/Main.java").isEmpty());
+        assertTrue(host.store.verdict(scope.id(), "auto:change:src").isEmpty());
     }
 
     @Test
     void bracketsMoveBetweenIntents() {
         seed();
 
-        assertEquals("1 · src/Main.java", intentLabel());
+        assertEquals("1 · Main.java", intentLabel());
         type(KeyCode.CLOSE_BRACKET);
-        assertEquals("2 · src/Other.java", intentLabel());
+        assertEquals("2 · Other.java", intentLabel());
         type(KeyCode.CLOSE_BRACKET);
-        assertEquals("2 · src/Other.java", intentLabel(), "the intent index clamps at the last one");
+        assertEquals("2 · Other.java", intentLabel(), "the intent index clamps at the last one");
         type(KeyCode.OPEN_BRACKET);
-        assertEquals("1 · src/Main.java", intentLabel());
+        assertEquals("1 · Main.java", intentLabel());
     }
 
     @Test
@@ -296,7 +299,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
 
         type(KeyCode.N);
 
-        assertEquals("2 · src/Other.java", intentLabel());
+        assertEquals("2 · Other.java", intentLabel());
     }
 
     /** Submitting early jumps to the first unsettled intent rather than posting a partial review. */
@@ -309,7 +312,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
         type(KeyCode.ENTER);
 
         assertTrue(host.submittedScopes.isEmpty(), "an incomplete review must not be posted");
-        assertEquals("1 · src/Main.java", intentLabel());
+        assertEquals("1 · Main.java", intentLabel());
     }
 
     @Test
@@ -335,13 +338,13 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
         assertFalse(lookup(".review-findings-scroll").query().isVisible(), "the margin collapses");
         assertTrue(lookup(".review-verdict-action").queryAll().stream().anyMatch(Node::isVisible),
                 "the verdict bar must stay reachable with every rail collapsed");
-        assertEquals("1 · src/Main.java", intentLabel());
+        assertEquals("1 · Main.java", intentLabel());
     }
 
     @Test
     void shiftFWidensTheMarginToTheWholeReview() {
         ReviewAnnotation other = new ReviewAnnotation(scopeId(), "f_other",
-                Optional.of("file:src/Other.java"), "src/Other.java", "n1", "n1",
+                Optional.of("auto:change:web"), "web/Other.java", "n1", "n1",
                 Severity.QUESTION, Confidence.HIGH, Optional.of("elsewhere"), "Claude",
                 Instant.EPOCH, List.of(), Optional.empty(), Optional.empty(), List.of(),
                 List.of(new ReviewAnnotation.Message("Claude", Instant.EPOCH, "elsewhere")),
@@ -389,7 +392,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
     }
 
     private ReviewAnnotation finding(String id, Severity severity) {
-        return new ReviewAnnotation(scopeId(), id, Optional.of("file:src/Main.java"),
+        return new ReviewAnnotation(scopeId(), id, Optional.of("auto:change:src"),
                 "src/Main.java", "n1", "n1", severity, Confidence.HIGH,
                 Optional.of("Title " + id), "Claude", Instant.EPOCH, List.of(),
                 Optional.empty(), Optional.empty(), List.of(),

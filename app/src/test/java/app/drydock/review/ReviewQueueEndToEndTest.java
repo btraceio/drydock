@@ -48,8 +48,15 @@ class ReviewQueueEndToEndTest {
         UnifiedDiff diff = diffService.diff(repo, DiffScope.WORKING_TREE, "main").get();
         List<ReviewIntent> intents = grouping.intentsFor("scope-local", diff);
 
+        // Asserted over the files the intents cover rather than their titles:
+        // the fallback groups by directory now, so all three of these land in
+        // one root-level intent. What must stay true is that the untouched
+        // file is not in it.
         assertEquals(List.of("A.java", "B.java"),
-                intents.stream().map(ReviewIntent::title).sorted().toList(),
+                intents.stream()
+                        .flatMap(intent -> intent.hunkIds().stream())
+                        .map(id -> id.substring("h_".length(), id.lastIndexOf('_')))
+                        .distinct().sorted().toList(),
                 "the clean file must not become an intent");
     }
 

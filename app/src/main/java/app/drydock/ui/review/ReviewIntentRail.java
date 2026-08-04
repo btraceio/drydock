@@ -280,16 +280,24 @@ final class ReviewIntentRail extends VBox {
 
         Label title = new Label(intent.title());
         title.getStyleClass().add("review-intent-title");
+        // Wraps rather than clipping. Every fallback title used to be a full
+        // path, and at this rail's width they all clipped to the same
+        // "app/src/main/java/app/dry…" -- 45 cards that could not be told
+        // apart. Titles are short now, but a long one must degrade into two
+        // lines, not into an ellipsis that hides what makes it distinct.
+        title.setWrapText(true);
         HBox.setHgrow(title, Priority.ALWAYS);
         Label tag = new Label(intent.kind().wireName());
-        tag.getStyleClass().add("review-intent-tag");
+        tag.getStyleClass().addAll("review-intent-tag", "kind-" + intent.kind().wireName());
+        tag.setMinWidth(Region.USE_PREF_SIZE);
         HBox titleRow = new HBox(6, number, title, tag);
-        titleRow.setAlignment(Pos.CENTER_LEFT);
+        titleRow.setAlignment(Pos.TOP_LEFT);
 
         VBox content = new VBox(4, titleRow);
         if (!intent.rationale().isBlank()) {
             Label rationale = new Label(intent.rationale());
             rationale.getStyleClass().add("review-intent-rationale");
+            rationale.setWrapText(true);
             content.getChildren().add(rationale);
         }
         intent.collapse().ifPresent(collapse -> {

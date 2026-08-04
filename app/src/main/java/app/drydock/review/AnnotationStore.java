@@ -308,6 +308,122 @@ public final class AnnotationStore implements AutoCloseable {
         persistAsync();
     }
 
+    /**
+     * The id scheme the by-file fallback grouping used before files were
+     * clustered by directory. Verdicts recorded under it are migrated onto
+     * the intent that now contains those files; see
+     * {@link #migrateLegacyVerdicts}.
+     */
+    private static final String LEGACY_FILE_INTENT_PREFIX = "file:";
+
+    /**
+     * Carries verdicts recorded under the old {@code file:<path>} intent ids
+     * onto {@code intents}, and returns how many were carried.
+     *
+     * <p>Verdicts are persisted by intent id, and the fallback grouping's ids
+     * changed when it stopped emitting one intent per file. Without this,
+     * every approval given before that change would read as unsettled and a
+     * finished review would ask to be done again.</p>
+     *
+     * <p>The merge is deliberately asymmetric, because the two directions
+     * carry different risk:</p>
+     * <ul>
+     *   <li>Any {@code CHANGES} among the group's files makes the group
+     *       {@code CHANGES}. "Something in here needs work" stays true of a
+     *       group however it is drawn.</li>
+     *   <li>{@code APPROVED} needs EVERY file of the group to have been
+     *       settled. Approving a group is a claim that the human read all of
+     *       it, so a partially-approved group carries nothing forward and is
+     *       re-settled by hand. Silently approving code nobody looked at is
+     *       the one outcome this must never produce.</li>
+     * </ul>
+     *
+     * <p>A partial group's legacy verdicts are left in place rather than
+     * deleted -- they record something the human really did decide, and the
+     * grouping may change again. Idempotent, and safe to call on every diff
+     * that lands: once a group is migrated its legacy keys are gone, and a
+     * verdict already recorded under a new id is never overwritten (it is
+     * necessarily the more recent decision).</p>
+     */
+    public int migrateLegacyVerdicts(String scopeId, List<ReviewIntent> intents) {
+        // Deliberately does NOT fire a change. Every other mutator here does,
+        // but this one is called from the render path -- the UI asks for a
+        // scope's intents, which is the only moment the grouping is known --
+        // and the caller reads the migrated verdicts immediately afterwards.
+        // Firing would re-enter that same render through the store's change
+        // listener while it was still running. The write is still persisted,
+        // so nothing is lost if the app closes before the next refresh.
+        return migrateLegacyVerdictsInternal(scopeId, intents);
+    }
+
+    private synchronized int migrateLegacyVerdictsInternal(String scopeId, List<ReviewIntent> intents) {
+        if (intents.isEmpty()) {
+            // No grouping means no diff has resolved for this scope yet.
+            // Rewriting verdicts against an empty grouping would delete them.
+            return 0;
+        }
+        Map<String, ReviewVerdict> legacy = new LinkedHashMap<>();
+        for (ReviewVerdict verdict : verdicts.values()) {
+            if (verdict.scopeId().equals(scopeId)
+                    && verdict.intentId().startsWith(LEGACY_FILE_INTENT_PREFIX)) {
+                legacy.put(verdict.intentId().substring(LEGACY_FILE_INTENT_PREFIX.length()), verdict);
+            }
+        }
+        if (legacy.isEmpty()) {
+            return 0;
+        }
+        int migrated = 0;
+        for (ReviewIntent intent : intents) {
+            if (verdicts.containsKey(new ReviewVerdict.Key(scopeId, intent.id()))) {
+                continue; // decided under the new grouping; that decision is newer
+            }
+            List<String> files = intent.files();
+            if (files.isEmpty()) {
+                continue;
+            }
+            List<ReviewVerdict> covering = files.stream().map(legacy::get).toList();
+            Optional<ReviewVerdict.Decision> merged = merge(covering);
+            if (merged.isEmpty()) {
+                continue;
+            }
+            Instant at = covering.stream().filter(Objects::nonNull)
+                    .map(ReviewVerdict::at).max(Instant::compareTo).orElse(Instant.now());
+            verdicts.put(new ReviewVerdict.Key(scopeId, intent.id()),
+                    new ReviewVerdict(scopeId, intent.id(), merged.get(),
+                            Optional.of("carried over from a per-file verdict when Review regrouped "
+                                    + "this scope's changes"), at));
+            for (String file : files) {
+                verdicts.remove(new ReviewVerdict.Key(scopeId, LEGACY_FILE_INTENT_PREFIX + file));
+            }
+            migrated++;
+        }
+        if (migrated > 0) {
+            persistAsync();
+        }
+        return migrated;
+    }
+
+    /**
+     * The group's decision, or empty when its files do not support one. See
+     * {@link #migrateLegacyVerdicts} for why "all settled" is required for an
+     * approval but any one file is enough for a change request.
+     */
+    private static Optional<ReviewVerdict.Decision> merge(List<ReviewVerdict> covering) {
+        if (covering.stream().anyMatch(verdict -> verdict != null
+                && verdict.decision() == ReviewVerdict.Decision.CHANGES)) {
+            return Optional.of(ReviewVerdict.Decision.CHANGES);
+        }
+        if (covering.stream().anyMatch(Objects::isNull)) {
+            return Optional.empty();
+        }
+        // A human's approval outranks an agent's auto-approval: the merged
+        // verdict must not claim less human attention than was actually paid.
+        return Optional.of(covering.stream()
+                .anyMatch(verdict -> verdict.decision() == ReviewVerdict.Decision.APPROVED)
+                ? ReviewVerdict.Decision.APPROVED
+                : ReviewVerdict.Decision.AUTO_APPROVED);
+    }
+
     /** {@code u}: undoes the verdict on one intent. */
     public void clearVerdict(String scopeId, String intentId) {
         if (clearVerdictInternal(scopeId, intentId)) {
