@@ -884,6 +884,11 @@ public final class ReviewDestinationView extends BorderPane {
         body.getChildren().setAll(bodyFor(item));
         intentIndex = 0;
         refreshReviewState();
+        // The diff usually has not arrived yet, in which case there is nothing
+        // to reveal and the setOnDiffResolved handler does it when it lands.
+        // Revealing here too covers the case where it already has -- coming
+        // back to an item whose diff is still cached.
+        revealCurrentIntent();
     }
 
     /**
