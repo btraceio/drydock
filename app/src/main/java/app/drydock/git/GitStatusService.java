@@ -443,20 +443,20 @@ public final class GitStatusService implements AutoCloseable {
      * local branch falls back to its {@code origin/} counterpart, because a
      * bare name that resolves to nothing fails the diff outright.</p>
      */
-    public CompletableFuture<String> reviewBase(Path checkoutRoot, Optional<String> pullRequestBase,
-                                                String defaultBranch) {
+    public CompletableFuture<ReviewBase> reviewBase(Path checkoutRoot, Optional<String> pullRequestBase,
+                                                    String defaultBranch) {
         return CompletableFuture.supplyAsync(
                 () -> reviewBaseBlocking(checkoutRoot, pullRequestBase, defaultBranch), executor);
     }
 
     /** Synchronous form of {@link #reviewBase}, package-private for tests. */
-    String reviewBaseBlocking(Path checkoutRoot, Optional<String> pullRequestBase, String defaultBranch) {
+    ReviewBase reviewBaseBlocking(Path checkoutRoot, Optional<String> pullRequestBase, String defaultBranch) {
         Path git = locator.locate()
                 .orElseThrow(() -> new GitExecutableNotFoundException(locator.describeSearched()));
 
         Optional<String> declared = pullRequestBase.flatMap(name -> resolveBranch(git, checkoutRoot, name));
         if (declared.isPresent()) {
-            return declared.get();
+            return new ReviewBase(declared.get(), ReviewBase.Origin.PULL_REQUEST);
         }
 
         // Preference order doubles as the tie-break: a branch cut from the
@@ -479,7 +479,14 @@ public final class GitStatusService implements AutoCloseable {
                 best = candidate;
             }
         }
-        return best;
+        if (fewest == Long.MAX_VALUE) {
+            // Not a detail to bury: this is the path that renders a whole
+            // integration branch as though it were the review.
+            LOG.log(Level.WARNING, "No review base candidate could be measured in " + checkoutRoot
+                    + " (tried " + candidates + "); falling back to " + defaultBranch);
+            return new ReviewBase(defaultBranch, ReviewBase.Origin.DEFAULT_UNMEASURED);
+        }
+        return new ReviewBase(best, ReviewBase.Origin.FORKED_FROM);
     }
 
     /**

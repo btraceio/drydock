@@ -73,7 +73,8 @@ final class ReviewDiffRows {
             return List.of();
         }
         List<ReviewDiffRow> card = new ArrayList<>();
-        card.add(new ReviewDiffRow.HunkHeader(file.path(), rangeLabel(hunk), startLine(hunk)));
+        card.add(new ReviewDiffRow.HunkHeader(file.path(), rangeLabel(hunk), startLine(hunk),
+                file.untracked(), file.staged()));
         card.addAll(body.subList(0, body.size() - 1));
         card.add(withBottomEdge(body.get(body.size() - 1)));
         return card;

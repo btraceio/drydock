@@ -2520,6 +2520,21 @@
     -fx-font-size: 11px;
     -fx-font-family: "JetBrains Mono", "Menlo", monospace;
 }
+/* Small and low-contrast on purpose -- a fact about the file, not a
+   warning, and it must not out-shout the file path beside it. */
+.review-hunk-chip {
+    -fx-background-radius: 100px;
+    -fx-font-size: 10px;
+    -fx-padding: 1 8 1 8;
+}
+.review-hunk-chip-untracked {
+    -fx-background-color: -drydock-dirty-soft;
+    -fx-text-fill: -drydock-dirty;
+}
+.review-hunk-chip-staged {
+    -fx-background-color: -drydock-running-soft;
+    -fx-text-fill: -drydock-running;
+}
 .review-hunk-explorer {
     -fx-background-color: transparent;
     -fx-background-radius: 6px;
@@ -2914,6 +2929,11 @@
     -fx-font-size: 10.5px;
     -fx-font-family: "JetBrains Mono", "Menlo", monospace;
 }
+.review-verdict-nav {
+    -fx-min-width: 24px;
+    -fx-padding: 2 6 2 6;
+    -fx-font-size: 13px;
+}
 .review-verdict-action {
     -fx-background-color: transparent;
     -fx-background-radius: 6px;
@@ -3034,6 +3054,11 @@
 .review-intent-rationale {
     -fx-text-fill: -drydock-text-faint;
     -fx-font-size: 10.5px;
+}
+.review-intent-empty {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 11px;
+    -fx-padding: 8 10 8 10;
 }
 .review-intent-collapsed-note {
     -fx-text-fill: -drydock-text-faint;

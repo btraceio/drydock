@@ -6,6 +6,7 @@ import app.drydock.git.GitBranchState;
 import app.drydock.git.GitStatus;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.PrCheckoutService;
+import app.drydock.git.ReviewBase;
 import app.drydock.git.WorktreeService;
 
 import java.lang.System.Logger;
@@ -125,8 +126,8 @@ public final class ReviewQueueService {
      * a worktree that was removed stops being addressable over MCP. A failed
      * scan is not evidence that an existing scope departed.</p>
      */
-    public CompletableFuture<List<ReviewItem>> assemble(List<RepositoryTarget> repositories,
-                                                        SessionLookup sessions) {
+    public CompletableFuture<QueueAssembly> assemble(List<RepositoryTarget> repositories,
+                                                     SessionLookup sessions) {
         Objects.requireNonNull(sessions, "sessions");
         List<CompletableFuture<RepositoryScan>> perRepository = repositories.stream()
                 .map(repository -> assembleRepository(repository, sessions))
@@ -139,7 +140,12 @@ public final class ReviewQueueService {
                             .sorted(Comparator.comparingInt(item -> item.group().ordinal()))
                             .toList();
                     revokeDepartedScopes(scans);
-                    return items;
+                    // One repository's failed gh makes the whole queue partial:
+                    // the reader cannot be told "complete" about a list that is
+                    // missing another repository's pull requests.
+                    return new QueueAssembly(items,
+                            scans.stream().allMatch(RepositoryScan::localComplete),
+                            scans.stream().allMatch(RepositoryScan::requestsComplete));
                 });
     }
 
@@ -227,10 +233,10 @@ public final class ReviewQueueService {
      * while every branch is cut from {@code develop} showed each review as
      * the whole of {@code develop} plus the branch.</p>
      */
-    private CompletableFuture<Map<Path, String>> resolveBases(RepositoryTarget repository,
-                                                              PartialScan scan) {
+    private CompletableFuture<Map<Path, ReviewBase>> resolveBases(RepositoryTarget repository,
+                                                                   PartialScan scan) {
         String fallback = baseBranchOf(scan.defaultBranch(), scan.status());
-        Map<Path, CompletableFuture<String>> pending = new LinkedHashMap<>();
+        Map<Path, CompletableFuture<ReviewBase>> pending = new LinkedHashMap<>();
         for (WorktreeService.Worktree worktree : scan.worktrees()) {
             if (skipForReview(worktree)) {
                 continue;
@@ -247,12 +253,12 @@ public final class ReviewQueueService {
                         }
                         LOG.log(Level.DEBUG, "Could not resolve the review base of "
                                 + worktree.path(), failure);
-                        return fallback;
+                        return new ReviewBase(fallback, ReviewBase.Origin.DEFAULT_UNMEASURED);
                     }));
         }
         return CompletableFuture.allOf(pending.values().toArray(CompletableFuture[]::new))
                 .thenApply(ignored -> {
-                    Map<Path, String> bases = new LinkedHashMap<>();
+                    Map<Path, ReviewBase> bases = new LinkedHashMap<>();
                     pending.forEach((path, future) -> bases.put(path, future.join()));
                     return Map.copyOf(bases);
                 });
@@ -285,7 +291,7 @@ public final class ReviewQueueService {
                                   boolean localComplete, boolean requestsComplete) { }
 
     private List<ReviewItem> build(RepositoryTarget repository, SessionLookup sessions,
-                                   PartialScan scan, Map<Path, String> worktreeBases,
+                                   PartialScan scan, Map<Path, ReviewBase> worktreeBases,
                                    List<GhCliService.ReviewRequest> requests) {
         String base = baseBranchOf(scan.defaultBranch(), scan.status());
         List<ReviewItem> items = new ArrayList<>();
@@ -315,7 +321,8 @@ public final class ReviewQueueService {
                 continue;
             }
             String head = worktree.branch().orElse("(no branch)");
-            String worktreeBase = worktreeBases.getOrDefault(worktree.path(), base);
+            ReviewBase worktreeBase = worktreeBases.getOrDefault(worktree.path(),
+                    new ReviewBase(base, ReviewBase.Origin.DEFAULT_UNMEASURED));
             Optional<ManagedSessionId> session = sessions.sessionAt(worktree.path());
             // Reviewing a PR from inside Drydock checks it out as pr-<n>, so
             // the worktree IS that PR. Resolved against every open PR rather
@@ -334,21 +341,21 @@ public final class ReviewQueueService {
                     pullRequest.map(pr -> requestsByNumber.get(pr.number())).filter(Objects::nonNull);
             ReviewScope scope = scopeRegistry.mint(ReviewScopeRegistry.spec(
                     ReviewScope.Kind.WORKTREE, repository.root(), Optional.of(worktree.path()),
-                    worktreeBase, head,
+                    worktreeBase.ref(), head,
                     pullRequest.map(pr -> new ReviewScope.PullRequestRef(pr.number(),
                             asked.flatMap(GhCliService.ReviewRequest::url))),
-                    session));
+                    session, Optional.of(worktreeBase.origin())));
             if (pullRequest.isPresent()) {
                 GhCliService.OpenPullRequest pr = pullRequest.get();
                 items.add(new ReviewItem(scope,
                         asked.isPresent() ? ReviewItem.Group.REQUESTED
                                 : session.isPresent() ? ReviewItem.Group.AGENTS : ReviewItem.Group.MINE,
                         "PR #" + pr.number() + " " + pr.headRefName(),
-                        repository.displayName() + " · vs " + worktreeBase));
+                        repository.displayName() + " · vs " + worktreeBase.ref()));
             } else {
                 items.add(new ReviewItem(scope,
                         session.isPresent() ? ReviewItem.Group.AGENTS : ReviewItem.Group.MINE,
-                        head, repository.displayName() + " · vs " + worktreeBase));
+                        head, repository.displayName() + " · vs " + worktreeBase.ref()));
             }
         }
 

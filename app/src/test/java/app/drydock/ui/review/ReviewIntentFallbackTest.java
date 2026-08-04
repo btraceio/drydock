@@ -1,6 +1,7 @@
 package app.drydock.ui.review;
 
 import app.drydock.git.DiffService;
+import app.drydock.review.QueueAssembly;
 import app.drydock.review.ReviewItem;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
@@ -21,7 +22,6 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -51,9 +51,6 @@ class ReviewIntentFallbackTest extends ApplicationTest {
             throw new UncheckedIOException(e);
         }
         view = new ReviewDestinationView(host, diffService);
-        // Exactly what MainWorkspace does: the fallback groups the diff the
-        // column is actually showing, not a second one read elsewhere.
-        host.diffSource = view::currentDiff;
         Scene scene = new Scene(view, 1400, 900);
         scene.getStylesheets().addAll(
                 getClass().getResource("/app/drydock/ui/app.css").toExternalForm(),
@@ -75,10 +72,10 @@ class ReviewIntentFallbackTest extends ApplicationTest {
                 ReviewScope.Kind.WORKING_TREE, repo, Optional.of(repo), "main", "main",
                 Optional.empty(), Optional.empty()));
 
-        interact(() -> view.setItems(List.of(new ReviewItem(scope, ReviewItem.Group.MINE,
-                "Working tree", "drydock · uncommitted changes")), 1));
+        interact(() -> view.setItems(new QueueAssembly(List.of(new ReviewItem(scope, ReviewItem.Group.MINE,
+                "Working tree", "drydock · uncommitted changes")), true, true), 1));
 
-        assertEquals("intent 1", awaitIntentLabel(),
+        assertEquals("1 · A.java", awaitIntentLabel(),
                 "the verdict bar must re-render when the diff arrives, not stay on 'no intent'");
     }
 
@@ -94,9 +91,9 @@ class ReviewIntentFallbackTest extends ApplicationTest {
                 ReviewScope.Kind.WORKING_TREE, repo, Optional.of(repo), "main", "main",
                 Optional.empty(), Optional.empty()));
 
-        interact(() -> view.setItems(List.of(new ReviewItem(scope, ReviewItem.Group.MINE,
-                "Working tree", "drydock · uncommitted changes")), 1));
-        assertEquals("intent 1", awaitIntentLabel());
+        interact(() -> view.setItems(new QueueAssembly(List.of(new ReviewItem(scope, ReviewItem.Group.MINE,
+                "Working tree", "drydock · uncommitted changes")), true, true), 1));
+        assertEquals("1 · Alpha.java", awaitIntentLabel());
 
         assertFalse(renderedHunkFiles().contains("Zulu.java"),
                 "the fixture must start with the second file below the fold");

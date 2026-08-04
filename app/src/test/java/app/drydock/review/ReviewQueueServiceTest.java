@@ -83,7 +83,7 @@ class ReviewQueueServiceTest {
         Path repo = initCommittedRepo(dir);
 
         List<ReviewItem> items = serviceWith(NO_REQUESTS)
-                .assemble(List.of(target(repo)), checkout -> Optional.empty()).get();
+                .assemble(List.of(target(repo)), checkout -> Optional.empty()).get().items();
 
         assertTrue(items.isEmpty(), items.toString());
     }
@@ -94,7 +94,7 @@ class ReviewQueueServiceTest {
         Files.writeString(repo.resolve("README.md"), "edited\n");
 
         List<ReviewItem> items = serviceWith(NO_REQUESTS)
-                .assemble(List.of(target(repo)), checkout -> Optional.empty()).get();
+                .assemble(List.of(target(repo)), checkout -> Optional.empty()).get().items();
 
         assertEquals(1, items.size());
         ReviewItem item = items.get(0);
@@ -112,7 +112,7 @@ class ReviewQueueServiceTest {
         Path agents = gitStatusService.createWorktree(repo, worktreeParent.resolve("agents"), "feat/agents").get();
 
         List<ReviewItem> items = serviceWith(NO_REQUESTS)
-                .assemble(List.of(target(repo)), sessionsIn(agents)).get();
+                .assemble(List.of(target(repo)), sessionsIn(agents)).get().items();
 
         ReviewItem mineItem = itemTitled(items, "feat/mine");
         ReviewItem agentsItem = itemTitled(items, "feat/agents");
@@ -132,7 +132,7 @@ class ReviewQueueServiceTest {
         gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/local").get();
 
         List<ReviewItem> items = serviceWith(NO_GH)
-                .assemble(List.of(target(repo)), checkout -> Optional.empty()).get();
+                .assemble(List.of(target(repo)), checkout -> Optional.empty()).get().items();
 
         assertEquals(1, items.size());
         assertEquals("feat/local", items.get(0).title());
@@ -147,7 +147,7 @@ class ReviewQueueServiceTest {
                 Optional.of("https://github.com/o/r/pull/412"), 21, false);
 
         List<ReviewItem> items = serviceWith(root -> CompletableFuture.completedFuture(List.of(request)))
-                .assemble(List.of(target(repo)), checkout -> Optional.empty()).get();
+                .assemble(List.of(target(repo)), checkout -> Optional.empty()).get().items();
 
         assertEquals(1, items.size());
         ReviewItem item = items.get(0);
@@ -172,7 +172,7 @@ class ReviewQueueServiceTest {
                 "feat/api-gateway", "main", Optional.of("nina"), Optional.empty(), 21, false);
 
         List<ReviewItem> items = serviceWith(root -> CompletableFuture.completedFuture(List.of(request)))
-                .assemble(List.of(target(repo)), checkout -> Optional.empty()).get();
+                .assemble(List.of(target(repo)), checkout -> Optional.empty()).get().items();
 
         assertEquals(1, items.size());
         assertEquals(ReviewScope.Kind.WORKTREE, items.get(0).scope().kind());
@@ -191,12 +191,12 @@ class ReviewQueueServiceTest {
         gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/stable").get();
         ReviewQueueService service = serviceWith(NO_REQUESTS);
         ReviewItem before = service.assemble(List.of(target(repo)), checkout -> Optional.empty())
-                .get().get(0);
+                .get().items().get(0);
 
         // Exactly what a reviewer does in another terminal, mid-review.
         runGit(repo, "switch", "-c", "some-other-thing");
         ReviewItem after = service.assemble(List.of(target(repo)), checkout -> Optional.empty())
-                .get().get(0);
+                .get().items().get(0);
 
         assertEquals(before.scope().id(), after.scope().id(),
                 "a branch switch in the main checkout must not orphan a worktree's findings");
@@ -213,7 +213,7 @@ class ReviewQueueServiceTest {
         runGit(repo, "switch", "-c", "scratch");
 
         List<ReviewItem> items = serviceWith(NO_REQUESTS)
-                .assemble(List.of(target(repo)), checkout -> Optional.empty()).get();
+                .assemble(List.of(target(repo)), checkout -> Optional.empty()).get().items();
 
         assertEquals("main", itemTitled(items, "feat/x").scope().base());
         assertDiffsResolve(items);
@@ -244,7 +244,7 @@ class ReviewQueueServiceTest {
         runGit(worktree, "commit", "-m", "the one commit under review");
 
         List<ReviewItem> items = serviceWith(NO_REQUESTS)
-                .assemble(List.of(target(repo)), checkout -> Optional.empty()).get();
+                .assemble(List.of(target(repo)), checkout -> Optional.empty()).get().items();
 
         ReviewItem item = itemTitled(items, "feat/x");
         assertEquals("develop", item.scope().base());
@@ -263,7 +263,7 @@ class ReviewQueueServiceTest {
         gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/x").get();
 
         List<ReviewItem> items = serviceWithBases(java.util.Map.of("feat/x", "release/2.0"))
-                .assemble(List.of(target(repo)), checkout -> Optional.empty()).get();
+                .assemble(List.of(target(repo)), checkout -> Optional.empty()).get().items();
 
         assertEquals("release/2.0", itemTitled(items, "feat/x").scope().base());
         assertDiffsResolve(items);
@@ -293,7 +293,7 @@ class ReviewQueueServiceTest {
         Files.writeString(repo.resolve("README.md"), "edited\n");
 
         List<ReviewItem> items = serviceWith(NO_REQUESTS)
-                .assemble(List.of(target(repo)), checkout -> Optional.empty()).get();
+                .assemble(List.of(target(repo)), checkout -> Optional.empty()).get().items();
 
         assertDiffsResolve(items);
     }
@@ -319,7 +319,7 @@ class ReviewQueueServiceTest {
         gitStatusService.createWorktree(clone, worktreeParent.resolve("wt"), "feat/y").get();
 
         List<ReviewItem> items = serviceWith(NO_REQUESTS)
-                .assemble(List.of(target(clone)), checkout -> Optional.empty()).get();
+                .assemble(List.of(target(clone)), checkout -> Optional.empty()).get().items();
 
         assertFalse(items.isEmpty(), "expected the worktree item");
         assertEquals("origin/main", itemTitled(items, "feat/y").scope().base(),
@@ -362,9 +362,9 @@ class ReviewQueueServiceTest {
         ReviewQueueService service = serviceWith(NO_REQUESTS);
 
         String first = service.assemble(List.of(target(repo)), checkout -> Optional.empty())
-                .get().get(0).scope().id();
+                .get().items().get(0).scope().id();
         String again = service.assemble(List.of(target(repo)), checkout -> Optional.empty())
-                .get().get(0).scope().id();
+                .get().items().get(0).scope().id();
 
         assertEquals(first, again);
     }
@@ -376,10 +376,10 @@ class ReviewQueueServiceTest {
         Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/gone").get();
         ReviewQueueService service = serviceWith(NO_REQUESTS);
         String scopeId = service.assemble(List.of(target(repo)), checkout -> Optional.empty())
-                .get().get(0).scope().id();
+                .get().items().get(0).scope().id();
 
         worktreeService.remove(repo, worktree, Optional.of("feat/gone")).get();
-        List<ReviewItem> after = service.assemble(List.of(target(repo)), checkout -> Optional.empty()).get();
+        List<ReviewItem> after = service.assemble(List.of(target(repo)), checkout -> Optional.empty()).get().items();
 
         assertTrue(after.isEmpty(), after.toString());
         assertEquals(Optional.empty(), registry.byId(scopeId));
@@ -393,7 +393,7 @@ class ReviewQueueServiceTest {
 
         List<ReviewItem> items = serviceWith(NO_REQUESTS).assemble(
                 List.of(new ReviewQueueService.RepositoryTarget(notARepo, "broken"), target(repo)),
-                checkout -> Optional.empty()).get();
+                checkout -> Optional.empty()).get().items();
 
         assertEquals(1, items.size());
         assertEquals("Working tree", items.get(0).title());
@@ -408,7 +408,7 @@ class ReviewQueueServiceTest {
                 Optional.empty(), Optional.empty(), 0, false);
 
         List<ReviewItem> items = serviceWith(root -> CompletableFuture.completedFuture(List.of(request)))
-                .assemble(List.of(target(repo)), sessionsIn(agents)).get();
+                .assemble(List.of(target(repo)), sessionsIn(agents)).get().items();
 
         assertEquals(List.of(ReviewItem.Group.MINE, ReviewItem.Group.AGENTS, ReviewItem.Group.REQUESTED),
                 items.stream().map(ReviewItem::group).toList());
@@ -439,7 +439,7 @@ class ReviewQueueServiceTest {
                         "renovate/all-minor-patch", openPr(854, "renovate/all-minor-patch", "gh-pages"),
                         "pr-854", openPr(854, "renovate/all-minor-patch", "gh-pages"))),
                 registry)
-                .assemble(List.of(target(repo)), sessionsIn(checkout)).get();
+                .assemble(List.of(target(repo)), sessionsIn(checkout)).get().items();
 
         ReviewItem item = itemTitled(items, "PR #854 renovate/all-minor-patch");
         assertEquals("gh-pages", item.scope().base(),
@@ -465,7 +465,7 @@ class ReviewQueueServiceTest {
         runGit(repo, "worktree", "add", "--detach", detached.toString());
 
         List<ReviewItem> items = serviceWith(NO_REQUESTS)
-                .assemble(List.of(target(repo)), checkout -> Optional.empty()).get();
+                .assemble(List.of(target(repo)), checkout -> Optional.empty()).get().items();
 
         assertTrue(items.stream().noneMatch(item -> item.title().equals("(detached)")),
                 "a detached worktree must not reach the queue: " + items);
@@ -494,7 +494,7 @@ class ReviewQueueServiceTest {
                         "jb/sessions", openPr(40, "jb/sessions", "release/1.x"),
                         "pr-40", openPr(40, "jb/sessions", "release/1.x"))),
                 registry)
-                .assemble(List.of(target(repo)), checkout -> Optional.empty()).get();
+                .assemble(List.of(target(repo)), checkout -> Optional.empty()).get().items();
 
         ReviewItem item = itemTitled(items, "PR #40 jb/sessions");
         assertEquals("release/1.x", item.scope().base(), "the PR's own base");

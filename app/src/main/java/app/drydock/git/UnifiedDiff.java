@@ -11,13 +11,25 @@ import java.util.OptionalInt;
  */
 public record UnifiedDiff(List<FileDiff> files) {
 
-    /** One changed file: M/A/D kind, +/- counts, staged flag (working-tree scope only), hunks. */
+    /**
+     * One changed file: M/A/D kind, +/- counts, staged flag (working-tree
+     * scope only), untracked flag (working-tree scope only), hunks.
+     *
+     * <p>{@code untracked} is set explicitly by {@link DiffService} from the
+     * {@code ls-files --others} set it already computes for the untracked
+     * working-tree pass, rather than left for callers to infer from
+     * {@code kind == "A" && !staged}. That inference happens to hold today --
+     * an untracked file is the only way to get a new-file kind with nothing
+     * staged -- but nothing enforces it, and it is exactly the kind of
+     * coincidence a refactor breaks silently.</p>
+     */
     public record FileDiff(
             String path,
             String kind,
             int insertions,
             int deletions,
             boolean staged,
+            boolean untracked,
             List<Hunk> hunks
     ) {
     }

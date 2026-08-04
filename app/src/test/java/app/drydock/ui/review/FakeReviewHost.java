@@ -41,13 +41,6 @@ final class FakeReviewHost implements ReviewDestinationView.Host {
     /** What {@link #intents} groups by when no reviewer has supplied a grouping. */
     UnifiedDiff diff = new UnifiedDiff(List.of());
 
-    /**
-     * Where the by-file fallback reads its diff from. Defaults to {@link
-     * #diff}; a test that needs the real asynchronous path points it at the
-     * view's own {@code currentDiff()}, which is what the app does.
-     */
-    java.util.function.Supplier<UnifiedDiff> diffSource = () -> diff;
-
     /** Whether the Explorer jump can succeed (no session bound = false). */
     boolean explorerAvailable;
 
@@ -58,8 +51,16 @@ final class FakeReviewHost implements ReviewDestinationView.Host {
         this.store = new AnnotationStore(storeFile);
     }
 
+    /** How many times the empty state's Retry asked for a rescan. */
+    int queueRetries;
+
     @Override
     public void refreshQueue() {
+    }
+
+    @Override
+    public void retryQueueScan() {
+        queueRetries++;
     }
 
     @Override
@@ -103,8 +104,8 @@ final class FakeReviewHost implements ReviewDestinationView.Host {
     }
 
     @Override
-    public List<ReviewIntent> intents(ReviewScope scope) {
-        return intents.intentsFor(scope.id(), diffSource.get());
+    public List<ReviewIntent> intents(ReviewScope scope, UnifiedDiff diff) {
+        return intents.intentsFor(scope.id(), diff);
     }
 
     @Override

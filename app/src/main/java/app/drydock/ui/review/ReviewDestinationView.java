@@ -1,6 +1,8 @@
 package app.drydock.ui.review;
 
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.git.ReviewBase;
+import app.drydock.review.QueueAssembly;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewItem;
@@ -77,6 +79,9 @@ public final class ReviewDestinationView extends BorderPane {
         /** Reassembles the queue (called when Review is shown). */
         void refreshQueue();
 
+        /** The empty surface's Retry button -- asks for the scan to run again. */
+        void retryQueueScan();
+
         /** {@code o} -- brings the scope's bound session's tab to the front. */
         void openSession(ManagedSessionId sessionId);
 
@@ -105,8 +110,18 @@ public final class ReviewDestinationView extends BorderPane {
         /** Every finding of {@code scope}, newest state (the store is the truth). */
         List<ReviewAnnotation> findings(ReviewScope scope);
 
-        /** The intents of {@code scope}: the reviewer's grouping, or the by-file fallback. */
-        List<ReviewIntent> intents(ReviewScope scope);
+        /**
+         * The intents of {@code scope}, grouping {@code diff}: the reviewer's
+         * grouping when one was supplied, otherwise one intent per changed
+         * file of the diff handed in.
+         *
+         * <p>The diff is a parameter rather than something the host fetches,
+         * because the only correct diff here is the one the caller has
+         * already established belongs to {@code scope}. A host that looked it
+         * up would be free to look up the wrong one, which is exactly the
+         * defect this shape removes.</p>
+         */
+        List<ReviewIntent> intents(ReviewScope scope, app.drydock.git.UnifiedDiff diff);
 
         /** The verdict recorded on one intent, if any. */
         Optional<ReviewVerdict> verdict(ReviewScope scope, ReviewIntent intent);
@@ -192,6 +207,13 @@ public final class ReviewDestinationView extends BorderPane {
 
     /** Scopes the human chose to read without a checkout ({@code Read the patch only}). */
     private final java.util.Map<String, app.drydock.git.UnifiedDiff> patchOnlyDiffs = new java.util.HashMap<>();
+
+    /**
+     * What each scope's diff attempt produced, keyed by scope id. A scope
+     * absent from this map has no diff -- which is a state, not a reason to
+     * reach for someone else's.
+     */
+    private final java.util.Map<String, DiffOutcome> outcomeByScope = new java.util.HashMap<>();
 
     /** The intent the verdict bar is settling; {@code [} / {@code ]} / {@code n} move it. */
     private int intentIndex;
@@ -317,7 +339,16 @@ public final class ReviewDestinationView extends BorderPane {
         // arrives asynchronously -- so the verdict bar has to be re-rendered
         // when it lands, or it stays on the "no intent" it correctly computed
         // from an empty diff and never recovers.
-        diffColumn.setOnDiffLoaded(this::refreshReviewState);
+        diffColumn.setOnDiffResolved((scopeId, outcome) -> {
+            outcomeByScope.put(scopeId, outcome);
+            // Only the selected scope's arrival changes what is on screen;
+            // a superseded one still records its outcome, so coming back to
+            // it does not re-run git.
+            if (selectedScope().map(scope -> scope.id().equals(scopeId)).orElse(false)) {
+                refreshReviewState();
+                revealCurrentIntent();
+            }
+        });
 
         widthProperty().addListener((obs, old, width) -> applyResponsiveLayout(width.doubleValue()));
         // The Browse split follows the rails' own width on every layout pass,
@@ -438,19 +469,25 @@ public final class ReviewDestinationView extends BorderPane {
     // ---- queue --------------------------------------------------------------
 
     /**
-     * Replaces the queue's contents. The previous selection survives when
-     * its scope is still present; otherwise the first item the rail is
-     * actually showing is selected -- falling back to the first item
-     * outright only when a query has hidden every row. An empty queue shows
-     * the zero state.
+     * Replaces the queue's contents. The previous selection survives when its
+     * scope is still present; otherwise the first item the rail is actually
+     * showing is selected. An assembly with no items shows whichever empty
+     * state the assembly's own completeness implies.
      */
-    public void setItems(List<ReviewItem> items, int repositoryCount) {
+    public void setItems(QueueAssembly assembly, int repositoryCount) {
+        List<ReviewItem> items = assembly.items();
         String previous = queue.selected().map(item -> item.scope().id()).orElse(null);
         queue.setItems(items);
+        outcomeByScope.keySet().retainAll(items.stream().map(item -> item.scope().id())
+                .collect(java.util.stream.Collectors.toUnmodifiableSet()));
         countsLabel.setText(items.size() + (items.size() == 1 ? " item · " : " items · ")
                 + repositoryCount + (repositoryCount == 1 ? " repo" : " repos"));
         if (items.isEmpty()) {
-            showItem(null);
+            showEmpty(repositoryCount == 0
+                    ? ReviewEmptyState.NO_REPOSITORIES
+                    : assembly.complete()
+                            ? ReviewEmptyState.NOTHING_REVIEWABLE
+                            : ReviewEmptyState.SCAN_INCOMPLETE);
             return;
         }
         boolean stillThere = previous != null
@@ -465,6 +502,67 @@ public final class ReviewDestinationView extends BorderPane {
         // falls back to items.get(0), so a reassembly still leaves something
         // selected rather than nothing.
         queue.select(queue.firstVisible().map(item -> item.scope().id()).orElse(items.get(0).scope().id()));
+    }
+
+    /** Called when Review is shown and a scan is in flight. */
+    public void showScanning() {
+        showEmpty(ReviewEmptyState.SCANNING);
+    }
+
+    /**
+     * The empty surface. The session row is not rendered at all here: with no
+     * item there is no session to describe, and a row reading "no items in
+     * the queue" beside a session dot read as a claim about the session
+     * Review was opened from.
+     */
+    private void showEmpty(ReviewEmptyState state) {
+        headerIcon.setText("◨");
+        headerTitle.setText(state.title());
+        headerContext.setText("");
+        hideSessionRow();
+        Region placeholder = placeholder(state.title(), state.detail(), "");
+        if (state == ReviewEmptyState.SCAN_INCOMPLETE) {
+            Button retry = new Button("Retry the scan");
+            retry.getStyleClass().addAll("review-chip-button", "review-empty-retry");
+            retry.setOnAction(e -> {
+                retry.setDisable(true);
+                retry.setText("Scanning…");
+                host.retryQueueScan();
+            });
+            ((VBox) placeholder).getChildren().add(retry);
+        }
+        body.getChildren().setAll(placeholder);
+        refreshReviewState();
+    }
+
+    /** Hides the whole session row -- dot, line, button and hint. */
+    /**
+     * Hides the whole session row -- dot, line, button and hint. With no item
+     * selected there is no session to describe, and a row reading "no items in
+     * the queue" beside a session dot read as a claim about the session Review
+     * was opened from.
+     */
+    private void hideSessionRow() {
+        sessionDot.setVisible(false);
+        sessionDot.setManaged(false);
+        sessionLine.setVisible(false);
+        sessionLine.setManaged(false);
+        openSessionButton.setVisible(false);
+        openSessionButton.setManaged(false);
+        returnHint.setVisible(false);
+        returnHint.setManaged(false);
+    }
+
+    /**
+     * Shows the dot and line. The button and hint are deliberately left alone:
+     * {@link #setSessionRow} owns them, because whether they belong on screen
+     * depends on the item having a bound session at all.
+     */
+    private void showSessionRow() {
+        sessionDot.setVisible(true);
+        sessionDot.setManaged(true);
+        sessionLine.setVisible(true);
+        sessionLine.setManaged(true);
     }
 
     /** Selects the item for {@code scopeId} ({@code ⌘4} and the sidebar's {@code ◨n} badge). */
@@ -507,12 +605,18 @@ public final class ReviewDestinationView extends BorderPane {
         if (scope.isEmpty()) {
             margin.setFindings(List.of());
             verdictBar.update(null, Optional.empty(), false, 0, 0);
+            // No scope selected means no rail: leaving the previous scope's
+            // cards up here is how the rail came to list a departed item's
+            // files (see the whole-branch review this fixes).
+            intentRail.setIntents(List.of(), null, ReviewIntentRail.Empty.NONE);
+            mcpPanel.ifPresent(panel -> panel.setScope(null));
             return;
         }
         margin.invalidate(null);
         margin.setFindings(findingsForMargin(scope.get()));
         diffColumn.refreshPins();
-        intentRail.setIntents(intents(), currentIntent().map(ReviewIntent::id).orElse(null));
+        intentRail.setIntents(intents(), currentIntent().map(ReviewIntent::id).orElse(null),
+                emptyReason());
         mcpPanel.filter(javafx.scene.Node::isVisible)
                 .ifPresent(panel -> panel.setScope(scope.get()));
         renderVerdictBar(scope.get());
@@ -539,8 +643,53 @@ public final class ReviewDestinationView extends BorderPane {
                 .toList();
     }
 
+    /**
+     * The selected scope's intents. A scope whose diff has not loaded -- or
+     * never will, because it has no checkout -- has none, and says so
+     * through {@link #emptyReason()} rather than borrowing another's.
+     */
+    /**
+     * What the selected scope's diff attempt produced, if there is a selected
+     * scope at all. Empty covers both "nothing selected" and "selected, but no
+     * diff has resolved for it yet" -- the callers below distinguish those.
+     */
+    private Optional<DiffOutcome> selectedOutcome() {
+        return selectedScope().map(scope -> outcomeByScope.get(scope.id()));
+    }
+
     private List<ReviewIntent> intents() {
-        return selectedScope().map(host::intents).orElse(List.of());
+        Optional<ReviewScope> scope = selectedScope();
+        if (scope.isEmpty()) {
+            return List.of();
+        }
+        if (selectedOutcome().orElse(null) instanceof DiffOutcome.Loaded loaded) {
+            return host.intents(scope.get(), loaded.diff());
+        }
+        return List.of();
+    }
+
+    /**
+     * Which empty the rail is showing. A scope with a checkout whose diff has
+     * not arrived is loading; one without a checkout never will; a loaded
+     * diff with no files is a genuine "nothing changed here".
+     */
+    private ReviewIntentRail.Empty emptyReason() {
+        Optional<ReviewScope> scope = selectedScope();
+        if (scope.isEmpty()) {
+            return ReviewIntentRail.Empty.NONE;
+        }
+        DiffOutcome outcome = selectedOutcome().orElse(null);
+        if (outcome instanceof DiffOutcome.Failed) {
+            return ReviewIntentRail.Empty.DIFF_FAILED;
+        }
+        if (outcome instanceof DiffOutcome.Loaded loaded) {
+            return loaded.diff().files().isEmpty()
+                    ? ReviewIntentRail.Empty.NO_CHANGES
+                    : ReviewIntentRail.Empty.NONE;
+        }
+        return scope.get().worktree().isEmpty()
+                ? ReviewIntentRail.Empty.NOT_CHECKED_OUT
+                : ReviewIntentRail.Empty.DIFFING;
     }
 
     private Optional<ReviewIntent> currentIntent() {
@@ -719,6 +868,16 @@ public final class ReviewDestinationView extends BorderPane {
         public void submit() {
             submitReview();
         }
+
+        @Override
+        public void previousIntent() {
+            moveIntent(-1);
+        }
+
+        @Override
+        public void nextIntent() {
+            moveIntent(1);
+        }
     }
 
     /**
@@ -749,23 +908,26 @@ public final class ReviewDestinationView extends BorderPane {
 
     private void showItem(ReviewItem item) {
         if (item == null) {
-            headerIcon.setText("◨");
-            headerTitle.setText("Nothing to review");
-            headerContext.setText("");
-            setSessionRow(null, "no items in the queue", false);
-            body.getChildren().setAll(placeholder("Nothing to review",
-                    "Worktrees, uncommitted changes and PRs that ask you for a review all land here.",
-                    ""));
+            // Reached only before the first queue assembly lands (the
+            // constructor's initial call); once a scan has run, setItems
+            // renders the empty surface itself and never routes through here.
+            showEmpty(ReviewEmptyState.NOTHING_REVIEWABLE);
             return;
         }
         ReviewScope scope = item.scope();
         headerIcon.setText(item.icon());
         headerTitle.setText(item.title());
         headerContext.setText(contextLine(item));
+        showSessionRow();
         setSessionRow(scope, sessionLineFor(scope), scope.sessionId().isPresent());
         body.getChildren().setAll(bodyFor(item));
         intentIndex = 0;
         refreshReviewState();
+        // The diff usually has not arrived yet, in which case there is nothing
+        // to reveal and the setOnDiffResolved handler does it when it lands.
+        // Revealing here too covers the case where it already has -- coming
+        // back to an item whose diff is still cached.
+        revealCurrentIntent();
     }
 
     /**
@@ -783,9 +945,13 @@ public final class ReviewDestinationView extends BorderPane {
                 ? "HEAD"
                 : item.scope().base();
         String comparison = "vs " + against;
-        return item.subtitle().endsWith(comparison)
+        String provenance = item.scope().baseOrigin()
+                .filter(origin -> origin == ReviewBase.Origin.DEFAULT_UNMEASURED)
+                .map(origin -> "  ·  " + origin.description())
+                .orElse("");
+        return (item.subtitle().endsWith(comparison)
                 ? item.subtitle()
-                : item.subtitle() + "  ·  " + comparison;
+                : item.subtitle() + "  ·  " + comparison) + provenance;
     }
 
     /**
@@ -842,7 +1008,7 @@ public final class ReviewDestinationView extends BorderPane {
      * reader must not be left guessing why.
      */
     private Region patchOnlyBody(ReviewScope scope) {
-        diffColumn.showDiff(patchOnlyDiffs.get(scope.id()));
+        diffColumn.showDiff(scope, patchOnlyDiffs.get(scope.id()));
         VBox.setVgrow(diffColumn, Priority.ALWAYS);
         VBox box = new VBox(ReviewCheckoutGate.readOnlyBanner(
                 scope.pr().map(ReviewScope.PullRequestRef::number).orElse(0)), diffColumn);
@@ -1248,15 +1414,6 @@ public final class ReviewDestinationView extends BorderPane {
     }
 
     /**
-     * The diff currently rendered. The intent fallback groups by file, so it
-     * needs the same diff the column is showing rather than a second one -- a
-     * grouping derived from a re-read would drift from what is on screen.
-     */
-    public app.drydock.git.UnifiedDiff currentDiff() {
-        return diffColumn.currentDiff();
-    }
-
-    /**
      * Diagnostic-only: walks EVERY queue item and reports what its diff
      * produced. The base a review diffs against is derived, so "the queue
      * assembled" is not evidence that each item can actually resolve it --
@@ -1267,10 +1424,27 @@ public final class ReviewDestinationView extends BorderPane {
         List<String> report = new java.util.ArrayList<>();
         for (ReviewItem item : queue.items()) {
             ReviewScope itemScope = item.scope();
-            report.add(item.title() + " [base=" + itemScope.base() + "] "
-                    + host.diagDiffSummary(itemScope));
+            // A scope that is not diffable (no checkout: a PR the human has
+            // not started a session for) must never reach diffService.diff --
+            // this diagnostic exists to prove each item resolves its base,
+            // and running it anyway reports a fabricated file count for
+            // exactly the scopes the branch declares wrong-by-construction.
+            String summary = itemScope.diffable()
+                    ? host.diagDiffSummary(itemScope)
+                    : "not diffable (no checkout)";
+            report.add(item.title() + " [base=" + itemScope.base() + "] " + summary);
         }
         return report;
+    }
+
+    /**
+     * Test-only: records an outcome for a scope without running git. The
+     * view derives everything from these outcomes now, so a test with a
+     * synthetic diff and no real checkout has no other way in.
+     */
+    void diagPublishOutcome(String scopeId, DiffOutcome outcome) {
+        outcomeByScope.put(scopeId, outcome);
+        refreshReviewState();
     }
 
     /** Diagnostic-only: selects the {@code index}-th queue item, for the visual pass. */

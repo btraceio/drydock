@@ -36,6 +36,7 @@ import app.drydock.mcp.WorkspaceMcpSessionContext;
 import app.drydock.process.SshCommandBuilder;
 import app.drydock.review.AnnotationStore;
 import app.drydock.review.IntentGrouping;
+import app.drydock.review.QueueAssembly;
 import app.drydock.review.ReviewItem;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewIntent;
@@ -993,14 +994,22 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 .map(repository -> new ReviewQueueService.RepositoryTarget(
                         repository.root(), repository.displayName()))
                 .toList();
+        if (reviewDestination.diagItems().isEmpty()) {
+            reviewDestination.showScanning();
+        }
         reviewQueueService.assemble(targets, this::sessionAtCheckout)
-                .whenComplete((items, failure) -> Platform.runLater(() -> {
+                .whenComplete((assembly, failure) -> Platform.runLater(() -> {
                     if (failure != null) {
                         LOG.log(Level.WARNING, "Could not assemble the Review queue", failure);
+                        // A backstop, not the mechanism: assemble absorbs its
+                        // own fetch failures, so this fires only for something
+                        // unforeseen -- which is all the more reason to show it.
+                        reviewDestination.setItems(new QueueAssembly(List.of(), false, false),
+                                local.size());
                         return;
                     }
-                    adoptLegacyAnnotations(items);
-                    reviewDestination.setItems(items, local.size());
+                    adoptLegacyAnnotations(assembly.items());
+                    reviewDestination.setItems(assembly, local.size());
                     if (pendingReviewSelection != null) {
                         selectReviewScopeFor(pendingReviewSelection);
                         pendingReviewSelection = null;
@@ -1115,6 +1124,11 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         }
 
         @Override
+        public void retryQueueScan() {
+            refreshReviewQueue();
+        }
+
+        @Override
         public void openSession(ManagedSessionId sessionId) {
             OpenSessionTab open = openTabs.get(sessionId);
             if (open == null) {
@@ -1176,8 +1190,8 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         }
 
         @Override
-        public List<ReviewIntent> intents(ReviewScope scope) {
-            return intentGrouping.intentsFor(scope.id(), reviewDestination.currentDiff());
+        public List<ReviewIntent> intents(ReviewScope scope, UnifiedDiff diff) {
+            return intentGrouping.intentsFor(scope.id(), diff);
         }
 
         @Override
@@ -1410,6 +1424,13 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
          */
         @Override
         public String diagDiffSummary(ReviewScope scope) {
+            // A scope with no checkout (a PR the human has not started a
+            // session for) is wrong-by-construction to diff: diffRoot() has
+            // nothing to point at, and running it anyway fabricates a file
+            // count for the very scopes this diagnostic exists to flag.
+            if (!scope.diffable()) {
+                return "not diffable (no checkout)";
+            }
             DiffScope diffScope = scope.kind() == ReviewScope.Kind.WORKING_TREE
                     ? DiffScope.WORKING_TREE
                     : DiffScope.BASE;

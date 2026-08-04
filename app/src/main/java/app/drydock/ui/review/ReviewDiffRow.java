@@ -32,8 +32,15 @@ sealed interface ReviewDiffRow {
      * A hunk card's header: {@code Sidebar.java  L112–124} plus the {@code ⤢}
      * jump into the Explorer. {@code startLine} is the 1-based new-file line
      * the jump targets (the old-file line for a pure deletion).
+     *
+     * <p>{@code untracked} and {@code staged} carry {@link UnifiedDiff.FileDiff}'s
+     * own flags for the {@code untracked}/{@code staged} chip -- they travel
+     * with the row rather than being re-derived in the renderer, because
+     * {@code buildHunkHeader} only ever sees the row, never the file it came
+     * from.</p>
      */
-    record HunkHeader(String file, String range, int startLine) implements ReviewDiffRow {
+    record HunkHeader(String file, String range, int startLine, boolean untracked, boolean staged)
+            implements ReviewDiffRow {
         @Override
         public Edge edge() {
             return Edge.TOP;

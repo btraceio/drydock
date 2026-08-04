@@ -226,6 +226,18 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
 
     @Override
     public UnifiedDiff reviewDiff(ReviewScope scope) throws McpToolException {
+        // The same guard the diff column and the diagnostics carry. A pull
+        // request with no checkout resolves diffRoot() to the repository's
+        // MAIN checkout, so a diff here would be that checkout's HEAD against
+        // the PR's base -- a real diff of entirely the wrong thing, which is
+        // the most misleading answer available. An agent asking over MCP must
+        // get the refusal, not the fabrication.
+        if (!scope.diffable()) {
+            throw new McpToolException("Pull request #"
+                    + scope.pr().map(pr -> String.valueOf(pr.number())).orElse("?")
+                    + " is not checked out, so it has no diff to read. "
+                    + "Check it out first, or read the patch with the GitHub CLI.");
+        }
         DiffScope diffScope = scope.kind() == ReviewScope.Kind.WORKING_TREE
                 ? DiffScope.WORKING_TREE
                 : DiffScope.BASE;

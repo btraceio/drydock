@@ -166,7 +166,7 @@ class DiffServiceTest {
                 +line two
                 """;
 
-        UnifiedDiff diff = DiffService.parse(diffText, Set.of("Fresh.java"));
+        UnifiedDiff diff = DiffService.parse(diffText, Set.of("Fresh.java"), Set.of());
 
         assertEquals(2, diff.files().size());
         UnifiedDiff.FileDiff sample = diff.files().get(0);

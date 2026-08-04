@@ -5,12 +5,17 @@ import app.drydock.process.ProcessRunner;
 import app.drydock.process.ProcessTimeoutException;
 
 import java.io.IOException;
+import java.lang.System.Logger;
+import java.lang.System.Logger.Level;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.OptionalInt;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -28,8 +33,19 @@ import java.util.concurrent.Executors;
  */
 public final class DiffService implements AutoCloseable {
 
+    private static final Logger LOG = System.getLogger(DiffService.class.getName());
+
     /** git's own default: three unchanged lines either side of a change. */
     public static final int DEFAULT_CONTEXT_LINES = 3;
+
+    /**
+     * Above this many untracked files, the intent-to-add pass is skipped
+     * rather than run: a repository with this many untracked entries is
+     * pathological (a build output directory that slipped past
+     * {@code .gitignore}, say), and diffing all of them would hang the
+     * Review diff column, which re-diffs constantly.
+     */
+    private static final int MAX_UNTRACKED = 2000;
 
     /**
      * What the Review diff column asks for. Wide enough that a fold is worth
@@ -119,12 +135,27 @@ public final class DiffService implements AutoCloseable {
                 "diff", "--no-color", "--no-ext-diff", "-U" + contextLines,
                 "--end-of-options", range);
 
-        ProcessResult result = run(command);
-        if (result.exitCode() != 0) {
-            if (result.stderr().toLowerCase(Locale.ROOT).contains("not a git repository")) {
-                throw new NotAGitRepositoryException(checkoutRoot);
-            }
-            throw new GitCommandFailedException(command, result.exitCode(), ProcessRunner.excerpt(result.stderr()));
+        // The untracked probe runs BEFORE the tracked-only diff so that diff
+        // can be skipped outright whenever the untracked pass is going to
+        // re-run the identical command against a temporary index. Running
+        // `git diff` twice and throwing the first result away doubled the
+        // whole diff computation on every refresh of a working tree that had
+        // any untracked file in it.
+        Set<String> untrackedPaths = scope == DiffScope.WORKING_TREE
+                ? untrackedPaths(git, checkoutRoot)
+                : Set.of();
+        if (untrackedPaths.size() > MAX_UNTRACKED) {
+            LOG.log(Level.WARNING, "Skipping untracked-file diff pass in " + checkoutRoot + ": "
+                    + untrackedPaths.size() + " untracked files exceeds the limit of " + MAX_UNTRACKED);
+            untrackedPaths = Set.of();
+        }
+
+        ProcessResult result;
+        if (untrackedPaths.isEmpty()) {
+            result = run(command);
+            failIfFailed(command, result, checkoutRoot);
+        } else {
+            result = withUntrackedFiles(git, checkoutRoot, command, untrackedPaths);
         }
 
         // Working-tree scope tags each file with whether (part of) its
@@ -133,7 +164,152 @@ public final class DiffService implements AutoCloseable {
                 ? stagedPaths(git, checkoutRoot)
                 : Set.of();
 
-        return parse(result.stdout(), stagedPaths);
+        return parse(result.stdout(), stagedPaths, untrackedPaths);
+    }
+
+    /**
+     * Extends a {@code git diff HEAD} result with untracked, non-ignored
+     * files as new-file additions.
+     *
+     * <p>{@code git diff HEAD} never shows untracked files -- it diffs
+     * against the index/HEAD, and an untracked path is in neither -- so a
+     * repository whose only "dirty" content is brand-new files rendered
+     * Review's working-tree diff as "No changes in this scope." with no way
+     * to see the file at all (task 14). git's own intent-to-add marker
+     * ({@code git add -N}) is what makes {@code git diff} treat a path as a
+     * new file; running that against the real index would be staging the
+     * user's files as a side effect of opening a diff, which no review tool
+     * should ever do. So this copies the real index to a throwaway one
+     * (selected via {@code GIT_INDEX_FILE}), marks the untracked paths
+     * intent-to-add there, re-runs the diff against that copy, and discards
+     * it -- the user's actual index and working tree are untouched, and
+     * their next real {@code git add} or {@code git commit} sees exactly
+     * what it would have before this ran. {@code git add -N} does still
+     * write one empty blob into the repository's object database (git
+     * always writes blob content before recording a tree/index entry that
+     * points at it) -- but it is unreachable from any ref, touches no
+     * index, status, or diff, and is identical every time regardless of how
+     * many untracked files there are, so it is gc-able noise rather than a
+     * correctness concern. The diff itself is still produced by git, not
+     * synthesised here, so binary detection and line handling for the new
+     * files match every other file in the diff exactly.</p>
+     */
+    /**
+     * The {@code ls-files --others} set: paths git considers untracked and
+     * non-ignored. Computed once per working-tree diff and reused both to
+     * drive the intent-to-add pass below and to tag each resulting
+     * {@link UnifiedDiff.FileDiff#untracked()} -- the same set, compared the
+     * same way {@code stagedPaths} compares its own, so the flag cannot
+     * drift from what {@link #withUntrackedFiles} actually diffed.
+     */
+    private Set<String> untrackedPaths(Path git, Path checkoutRoot) {
+        // -z: NUL-separated raw paths, and also what lets an empty result be
+        // told apart from a single empty-named entry unambiguously.
+        List<String> lsFilesCommand = List.of(
+                git.toString(), "-C", checkoutRoot.toString(),
+                "ls-files", "--others", "--exclude-standard", "-z");
+        ProcessResult lsFiles = run(lsFilesCommand);
+        failIfFailed(lsFilesCommand, lsFiles, checkoutRoot);
+        Set<String> untracked = new HashSet<>();
+        for (String entry : lsFiles.stdout().split("\\u0000")) {
+            if (!entry.isEmpty()) {
+                untracked.add(entry);
+            }
+        }
+        return untracked;
+    }
+
+    /**
+     * Runs {@code diffCommand} against a throwaway index that has every
+     * untracked file marked intent-to-add, so git emits proper new-file
+     * diffs for them.
+     *
+     * <p>Only called when there is something untracked to add and the count
+     * is within {@link #MAX_UNTRACKED} -- the caller owns both decisions,
+     * because it is the caller that skips the plain diff when this runs
+     * instead.</p>
+     */
+    private ProcessResult withUntrackedFiles(Path git, Path checkoutRoot, List<String> diffCommand,
+                                             Set<String> untracked) {
+        Path tempIndex;
+        try {
+            // Files.createTempFile is the only portable way to reserve a
+            // unique path; it creates an empty regular file to do so. That
+            // file is then deleted immediately, leaving the path reserved
+            // but absent, because a zero-length file is not a valid git
+            // index -- git would fail to read it -- whereas a copy is about
+            // to be written to this same path below.
+            tempIndex = Files.createTempFile("drydock-diff-index", ".tmp");
+            Files.delete(tempIndex);
+        } catch (IOException e) {
+            throw new GitCommandFailedException(List.of("Files.createTempFile"), -1,
+                    e.getMessage() == null ? "could not create a temporary index file" : e.getMessage());
+        }
+        try {
+            // --absolute-git-dir, never a hand-built ".git/index": inside a
+            // linked worktree the real index lives at
+            // ".git/worktrees/<name>/index", and this runs in worktrees
+            // constantly.
+            List<String> gitDirCommand = List.of(
+                    git.toString(), "-C", checkoutRoot.toString(), "rev-parse", "--absolute-git-dir");
+            ProcessResult gitDirResult = run(gitDirCommand);
+            if (gitDirResult.exitCode() != 0) {
+                throw new GitCommandFailedException(gitDirCommand, gitDirResult.exitCode(),
+                        ProcessRunner.excerpt(gitDirResult.stderr()));
+            }
+            Path realIndex = Path.of(gitDirResult.stdout().strip()).resolve("index");
+            if (Files.exists(realIndex)) {
+                // COPY_ATTRIBUTES is load-bearing, not tidiness: git decides
+                // whether a cached stat entry can be trusted by comparing it
+                // against the INDEX FILE'S OWN mtime ("racily clean" entries
+                // get their content re-read). A copy stamped with `now` looks
+                // far newer than every entry in it, so git trusts the stat
+                // cache outright -- and a file edited in the same second it
+                // was committed, to the same size, is then reported unchanged
+                // and silently vanishes from the diff. Preserving the real
+                // index's timestamps makes the copy behave exactly as the
+                // index it came from.
+                Files.copy(realIndex, tempIndex,
+                        StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
+            }
+
+            Map<String, String> tempIndexEnv = Map.of("GIT_INDEX_FILE", tempIndex.toString());
+
+            // Pathspec "." rather than the explicit untracked-file list: an
+            // explicit list of every untracked path can blow past ARG_MAX on
+            // a large repository, and "." already respects .gitignore.
+            List<String> addCommand = List.of(
+                    git.toString(), "-C", checkoutRoot.toString(), "add", "-N", "--", ".");
+            ProcessResult addResult = run(addCommand,
+                    new ProcessRunner.Options(null, PROCESS_TIMEOUT, false, tempIndexEnv));
+            if (addResult.exitCode() != 0) {
+                throw new GitCommandFailedException(addCommand, addResult.exitCode(),
+                        ProcessRunner.excerpt(addResult.stderr()));
+            }
+
+            ProcessResult withUntracked = run(diffCommand,
+                    new ProcessRunner.Options(null, PROCESS_TIMEOUT, false, tempIndexEnv));
+            if (withUntracked.exitCode() != 0) {
+                throw new GitCommandFailedException(diffCommand, withUntracked.exitCode(),
+                        ProcessRunner.excerpt(withUntracked.stderr()));
+            }
+            return withUntracked;
+        } catch (IOException e) {
+            // The only IOException source in this block is the Files.copy
+            // above (no git process is spawned between it and here that
+            // could throw one) -- label the failure as what it actually is,
+            // not as a git invocation that never ran.
+            throw new GitCommandFailedException(List.of("Files.copy", "->", tempIndex.toString()), -1,
+                    e.getMessage() == null ? "could not copy the index to a temporary file" : e.getMessage());
+        } finally {
+            // A leaked temp index is a leaked file per diff -- and Review
+            // re-diffs constantly.
+            try {
+                Files.deleteIfExists(tempIndex);
+            } catch (IOException e) {
+                LOG.log(Level.WARNING, "Could not delete temporary index " + tempIndex, e);
+            }
+        }
     }
 
     private Set<String> stagedPaths(Path git, Path checkoutRoot) {
@@ -178,10 +354,10 @@ public final class DiffService implements AutoCloseable {
      * read without a worktree renders exactly like one with.
      */
     public static UnifiedDiff parseUnified(String unifiedDiff) {
-        return parse(unifiedDiff, Set.of());
+        return parse(unifiedDiff, Set.of(), Set.of());
     }
 
-    static UnifiedDiff parse(String stdout, Set<String> stagedPaths) {
+    static UnifiedDiff parse(String stdout, Set<String> stagedPaths, Set<String> untrackedPaths) {
         List<UnifiedDiff.FileDiff> files = new ArrayList<>();
 
         String path = null;
@@ -202,7 +378,7 @@ public final class DiffService implements AutoCloseable {
                         hunks.add(new UnifiedDiff.Hunk(hunkHeader, List.copyOf(lines)));
                     }
                     files.add(new UnifiedDiff.FileDiff(path, kind == null ? "M" : kind, insertions, deletions,
-                            stagedPaths.contains(path), List.copyOf(hunks)));
+                            stagedPaths.contains(path), untrackedPaths.contains(path), List.copyOf(hunks)));
                 }
                 path = parseDiffGitPath(line);
                 kind = null;
@@ -252,7 +428,7 @@ public final class DiffService implements AutoCloseable {
                 hunks.add(new UnifiedDiff.Hunk(hunkHeader, List.copyOf(lines)));
             }
             files.add(new UnifiedDiff.FileDiff(path, kind == null ? "M" : kind, insertions, deletions,
-                    stagedPaths.contains(path), List.copyOf(hunks)));
+                    stagedPaths.contains(path), untrackedPaths.contains(path), List.copyOf(hunks)));
         }
         return new UnifiedDiff(List.copyOf(files));
     }
@@ -297,14 +473,39 @@ public final class DiffService implements AutoCloseable {
 
     // ---- process execution (shared ProcessRunner, git-flavored failure translation) ----
 
+    /**
+     * Throws for a failed git invocation, mapping "not a git repository" to
+     * {@link NotAGitRepositoryException} whichever command hit it.
+     *
+     * <p>Shared rather than inlined at the diff: the untracked probe now runs
+     * <em>before</em> the diff, so in a directory that is not a repository the
+     * probe is the command that fails first, and it has to report that the
+     * same way the diff used to.</p>
+     */
+    private static void failIfFailed(List<String> command, ProcessResult result, Path checkoutRoot) {
+        if (result.exitCode() == 0) {
+            return;
+        }
+        if (result.stderr().toLowerCase(Locale.ROOT).contains("not a git repository")) {
+            throw new NotAGitRepositoryException(checkoutRoot);
+        }
+        throw new GitCommandFailedException(command, result.exitCode(),
+                ProcessRunner.excerpt(result.stderr()));
+    }
+
     private static ProcessResult run(List<String> command) {
+        return run(command, new ProcessRunner.Options(null, PROCESS_TIMEOUT, false, Map.of()));
+    }
+
+    /** As {@link #run(List)}, with explicit {@link ProcessRunner.Options} -- e.g. a {@code GIT_INDEX_FILE} override. */
+    private static ProcessResult run(List<String> command, ProcessRunner.Options options) {
         try {
-            return ProcessRunner.run(command, null, PROCESS_TIMEOUT);
+            return ProcessRunner.run(command, options);
         } catch (IOException e) {
             throw new GitCommandFailedException(command, -1, e.getMessage() == null ? "" : e.getMessage());
         } catch (ProcessTimeoutException e) {
             throw new GitCommandFailedException(command, -1,
-                    "timed out after " + PROCESS_TIMEOUT.toSeconds() + "s (killed)");
+                    "timed out after " + options.timeout().toSeconds() + "s (killed)");
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new GitCommandFailedException(command, -1, "interrupted while waiting for git");
