@@ -839,6 +839,16 @@ public final class ReviewDestinationView extends BorderPane {
         public void submit() {
             submitReview();
         }
+
+        @Override
+        public void previousIntent() {
+            moveIntent(-1);
+        }
+
+        @Override
+        public void nextIntent() {
+            moveIntent(1);
+        }
     }
 
     /**

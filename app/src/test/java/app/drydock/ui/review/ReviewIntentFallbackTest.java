@@ -76,7 +76,7 @@ class ReviewIntentFallbackTest extends ApplicationTest {
         interact(() -> view.setItems(new QueueAssembly(List.of(new ReviewItem(scope, ReviewItem.Group.MINE,
                 "Working tree", "drydock · uncommitted changes")), true, true), 1));
 
-        assertEquals("intent 1", awaitIntentLabel(),
+        assertEquals("1 · A.java", awaitIntentLabel(),
                 "the verdict bar must re-render when the diff arrives, not stay on 'no intent'");
     }
 
@@ -94,7 +94,7 @@ class ReviewIntentFallbackTest extends ApplicationTest {
 
         interact(() -> view.setItems(new QueueAssembly(List.of(new ReviewItem(scope, ReviewItem.Group.MINE,
                 "Working tree", "drydock · uncommitted changes")), true, true), 1));
-        assertEquals("intent 1", awaitIntentLabel());
+        assertEquals("1 · Alpha.java", awaitIntentLabel());
 
         assertFalse(renderedHunkFiles().contains("Zulu.java"),
                 "the fixture must start with the second file below the fold");

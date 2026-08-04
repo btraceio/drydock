@@ -280,13 +280,13 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
     void bracketsMoveBetweenIntents() {
         seed();
 
-        assertEquals("intent 1", intentLabel());
+        assertEquals("1 · src/Main.java", intentLabel());
         type(KeyCode.CLOSE_BRACKET);
-        assertEquals("intent 2", intentLabel());
+        assertEquals("2 · src/Other.java", intentLabel());
         type(KeyCode.CLOSE_BRACKET);
-        assertEquals("intent 2", intentLabel(), "the intent index clamps at the last one");
+        assertEquals("2 · src/Other.java", intentLabel(), "the intent index clamps at the last one");
         type(KeyCode.OPEN_BRACKET);
-        assertEquals("intent 1", intentLabel());
+        assertEquals("1 · src/Main.java", intentLabel());
     }
 
     @Test
@@ -296,7 +296,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
 
         type(KeyCode.N);
 
-        assertEquals("intent 2", intentLabel());
+        assertEquals("2 · src/Other.java", intentLabel());
     }
 
     /** Submitting early jumps to the first unsettled intent rather than posting a partial review. */
@@ -309,7 +309,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
         type(KeyCode.ENTER);
 
         assertTrue(host.submittedScopes.isEmpty(), "an incomplete review must not be posted");
-        assertEquals("intent 1", intentLabel());
+        assertEquals("1 · src/Main.java", intentLabel());
     }
 
     @Test
@@ -335,7 +335,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
         assertFalse(lookup(".review-findings-scroll").query().isVisible(), "the margin collapses");
         assertTrue(lookup(".review-verdict-action").queryAll().stream().anyMatch(Node::isVisible),
                 "the verdict bar must stay reachable with every rail collapsed");
-        assertEquals("intent 1", intentLabel());
+        assertEquals("1 · src/Main.java", intentLabel());
     }
 
     @Test

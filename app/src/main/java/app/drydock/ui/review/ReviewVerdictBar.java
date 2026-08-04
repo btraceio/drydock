@@ -43,11 +43,19 @@ final class ReviewVerdictBar extends VBox {
 
         /** {@code ⏎} -- submits the review, once everything is settled. */
         void submit();
+
+        /** {@code [} -- the intent before this one. */
+        void previousIntent();
+
+        /** {@code ]} -- the intent after this one. */
+        void nextIntent();
     }
 
     private final Host host;
 
     private final Label intentLabel = new Label();
+    private final Button previousButton = new Button("‹");
+    private final Button nextButton = new Button("›");
     private final Button approveButton = new Button("Approve intent");
     private final Button requestChangesButton = new Button("Request change");
     private final Button askAgentButton = new Button("Ask the agent to fix it");
@@ -72,6 +80,14 @@ final class ReviewVerdictBar extends VBox {
         getStyleClass().add("review-verdict-bar");
 
         intentLabel.getStyleClass().add("review-verdict-intent");
+
+        previousButton.getStyleClass().addAll("review-verdict-nav", "review-verdict-previous");
+        previousButton.setTooltip(new Tooltip("Previous intent ([)"));
+        previousButton.setOnAction(e -> host.previousIntent());
+
+        nextButton.getStyleClass().addAll("review-verdict-nav", "review-verdict-next");
+        nextButton.setTooltip(new Tooltip("Next intent (])"));
+        nextButton.setOnAction(e -> host.nextIntent());
 
         approveButton.getStyleClass().addAll("review-verdict-action", "primary");
         approveButton.setTooltip(new Tooltip("Approve this intent (a)"));
@@ -146,13 +162,17 @@ final class ReviewVerdictBar extends VBox {
     private void render() {
         if (intent == null) {
             intentLabel.setText("no intent");
-            actionRow.getChildren().setAll(intentLabel);
+            previousButton.setDisable(true);
+            nextButton.setDisable(true);
+            actionRow.getChildren().setAll(previousButton, nextButton, intentLabel);
             progressLabel.setText("");
             progressFill.setPrefWidth(0);
             submitButton.setDisable(true);
             return;
         }
-        intentLabel.setText("intent " + intent.number());
+        intentLabel.setText(intent.number() + " · " + intent.title());
+        previousButton.setDisable(false);
+        nextButton.setDisable(false);
 
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
@@ -165,15 +185,17 @@ final class ReviewVerdictBar extends VBox {
             settledLabel.setText(verdict.get().decision().label());
             settledLabel.getStyleClass().removeIf(styleClass -> styleClass.startsWith("decision-"));
             settledLabel.getStyleClass().add("decision-" + verdict.get().decision().wireName());
-            actionRow.getChildren().setAll(intentLabel, settledLabel, undoButton, spacer, right);
+            actionRow.getChildren().setAll(previousButton, nextButton, intentLabel,
+                    settledLabel, undoButton, spacer, right);
         } else {
             refusalLabel.setText("⚠ a blocking finding is still open");
             refusalLabel.setVisible(blocked);
             refusalLabel.setManaged(blocked);
             approveButton.pseudoClassStateChanged(
                     javafx.css.PseudoClass.getPseudoClass("refused"), blocked);
-            actionRow.getChildren().setAll(intentLabel, approveButton, requestChangesButton,
-                    askAgentButton, refusalLabel, spacer, right);
+            actionRow.getChildren().setAll(previousButton, nextButton, intentLabel,
+                    approveButton, requestChangesButton, askAgentButton, refusalLabel,
+                    spacer, right);
         }
 
         progressLabel.setText(settledCount + "/" + totalCount + " intents settled");
