@@ -1424,6 +1424,13 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
          */
         @Override
         public String diagDiffSummary(ReviewScope scope) {
+            // A scope with no checkout (a PR the human has not started a
+            // session for) is wrong-by-construction to diff: diffRoot() has
+            // nothing to point at, and running it anyway fabricates a file
+            // count for the very scopes this diagnostic exists to flag.
+            if (!scope.diffable()) {
+                return "not diffable (no checkout)";
+            }
             DiffScope diffScope = scope.kind() == ReviewScope.Kind.WORKING_TREE
                     ? DiffScope.WORKING_TREE
                     : DiffScope.BASE;

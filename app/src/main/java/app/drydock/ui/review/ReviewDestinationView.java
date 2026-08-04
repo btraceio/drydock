@@ -589,6 +589,11 @@ public final class ReviewDestinationView extends BorderPane {
         if (scope.isEmpty()) {
             margin.setFindings(List.of());
             verdictBar.update(null, Optional.empty(), false, 0, 0);
+            // No scope selected means no rail: leaving the previous scope's
+            // cards up here is how the rail came to list a departed item's
+            // files (see the whole-branch review this fixes).
+            intentRail.setIntents(List.of(), null, ReviewIntentRail.Empty.NONE);
+            mcpPanel.ifPresent(panel -> panel.setScope(null));
             return;
         }
         margin.invalidate(null);
@@ -1395,8 +1400,15 @@ public final class ReviewDestinationView extends BorderPane {
         List<String> report = new java.util.ArrayList<>();
         for (ReviewItem item : queue.items()) {
             ReviewScope itemScope = item.scope();
-            report.add(item.title() + " [base=" + itemScope.base() + "] "
-                    + host.diagDiffSummary(itemScope));
+            // A scope that is not diffable (no checkout: a PR the human has
+            // not started a session for) must never reach diffService.diff --
+            // this diagnostic exists to prove each item resolves its base,
+            // and running it anyway reports a fabricated file count for
+            // exactly the scopes the branch declares wrong-by-construction.
+            String summary = itemScope.diffable()
+                    ? host.diagDiffSummary(itemScope)
+                    : "not diffable (no checkout)";
+            report.add(item.title() + " [base=" + itemScope.base() + "] " + summary);
         }
         return report;
     }

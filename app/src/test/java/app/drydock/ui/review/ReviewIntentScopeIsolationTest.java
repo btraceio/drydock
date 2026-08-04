@@ -20,7 +20,7 @@ import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 /**
  * The reported defect: the intent rail described whichever scope last
@@ -107,7 +107,73 @@ class ReviewIntentScopeIsolationTest extends ApplicationTest {
         interact(() -> view.selectScope(worktree.id()));
 
         awaitCardCount(2);
-        assertTrue(cardCount() == 2, "the worktree's own intents come back");
+    }
+
+    /**
+     * The reported defect: {@code refreshReviewState}'s early return for "no
+     * scope selected" cleared the margin and the verdict bar but never the
+     * rail, so a rescan that emptied the queue left the previous scope's
+     * cards on screen -- a dead click describing an item no longer queued.
+     */
+    @Test
+    void theRailClearsWhenTheQueueEmpties() throws Exception {
+        Path repo = repoWithTwoChangedFiles();
+        ReviewScope worktree = registry.mint(ReviewScopeRegistry.spec(
+                ReviewScope.Kind.WORKING_TREE, repo, Optional.of(repo), "main", "main",
+                Optional.empty(), Optional.empty()));
+
+        interact(() -> view.setItems(new QueueAssembly(List.of(
+                new ReviewItem(worktree, ReviewItem.Group.MINE, "Working tree", "repo · uncommitted")),
+                true, true), 1));
+        awaitCardCount(2);
+
+        // A rescan that finds nothing (worktree pruned, or gh down): the
+        // SCAN_INCOMPLETE empty state, exactly as QueueAssembly.complete()
+        // computes it for localComplete=true, requestsComplete=false.
+        interact(() -> view.setItems(new QueueAssembly(List.of(), true, false), 1));
+        org.testfx.util.WaitForAsyncUtils.waitForFxEvents();
+
+        assertEquals(0, cardCount(), "an empty queue must clear the rail, not keep the departed scope's cards");
+    }
+
+    /**
+     * The spec's own statement of the defect (design §"cross-repository"):
+     * "selecting an item in a second repository never shows the first
+     * repository's files." Two distinct repos, two distinctly-named files,
+     * selecting the second must show only its own titles.
+     */
+    @Test
+    void aSecondRepositoryNeverShowsTheFirstRepositorysFiles() throws Exception {
+        Path repoOne = repoWithNamedFile("drydock-isolation-repo-one", "Alpha.java");
+        Path repoTwo = repoWithNamedFile("drydock-isolation-repo-two", "Zulu.java");
+        ReviewScope scopeOne = registry.mint(ReviewScopeRegistry.spec(
+                ReviewScope.Kind.WORKING_TREE, repoOne, Optional.of(repoOne), "main", "main",
+                Optional.empty(), Optional.empty()));
+        ReviewScope scopeTwo = registry.mint(ReviewScopeRegistry.spec(
+                ReviewScope.Kind.WORKING_TREE, repoTwo, Optional.of(repoTwo), "main", "main",
+                Optional.empty(), Optional.empty()));
+
+        interact(() -> view.setItems(new QueueAssembly(List.of(
+                new ReviewItem(scopeOne, ReviewItem.Group.MINE, "repo-one", "repo-one · uncommitted"),
+                new ReviewItem(scopeTwo, ReviewItem.Group.MINE, "repo-two", "repo-two · uncommitted")),
+                true, true), 2));
+
+        interact(() -> view.selectScope(scopeOne.id()));
+        awaitCardCount(1);
+        assertEquals(List.of("Alpha.java"), cardTitles());
+
+        interact(() -> view.selectScope(scopeTwo.id()));
+        awaitCardCount(1);
+        List<String> titles = cardTitles();
+        assertEquals(List.of("Zulu.java"), titles);
+        assertFalse(titles.contains("Alpha.java"), "the second repository must not carry the first's files");
+    }
+
+    private List<String> cardTitles() {
+        List<String> titles = new ArrayList<>();
+        interact(() -> lookup(".review-intent-title").queryAll()
+                .forEach(node -> titles.add(((Label) node).getText())));
+        return titles;
     }
 
     private int cardCount() {
@@ -145,6 +211,20 @@ class ReviewIntentScopeIsolationTest extends ApplicationTest {
         runGit(repo, "commit", "-m", "initial");
         Files.writeString(repo.resolve("A.java"), "class A { int x = 2; }\n");
         Files.writeString(repo.resolve("B.java"), "class B { int y = 2; }\n");
+        return repo;
+    }
+
+    /** A repo with a single changed file named {@code fileName}, for cross-repository isolation. */
+    private static Path repoWithNamedFile(String tempDirPrefix, String fileName) throws Exception {
+        Path repo = Files.createDirectories(
+                Files.createTempDirectory(tempDirPrefix).resolve("repo"));
+        runGit(repo, "init", "-b", "main");
+        runGit(repo, "config", "user.name", "Test");
+        runGit(repo, "config", "user.email", "test@example.com");
+        Files.writeString(repo.resolve(fileName), "class Original { int x = 1; }\n");
+        runGit(repo, "add", ".");
+        runGit(repo, "commit", "-m", "initial");
+        Files.writeString(repo.resolve(fileName), "class Original { int x = 2; }\n");
         return repo;
     }
 

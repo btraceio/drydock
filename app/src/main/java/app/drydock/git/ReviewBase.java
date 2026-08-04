@@ -38,9 +38,4 @@ public record ReviewBase(String ref, Origin origin) {
         Objects.requireNonNull(ref, "ref");
         Objects.requireNonNull(origin, "origin");
     }
-
-    /** "develop (forked from)" -- what the item header shows. */
-    public String describe() {
-        return ref + " (" + origin.description() + ")";
-    }
 }

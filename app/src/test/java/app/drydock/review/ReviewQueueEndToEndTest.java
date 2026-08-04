@@ -30,6 +30,7 @@ class ReviewQueueEndToEndTest {
     @AfterEach
     void tearDown() {
         diffService.close();
+        gitStatusService.close();
     }
 
     @Test
