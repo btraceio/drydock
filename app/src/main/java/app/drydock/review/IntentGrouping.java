@@ -60,32 +60,25 @@ public final class IntentGrouping {
 
     /**
      * {@code scopeId}'s intents: the reviewer's grouping when there is one,
-     * otherwise one intent per changed file, derived from {@code diff}.
+     * otherwise {@link FallbackIntents}' clustering of {@code diff}.
      */
     public List<ReviewIntent> intentsFor(String scopeId, UnifiedDiff diff) {
         List<ReviewIntent> supplied = byScope.get(scopeId);
         if (supplied != null) {
             return supplied;
         }
-        return byFile(diff);
+        return FallbackIntents.group(diff);
     }
 
-    /** The fallback grouping: one intent per changed file, in diff order. */
-    static List<ReviewIntent> byFile(UnifiedDiff diff) {
-        Map<String, ReviewIntent> intents = new LinkedHashMap<>();
-        int number = 1;
-        for (UnifiedDiff.FileDiff file : diff.files()) {
-            if (!intents.containsKey(file.path())) {
-                intents.put(file.path(), ReviewIntent.forFile(number++, file.path()));
-            }
-        }
-        return List.copyOf(intents.values());
-    }
-
-    /** The intent a given file belongs to, for anchoring a finding that names no intent. */
+    /**
+     * The intent a given file belongs to, for anchoring a finding that names
+     * no intent. Matched through the hunks an intent names rather than
+     * through its id: the fallback groups several files into one intent now,
+     * so an id can no longer be reconstructed from a path.
+     */
     public Optional<ReviewIntent> intentForFile(String scopeId, UnifiedDiff diff, String file) {
         return intentsFor(scopeId, diff).stream()
-                .filter(intent -> intent.id().equals("file:" + file))
+                .filter(intent -> intent.touches(file))
                 .findFirst();
     }
 

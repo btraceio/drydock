@@ -35,6 +35,7 @@ import app.drydock.config.UserConfig;
 import app.drydock.mcp.WorkspaceMcpSessionContext;
 import app.drydock.process.SshCommandBuilder;
 import app.drydock.review.AnnotationStore;
+import app.drydock.review.Confidence;
 import app.drydock.review.IntentGrouping;
 import app.drydock.review.QueueAssembly;
 import app.drydock.review.ReviewItem;
@@ -1231,6 +1232,32 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         }
 
         /**
+         * A comment the human wrote in the diff column's gutter composer.
+         *
+         * <p>Stored as a NIT: a human note is not a blocking finding, and
+         * anything that blocks approval would make leaving a remark on a line
+         * silently prevent the reviewer approving their own review. The
+         * intent is resolved from the file so the comment lands under the
+         * intent that owns that code rather than floating outside the
+         * grouping.</p>
+         */
+        @Override
+        public void addComment(ReviewScope scope, String file, String lineKey, String body,
+                               Optional<String> intentId) {
+            Instant now = Instant.now();
+            annotationStore.upsert(new ReviewAnnotation(
+                    scope.id(),
+                    "c_" + java.util.UUID.randomUUID(),
+                    intentId,
+                    file, lineKey, lineKey,
+                    Severity.NIT, Confidence.HIGH,
+                    Optional.empty(), "You", now,
+                    List.of(), Optional.empty(), Optional.empty(), List.of(),
+                    List.of(new ReviewAnnotation.Message("You", now, body)),
+                    Optional.empty(), AnnotationStatus.OPEN));
+        }
+
+        /**
          * {@code Apply patch}. drydock does not apply the patch itself: it
          * hands the proposal to the scope's live session, exactly as every
          * other worktree action hands work to the agent. What it records is
@@ -2397,6 +2424,11 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * transitions -- which is the only way to photograph the Detail page.
      * Reports the page Review is on afterwards.
      */
+    /** Diagnostic-only: opens Review's gutter comment composer (see the verb in DrydockApplication). */
+    public String diagOpenReviewComposer() {
+        return reviewDestination.diagOpenComposer();
+    }
+
     public String diagReviewKey(String keyCode) {
         javafx.scene.input.KeyCode code;
         try {

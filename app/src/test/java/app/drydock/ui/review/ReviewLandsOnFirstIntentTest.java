@@ -84,7 +84,8 @@ class ReviewLandsOnFirstIntentTest extends ApplicationTest {
         List<javafx.scene.Node> cards = new ArrayList<>(lookup(".review-intent-card").queryAll());
         interact(((javafx.scene.control.Button) cards.get(1))::fire);
         org.testfx.util.WaitForAsyncUtils.waitForFxEvents();
-        assertTrue(renderedHunkFiles().contains("Zulu.java"), "precondition: moved off intent 1");
+        assertTrue(renderedHunkFiles().stream().anyMatch(p -> p.endsWith("Zulu.java")),
+                "precondition: moved off intent 1");
 
         // A background queue reassembly rebuilds the rows and re-selects the
         // same scope -- the column is already showing it, so setScope takes
@@ -94,7 +95,7 @@ class ReviewLandsOnFirstIntentTest extends ApplicationTest {
         interact(() -> view.setItems(new QueueAssembly(List.of(item), true, true), 1));
         awaitCardCount(2);
 
-        assertTrue(renderedHunkFiles().contains("Alpha.java"),
+        assertTrue(renderedHunkFiles().stream().anyMatch(p -> p.endsWith("Alpha.java")),
                 "a reassembly lands on the first intent; rendered " + renderedHunkFiles());
     }
 
@@ -128,20 +129,22 @@ class ReviewLandsOnFirstIntentTest extends ApplicationTest {
         runGit(repo, "init", "-b", "main");
         runGit(repo, "config", "user.name", "Test");
         runGit(repo, "config", "user.email", "test@example.com");
-        for (String name : List.of("Alpha.java", "Zulu.java")) {
+        for (String name : List.of("alpha/Alpha.java", "zulu/Zulu.java")) {
             StringBuilder original = new StringBuilder();
             for (int i = 1; i <= 120; i++) {
                 original.append("int field").append(i).append(" = ").append(i).append(";\n");
             }
+            Files.createDirectories(repo.resolve(name).getParent());
             Files.writeString(repo.resolve(name), original.toString());
         }
         runGit(repo, "add", ".");
         runGit(repo, "commit", "-m", "two files");
-        for (String name : List.of("Alpha.java", "Zulu.java")) {
+        for (String name : List.of("alpha/Alpha.java", "zulu/Zulu.java")) {
             StringBuilder changed = new StringBuilder();
             for (int i = 1; i <= 120; i++) {
                 changed.append("int field").append(i).append(" = ").append(i * 2).append(";\n");
             }
+            Files.createDirectories(repo.resolve(name).getParent());
             Files.writeString(repo.resolve(name), changed.toString());
         }
         return repo;

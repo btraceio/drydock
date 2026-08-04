@@ -14,10 +14,21 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  */
 class ReviewIntentAnchorTest {
 
+    /**
+     * The fallback grouping addresses hunks by id exactly as a reviewer's
+     * does -- one mechanism, so the column's filter and the scroll-into-view
+     * cannot disagree about what an intent contains.
+     */
     @Test
-    void theByFileFallbackAnchorsToItsFile() {
-        assertEquals(Optional.of(new ReviewIntent.Anchor("app/src/Main.java", 0)),
-                ReviewIntent.forFile(1, "app/src/Main.java").anchor());
+    void theFallbackGroupingAnchorsThroughItsHunkIds() {
+        ReviewIntent intent = intentWith(List.of(ReviewIntent.hunkId("app/src/Main.java", 0)));
+
+        assertEquals(Optional.of(new ReviewIntent.Anchor("app/src/Main.java", 0)), intent.anchor());
+    }
+
+    @Test
+    void anIntentThatNamesNoHunksHasNoAnchor() {
+        assertEquals(Optional.empty(), intentWith(List.of()).anchor());
     }
 
     @Test

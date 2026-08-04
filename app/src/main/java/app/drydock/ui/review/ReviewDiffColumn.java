@@ -70,6 +70,13 @@ final class ReviewDiffColumn extends BorderPane {
         boolean openFileAtLine(ReviewScope scope, Path file, int line);
     }
 
+    /** Where a comment written in the gutter composer goes. */
+    @FunctionalInterface
+    interface CommentSink {
+        /** Records {@code body} as a human comment anchored to {@code lineKey} in {@code file}. */
+        void addComment(String file, String lineKey, String body);
+    }
+
     /** Findings anchored to a line, and what happens when their pin is clicked (spec §4.4). */
     interface PinSource {
         /** The pin numbers of the findings anchored to {@code lineKey} in {@code file}, in margin order. */
@@ -100,8 +107,38 @@ final class ReviewDiffColumn extends BorderPane {
     private final Label summaryLabel = new Label();
     private final Button contextToggle = new Button();
     private final Button untrackedToggle = new Button();
+
+    /**
+     * The escape hatch out of the intent filter (spec §4.4). Present only
+     * while an intent is selected, because "show all" with nothing to show
+     * all of is a control that does nothing.
+     */
+    private final Button scopeToggle = new Button();
     private final ObservableList<ReviewDiffRow> rows = FXCollections.observableArrayList();
     private final ListView<ReviewDiffRow> list = new ListView<>(rows);
+
+    /**
+     * The width rows are laid out at: the list's own viewport, never the cell.
+     *
+     * <p>Binding a row to its {@link ListCell}'s width -- which is what this
+     * replaces -- is a feedback loop, and a slow one, so it looked like it
+     * worked. A {@code ListCell}'s own preferred width is its graphic's plus
+     * its 24px of horizontal padding, and a {@code ListView} sizes every cell
+     * to the widest preferred width in the list. Bind the graphic back to the
+     * cell and each layout pass adds another 24px: measured in the running
+     * app, a 606px column rendering 1437px cells, with the hunk-card frames
+     * off the right edge behind a horizontal scrollbar the reader had to use
+     * to see the borders of cards whose content was short.</p>
+     *
+     * <p>The viewport is a {@code BorderPane}-style slot -- its width is
+     * handed down by the skin and does not depend on the cells -- so reading
+     * it here cannot feed back.</p>
+     */
+    private final javafx.beans.property.DoubleProperty viewportWidth =
+            new javafx.beans.property.SimpleDoubleProperty();
+
+    /** Fallback allowance for the vertical scrollbar, until the skin exists to measure. */
+    private static final double VERTICAL_SCROLLBAR_ALLOWANCE = 16;
 
     /**
      * Notified when a diff resolves, with the scope it resolved for.
@@ -166,6 +203,45 @@ final class ReviewDiffColumn extends BorderPane {
     private final Set<ReviewDiffRow.RunKey> expandedRuns = new HashSet<>();
 
     /**
+     * The intent the column is filtered to, or {@code null} for the whole
+     * scope. Selecting an intent in the rail used only to scroll this column,
+     * which left the rail looking like decoration on a 45-file diff: the
+     * reader clicked intent 12 and got the same wall of code they were
+     * already looking at.
+     */
+    private app.drydock.review.ReviewIntent intentFilter;
+
+    private CommentSink commentSink = (file, lineKey, body) -> { };
+
+    /**
+     * The open composer's anchor, or {@code null} for none. One at a time: a
+     * second gutter click moves it rather than opening another, because two
+     * open drafts give the reader no way to tell which one Enter would send.
+     */
+    private ReviewDiffRow.Composer composerRow;
+
+    /**
+     * The composer's node, owned by the column rather than by the cell.
+     *
+     * <p>Cells are recycled as the list scrolls, so a composer built inside
+     * {@code updateItem} would lose its half-typed draft the moment it left
+     * the viewport and came back. Holding the node here means the cell only
+     * ever adopts it.</p>
+     */
+    private Node composerNode;
+
+    /** The composer's text area, kept so Escape and submit can reach it. */
+    private javafx.scene.control.TextArea composerInput;
+
+    /**
+     * Set by the {@code whole scope} toggle: the reader has asked to see past
+     * the selected intent. Cleared whenever a different intent is selected,
+     * so the escape hatch is per-look rather than a mode that silently
+     * outlives the intent it was opened from.
+     */
+    private boolean showWholeScope;
+
+    /**
      * Guards against a slow diff of a scope the user has already navigated
      * away from overwriting a newer one. Incremented on every request; a
      * completion whose token is stale is dropped.
@@ -187,9 +263,13 @@ final class ReviewDiffColumn extends BorderPane {
         untrackedToggle.setOnAction(e -> toggleUntracked());
         untrackedToggle.setVisible(false);
         untrackedToggle.setManaged(false);
+        scopeToggle.getStyleClass().add("review-chip-button");
+        scopeToggle.setOnAction(e -> toggleWholeScope());
+        scopeToggle.setVisible(false);
+        scopeToggle.setManaged(false);
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
-        HBox header = new HBox(9, summaryLabel, spacer, untrackedToggle, contextToggle);
+        HBox header = new HBox(9, summaryLabel, spacer, scopeToggle, untrackedToggle, contextToggle);
         header.setAlignment(Pos.CENTER_LEFT);
         header.getStyleClass().add("review-diff-header");
         setTop(header);
@@ -197,9 +277,29 @@ final class ReviewDiffColumn extends BorderPane {
         list.getStyleClass().add("review-diff-list");
         list.setFocusTraversable(false);
         list.setCellFactory(view -> new DiffCell());
+        // Long lines wrap; the column never scrolls sideways. See
+        // viewportWidth for what this replaces.
+        list.skinProperty().addListener((obs, old, skin) -> bindViewportWidth());
+        bindViewportWidth();
         setCenter(list);
 
         updateContextToggle();
+    }
+
+    /**
+     * Tracks the list's real viewport once its skin exists, falling back to
+     * the list's width less a scrollbar allowance until then. The fallback
+     * matters: rows are laid out before the first skin pulse, and a viewport
+     * width of zero there would collapse every row to nothing.
+     */
+    private void bindViewportWidth() {
+        Node viewport = list.lookup(".viewport");
+        viewportWidth.unbind();
+        if (viewport instanceof Region region) {
+            viewportWidth.bind(region.widthProperty());
+        } else {
+            viewportWidth.bind(list.widthProperty().subtract(VERTICAL_SCROLLBAR_ALLOWANCE));
+        }
     }
 
     // ---- scope + loading ----------------------------------------------------
@@ -219,6 +319,11 @@ final class ReviewDiffColumn extends BorderPane {
         }
         scope = newScope;
         expandedRuns.clear();
+        // The outgoing scope's intent must not filter the incoming scope's
+        // diff: its hunk ids name files that are not in it, so the column
+        // would render empty until the new selection caught up.
+        intentFilter = null;
+        showWholeScope = false;
         // Hidden for the duration of the load: its visibility reflects
         // whether the OUTGOING scope's diff had untracked files, which says
         // nothing about the incoming one. applyDiff() re-derives it once the
@@ -278,6 +383,149 @@ final class ReviewDiffColumn extends BorderPane {
      */
     void setOnDiffResolved(java.util.function.BiConsumer<String, DiffOutcome> handler) {
         this.onDiffResolved = handler == null ? (scopeId, outcome) -> { } : handler;
+    }
+
+    /** Where gutter comments go; set once by the destination. */
+    void setCommentSink(CommentSink sink) {
+        if (sink != null) {
+            this.commentSink = sink;
+        }
+    }
+
+    // ---- the gutter comment composer ---------------------------------------
+
+    /**
+     * Opens the composer under {@code file}:{@code lineKey}, or closes it if
+     * it is already open there -- a second click on the same gutter is the
+     * reader changing their mind, not a request for a second composer.
+     */
+    private void toggleComposer(String file, String lineKey) {
+        if (composerRow != null && composerRow.file().equals(file)
+                && composerRow.lineKey().equals(lineKey)) {
+            closeComposer();
+            return;
+        }
+        composerRow = new ReviewDiffRow.Composer(file, lineKey);
+        composerNode = buildComposer(composerRow);
+        insertComposerRow();
+        if (composerInput != null) {
+            composerInput.requestFocus();
+        }
+    }
+
+    /** Closes the composer and discards its draft. Part of Escape's unwind order. */
+    void closeComposer() {
+        if (composerRow == null) {
+            return;
+        }
+        composerRow = null;
+        composerNode = null;
+        composerInput = null;
+        rows.removeIf(ReviewDiffRow.Composer.class::isInstance);
+    }
+
+    /** Whether a composer is open (Escape unwinds topmost-first). */
+    boolean composerOpen() {
+        return composerRow != null;
+    }
+
+    /**
+     * Puts the composer row directly under the line it is anchored to. Any
+     * previously open one is removed first, so the row list can never carry
+     * two.
+     */
+    private void insertComposerRow() {
+        rows.removeIf(ReviewDiffRow.Composer.class::isInstance);
+        if (composerRow == null) {
+            return;
+        }
+        for (int i = 0; i < rows.size(); i++) {
+            if (rows.get(i) instanceof ReviewDiffRow.Line line
+                    && line.file().equals(composerRow.file())
+                    && line.lineKey().equals(composerRow.lineKey())) {
+                rows.add(i + 1, composerRow);
+                return;
+            }
+        }
+        // The anchor line is not rendered (a filter or the row cap moved it).
+        // Dropping the composer silently would read as a dead click, so it is
+        // abandoned explicitly instead.
+        composerRow = null;
+        composerNode = null;
+        composerInput = null;
+    }
+
+    private Region buildComposer(ReviewDiffRow.Composer row) {
+        // The file's name, not its path: the path is already on the hunk
+        // header a few rows up, and spelling it out again here squeezed the
+        // buttons down to "Can.." and "Comm..".
+        String name = row.file().substring(row.file().lastIndexOf('/') + 1);
+        String line = row.lineKey().startsWith("n") || row.lineKey().startsWith("o")
+                ? " line " + row.lineKey().substring(1)
+                : " " + row.lineKey();
+        Label where = new Label(name + line);
+        where.getStyleClass().add("review-composer-where");
+        // Truncates before the buttons do: the label is context, the buttons
+        // are the actions.
+        where.setMinWidth(0);
+
+        javafx.scene.control.TextArea input = new javafx.scene.control.TextArea();
+        input.getStyleClass().add("review-composer-input");
+        input.setPromptText("Leave a comment on this line…");
+        input.setWrapText(true);
+        input.setPrefRowCount(3);
+        composerInput = input;
+
+        Button save = new Button("Comment");
+        save.getStyleClass().addAll("review-chip-button", "review-composer-save");
+        save.setDefaultButton(false);
+        save.setFocusTraversable(false);
+        save.setOnAction(e -> submitComposer());
+
+        Button cancel = new Button("Cancel");
+        cancel.getStyleClass().add("review-chip-button");
+        cancel.setFocusTraversable(false);
+        cancel.setOnAction(e -> closeComposer());
+
+        // Never shrink below their labels. A button reading "Comm.." is worse
+        // than no button: the reader cannot tell what it does.
+        save.setMinWidth(Region.USE_PREF_SIZE);
+        cancel.setMinWidth(Region.USE_PREF_SIZE);
+
+        // ⌘/Ctrl+Enter sends, Escape cancels: a plain Enter has to stay a
+        // newline, because a comment on a diff is usually more than one line.
+        input.addEventFilter(javafx.scene.input.KeyEvent.KEY_PRESSED, event -> {
+            if (event.getCode() == javafx.scene.input.KeyCode.ENTER && event.isShortcutDown()) {
+                submitComposer();
+                event.consume();
+            } else if (event.getCode() == javafx.scene.input.KeyCode.ESCAPE) {
+                closeComposer();
+                event.consume();
+            }
+        });
+
+        Region spacer = new Region();
+        HBox.setHgrow(spacer, Priority.ALWAYS);
+        HBox actions = new HBox(8, where, spacer, cancel, save);
+        actions.setAlignment(Pos.CENTER_LEFT);
+
+        VBox box = new VBox(6, input, actions);
+        box.getStyleClass().add("review-composer");
+        return box;
+    }
+
+    /** Sends the draft. A blank one is a no-op rather than an empty comment. */
+    private void submitComposer() {
+        if (composerRow == null || composerInput == null) {
+            return;
+        }
+        String body = composerInput.getText().strip();
+        if (body.isEmpty()) {
+            closeComposer();
+            return;
+        }
+        commentSink.addComment(composerRow.file(), composerRow.lineKey(), body);
+        closeComposer();
     }
 
     /** Supplies the {@code ◆n} pins; set once by the destination. */
@@ -373,6 +621,43 @@ final class ReviewDiffColumn extends BorderPane {
         getStyleClass().add(density.styleClass());
     }
 
+    /**
+     * Filters the column to {@code intent}, or to the whole scope when it is
+     * {@code null}. Re-selecting the same intent is a no-op so that walking
+     * the rail with {@code [}/{@code ]} and coming back does not discard a
+     * "whole scope" the reader asked for.
+     */
+    void setIntent(app.drydock.review.ReviewIntent intent) {
+        String was = intentFilter == null ? null : intentFilter.id();
+        String now = intent == null ? null : intent.id();
+        if (java.util.Objects.equals(was, now)) {
+            return;
+        }
+        intentFilter = intent;
+        showWholeScope = false;
+        expandedRuns.clear();
+        rebuild();
+    }
+
+    /** The {@code whole scope} / {@code this intent} chip. */
+    private void toggleWholeScope() {
+        showWholeScope = !showWholeScope;
+        rebuild();
+    }
+
+    /** Whether the rows are currently narrowed to one intent. */
+    private boolean filtering() {
+        return intentFilter != null && !showWholeScope;
+    }
+
+    private ReviewDiffRows.HunkFilter hunkFilter() {
+        if (!filtering()) {
+            return ReviewDiffRows.HunkFilter.ALL;
+        }
+        app.drydock.review.ReviewIntent intent = intentFilter;
+        return intent::containsHunk;
+    }
+
     /** {@code c}: shows or hides unchanged lines entirely. */
     void toggleContext() {
         showContext = !showContext;
@@ -447,10 +732,39 @@ final class ReviewDiffColumn extends BorderPane {
     }
 
     private void rebuild() {
-        rows.setAll(ReviewDiffRows.build(displayedDiff,
-                new ReviewDiffRows.Options(showContext, expandedRuns, MAX_RENDERED_ROWS)));
+        rows.setAll(ReviewDiffRows.build(displayedDiff, buildOptions()));
+        // Re-anchored rather than dropped: a rebuild happens for reasons that
+        // have nothing to do with the draft (a pin refresh, the context
+        // toggle), and losing typed text to one of those is the kind of thing
+        // a reader never forgives.
+        insertComposerRow();
+        updateScopeToggle();
         updateSummary();
         list.scrollTo(0);
+    }
+
+    private ReviewDiffRows.Options buildOptions() {
+        return new ReviewDiffRows.Options(showContext, expandedRuns, MAX_RENDERED_ROWS, hunkFilter());
+    }
+
+    /**
+     * The escape hatch's label. It names what clicking it WOULD show, not
+     * what is showing -- a chip reading "this intent" while the intent is
+     * already the only thing on screen says nothing about what it does.
+     */
+    private void updateScopeToggle() {
+        boolean present = intentFilter != null;
+        scopeToggle.setVisible(present);
+        scopeToggle.setManaged(present);
+        if (!present) {
+            return;
+        }
+        scopeToggle.setText(showWholeScope
+                ? "intent " + intentFilter.number() + " only"
+                : "whole scope");
+        scopeToggle.setTooltip(new Tooltip(showWholeScope
+                ? "Narrow back to intent " + intentFilter.number() + ": " + intentFilter.title()
+                : "Show every hunk in this scope, not just intent " + intentFilter.number()));
     }
 
     private void showMessage(String text) {
@@ -458,7 +772,21 @@ final class ReviewDiffColumn extends BorderPane {
         updateSummary();
     }
 
+    /**
+     * The header count. While the column is filtered this counts what is
+     * ACTUALLY on screen and names the intent it belongs to; the scope's own
+     * totals would contradict the rows directly below them.
+     */
     private void updateSummary() {
+        if (filtering()) {
+            // Hunks, not files: an intent's title often already carries its
+            // file count ("drydock/git · 4 files"), and appending another one
+            // read as "4 files · 4 files".
+            long hunks = rows.stream().filter(ReviewDiffRow.HunkHeader.class::isInstance).count();
+            summaryLabel.setText("intent " + intentFilter.number() + "  ·  " + intentFilter.title()
+                    + "  ·  " + hunks + (hunks == 1 ? " hunk" : " hunks"));
+            return;
+        }
         int files = displayedDiff.files().size();
         int insertions = displayedDiff.files().stream().mapToInt(UnifiedDiff.FileDiff::insertions).sum();
         int deletions = displayedDiff.files().stream().mapToInt(UnifiedDiff.FileDiff::deletions).sum();
@@ -470,8 +798,10 @@ final class ReviewDiffColumn extends BorderPane {
     /** Expands one collapsed run in place; a full rebuild is a single list swap. */
     private void expandRun(ReviewDiffRow.CollapsedRun run) {
         expandedRuns.add(run.key());
-        rows.setAll(ReviewDiffRows.build(displayedDiff,
-                new ReviewDiffRows.Options(showContext, expandedRuns, MAX_RENDERED_ROWS)));
+        // Deliberately not rebuild(): that scrolls back to the top, and
+        // expanding a run is the one action whose whole point is to stay
+        // where the reader already is.
+        rows.setAll(ReviewDiffRows.build(displayedDiff, buildOptions()));
     }
 
     /**
@@ -497,14 +827,34 @@ final class ReviewDiffColumn extends BorderPane {
                 case ReviewDiffRow.HunkHeader header -> buildHunkHeader(header);
                 case ReviewDiffRow.Line line -> buildLine(line);
                 case ReviewDiffRow.CollapsedRun run -> buildCollapsedRun(run);
+                // The view-owned node, never a fresh one: rebuilding it here
+                // would discard the draft every time the cell was recycled.
+                case ReviewDiffRow.Composer ignored ->
+                        composerNode != null ? composerNode : new Region();
                 case ReviewDiffRow.Truncation truncation ->
                         message("… diff truncated at " + truncation.limit() + " rows");
                 case ReviewDiffRow.Message text -> message(text.text());
             };
             if (node instanceof Region region) {
-                // Width only. Binding height would fix the row height, which
-                // is exactly the bug that hid code behind no scrollbar.
-                region.prefWidthProperty().bind(widthProperty());
+                // Width only, and to the VIEWPORT -- never to this cell. See
+                // ReviewDiffColumn.viewportWidth: binding a row back to the
+                // cell that sizes itself from the row is a feedback loop that
+                // grew the cards 24px per layout pass until they hung off the
+                // right edge of the column.
+                //
+                // Height is deliberately never bound: a fixed row height was
+                // the bug that hid code behind no scrollbar, and rows have to
+                // grow now that long lines wrap.
+                javafx.beans.binding.DoubleBinding rowWidth =
+                        javafx.beans.binding.Bindings.createDoubleBinding(
+                                () -> Math.max(0, viewportWidth.get()
+                                        - getInsets().getLeft() - getInsets().getRight()),
+                                viewportWidth, insetsProperty());
+                region.prefWidthProperty().bind(rowWidth);
+                // maxWidth is what makes the TextFlow wrap instead of running
+                // off the side; without it prefWidth is only a suggestion a
+                // wider child can overrule.
+                region.maxWidthProperty().bind(rowWidth);
             }
             setGraphic(node);
         }
@@ -573,6 +923,18 @@ final class ReviewDiffColumn extends BorderPane {
         Label newNumber = new Label(line.newLine().isPresent()
                 ? String.valueOf(line.newLine().getAsInt()) : "");
         newNumber.getStyleClass().add("review-code-gutter");
+        // Clicking either gutter number opens the comment composer on this
+        // line. Both, not just one: which of the two carries a number depends
+        // on whether the line was added or deleted, and a reader aiming at
+        // "the line numbers" should not have to know that.
+        for (Label gutter : List.of(oldNumber, newNumber)) {
+            gutter.getStyleClass().add("commentable");
+            gutter.setOnMouseClicked(e -> {
+                toggleComposer(row.file(), row.lineKey());
+                e.consume();
+            });
+            gutter.setTooltip(new Tooltip("Comment on this line"));
+        }
 
         Label sign = new Label(switch (line.kind()) {
             case ADD -> "+";
@@ -586,13 +948,13 @@ final class ReviewDiffColumn extends BorderPane {
         });
 
         TextFlow source = highlighted(row.file(), line.text());
-        // Deliberately NOT Hgrow. A growing source column pushes the pin to
-        // the right edge of the CONTENT, which on a wide diff is far outside
-        // the viewport -- the pins were rendering correctly and were simply
-        // never on screen. Sitting the pin immediately after the code keeps
-        // it visible without horizontal scrolling; the design right-aligns it
-        // to the card edge instead, which a virtualized row whose width is
-        // the widest line in the whole diff cannot do.
+        // Hgrow, now that a row is exactly as wide as the viewport rather
+        // than as wide as the widest line in the whole diff. That is what
+        // makes the TextFlow wrap a long line instead of running off the
+        // side, and it puts the pin at the card's right edge where the design
+        // wants it -- which was impossible while the card edge itself was
+        // off-screen.
+        HBox.setHgrow(source, Priority.ALWAYS);
 
         HBox box = new HBox(oldNumber, newNumber, sign, source);
         for (Pin pin : pinSource.pinsAt(row.file(), row.lineKey())) {
@@ -762,6 +1124,18 @@ final class ReviewDiffColumn extends BorderPane {
         return box;
     }
 
+    /** Diagnostic-only: opens the composer on the first changed line rendered. */
+    String diagOpenComposer() {
+        for (ReviewDiffRow row : rows) {
+            if (row instanceof ReviewDiffRow.Line line
+                    && line.line().kind() != UnifiedDiff.Line.Kind.CONTEXT) {
+                toggleComposer(line.file(), line.lineKey());
+                return "composer on " + line.file() + " " + line.lineKey();
+            }
+        }
+        return "no changed line to comment on";
+    }
+
     /** Diagnostic/test-only: the rows currently rendered. */
     List<ReviewDiffRow> diagRows() {
         return List.copyOf(rows);
@@ -770,5 +1144,42 @@ final class ReviewDiffColumn extends BorderPane {
     /** Diagnostic/test-only: the scope currently rendered. */
     Optional<ReviewScope> diagScope() {
         return Optional.ofNullable(scope);
+    }
+
+    /**
+     * Diagnostic-only: the column's real laid-out widths.
+     *
+     * <p>This is what turned "the diff is too wide" into a measurement --
+     * a 606px column rendering 1437px cells -- and it is the check that the
+     * cards still fit: {@code maxCell} must not exceed {@code viewport}, and
+     * the horizontal scrollbar must not be visible. The FX layer has no
+     * headless harness inside the running app (docs/architecture.md), so
+     * this is how that stays verifiable rather than eyeballed.</p>
+     */
+    String diagWidths() {
+        Node viewport = list.lookup(".viewport");
+        double viewportWidth = viewport instanceof Region region ? region.getWidth() : -1;
+        double maxCell = 0;
+        double maxGraphic = 0;
+        for (Node cell : list.lookupAll(".review-diff-cell")) {
+            if (cell instanceof Region region) {
+                maxCell = Math.max(maxCell, region.getWidth());
+                if (cell instanceof javafx.scene.control.Cell<?> c
+                        && c.getGraphic() instanceof Region graphic) {
+                    maxGraphic = Math.max(maxGraphic, graphic.prefWidth(-1));
+                }
+            }
+        }
+        String hbar = "none";
+        for (Node bar : list.lookupAll(".scroll-bar")) {
+            if (bar instanceof javafx.scene.control.ScrollBar sb
+                    && sb.getOrientation() == javafx.geometry.Orientation.HORIZONTAL) {
+                hbar = "visible=" + sb.isVisible() + " max=" + (int) sb.getMax()
+                        + " visibleAmount=" + (int) sb.getVisibleAmount();
+            }
+        }
+        return "column=" + (int) getWidth() + " list=" + (int) list.getWidth()
+                + " viewport=" + (int) viewportWidth + " maxCell=" + (int) maxCell
+                + " maxGraphicPref=" + (int) maxGraphic + " hbar[" + hbar + "]";
     }
 }

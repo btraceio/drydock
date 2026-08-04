@@ -136,6 +136,26 @@ public final class ReviewDestinationView extends BorderPane {
         /** Appends a human message to a thread (Reply, and the ASK chips). */
         void postMessage(ReviewScope scope, ReviewAnnotation finding, String body);
 
+        /**
+         * Records a comment the human wrote against a line, from the diff
+         * column's gutter composer.
+         *
+         * <p>A comment and a reviewer's finding are the same thing in this
+         * model and differ only by author (see {@link ReviewAnnotation}), so
+         * this lands in the same store the margin and the {@code ◆n} pins
+         * already render from -- there is no second kind of note to keep in
+         * sync.</p>
+         *
+         * <p>{@code intentId} is resolved by the view, not looked up here,
+         * for the same reason {@link #intents} takes its diff as a parameter:
+         * the only correct grouping is the one the caller has already
+         * established belongs to this scope's current diff. Empty when no
+         * intent covers the file, which costs the comment nothing -- the
+         * margin falls back to matching it by file.</p>
+         */
+        void addComment(ReviewScope scope, String file, String lineKey, String body,
+                        Optional<String> intentId);
+
         /** {@code Apply patch} -- a human click; drydock never applies one on its own. */
         void applyPatch(ReviewScope scope, ReviewAnnotation finding);
 
@@ -233,6 +253,23 @@ public final class ReviewDestinationView extends BorderPane {
     private boolean intentsCollapsedByUser;
 
     private final Label countsLabel = new Label();
+
+    /** The item header (icon, title, context, session row); hidden when there is no item. */
+    private VBox itemHeader;
+
+    /**
+     * True while the queue has no items at all.
+     *
+     * <p>Everything except the title bar and the centred state is hidden in
+     * that case. It used to all stay on screen: an empty queue rail with a
+     * live filter field, an empty intent rail reading {@code 0/0}, a findings
+     * margin claiming "Nothing flagged in this intent" when there was no
+     * intent, and a verdict bar with dead arrows, a {@code 0/0} progress bar
+     * and a disabled Submit -- five regions describing an item that did not
+     * exist, framing one sentence that did. A surface with nothing in it
+     * should be one thing, not the full chrome with the content removed.</p>
+     */
+    private boolean queueEmpty;
 
     /**
      * The {@code ‹} affordance naming the tab Review was entered from
@@ -335,6 +372,17 @@ public final class ReviewDestinationView extends BorderPane {
         });
         margin.setOnFilterChanged(filter -> refreshReviewState());
         diffColumn.setPinSource(new PinSource());
+        diffColumn.setCommentSink((file, lineKey, body) -> selectedScope().ifPresent(scope -> {
+            // The intent that owns this code, so the comment lands under it
+            // rather than floating outside the grouping.
+            Optional<String> intentId = intents().stream()
+                    .filter(intent -> intent.touches(file))
+                    .findFirst()
+                    .map(ReviewIntent::id);
+            host.addComment(scope, file, lineKey, body, intentId);
+            refreshReviewState();
+            diffColumn.refreshPins();
+        }));
         // The by-file intent fallback is derived from the diff, and the diff
         // arrives asynchronously -- so the verdict bar has to be re-rendered
         // when it lands, or it stays on the "no intent" it correctly computed
@@ -443,6 +491,7 @@ public final class ReviewDestinationView extends BorderPane {
 
         VBox header = new VBox(row1, row2);
         header.getStyleClass().add("review-item-header");
+        itemHeader = header;
 
         body.getStyleClass().add("review-body");
         HBox.setHgrow(body, Priority.ALWAYS);
@@ -490,6 +539,8 @@ public final class ReviewDestinationView extends BorderPane {
                             : ReviewEmptyState.SCAN_INCOMPLETE);
             return;
         }
+        queueEmpty = false;
+        applyResponsiveLayout(getWidth());
         boolean stillThere = previous != null
                 && items.stream().anyMatch(item -> item.scope().id().equals(previous));
         if (stillThere) {
@@ -516,6 +567,7 @@ public final class ReviewDestinationView extends BorderPane {
      * Review was opened from.
      */
     private void showEmpty(ReviewEmptyState state) {
+        queueEmpty = true;
         headerIcon.setText("◨");
         headerTitle.setText(state.title());
         headerContext.setText("");
@@ -533,6 +585,7 @@ public final class ReviewDestinationView extends BorderPane {
         }
         body.getChildren().setAll(placeholder);
         refreshReviewState();
+        applyResponsiveLayout(getWidth());
     }
 
     /** Hides the whole session row -- dot, line, button and hint. */
@@ -636,11 +689,34 @@ public final class ReviewDestinationView extends BorderPane {
         if (current.isEmpty()) {
             return all;
         }
-        return all.stream()
-                .filter(finding -> finding.intentId()
-                        .map(id -> id.equals(current.get().id()))
-                        .orElse(true))
-                .toList();
+        return all.stream().filter(finding -> belongsToCurrentIntent(finding)).toList();
+    }
+
+    /**
+     * Whether a finding belongs under the intent now selected.
+     *
+     * <p>Matched by id when the finding names an intent the current grouping
+     * actually contains, and by file otherwise. That second path is the
+     * important one: a finding can name an intent that no longer exists --
+     * a reviewer re-grouped, or the finding was stored under an older
+     * grouping and read back. Matching on the id alone made such a finding
+     * belong to no intent at all, so it silently disappeared from every
+     * margin instead of being shown somewhere. A finding is a thing a human
+     * or an agent went to the trouble of writing down; it must not be
+     * possible for the UI to lose one by regrouping around it.</p>
+     */
+    private boolean belongsToCurrentIntent(ReviewAnnotation finding) {
+        ReviewIntent current = currentIntent().orElse(null);
+        if (current == null) {
+            return true;
+        }
+        String named = finding.intentId().orElse(null);
+        if (named != null && intents().stream().anyMatch(intent -> intent.id().equals(named))) {
+            return named.equals(current.id());
+        }
+        // Unnamed, or naming an intent this grouping does not have: fall back
+        // to where the finding actually is.
+        return current.touches(finding.file());
     }
 
     /**
@@ -716,22 +792,31 @@ public final class ReviewDestinationView extends BorderPane {
                 .filter(intent -> host.verdict(scope, intent).isPresent())
                 .count();
         boolean blocked = host.findings(scope).stream()
-                .filter(finding -> finding.intentId()
-                        .map(id -> id.equals(current.get().id()))
-                        .orElse(true))
+                .filter(this::belongsToCurrentIntent)
                 .anyMatch(ReviewAnnotation::blocksApproval);
         verdictBar.update(current.get(), host.verdict(scope, current.get()), blocked,
                 (int) settled, counted.size());
     }
 
     /**
-     * Brings the current intent's code into view. Selecting an intent that
-     * left the diff where it was is the bug this fixes: the rail said one
-     * thing and the centre showed another, so the rail read as decoration.
+     * Points the diff column at the current intent.
+     *
+     * <p>The column narrows to that intent's hunks rather than merely
+     * scrolling to them. Scrolling was what this did before, and on a
+     * 45-file diff it was indistinguishable from doing nothing: the reader
+     * clicked intent 12 and got the same wall of code, so the rail read as
+     * decoration. The column's own {@code whole scope} chip is the way
+     * back out (spec §4.4).</p>
      */
     private void revealCurrentIntent() {
-        currentIntent().flatMap(ReviewIntent::anchor)
-                .ifPresent(anchor -> diffColumn.revealHunk(anchor.file(), anchor.hunkIndex()));
+        ReviewIntent intent = currentIntent().orElse(null);
+        diffColumn.setIntent(intent);
+        // Still scrolled, for the case the reader has taken the escape hatch:
+        // the whole scope is on screen and the intent has to be found in it.
+        if (intent != null) {
+            intent.anchor().ifPresent(anchor ->
+                    diffColumn.revealHunk(anchor.file(), anchor.hunkIndex()));
+        }
     }
 
     /** {@code [} / {@code ]}: moves the intent the verdict bar is settling. */
@@ -849,8 +934,7 @@ public final class ReviewDestinationView extends BorderPane {
             selectedScope().ifPresent(scope -> host.askAgentToFix(scope, intent,
                     host.findings(scope).stream()
                             .filter(finding -> !finding.resolved())
-                            .filter(finding -> finding.intentId()
-                                    .map(id -> id.equals(intent.id())).orElse(true))
+                            .filter(ReviewDestinationView.this::belongsToCurrentIntent)
                             .toList()));
         }
 
@@ -1080,6 +1164,11 @@ public final class ReviewDestinationView extends BorderPane {
      * exactly what they chose.</p>
      */
     private void applyResponsiveLayout(double width) {
+        if (queueEmpty) {
+            applyEmptySurface();
+            return;
+        }
+        showEveryRegion();
         // A width of 0 is the pre-layout state, not a narrow window; drilling
         // in there would flash the Browse page on every first show.
         boolean narrowNow = width > 0 && width < DRILL_IN_WIDTH;
@@ -1106,6 +1195,51 @@ public final class ReviewDestinationView extends BorderPane {
         intentRail.setCollapsed(intentsCollapsedByUser || width < INTENT_COLLAPSE_WIDTH);
         margin.setNarrow(width < NARROW_WIDTH);
         margin.setCollapsed(marginCollapsedByUser || width < MARGIN_COLLAPSE_WIDTH);
+    }
+
+    /**
+     * The empty surface: the title bar, and one centred state in the middle
+     * of the window. Every region that describes an item is hidden rather
+     * than left empty -- see {@link #queueEmpty}.
+     *
+     * <p>The drill-in is unwound here too. Its whole job is to trade width
+     * between rails that are not on screen, and leaving the view in a narrow
+     * page meant the centred state could land in a slot the layout had
+     * already given to a hidden rail.</p>
+     */
+    private void applyEmptySurface() {
+        if (drilledIn) {
+            drilledIn = false;
+            queue.setSpanWidth(0);
+            intentRail.setSpanWidth(0);
+            setCenter(centre);
+        }
+        setLeft(null);
+        setCenter(centre);
+        show(rails, false);
+        show(margin, false);
+        show(verdictBar, false);
+        show(itemHeader, false);
+        show(queueBackChip, false);
+        mcpPanel.ifPresent(panel -> show(panel, false));
+    }
+
+    /** Undoes {@link #applyEmptySurface}; the responsive rules take it from here. */
+    private void showEveryRegion() {
+        show(margin, true);
+        show(verdictBar, true);
+        show(itemHeader, true);
+        if (getLeft() == null && !drilledIn) {
+            setLeft(rails);
+        }
+    }
+
+    private static void show(javafx.scene.Node node, boolean visible) {
+        if (node == null) {
+            return;
+        }
+        node.setVisible(visible);
+        node.setManaged(visible);
     }
 
     /**
@@ -1390,6 +1524,10 @@ public final class ReviewDestinationView extends BorderPane {
             diffColumn.hideLens();
             return true;
         }
+        if (diffColumn.composerOpen()) {
+            diffColumn.closeComposer();
+            return true;
+        }
         if (mcpPanel.filter(javafx.scene.Node::isVisible).isPresent()) {
             toggleMcpPanel();
             return true;
@@ -1447,6 +1585,31 @@ public final class ReviewDestinationView extends BorderPane {
         refreshReviewState();
     }
 
+    /**
+     * Test-only: renders {@code diff} in the column as though it had been
+     * read for {@code scope}, with no git behind it.
+     *
+     * <p>Safe after the body has already asked for a real diff: {@code
+     * showDiff} bumps the column's request token, so the in-flight git
+     * completion is dropped rather than overwriting this one.</p>
+     */
+    void diagShowDiff(ReviewScope forScope, app.drydock.git.UnifiedDiff diff) {
+        diffColumn.showDiff(forScope, diff);
+    }
+
+    /**
+     * Diagnostic-only: opens the gutter comment composer on the first
+     * rendered changed line, and says where it landed.
+     *
+     * <p>The composer is opened by a mouse click on a 34px label inside a
+     * virtualized cell, which the screenshot harness cannot aim at. This is
+     * how the one part of it that no unit test can show -- what it actually
+     * looks like sitting in the diff -- gets photographed.</p>
+     */
+    public String diagOpenComposer() {
+        return diffColumn.diagOpenComposer();
+    }
+
     /** Diagnostic-only: selects the {@code index}-th queue item, for the visual pass. */
     public void diagSelectItem(int index) {
         List<ReviewItem> items = queue.items();
@@ -1493,7 +1656,8 @@ public final class ReviewDestinationView extends BorderPane {
     /** Diagnostic-only: the widths the drill-in actually resolved to, for the visual pass. */
     public String diagLayoutWidths() {
         return diagNarrowPage() + " view=" + (int) getWidth() + " rails=" + (int) rails.getWidth()
-                + " queue=" + (int) queue.getWidth() + " intents=" + (int) intentRail.getWidth();
+                + " queue=" + (int) queue.getWidth() + " intents=" + (int) intentRail.getWidth()
+                + " | diff " + diffColumn.diagWidths();
     }
 
     /** Diagnostic-only: every queue item, filtered or not (visual verification harness). */

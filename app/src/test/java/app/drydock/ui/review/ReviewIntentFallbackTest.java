@@ -75,7 +75,7 @@ class ReviewIntentFallbackTest extends ApplicationTest {
         interact(() -> view.setItems(new QueueAssembly(List.of(new ReviewItem(scope, ReviewItem.Group.MINE,
                 "Working tree", "drydock · uncommitted changes")), true, true), 1));
 
-        assertEquals("1 · A.java", awaitIntentLabel(),
+        assertEquals("1 · B.java", awaitIntentLabel(),
                 "the verdict bar must re-render when the diff arrives, not stay on 'no intent'");
     }
 
@@ -95,17 +95,17 @@ class ReviewIntentFallbackTest extends ApplicationTest {
                 "Working tree", "drydock · uncommitted changes")), true, true), 1));
         assertEquals("1 · Alpha.java", awaitIntentLabel());
 
-        assertFalse(renderedHunkFiles().contains("Zulu.java"),
+        assertFalse(renderedHunkFiles().stream().anyMatch(p -> p.endsWith("Zulu.java")),
                 "the fixture must start with the second file below the fold");
 
         // fire() rather than clickOn(): what is under test is the handler, not
         // TestFX's ability to land a pointer on a rail card.
         List<javafx.scene.Node> cards = new ArrayList<>(lookup(".review-intent-card").queryAll());
-        assertEquals(2, cards.size(), "expected one intent per changed file");
+        assertEquals(2, cards.size(), "expected one intent per changed directory");
         interact(((javafx.scene.control.Button) cards.get(1))::fire);
         org.testfx.util.WaitForAsyncUtils.waitForFxEvents();
 
-        assertTrue(renderedHunkFiles().contains("Zulu.java"),
+        assertTrue(renderedHunkFiles().stream().anyMatch(p -> p.endsWith("Zulu.java")),
                 "selecting the second intent must scroll to its file; rendered " + renderedHunkFiles());
     }
 
@@ -123,20 +123,22 @@ class ReviewIntentFallbackTest extends ApplicationTest {
         runGit(repo, "init", "-b", "main");
         runGit(repo, "config", "user.name", "Test");
         runGit(repo, "config", "user.email", "test@example.com");
-        for (String name : List.of("Alpha.java", "Zulu.java")) {
+        for (String name : List.of("alpha/Alpha.java", "zulu/Zulu.java")) {
             StringBuilder original = new StringBuilder();
             for (int i = 1; i <= 120; i++) {
                 original.append("int field").append(i).append(" = ").append(i).append(";\n");
             }
+            Files.createDirectories(repo.resolve(name).getParent());
             Files.writeString(repo.resolve(name), original.toString());
         }
         runGit(repo, "add", ".");
         runGit(repo, "commit", "-m", "two files");
-        for (String name : List.of("Alpha.java", "Zulu.java")) {
+        for (String name : List.of("alpha/Alpha.java", "zulu/Zulu.java")) {
             StringBuilder changed = new StringBuilder();
             for (int i = 1; i <= 120; i++) {
                 changed.append("int field").append(i).append(" = ").append(i * 2).append(";\n");
             }
+            Files.createDirectories(repo.resolve(name).getParent());
             Files.writeString(repo.resolve(name), changed.toString());
         }
         return repo;
@@ -163,12 +165,14 @@ class ReviewIntentFallbackTest extends ApplicationTest {
         runGit(repo, "init", "-b", "main");
         runGit(repo, "config", "user.name", "Test");
         runGit(repo, "config", "user.email", "test@example.com");
-        Files.writeString(repo.resolve("A.java"), "class A { int x = 1; }\n");
-        Files.writeString(repo.resolve("B.java"), "class B { int y = 1; }\n");
+        Files.createDirectories(repo.resolve("src"));
+        Files.createDirectories(repo.resolve("lib"));
+        Files.writeString(repo.resolve("src/A.java"), "class A { int x = 1; }\n");
+        Files.writeString(repo.resolve("lib/B.java"), "class B { int y = 1; }\n");
         runGit(repo, "add", ".");
         runGit(repo, "commit", "-m", "initial");
-        Files.writeString(repo.resolve("A.java"), "class A { int x = 2; }\n");
-        Files.writeString(repo.resolve("B.java"), "class B { int y = 2; }\n");
+        Files.writeString(repo.resolve("src/A.java"), "class A { int x = 2; }\n");
+        Files.writeString(repo.resolve("lib/B.java"), "class B { int y = 2; }\n");
         return repo;
     }
 

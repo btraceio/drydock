@@ -2575,6 +2575,41 @@
     -fx-font-family: "JetBrains Mono", "Menlo", monospace;
     -fx-padding: 0 6 0 0;
 }
+/* The gutter is the comment affordance. Discoverable on hover rather than
+   permanently decorated: a marker on every line of a 4000-row diff is noise,
+   but a gutter that gives no sign it is clickable is the reason this stopped
+   being findable at all. */
+.review-code-gutter.commentable {
+    -fx-cursor: hand;
+}
+.review-code-gutter.commentable:hover {
+    -fx-background-color: -drydock-accent;
+    -fx-text-fill: -drydock-main;
+    -fx-background-radius: 3px;
+}
+
+/* The inline comment composer, sitting under the line it is anchored to. */
+.review-composer {
+    -fx-background-color: -drydock-sidebar;
+    -fx-border-color: -drydock-accent;
+    -fx-border-width: 0 0 0 2;
+    -fx-padding: 8 10 8 10;
+}
+.review-composer-where {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-composer-input {
+    -fx-font-size: 12px;
+}
+.review-composer-input .content {
+    -fx-background-color: -drydock-main;
+}
+.review-composer-save {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-text-fill: -drydock-accent;
+}
 .review-code-sign {
     -fx-min-width: 12px;
     -fx-max-width: 12px;
@@ -3047,9 +3082,36 @@
     -fx-font-weight: 600;
 }
 .review-intent-card:selected .review-intent-title { -fx-text-fill: -drydock-text; }
+/* The kind tag. Chipped and colour-keyed rather than plain faint text: it is
+   the fastest way to tell a production change from the tests and lockfiles
+   that came with it, and every card used to read "change" so the tag was
+   carrying no information at all. */
 .review-intent-tag {
     -fx-text-fill: -drydock-text-faint;
     -fx-font-size: 9px;
+    -fx-padding: 1 5 1 5;
+    -fx-background-radius: 100px;
+    -fx-background-color: -drydock-border;
+}
+.review-intent-tag.kind-change {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-text-fill: -drydock-accent;
+}
+.review-intent-tag.kind-tests {
+    -fx-background-color: -drydock-resolved-soft;
+    -fx-text-fill: -drydock-resolved;
+}
+.review-intent-tag.kind-config {
+    -fx-background-color: -drydock-question-soft;
+    -fx-text-fill: -drydock-question;
+}
+/* Generated output stays deliberately flat -- it is the one kind the reader
+   is being told they can skip. */
+.review-intent-tag.kind-generated,
+.review-intent-tag.kind-move,
+.review-intent-tag.kind-refactor {
+    -fx-background-color: -drydock-border;
+    -fx-text-fill: -drydock-text-faint;
 }
 .review-intent-rationale {
     -fx-text-fill: -drydock-text-faint;

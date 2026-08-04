@@ -145,6 +145,21 @@ final class FakeReviewHost implements ReviewDestinationView.Host {
                 new ReviewAnnotation.Message("You", Instant.now(), body)));
     }
 
+    /** Written into the same store the real host uses, so the margin and pins pick it up. */
+    @Override
+    public void addComment(ReviewScope scope, String file, String lineKey, String body,
+                           Optional<String> intentId) {
+        Instant now = Instant.now();
+        store.upsert(new ReviewAnnotation(scope.id(), "c_" + (++commentCount), intentId,
+                file, lineKey, lineKey, Severity.NIT, app.drydock.review.Confidence.HIGH,
+                Optional.empty(), "You", now, List.of(), Optional.empty(), Optional.empty(),
+                List.of(), List.of(new ReviewAnnotation.Message("You", now, body)),
+                Optional.empty(), AnnotationStatus.OPEN));
+    }
+
+    /** Sequential rather than random, so a test can name the comment it just made. */
+    int commentCount;
+
     @Override
     public void applyPatch(ReviewScope scope, ReviewAnnotation finding) {
         finding.patch().ifPresent(patch -> {
