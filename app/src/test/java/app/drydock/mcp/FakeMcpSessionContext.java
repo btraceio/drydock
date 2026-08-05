@@ -1,6 +1,8 @@
 package app.drydock.mcp;
 
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.mcp.McpSessionContext.RenameKind;
+import app.drydock.mcp.McpSessionContext.RenameOutcome;
 import app.drydock.review.ReviewAnnotation;
 
 import java.nio.file.Path;
@@ -222,5 +224,23 @@ final class FakeMcpSessionContext implements McpSessionContext {
         startedSessions.add(worktree);
         initialPrompt.ifPresent(startedPrompts::add);
         return ManagedSessionId.newId();
+    }
+
+    private RenameOutcome renameOutcome = new RenameOutcome(RenameKind.RENAMED, "renamed");
+    private final List<String> renameCalls = new ArrayList<>();
+
+    /** Canned answer for the next rename -- not a pin flag: the pin lives in SessionManager's transform. */
+    void setRenameOutcome(RenameOutcome renameOutcome) {
+        this.renameOutcome = renameOutcome;
+    }
+
+    List<String> renameCalls() {
+        return renameCalls;
+    }
+
+    @Override
+    public RenameOutcome renameSession(ManagedSessionId caller, String title) {
+        renameCalls.add(title);
+        return renameOutcome;
     }
 }

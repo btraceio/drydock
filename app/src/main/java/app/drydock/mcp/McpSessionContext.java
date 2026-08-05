@@ -185,4 +185,14 @@ public interface McpSessionContext {
 
     /** Opens a session tab in {@code worktree}; returns the new session's id. */
     ManagedSessionId startSession(Path worktree, Optional<String> initialPrompt) throws McpToolException;
+
+    /**
+     * Renames the caller's own session to an already-validated title.
+     *
+     * <p>Refusal is an outcome, not an exception: {@link
+     * RenameKind#PINNED} and {@link RenameKind#COLLIDED} are legal answers
+     * to a legal call, and the router owns the wording. Only a timeout or a
+     * session that vanished mid-call throws.</p>
+     */
+    RenameOutcome renameSession(ManagedSessionId caller, String title) throws McpToolException;
 }

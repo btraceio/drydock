@@ -12,6 +12,8 @@ import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SshRemote;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.WorktreeService;
+import app.drydock.mcp.McpSessionContext.RenameKind;
+import app.drydock.mcp.McpSessionContext.RenameOutcome;
 import app.drydock.review.AnnotationStore;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -346,7 +348,8 @@ class WorkspaceMcpSessionContextTest {
                 worktreeService,
                 UserConfig::empty,
                 (worktree, prompt) -> CompletableFuture.failedFuture(
-                        new UnsupportedOperationException("no window in this test")));
+                        new UnsupportedOperationException("no window in this test")),
+                (id, title) -> CompletableFuture.completedFuture(new RenameOutcome(RenameKind.RENAMED, title)));
     }
 
     // ---- git helpers (mirrors WorktreeServiceTest) ---------------------------

@@ -86,6 +86,15 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
      */
     public static final long START_SESSION_TIMEOUT_SECONDS = 30;
 
+    /**
+     * Bound on {@link #renameSession}: one FX-thread hop and one state
+     * transform. Public for the same reason {@link
+     * #START_SESSION_TIMEOUT_SECONDS} is -- the workspace derives its own,
+     * smaller budget from it rather than restating a number. Deliberately not
+     * 20, so it is never confused with {@code JOIN_TIMEOUT_SECONDS}.
+     */
+    public static final long RENAME_TIMEOUT_SECONDS = 25;
+
     /** Excerpts come from source files; anything this large is not one. */
     private static final long MAX_EXCERPT_FILE_BYTES = 4L * 1024 * 1024;
 
@@ -100,6 +109,7 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
     private final WorktreeService worktreeService;
     private final Supplier<UserConfig> userConfig;
     private final BiFunction<Path, Optional<String>, CompletableFuture<ManagedSessionId>> sessionStarter;
+    private final BiFunction<ManagedSessionId, String, CompletableFuture<RenameOutcome>> sessionRenamer;
 
     /**
      * @param sessionCatalog   every managed session, e.g. {@code SessionManager::sessions}
@@ -107,6 +117,7 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
      * @param userConfig       supplier rather than a value because {@link UserConfig#load()}
      *                         reads a file, and the user may edit it while the app runs
      * @param sessionStarter   bound to {@code MainWorkspace.startAgentSession}
+     * @param sessionRenamer   bound to {@code MainWorkspace.renameSessionFromAgent}
      */
     public WorkspaceMcpSessionContext(Supplier<List<ManagedAgentSession>> sessionCatalog,
                                       Supplier<List<Repository>> repositoryCatalog,
@@ -119,7 +130,9 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
                                       WorktreeService worktreeService,
                                       Supplier<UserConfig> userConfig,
                                       BiFunction<Path, Optional<String>,
-                                              CompletableFuture<ManagedSessionId>> sessionStarter) {
+                                              CompletableFuture<ManagedSessionId>> sessionStarter,
+                                      BiFunction<ManagedSessionId, String,
+                                              CompletableFuture<RenameOutcome>> sessionRenamer) {
         this.sessionCatalog = Objects.requireNonNull(sessionCatalog, "sessionCatalog");
         this.repositoryCatalog = Objects.requireNonNull(repositoryCatalog, "repositoryCatalog");
         this.annotationStore = Objects.requireNonNull(annotationStore, "annotationStore");
@@ -131,6 +144,7 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
         this.worktreeService = Objects.requireNonNull(worktreeService, "worktreeService");
         this.userConfig = Objects.requireNonNull(userConfig, "userConfig");
         this.sessionStarter = Objects.requireNonNull(sessionStarter, "sessionStarter");
+        this.sessionRenamer = Objects.requireNonNull(sessionRenamer, "sessionRenamer");
     }
 
     // ---- caller lookup ------------------------------------------------------
@@ -524,6 +538,11 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
     @Override
     public ManagedSessionId startSession(Path worktree, Optional<String> initialPrompt) throws McpToolException {
         return join(sessionStarter.apply(worktree, initialPrompt), START_SESSION_TIMEOUT_SECONDS);
+    }
+
+    @Override
+    public RenameOutcome renameSession(ManagedSessionId caller, String title) throws McpToolException {
+        return join(sessionRenamer.apply(caller, title), RENAME_TIMEOUT_SECONDS);
     }
 
     // ---- shared helpers -----------------------------------------------------

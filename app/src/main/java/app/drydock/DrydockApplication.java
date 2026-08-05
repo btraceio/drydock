@@ -1236,7 +1236,8 @@ public final class DrydockApplication extends Application {
                 gitStatusService,
                 worktreeService,
                 UserConfig::load,
-                (worktree, prompt) -> mainWorkspace.startAgentSession(worktree, prompt));
+                (worktree, prompt) -> mainWorkspace.startAgentSession(worktree, prompt),
+                mainWorkspace::renameSessionFromAgent);
         McpServer server = new McpServer(registry, new McpToolRouter(context, registry), mcpActivityLog);
         // Published before start() so a shutdown racing startup still reaches
         // it. Publication alone would not be enough -- a close() that wins the

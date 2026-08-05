@@ -30,6 +30,8 @@ import app.drydock.git.GitStatusService;
 import app.drydock.git.GitTarget;
 import app.drydock.git.WorktreeService;
 import app.drydock.mcp.McpActivityLog;
+import app.drydock.mcp.McpSessionContext.RenameKind;
+import app.drydock.mcp.McpSessionContext.RenameOutcome;
 import app.drydock.mcp.McpSessionRegistry.Spawn;
 import app.drydock.config.UserConfig;
 import app.drydock.mcp.WorkspaceMcpSessionContext;
@@ -152,6 +154,16 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      */
     private static final long AGENT_SESSION_BUDGET_SECONDS =
             WorkspaceMcpSessionContext.START_SESSION_TIMEOUT_SECONDS / 2;
+
+    /**
+     * Whole budget for an agent-driven rename, provably SMALLER than {@link
+     * WorkspaceMcpSessionContext#RENAME_TIMEOUT_SECONDS} for the same reason
+     * the session budget is smaller than its own: if the context's join could
+     * expire first, the router would refund the charge while the rename went
+     * on to land, and the budget would stop bounding anything.
+     */
+    private static final long AGENT_RENAME_BUDGET_SECONDS =
+            WorkspaceMcpSessionContext.RENAME_TIMEOUT_SECONDS / 2;
 
     private final SessionManager sessionManager;
     private final AgentRegistry agentRegistry;
@@ -1846,6 +1858,45 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             });
             return opened;
         });
+    }
+
+    /**
+     * Applies an agent's {@code session_rename} and republishes, so the tab
+     * and the sidebar actually relabel.
+     *
+     * <p>The publish is the whole reason this goes through the workspace at
+     * all: {@link SessionManager} has no listeners, so a rename that stopped
+     * at the state store would change the file and nothing on screen.</p>
+     */
+    public CompletableFuture<RenameOutcome> renameSessionFromAgent(ManagedSessionId id, String title) {
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(AGENT_RENAME_BUDGET_SECONDS);
+        CompletableFuture<RenameOutcome> renamed = new CompletableFuture<>();
+        Platform.runLater(() -> {
+            // Re-checked ON the FX thread: a runLater queued behind a busy FX
+            // thread must refuse rather than apply a rename whose caller has
+            // already given up and had its budget refunded.
+            if (expired(deadlineNanos)) {
+                renamed.completeExceptionally(new IllegalStateException(
+                        "Drydock was too busy to rename the session in time."));
+                return;
+            }
+            try {
+                RenameOutcome outcome = sessionManager.applyAgentRename(id, title);
+                // Only a real change is worth a full republish; a refused
+                // attempt must not buy the agent a sidebar rebuild.
+                if (outcome.kind() == RenameKind.RENAMED) {
+                    publishSessions();
+                }
+                renamed.complete(outcome);
+            } catch (RuntimeException e) {
+                // UnknownSessionException is reachable here: the session can
+                // vanish between the router's liveness check and this hop.
+                // Without this arm the future never completes and the HTTP
+                // handler blocks for the whole join.
+                renamed.completeExceptionally(e);
+            }
+        });
+        return renamed;
     }
 
     /** A worktree matched to the repository that owns it, plus its branch (for the tab title). */
