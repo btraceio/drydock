@@ -246,3 +246,36 @@ Walk this with a human at the keyboard:
     in the jlink module list:** `:app:test` and `:app:run` both resolve
     `com.sun.net.httpserver` from the full JDK and would stay green while the
     shipped app failed to serve a single request.
+
+## Session rename via MCP (spec 2026-08-05)
+
+**Status: NOT YET RUN — UNVERIFIABLE HEADLESSLY.** The `session_rename` tool
+lets a hosted `claude` agent rename its own session tab. Whether it actually
+does so depends on the MCP client injecting the server's `instructions` field
+into the agent's system prompt — no unit test can observe a real system
+prompt — and the visible result is a relabel of live JavaFX UI
+(`MainWorkspace` has no test harness; its constructor takes 15 collaborators
+plus a live `Stage`). Walk this with a human at the keyboard:
+
+1. Start a session in a local repository and give it work. Within its first
+   few turns, confirm the agent renames its own tab unprompted, without
+   being asked to. *Nothing else proves the MCP client actually injects the
+   server's `instructions` field into the agent's system prompt — every
+   automated test passes with the feature completely inert.*
+2. When it does, confirm both the tab label and the sidebar row change, and
+   that the sidebar row re-sorts into its new alphabetical position.
+3. Rename a session to something long, e.g. 60 full-width CJK characters.
+   Confirm the sidebar row and the session header text are actually
+   **ellipsized** — look for the "…" character itself, not just a
+   shorter-looking label — and separately confirm the window still narrows
+   to its usual minimum width. Check both: `setMinWidth(0)` alone would
+   satisfy the window-narrowing half of this check while the clamp silently
+   did nothing to the text, so a check that only looks at window width
+   cannot tell a correct fix from a half-finished one.
+4. Double-click a tab to open its inline rename field, type a new name, then
+   click elsewhere without pressing Enter. Ask the agent to rename that
+   session afterwards and confirm it still can — the name was never pinned.
+   Then repeat with Enter instead of clicking away: type a new name, press
+   Enter, and confirm the agent's next rename attempt on that session is now
+   refused. This mapping (Enter pins, blur does not) lives in a JavaFX focus
+   listener with no test harness.
