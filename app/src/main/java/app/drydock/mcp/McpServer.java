@@ -314,10 +314,7 @@ public final class McpServer implements AutoCloseable {
                         ? Optional.of(scope.value())
                         : Optional.empty();
                 activityLog.record(new McpActivityLog.Entry(Instant.now(),
-                        tool.startsWith("review_") && !tool.equals("review_scope")
-                                && !tool.equals("review_state")
-                                ? McpActivityLog.Direction.INBOUND
-                                : McpActivityLog.Direction.OUTBOUND,
+                        directionOf(tool),
                         tool, McpServer.summarize(arguments), scopeId, bytes, failed));
             } catch (RuntimeException e) {
                 LOG.log(Level.FINE, "Could not log MCP activity for " + tool, e);
@@ -407,6 +404,26 @@ public final class McpServer implements AutoCloseable {
                 .put("error", JsonObject.empty()
                         .put("code", JsonNumber.of(code))
                         .put("message", new JsonString(message)));
+    }
+
+    /**
+     * The tools that WRITE into drydock. Everything else is drydock answering
+     * a question, including the tools whose names begin "review_".
+     *
+     * <p>An explicit set rather than the name-prefix rule this replaced: that
+     * rule classified {@code review_comments} as a write, which it is not --
+     * the agent asks for open threads and drydock answers -- and it would
+     * have classified {@code session_rename} as a read. A prefix cannot
+     * express either, and every tool added later must be classified on
+     * purpose rather than by how it was named.</p>
+     */
+    private static final Set<String> AGENT_WRITE_TOOLS = Set.of(
+            "review_reply", "review_intents", "review_finding", "review_answer", "session_rename");
+
+    static McpActivityLog.Direction directionOf(String tool) {
+        return AGENT_WRITE_TOOLS.contains(tool)
+                ? McpActivityLog.Direction.INBOUND
+                : McpActivityLog.Direction.OUTBOUND;
     }
 
     /**

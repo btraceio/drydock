@@ -398,6 +398,18 @@ class McpServerTest {
     }
 
     @Test
+    void activityDirectionIsClassifiedByAnExplicitSet() {
+        // an agent write
+        assertEquals(McpActivityLog.Direction.INBOUND, McpServer.directionOf("review_finding"));
+        // a read that the old startsWith("review_") rule got wrong
+        assertEquals(McpActivityLog.Direction.OUTBOUND, McpServer.directionOf("review_comments"));
+        // the new tool, which the old rule would have called OUTBOUND
+        assertEquals(McpActivityLog.Direction.INBOUND, McpServer.directionOf("session_rename"));
+        // unknown tools are reads, not writes
+        assertEquals(McpActivityLog.Direction.OUTBOUND, McpServer.directionOf("repos_list"));
+    }
+
+    @Test
     void summarizeTruncationNeverSplitsASurrogatePair() {
         String emoji = "😀"; // U+1F600, one code point, two chars
         JsonObject args = JsonObject.empty().put("title", new JsonString(emoji.repeat(200)));
