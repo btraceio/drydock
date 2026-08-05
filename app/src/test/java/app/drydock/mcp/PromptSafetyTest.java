@@ -3,6 +3,7 @@ package app.drydock.mcp;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -38,6 +39,35 @@ class PromptSafetyTest {
         // U+202E RIGHT-TO-LEFT OVERRIDE, and U+200B ZERO WIDTH SPACE.
         assertThrows(McpToolException.class, () -> check("safe \u202E gnirts"));
         assertThrows(McpToolException.class, () -> check("a\u200Bb"));
+    }
+
+    @Test
+    void ordinaryEmojiAreFineIncludingTheirVariationSelectors() throws Exception {
+        // Recorded because it is easy to assume otherwise, and a reviewer of
+        // this branch did: the variation selector that renders an emoji in
+        // colour is a NONSPACING MARK (Mn), not FORMAT (Cf), so rule 1 never
+        // touches it. U+26A0 and U+1F600 are OTHER_SYMBOL. All pass.
+        assertEquals("Fix login \u26A0\uFE0F", check("Fix login \u26A0\uFE0F"));
+        assertEquals("Fix login \u26A0", check("Fix login \u26A0"));
+        assertEquals("Ship it \uD83D\uDE00", check("Ship it \uD83D\uDE00"));
+    }
+
+    @Test
+    void tellsTheAgentWhatToDoAboutAnEmojiItCannotUse() {
+        // U+200D ZERO WIDTH JOINER *is* FORMAT, so multi-part emoji -- the
+        // professions, families, and composed flags -- are refused. That ban is
+        // deliberate (an invisible joiner is a smuggling primitive), but naming
+        // the code point alone gives the agent nothing to act on, so it retries
+        // blind until its rename budget runs out.
+        McpToolException joiner =
+                assertThrows(McpToolException.class, () -> check("Ship it \uD83D\uDC68\u200D\uD83D\uDCBB"));
+        assertTrue(joiner.getMessage().contains("emoji"), joiner.getMessage());
+
+        // A bidi override is not an emoji problem and must not claim to be --
+        // telling an agent to "drop the emoji" from a title that has none sends
+        // it looking for something that is not there.
+        McpToolException bidi = assertThrows(McpToolException.class, () -> check("safe \u202E gnirts"));
+        assertFalse(bidi.getMessage().contains("emoji"), bidi.getMessage());
     }
 
     @Test

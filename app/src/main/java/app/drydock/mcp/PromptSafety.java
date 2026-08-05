@@ -119,9 +119,7 @@ public final class PromptSafety {
             if (type == Character.CONTROL || type == Character.FORMAT || type == Character.SURROGATE
                     || type == Character.PRIVATE_USE || type == Character.UNASSIGNED
                     || type == Character.LINE_SEPARATOR || type == Character.PARAGRAPH_SEPARATOR) {
-                throw new McpToolException("A session title must be one line of visible text; "
-                        + "it may not contain control, invisible or direction-changing characters "
-                        + "(found U+" + String.format("%04X", cp) + ").");
+                throw new McpToolException(unrenderableMessage(cp));
             }
             if (cp == '"') {
                 throw new McpToolException("A session title may not contain a double quote: drydock "
@@ -153,6 +151,35 @@ public final class PromptSafety {
     /** The folding half of {@link #checkSessionTitle}, for comparing against already-stored names. */
     public static String foldForComparison(String title) {
         return fold(title);
+    }
+
+    /** U+200D ZERO WIDTH JOINER: what welds a multi-part emoji together. */
+    private static final int ZERO_WIDTH_JOINER = 0x200D;
+
+    /**
+     * Why a code point was refused, phrased so the caller can act on it.
+     *
+     * <p>The joiner gets its own sentence because it is the one refusal an
+     * honest agent trips over. It is {@code FORMAT}, like a bidi override, so
+     * the same rule catches both -- but a model writing a family or profession
+     * emoji is not smuggling anything, and "found U+200D" gives it nothing to
+     * act on. It then retries blind until its rename budget runs out.</p>
+     *
+     * <p>Note what is NOT here: an emoji's variation selector (U+FE0F and its
+     * neighbours) is a {@code NONSPACING_MARK}, not {@code FORMAT}, so plain
+     * emoji and their colour presentation forms pass rule 1 untouched. Only
+     * the glued sequences are refused, which is why the advice is "use a
+     * single emoji" rather than "drop the emoji".</p>
+     */
+    private static String unrenderableMessage(int codePoint) {
+        if (codePoint == ZERO_WIDTH_JOINER) {
+            return "A session title may not contain a zero-width joiner (U+200D), so multi-part "
+                    + "emoji -- professions, families, composed flags -- cannot be used. A single "
+                    + "emoji is fine.";
+        }
+        return "A session title must be one line of visible text; it may not contain control, "
+                + "invisible or direction-changing characters (found U+"
+                + String.format("%04X", codePoint) + ").";
     }
 
     /**
