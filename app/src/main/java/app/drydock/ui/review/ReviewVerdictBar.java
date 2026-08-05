@@ -12,6 +12,7 @@ import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
 import javafx.scene.layout.VBox;
 
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -63,6 +64,9 @@ final class ReviewVerdictBar extends VBox {
     private final Label settledLabel = new Label();
     private final Label refusalLabel = new Label();
     private final Label progressLabel = new Label();
+    /** "3 left · n jumps to the next" -- the first thing dropped when the row is tight. */
+    private final Label navHint = new Label();
+    private final Region actionSpacer = new Region();
     private final Region progressFill = new Region();
     private final Region progressTrack = new Region();
     private final Label hintLabel = new Label("press ? for shortcuts");
@@ -80,6 +84,19 @@ final class ReviewVerdictBar extends VBox {
         getStyleClass().add("review-verdict-bar");
 
         intentLabel.getStyleClass().add("review-verdict-intent");
+        // The bar spans the code column, whose floor is RailLayout.CODE_MIN_WIDTH,
+        // and at that width its own contents do not fit. What gives way is
+        // decided here rather than by HBox's proportional shrinking, which
+        // elided every action label equally: the actions are the point of the
+        // bar, the title is context, so the actions keep their width and the
+        // title yields. Its tooltip carries what the ellipsis takes.
+        intentLabel.setMinWidth(0);
+        for (Button action : List.of(previousButton, nextButton, approveButton,
+                requestChangesButton, askAgentButton, undoButton)) {
+            action.setMinWidth(Region.USE_PREF_SIZE);
+        }
+        navHint.getStyleClass().add("review-verdict-hint");
+        HBox.setHgrow(actionSpacer, Priority.ALWAYS);
 
         previousButton.getStyleClass().addAll("review-verdict-nav", "review-verdict-previous");
         previousButton.setTooltip(new Tooltip("Previous intent ([)"));
@@ -110,8 +127,6 @@ final class ReviewVerdictBar extends VBox {
         refusalLabel.setVisible(false);
         refusalLabel.setManaged(false);
 
-        Region spacer = new Region();
-        HBox.setHgrow(spacer, Priority.ALWAYS);
         progressLabel.getStyleClass().add("review-verdict-progress-label");
         actionRow.setAlignment(Pos.CENTER_LEFT);
         actionRow.getStyleClass().add("review-verdict-actions");
@@ -171,22 +186,20 @@ final class ReviewVerdictBar extends VBox {
             return;
         }
         intentLabel.setText(intent.number() + " · " + intent.title());
+        intentLabel.setTooltip(new Tooltip(intentLabel.getText()));
         previousButton.setDisable(false);
         nextButton.setDisable(false);
 
-        Region spacer = new Region();
-        HBox.setHgrow(spacer, Priority.ALWAYS);
-        Label right = new Label(settledCount >= totalCount
+        navHint.setText(settledCount >= totalCount
                 ? "all settled — ⏎ submits"
                 : (totalCount - settledCount) + " left · n jumps to the next");
-        right.getStyleClass().add("review-verdict-hint");
 
         if (verdict.isPresent()) {
             settledLabel.setText(verdict.get().decision().label());
             settledLabel.getStyleClass().removeIf(styleClass -> styleClass.startsWith("decision-"));
             settledLabel.getStyleClass().add("decision-" + verdict.get().decision().wireName());
             actionRow.getChildren().setAll(previousButton, nextButton, intentLabel,
-                    settledLabel, undoButton, spacer, right);
+                    settledLabel, undoButton, actionSpacer, navHint);
         } else {
             refusalLabel.setText("⚠ a blocking finding is still open");
             refusalLabel.setVisible(blocked);
@@ -195,8 +208,9 @@ final class ReviewVerdictBar extends VBox {
                     javafx.css.PseudoClass.getPseudoClass("refused"), blocked);
             actionRow.getChildren().setAll(previousButton, nextButton, intentLabel,
                     approveButton, requestChangesButton, askAgentButton, refusalLabel,
-                    spacer, right);
+                    actionSpacer, navHint);
         }
+        fitActionRow(actionRow.getWidth());
 
         progressLabel.setText(settledCount + "/" + totalCount + " intents settled");
         progressTrack.setPrefWidth(120);
@@ -205,6 +219,59 @@ final class ReviewVerdictBar extends VBox {
         submitButton.setText(settledCount >= totalCount
                 ? "Submit review ⏎"
                 : "Submit (" + (totalCount - settledCount) + " left)");
+    }
+
+    /**
+     * The width the intent title is worth showing at. Below this it says
+     * "11 · app…" and stops being context at all, so the hint goes instead --
+     * it is the one thing on the bar stated nowhere else only in part: the
+     * count repeats in the progress line and in the Submit button, and the
+     * key it names lives in the shortcuts overlay.
+     */
+    private static final double INTENT_LABEL_MIN = 96;
+
+    /**
+     * Drops {@link #navHint} when the row cannot hold it, the actions and a
+     * legible title at once.
+     *
+     * <p>The decision is made from the row's width against every other
+     * child's preferred width -- deliberately including the hint's own slot
+     * whether or not it is currently showing. Deciding from the laid-out
+     * result instead would oscillate: hiding the hint frees the width that
+     * says it should be shown.</p>
+     */
+    @Override
+    protected void layoutChildren() {
+        // Not a width listener: the first width the row is given arrives
+        // before its buttons have been through CSS, so every preferred width
+        // read then is a bare unstyled label's and the row looks roomy. A
+        // layout pass is the earliest point the measurements are real, and
+        // running here re-checks after a font or density change too.
+        fitActionRow(actionRow.getWidth());
+        super.layoutChildren();
+    }
+
+    private void fitActionRow(double width) {
+        if (width <= 0) {
+            return;
+        }
+        double needed = actionRow.getInsets().getLeft() + actionRow.getInsets().getRight()
+                + INTENT_LABEL_MIN;
+        int slots = 0;
+        for (javafx.scene.Node child : actionRow.getChildren()) {
+            if (!child.isManaged() && child != navHint) {
+                continue;
+            }
+            slots++;
+            if (child == actionSpacer || child == navHint || child == intentLabel) {
+                continue;
+            }
+            needed += child.prefWidth(-1);
+        }
+        needed += actionRow.getSpacing() * Math.max(0, slots - 1);
+        boolean room = width - needed >= navHint.prefWidth(-1);
+        navHint.setVisible(room);
+        navHint.setManaged(room);
     }
 
     /** Test-only: whether approval is currently being refused. */
