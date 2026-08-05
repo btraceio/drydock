@@ -48,18 +48,12 @@ import java.util.function.Consumer;
  */
 public final class ReviewDestinationView extends BorderPane {
 
-    /** Below this width the rails take their narrow sizes; below {@link #QUEUE_COLLAPSE_WIDTH} they collapse (spec §4.9). */
-    private static final double NARROW_WIDTH = 1320;
-    private static final double QUEUE_COLLAPSE_WIDTH = 1180;
-    private static final double INTENT_COLLAPSE_WIDTH = 1040;
-    private static final double MARGIN_COLLAPSE_WIDTH = 880;
-
     /**
      * Below this width the three-column layout is replaced by two alternating
-     * pages (spec §4.9). The auto-collapse thresholds above only ever shrink a
-     * rail; below 980px shrinking them further produced 44/40px slivers that
-     * could not be expanded, so the whole tab became unusable. Two full-width
-     * pages is the answer, not a fourth threshold.
+     * pages (spec §4.9). {@link RailLayout} only ever shrinks a rail; below
+     * 980px shrinking them further produced 44/40px slivers that could not be
+     * expanded, so the whole tab became unusable. Two full-width pages is the
+     * answer, not one more threshold.
      */
     private static final double DRILL_IN_WIDTH = 980;
 
@@ -1189,12 +1183,18 @@ public final class ReviewDestinationView extends BorderPane {
         }
         rails.setVisible(true);
         rails.setManaged(true);
-        queue.setNarrow(width < NARROW_WIDTH);
-        queue.setCollapsed(queueCollapsedByUser || width < QUEUE_COLLAPSE_WIDTH);
-        intentRail.setNarrow(width < NARROW_WIDTH);
-        intentRail.setCollapsed(intentsCollapsedByUser || width < INTENT_COLLAPSE_WIDTH);
-        margin.setNarrow(width < NARROW_WIDTH);
-        margin.setCollapsed(marginCollapsedByUser || width < MARGIN_COLLAPSE_WIDTH);
+        // Rails give up their width, margin first and queue last, until the
+        // code column clears its floor. A manual collapse is remembered
+        // separately: a user who collapsed the queue keeps it collapsed when
+        // the window grows back, and one who did not gets it back.
+        RailLayout.Layout layout = RailLayout.solve(width, queueCollapsedByUser,
+                intentsCollapsedByUser, marginCollapsedByUser);
+        queue.setNarrow(layout.narrow());
+        queue.setCollapsed(layout.queueCollapsed());
+        intentRail.setNarrow(layout.narrow());
+        intentRail.setCollapsed(layout.intentsCollapsed());
+        margin.setNarrow(layout.narrow());
+        margin.setCollapsed(layout.marginCollapsed());
     }
 
     /**
