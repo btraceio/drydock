@@ -318,19 +318,10 @@ public final class McpServer implements AutoCloseable {
                                 && !tool.equals("review_state")
                                 ? McpActivityLog.Direction.INBOUND
                                 : McpActivityLog.Direction.OUTBOUND,
-                        tool, summarize(arguments), scopeId, bytes, failed));
+                        tool, McpServer.summarize(arguments), scopeId, bytes, failed));
             } catch (RuntimeException e) {
                 LOG.log(Level.FINE, "Could not log MCP activity for " + tool, e);
             }
-        }
-
-        /** A one-line detail for the panel: the arguments, bounded. */
-        private static String summarize(JsonValue arguments) {
-            if (arguments == null) {
-                return "";
-            }
-            String text = JsonWriter.write(arguments).replaceAll("\\s+", " ");
-            return text.length() <= 160 ? text : text.substring(0, 159) + "…";
         }
 
         private JsonValue initializeResult(JsonValue params) {
@@ -416,5 +407,47 @@ public final class McpServer implements AutoCloseable {
                 .put("error", JsonObject.empty()
                         .put("code", JsonNumber.of(code))
                         .put("message", new JsonString(message)));
+    }
+
+    /**
+     * A one-line detail for the panel: the arguments, bounded and stripped of
+     * anything that can lie in a Label.
+     *
+     * <p>Order matters. The whitespace collapse runs FIRST: Java's {@code \s}
+     * is ASCII-only, so it flattens {@link JsonWriter}'s own pretty-print
+     * newlines and indents and nothing else. Only then are the invisible and
+     * control categories replaced -- sanitizing first would replace those
+     * structural newlines too and turn every row into "{&#xFFFD; ...".
+     *
+     * <p>{@code JsonWriter} escapes only {@code c < 0x20}, so U+007F, the C1
+     * block, the bidi overrides and the tag block all arrive here verbatim.
+     * The panel renders this as a {@code Label}, on failed calls as well as
+     * successful ones, so this is the boundary that has to remove them.
+     */
+    static String summarize(JsonValue arguments) {
+        if (arguments == null) {
+            return "";
+        }
+        String collapsed = JsonWriter.write(arguments).replaceAll("\\s+", " ");
+        StringBuilder clean = new StringBuilder(collapsed.length());
+        collapsed.codePoints().forEach(cp -> clean.appendCodePoint(isUnrenderable(cp) ? '�' : cp));
+        return truncateByCodePoints(clean.toString(), 80);
+    }
+
+    /** Categories that must never reach a Label: invisible, reordering, or not a character at all. */
+    private static boolean isUnrenderable(int codePoint) {
+        int type = Character.getType(codePoint);
+        return type == Character.CONTROL || type == Character.FORMAT || type == Character.SURROGATE
+                || type == Character.PRIVATE_USE || type == Character.UNASSIGNED
+                || type == Character.LINE_SEPARATOR || type == Character.PARAGRAPH_SEPARATOR;
+    }
+
+    /** Truncates on a code-point boundary, so a cut never re-creates a lone surrogate. */
+    private static String truncateByCodePoints(String text, int maxCodePoints) {
+        if (text.codePointCount(0, text.length()) <= maxCodePoints) {
+            return text;
+        }
+        int end = text.offsetByCodePoints(0, maxCodePoints - 1);
+        return text.substring(0, end) + "…";
     }
 }

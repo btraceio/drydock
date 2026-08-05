@@ -2,6 +2,8 @@ package app.drydock.mcp;
 
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.mcp.McpSessionRegistry.Spawn;
+import app.drydock.state.json.JsonValue.JsonObject;
+import app.drydock.state.json.JsonValue.JsonString;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -366,5 +368,49 @@ class McpServerTest {
         racing.start();
 
         assertEquals(0, racing.port(), "close() must permanently prevent binding");
+    }
+
+    @Test
+    void summarizeReplacesInvisibleCodePoints() {
+        // Input has: U+202E (RIGHT-TO-LEFT OVERRIDE), U+200B (ZERO-WIDTH SPACE)
+        JsonObject args = JsonObject.empty().put("title", new JsonString("a‮b​cd"));
+
+        String summary = McpServer.summarize(args);
+
+        // None of these should survive
+        assertFalse(summary.contains("‮"), "bidi override survived: " + summary);
+        assertFalse(summary.contains("​"), "zero-width space survived: " + summary);
+        assertFalse(summary.contains(""), "DEL survived: " + summary);
+        // But the replacement character should appear for each hidden char
+        assertTrue(summary.contains("�"), "nothing was replaced: " + summary);
+    }
+
+    @Test
+    void summarizeKeepsMultiMemberObjectOnOneLine() {
+        JsonObject args = JsonObject.empty()
+                .put("scopeId", new JsonString("s1"))
+                .put("title", new JsonString("ok"));
+
+        String summary = McpServer.summarize(args);
+
+        assertFalse(summary.contains("\n"), "structural newline survived: " + summary);
+        assertFalse(summary.contains("�"), "structural whitespace was replaced: " + summary);
+    }
+
+    @Test
+    void summarizeTruncationNeverSplitsASurrogatePair() {
+        String emoji = "😀"; // U+1F600, one code point, two chars
+        JsonObject args = JsonObject.empty().put("title", new JsonString(emoji.repeat(200)));
+
+        String summary = McpServer.summarize(args);
+
+        assertTrue(summary.length() <= 161, "not truncated: " + summary.length());
+        for (int i = 0; i < summary.length(); i++) {
+            char c = summary.charAt(i);
+            if (Character.isHighSurrogate(c)) {
+                assertTrue(i + 1 < summary.length() && Character.isLowSurrogate(summary.charAt(i + 1)),
+                        "unpaired high surrogate at " + i);
+            }
+        }
     }
 }
