@@ -2147,10 +2147,14 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         Alert prompt = new Alert(Alert.AlertType.CONFIRMATION);
         prompt.setTitle("Conversation not found");
         prompt.setHeaderText("The conversation for \"" + session.displayName() + "\" no longer exists");
+        // The name is agent-authored and can be a near-miss of a sibling's,
+        // and the sidebar sorts by name so the impostor lands adjacent. The
+        // working directory is what actually tells two sessions apart.
         prompt.setContentText(AgentLabels.displayName(agentRegistry, session)
                 + " has no stored history for this session's conversation id anymore "
                 + "(it may have been cleaned up). Start a fresh conversation under the same name, "
-                + "or delete the session?");
+                + "or delete the session?"
+                + "\n\nWorking directory: " + session.workingDirectory());
         prompt.getButtonTypes().setAll(startFresh, delete, ButtonType.CANCEL);
 
         Optional<ButtonType> choice = prompt.showAndWait();

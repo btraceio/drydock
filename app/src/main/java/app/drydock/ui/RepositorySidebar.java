@@ -1239,9 +1239,13 @@ public final class RepositorySidebar extends VBox {
         Alert confirm = new Alert(AlertType.CONFIRMATION);
         confirm.setTitle("Delete session");
         confirm.setHeaderText("Delete session \"" + session.displayName() + "\"?");
+        // The name is agent-authored and can be a near-miss of a sibling's,
+        // and the sidebar sorts by name so the impostor lands adjacent. The
+        // working directory is what actually tells two sessions apart.
         confirm.setContentText("This removes the session from the manager (stopping it first if running). "
                 + AgentLabels.displayName(agentRegistry, session)
-                + "'s own conversation history on disk is not deleted.");
+                + "'s own conversation history on disk is not deleted."
+                + "\n\nWorking directory: " + session.workingDirectory());
         confirm.showAndWait().filter(button -> button == ButtonType.OK).ifPresent(button ->
                 sessionManager.deleteSession(session.id()).whenComplete((v, ex) -> Platform.runLater(() -> {
                     if (ex != null) {
