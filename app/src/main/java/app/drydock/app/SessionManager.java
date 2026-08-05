@@ -914,7 +914,8 @@ public final class SessionManager implements AutoCloseable {
                 Optional.empty(),
                 PrState.NONE,
                 Optional.empty(),
-                branchCreatedHere);
+                branchCreatedHere,
+                false);
     }
 
     /**

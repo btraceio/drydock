@@ -211,7 +211,7 @@ class ApplicationStateCodecTest {
                 ManagedSessionId.newId(), RepositoryId.of(REPO_ID), AgentKind.CODEX, "Session 1",
                 Optional.of("id"), Optional.empty(), Path.of("/tmp"), Optional.empty(),
                 SessionStatus.RUNNING, Instant.EPOCH, Instant.EPOCH, Optional.empty(),
-                PrState.NONE, Optional.empty(), true);
+                PrState.NONE, Optional.empty(), true, false);
         ApplicationState state = ApplicationState.empty().withSessions(List.of(session));
         ApplicationState roundTripped = ApplicationStateCodec.fromJson(ApplicationStateCodec.toJson(state));
         assertEquals(AgentKind.CODEX, roundTripped.sessions().get(0).agentKind());
@@ -240,12 +240,65 @@ class ApplicationStateCodecTest {
                 Optional.empty(),
                 PrState.NONE,
                 Optional.empty(),
+                false,
                 false);
         ApplicationState state = new ApplicationState(List.of(repo), List.of(session), WorkspaceUiState.empty());
 
         ApplicationState decoded = ApplicationStateCodec.fromJson(ApplicationStateCodec.toJson(state));
 
         assertFalse(decoded.sessions().getFirst().branchCreatedHere());
+    }
+
+    @Test
+    void namePinnedSurvivesARoundTrip() {
+        Repository repo = new Repository(RepositoryId.newId(), Path.of("/tmp/repo"), "repo",
+                Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT);
+        ManagedAgentSession pinned = new ManagedAgentSession(
+                ManagedSessionId.newId(),
+                repo.id(),
+                AgentKind.CLAUDE,
+                "test session",
+                Optional.empty(),
+                Optional.empty(),
+                Path.of("/tmp/repo/wd"),
+                Optional.empty(),
+                SessionStatus.INACTIVE,
+                Instant.EPOCH,
+                Instant.EPOCH,
+                Optional.empty(),
+                PrState.NONE,
+                Optional.empty(),
+                true,
+                true);
+        ApplicationState state = new ApplicationState(List.of(repo), List.of(pinned), WorkspaceUiState.empty());
+
+        ApplicationState decoded = ApplicationStateCodec.fromJson(ApplicationStateCodec.toJson(state));
+
+        assertTrue(decoded.sessions().getFirst().namePinned());
+    }
+
+    @Test
+    void aSessionWrittenBeforeThisMemberDecodesUnpinned() {
+        // VALID_SESSION has no "namePinned" member at all, as every state
+        // file written before this change.
+        ApplicationState decoded = ApplicationStateCodec.fromJson(JsonParser.parse(sessionDocument(VALID_SESSION)));
+
+        assertFalse(decoded.sessions().getFirst().namePinned());
+    }
+
+    @Test
+    void aMalformedNamePinnedDecodesUnpinned() {
+        // Unlike branchCreatedHere, which decodes TRUE when absent or
+        // malformed by deliberate choice, an unreadable pin means "nobody
+        // has claimed this name" -- the safe reading, since the pin only
+        // ever removes ability.
+        String session = VALID_SESSION.replace(
+                "\"lastOpenedAt\": \"2026-01-02T00:00:00Z\"",
+                "\"lastOpenedAt\": \"2026-01-02T00:00:00Z\",\n  \"namePinned\": \"yes\"");
+
+        ApplicationState decoded = ApplicationStateCodec.fromJson(JsonParser.parse(sessionDocument(session)));
+
+        assertFalse(decoded.sessions().getFirst().namePinned());
     }
 
     @Test

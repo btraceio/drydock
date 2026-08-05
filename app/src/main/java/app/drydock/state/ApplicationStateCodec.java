@@ -63,7 +63,8 @@ import java.util.Set;
  *       "lastExitCode": <int> | null,
  *       "prState": "NONE" | "OPEN" | "MERGED",
  *       "prNumber": <int> | null,
- *       "branchCreatedHere": <boolean>
+ *       "branchCreatedHere": <boolean>,
+ *       "namePinned": <boolean>
  *     }
  *   ],
  *   "ui": {
@@ -103,7 +104,11 @@ import java.util.Set;
  * The repository {@code settings.lastUsedAgent} member was likewise added
  * leniently within version 2: an absent or unrecognized value decodes to
  * {@link app.drydock.domain.RepositorySettings#DEFAULT} (no preference)
- * rather than throwing.
+ * rather than throwing. The {@code namePinned} member was likewise added
+ * leniently within version 2: unlike {@code branchCreatedHere}, an absent or
+ * malformed value decodes to {@code false}, not {@code true} -- a session
+ * persisted before this member existed was never pinned, and an unreadable
+ * value must not silently lock a name a human never confirmed.
  * The persisted id/name fields were renamed from {@code claudeSessionId}/
  * {@code claudeSessionName} to {@code agentSessionId}/{@code
  * agentSessionName}; {@link #fromJson} accepts both the new and legacy
@@ -186,6 +191,7 @@ public final class ApplicationStateCodec {
                 .<JsonValue>map(number -> JsonNumber.of((long) number))
                 .orElse(JsonValue.JsonNull.INSTANCE));
         obj.put("branchCreatedHere", new JsonBoolean(session.branchCreatedHere()));
+        obj.put("namePinned", new JsonBoolean(session.namePinned()));
         return obj;
     }
 
@@ -331,9 +337,14 @@ public final class ApplicationStateCodec {
             // malformed value decodes to true. No schema bump.
             boolean branchCreatedHere = !(obj.get("branchCreatedHere") instanceof JsonBoolean b)
                     || b.value();
+            // Lenient and added within schema version 2, no bump -- like
+            // branchCreatedHere, but defaulting the other way: a session
+            // persisted before this member existed was never pinned, and a
+            // malformed value must not silently lock a name.
+            boolean namePinned = obj.get("namePinned") instanceof JsonBoolean pinned && pinned.value();
             return new ManagedAgentSession(id, repositoryId, agentKind, displayName, agentSessionId,
                     agentSessionName, workingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, lastExitCode,
-                    prState, prNumber, branchCreatedHere);
+                    prState, prNumber, branchCreatedHere, namePinned);
         } catch (IllegalArgumentException | DateTimeException e) {
             throw new StateDecodeException("Malformed session entry: " + e.getMessage());
         }

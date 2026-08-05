@@ -9,6 +9,7 @@ import java.time.Instant;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -33,7 +34,8 @@ class ManagedAgentSessionTest {
                 Optional.empty(),
                 PrState.NONE,
                 Optional.empty(),
-                true);
+                true,
+                false);
     }
 
     @Test
@@ -61,7 +63,7 @@ class ManagedAgentSessionTest {
         assertThrows(IllegalArgumentException.class, () -> new ManagedAgentSession(
                 ManagedSessionId.newId(), RepositoryId.newId(), AgentKind.CLAUDE, "example", Optional.empty(),
                 Optional.empty(), dir, Optional.of(notNormalized), SessionStatus.INACTIVE, Instant.now(),
-                Instant.now(), Optional.empty(), PrState.NONE, Optional.empty(), true));
+                Instant.now(), Optional.empty(), PrState.NONE, Optional.empty(), true, false));
     }
 
     @Test
@@ -70,7 +72,7 @@ class ManagedAgentSessionTest {
         assertThrows(IllegalArgumentException.class, () -> new ManagedAgentSession(
                 ManagedSessionId.newId(), RepositoryId.newId(), AgentKind.CLAUDE, "   ", Optional.empty(),
                 Optional.empty(), dir, Optional.empty(), SessionStatus.INACTIVE, Instant.now(), Instant.now(),
-                Optional.empty(), PrState.NONE, Optional.empty(), true));
+                Optional.empty(), PrState.NONE, Optional.empty(), true, false));
     }
 
     @Test
@@ -142,12 +144,35 @@ class ManagedAgentSessionTest {
     }
 
     @Test
+    void withDisplayNameLeavesNamePinnedUnchanged() {
+        // Renaming is not pinning: only an explicit withNamePinned(true) call
+        // (a human's confirmed rename) may set the pin.
+        Path dir = tempDir.toAbsolutePath().normalize();
+        ManagedAgentSession pinned = sessionAt(dir).withNamePinned(true);
+
+        assertTrue(pinned.withDisplayName("new name").namePinned());
+        assertFalse(sessionAt(dir).withDisplayName("new name").namePinned());
+    }
+
+    @Test
+    void withNamePinnedPreservesOtherFields() {
+        Path dir = tempDir.toAbsolutePath().normalize();
+        ManagedAgentSession original = sessionAt(dir);
+
+        ManagedAgentSession pinned = original.withNamePinned(true);
+
+        assertTrue(pinned.namePinned());
+        assertEquals(original.displayName(), pinned.displayName());
+        assertEquals(original.id(), pinned.id());
+    }
+
+    @Test
     void agentKindDefaultsAreCarriedThroughWithers() {
         ManagedAgentSession session = new ManagedAgentSession(
                 ManagedSessionId.newId(), RepositoryId.newId(), AgentKind.CLAUDE, "Session 1",
                 Optional.empty(), Optional.empty(), Path.of("/tmp"), Optional.empty(),
                 SessionStatus.INACTIVE, Instant.EPOCH, Instant.EPOCH, Optional.empty(),
-                PrState.NONE, Optional.empty(), true);
+                PrState.NONE, Optional.empty(), true, false);
         assertEquals(AgentKind.CODEX, session.withAgentKind(AgentKind.CODEX).agentKind());
         assertEquals(Optional.of("x"), session.withAgentSessionId(Optional.of("x")).agentSessionId());
     }

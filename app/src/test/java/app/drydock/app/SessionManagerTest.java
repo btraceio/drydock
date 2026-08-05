@@ -95,7 +95,7 @@ class SessionManagerTest {
     /**
      * A minimal INACTIVE session, shared with {@link
      * SessionManagerExitReleasesMcpTest} (same package) so the MCP-lifecycle
-     * tests do not restate this 15-component record.
+     * tests do not restate this 16-component record.
      */
     static ManagedAgentSession newSessionFixture() {
         return sessionWith(Path.of("/tmp"), Optional.empty(), Optional.empty());
@@ -119,7 +119,8 @@ class SessionManagerTest {
                 Optional.empty(),
                 PrState.NONE,
                 Optional.empty(),
-                true);
+                true,
+                false);
     }
 
     private Repository someRepository() {

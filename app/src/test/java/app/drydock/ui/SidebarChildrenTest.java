@@ -41,7 +41,7 @@ class SidebarChildrenTest {
                 worktreeRoot == null ? ROOT : worktreeRoot,
                 Optional.ofNullable(worktreeRoot),
                 status, Instant.EPOCH, lastOpened, Optional.empty(),
-                PrState.NONE, Optional.empty(), false);
+                PrState.NONE, Optional.empty(), false, false);
     }
 
     private static Function<ManagedSessionId, SessionActivity> noActivity() {
