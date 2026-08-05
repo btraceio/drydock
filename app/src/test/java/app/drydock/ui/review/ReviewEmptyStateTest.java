@@ -55,7 +55,7 @@ class ReviewEmptyStateTest extends ApplicationTest {
 
     @Test
     void anIncompleteScanSaysSoRatherThanClaimingNothingToReview() {
-        interact(() -> view.setItems(new QueueAssembly(List.of(), true, false), 2));
+        interact(() -> view.setItems(new QueueAssembly(List.of(), true, false), List.of("repo", "other")));
 
         assertEquals(ReviewEmptyState.SCAN_INCOMPLETE.title(), placeholderTitle());
         assertTrue(retryVisible(), "an incomplete scan offers a retry");
@@ -63,21 +63,21 @@ class ReviewEmptyStateTest extends ApplicationTest {
 
     @Test
     void aCompleteScanWithNoItemsSaysThereIsNothingToReview() {
-        interact(() -> view.setItems(new QueueAssembly(List.of(), true, true), 2));
+        interact(() -> view.setItems(new QueueAssembly(List.of(), true, true), List.of("repo", "other")));
 
         assertEquals(ReviewEmptyState.NOTHING_REVIEWABLE.title(), placeholderTitle());
     }
 
     @Test
     void noRepositoriesIsItsOwnState() {
-        interact(() -> view.setItems(new QueueAssembly(List.of(), true, true), 0));
+        interact(() -> view.setItems(new QueueAssembly(List.of(), true, true), List.of()));
 
         assertEquals(ReviewEmptyState.NO_REPOSITORIES.title(), placeholderTitle());
     }
 
     @Test
     void retryAsksTheHostToScanAgain() {
-        interact(() -> view.setItems(new QueueAssembly(List.of(), false, false), 2));
+        interact(() -> view.setItems(new QueueAssembly(List.of(), false, false), List.of("repo", "other")));
 
         interact(() -> ((Button) lookup(".review-empty-retry").query()).fire());
 
@@ -86,11 +86,48 @@ class ReviewEmptyStateTest extends ApplicationTest {
 
     @Test
     void anEmptyQueueRendersNoSessionRow() {
-        interact(() -> view.setItems(new QueueAssembly(List.of(), true, true), 2));
+        interact(() -> view.setItems(new QueueAssembly(List.of(), true, true), List.of("repo", "other")));
 
         assertTrue(lookup(".review-session-line").queryAll().stream()
                         .noneMatch(javafx.scene.Node::isManaged),
                 "with no item there is no session to describe");
+    }
+
+    /**
+     * The conclusion is only checkable beside its scope. Asserted on the
+     * rendered surface, not on {@link ReviewEmptyState#scanned} alone: the
+     * wording being right is no use if the view never asks for it, which is
+     * exactly the state this line was in.
+     */
+    @Test
+    void theEmptySurfaceNamesWhatWasScanned() {
+        interact(() -> view.setItems(new QueueAssembly(List.of(), true, true),
+                List.of("drydock", "btrace")));
+
+        assertEquals("Scanned drydock and btrace", placeholderScope());
+    }
+
+    /** With no repositories there is nothing to name, and no line for it. */
+    @Test
+    void noRepositoriesNamesNothing() {
+        interact(() -> view.setItems(new QueueAssembly(List.of(), true, true), List.of()));
+
+        assertEquals("", placeholderScope());
+    }
+
+    @Test
+    void aScanInFlightNamesWhatItIsScanning() {
+        interact(() -> view.showScanning(List.of("drydock", "btrace")));
+
+        assertEquals(ReviewEmptyState.SCANNING.title(), placeholderTitle());
+        assertEquals("Scanning drydock and btrace", placeholderScope());
+    }
+
+    private String placeholderScope() {
+        String[] text = new String[1];
+        interact(() -> text[0] = lookup(".review-placeholder-scope").tryQuery()
+                .map(node -> ((Label) node).getText()).orElse(""));
+        return text[0];
     }
 
     private String placeholderTitle() {

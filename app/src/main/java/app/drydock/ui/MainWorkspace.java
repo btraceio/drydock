@@ -995,8 +995,9 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 .map(repository -> new ReviewQueueService.RepositoryTarget(
                         repository.root(), repository.displayName()))
                 .toList();
+        List<String> names = local.stream().map(Repository::displayName).toList();
         if (reviewDestination.diagItems().isEmpty()) {
-            reviewDestination.showScanning();
+            reviewDestination.showScanning(names);
         }
         reviewQueueService.assemble(targets, this::sessionAtCheckout)
                 .whenComplete((assembly, failure) -> Platform.runLater(() -> {
@@ -1005,12 +1006,11 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                         // A backstop, not the mechanism: assemble absorbs its
                         // own fetch failures, so this fires only for something
                         // unforeseen -- which is all the more reason to show it.
-                        reviewDestination.setItems(new QueueAssembly(List.of(), false, false),
-                                local.size());
+                        reviewDestination.setItems(new QueueAssembly(List.of(), false, false), names);
                         return;
                     }
                     adoptLegacyAnnotations(assembly.items());
-                    reviewDestination.setItems(assembly, local.size());
+                    reviewDestination.setItems(assembly, names);
                     if (pendingReviewSelection != null) {
                         selectReviewScopeFor(pendingReviewSelection);
                         pendingReviewSelection = null;

@@ -77,7 +77,7 @@ class ReviewLandsOnFirstIntentTest extends ApplicationTest {
         ReviewItem item = new ReviewItem(scope, ReviewItem.Group.MINE, "Working tree",
                 "repo · uncommitted");
 
-        interact(() -> view.setItems(new QueueAssembly(List.of(item), true, true), 1));
+        interact(() -> view.setItems(new QueueAssembly(List.of(item), true, true), List.of("repo")));
         awaitCardCount(2);
 
         // Walk to the second intent, which scrolls the column to Zulu.java.
@@ -92,7 +92,7 @@ class ReviewLandsOnFirstIntentTest extends ApplicationTest {
         // its same-id no-op branch and no diff re-runs. The reassembly must
         // still land on the first intent, not leave the column where the
         // last read of it happened to stop.
-        interact(() -> view.setItems(new QueueAssembly(List.of(item), true, true), 1));
+        interact(() -> view.setItems(new QueueAssembly(List.of(item), true, true), List.of("repo")));
         awaitCardCount(2);
 
         assertTrue(renderedHunkFiles().stream().anyMatch(p -> p.endsWith("Alpha.java")),

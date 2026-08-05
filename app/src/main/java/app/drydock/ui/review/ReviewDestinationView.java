@@ -48,18 +48,12 @@ import java.util.function.Consumer;
  */
 public final class ReviewDestinationView extends BorderPane {
 
-    /** Below this width the rails take their narrow sizes; below {@link #QUEUE_COLLAPSE_WIDTH} they collapse (spec §4.9). */
-    private static final double NARROW_WIDTH = 1320;
-    private static final double QUEUE_COLLAPSE_WIDTH = 1180;
-    private static final double INTENT_COLLAPSE_WIDTH = 1040;
-    private static final double MARGIN_COLLAPSE_WIDTH = 880;
-
     /**
      * Below this width the three-column layout is replaced by two alternating
-     * pages (spec §4.9). The auto-collapse thresholds above only ever shrink a
-     * rail; below 980px shrinking them further produced 44/40px slivers that
-     * could not be expanded, so the whole tab became unusable. Two full-width
-     * pages is the answer, not a fourth threshold.
+     * pages (spec §4.9). {@link RailLayout} only ever shrinks a rail; below
+     * 980px shrinking them further produced 44/40px slivers that could not be
+     * expanded, so the whole tab became unusable. Two full-width pages is the
+     * answer, not one more threshold.
      */
     private static final double DRILL_IN_WIDTH = 980;
 
@@ -270,6 +264,13 @@ public final class ReviewDestinationView extends BorderPane {
      * should be one thing, not the full chrome with the content removed.</p>
      */
     private boolean queueEmpty;
+
+    /**
+     * The repositories the last scan covered, so an empty surface can say what
+     * it looked at. Held rather than passed through {@link #showEmpty}: the
+     * scanning state is raised before there is any assembly to carry them.
+     */
+    private List<String> repositoryNames = List.of();
 
     /**
      * The {@code ‹} affordance naming the tab Review was entered from
@@ -523,8 +524,10 @@ public final class ReviewDestinationView extends BorderPane {
      * showing is selected. An assembly with no items shows whichever empty
      * state the assembly's own completeness implies.
      */
-    public void setItems(QueueAssembly assembly, int repositoryCount) {
+    public void setItems(QueueAssembly assembly, List<String> repositoryNames) {
         List<ReviewItem> items = assembly.items();
+        this.repositoryNames = List.copyOf(repositoryNames);
+        int repositoryCount = this.repositoryNames.size();
         String previous = queue.selected().map(item -> item.scope().id()).orElse(null);
         queue.setItems(items);
         outcomeByScope.keySet().retainAll(items.stream().map(item -> item.scope().id())
@@ -556,7 +559,8 @@ public final class ReviewDestinationView extends BorderPane {
     }
 
     /** Called when Review is shown and a scan is in flight. */
-    public void showScanning() {
+    public void showScanning(List<String> repositoryNames) {
+        this.repositoryNames = List.copyOf(repositoryNames);
         showEmpty(ReviewEmptyState.SCANNING);
     }
 
@@ -572,7 +576,8 @@ public final class ReviewDestinationView extends BorderPane {
         headerTitle.setText(state.title());
         headerContext.setText("");
         hideSessionRow();
-        Region placeholder = placeholder(state.title(), state.detail(), "");
+        Region placeholder = placeholder(state.title(), state.detail(),
+                state.scanned(repositoryNames));
         if (state == ReviewEmptyState.SCAN_INCOMPLETE) {
             Button retry = new Button("Retry the scan");
             retry.getStyleClass().addAll("review-chip-button", "review-empty-retry");
@@ -1130,7 +1135,12 @@ public final class ReviewDestinationView extends BorderPane {
         }
     }
 
-    private static Region placeholder(String title, String detail, String mono) {
+    /**
+     * @param scope what the state is talking about -- the repositories a scan
+     *              covered. Blank renders no line: an empty one would read as
+     *              a scope that came back empty.
+     */
+    private static Region placeholder(String title, String detail, String scope) {
         Label titleLabel = new Label(title);
         titleLabel.getStyleClass().add("review-placeholder-title");
         Label detailLabel = new Label(detail);
@@ -1138,10 +1148,12 @@ public final class ReviewDestinationView extends BorderPane {
         detailLabel.setWrapText(true);
         detailLabel.setMaxWidth(520);
         VBox box = new VBox(8, titleLabel, detailLabel);
-        if (!mono.isBlank()) {
-            Label monoLabel = new Label(mono);
-            monoLabel.getStyleClass().add("review-placeholder-mono");
-            box.getChildren().add(monoLabel);
+        if (!scope.isBlank()) {
+            Label scopeLabel = new Label(scope);
+            scopeLabel.getStyleClass().add("review-placeholder-scope");
+            scopeLabel.setWrapText(true);
+            scopeLabel.setMaxWidth(520);
+            box.getChildren().add(scopeLabel);
         }
         box.setAlignment(Pos.CENTER);
         box.getStyleClass().add("review-placeholder");
@@ -1189,12 +1201,18 @@ public final class ReviewDestinationView extends BorderPane {
         }
         rails.setVisible(true);
         rails.setManaged(true);
-        queue.setNarrow(width < NARROW_WIDTH);
-        queue.setCollapsed(queueCollapsedByUser || width < QUEUE_COLLAPSE_WIDTH);
-        intentRail.setNarrow(width < NARROW_WIDTH);
-        intentRail.setCollapsed(intentsCollapsedByUser || width < INTENT_COLLAPSE_WIDTH);
-        margin.setNarrow(width < NARROW_WIDTH);
-        margin.setCollapsed(marginCollapsedByUser || width < MARGIN_COLLAPSE_WIDTH);
+        // Rails give up their width, margin first and queue last, until the
+        // code column clears its floor. A manual collapse is remembered
+        // separately: a user who collapsed the queue keeps it collapsed when
+        // the window grows back, and one who did not gets it back.
+        RailLayout.Layout layout = RailLayout.solve(width, queueCollapsedByUser,
+                intentsCollapsedByUser, marginCollapsedByUser);
+        queue.setNarrow(layout.narrow());
+        queue.setCollapsed(layout.queueCollapsed());
+        intentRail.setNarrow(layout.narrow());
+        intentRail.setCollapsed(layout.intentsCollapsed());
+        margin.setNarrow(layout.narrow());
+        margin.setCollapsed(layout.marginCollapsed());
     }
 
     /**
@@ -1657,7 +1675,8 @@ public final class ReviewDestinationView extends BorderPane {
     public String diagLayoutWidths() {
         return diagNarrowPage() + " view=" + (int) getWidth() + " rails=" + (int) rails.getWidth()
                 + " queue=" + (int) queue.getWidth() + " intents=" + (int) intentRail.getWidth()
-                + " | diff " + diffColumn.diagWidths();
+                + " | diff " + diffColumn.diagWidths()
+                + " | rail " + intentRail.diagCards();
     }
 
     /** Diagnostic-only: every queue item, filtered or not (visual verification harness). */

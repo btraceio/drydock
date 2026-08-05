@@ -305,7 +305,7 @@ class ReviewNarrowLayoutTest extends ApplicationTest {
 
     private void seedQueue() {
         List<ReviewItem> items = List.of(item("feat/a"), item("feat/b"));
-        interact(() -> view.setItems(new QueueAssembly(items, true, true), 1));
+        interact(() -> view.setItems(new QueueAssembly(items, true, true), List.of("repo")));
         // Intents now come from the selected scope's OWN diff outcome rather
         // than a globally-injected one, and these fixtures point at worktree
         // paths that do not exist, so no real diff can ever land for them.

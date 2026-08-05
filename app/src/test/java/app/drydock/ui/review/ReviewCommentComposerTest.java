@@ -196,7 +196,7 @@ class ReviewCommentComposerTest extends ApplicationTest {
                 Path.of("/tmp/nowhere"), Optional.of(Path.of("/tmp/nowhere")), "main", "main",
                 Optional.empty(), Optional.empty()));
         interact(() -> view.setItems(new QueueAssembly(List.of(new ReviewItem(scope,
-                ReviewItem.Group.MINE, "Working tree", "repo · uncommitted")), true, true), 1));
+                ReviewItem.Group.MINE, "Working tree", "repo · uncommitted")), true, true), List.of("repo")));
         interact(() -> view.diagShowDiff(scope, host.diff));
         WaitForAsyncUtils.waitForFxEvents();
     }

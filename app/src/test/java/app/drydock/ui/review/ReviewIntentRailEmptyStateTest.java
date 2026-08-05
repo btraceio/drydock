@@ -72,7 +72,7 @@ class ReviewIntentRailEmptyStateTest extends ApplicationTest {
                 Optional.empty(), Optional.empty()));
         interact(() -> view.setItems(new QueueAssembly(
                 List.of(new ReviewItem(scope, ReviewItem.Group.MINE, "Working tree", "repo · uncommitted")),
-                true, true), 1));
+                true, true), List.of("repo")));
     }
 
     @AfterEach
