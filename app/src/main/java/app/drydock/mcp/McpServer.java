@@ -431,7 +431,7 @@ public final class McpServer implements AutoCloseable {
         String collapsed = JsonWriter.write(arguments).replaceAll("\\s+", " ");
         StringBuilder clean = new StringBuilder(collapsed.length());
         collapsed.codePoints().forEach(cp -> clean.appendCodePoint(isUnrenderable(cp) ? '�' : cp));
-        return truncateByCodePoints(clean.toString(), 80);
+        return truncateByCodePoints(clean.toString(), 160);
     }
 
     /** Categories that must never reach a Label: invisible, reordering, or not a character at all. */

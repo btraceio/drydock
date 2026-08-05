@@ -404,7 +404,8 @@ class McpServerTest {
 
         String summary = McpServer.summarize(args);
 
-        assertTrue(summary.length() <= 161, "not truncated: " + summary.length());
+        assertTrue(summary.codePointCount(0, summary.length()) <= 161,
+                "not truncated: " + summary.codePointCount(0, summary.length()));
         for (int i = 0; i < summary.length(); i++) {
             char c = summary.charAt(i);
             if (Character.isHighSurrogate(c)) {
