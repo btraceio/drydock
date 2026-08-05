@@ -13,6 +13,8 @@ import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.RepositorySettings;
 import app.drydock.domain.SessionStatus;
+import app.drydock.mcp.McpSessionContext.RenameKind;
+import app.drydock.mcp.McpSessionContext.RenameOutcome;
 import app.drydock.state.ApplicationStateRepository;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -30,6 +32,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -95,7 +98,7 @@ class SessionManagerTest {
     /**
      * A minimal INACTIVE session, shared with {@link
      * SessionManagerExitReleasesMcpTest} (same package) so the MCP-lifecycle
-     * tests do not restate this 15-component record.
+     * tests do not restate this 16-component record.
      */
     static ManagedAgentSession newSessionFixture() {
         return sessionWith(Path.of("/tmp"), Optional.empty(), Optional.empty());
@@ -119,7 +122,8 @@ class SessionManagerTest {
                 Optional.empty(),
                 PrState.NONE,
                 Optional.empty(),
-                true);
+                true,
+                false);
     }
 
     private Repository someRepository() {
@@ -268,11 +272,157 @@ class SessionManagerTest {
         InMemoryStateRepository stateRepository = new InMemoryStateRepository(List.of(session));
         SessionManager manager = newManager(stateRepository);
 
-        ManagedAgentSession renamed = manager.renameSession(session.id(), "new name");
+        ManagedAgentSession renamed = manager.renameSession(session.id(), "new name", true);
 
         assertEquals("new name", renamed.displayName());
         flushState(stateRepository);
         assertEquals("new name", stateRepository.savedState().sessions().get(0).displayName());
+    }
+
+    // ---- Task 7: applyAgentRename's single-transform outcome ---------------
+
+    /** A session seeded directly into a repository's state, bypassing launch. */
+    private static ManagedAgentSession sessionIn(Repository repository, String displayName) {
+        Instant now = Instant.now();
+        return new ManagedAgentSession(
+                ManagedSessionId.newId(),
+                repository.id(),
+                AgentKind.CLAUDE,
+                displayName,
+                Optional.empty(),
+                Optional.empty(),
+                repository.root(),
+                Optional.empty(),
+                SessionStatus.INACTIVE,
+                now,
+                now,
+                Optional.empty(),
+                PrState.NONE,
+                Optional.empty(),
+                true,
+                false);
+    }
+
+    /** {@link SessionManager#sessions()} is public where {@code findSession} is not; use it to read state back. */
+    private static Optional<ManagedAgentSession> currentSession(SessionManager manager, ManagedSessionId id) {
+        return manager.sessions().stream().filter(session -> session.id().equals(id)).findFirst();
+    }
+
+    @Test
+    void anAgentRenameAppliesAndDoesNotPin() {
+        Repository repository = someRepository();
+        ManagedAgentSession session = sessionIn(repository, "Session 1");
+        SessionManager manager = newManager(new InMemoryStateRepository(List.of(session)));
+
+        RenameOutcome outcome = manager.applyAgentRename(session.id(), "Fix the login flow");
+
+        assertEquals(RenameKind.RENAMED, outcome.kind());
+        assertEquals("Fix the login flow", outcome.currentName());
+        assertFalse(currentSession(manager, session.id()).orElseThrow().namePinned());
+        // ...so a second agent rename also succeeds
+        assertEquals(RenameKind.RENAMED, manager.applyAgentRename(session.id(), "Fix the logout flow").kind());
+    }
+
+    @Test
+    void aHumanRenameWithPinBlocksLaterAgentRenames() {
+        Repository repository = someRepository();
+        ManagedAgentSession session = sessionIn(repository, "Session 1");
+        SessionManager manager = newManager(new InMemoryStateRepository(List.of(session)));
+        manager.renameSession(session.id(), "Mine", true);
+
+        RenameOutcome outcome = manager.applyAgentRename(session.id(), "Fix the login flow");
+
+        assertEquals(RenameKind.PINNED, outcome.kind());
+        assertEquals("Mine", outcome.currentName());
+        assertEquals("Mine", currentSession(manager, session.id()).orElseThrow().displayName());
+    }
+
+    @Test
+    void aHumanRenameWithoutPinLeavesTheAgentFree() {
+        Repository repository = someRepository();
+        ManagedAgentSession session = sessionIn(repository, "Session 1");
+        SessionManager manager = newManager(new InMemoryStateRepository(List.of(session)));
+        manager.renameSession(session.id(), "Blur wrote this", false);
+
+        assertEquals(RenameKind.RENAMED, manager.applyAgentRename(session.id(), "Fix the login flow").kind());
+    }
+
+    @Test
+    void renamingToTheCurrentNameIsUnchanged() {
+        Repository repository = someRepository();
+        ManagedAgentSession session = sessionIn(repository, "Session 1");
+        SessionManager manager = newManager(new InMemoryStateRepository(List.of(session)));
+        manager.applyAgentRename(session.id(), "Fix the login flow");
+
+        assertEquals(RenameKind.UNCHANGED, manager.applyAgentRename(session.id(), "Fix the login flow").kind());
+    }
+
+    @Test
+    void pinBeatsUnchangedWhenBothApply() {
+        Repository repository = someRepository();
+        ManagedAgentSession session = sessionIn(repository, "Session 1");
+        SessionManager manager = newManager(new InMemoryStateRepository(List.of(session)));
+        manager.renameSession(session.id(), "Mine", true);
+
+        // Asking for the name it already has, on a pinned session: PINNED wins.
+        assertEquals(RenameKind.PINNED, manager.applyAgentRename(session.id(), "Mine").kind());
+    }
+
+    @Test
+    void aTitleAnotherSessionInTheSameRepositoryHoldsCollides() {
+        Repository repository = someRepository();
+        ManagedAgentSession first = sessionIn(repository, "Session 1");
+        ManagedAgentSession second = sessionIn(repository, "Session 2");
+        SessionManager manager = newManager(new InMemoryStateRepository(List.of(first, second)));
+        manager.applyAgentRename(first.id(), "Fix the login flow");
+
+        RenameOutcome outcome = manager.applyAgentRename(second.id(), "fix the LOGIN flow");
+
+        assertEquals(RenameKind.COLLIDED, outcome.kind());
+        assertEquals("Fix the login flow", outcome.currentName());
+        assertEquals("Session 2", currentSession(manager, second.id()).orElseThrow().displayName());
+    }
+
+    @Test
+    void theSameTitleInAnotherRepositoryIsFine() {
+        Repository repository = someRepository();
+        Repository otherRepository = someRepository();
+        ManagedAgentSession here = sessionIn(repository, "Session 1");
+        ManagedAgentSession there = sessionIn(otherRepository, "Session 1");
+        SessionManager manager = newManager(new InMemoryStateRepository(List.of(here, there)));
+        manager.applyAgentRename(here.id(), "Fix the login flow");
+
+        assertEquals(RenameKind.RENAMED, manager.applyAgentRename(there.id(), "Fix the login flow").kind());
+    }
+
+    @Test
+    void collisionComparesAgainstFoldedStoredNames() {
+        // The human path applies no checkSessionTitle, so a stored name can carry
+        // a non-breaking space that renders identically to a plain one. Folding
+        // only the incoming side would let an agent take a name that looks, in
+        // the sidebar and in every confirm dialog, exactly like its neighbour's.
+        // U+00A0 is deliberately an escape, not a literal: an invisible character
+        // in source is unreviewable.
+        Repository repository = someRepository();
+        ManagedAgentSession first = sessionIn(repository, "Session 1");
+        ManagedAgentSession second = sessionIn(repository, "Session 2");
+        SessionManager manager = newManager(new InMemoryStateRepository(List.of(first, second)));
+        manager.renameSession(first.id(), "Fix\u00A0login", false);   // NBSP, stored unfolded
+
+        assertEquals(RenameKind.COLLIDED,
+                manager.applyAgentRename(second.id(), "Fix login").kind());   // plain space
+    }
+
+    @Test
+    void anExitedSessionStillHoldsItsName() {
+        Repository repository = someRepository();
+        ManagedAgentSession first = sessionIn(repository, "Session 1").withStatus(SessionStatus.RUNNING);
+        ManagedAgentSession second = sessionIn(repository, "Session 2");
+        SessionManager manager = newManager(new InMemoryStateRepository(List.of(first, second)));
+        manager.applyAgentRename(first.id(), "Fix the login flow");
+        manager.markSessionExited(first.id());
+
+        assertEquals(RenameKind.COLLIDED, manager.applyAgentRename(second.id(), "Fix the login flow").kind());
     }
 
     @Test

@@ -66,7 +66,7 @@ class McpToolRouterReadTest {
 
         assertEquals(List.of("review_comments", "review_reply", "review_scope", "review_intents",
                 "review_finding", "review_answer", "review_state", "worktree_create",
-                "session_start", "repos_list", "sessions_list"), names);
+                "session_start", "session_rename", "repos_list", "sessions_list"), names);
     }
 
     @Test
@@ -97,6 +97,7 @@ class McpToolRouterReadTest {
                 Map.entry("review_state", List.of("scopeId")),
                 Map.entry("worktree_create", List.of("branch")),
                 Map.entry("session_start", List.of("worktree_path")),
+                Map.entry("session_rename", List.of("title")),
                 Map.entry("repos_list", List.of()),
                 Map.entry("sessions_list", List.of()));
 
@@ -128,7 +129,7 @@ class McpToolRouterReadTest {
         context.sessionRunning = false;
 
         for (String tool : List.of("review_comments", "review_reply", "worktree_create",
-                "session_start", "repos_list", "sessions_list")) {
+                "session_start", "session_rename", "repos_list", "sessions_list")) {
             McpToolException failure = assertThrows(McpToolException.class,
                     () -> router.call(caller, tool, noArgs()), tool + " must be refused");
             assertTrue(failure.getMessage().contains("Session has ended"),

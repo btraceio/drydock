@@ -37,6 +37,14 @@ final class JsonPeek {
         return ((JsonBoolean) field(value, key)).value();
     }
 
+    /** Names listed in a tool descriptor's {@code inputSchema.required}. */
+    static List<String> requiredNames(JsonValue tool) {
+        JsonValue schema = field(tool, "inputSchema");
+        return array(schema, "required").stream()
+                .map(name -> ((JsonString) name).value())
+                .toList();
+    }
+
     /** Builds a flat string-valued argument object; most tool arguments are strings. */
     static JsonObject args(String... keysAndValues) {
         Map<String, JsonValue> members = new LinkedHashMap<>();

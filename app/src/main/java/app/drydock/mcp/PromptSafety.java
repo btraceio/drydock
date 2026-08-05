@@ -1,8 +1,11 @@
 package app.drydock.mcp;
 
+import java.util.Objects;
+
 /**
  * Validates a prompt an MCP tool call wants to send into a hosted
- * {@code claude} session, before it is delivered.
+ * {@code claude} session, before it is delivered, and validates
+ * agent-authored text that drydock itself renders.
  *
  * <p>The prompt is not sent as an API message: {@code
  * MainWorkspace.sendTaskWhenReady} collapses its whitespace and types the
@@ -27,6 +30,12 @@ public final class PromptSafety {
      * one such call from making the margin unusable.
      */
     private static final int MAX_INBOUND_TEXT = 8000;
+
+    /** Longest session title, in code points. Bounds what can enter a confirm dialog. */
+    private static final int MAX_TITLE_CODE_POINTS = 60;
+
+    /** Longest run of combining marks, so a title cannot grow vertically out of the tab rail. */
+    private static final int MAX_CONSECUTIVE_MARKS = 2;
 
     /**
      * Validates text arriving <em>from</em> an agent -- a finding title, body
@@ -74,6 +83,135 @@ public final class PromptSafety {
             }
         }
         return text;
+    }
+
+    /**
+     * Validates a session title an agent wants to write to its own tab
+     * ({@code session_rename}), and returns it folded.
+     *
+     * <p>Unlike {@link #checkInboundText}, which is written for finding
+     * bodies and deliberately permits {@code \n}, {@code \r} and {@code \t}:
+     * a title is one line, and it lands somewhere a finding body never does.
+     * It is the label of the tab rail and the sidebar row, and it is
+     * interpolated into five confirm dialogs -- including
+     * "Delete session \"...\"?" and the Start-new-conversation /
+     * Delete-session pair. Text that can reorder, hide, or re-punctuate
+     * itself there can make a destructive confirmation read as a reassurance.
+     *
+     * <p>The scan iterates code points. A {@code char} loop would miss the
+     * supplementary-plane tag block U+E0020-U+E007F -- FORMAT characters
+     * whose surrogates are neither FORMAT nor controls, and the current
+     * invisible-text-smuggling vector.
+     *
+     * @return {@code title} with every Unicode space folded to U+0020, runs
+     *         collapsed and the result trimmed -- the value that gets stored
+     *         and compared, never the raw argument
+     */
+    public static String checkSessionTitle(String title) throws McpToolException {
+        Objects.requireNonNull(title, "title");
+
+        int marksInARow = 0;
+        for (int i = 0; i < title.length(); ) {
+            int cp = title.codePointAt(i);
+            i += Character.charCount(cp);
+
+            int type = Character.getType(cp);
+            if (type == Character.CONTROL || type == Character.FORMAT || type == Character.SURROGATE
+                    || type == Character.PRIVATE_USE || type == Character.UNASSIGNED
+                    || type == Character.LINE_SEPARATOR || type == Character.PARAGRAPH_SEPARATOR) {
+                throw new McpToolException(unrenderableMessage(cp));
+            }
+            if (cp == '"') {
+                throw new McpToolException("A session title may not contain a double quote: drydock "
+                        + "shows it inside quotes in confirmation dialogs.");
+            }
+            if (type == Character.NON_SPACING_MARK || type == Character.ENCLOSING_MARK
+                    || type == Character.COMBINING_SPACING_MARK) {
+                if (++marksInARow > MAX_CONSECUTIVE_MARKS) {
+                    throw new McpToolException("A session title may not stack more than "
+                            + MAX_CONSECUTIVE_MARKS + " combining marks on one character.");
+                }
+            } else {
+                marksInARow = 0;
+            }
+        }
+
+        String folded = fold(title);
+        if (folded.isEmpty()) {
+            throw new McpToolException("A session title must not be blank.");
+        }
+        int codePoints = folded.codePointCount(0, folded.length());
+        if (codePoints > MAX_TITLE_CODE_POINTS) {
+            throw new McpToolException("A session title may be at most " + MAX_TITLE_CODE_POINTS
+                    + " characters; this one is " + codePoints + ".");
+        }
+        return folded;
+    }
+
+    /** The folding half of {@link #checkSessionTitle}, for comparing against already-stored names. */
+    public static String foldForComparison(String title) {
+        return fold(title);
+    }
+
+    /** U+200D ZERO WIDTH JOINER: what welds a multi-part emoji together. */
+    private static final int ZERO_WIDTH_JOINER = 0x200D;
+
+    /**
+     * Why a code point was refused, phrased so the caller can act on it.
+     *
+     * <p>The joiner gets its own sentence because it is the one refusal an
+     * honest agent trips over. It is {@code FORMAT}, like a bidi override, so
+     * the same rule catches both -- but a model writing a family or profession
+     * emoji is not smuggling anything, and "found U+200D" gives it nothing to
+     * act on. It then retries blind until its rename budget runs out.</p>
+     *
+     * <p>Note what is NOT here: an emoji's variation selector (U+FE0F and its
+     * neighbours) is a {@code NONSPACING_MARK}, not {@code FORMAT}, so plain
+     * emoji and their colour presentation forms pass rule 1 untouched. Only
+     * the glued sequences are refused, which is why the advice is "use a
+     * single emoji" rather than "drop the emoji".</p>
+     */
+    private static String unrenderableMessage(int codePoint) {
+        if (codePoint == ZERO_WIDTH_JOINER) {
+            return "A session title may not contain a zero-width joiner (U+200D), so multi-part "
+                    + "emoji -- professions, families, composed flags -- cannot be used. A single "
+                    + "emoji is fine.";
+        }
+        return "A session title must be one line of visible text; it may not contain control, "
+                + "invisible or direction-changing characters (found U+"
+                + String.format("%04X", codePoint) + ").";
+    }
+
+    /**
+     * Every Unicode space separator to U+0020, runs collapsed, then trimmed.
+     *
+     * <p>Not {@code strip()} or {@code \s}: {@link Character#isWhitespace} is
+     * false for U+00A0, U+2007 and U+202F, so a title made entirely of
+     * non-breaking spaces would otherwise pass every check and render as a
+     * blank tab and a blank "Delete session" dialog.</p>
+     */
+    private static String fold(String title) {
+        StringBuilder folded = new StringBuilder(title.length());
+        boolean lastWasSpace = false;
+        for (int i = 0; i < title.length(); ) {
+            int cp = title.codePointAt(i);
+            i += Character.charCount(cp);
+            boolean isSpace = cp == ' ' || Character.isSpaceChar(cp);
+            if (isSpace) {
+                if (!lastWasSpace && folded.length() > 0) {
+                    folded.append(' ');
+                }
+                lastWasSpace = true;
+            } else {
+                folded.appendCodePoint(cp);
+                lastWasSpace = false;
+            }
+        }
+        int end = folded.length();
+        while (end > 0 && folded.charAt(end - 1) == ' ') {
+            end--;
+        }
+        return folded.substring(0, end);
     }
 
     /**

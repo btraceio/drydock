@@ -314,24 +314,26 @@ public final class McpServer implements AutoCloseable {
                         ? Optional.of(scope.value())
                         : Optional.empty();
                 activityLog.record(new McpActivityLog.Entry(Instant.now(),
-                        tool.startsWith("review_") && !tool.equals("review_scope")
-                                && !tool.equals("review_state")
-                                ? McpActivityLog.Direction.INBOUND
-                                : McpActivityLog.Direction.OUTBOUND,
-                        tool, summarize(arguments), scopeId, bytes, failed));
+                        directionOf(tool),
+                        tool, McpServer.summarize(arguments), scopeId, bytes, failed));
             } catch (RuntimeException e) {
                 LOG.log(Level.FINE, "Could not log MCP activity for " + tool, e);
             }
         }
 
-        /** A one-line detail for the panel: the arguments, bounded. */
-        private static String summarize(JsonValue arguments) {
-            if (arguments == null) {
-                return "";
-            }
-            String text = JsonWriter.write(arguments).replaceAll("\\s+", " ");
-            return text.length() <= 160 ? text : text.substring(0, 159) + "…";
-        }
+        /**
+         * Injected into the hosted agent's system prompt by the client. This
+         * is the only thing that makes a tool get called without the agent
+         * already hunting for one -- a tool description is read at selection
+         * time, not at the moment the agent learns what its work is.
+         */
+        private static final String INSTRUCTIONS = """
+                Drydock hosts this session in a tab a human is watching. As soon as you know what \
+                the work actually is, call session_rename with a short title naming the work -- not \
+                the branch. Re-title it if the work turns out to be something else. Two refusals are \
+                normal and both explain themselves: if the human has named the session, leave it \
+                alone; if another session here already has that title, pick one that tells them apart.\
+                """;
 
         private JsonValue initializeResult(JsonValue params) {
             return JsonObject.empty()
@@ -339,7 +341,8 @@ public final class McpServer implements AutoCloseable {
                     .put("capabilities", JsonObject.empty().put("tools", JsonObject.empty()))
                     .put("serverInfo", JsonObject.empty()
                             .put("name", new JsonString("drydock"))
-                            .put("version", new JsonString("1.0.0")));
+                            .put("version", new JsonString("1.0.0")))
+                    .put("instructions", new JsonString(INSTRUCTIONS));
         }
 
         /**
@@ -416,5 +419,67 @@ public final class McpServer implements AutoCloseable {
                 .put("error", JsonObject.empty()
                         .put("code", JsonNumber.of(code))
                         .put("message", new JsonString(message)));
+    }
+
+    /**
+     * The tools that WRITE into drydock. Everything else is drydock answering
+     * a question, including the tools whose names begin "review_".
+     *
+     * <p>An explicit set rather than the name-prefix rule this replaced: that
+     * rule classified {@code review_comments} as a write, which it is not --
+     * the agent asks for open threads and drydock answers -- and it would
+     * have classified {@code session_rename} as a read. A prefix cannot
+     * express either, and every tool added later must be classified on
+     * purpose rather than by how it was named.</p>
+     */
+    private static final Set<String> AGENT_WRITE_TOOLS = Set.of(
+            "review_reply", "review_intents", "review_finding", "review_answer", "session_rename");
+
+    static McpActivityLog.Direction directionOf(String tool) {
+        return AGENT_WRITE_TOOLS.contains(tool)
+                ? McpActivityLog.Direction.INBOUND
+                : McpActivityLog.Direction.OUTBOUND;
+    }
+
+    /**
+     * A one-line detail for the panel: the arguments, bounded and stripped of
+     * anything that can lie in a Label.
+     *
+     * <p>Order matters. The whitespace collapse runs FIRST: Java's {@code \s}
+     * is ASCII-only, so it flattens {@link JsonWriter}'s own pretty-print
+     * newlines and indents and nothing else. Only then are the invisible and
+     * control categories replaced -- sanitizing first would replace those
+     * structural newlines too and turn every row into "{&#xFFFD; ...".
+     *
+     * <p>{@code JsonWriter} escapes only {@code c < 0x20}, so U+007F, the C1
+     * block, the bidi overrides and the tag block all arrive here verbatim.
+     * The panel renders this as a {@code Label}, on failed calls as well as
+     * successful ones, so this is the boundary that has to remove them.
+     */
+    static String summarize(JsonValue arguments) {
+        if (arguments == null) {
+            return "";
+        }
+        String collapsed = JsonWriter.write(arguments).replaceAll("\\s+", " ");
+        StringBuilder clean = new StringBuilder(collapsed.length());
+        collapsed.codePoints().forEach(cp -> clean.appendCodePoint(isUnrenderable(cp) ? '�' : cp));
+        return truncateByCodePoints(clean.toString(), 160);
+    }
+
+    /** Categories that must never reach a Label: invisible, reordering, or not a character at all. */
+    private static boolean isUnrenderable(int codePoint) {
+        int type = Character.getType(codePoint);
+        return type == Character.CONTROL || type == Character.FORMAT || type == Character.SURROGATE
+                || type == Character.PRIVATE_USE || type == Character.UNASSIGNED
+                || type == Character.LINE_SEPARATOR || type == Character.PARAGRAPH_SEPARATOR;
+    }
+
+    /** Truncates on a code-point boundary, so a cut never re-creates a lone surrogate. */
+    private static String truncateByCodePoints(String text, int maxCodePoints) {
+        if (text.codePointCount(0, text.length()) <= maxCodePoints) {
+            return text;
+        }
+        int end = text.offsetByCodePoints(0, maxCodePoints - 1);
+        return text.substring(0, end) + "…";
     }
 }

@@ -18,8 +18,11 @@ import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SshRemote;
 import app.drydock.mcp.McpConfigWriter;
+import app.drydock.mcp.McpSessionContext.RenameKind;
+import app.drydock.mcp.McpSessionContext.RenameOutcome;
 import app.drydock.mcp.McpSessionRegistry;
 import app.drydock.mcp.McpSessionRegistry.Spawn;
+import app.drydock.mcp.PromptSafety;
 import app.drydock.state.ApplicationStateRepository;
 import app.drydock.terminal.api.TerminalHostView;
 import app.drydock.terminal.api.TerminalRuntime;
@@ -691,8 +694,67 @@ public final class SessionManager implements AutoCloseable {
                 session -> session.withWorkingDirectory(normalized).withStatus(SessionStatus.INACTIVE));
     }
 
-    public ManagedAgentSession renameSession(ManagedSessionId sessionId, String newDisplayName) {
-        return updateSession(sessionId, session -> session.withDisplayName(newDisplayName));
+    /**
+     * The human's rename. {@code pin} marks the name as theirs, which refuses
+     * every later {@link #applyAgentRename}.
+     *
+     * <p>Pinning is a decision of the caller, not of renaming: {@code pin} is
+     * true for an explicit confirm (Enter in the inline editor, OK in the
+     * Rename dialog) and false for a focus-loss commit, which an agent can
+     * provoke by opening a tab and stealing focus.</p>
+     */
+    public ManagedAgentSession renameSession(ManagedSessionId sessionId, String newDisplayName, boolean pin) {
+        return updateSession(sessionId, session -> pin
+                ? session.withDisplayName(newDisplayName).withNamePinned(true)
+                : session.withDisplayName(newDisplayName));
+    }
+
+    /**
+     * The {@code session_rename} MCP tool's write.
+     *
+     * <p>One transform, deliberately: the pin test, the unchanged test, the
+     * collision test and the write all read the same state under {@link
+     * ApplicationStateStore}'s single lock. Reading first and writing after
+     * would let a human rename land in between and be silently overwritten --
+     * the load-then-save shape AGENTS.md names as a data-loss bug.</p>
+     *
+     * <p>{@code title} must already have been through {@link
+     * PromptSafety#checkSessionTitle}: this compares and stores it verbatim.</p>
+     */
+    public RenameOutcome applyAgentRename(ManagedSessionId sessionId, String title) {
+        RenameOutcome[] result = new RenameOutcome[1];
+        stateStore.update(state -> {
+            ManagedAgentSession session = state.sessions().stream()
+                    .filter(existing -> existing.id().equals(sessionId))
+                    .findFirst()
+                    .orElseThrow(() -> new UnknownSessionException(sessionId));
+
+            if (session.namePinned()) {
+                result[0] = new RenameOutcome(RenameKind.PINNED, session.displayName());
+                return state;
+            }
+            if (session.displayName().equals(title)) {
+                result[0] = new RenameOutcome(RenameKind.UNCHANGED, session.displayName());
+                return state;
+            }
+            Optional<ManagedAgentSession> clash = state.sessions().stream()
+                    .filter(other -> !other.id().equals(sessionId))
+                    .filter(other -> other.repositoryId().equals(session.repositoryId()))
+                    // Both sides folded: a stored name came through the human
+                    // path, which applies no checkSessionTitle, so it can
+                    // carry a non-breaking space that renders identically.
+                    .filter(other -> PromptSafety.foldForComparison(other.displayName()).equalsIgnoreCase(title))
+                    .findFirst();
+            if (clash.isPresent()) {
+                result[0] = new RenameOutcome(RenameKind.COLLIDED, clash.get().displayName());
+                return state;
+            }
+
+            ManagedAgentSession renamed = session.withDisplayName(title);
+            result[0] = new RenameOutcome(RenameKind.RENAMED, title);
+            return withReplacedSession(state, renamed);
+        });
+        return result[0];
     }
 
     /** Records the observed PR lifecycle state of a worktree session's branch (Finish-panel reconciliation). */
@@ -914,7 +976,8 @@ public final class SessionManager implements AutoCloseable {
                 Optional.empty(),
                 PrState.NONE,
                 Optional.empty(),
-                branchCreatedHere);
+                branchCreatedHere,
+                false);
     }
 
     /**

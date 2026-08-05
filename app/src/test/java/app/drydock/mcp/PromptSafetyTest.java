@@ -2,10 +2,123 @@ package app.drydock.mcp;
 
 import org.junit.jupiter.api.Test;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PromptSafetyTest {
+
+    private static String check(String title) throws McpToolException {
+        return PromptSafety.checkSessionTitle(title);
+    }
+
+    @Test
+    void acceptsAnOrdinaryTitleAndReturnsItFolded() throws Exception {
+        assertEquals("Fix the login flow", check("  Fix   the  login flow  "));
+    }
+
+    @Test
+    void foldsNonBreakingSpacesSoAWhitespaceOnlyTitleIsBlank() {
+        // U+00A0 is NOT Character.isWhitespace, so strip()/isBlank() miss it.
+        assertThrows(McpToolException.class, () -> check("\u00A0\u00A0\u00A0"));
+    }
+
+    @Test
+    void foldsNonBreakingSpacesInsideATitle() throws Exception {
+        assertEquals("a b", check("a\u00A0\u00A0b"));
+    }
+
+    @Test
+    void refusesNewlinesEvenThoughCheckInboundTextAllowsThem() {
+        assertThrows(McpToolException.class, () -> check("one\ntwo"));
+    }
+
+    @Test
+    void refusesBidiOverridesAndZeroWidthCharacters() {
+        // U+202E RIGHT-TO-LEFT OVERRIDE, and U+200B ZERO WIDTH SPACE.
+        assertThrows(McpToolException.class, () -> check("safe \u202E gnirts"));
+        assertThrows(McpToolException.class, () -> check("a\u200Bb"));
+    }
+
+    @Test
+    void ordinaryEmojiAreFineIncludingTheirVariationSelectors() throws Exception {
+        // Recorded because it is easy to assume otherwise, and a reviewer of
+        // this branch did: the variation selector that renders an emoji in
+        // colour is a NONSPACING MARK (Mn), not FORMAT (Cf), so rule 1 never
+        // touches it. U+26A0 and U+1F600 are OTHER_SYMBOL. All pass.
+        assertEquals("Fix login \u26A0\uFE0F", check("Fix login \u26A0\uFE0F"));
+        assertEquals("Fix login \u26A0", check("Fix login \u26A0"));
+        assertEquals("Ship it \uD83D\uDE00", check("Ship it \uD83D\uDE00"));
+    }
+
+    @Test
+    void tellsTheAgentWhatToDoAboutAnEmojiItCannotUse() {
+        // U+200D ZERO WIDTH JOINER *is* FORMAT, so multi-part emoji -- the
+        // professions, families, and composed flags -- are refused. That ban is
+        // deliberate (an invisible joiner is a smuggling primitive), but naming
+        // the code point alone gives the agent nothing to act on, so it retries
+        // blind until its rename budget runs out.
+        McpToolException joiner =
+                assertThrows(McpToolException.class, () -> check("Ship it \uD83D\uDC68\u200D\uD83D\uDCBB"));
+        assertTrue(joiner.getMessage().contains("emoji"), joiner.getMessage());
+
+        // A bidi override is not an emoji problem and must not claim to be --
+        // telling an agent to "drop the emoji" from a title that has none sends
+        // it looking for something that is not there.
+        McpToolException bidi = assertThrows(McpToolException.class, () -> check("safe \u202E gnirts"));
+        assertFalse(bidi.getMessage().contains("emoji"), bidi.getMessage());
+    }
+
+    @Test
+    void refusesSupplementaryPlaneTagCharacters() {
+        // U+E0021 is FORMAT but neither of its surrogates is; a char-based
+        // loop passes it. This is the current invisible-text vector.
+        assertThrows(McpToolException.class, () -> check("work " + new String(Character.toChars(0xE0021))));
+    }
+
+    @Test
+    void refusesLineAndParagraphSeparators() {
+        // U+2028 LINE SEPARATOR, U+2029 PARAGRAPH SEPARATOR.
+        assertThrows(McpToolException.class, () -> check("a\u2028b"));
+        assertThrows(McpToolException.class, () -> check("a\u2029b"));
+    }
+
+    @Test
+    void refusesALoneSurrogate() {
+        assertThrows(McpToolException.class, () -> check("a\uD800b"));
+    }
+
+    @Test
+    void refusesTheDoubleQuoteThatWouldForgeAConfirmDialog() {
+        assertThrows(McpToolException.class, () -> check("x\" - already merged, safe to remove"));
+    }
+
+    @Test
+    void refusesThreeConsecutiveCombiningMarksButAllowsTwo() throws Exception {
+        // U+0301 COMBINING ACUTE ACCENT, U+0302 COMBINING CIRCUMFLEX ACCENT,
+        // U+0303 COMBINING TILDE.
+        String twoMarks = "e\u0301\u0302";
+        assertEquals(twoMarks, check(twoMarks));
+        String threeMarks = "e\u0301\u0302\u0303";
+        assertThrows(McpToolException.class, () -> check(threeMarks));
+    }
+
+    @Test
+    void capsAtSixtyCodePointsMeasuredAfterFolding() throws Exception {
+        assertEquals("a".repeat(60), check("a".repeat(60)));
+        assertThrows(McpToolException.class, () -> check("a".repeat(61)));
+        // 70 characters that fold to 55 must pass: folding precedes the cap.
+        assertEquals(("ab ".repeat(18) + "x").strip(), check("ab  ".repeat(18) + "x"));
+    }
+
+    @Test
+    void countsCodePointsNotCharsSoAstralTitlesAreNotCutShort() throws Exception {
+        String cjk = "工".repeat(60);            // 60 code points, 60 chars
+        String astral = "𠮷".repeat(60);   // 60 code points, 120 chars
+        assertEquals(cjk, check(cjk));
+        assertEquals(astral, check(astral));
+    }
 
     @Test
     void anOrdinaryPromptIsAccepted() throws Exception {

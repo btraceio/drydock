@@ -84,6 +84,6 @@ class AgentLabelsTest {
     private static ManagedAgentSession session(AgentKind kind, SessionStatus status) {
         return new ManagedAgentSession(ManagedSessionId.newId(), RepositoryId.newId(), kind, "work",
                 Optional.empty(), Optional.empty(), Path.of("/tmp"), Optional.empty(), status,
-                Instant.EPOCH, Instant.EPOCH, Optional.empty(), PrState.NONE, Optional.empty(), false);
+                Instant.EPOCH, Instant.EPOCH, Optional.empty(), PrState.NONE, Optional.empty(), false, false);
     }
 }

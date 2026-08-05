@@ -141,7 +141,8 @@ class JsonApplicationStateRepositoryTest {
                 Optional.of(1),
                 PrState.OPEN,
                 Optional.of(128),
-                true);
+                true,
+                false);
         ApplicationState state = new ApplicationState(List.of(repo), List.of(session), WorkspaceUiState.empty());
 
         JsonApplicationStateRepository repository = new JsonApplicationStateRepository(stateFile());
@@ -172,7 +173,8 @@ class JsonApplicationStateRepositoryTest {
                 Optional.empty(),
                 PrState.NONE,
                 Optional.empty(),
-                true);
+                true,
+                false);
         ApplicationState state = new ApplicationState(List.of(repo), List.of(session), WorkspaceUiState.empty());
 
         JsonApplicationStateRepository repository = new JsonApplicationStateRepository(stateFile());

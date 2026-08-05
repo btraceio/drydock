@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.Optional;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -197,5 +198,31 @@ class McpSessionRegistryTest {
         }
 
         assertThrows(McpBudgetExhaustedException.class, () -> registry.chargeWorktree(session));
+    }
+
+    @Test
+    void aSessionMayRenameItselfTwentyTimes() throws Exception {
+        ManagedSessionId session = ManagedSessionId.newId();
+
+        for (int i = 0; i < McpSessionRegistry.MAX_RENAMES_PER_SESSION; i++) {
+            registry.chargeRename(session);
+        }
+
+        McpBudgetExhaustedException refused =
+                assertThrows(McpBudgetExhaustedException.class, () -> registry.chargeRename(session));
+        assertTrue(refused.getMessage().contains("renamed itself"),
+                "message reads as a creation limit: " + refused.getMessage());
+    }
+
+    @Test
+    void aRefundedRenameCanBeRetried() throws Exception {
+        ManagedSessionId session = ManagedSessionId.newId();
+        for (int i = 0; i < McpSessionRegistry.MAX_RENAMES_PER_SESSION; i++) {
+            registry.chargeRename(session);
+        }
+
+        registry.refundRename(session);
+
+        assertDoesNotThrow(() -> registry.chargeRename(session));
     }
 }

@@ -129,6 +129,28 @@ public interface McpSessionContext {
                           Optional<String> branch, Path worktree, String status, boolean remote) {
     }
 
+    /** How a {@code session_rename} call ended. */
+    enum RenameKind {
+        /** The name changed and the workspace republished. */
+        RENAMED,
+        /** The validated title was already this session's name; nothing was written. */
+        UNCHANGED,
+        /** A human explicitly named this session, so drydock will not rename it. */
+        PINNED,
+        /** Another session in the same repository already answers to that name. */
+        COLLIDED
+    }
+
+    /**
+     * The result of a rename attempt.
+     *
+     * <p>{@code currentName} is the name in force after the call -- except on
+     * {@link RenameKind#COLLIDED}, where it is the colliding sibling's name,
+     * which is what the refusal has to quote.</p>
+     */
+    record RenameOutcome(RenameKind kind, String currentName) {
+    }
+
     /**
      * Every registered repository. Remote repositories carry empty git state:
      * {@code GitStatusService} has no cache, so probing them would open one ssh
@@ -163,4 +185,14 @@ public interface McpSessionContext {
 
     /** Opens a session tab in {@code worktree}; returns the new session's id. */
     ManagedSessionId startSession(Path worktree, Optional<String> initialPrompt) throws McpToolException;
+
+    /**
+     * Renames the caller's own session to an already-validated title.
+     *
+     * <p>Refusal is an outcome, not an exception: {@link
+     * RenameKind#PINNED} and {@link RenameKind#COLLIDED} are legal answers
+     * to a legal call, and the router owns the wording. Only a timeout or a
+     * session that vanished mid-call throws.</p>
+     */
+    RenameOutcome renameSession(ManagedSessionId caller, String title) throws McpToolException;
 }

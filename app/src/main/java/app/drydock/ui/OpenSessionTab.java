@@ -13,10 +13,12 @@ import app.drydock.ui.explorer.SessionExplorerView;
 import javafx.animation.PauseTransition;
 import javafx.application.Platform;
 import javafx.css.PseudoClass;
+import javafx.event.ActionEvent;
 import javafx.geometry.Pos;
 import javafx.scene.control.Button;
 import javafx.scene.control.ContentDisplay;
 import javafx.scene.control.Label;
+import javafx.scene.control.OverrunStyle;
 import javafx.scene.control.ProgressIndicator;
 import javafx.scene.control.Tab;
 import javafx.scene.control.TextField;
@@ -36,7 +38,7 @@ import javafx.util.Duration;
 import java.lang.System.Logger;
 import java.nio.file.Path;
 import java.util.Optional;
-import java.util.function.Consumer;
+import java.util.function.BiConsumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -172,7 +174,7 @@ final class OpenSessionTab {
     private final StackPane finishBox = new StackPane();
 
     private Runnable onCloseRequested = () -> { };
-    private Consumer<String> onRenamed = name -> { };
+    private BiConsumer<String, Boolean> onRenamed = (name, pin) -> { };
     private Runnable onBack = () -> { };
     private Runnable onPreviousSessionTab = () -> { };
     private Runnable onNextSessionTab = () -> { };
@@ -604,10 +606,16 @@ final class OpenSessionTab {
                 event.consume();
             }
         });
-        renameField.setOnAction(e -> commitInlineRename());
+        // Enter is an explicit confirm: it pins, even when the text is
+        // unchanged -- a human who opened the editor, read the agent's title
+        // and pressed Enter has claimed that name.
+        renameField.setOnAction(e -> commitInlineRename(true));
         renameField.focusedProperty().addListener((obs, was, is) -> {
             if (!is && tabLabels.getChildren().contains(renameField)) {
-                commitInlineRename();
+                // Focus loss is not a confirm. An agent's session_start opens
+                // and selects a tab, which blurs an open editor -- so pinning
+                // here would let an agent pin a human's session at will.
+                commitInlineRename(false);
             }
         });
         renameField.setOnKeyPressed(event -> {
@@ -627,6 +635,12 @@ final class OpenSessionTab {
         back.setOnAction(e -> onBack.run());
 
         headerTitle.getStyleClass().add("session-title");
+        // Same hazard as the sidebar row: agent-authored text in a Label with
+        // no clamp. headerTitles is the HGROW'd node inside the header HBox,
+        // so the max width resolves against the header, not the title.
+        headerTitle.setMinWidth(0);
+        headerTitle.setMaxWidth(Double.MAX_VALUE);
+        headerTitle.setTextOverrun(OverrunStyle.ELLIPSIS);
         headerMeta.getStyleClass().add("session-meta-line");
         headerTitles.getChildren().setAll(headerTitle, headerMeta);
         HBox.setHgrow(headerTitles, Priority.ALWAYS);
@@ -772,11 +786,15 @@ final class OpenSessionTab {
         renameField.selectAll();
     }
 
-    private void commitInlineRename() {
+    private void commitInlineRename(boolean pin) {
         String newName = renameField.getText() == null ? "" : renameField.getText().strip();
         cancelInlineRename();
-        if (!newName.isEmpty() && !newName.equals(displayName)) {
-            onRenamed.accept(newName);
+        // Empty text cancels on both paths: MainWorkspace.renameSession has no
+        // emptiness filter of its own, and the human path applies no
+        // checkSessionTitle, so notifying here would blank the tab label
+        // permanently -- and, on the pin path, pin the blank.
+        if (!newName.isEmpty() && (pin || !newName.equals(displayName))) {
+            onRenamed.accept(newName, pin);
         }
     }
 
@@ -800,6 +818,40 @@ final class OpenSessionTab {
     /** Ends the inline rename exactly as Esc does (no rename applied). */
     void diagCancelRename() {
         cancelInlineRename();
+    }
+
+    /** Replaces the open rename field's text, as typing into it would. No-op when it is not showing. */
+    void diagSetRenameText(String text) {
+        if (tabLabels.getChildren().contains(renameField)) {
+            renameField.setText(text);
+        }
+    }
+
+    /**
+     * Commits the inline rename the way Enter does -- by firing the field's
+     * own action handler.
+     *
+     * <p>Deliberately not a call to {@code commitInlineRename(true)}: the
+     * property this hook exists to check is that Enter is <em>wired</em> to
+     * the pinning commit and blur is not, so a hook that bypassed the
+     * handler would pass even if the wiring were swapped.</p>
+     */
+    void diagCommitRenameByEnter() {
+        renameField.fireEvent(new ActionEvent(renameField, renameField));
+    }
+
+    /**
+     * Commits the inline rename the way clicking elsewhere does: by moving
+     * focus off the field so its own focus listener fires.
+     *
+     * <p>This path must NOT pin. An agent's {@code session_start} opens and
+     * selects a tab, which blurs any open rename editor -- so if blur pinned,
+     * an agent could pin a human's session at will.</p>
+     */
+    void diagCommitRenameByBlur() {
+        if (renameField.getScene() != null) {
+            renameField.getScene().getRoot().requestFocus();
+        }
     }
 
     /**
@@ -857,8 +909,8 @@ final class OpenSessionTab {
         this.onCloseRequested = handler == null ? () -> { } : handler;
     }
 
-    void setOnRenamed(Consumer<String> handler) {
-        this.onRenamed = handler == null ? name -> { } : handler;
+    void setOnRenamed(BiConsumer<String, Boolean> handler) {
+        this.onRenamed = handler == null ? (name, pin) -> { } : handler;
     }
 
     void setOnBack(Runnable handler) {

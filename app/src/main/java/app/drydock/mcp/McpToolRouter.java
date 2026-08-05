@@ -3,6 +3,7 @@ package app.drydock.mcp;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.git.DiffScope;
 import app.drydock.mcp.AnnotationLines.LineRef;
+import app.drydock.mcp.McpSessionContext.RenameOutcome;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.ReviewAnnotation;
@@ -145,6 +146,16 @@ public final class McpToolRouter {
                                         + "must be a worktree of the caller's repository."))
                                 .put("prompt", schemaString("Optional prompt to seed the new session with.")),
                         "worktree_path"),
+                descriptor("session_rename",
+                        "Renames this session's own tab, which the human is watching. Call it as soon as "
+                                + "you know what the work actually is -- a short title naming the work, not "
+                                + "the branch -- and again if the work turns out to be something else. "
+                                + "Refused if the human named this session, or if another session in this "
+                                + "repository already has that title.",
+                        JsonObject.empty()
+                                .put("title", schemaString("Short title naming the work; at most 60 "
+                                        + "characters, one line.")),
+                        "title"),
                 descriptor("repos_list",
                         "Lists every repository registered in Drydock, with git state for local repositories.",
                         JsonObject.empty()),
@@ -165,6 +176,7 @@ public final class McpToolRouter {
             case "review_state" -> reviewState(caller, arguments);
             case "worktree_create" -> worktreeCreate(caller, arguments);
             case "session_start" -> sessionStart(caller, arguments);
+            case "session_rename" -> sessionRename(caller, arguments);
             case "repos_list" -> reposList(caller);
             case "sessions_list" -> sessionsList(caller);
             default -> throw new McpToolException("Unknown tool: " + tool);
@@ -602,6 +614,50 @@ public final class McpToolRouter {
         } catch (IOException e) {
             return path;
         }
+    }
+
+    // ---- session_rename -----------------------------------------------------
+
+    private JsonValue sessionRename(ManagedSessionId caller, JsonValue arguments) throws McpToolException {
+        requireLiveSession(caller);
+        JsonObject args = asObject(arguments);
+        // Validate before charging: a malformed title is the agent's mistake
+        // to fix, not a spend.
+        String title = PromptSafety.checkSessionTitle(requiredStringArg(args, "title"));
+
+        try {
+            registry.chargeRename(caller);
+        } catch (McpBudgetExhaustedException e) {
+            throw new McpToolException(e.getMessage());
+        }
+
+        RenameOutcome outcome;
+        try {
+            outcome = context.renameSession(caller, title);
+        } catch (McpToolException e) {
+            // Only an outright failure is refunded. The refused OUTCOMES are
+            // charged: each one still costs an FX hop and a turn under the
+            // state lock, dispatched from an unbounded virtual-thread
+            // executor, and each one says what is wrong, so twenty attempts
+            // is far more than an agent needs to stop.
+            registry.refundRename(caller);
+            throw e;
+        }
+
+        return switch (outcome.kind()) {
+            case RENAMED -> renameResult("renamed", outcome.currentName());
+            case UNCHANGED -> renameResult("unchanged", outcome.currentName());
+            case PINNED -> throw new McpToolException("This session was named by the human ('"
+                    + outcome.currentName() + "'); drydock will not rename it.");
+            case COLLIDED -> throw new McpToolException("Another session in this repository is already "
+                    + "called '" + outcome.currentName() + "'. Choose a title that tells the two apart.");
+        };
+    }
+
+    private static JsonValue renameResult(String outcome, String title) {
+        return JsonObject.empty()
+                .put("outcome", new JsonString(outcome))
+                .put("title", new JsonString(title));
     }
 
     // ---- repos_list -------------------------------------------------------

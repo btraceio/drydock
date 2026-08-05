@@ -1239,9 +1239,13 @@ public final class RepositorySidebar extends VBox {
         Alert confirm = new Alert(AlertType.CONFIRMATION);
         confirm.setTitle("Delete session");
         confirm.setHeaderText("Delete session \"" + session.displayName() + "\"?");
+        // The name is agent-authored and can be a near-miss of a sibling's,
+        // and the sidebar sorts by name so the impostor lands adjacent. The
+        // working directory is what actually tells two sessions apart.
         confirm.setContentText("This removes the session from the manager (stopping it first if running). "
                 + AgentLabels.displayName(agentRegistry, session)
-                + "'s own conversation history on disk is not deleted.");
+                + "'s own conversation history on disk is not deleted."
+                + "\n\nWorking directory: " + session.workingDirectory());
         confirm.showAndWait().filter(button -> button == ButtonType.OK).ifPresent(button ->
                 sessionManager.deleteSession(session.id()).whenComplete((v, ex) -> Platform.runLater(() -> {
                     if (ex != null) {
@@ -1490,6 +1494,14 @@ public final class RepositorySidebar extends VBox {
 
             Label name = new Label(session.displayName());
             name.getStyleClass().add("session-name");
+            // The name is agent-authored (session_rename) and can be 60 code
+            // points of full-width CJK. A Label's min width is its pref
+            // width, so without this the row -- and then the window -- takes
+            // its minimum width from the title. The clamp resolves against
+            // the HGROW'd `text` column below, not against the text.
+            name.setMinWidth(0);
+            name.setMaxWidth(Double.MAX_VALUE);
+            name.setTextOverrun(OverrunStyle.ELLIPSIS);
 
             // Branch tag (worktree handoff "Sidebar session rows"): ◫ accent
             // for a worktree checkout, ⎇ dim for the current checkout.

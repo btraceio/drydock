@@ -30,6 +30,8 @@ import app.drydock.git.GitStatusService;
 import app.drydock.git.GitTarget;
 import app.drydock.git.WorktreeService;
 import app.drydock.mcp.McpActivityLog;
+import app.drydock.mcp.McpSessionContext.RenameKind;
+import app.drydock.mcp.McpSessionContext.RenameOutcome;
 import app.drydock.mcp.McpSessionRegistry.Spawn;
 import app.drydock.config.UserConfig;
 import app.drydock.mcp.WorkspaceMcpSessionContext;
@@ -153,6 +155,16 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      */
     private static final long AGENT_SESSION_BUDGET_SECONDS =
             WorkspaceMcpSessionContext.START_SESSION_TIMEOUT_SECONDS / 2;
+
+    /**
+     * Whole budget for an agent-driven rename, provably SMALLER than {@link
+     * WorkspaceMcpSessionContext#RENAME_TIMEOUT_SECONDS} for the same reason
+     * the session budget is smaller than its own: if the context's join could
+     * expire first, the router would refund the charge while the rename went
+     * on to land, and the budget would stop bounding anything.
+     */
+    private static final long AGENT_RENAME_BUDGET_SECONDS =
+            WorkspaceMcpSessionContext.RENAME_TIMEOUT_SECONDS / 2;
 
     private final SessionManager sessionManager;
     private final AgentRegistry agentRegistry;
@@ -1883,6 +1895,45 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         });
     }
 
+    /**
+     * Applies an agent's {@code session_rename} and republishes, so the tab
+     * and the sidebar actually relabel.
+     *
+     * <p>The publish is the whole reason this goes through the workspace at
+     * all: {@link SessionManager} has no listeners, so a rename that stopped
+     * at the state store would change the file and nothing on screen.</p>
+     */
+    public CompletableFuture<RenameOutcome> renameSessionFromAgent(ManagedSessionId id, String title) {
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(AGENT_RENAME_BUDGET_SECONDS);
+        CompletableFuture<RenameOutcome> renamed = new CompletableFuture<>();
+        Platform.runLater(() -> {
+            // Re-checked ON the FX thread: a runLater queued behind a busy FX
+            // thread must refuse rather than apply a rename whose caller has
+            // already given up and had its budget refunded.
+            if (expired(deadlineNanos)) {
+                renamed.completeExceptionally(new IllegalStateException(
+                        "Drydock was too busy to rename the session in time."));
+                return;
+            }
+            try {
+                RenameOutcome outcome = sessionManager.applyAgentRename(id, title);
+                // Only a real change is worth a full republish; a refused
+                // attempt must not buy the agent a sidebar rebuild.
+                if (outcome.kind() == RenameKind.RENAMED) {
+                    publishSessions();
+                }
+                renamed.complete(outcome);
+            } catch (RuntimeException e) {
+                // UnknownSessionException is reachable here: the session can
+                // vanish between the router's liveness check and this hop.
+                // Without this arm the future never completes and the HTTP
+                // handler blocks for the whole join.
+                renamed.completeExceptionally(e);
+            }
+        });
+        return renamed;
+    }
+
     /** A worktree matched to the repository that owns it, plus its branch (for the tab title). */
     private record WorktreeOwner(Repository repository, String branch, Path path) { }
 
@@ -2131,10 +2182,14 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         Alert prompt = new Alert(Alert.AlertType.CONFIRMATION);
         prompt.setTitle("Conversation not found");
         prompt.setHeaderText("The conversation for \"" + session.displayName() + "\" no longer exists");
+        // The name is agent-authored and can be a near-miss of a sibling's,
+        // and the sidebar sorts by name so the impostor lands adjacent. The
+        // working directory is what actually tells two sessions apart.
         prompt.setContentText(AgentLabels.displayName(agentRegistry, session)
                 + " has no stored history for this session's conversation id anymore "
                 + "(it may have been cleaned up). Start a fresh conversation under the same name, "
-                + "or delete the session?");
+                + "or delete the session?"
+                + "\n\nWorking directory: " + session.workingDirectory());
         prompt.getButtonTypes().setAll(startFresh, delete, ButtonType.CANCEL);
 
         Optional<ButtonType> choice = prompt.showAndWait();
@@ -2336,8 +2391,8 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         publishSessions();
     }
 
-    public void renameSession(ManagedSessionId sessionId, String newDisplayName) {
-        sessionManager.renameSession(sessionId, newDisplayName);
+    public void renameSession(ManagedSessionId sessionId, String newDisplayName, boolean pin) {
+        sessionManager.renameSession(sessionId, newDisplayName, pin);
         publishSessions();
     }
 
@@ -2351,7 +2406,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         dialog.showAndWait()
                 .map(String::strip)
                 .filter(name -> !name.isEmpty())
-                .ifPresent(name -> renameSession(session.id(), name));
+                .ifPresent(name -> renameSession(session.id(), name, true));
     }
 
     /** Diagnostic-only (see OpenSessionTab.diagPressKey): sends a key through the selected tab's key path. */
@@ -2488,6 +2543,27 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     /** Diagnostic-only: ends the selected tab's inline rename, as Esc does. */
     public void diagCancelRename() {
         currentlySelected().ifPresent(OpenSessionTab::diagCancelRename);
+    }
+
+    /** Diagnostic-only: types into the selected tab's open rename field. */
+    public void diagSetRenameText(String text) {
+        currentlySelected().ifPresent(open -> open.diagSetRenameText(text));
+    }
+
+    /**
+     * Diagnostic-only: commits the selected tab's inline rename as Enter does,
+     * which pins the name against later agent renames.
+     */
+    public void diagCommitRenameByEnter() {
+        currentlySelected().ifPresent(OpenSessionTab::diagCommitRenameByEnter);
+    }
+
+    /**
+     * Diagnostic-only: commits the selected tab's inline rename as clicking
+     * away does, which must NOT pin.
+     */
+    public void diagCommitRenameByBlur() {
+        currentlySelected().ifPresent(OpenSessionTab::diagCommitRenameByBlur);
     }
 
     /** Diagnostic-only: the selected tab's keyboard-ownership summary (see {@code OpenSessionTab}). */
@@ -2721,7 +2797,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         // Read the id through the tab, not the constructor parameter: for a
         // brand-new session the tab adopts SessionManager's real id later
         // (see attachOpenedSession) and the rename must target THAT id.
-        openTab.setOnRenamed(name -> renameSession(openTab.sessionId(), name));
+        openTab.setOnRenamed((name, pin) -> renameSession(openTab.sessionId(), name, pin));
         openTab.setOnBack(this::showPicker);
         openTab.setOnPreviousSessionTab(this::selectPreviousSessionTab);
         openTab.setOnNextSessionTab(this::selectNextSessionTab);

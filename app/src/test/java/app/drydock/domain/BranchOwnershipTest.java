@@ -24,7 +24,7 @@ class BranchOwnershipTest {
                 Optional.empty(), Optional.empty(),
                 worktreeRoot, Optional.of(worktreeRoot),
                 SessionStatus.INACTIVE, now, now, Optional.empty(),
-                PrState.NONE, Optional.empty(), branchCreatedHere);
+                PrState.NONE, Optional.empty(), branchCreatedHere, false);
     }
 
     @Test

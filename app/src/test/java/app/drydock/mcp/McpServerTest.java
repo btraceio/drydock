@@ -2,6 +2,10 @@ package app.drydock.mcp;
 
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.mcp.McpSessionRegistry.Spawn;
+import app.drydock.state.json.JsonParser;
+import app.drydock.state.json.JsonValue;
+import app.drydock.state.json.JsonValue.JsonObject;
+import app.drydock.state.json.JsonValue.JsonString;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -125,6 +129,23 @@ class McpServerTest {
         assertTrue(response.body().contains("drydock"), response.body());
         assertTrue(response.body().contains("protocolVersion"), response.body());
         assertTrue(response.body().contains("tools"), response.body());
+    }
+
+    /**
+     * A tool description is read only once the agent is already hunting for a
+     * tool; nothing prompts it to look for session_rename unbidden. The
+     * client injects {@code instructions} into the session's system prompt,
+     * so that -- not the tool descriptor -- is what has to name the tool.
+     */
+    @Test
+    void initializeCarriesInstructionsThatNameTheRenameTool() throws Exception {
+        HttpResponse<String> response = post("""
+                {"jsonrpc":"2.0","id":27,"method":"initialize","params":{}}""");
+
+        JsonValue result = JsonPeek.field(JsonParser.parse(response.body()), "result");
+        String instructions = JsonPeek.str(result, "instructions");
+        assertFalse(instructions.isBlank(), instructions);
+        assertTrue(instructions.contains("session_rename"), instructions);
     }
 
     /**
@@ -366,5 +387,66 @@ class McpServerTest {
         racing.start();
 
         assertEquals(0, racing.port(), "close() must permanently prevent binding");
+    }
+
+    @Test
+    void summarizeReplacesInvisibleCodePoints() {
+        // Input has: U+202E (RIGHT-TO-LEFT OVERRIDE), U+200B (ZERO-WIDTH SPACE),
+        // U+007F (DEL -- a CONTROL character JsonWriter does not escape, which
+        // is why it reaches the panel), and a lone U+D800 (an unpaired
+        // SURROGATE, never a member of a valid pair).
+        JsonObject args = JsonObject.empty().put("title", new JsonString("a‮b​cd\uD800e"));
+
+        String summary = McpServer.summarize(args);
+
+        // None of these should survive
+        assertFalse(summary.contains("‮"), "bidi override survived: " + summary);
+        assertFalse(summary.contains("​"), "zero-width space survived: " + summary);
+        assertFalse(summary.contains(""), "DEL survived: " + summary);
+        assertFalse(summary.contains("\uD800"), "lone surrogate survived: " + summary);
+        // But the replacement character should appear for each hidden char
+        assertTrue(summary.contains("�"), "nothing was replaced: " + summary);
+    }
+
+    @Test
+    void summarizeKeepsMultiMemberObjectOnOneLine() {
+        JsonObject args = JsonObject.empty()
+                .put("scopeId", new JsonString("s1"))
+                .put("title", new JsonString("ok"));
+
+        String summary = McpServer.summarize(args);
+
+        assertFalse(summary.contains("\n"), "structural newline survived: " + summary);
+        assertFalse(summary.contains("�"), "structural whitespace was replaced: " + summary);
+    }
+
+    @Test
+    void activityDirectionIsClassifiedByAnExplicitSet() {
+        // an agent write
+        assertEquals(McpActivityLog.Direction.INBOUND, McpServer.directionOf("review_finding"));
+        // a read that the old startsWith("review_") rule got wrong
+        assertEquals(McpActivityLog.Direction.OUTBOUND, McpServer.directionOf("review_comments"));
+        // the new tool, which the old rule would have called OUTBOUND
+        assertEquals(McpActivityLog.Direction.INBOUND, McpServer.directionOf("session_rename"));
+        // unknown tools are reads, not writes
+        assertEquals(McpActivityLog.Direction.OUTBOUND, McpServer.directionOf("repos_list"));
+    }
+
+    @Test
+    void summarizeTruncationNeverSplitsASurrogatePair() {
+        String emoji = "😀"; // U+1F600, one code point, two chars
+        JsonObject args = JsonObject.empty().put("title", new JsonString(emoji.repeat(200)));
+
+        String summary = McpServer.summarize(args);
+
+        assertTrue(summary.codePointCount(0, summary.length()) <= 161,
+                "not truncated: " + summary.codePointCount(0, summary.length()));
+        for (int i = 0; i < summary.length(); i++) {
+            char c = summary.charAt(i);
+            if (Character.isHighSurrogate(c)) {
+                assertTrue(i + 1 < summary.length() && Character.isLowSurrogate(summary.charAt(i + 1)),
+                        "unpaired high surrogate at " + i);
+            }
+        }
     }
 }

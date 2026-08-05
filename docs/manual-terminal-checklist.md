@@ -246,3 +246,55 @@ Walk this with a human at the keyboard:
     in the jlink module list:** `:app:test` and `:app:run` both resolve
     `com.sun.net.httpserver` from the full JDK and would stay green while the
     shipped app failed to serve a single request.
+
+## Session rename via MCP (spec 2026-08-05)
+
+**Status: NOT YET RUN — UNVERIFIABLE HEADLESSLY.** The `session_rename` tool
+lets a hosted `claude` agent rename its own session tab. Whether it actually
+does so depends on the MCP client injecting the server's `instructions` field
+into the agent's system prompt — no unit test can observe a real system
+prompt — and the visible result is a relabel of live JavaFX UI
+(`MainWorkspace` has no test harness; its constructor takes 15 collaborators
+plus a live `Stage`). Walk this with a human at the keyboard:
+
+1. Start a session in a local repository and give it work. Within its first
+   few turns, confirm the agent renames its own tab unprompted, without
+   being asked to. *Nothing else proves the MCP client actually injects the
+   server's `instructions` field into the agent's system prompt — every
+   automated test passes with the feature completely inert.*
+2. When it does, confirm both the tab label and the sidebar row change. Do
+   NOT expect the row to move: `RepositorySidebar.sessionsFor` sorts by name,
+   but `SidebarChildren.classify` then re-bands the rows live-then-idle, each
+   by `lastOpenedAt` descending, and that is what reaches the tree. A rename
+   never changes a row's position. *(Verified 2026-08-05 by driving a real
+   `session_rename` call against a running app: the tab label, the session
+   header and the sidebar row all changed; the row did not move.)*
+3. Rename a session to something long, e.g. 60 full-width CJK characters.
+   Confirm the sidebar row and the session header text are actually
+   **ellipsized** — look for the "…" character itself, not just a
+   shorter-looking label — and separately confirm the window still narrows
+   to its usual minimum width. Check both: `setMinWidth(0)` alone would
+   satisfy the window-narrowing half of this check while the clamp silently
+   did nothing to the text, so a check that only looks at window width
+   cannot tell a correct fix from a half-finished one.
+4. Enter pins a name; clicking away does not. This is now scriptable — the
+   diag verbs fire the field's real handlers rather than calling the commit
+   directly, so they would still catch the wiring being swapped:
+
+   ```
+   ./gradlew run \
+     -Papp.drydock.diag.stateFile=<tmp>/state.json \
+     -Papp.drydock.diag.autoCreateSession=true \
+     -Papp.drydock.diag.repo=<repo> \
+     -Papp.drydock.diag.tabScript="30:rename,32:renametext:Blur named this,34:renameblur,\
+   60:rename,62:renametext:Human named this,64:renameenter"
+   ```
+
+   After the blur commit, `<tmp>/state.json` must show the new name with
+   `namePinned: false`, and a `session_rename` MCP call must still succeed.
+   After the Enter commit it must show `namePinned: true`, and the same call
+   must be refused with the human's title quoted back. *(Verified 2026-08-05:
+   blur → `namePinned=false`, agent rename returned `renamed`; Enter →
+   `namePinned=true`, agent rename refused with "This session was named by
+   the human ('Human named this')".)* Blur must never pin because an agent's
+   `session_start` opens and selects a tab, which blurs any open editor.

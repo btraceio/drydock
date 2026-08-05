@@ -1238,7 +1238,8 @@ public final class DrydockApplication extends Application {
                 gitStatusService,
                 worktreeService,
                 UserConfig::load,
-                (worktree, prompt) -> mainWorkspace.startAgentSession(worktree, prompt));
+                (worktree, prompt) -> mainWorkspace.startAgentSession(worktree, prompt),
+                mainWorkspace::renameSessionFromAgent);
         McpServer server = new McpServer(registry, new McpToolRouter(context, registry), mcpActivityLog);
         // Published before start() so a shutdown racing startup still reaches
         // it. Publication alone would not be enough -- a close() that wins the
@@ -1317,6 +1318,23 @@ public final class DrydockApplication extends Application {
                 case "renamecancel" -> {
                     mainWorkspace.diagCancelRename();
                     System.out.println("[diag] rename cancelled");
+                }
+                case "renametext" -> {
+                    mainWorkspace.diagSetRenameText(arg);
+                    System.out.println("[diag] rename text set to '" + arg + "'");
+                }
+                // renameenter and renameblur are separate verbs, not one with a
+                // flag, because the difference between them IS the thing worth
+                // checking: Enter pins the name against later agent renames and
+                // blur must not, and an agent can cause a blur at will by
+                // opening a tab.
+                case "renameenter" -> {
+                    mainWorkspace.diagCommitRenameByEnter();
+                    System.out.println("[diag] rename committed by Enter (pins)");
+                }
+                case "renameblur" -> {
+                    mainWorkspace.diagCommitRenameByBlur();
+                    System.out.println("[diag] rename committed by blur (must not pin)");
                 }
                 case "filter" -> {
                     sidebar.diagFilter(arg);
