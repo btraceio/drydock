@@ -2,6 +2,8 @@ package app.drydock.mcp;
 
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.mcp.McpSessionRegistry.Spawn;
+import app.drydock.state.json.JsonParser;
+import app.drydock.state.json.JsonValue;
 import app.drydock.state.json.JsonValue.JsonObject;
 import app.drydock.state.json.JsonValue.JsonString;
 import org.junit.jupiter.api.AfterEach;
@@ -127,6 +129,23 @@ class McpServerTest {
         assertTrue(response.body().contains("drydock"), response.body());
         assertTrue(response.body().contains("protocolVersion"), response.body());
         assertTrue(response.body().contains("tools"), response.body());
+    }
+
+    /**
+     * A tool description is read only once the agent is already hunting for a
+     * tool; nothing prompts it to look for session_rename unbidden. The
+     * client injects {@code instructions} into the session's system prompt,
+     * so that -- not the tool descriptor -- is what has to name the tool.
+     */
+    @Test
+    void initializeCarriesInstructionsThatNameTheRenameTool() throws Exception {
+        HttpResponse<String> response = post("""
+                {"jsonrpc":"2.0","id":27,"method":"initialize","params":{}}""");
+
+        JsonValue result = JsonPeek.field(JsonParser.parse(response.body()), "result");
+        String instructions = JsonPeek.str(result, "instructions");
+        assertFalse(instructions.isBlank(), instructions);
+        assertTrue(instructions.contains("session_rename"), instructions);
     }
 
     /**

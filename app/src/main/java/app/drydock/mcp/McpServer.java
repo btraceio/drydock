@@ -321,13 +321,28 @@ public final class McpServer implements AutoCloseable {
             }
         }
 
+        /**
+         * Injected into the hosted agent's system prompt by the client. This
+         * is the only thing that makes a tool get called without the agent
+         * already hunting for one -- a tool description is read at selection
+         * time, not at the moment the agent learns what its work is.
+         */
+        private static final String INSTRUCTIONS = """
+                Drydock hosts this session in a tab a human is watching. As soon as you know what \
+                the work actually is, call session_rename with a short title naming the work -- not \
+                the branch. Re-title it if the work turns out to be something else. Two refusals are \
+                normal and both explain themselves: if the human has named the session, leave it \
+                alone; if another session here already has that title, pick one that tells them apart.\
+                """;
+
         private JsonValue initializeResult(JsonValue params) {
             return JsonObject.empty()
                     .put("protocolVersion", new JsonString(negotiatedProtocolVersion(params)))
                     .put("capabilities", JsonObject.empty().put("tools", JsonObject.empty()))
                     .put("serverInfo", JsonObject.empty()
                             .put("name", new JsonString("drydock"))
-                            .put("version", new JsonString("1.0.0")));
+                            .put("version", new JsonString("1.0.0")))
+                    .put("instructions", new JsonString(INSTRUCTIONS));
         }
 
         /**
