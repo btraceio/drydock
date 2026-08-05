@@ -398,15 +398,19 @@ class SessionManagerTest {
     @Test
     void collisionComparesAgainstFoldedStoredNames() {
         // The human path applies no checkSessionTitle, so a stored name can carry
-        // a non-breaking space. Folding only the incoming side would let an agent
-        // clone it exactly as rendered.
+        // a non-breaking space that renders identically to a plain one. Folding
+        // only the incoming side would let an agent take a name that looks, in
+        // the sidebar and in every confirm dialog, exactly like its neighbour's.
+        // U+00A0 is deliberately an escape, not a literal: an invisible character
+        // in source is unreviewable.
         Repository repository = someRepository();
         ManagedAgentSession first = sessionIn(repository, "Session 1");
         ManagedAgentSession second = sessionIn(repository, "Session 2");
         SessionManager manager = newManager(new InMemoryStateRepository(List.of(first, second)));
-        manager.renameSession(first.id(), "Fix login", false);
+        manager.renameSession(first.id(), "Fix\u00A0login", false);   // NBSP, stored unfolded
 
-        assertEquals(RenameKind.COLLIDED, manager.applyAgentRename(second.id(), "Fix login").kind());
+        assertEquals(RenameKind.COLLIDED,
+                manager.applyAgentRename(second.id(), "Fix login").kind());   // plain space
     }
 
     @Test
