@@ -135,7 +135,7 @@ class ReviewEmptySurfaceTest extends ApplicationTest {
                 ReviewScope.Kind.WORKING_TREE, java.nio.file.Path.of("/tmp/nowhere"),
                 Optional.empty(), "main", "main", Optional.empty(), Optional.empty()));
         interact(() -> view.setItems(new QueueAssembly(List.of(new ReviewItem(scope,
-                ReviewItem.Group.MINE, "Working tree", "repo · uncommitted")), true, true), 1));
+                ReviewItem.Group.MINE, "Working tree", "repo · uncommitted")), true, true), List.of("repo")));
         WaitForAsyncUtils.waitForFxEvents();
 
         assertTrue(isShowing(".review-queue-rail"), "the queue rail must come back");
@@ -146,7 +146,7 @@ class ReviewEmptySurfaceTest extends ApplicationTest {
     // ---- helpers --------------------------------------------------------
 
     private void showEmptyQueue() {
-        interact(() -> view.setItems(new QueueAssembly(List.of(), true, true), 1));
+        interact(() -> view.setItems(new QueueAssembly(List.of(), true, true), List.of("repo")));
         WaitForAsyncUtils.waitForFxEvents();
     }
 

@@ -73,7 +73,7 @@ class ReviewIntentScopeIsolationTest extends ApplicationTest {
         interact(() -> view.setItems(new QueueAssembly(List.of(
                 new ReviewItem(worktree, ReviewItem.Group.MINE, "Working tree", "repo · uncommitted"),
                 new ReviewItem(gate, ReviewItem.Group.REQUESTED, "PR #7 feature", "repo · not checked out")),
-                true, true), 1));
+                true, true), List.of("repo")));
 
         awaitCardCount(2);
 
@@ -99,7 +99,7 @@ class ReviewIntentScopeIsolationTest extends ApplicationTest {
         interact(() -> view.setItems(new QueueAssembly(List.of(
                 new ReviewItem(worktree, ReviewItem.Group.MINE, "Working tree", "repo · uncommitted"),
                 new ReviewItem(gate, ReviewItem.Group.REQUESTED, "PR #7 feature", "repo · not checked out")),
-                true, true), 1));
+                true, true), List.of("repo")));
         awaitCardCount(2);
 
         interact(() -> view.selectScope(gate.id()));
@@ -124,13 +124,13 @@ class ReviewIntentScopeIsolationTest extends ApplicationTest {
 
         interact(() -> view.setItems(new QueueAssembly(List.of(
                 new ReviewItem(worktree, ReviewItem.Group.MINE, "Working tree", "repo · uncommitted")),
-                true, true), 1));
+                true, true), List.of("repo")));
         awaitCardCount(2);
 
         // A rescan that finds nothing (worktree pruned, or gh down): the
         // SCAN_INCOMPLETE empty state, exactly as QueueAssembly.complete()
         // computes it for localComplete=true, requestsComplete=false.
-        interact(() -> view.setItems(new QueueAssembly(List.of(), true, false), 1));
+        interact(() -> view.setItems(new QueueAssembly(List.of(), true, false), List.of("repo")));
         org.testfx.util.WaitForAsyncUtils.waitForFxEvents();
 
         assertEquals(0, cardCount(), "an empty queue must clear the rail, not keep the departed scope's cards");
@@ -156,7 +156,7 @@ class ReviewIntentScopeIsolationTest extends ApplicationTest {
         interact(() -> view.setItems(new QueueAssembly(List.of(
                 new ReviewItem(scopeOne, ReviewItem.Group.MINE, "repo-one", "repo-one · uncommitted"),
                 new ReviewItem(scopeTwo, ReviewItem.Group.MINE, "repo-two", "repo-two · uncommitted")),
-                true, true), 2));
+                true, true), List.of("repo", "other")));
 
         interact(() -> view.selectScope(scopeOne.id()));
         awaitCardCount(1);

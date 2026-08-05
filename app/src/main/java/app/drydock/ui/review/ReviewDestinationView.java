@@ -266,6 +266,13 @@ public final class ReviewDestinationView extends BorderPane {
     private boolean queueEmpty;
 
     /**
+     * The repositories the last scan covered, so an empty surface can say what
+     * it looked at. Held rather than passed through {@link #showEmpty}: the
+     * scanning state is raised before there is any assembly to carry them.
+     */
+    private List<String> repositoryNames = List.of();
+
+    /**
      * The {@code ‹} affordance naming the tab Review was entered from
      * (nav §3). Review is a pinned tab beside the sessions, so this is a
      * convenience, not the only way back -- clicking the session's own tab
@@ -517,8 +524,10 @@ public final class ReviewDestinationView extends BorderPane {
      * showing is selected. An assembly with no items shows whichever empty
      * state the assembly's own completeness implies.
      */
-    public void setItems(QueueAssembly assembly, int repositoryCount) {
+    public void setItems(QueueAssembly assembly, List<String> repositoryNames) {
         List<ReviewItem> items = assembly.items();
+        this.repositoryNames = List.copyOf(repositoryNames);
+        int repositoryCount = this.repositoryNames.size();
         String previous = queue.selected().map(item -> item.scope().id()).orElse(null);
         queue.setItems(items);
         outcomeByScope.keySet().retainAll(items.stream().map(item -> item.scope().id())
@@ -550,7 +559,8 @@ public final class ReviewDestinationView extends BorderPane {
     }
 
     /** Called when Review is shown and a scan is in flight. */
-    public void showScanning() {
+    public void showScanning(List<String> repositoryNames) {
+        this.repositoryNames = List.copyOf(repositoryNames);
         showEmpty(ReviewEmptyState.SCANNING);
     }
 
@@ -566,7 +576,8 @@ public final class ReviewDestinationView extends BorderPane {
         headerTitle.setText(state.title());
         headerContext.setText("");
         hideSessionRow();
-        Region placeholder = placeholder(state.title(), state.detail(), "");
+        Region placeholder = placeholder(state.title(), state.detail(),
+                state.scanned(repositoryNames));
         if (state == ReviewEmptyState.SCAN_INCOMPLETE) {
             Button retry = new Button("Retry the scan");
             retry.getStyleClass().addAll("review-chip-button", "review-empty-retry");
@@ -1124,7 +1135,12 @@ public final class ReviewDestinationView extends BorderPane {
         }
     }
 
-    private static Region placeholder(String title, String detail, String mono) {
+    /**
+     * @param scope what the state is talking about -- the repositories a scan
+     *              covered. Blank renders no line: an empty one would read as
+     *              a scope that came back empty.
+     */
+    private static Region placeholder(String title, String detail, String scope) {
         Label titleLabel = new Label(title);
         titleLabel.getStyleClass().add("review-placeholder-title");
         Label detailLabel = new Label(detail);
@@ -1132,10 +1148,12 @@ public final class ReviewDestinationView extends BorderPane {
         detailLabel.setWrapText(true);
         detailLabel.setMaxWidth(520);
         VBox box = new VBox(8, titleLabel, detailLabel);
-        if (!mono.isBlank()) {
-            Label monoLabel = new Label(mono);
-            monoLabel.getStyleClass().add("review-placeholder-mono");
-            box.getChildren().add(monoLabel);
+        if (!scope.isBlank()) {
+            Label scopeLabel = new Label(scope);
+            scopeLabel.getStyleClass().add("review-placeholder-scope");
+            scopeLabel.setWrapText(true);
+            scopeLabel.setMaxWidth(520);
+            box.getChildren().add(scopeLabel);
         }
         box.setAlignment(Pos.CENTER);
         box.getStyleClass().add("review-placeholder");

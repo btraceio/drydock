@@ -384,7 +384,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
         // The view renders the diff column for a worktree scope; the fake's
         // diff is what the by-file intent fallback groups.
         interact(() -> view.setItems(new QueueAssembly(List.of(new ReviewItem(minted, ReviewItem.Group.AGENTS,
-                "feat", "drydock · vs master")), true, true), 1));
+                "feat", "drydock · vs master")), true, true), List.of("repo")));
         interact(() -> view.diagPublishOutcome(minted.id(),
                 new DiffOutcome.Loaded(host.diff)));
         interact(view::refreshReviewState);

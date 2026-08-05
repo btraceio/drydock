@@ -73,7 +73,7 @@ class ReviewIntentFallbackTest extends ApplicationTest {
                 Optional.empty(), Optional.empty()));
 
         interact(() -> view.setItems(new QueueAssembly(List.of(new ReviewItem(scope, ReviewItem.Group.MINE,
-                "Working tree", "drydock · uncommitted changes")), true, true), 1));
+                "Working tree", "drydock · uncommitted changes")), true, true), List.of("repo")));
 
         assertEquals("1 · B.java", awaitIntentLabel(),
                 "the verdict bar must re-render when the diff arrives, not stay on 'no intent'");
@@ -92,7 +92,7 @@ class ReviewIntentFallbackTest extends ApplicationTest {
                 Optional.empty(), Optional.empty()));
 
         interact(() -> view.setItems(new QueueAssembly(List.of(new ReviewItem(scope, ReviewItem.Group.MINE,
-                "Working tree", "drydock · uncommitted changes")), true, true), 1));
+                "Working tree", "drydock · uncommitted changes")), true, true), List.of("repo")));
         assertEquals("1 · Alpha.java", awaitIntentLabel());
 
         assertFalse(renderedHunkFiles().stream().anyMatch(p -> p.endsWith("Zulu.java")),
