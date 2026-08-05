@@ -42,6 +42,14 @@ final class ReviewIntentRail extends VBox {
     static final double COLLAPSED_WIDTH = 40;
     private static final Duration COLLAPSE_ANIMATION = Duration.millis(160);
 
+    /**
+     * How much narrower a card's content is than the cards column: the
+     * column's 6px side padding, the card's 8px side padding and its 1px
+     * border, both sides. Matches {@code .review-intent-cards} and
+     * {@code .review-intent-card} in {@code app.css}.
+     */
+    private static final double CARD_WIDTH_INSET = 2 * (6 + 8 + 1);
+
     // The handler is read at click time, so it can be installed after construction.
     private final PanelHeader header = PanelHeader.left(
             "INTENTS", "", "Collapse or expand the intents (i)",
@@ -293,7 +301,17 @@ final class ReviewIntentRail extends VBox {
         HBox titleRow = new HBox(6, number, title, tag);
         titleRow.setAlignment(Pos.TOP_LEFT);
 
-        VBox content = new VBox(4, titleRow);
+        VBox content = new VBox(4, titleRow) {
+            @Override
+            protected double computePrefHeight(double width) {
+                // The Button sizes its graphic by asking for prefHeight(-1),
+                // and a wrapping Label answers that with the height it needs
+                // at its MINIMUM width -- one word per line, hundreds of
+                // pixels. The card's width is known and pinned below, so
+                // answer at that width instead of at no width at all.
+                return super.computePrefHeight(width < 0 ? getPrefWidth() : width);
+            }
+        };
         if (!intent.rationale().isBlank()) {
             Label rationale = new Label(intent.rationale());
             rationale.getStyleClass().add("review-intent-rationale");
@@ -313,7 +331,14 @@ final class ReviewIntentRail extends VBox {
             label.getStyleClass().addAll("review-intent-settled", decisionStyleClass(verdict, intent));
             content.getChildren().add(label);
         }
-        content.prefWidthProperty().bind(card.widthProperty().subtract(24));
+        // Bound to the CARDS COLUMN, never to the card. A Button takes its
+        // width from its graphic, so a graphic bound back to the button is a
+        // cycle: on the pass that fixes the height the card is still 0 wide,
+        // both wrapping labels above wrap at 0, and each reports the height of
+        // a column of single characters -- an 1100px card, one per rail. The
+        // column's width is handed down by the ScrollPane's viewport
+        // (setFitToWidth) and cannot depend on what is inside it.
+        content.prefWidthProperty().bind(cards.widthProperty().subtract(CARD_WIDTH_INSET));
         content.maxWidthProperty().bind(content.prefWidthProperty());
         card.setGraphic(content);
         return card;
@@ -324,6 +349,17 @@ final class ReviewIntentRail extends VBox {
                 .orElse(intent.autoApprove() ? ReviewVerdict.Decision.AUTO_APPROVED
                         : ReviewVerdict.Decision.APPROVED);
         return "decision-" + decision.wireName();
+    }
+
+    /** Diagnostic-only: how many cards the rail drew, and how tall each one is. */
+    String diagCards() {
+        StringBuilder sb = new StringBuilder(intents.size() + " intents · "
+                + cards.getChildren().size() + " cards h=[");
+        for (Node node : cards.getChildren()) {
+            sb.append((int) node.getBoundsInParent().getHeight()).append(' ');
+        }
+        return sb.append("] cardsH=").append((int) cards.getHeight())
+                .append(" scrollH=").append((int) scroll.getHeight()).toString();
     }
 
     private void applySelection() {

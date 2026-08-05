@@ -1657,7 +1657,8 @@ public final class ReviewDestinationView extends BorderPane {
     public String diagLayoutWidths() {
         return diagNarrowPage() + " view=" + (int) getWidth() + " rails=" + (int) rails.getWidth()
                 + " queue=" + (int) queue.getWidth() + " intents=" + (int) intentRail.getWidth()
-                + " | diff " + diffColumn.diagWidths();
+                + " | diff " + diffColumn.diagWidths()
+                + " | rail " + intentRail.diagCards();
     }
 
     /** Diagnostic-only: every queue item, filtered or not (visual verification harness). */
