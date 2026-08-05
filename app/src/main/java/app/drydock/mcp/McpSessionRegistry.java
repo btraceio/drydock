@@ -34,6 +34,15 @@ public final class McpSessionRegistry {
     public static final int MAX_WORKTREES_PER_SESSION = 4;
     public static final int MAX_SESSIONS_PER_SESSION = 4;
 
+    /**
+     * Renames one session may apply. Not about disk: {@code
+     * ApplicationStateStore} coalesces saves and the activity log is a ring.
+     * It bounds FX-thread work -- every rename attempt costs a {@code
+     * Platform.runLater} and a turn under the state lock, dispatched from an
+     * unbounded virtual-thread executor, so a loop would freeze the UI.
+     */
+    public static final int MAX_RENAMES_PER_SESSION = 20;
+
     /** Whether a session may create worktrees and start further sessions. */
     public enum Spawn {
         /** A session the human started. */
@@ -48,6 +57,7 @@ public final class McpSessionRegistry {
     private final Map<ManagedSessionId, Spawn> grants = new ConcurrentHashMap<>();
     private final Map<ManagedSessionId, AtomicInteger> worktreesCreated = new ConcurrentHashMap<>();
     private final Map<ManagedSessionId, AtomicInteger> sessionsStarted = new ConcurrentHashMap<>();
+    private final Map<ManagedSessionId, AtomicInteger> renamesApplied = new ConcurrentHashMap<>();
 
     /** Returns this session's token, minting one on first call. Idempotent per session. */
     public String mint(ManagedSessionId sessionId, Spawn spawn) {
@@ -106,6 +116,29 @@ public final class McpSessionRegistry {
     /** Releases a charge whose operation then failed. Never drops below zero. */
     public void refundSession(ManagedSessionId sessionId) {
         refund(sessionsStarted, sessionId);
+    }
+
+    /**
+     * Charges one rename attempt. Refused attempts are charged too -- they
+     * cost the same FX hop, and each one tells the agent what is wrong, so
+     * twenty is far more than it needs to learn.
+     *
+     * <p>Not the shared {@link #charge} helper: its message is written for a
+     * creation limit ("has already created its limit of N ... Ask the human
+     * to continue in one of them"), which reads as nonsense for a rename.</p>
+     */
+    public void chargeRename(ManagedSessionId sessionId) throws McpBudgetExhaustedException {
+        AtomicInteger counter = renamesApplied.computeIfAbsent(sessionId, id -> new AtomicInteger());
+        if (counter.incrementAndGet() > MAX_RENAMES_PER_SESSION) {
+            counter.decrementAndGet();
+            throw new McpBudgetExhaustedException("This session has already renamed itself "
+                    + MAX_RENAMES_PER_SESSION + " times.");
+        }
+    }
+
+    /** Releases a charge whose call then failed outright. Never drops below zero. */
+    public void refundRename(ManagedSessionId sessionId) {
+        refund(renamesApplied, sessionId);
     }
 
     private static void refund(Map<ManagedSessionId, AtomicInteger> counters, ManagedSessionId sessionId) {
