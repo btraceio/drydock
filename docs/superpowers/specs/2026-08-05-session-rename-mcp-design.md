@@ -9,7 +9,7 @@ row of labels saying where the work lives and nothing about what it is.
 The agent inside each of those tabs knows what the work is. This design
 gives it a tool to say so.
 
-> **Revision note.** Adversarially reviewed four times before
+> **Revision note.** Adversarially reviewed five times before
 > implementation, three reviewers per round (mechanism, abuse, spec
 > quality). "What the adversarial review changed" at the end records
 > every finding and its resolution, including five claims of earlier
@@ -376,7 +376,8 @@ The human's rename wins, permanently.
 `ManagedAgentSession` gains a `boolean namePinned` component. Not free:
 it is a 15-component record with ten hand-written `withX` copy methods
 that each re-list every component (`ManagedAgentSession.java:98` onward)
-plus 26 `new ManagedAgentSession(...)` call sites across main and test.
+inside 26 `new ManagedAgentSession(...)` call sites in all — ten in the
+record itself, sixteen across main and test.
 All must be extended, and a `withNamePinned` added. `withDisplayName`
 must **not** touch the pin — pinning is a decision of the caller, not of
 the act of renaming.
@@ -783,7 +784,8 @@ not a design split.
 
 ## What the adversarial review changed
 
-Four rounds, three reviewers each (mechanism, abuse, spec quality).
+Five rounds, three reviewers each (mechanism, abuse, spec quality),
+the last a convergence check.
 
 **Round 1 — the first draft.**
 
