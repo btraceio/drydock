@@ -13,6 +13,7 @@ import app.drydock.ui.explorer.SessionExplorerView;
 import javafx.animation.PauseTransition;
 import javafx.application.Platform;
 import javafx.css.PseudoClass;
+import javafx.event.ActionEvent;
 import javafx.geometry.Pos;
 import javafx.scene.control.Button;
 import javafx.scene.control.ContentDisplay;
@@ -817,6 +818,40 @@ final class OpenSessionTab {
     /** Ends the inline rename exactly as Esc does (no rename applied). */
     void diagCancelRename() {
         cancelInlineRename();
+    }
+
+    /** Replaces the open rename field's text, as typing into it would. No-op when it is not showing. */
+    void diagSetRenameText(String text) {
+        if (tabLabels.getChildren().contains(renameField)) {
+            renameField.setText(text);
+        }
+    }
+
+    /**
+     * Commits the inline rename the way Enter does -- by firing the field's
+     * own action handler.
+     *
+     * <p>Deliberately not a call to {@code commitInlineRename(true)}: the
+     * property this hook exists to check is that Enter is <em>wired</em> to
+     * the pinning commit and blur is not, so a hook that bypassed the
+     * handler would pass even if the wiring were swapped.</p>
+     */
+    void diagCommitRenameByEnter() {
+        renameField.fireEvent(new ActionEvent(renameField, renameField));
+    }
+
+    /**
+     * Commits the inline rename the way clicking elsewhere does: by moving
+     * focus off the field so its own focus listener fires.
+     *
+     * <p>This path must NOT pin. An agent's {@code session_start} opens and
+     * selects a tab, which blurs any open rename editor -- so if blur pinned,
+     * an agent could pin a human's session at will.</p>
+     */
+    void diagCommitRenameByBlur() {
+        if (renameField.getScene() != null) {
+            renameField.getScene().getRoot().requestFocus();
+        }
     }
 
     /**

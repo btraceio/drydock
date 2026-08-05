@@ -2505,6 +2505,27 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         currentlySelected().ifPresent(OpenSessionTab::diagCancelRename);
     }
 
+    /** Diagnostic-only: types into the selected tab's open rename field. */
+    public void diagSetRenameText(String text) {
+        currentlySelected().ifPresent(open -> open.diagSetRenameText(text));
+    }
+
+    /**
+     * Diagnostic-only: commits the selected tab's inline rename as Enter does,
+     * which pins the name against later agent renames.
+     */
+    public void diagCommitRenameByEnter() {
+        currentlySelected().ifPresent(OpenSessionTab::diagCommitRenameByEnter);
+    }
+
+    /**
+     * Diagnostic-only: commits the selected tab's inline rename as clicking
+     * away does, which must NOT pin.
+     */
+    public void diagCommitRenameByBlur() {
+        currentlySelected().ifPresent(OpenSessionTab::diagCommitRenameByBlur);
+    }
+
     /** Diagnostic-only: the selected tab's keyboard-ownership summary (see {@code OpenSessionTab}). */
     public String diagKeyboardState() {
         return currentlySelected().map(OpenSessionTab::diagKeyboardState).orElse("no selected tab");

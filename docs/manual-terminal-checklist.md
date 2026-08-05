@@ -277,10 +277,24 @@ plus a live `Stage`). Walk this with a human at the keyboard:
    satisfy the window-narrowing half of this check while the clamp silently
    did nothing to the text, so a check that only looks at window width
    cannot tell a correct fix from a half-finished one.
-4. Double-click a tab to open its inline rename field, type a new name, then
-   click elsewhere without pressing Enter. Ask the agent to rename that
-   session afterwards and confirm it still can — the name was never pinned.
-   Then repeat with Enter instead of clicking away: type a new name, press
-   Enter, and confirm the agent's next rename attempt on that session is now
-   refused. This mapping (Enter pins, blur does not) lives in a JavaFX focus
-   listener with no test harness.
+4. Enter pins a name; clicking away does not. This is now scriptable — the
+   diag verbs fire the field's real handlers rather than calling the commit
+   directly, so they would still catch the wiring being swapped:
+
+   ```
+   ./gradlew run \
+     -Papp.drydock.diag.stateFile=<tmp>/state.json \
+     -Papp.drydock.diag.autoCreateSession=true \
+     -Papp.drydock.diag.repo=<repo> \
+     -Papp.drydock.diag.tabScript="30:rename,32:renametext:Blur named this,34:renameblur,\
+   60:rename,62:renametext:Human named this,64:renameenter"
+   ```
+
+   After the blur commit, `<tmp>/state.json` must show the new name with
+   `namePinned: false`, and a `session_rename` MCP call must still succeed.
+   After the Enter commit it must show `namePinned: true`, and the same call
+   must be refused with the human's title quoted back. *(Verified 2026-08-05:
+   blur → `namePinned=false`, agent rename returned `renamed`; Enter →
+   `namePinned=true`, agent rename refused with "This session was named by
+   the human ('Human named this')".)* Blur must never pin because an agent's
+   `session_start` opens and selects a tab, which blurs any open editor.
