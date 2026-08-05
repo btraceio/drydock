@@ -11,9 +11,11 @@ gives it a tool to say so.
 
 > **Revision note.** Adversarially reviewed five times before
 > implementation, three reviewers per round (mechanism, abuse, spec
-> quality). "What the adversarial review changed" at the end records
-> every finding and its resolution, including five claims of earlier
-> drafts that were false and are corrected in place.
+> quality), then corrected once more during implementation. "What the
+> adversarial review changed" at the end records every finding and its
+> resolution, including six claims that were false and are corrected in
+> place — one of which survived every review round and was caught only
+> by a test that refused to fail.
 
 ## What it writes
 
@@ -92,6 +94,17 @@ Rules, in this order:
      It also covers U+200D ZWJ, so ZWJ emoji sequences are refused. That
      is accepted: an invisible joiner is exactly the smuggling primitive
      this rule removes, and a session title does not need one.
+
+     **Emoji are otherwise unaffected, and this is easy to get wrong** — a
+     reviewer of this design got it wrong, and the correction was only
+     forced when a test written to prove the bug refused to fail. An
+     emoji's variation selector (U+FE0F and its neighbours, and the
+     U+E0100 supplement) is `NON_SPACING_MARK`, **not** `FORMAT`; the
+     emoji themselves are `OTHER_SYMBOL`. So `⚠️`, `❤️` and `😀` all pass
+     rule 1 untouched. Only the *glued* sequences — professions,
+     families, composed flags — are refused. The refusal message says so
+     in those words, because an agent told only "found U+200D" retries
+     blind until its rename budget runs out.
    - `LINE_SEPARATOR`/`PARAGRAPH_SEPARATOR` (U+2028/U+2029) are neither
      ISO controls nor `FORMAT`, and AppKit honours them — without this
      clause "a title is one line" is not enforced.
@@ -107,7 +120,10 @@ Rules, in this order:
 3. **Reject** more than two consecutive combining marks
    (`NON_SPACING_MARK`, `ENCLOSING_MARK`, `COMBINING_SPACING_MARK`).
    Legitimate scripts never need a third in a row, and the cap in rule 6
-   bounds code points, not rendered height.
+   bounds code points, not rendered height. Note the interaction with the
+   bullet above: a variation selector is a `NON_SPACING_MARK`, so it is
+   *this* rule that governs it, not rule 1 — one selector after a base
+   character is one mark, which is why colour-presentation emoji pass.
 4. **Fold** every `SPACE_SEPARATOR` (Zs) code point to U+0020, collapse
    runs of U+0020 to one, then trim. Folding rather than trusting
    `strip()`/`isBlank()`/`\s`: `Character.isWhitespace` is **false** for
@@ -858,7 +874,8 @@ the last a convergence check.
 32. **`FakeMcpSessionContext` "gains a settable pin"** described state
     the fake cannot hold. → A canned `RenameOutcome`.
 33. **ZWJ is `FORMAT`**, so rule 1 bans ZWJ emoji, contradicting the
-    emoji rationale. → Ban kept, rationale corrected.
+    emoji rationale. → Ban kept, rationale corrected. (This entry was
+    itself half-wrong about the scope of the ban; see #60.)
 34. **False claim removed:** that `displayName` is "typed into a
     terminal" via `claude -n`. `TerminalSpec`'s command is exec'd as an
     argv by libghostty and `shellQuote` is correct POSIX quoting.
@@ -978,3 +995,28 @@ the last a convergence check.
 Round 5 found nothing else: no contradiction between sections, no
 unbuildable construct, no unwritable test, and every stated sink
 verified.
+
+**After implementation — corrected in the code, then here.**
+
+60. **The whole-branch review claimed rule 1 rejects ordinary emoji**
+    (`⚠️`, `❤️`, `▶️`) because U+FE0F is `FORMAT`, and I repeated that
+    claim. **Both were wrong.** Variation selectors are
+    `NON_SPACING_MARK`; the emoji themselves are `OTHER_SYMBOL`. Rule 1
+    never touched either — only U+200D ZWJ, and therefore only the glued
+    sequences. The error survived a five-round adversarial review, a
+    whole-branch review, and my own summary, and was caught only because
+    the test written to demonstrate the bug would not fail. → Rule 1 and
+    rule 3 now state what actually happens, and a test pins it
+    (`ordinaryEmojiAreFineIncludingTheirVariationSelectors`) so the next
+    reader need not re-derive it from the Unicode tables.
+61. **The ZWJ refusal named a code point and nothing else.** The ban is
+    right, but "found U+200D" is not actionable, and an agent that cannot
+    tell what to change retries until its rename budget is gone. → The
+    message now says multi-part emoji cannot be used and a single emoji
+    is fine. Mutation-checked: disabling the branch fails the test.
+
+The lesson worth keeping from #60 is not about Unicode. Three tests in
+this work asserted things that would pass against any implementation, and
+every one of them was written to describe a property rather than to
+exercise it. A test that cannot fail does not merely add nothing — here
+it actively laundered a false claim through two review layers.
