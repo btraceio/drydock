@@ -2302,7 +2302,8 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     }
 
     public void renameSession(ManagedSessionId sessionId, String newDisplayName) {
-        sessionManager.renameSession(sessionId, newDisplayName);
+        // TODO(Task 8): pass the caller's actual pin decision instead of true.
+        sessionManager.renameSession(sessionId, newDisplayName, true);
         publishSessions();
     }
 
