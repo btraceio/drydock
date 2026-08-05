@@ -391,8 +391,11 @@ class McpServerTest {
 
     @Test
     void summarizeReplacesInvisibleCodePoints() {
-        // Input has: U+202E (RIGHT-TO-LEFT OVERRIDE), U+200B (ZERO-WIDTH SPACE)
-        JsonObject args = JsonObject.empty().put("title", new JsonString("a‮b​cd"));
+        // Input has: U+202E (RIGHT-TO-LEFT OVERRIDE), U+200B (ZERO-WIDTH SPACE),
+        // U+007F (DEL -- a CONTROL character JsonWriter does not escape, which
+        // is why it reaches the panel), and a lone U+D800 (an unpaired
+        // SURROGATE, never a member of a valid pair).
+        JsonObject args = JsonObject.empty().put("title", new JsonString("a‮b​cd\uD800e"));
 
         String summary = McpServer.summarize(args);
 
@@ -400,6 +403,7 @@ class McpServerTest {
         assertFalse(summary.contains("‮"), "bidi override survived: " + summary);
         assertFalse(summary.contains("​"), "zero-width space survived: " + summary);
         assertFalse(summary.contains(""), "DEL survived: " + summary);
+        assertFalse(summary.contains("\uD800"), "lone surrogate survived: " + summary);
         // But the replacement character should appear for each hidden char
         assertTrue(summary.contains("�"), "nothing was replaced: " + summary);
     }

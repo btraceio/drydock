@@ -150,6 +150,11 @@ public final class PromptSafety {
         return folded;
     }
 
+    /** The folding half of {@link #checkSessionTitle}, for comparing against already-stored names. */
+    public static String foldForComparison(String title) {
+        return fold(title);
+    }
+
     /**
      * Every Unicode space separator to U+0020, runs collapsed, then trimmed.
      *
@@ -158,11 +163,6 @@ public final class PromptSafety {
      * non-breaking spaces would otherwise pass every check and render as a
      * blank tab and a blank "Delete session" dialog.</p>
      */
-    /** The folding half of {@link #checkSessionTitle}, for comparing against already-stored names. */
-    public static String foldForComparison(String title) {
-        return fold(title);
-    }
-
     private static String fold(String title) {
         StringBuilder folded = new StringBuilder(title.length());
         boolean lastWasSpace = false;

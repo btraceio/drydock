@@ -59,10 +59,11 @@ import java.util.function.UnaryOperator;
  * owns its own executor -- and every wait is bounded: a wedged FX thread must
  * fail the tool call, not hold the HTTP connection open (AGENTS.md).</p>
  *
- * <p>Deliberately holds no JavaFX type and no import from the UI package: the
- * one thing it needs from the UI -- opening a session tab -- arrives as a
- * {@link BiFunction} bound to {@code MainWorkspace.startAgentSession}, which
- * does its own FX-thread hop.</p>
+ * <p>Deliberately holds no JavaFX type: everything this class needs from the
+ * UI arrives as an injected function rather than a live reference to it.
+ * Opening a session tab is a {@link BiFunction} bound to {@code
+ * MainWorkspace.startAgentSession}; renaming one is {@code sessionRenamer}.
+ * Both do their own FX-thread hop inside {@code MainWorkspace}, never here.</p>
  */
 public final class WorkspaceMcpSessionContext implements McpSessionContext {
 
