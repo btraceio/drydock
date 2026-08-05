@@ -1490,6 +1490,14 @@ public final class RepositorySidebar extends VBox {
 
             Label name = new Label(session.displayName());
             name.getStyleClass().add("session-name");
+            // The name is agent-authored (session_rename) and can be 60 code
+            // points of full-width CJK. A Label's min width is its pref
+            // width, so without this the row -- and then the window -- takes
+            // its minimum width from the title. The clamp resolves against
+            // the HGROW'd `text` column below, not against the text.
+            name.setMinWidth(0);
+            name.setMaxWidth(Double.MAX_VALUE);
+            name.setTextOverrun(OverrunStyle.ELLIPSIS);
 
             // Branch tag (worktree handoff "Sidebar session rows"): ◫ accent
             // for a worktree checkout, ⎇ dim for the current checkout.

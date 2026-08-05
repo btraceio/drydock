@@ -17,6 +17,7 @@ import javafx.geometry.Pos;
 import javafx.scene.control.Button;
 import javafx.scene.control.ContentDisplay;
 import javafx.scene.control.Label;
+import javafx.scene.control.OverrunStyle;
 import javafx.scene.control.ProgressIndicator;
 import javafx.scene.control.Tab;
 import javafx.scene.control.TextField;
@@ -627,6 +628,12 @@ final class OpenSessionTab {
         back.setOnAction(e -> onBack.run());
 
         headerTitle.getStyleClass().add("session-title");
+        // Same hazard as the sidebar row: agent-authored text in a Label with
+        // no clamp. headerTitles is the HGROW'd node inside the header HBox,
+        // so the max width resolves against the header, not the title.
+        headerTitle.setMinWidth(0);
+        headerTitle.setMaxWidth(Double.MAX_VALUE);
+        headerTitle.setTextOverrun(OverrunStyle.ELLIPSIS);
         headerMeta.getStyleClass().add("session-meta-line");
         headerTitles.getChildren().setAll(headerTitle, headerMeta);
         HBox.setHgrow(headerTitles, Priority.ALWAYS);
