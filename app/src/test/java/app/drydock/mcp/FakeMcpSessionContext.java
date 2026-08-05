@@ -228,10 +228,16 @@ final class FakeMcpSessionContext implements McpSessionContext {
 
     private RenameOutcome renameOutcome = new RenameOutcome(RenameKind.RENAMED, "renamed");
     private final List<String> renameCalls = new ArrayList<>();
+    private McpToolException renameFailure;
 
     /** Canned answer for the next rename -- not a pin flag: the pin lives in SessionManager's transform. */
     void setRenameOutcome(RenameOutcome renameOutcome) {
         this.renameOutcome = renameOutcome;
+    }
+
+    /** When set, {@link #renameSession} throws this instead of returning an outcome. */
+    void setRenameFailure(McpToolException renameFailure) {
+        this.renameFailure = renameFailure;
     }
 
     List<String> renameCalls() {
@@ -239,7 +245,10 @@ final class FakeMcpSessionContext implements McpSessionContext {
     }
 
     @Override
-    public RenameOutcome renameSession(ManagedSessionId caller, String title) {
+    public RenameOutcome renameSession(ManagedSessionId caller, String title) throws McpToolException {
+        if (renameFailure != null) {
+            throw renameFailure;
+        }
         renameCalls.add(title);
         return renameOutcome;
     }
