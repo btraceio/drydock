@@ -262,8 +262,13 @@ plus a live `Stage`). Walk this with a human at the keyboard:
    being asked to. *Nothing else proves the MCP client actually injects the
    server's `instructions` field into the agent's system prompt — every
    automated test passes with the feature completely inert.*
-2. When it does, confirm both the tab label and the sidebar row change, and
-   that the sidebar row re-sorts into its new alphabetical position.
+2. When it does, confirm both the tab label and the sidebar row change. Do
+   NOT expect the row to move: `RepositorySidebar.sessionsFor` sorts by name,
+   but `SidebarChildren.classify` then re-bands the rows live-then-idle, each
+   by `lastOpenedAt` descending, and that is what reaches the tree. A rename
+   never changes a row's position. *(Verified 2026-08-05 by driving a real
+   `session_rename` call against a running app: the tab label, the session
+   header and the sidebar row all changed; the row did not move.)*
 3. Rename a session to something long, e.g. 60 full-width CJK characters.
    Confirm the sidebar row and the session header text are actually
    **ellipsized** — look for the "…" character itself, not just a

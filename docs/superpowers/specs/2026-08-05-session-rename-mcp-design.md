@@ -32,8 +32,9 @@ That choice is what makes the validation section long, because
   four more the same way (`:2081`, `:2098`, `:2159`, `:2170`) —
   including the one whose buttons are **Start new conversation** /
   **Delete session**, and one that is a native `DirectoryChooser` title.
-- `RepositorySidebar.java:893` sorts the sidebar's session rows by
-  `displayName`, and `:1491` renders each as an unconstrained `Label`.
+- `RepositorySidebar.java:1491` renders each sidebar row's name as an
+  unconstrained `Label`. (`:893` sorts by `displayName`, but that sort
+  never reaches the tree — see the correction under "Impersonation".)
 - `McpToolRouter.java:634` returns every session's `display_name` from
   `sessions_list` to any live agent.
 - `McpServer.summarize` (`:328`) puts the raw call arguments into the
@@ -171,10 +172,21 @@ The router also calls `requireLiveSession(caller)`
 
 The sharpest attack needs no special characters. `sessions_list` hands an
 agent every sibling's exact title, so it can rename itself to a
-byte-identical copy; the sidebar then sorts the impostor directly
-adjacent to its target (`RepositorySidebar.java:893`), and every
-destructive dialog is keyed on the name alone. `MAX_SESSIONS_PER_SESSION
-= 4` means one agent can hold five such rows.
+byte-identical copy, and every destructive dialog is keyed on the name
+alone. `MAX_SESSIONS_PER_SESSION = 4` means one agent can hold five such
+rows.
+
+**Corrected after implementation.** Earlier drafts added "and the sidebar
+sorts the impostor directly adjacent to its target
+(`RepositorySidebar.java:893`)". That is false, and running the app is
+what showed it: `sessionsFor` does sort by name at `:893`, but
+`SidebarChildren.classify` (`:85-96`) then re-bands the rows
+live-then-idle, each by `lastOpenedAt` descending, and *that* is the
+order the tree renders. A rename never moves a row. So name-cloning
+cannot buy adjacency; it buys two identically-labelled rows somewhere in
+the list. That is still confusing, and the destructive dialogs are still
+keyed on the name, so both mitigations below keep their justification —
+but the most alarming-sounding half of the threat was never real.
 
 **Rule 7** kills the exact-clone case: an agent cannot take a name
 another session in the same repository is already using. Precisely:
@@ -1014,6 +1026,23 @@ verified.
     tell what to change retries until its rename budget is gone. → The
     message now says multi-part emoji cannot be used and a single emoji
     is fine. Mutation-checked: disabling the branch fails the test.
+
+62. **The sidebar-adjacency claim was false.** Every draft said a
+    name-cloning impostor "lands directly adjacent to its target" because
+    the sidebar sorts by `displayName`. Running the app showed rows are
+    ordered by `lastOpenedAt` within live/idle bands
+    (`SidebarChildren.classify:85-96`); the name sort at
+    `RepositorySidebar:893` never reaches the tree, and a rename never
+    moves a row. → Corrected in "Impersonation" and in the manual
+    checklist, which had inherited the same error. Rule 7 and the dialog
+    disambiguation keep their justification; the adjacency framing does
+    not.
+63. **Verified end to end on a running app** (2026-08-05): a real
+    `session_rename` call over the live HTTP endpoint, with a real minted
+    token, returned `renamed` and the tab, session header and sidebar row
+    all relabelled. The `initialize` response over the wire carries
+    `instructions` naming the tool. That is the chain no automated test in
+    this repo can reach.
 
 The lesson worth keeping from #60 is not about Unicode. Three tests in
 this work asserted things that would pass against any implementation, and
