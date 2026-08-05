@@ -37,7 +37,7 @@ import javafx.util.Duration;
 import java.lang.System.Logger;
 import java.nio.file.Path;
 import java.util.Optional;
-import java.util.function.Consumer;
+import java.util.function.BiConsumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -173,7 +173,7 @@ final class OpenSessionTab {
     private final StackPane finishBox = new StackPane();
 
     private Runnable onCloseRequested = () -> { };
-    private Consumer<String> onRenamed = name -> { };
+    private BiConsumer<String, Boolean> onRenamed = (name, pin) -> { };
     private Runnable onBack = () -> { };
     private Runnable onPreviousSessionTab = () -> { };
     private Runnable onNextSessionTab = () -> { };
@@ -605,10 +605,16 @@ final class OpenSessionTab {
                 event.consume();
             }
         });
-        renameField.setOnAction(e -> commitInlineRename());
+        // Enter is an explicit confirm: it pins, even when the text is
+        // unchanged -- a human who opened the editor, read the agent's title
+        // and pressed Enter has claimed that name.
+        renameField.setOnAction(e -> commitInlineRename(true));
         renameField.focusedProperty().addListener((obs, was, is) -> {
             if (!is && tabLabels.getChildren().contains(renameField)) {
-                commitInlineRename();
+                // Focus loss is not a confirm. An agent's session_start opens
+                // and selects a tab, which blurs an open editor -- so pinning
+                // here would let an agent pin a human's session at will.
+                commitInlineRename(false);
             }
         });
         renameField.setOnKeyPressed(event -> {
@@ -779,11 +785,15 @@ final class OpenSessionTab {
         renameField.selectAll();
     }
 
-    private void commitInlineRename() {
+    private void commitInlineRename(boolean pin) {
         String newName = renameField.getText() == null ? "" : renameField.getText().strip();
         cancelInlineRename();
-        if (!newName.isEmpty() && !newName.equals(displayName)) {
-            onRenamed.accept(newName);
+        // Empty text cancels on both paths: MainWorkspace.renameSession has no
+        // emptiness filter of its own, and the human path applies no
+        // checkSessionTitle, so notifying here would blank the tab label
+        // permanently -- and, on the pin path, pin the blank.
+        if (!newName.isEmpty() && (pin || !newName.equals(displayName))) {
+            onRenamed.accept(newName, pin);
         }
     }
 
@@ -864,8 +874,8 @@ final class OpenSessionTab {
         this.onCloseRequested = handler == null ? () -> { } : handler;
     }
 
-    void setOnRenamed(Consumer<String> handler) {
-        this.onRenamed = handler == null ? name -> { } : handler;
+    void setOnRenamed(BiConsumer<String, Boolean> handler) {
+        this.onRenamed = handler == null ? (name, pin) -> { } : handler;
     }
 
     void setOnBack(Runnable handler) {

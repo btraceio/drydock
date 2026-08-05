@@ -2301,9 +2301,8 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         publishSessions();
     }
 
-    public void renameSession(ManagedSessionId sessionId, String newDisplayName) {
-        // TODO(Task 8): pass the caller's actual pin decision instead of true.
-        sessionManager.renameSession(sessionId, newDisplayName, true);
+    public void renameSession(ManagedSessionId sessionId, String newDisplayName, boolean pin) {
+        sessionManager.renameSession(sessionId, newDisplayName, pin);
         publishSessions();
     }
 
@@ -2317,7 +2316,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         dialog.showAndWait()
                 .map(String::strip)
                 .filter(name -> !name.isEmpty())
-                .ifPresent(name -> renameSession(session.id(), name));
+                .ifPresent(name -> renameSession(session.id(), name, true));
     }
 
     /** Diagnostic-only (see OpenSessionTab.diagPressKey): sends a key through the selected tab's key path. */
@@ -2682,7 +2681,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         // Read the id through the tab, not the constructor parameter: for a
         // brand-new session the tab adopts SessionManager's real id later
         // (see attachOpenedSession) and the rename must target THAT id.
-        openTab.setOnRenamed(name -> renameSession(openTab.sessionId(), name));
+        openTab.setOnRenamed((name, pin) -> renameSession(openTab.sessionId(), name, pin));
         openTab.setOnBack(this::showPicker);
         openTab.setOnPreviousSessionTab(this::selectPreviousSessionTab);
         openTab.setOnNextSessionTab(this::selectNextSessionTab);
