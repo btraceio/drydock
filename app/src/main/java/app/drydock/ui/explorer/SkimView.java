@@ -172,9 +172,14 @@ final class SkimView extends ScrollPane {
         rows.getChildren().clear();
         List<SourceOutline.Member> folded = new ArrayList<>();
         for (SourceOutline.Member member : outline.members()) {
+            // An explicit expansion beats the fold: revealLine puts one here
+            // when a search hit or a minimap click lands inside an untouched
+            // helper, and leaving it folded would make that click do nothing
+            // at all.
             boolean untouchedHelper = member.privateHelper()
                     && !member.isChanged(changed)
-                    && findingIn(member) == null;
+                    && findingIn(member) == null
+                    && !Boolean.TRUE.equals(expansion.get(member.startLine()));
             if (untouchedHelper) {
                 folded.add(member);
                 continue;

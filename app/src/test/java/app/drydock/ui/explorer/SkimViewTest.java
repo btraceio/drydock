@@ -125,6 +125,23 @@ class SkimViewTest extends ApplicationTest {
     }
 
     @Test
+    void revealingALineInsideAFoldedHelperOpensIt() {
+        show(Set.of(), Map.of());
+        assertTrue(lookup(".skim-group-signature").queryAll().stream()
+                        .anyMatch(node -> ((Label) node).getText().startsWith("private helpers")),
+                "the untouched private helpers start folded into their group");
+
+        // snapToGuide's body -- inside the folded group.
+        int lineInsideAHelper = SOURCE.lines().toList().indexOf("    private void snapToGuide() {") + 2;
+        interact(() -> skim.revealLine(lineInsideAHelper));
+        settle();
+
+        assertTrue(lookup(".skim-signature-open").queryAll().stream()
+                        .anyMatch(node -> ((Label) node).getText().contains("snapToGuide")),
+                "…and revealing a line inside one pulls it out of the group, open");
+    }
+
+    @Test
     void aFindingKeepsItsMemberOutOfTheFoldedGroupAndLabelsTheRow() {
         show(Set.of(), Map.of(13, "leak"));
 
