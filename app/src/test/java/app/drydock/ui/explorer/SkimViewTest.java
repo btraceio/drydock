@@ -6,6 +6,7 @@ import javafx.scene.control.Button;
 import javafx.scene.control.Label;
 import javafx.scene.input.ScrollEvent;
 import javafx.scene.layout.HBox;
+import javafx.scene.layout.Region;
 import javafx.stage.Stage;
 import org.fxmisc.richtext.CodeArea;
 import org.junit.jupiter.api.Test;
@@ -198,14 +199,20 @@ class SkimViewTest extends ApplicationTest {
         // squeezing it down to where Flowless's own flow has no visible
         // area left to misbehave in.
         show(Set.of(4, 8, 12, 16), Map.of());
-        // Short enough that the rows overflow the viewport: with no overflow
-        // there is nothing to scroll, and asserting "> 0.0" would pass on the
-        // span-clamp bug's snap-to-1 artifact just as easily as on a real
-        // scroll. The VIEW is sized, never the shared stage.
+        settle();
+        // Derived, not chosen: row height, padding, and per-member line count
+        // have all shifted this test's margins before (twice, across two
+        // unrelated changes) when the viewport was a hand-picked literal.
+        // Reading the real, already-laid-out content height and sizing the
+        // viewport to a quarter of it keeps ~3/4 of the content scrollable no
+        // matter what those numbers happen to be, so a single wheel notch
+        // always lands with room on both sides of the assertion below.
+        Region rows = (Region) lookup(".skim-rows").query();
+        double viewportHeight = rows.getHeight() / 4;
         interact(() -> {
-            skim.setMinHeight(100);
-            skim.setPrefHeight(100);
-            skim.setMaxHeight(100);
+            skim.setMinHeight(viewportHeight);
+            skim.setPrefHeight(viewportHeight);
+            skim.setMaxHeight(viewportHeight);
         });
         settle();
         // A paragraph's own line-number graphic, not the CodeArea itself:
@@ -253,14 +260,19 @@ class SkimViewTest extends ApplicationTest {
     @Test
     void expandingAMemberKeepsTheReadersPlace() {
         show(Set.of(3, 4), Map.of());
-        // Short enough that the rows overflow the viewport, same as
-        // revealingScrollsToTheMemberRatherThanTheTopOfTheFile above: with no
-        // overflow there is nowhere to scroll, vvalue is inert, and the bug
-        // cannot show itself. The VIEW is sized, never the shared stage.
+        settle();
+        // Derived, not chosen: same reasoning as the wheel-proportionality
+        // test below. A fixed literal here goes stale the moment row height,
+        // padding, or the shared SkimView's carried-over expansion state
+        // (it survives across show() calls by design) changes how tall this
+        // content actually renders; a quarter of the real height always
+        // leaves overflow to scroll into regardless.
+        Region rows = (Region) lookup(".skim-rows").query();
+        double viewportHeight = rows.getHeight() / 4;
         interact(() -> {
-            skim.setMinHeight(150);
-            skim.setPrefHeight(150);
-            skim.setMaxHeight(150);
+            skim.setMinHeight(viewportHeight);
+            skim.setPrefHeight(viewportHeight);
+            skim.setMaxHeight(viewportHeight);
         });
         settle();
         interact(() -> skim.setVvalue(0.4));
