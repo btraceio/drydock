@@ -14,9 +14,10 @@ import javafx.util.Duration;
 /**
  * Shared visual vocabulary for session status (design handoff: "Session
  * status drives the sidebar dot, tab dot, and header pill consistently").
- * The three design statuses map from the richer domain enum:
- * running/starting {@code -> :running}, failed/missing {@code -> :error},
- * inactive/exited {@code -> } neither (the design's "idle").
+ * The three design statuses ({@code :running}, {@code :error}, and neither
+ * for the design's "idle") are driven entirely by {@link SessionStatusFacet},
+ * the single status-to-facet mapping -- see that type for which
+ * {@link SessionStatus} values land in which bucket.
  */
 final class SessionStatusStyles {
 
