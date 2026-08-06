@@ -285,6 +285,13 @@ final class FileViewer extends BorderPane {
         editBannerPrimary.setMinWidth(Region.USE_PREF_SIZE);
         editBannerSecondary.setMinWidth(Region.USE_PREF_SIZE);
         editBannerLabel.setMinWidth(0);
+        // The same trap the edit banner hit: an HBox shrinks its rigid
+        // children before its growing one, so at 1000px the skim/full pair
+        // and the chip rendered as "…", "…", "e…" -- two identical
+        // unreadable buttons, one of which changes the reading mode.
+        skimSegment.setMinWidth(Region.USE_PREF_SIZE);
+        statusChip.setMinWidth(Region.USE_PREF_SIZE);
+        gutterToggle.setMinWidth(Region.USE_PREF_SIZE);
         HBox.setHgrow(editBannerLabel, Priority.ALWAYS);
         editBanner.getChildren().setAll(editBannerLabel, editBannerPrimary, editBannerSecondary);
         editBanner.setAlignment(Pos.CENTER_LEFT);
@@ -349,6 +356,8 @@ final class FileViewer extends BorderPane {
         });
         updateBreadcrumb(null);
         updateEmptyState();
+        widthProperty().addListener((obs, was, is) ->
+                updateBreadcrumb(fileTabs.getSelectionModel().getSelectedItem()));
 
         // Poll only while the viewer is actually in the scene graph.
         // OpenSessionTab.showSubTab swaps the tab's center node, so leaving
@@ -2028,7 +2037,11 @@ final class FileViewer extends BorderPane {
         if (shown == null) {
             return;
         }
-        breadcrumb.getChildren().addAll(UiFormats.breadcrumbSegments(shown));
+        // Below this the trailing controls start eating each other; three
+        // trailing segments is what fits beside them at the narrowest width
+        // the window allows.
+        int maxSegments = getWidth() > 0 && getWidth() < 900 ? 3 : Integer.MAX_VALUE;
+        breadcrumb.getChildren().addAll(UiFormats.breadcrumbSegments(shown, maxSegments));
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
         breadcrumb.getChildren().addAll(spacer, skimSegment, statusChip, gutterToggle);

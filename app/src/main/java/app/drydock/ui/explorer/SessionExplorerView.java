@@ -37,6 +37,9 @@ public final class SessionExplorerView extends HBox {
     private static final double RAIL_COLLAPSED_WIDTH = 46;
     private static final Duration COLLAPSE_ANIMATION = Duration.millis(160);
 
+    /** Below this the rail's 324px is most of a narrow window; it gets out of the way. */
+    private static final double NARROW_WIDTH = 1100;
+
     /**
      * Bounded so a stuck filesystem cannot hang application shutdown.
      * Fully-qualified because this class already imports {@link
@@ -51,6 +54,9 @@ public final class SessionExplorerView extends HBox {
     private boolean railCollapsed;
     private ExplorerTrailStore trailStore;
     private String trailKey;
+
+    /** True when the reader collapsed the rail themselves, so widening must not undo it. */
+    private boolean collapsedByReader;
 
     public SessionExplorerView(Path searchRoot, SessionSearchService searchService) {
         this(searchRoot, searchService, null);
@@ -156,8 +162,24 @@ public final class SessionExplorerView extends HBox {
         rail.setPrefWidth(RAIL_EXPANDED_WIDTH);
         rail.setMinWidth(RAIL_EXPANDED_WIDTH);
         rail.setMaxWidth(RAIL_EXPANDED_WIDTH);
-        rail.setOnCollapseRequested(() -> setRailCollapsed(true));
-        rail.setOnExpandRequested(() -> setRailCollapsed(false));
+        rail.setOnCollapseRequested(() -> {
+            collapsedByReader = true;
+            setRailCollapsed(true);
+        });
+        rail.setOnExpandRequested(() -> {
+            collapsedByReader = false;
+            setRailCollapsed(false);
+        });
+        widthProperty().addListener((obs, was, width) -> {
+            if (width.doubleValue() <= 0) {
+                return;
+            }
+            if (width.doubleValue() < NARROW_WIDTH) {
+                setRailCollapsed(true);
+            } else if (!collapsedByReader) {
+                setRailCollapsed(false);
+            }
+        });
 
         HBox.setHgrow(viewer, Priority.ALWAYS);
         getChildren().setAll(rail, viewer);
@@ -249,6 +271,17 @@ public final class SessionExplorerView extends HBox {
     /** Diagnostic- and test-only: the trail as its chips read, oldest first. */
     public java.util.List<String> diagTrail() {
         return viewer.trail().waypoints().stream().map(NavigationTrail.Waypoint::label).toList();
+    }
+
+    /** Diagnostic- and test-only: whether the rail is showing its collapsed strip. */
+    public boolean diagRailCollapsed() {
+        return railCollapsed;
+    }
+
+    /** Diagnostic- and test-only: the reader's own «, so a test can assert it survives a resize. */
+    public void diagCollapseRail() {
+        collapsedByReader = true;
+        setRailCollapsed(true);
     }
 
     /** Review-tab bridge: runs a Text-mode search for {@code token} (the "Search in Explorer" chip). */
