@@ -191,9 +191,50 @@ class SkimViewTest extends ApplicationTest {
     }
 
     @Test
-    void theWheelOverAnExpandedBodyScrollsTheSkimViewNotNothing() {
+    void theWheelOverAnExpandedBodyScrollsTheSkimViewProportionally() {
+        // Every member changed, so every body is open: enough rendered
+        // content that the viewport below genuinely overflows without
+        // squeezing it down to where Flowless's own flow has no visible
+        // area left to misbehave in.
+        show(Set.of(4, 8, 12, 16), Map.of());
+        // Short enough that the rows overflow the viewport: with no overflow
+        // there is nothing to scroll, and asserting "> 0.0" would pass on the
+        // span-clamp bug's snap-to-1 artifact just as easily as on a real
+        // scroll. The VIEW is sized, never the shared stage.
+        interact(() -> {
+            skim.setMinHeight(150);
+            skim.setPrefHeight(150);
+            skim.setMaxHeight(150);
+        });
+        settle();
+        // A paragraph's own line-number graphic, not the CodeArea itself:
+        // Flowless's VirtualFlow is a private child *inside* the CodeArea, so
+        // an event fired on the CodeArea as target never reaches it -- event
+        // dispatch never descends into a target's own children. Firing on a
+        // real paragraph-graphic node makes the flow a genuine ancestor of
+        // the target, on the bubbling path our filter has to beat.
+        Node body = lookup(".skim-body-lineno").query();
+        interact(() -> skim.setVvalue(0.0));
+        settle();
+
+        interact(() -> body.fireEvent(new ScrollEvent(ScrollEvent.SCROLL,
+                0, 0, 0, 0, false, false, false, false, false, false,
+                0, -120, 0, -120, ScrollEvent.HorizontalTextScrollUnits.NONE, 0,
+                ScrollEvent.VerticalTextScrollUnits.NONE, 0, 0, null)));
+        settle();
+
+        assertTrue(skim.getVvalue() > 0.0 && skim.getVvalue() < 1.0,
+                "a single wheel notch over open code must move the skim scroller proportionally,"
+                        + " not be swallowed and not snap to an end: vvalue=" + skim.getVvalue());
+    }
+
+    @Test
+    void theWheelOverABodyThatDoesNotOverflowLeavesTheSkimViewAtRest() {
         show(Set.of(3, 4), Map.of());
-        // The changed member is open by default, so its body is on screen.
+        // No height shrink here: the default stage keeps the rows well
+        // inside the viewport, so there is nothing to scroll. Pins the
+        // span-clamp defect, where flooring the divisor at 1 turned a wheel
+        // notch into a snap to vvalue 0 or 1 instead of a no-op.
         Node body = lookup(".skim-code").query();
         interact(() -> skim.setVvalue(0.0));
         settle();
@@ -204,8 +245,8 @@ class SkimViewTest extends ApplicationTest {
                 ScrollEvent.VerticalTextScrollUnits.NONE, 0, 0, null)));
         settle();
 
-        assertTrue(skim.getVvalue() > 0.0,
-                "the wheel over open code must move the skim scroller, not be swallowed");
+        assertEquals(0.0, skim.getVvalue(),
+                "a wheel notch over a body with nothing to scroll must leave the skim view alone");
     }
 
     @Test

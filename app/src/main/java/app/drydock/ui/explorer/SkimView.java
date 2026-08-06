@@ -113,9 +113,16 @@ final class SkimView extends ScrollPane {
      * scrollable span {@link #topLine()} uses.
      */
     private void redispatchWheel(ScrollEvent event) {
+        double overflow = rows.getHeight() - getViewportBounds().getHeight();
+        if (overflow <= 0) {
+            // Nothing to scroll: unlike topLine()'s multiplier, this value is
+            // a divisor, so flooring it at 1 would turn a ~120px wheel delta
+            // into a snap to vvalue 0 or 1 instead of a no-op. Left
+            // unconsumed so the event can still reach an enclosing scroller.
+            return;
+        }
         event.consume();
-        double span = Math.max(1, rows.getHeight() - getViewportBounds().getHeight());
-        setVvalue(Math.max(0, Math.min(1, getVvalue() - event.getDeltaY() / span)));
+        setVvalue(Math.max(0, Math.min(1, getVvalue() - event.getDeltaY() / overflow)));
     }
 
     /** Expands the member containing {@code line} and scrolls it into view (a minimap click, or {@code z} back). */
