@@ -1,10 +1,12 @@
 package app.drydock.ui.explorer;
 
 import app.drydock.ui.code.SyntaxHighlighter;
+import javafx.application.Platform;
 import javafx.geometry.Pos;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
 import javafx.scene.control.ScrollPane;
+import javafx.scene.input.ScrollEvent;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
@@ -46,6 +48,9 @@ final class SkimView extends ScrollPane {
     /** Explicit expand/collapse per member start line; absent means "whatever the default says". */
     private final Map<Integer, Boolean> expansion = new java.util.HashMap<>();
     private boolean helpersExpanded;
+
+    /** Set while revealLine is driving the scroll, so rebuild's restore does not undo it. */
+    private boolean revealing;
 
     private Consumer<Integer> onMemberRead = line -> { };
     private BiConsumer<CodeArea, Integer> onBodyBuilt = (area, startLine) -> { };
@@ -102,12 +107,28 @@ final class SkimView extends ScrollPane {
         return outline.members().isEmpty() ? 1 : outline.members().get(0).startLine();
     }
 
+    /**
+     * Applies a wheel event that landed on a member body to this scroller.
+     * Deltas are in pixels, so they are converted against the same
+     * scrollable span {@link #topLine()} uses.
+     */
+    private void redispatchWheel(ScrollEvent event) {
+        event.consume();
+        double span = Math.max(1, rows.getHeight() - getViewportBounds().getHeight());
+        setVvalue(Math.max(0, Math.min(1, getVvalue() - event.getDeltaY() / span)));
+    }
+
     /** Expands the member containing {@code line} and scrolls it into view (a minimap click, or {@code z} back). */
     void revealLine(int line) {
         outline.memberAt(line).ifPresent(member -> {
             expansion.put(member.startLine(), true);
             onMemberRead.accept(member.startLine());
-            rebuild();
+            revealing = true;
+            try {
+                rebuild();
+            } finally {
+                revealing = false;
+            }
             // rebuild() replaced every row, so until a layout pass runs they
             // all report bounds of zero -- and the target below would come out
             // as 0, i.e. "scroll to the top", every single time. Forcing the
@@ -136,6 +157,11 @@ final class SkimView extends ScrollPane {
     }
 
     private void rebuild() {
+        // Expanding one member must not move every other one under the
+        // reader. Captured, not read in the lambda: `revealing` is already
+        // back to false by the time a deferred read would run.
+        double scrollPosition = getVvalue();
+        boolean restoreScroll = !revealing;
         rows.getChildren().clear();
         List<SourceOutline.Member> folded = new ArrayList<>();
         for (SourceOutline.Member member : outline.members()) {
@@ -150,6 +176,11 @@ final class SkimView extends ScrollPane {
         }
         if (!folded.isEmpty()) {
             rows.getChildren().add(buildHelperGroup(folded));
+        }
+        // Deferred: the ScrollPane clamps vvalue against a content height
+        // that is still zero until the new rows have been laid out.
+        if (restoreScroll) {
+            Platform.runLater(() -> setVvalue(scrollPosition));
         }
     }
 
@@ -304,6 +335,12 @@ final class SkimView extends ScrollPane {
         scroll.setPrefHeight(height);
         scroll.setMinHeight(height);
         VBox.setVgrow(scroll, Priority.NEVER);
+        // Flowless's VirtualFlow handles ScrollEvent.ANY and consumes it
+        // unconditionally -- even here, where the body is sized to its
+        // content and has nothing to scroll. Without this filter the wheel
+        // dies wherever the cursor sits over open code. A filter, not a
+        // handler: it has to win before the event reaches the flow.
+        scroll.addEventFilter(ScrollEvent.SCROLL, this::redispatchWheel);
         return scroll;
     }
 }

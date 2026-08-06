@@ -1,8 +1,10 @@
 package app.drydock.ui.explorer;
 
+import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
+import javafx.scene.input.ScrollEvent;
 import javafx.scene.layout.HBox;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.Test;
@@ -65,6 +67,10 @@ class SkimViewTest extends ApplicationTest {
     private void show(Set<Integer> changed, Map<Integer, String> findings) {
         interact(() -> skim.show(Path.of("ui/Sidebar.java"), SOURCE,
                 SourceOutline.parse(SOURCE), changed, findings));
+        org.testfx.util.WaitForAsyncUtils.waitForFxEvents();
+    }
+
+    private void settle() {
         org.testfx.util.WaitForAsyncUtils.waitForFxEvents();
     }
 
@@ -182,5 +188,53 @@ class SkimViewTest extends ApplicationTest {
     void everySkimRowIsFocusTraversable() {
         show(Set.of(8), Map.of());
         assertTrue(lookup(".skim-header").queryAll().stream().allMatch(node -> node.isFocusTraversable()));
+    }
+
+    @Test
+    void theWheelOverAnExpandedBodyScrollsTheSkimViewNotNothing() {
+        show(Set.of(3, 4), Map.of());
+        // The changed member is open by default, so its body is on screen.
+        Node body = lookup(".skim-code").query();
+        interact(() -> skim.setVvalue(0.0));
+        settle();
+
+        interact(() -> body.fireEvent(new ScrollEvent(ScrollEvent.SCROLL,
+                0, 0, 0, 0, false, false, false, false, false, false,
+                0, -120, 0, -120, ScrollEvent.HorizontalTextScrollUnits.NONE, 0,
+                ScrollEvent.VerticalTextScrollUnits.NONE, 0, 0, null)));
+        settle();
+
+        assertTrue(skim.getVvalue() > 0.0,
+                "the wheel over open code must move the skim scroller, not be swallowed");
+    }
+
+    @Test
+    void expandingAMemberKeepsTheReadersPlace() {
+        show(Set.of(3, 4), Map.of());
+        // Short enough that the rows overflow the viewport, same as
+        // revealingScrollsToTheMemberRatherThanTheTopOfTheFile above: with no
+        // overflow there is nowhere to scroll, vvalue is inert, and the bug
+        // cannot show itself. The VIEW is sized, never the shared stage.
+        interact(() -> {
+            skim.setMinHeight(150);
+            skim.setPrefHeight(150);
+            skim.setMaxHeight(150);
+        });
+        settle();
+        interact(() -> skim.setVvalue(0.4));
+        settle();
+        double before = skim.getVvalue();
+
+        Button helpers = lookup(".skim-header").queryAll().stream()
+                .map(Button.class::cast)
+                .filter(row -> row.getGraphic() instanceof HBox box && box.getChildren().stream()
+                        .anyMatch(node -> node instanceof Label label
+                                && label.getText().startsWith("private helpers")))
+                .findFirst().orElseThrow();
+        clickOn(helpers);
+        settle();
+
+        assertEquals(before, skim.getVvalue(), 0.05,
+                "expanding a group must not throw the reader to the top");
     }
 }
