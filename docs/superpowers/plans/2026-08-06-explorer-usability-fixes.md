@@ -70,8 +70,13 @@ void theMatchGroupCaretIsVisibleAndCollapsesTheGroup() {
     clickOn(caret);
     settle();
     assertEquals("▸", caret.getText(), "collapsed groups point right");
-    assertTrue(lookup(".result-match-line").queryAll().stream().noneMatch(Node::isVisible),
-            "…and the match lines are gone");
+    // The CONTAINER, not the children: JavaFX visibility is inherited for
+    // rendering, so the group's own flags are what the collapse sets, and
+    // asserting on each child would force redundant per-child state into
+    // the production code just to satisfy the test.
+    Node lines = lookup(".result-match-lines").query();
+    assertFalse(lines.isVisible(), "…and the match lines are hidden");
+    assertFalse(lines.isManaged(), "…and take up no space in the rail");
 }
 ```
 
@@ -192,8 +197,9 @@ void aCollapsedGroupStaysCollapsedWhenTheRailRebuilds() {
             .filter(Node::isVisible)
             .findFirst().orElseThrow();
     assertEquals("▸", afterRebuild.getText(), "the group is still collapsed after a rebuild");
-    assertTrue(lookup(".result-match-line").queryAll().stream().noneMatch(Node::isVisible),
-            "…and its match lines are still hidden");
+    Node lines = lookup(".result-match-lines").query();
+    assertFalse(lines.isVisible(), "…and its match lines are still hidden");
+    assertFalse(lines.isManaged(), "…and still take up no space");
 }
 
 @Test
