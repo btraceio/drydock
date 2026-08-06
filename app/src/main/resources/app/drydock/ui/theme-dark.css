@@ -45,6 +45,16 @@
     -drydock-merged-soft: rgba(176, 122, 217, 0.16);
     -drydock-match-bg: rgba(217, 119, 87, 0.32);
 
+    /* Agent identity (harness marks). Claude is deliberately NOT
+     * -drydock-accent: accent is the app's universal emphasis color, and an
+     * accent mark on every Claude row would read as "these rows are
+     * special" rather than "these rows are Claude". Pi is magenta rather
+     * than purple so it cannot be confused with the `merged` PR chip that
+     * renders on the same rows. */
+    -drydock-agent-claude: #c98168;
+    -drydock-agent-codex: #5bb3ab;
+    -drydock-agent-pi: #d977b0;
+
     /* Diff Review (design handoff section C): add/del rows, annotation
      * range selection, and the Explorer changed-line gutter overlay. */
     -drydock-add-bg: rgba(108, 192, 122, 0.10);

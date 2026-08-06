@@ -232,6 +232,19 @@
 .child-row { -fx-padding: 5 8 5 16; }
 .child-row-status { -fx-min-width: 16; -fx-alignment: center; }
 
+/* The per-agent mark in a session row's leading gutter. Identity is carried
+ * by the glyph first and the color second, so the row still reads in
+ * grayscale. */
+.agent-mark {
+    -fx-font-size: 11px;
+    -fx-min-width: -fx-pref-width;
+}
+
+.agent-mark-claude { -fx-text-fill: -drydock-agent-claude; }
+.agent-mark-codex { -fx-text-fill: -drydock-agent-codex; }
+.agent-mark-pi { -fx-text-fill: -drydock-agent-pi; }
+.agent-mark-unknown { -fx-text-fill: -drydock-text-faint; }
+
 /* Small square hover-action buttons on repo/session rows (22px). */
 .row-action-button {
     -fx-min-width: 22px;  -fx-max-width: 22px;
