@@ -324,15 +324,35 @@ public final class DrydockApplication extends Application {
 
                 @Override
                 public CompletableFuture<Void> saveWorktreesDirectory(Optional<Path> directory) {
-                    return UserConfig.saveAsync(new UserConfig(directory));
+                    // Read-modify-write: constructing a bare UserConfig here
+                    // would reset every other preference in the file on each
+                    // worktrees-directory edit.
+                    return UserConfig.loadAsync().thenCompose(existing ->
+                            UserConfig.saveAsync(new UserConfig(directory, existing.openChangedFilesInSkim())));
+                }
+
+                @Override
+                public CompletableFuture<Boolean> loadOpenChangedFilesInSkim() {
+                    return UserConfig.loadAsync().thenApply(UserConfig::openChangedFilesInSkim);
+                }
+
+                @Override
+                public CompletableFuture<Void> saveOpenChangedFilesInSkim(boolean value) {
+                    return UserConfig.loadAsync().thenCompose(existing ->
+                            UserConfig.saveAsync(new UserConfig(existing.worktreesDirectory(), value)));
                 }
             }, appShell.modalLayer()::close);
             // onClosed, not just the Done/× onClose above: Esc and a
             // backdrop click hide the modal without moving focus off the
             // worktrees field, so its focus-lost commit never fires --
             // flushPendingEdit is the one seam every close path runs
-            // through (see ModalLayer.close's onClosed callback).
-            appShell.modalLayer().show(settingsModal, settingsModal::flushPendingEdit);
+            // through (see ModalLayer.close's onClosed callback). Chained
+            // after it so the Explorer's cached skim preference picks up
+            // whatever the modal just saved.
+            appShell.modalLayer().show(settingsModal, () -> {
+                settingsModal.flushPendingEdit();
+                mainWorkspace.refreshExplorerPreferences();
+            });
         });
 
         mainWorkspace.setModalLayer(appShell.modalLayer());

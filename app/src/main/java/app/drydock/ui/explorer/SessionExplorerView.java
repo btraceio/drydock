@@ -232,6 +232,15 @@ public final class SessionExplorerView extends HBox {
         rail.setFindings(provider);
     }
 
+    /**
+     * Whether a file in the current change opens folded. Read per open, not
+     * captured, so a change in Settings takes effect on the next file rather
+     * than the next session.
+     */
+    public void setSkimDefault(BooleanSupplier skimDefault) {
+        viewer.setSkimDefault(skimDefault);
+    }
+
     /** Diagnostic- and test-only: how many peek cards are stacked. */
     public int diagPeekDepth() {
         return viewer.diagPeekDepth();

@@ -81,8 +81,13 @@ final class FileViewer extends BorderPane {
     private final Button fullToggle = new Button("full");
     private final HBox skimSegment = new HBox(0);
 
-    /** Whether a changed file opens folded; see the Explorer setting (Task 7). */
+    /** Whether a changed file opens folded; the Settings "Explorer" checkbox. */
     private BooleanSupplier skimDefault = () -> true;
+
+    /** Wired by MainWorkspace from the user's config; read at every file open. */
+    void setSkimDefault(BooleanSupplier supplier) {
+        this.skimDefault = supplier == null ? () -> true : supplier;
+    }
 
     /** Findings anchored in the open files; empty without a review scope. */
     private java.util.function.Function<Path, List<ExplorerFinding>> findingsProvider = path -> List.of();

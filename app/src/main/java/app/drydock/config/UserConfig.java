@@ -3,6 +3,7 @@ package app.drydock.config;
 import app.drydock.state.json.JsonParseException;
 import app.drydock.state.json.JsonParser;
 import app.drydock.state.json.JsonValue;
+import app.drydock.state.json.JsonValue.JsonBoolean;
 import app.drydock.state.json.JsonValue.JsonObject;
 import app.drydock.state.json.JsonValue.JsonString;
 import app.drydock.state.json.JsonWriter;
@@ -27,22 +28,26 @@ import java.util.concurrent.atomic.AtomicReference;
 /**
  * User-editable settings read from {@code ~/.drydock/config.json}, separate
  * from the app's own {@code ApplicationState} (which the app writes itself
- * and never expects a human to hand-edit). Deliberately tiny: one field for
- * now, {@code worktreesDirectory} -- the directory new worktrees are
- * created under, in place of the {@code <home>/dev/wt} default (see
- * {@link app.drydock.git.WorktreeNaming}).
+ * and never expects a human to hand-edit). Deliberately tiny: {@code
+ * worktreesDirectory} -- the directory new worktrees are created under, in
+ * place of the {@code <home>/dev/wt} default (see {@link
+ * app.drydock.git.WorktreeNaming}) -- and {@code openChangedFilesInSkim},
+ * whether a file already part of the current change opens folded to its
+ * signatures.
  *
  * <p>{@link #load()} never throws for a missing or malformed config file:
  * it logs a warning for malformed input and falls back to {@link #empty()},
  * consistent with how {@code JsonApplicationStateRepository} treats a
  * corrupt state file.</p>
  */
-public record UserConfig(Optional<Path> worktreesDirectory) {
+public record UserConfig(Optional<Path> worktreesDirectory, boolean openChangedFilesInSkim) {
 
     private static final Logger LOG = System.getLogger(UserConfig.class.getName());
 
     public static UserConfig empty() {
-        return new UserConfig(Optional.empty());
+        // Skim-by-default is the Explorer delta's design (part 2); the
+        // setting exists to turn it off, not to opt into it.
+        return new UserConfig(Optional.empty(), true);
     }
 
     /** {@code ~/.drydock/config.json}. */
@@ -101,7 +106,9 @@ public record UserConfig(Optional<Path> worktreesDirectory) {
             Optional<Path> worktreesDirectory = root.get("worktreesDirectory") instanceof JsonString s
                     ? Optional.of(Path.of(s.value()).toAbsolutePath().normalize())
                     : Optional.empty();
-            return new UserConfig(worktreesDirectory);
+            boolean openChangedFilesInSkim = !(root.get("openChangedFilesInSkim") instanceof JsonBoolean b)
+                    || b.value();
+            return new UserConfig(worktreesDirectory, openChangedFilesInSkim);
         } catch (IOException | JsonParseException | InvalidPathException e) {
             LOG.log(Level.WARNING, "Config file " + configFile + " is missing, unreadable, or malformed; "
                     + "ignoring it and using defaults", e);
@@ -141,6 +148,8 @@ public record UserConfig(Optional<Path> worktreesDirectory) {
         JsonObject root = readExistingRootOrEmpty(resolvedConfigFile);
         root.members().remove("worktreesDirectory");
         config.worktreesDirectory().ifPresent(dir -> root.put("worktreesDirectory", new JsonString(dir.toString())));
+        root.members().remove("openChangedFilesInSkim");
+        root.put("openChangedFilesInSkim", new JsonBoolean(config.openChangedFilesInSkim()));
 
         Files.createDirectories(parent);
         Path temp = Files.createTempFile(parent, "config", ".json.tmp");
