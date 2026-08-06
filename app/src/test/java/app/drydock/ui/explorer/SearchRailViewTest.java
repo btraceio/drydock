@@ -199,6 +199,14 @@ class SearchRailViewTest extends ApplicationTest {
     }
 
     @Test
+    void theSortButtonAdvertisesItsKeyLikeTheScopeToggleDoes() {
+        List<String> hints = lookup(".rail-key-hint").queryAll().stream()
+                .map(node -> ((Label) node).getText())
+                .toList();
+        assertEquals(List.of("d", "s"), hints, "both single-letter rail keys are on screen");
+    }
+
+    @Test
     void everyRailControlIsFocusTraversable() {
         interact(() -> rail.refresh());
         settle();

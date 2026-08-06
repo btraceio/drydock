@@ -293,6 +293,9 @@ final class SearchRail extends VBox {
         sortButton.setTooltip(new Tooltip("Sort: churn · findings · a-z (s)"));
         sortButton.setOnAction(e -> cycleSort());
 
+        Label sortKey = new Label("s");
+        sortKey.getStyleClass().add("rail-key-hint");
+
         Button collapse = new Button("«");
         collapse.getStyleClass().add("rail-collapse-button");
         collapse.setFocusTraversable(false);
@@ -300,7 +303,8 @@ final class SearchRail extends VBox {
 
         Region headerSpacer = new Region();
         HBox.setHgrow(headerSpacer, Priority.ALWAYS);
-        HBox headerRow = new HBox(6, header, scopeSegment, scopeKey, headerSpacer, sortButton, collapse);
+        HBox headerRow = new HBox(6, header, scopeSegment, scopeKey, headerSpacer,
+                sortButton, sortKey, collapse);
         headerRow.setAlignment(Pos.CENTER_LEFT);
         headerRow.getStyleClass().add("search-rail-header");
 
