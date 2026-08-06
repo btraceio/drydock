@@ -230,7 +230,10 @@
 /* One fixed indent gutter shared by every child row (session / unopened
    worktree / stale summary) so their status columns line up. */
 .child-row { -fx-padding: 5 8 5 16; }
-.child-row-status { -fx-min-width: 16; -fx-alignment: center; }
+.child-row-status {
+    -fx-min-width: 30;
+    -fx-alignment: center;
+}
 
 /* The per-agent mark in a session row's leading gutter. Identity is carried
  * by the glyph first and the color second, so the row still reads in

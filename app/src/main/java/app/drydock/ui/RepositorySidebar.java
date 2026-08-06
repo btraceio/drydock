@@ -1489,8 +1489,13 @@ public final class RepositorySidebar extends VBox {
         private HBox buildSessionRow(ManagedAgentSession session, Repository repository) {
             boolean live = SessionStatusStyles.isRunning(session.status());
             Region dot = SessionStatusStyles.createDot(8, session.status(), live);
-            StackPane statusCol = new StackPane(dot);
+            // Leading gutter: status dot, then the agent mark. Two independent
+            // axes (is it running / what is it running), so two marks -- and
+            // an HBox, because the StackPane this used to be would have stacked
+            // the mark on top of the dot.
+            HBox statusCol = new HBox(3, dot, AgentMarks.createMark(session));
             statusCol.getStyleClass().add("child-row-status");
+            statusCol.setAlignment(Pos.CENTER_LEFT);
 
             Label name = new Label(session.displayName());
             name.getStyleClass().add("session-name");
@@ -1578,6 +1583,7 @@ public final class RepositorySidebar extends VBox {
                     ? repository.remote().host() + ":" + repository.remote().remotePath()
                     : session.workingDirectory().toString();
             rowTip.setText("Status: " + session.status()
+                    + "\nAgent: " + AgentLabels.displayName(agentRegistry, session)
                     + (activity == SessionActivity.UNKNOWN ? ""
                             : "\n" + AgentLabels.displayName(agentRegistry, session) + ": "
                                     + activityLabel(activity))
@@ -1702,7 +1708,7 @@ public final class RepositorySidebar extends VBox {
                 for (WorktreeService.Worktree worktree : worktrees) {
                     Label path = new Label(shortPath(worktree.path()));
                     path.getStyleClass().add("stale-path");
-                    path.setPadding(new Insets(2, 8, 2, 34));
+                    path.setPadding(new Insets(2, 8, 2, 48));
                     box.getChildren().add(path);
                 }
             }
@@ -1754,7 +1760,7 @@ public final class RepositorySidebar extends VBox {
                     Label path = new Label(shortPath(worktree.path())
                             + worktree.lockReason().map(reason -> "  (" + reason + ")").orElse(""));
                     path.getStyleClass().add("stale-path");
-                    path.setPadding(new Insets(2, 8, 2, 34));
+                    path.setPadding(new Insets(2, 8, 2, 48));
                     box.getChildren().add(path);
                 }
             }
