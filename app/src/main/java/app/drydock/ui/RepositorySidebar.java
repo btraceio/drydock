@@ -1495,7 +1495,6 @@ public final class RepositorySidebar extends VBox {
             // the mark on top of the dot.
             HBox statusCol = new HBox(3, dot, AgentMarks.createMark(session));
             statusCol.getStyleClass().add("child-row-status");
-            statusCol.setAlignment(Pos.CENTER_LEFT);
 
             Label name = new Label(session.displayName());
             name.getStyleClass().add("session-name");
@@ -1585,7 +1584,7 @@ public final class RepositorySidebar extends VBox {
             rowTip.setText("Status: " + session.status()
                     + "\nAgent: " + AgentLabels.displayName(agentRegistry, session)
                     + (activity == SessionActivity.UNKNOWN ? ""
-                            : "\n" + AgentLabels.displayName(agentRegistry, session) + ": "
+                            : "\nActivity: "
                                     + activityLabel(activity))
                     + "\nLast opened: " + session.lastOpenedAt()
                     + "\nWorking directory: " + workingDirectoryText);
