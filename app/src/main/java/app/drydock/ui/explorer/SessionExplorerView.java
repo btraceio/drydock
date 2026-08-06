@@ -305,6 +305,10 @@ public final class SessionExplorerView extends HBox {
 
     /** Review-tab bridge: runs a Text-mode search for {@code token} (the "Search in Explorer" chip). */
     public void searchText(String token) {
+        // Claims the rail exactly like the manual ⌕ does (setOnExpandRequested
+        // above): leaving railOverride null here let the next width tick below
+        // the threshold take the rail away again right after this expanded it.
+        railOverride = Boolean.FALSE;
         setRailCollapsed(false);
         rail.setSearch(token);
     }

@@ -469,8 +469,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         exitWatcher.setCycleCount(Animation.INDEFINITE);
         exitWatcher.play();
 
-        UserConfig.loadAsync().thenAccept(config ->
-                skimDefaultCache.set(config.openChangedFilesInSkim()));
+        refreshExplorerPreferences();
     }
 
     /** Re-reads the Explorer's user preferences after the settings modal closes. */

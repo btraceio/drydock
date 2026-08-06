@@ -92,6 +92,13 @@ final class SkimView extends ScrollPane {
         this.lines = text.isEmpty() ? List.of() : List.of(text.split("\n", -1));
         this.changed = Set.copyOf(changed);
         this.findingLabels = Map.copyOf(findingLabels);
+        // expansion is keyed by line number, not by member identity: a stale
+        // TRUE surviving from the previous document would pull open whatever
+        // member happens to start at that line number in THIS one, and
+        // rebuild() consults expansion to override folding -- so this is not
+        // cosmetic, it decides what a fresh document looks like on arrival.
+        expansion.clear();
+        helpersExpanded = false;
         // New content: there is no reader's place in this document to
         // preserve, and a vvalue measured against the previous document
         // would be meaningless here. The caller decides where to land --
@@ -222,7 +229,20 @@ final class SkimView extends ScrollPane {
         // Deferred: the ScrollPane clamps vvalue against a content height
         // that is still zero until the new rows have been laid out.
         if (restoreScroll) {
-            Platform.runLater(() -> setVvalue(scrollPosition));
+            // Same rule SearchRail.rebuild() uses for the identical race: a
+            // revealLine (minimap click, `z` back) can land in the pulse
+            // between this rebuild and its own deferred restore -- findings
+            // and diff-overlay refreshes arrive over MCP while the reader is
+            // reading, so refresh() and a reveal really are asynchronous
+            // with respect to each other. Clearing the rows just above
+            // collapses the content height and clamps vvalue to 0, so a
+            // non-zero value one pulse later is someone else's write and
+            // outranks the position captured here.
+            Platform.runLater(() -> {
+                if (getVvalue() == 0) {
+                    setVvalue(scrollPosition);
+                }
+            });
         }
     }
 

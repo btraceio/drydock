@@ -371,6 +371,85 @@ class SkimViewTest extends ApplicationTest {
     }
 
     @Test
+    void aRevealDuringAnOrdinaryRefreshSurvivesTheNextPulse() {
+        // refresh() is what FileViewer.refreshSkim calls on every findings and
+        // diff-overlay refresh, and findings arrive over MCP while the reader
+        // is reading -- so a refresh() landing in the same pulse as a minimap
+        // click or a `z` toggle is a real interleaving, not a contrived one.
+        // refresh()'s own deferred restore must not overwrite a reveal that
+        // lands in the gap before it fires.
+        show(Set.of(), Map.of());
+        settle();
+        // Derived, not chosen: same reasoning as the other viewport-shrinking
+        // tests above -- a hand-picked literal goes stale the moment row
+        // height or padding changes.
+        Region rows = (Region) lookup(".skim-rows").query();
+        double viewportHeight = rows.getHeight() / 4;
+        interact(() -> {
+            skim.setMinHeight(viewportHeight);
+            skim.setPrefHeight(viewportHeight);
+            skim.setMaxHeight(viewportHeight);
+        });
+        settle();
+
+        // A distinctive scroll position, well past where the reveal below
+        // lands: refresh()'s rebuild captures THIS as the value to restore,
+        // and if the guard is missing, that capture -- not wherever the
+        // reveal put the reader -- is what silently wins back.
+        interact(() -> skim.setVvalue(0.95));
+        settle();
+
+        // persist() is the last member -- well down the file, so revealing it
+        // only reads as success if the skim view is still looking at it.
+        int lineWellDown = SOURCE.lines().toList().indexOf("        prefs.put(KEY, w);") + 1;
+        interact(() -> {
+            skim.refresh(Set.of(), Map.of());
+            skim.revealLine(lineWellDown);
+        });
+        // Two pulses, not one: see aRevealRightAfterShowSurvivesTheNextPulse
+        // for why a single settle() cannot force the deferred restore to run.
+        settle();
+        settle();
+
+        assertTrue(skim.getVvalue() < 0.7,
+                "the revealed member is still what the reader is looking at, not the pre-refresh "
+                        + "scroll position refresh() queued to restore: vvalue=" + skim.getVvalue());
+    }
+
+    @Test
+    void aSecondShowOfADifferentDocumentDoesNotCarryTheFirstDocumentsExpansion() {
+        show(Set.of(), Map.of());
+        // onRelease starts at line 7 and is not pre-expanded by default (only
+        // the changed set is), so an explicit reveal is what puts a TRUE in
+        // expansion keyed by that line number.
+        interact(() -> skim.revealLine(7));
+        settle();
+        assertTrue(openRowSignatures().contains("void onRelease(MouseEvent e) {"));
+
+        // A second, unrelated document whose member b() happens to start at
+        // the same line 7, and is neither changed nor otherwise expanded.
+        String other = """
+                class Other {
+
+                    int a() {
+                        return 1;
+                    }
+
+                    void b() {
+                        doStuff();
+                    }
+                }
+                """;
+        interact(() -> skim.show(Path.of("Other.java"), other,
+                SourceOutline.parse(other), Set.of(), Map.of()));
+        settle();
+
+        assertEquals(List.of(), openRowSignatures(),
+                "a stale expansion keyed by line number must not leak into an unrelated member "
+                        + "of the new document");
+    }
+
+    @Test
     void aSingleLineMemberStillShowsItsOnlyLine() {
         String source = """
                 interface Clock {
