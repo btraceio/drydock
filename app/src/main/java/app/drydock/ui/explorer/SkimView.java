@@ -49,8 +49,15 @@ final class SkimView extends ScrollPane {
     private final Map<Integer, Boolean> expansion = new java.util.HashMap<>();
     private boolean helpersExpanded;
 
-    /** Set while revealLine is driving the scroll, so rebuild's restore does not undo it. */
-    private boolean revealing;
+    /**
+     * Set while a caller has already decided (or is about to decide) the
+     * scroll position rebuild() would otherwise fight over: revealLine
+     * driving an anchor, or show() loading a brand new document, where the
+     * previous vvalue was measured against different content and restoring
+     * it is meaningless. refresh() -- the same document repainted -- leaves
+     * this false, because there the restore is the whole point.
+     */
+    private boolean scrollClaimed;
 
     private Consumer<Integer> onMemberRead = line -> { };
     private BiConsumer<CodeArea, Integer> onBodyBuilt = (area, startLine) -> { };
@@ -85,7 +92,17 @@ final class SkimView extends ScrollPane {
         this.lines = text.isEmpty() ? List.of() : List.of(text.split("\n", -1));
         this.changed = Set.copyOf(changed);
         this.findingLabels = Map.copyOf(findingLabels);
-        rebuild();
+        // New content: there is no reader's place in this document to
+        // preserve, and a vvalue measured against the previous document
+        // would be meaningless here. The caller decides where to land --
+        // scrollToTop() or a revealLine() -- right after this returns; a
+        // restore queued behind it would land a pulse later and undo it.
+        scrollClaimed = true;
+        try {
+            rebuild();
+        } finally {
+            scrollClaimed = false;
+        }
     }
 
     /** Repaints against a new changed set / finding set without touching expansion state. */
@@ -130,11 +147,11 @@ final class SkimView extends ScrollPane {
         outline.memberAt(line).ifPresent(member -> {
             expansion.put(member.startLine(), true);
             onMemberRead.accept(member.startLine());
-            revealing = true;
+            scrollClaimed = true;
             try {
                 rebuild();
             } finally {
-                revealing = false;
+                scrollClaimed = false;
             }
             // rebuild() replaced every row, so until a layout pass runs they
             // all report bounds of zero -- and the target below would come out
@@ -178,10 +195,10 @@ final class SkimView extends ScrollPane {
 
     private void rebuild() {
         // Expanding one member must not move every other one under the
-        // reader. Captured, not read in the lambda: `revealing` is already
-        // back to false by the time a deferred read would run.
+        // reader. Captured, not read in the lambda: `scrollClaimed` is
+        // already back to false by the time a deferred read would run.
         double scrollPosition = getVvalue();
-        boolean restoreScroll = !revealing;
+        boolean restoreScroll = !scrollClaimed;
         rows.getChildren().clear();
         List<SourceOutline.Member> folded = new ArrayList<>();
         for (SourceOutline.Member member : outline.members()) {

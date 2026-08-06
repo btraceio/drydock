@@ -333,6 +333,44 @@ class SkimViewTest extends ApplicationTest {
     }
 
     @Test
+    void aRevealRightAfterShowSurvivesTheNextPulse() {
+        // show() + an immediate reveal is the file-open path: the viewer opens
+        // the file and jumps to the requested line in the same FX pulse.
+        // A restore queued by show()'s own rebuild must not undo the jump.
+        show(Set.of(), Map.of());
+        settle();
+        // Derived, not chosen: same reasoning as the other viewport-shrinking
+        // tests above -- a hand-picked literal goes stale the moment row
+        // height or padding changes.
+        Region rows = (Region) lookup(".skim-rows").query();
+        double viewportHeight = rows.getHeight() / 4;
+        interact(() -> {
+            skim.setMinHeight(viewportHeight);
+            skim.setPrefHeight(viewportHeight);
+            skim.setMaxHeight(viewportHeight);
+        });
+        settle();
+
+        // persist() is the last member -- well down the file, so revealing it
+        // only reads as success if the skim view is still looking at it.
+        int lineWellDown = SOURCE.lines().toList().indexOf("        prefs.put(KEY, w);") + 1;
+        interact(() -> {
+            skim.show(Path.of("ui/Sidebar.java"), SOURCE, SourceOutline.parse(SOURCE), Set.of(), Map.of());
+            skim.revealLine(lineWellDown);
+        });
+        // Two pulses, not one: a single settle() only drains the synchronous
+        // work above, which already leaves vvalue at the reveal's target --
+        // against the regression this test pins, that first settle() alone
+        // still passes. The restore show()'s rebuild queued fires on the
+        // pulse after that; this second settle() is what actually forces it
+        // to run and is what the regression needs to fail against.
+        settle();
+        settle();
+
+        assertTrue(skim.getVvalue() > 0.0, "the requested line is still what the reader is looking at");
+    }
+
+    @Test
     void aSingleLineMemberStillShowsItsOnlyLine() {
         String source = """
                 interface Clock {
