@@ -372,12 +372,14 @@ class SearchRailViewTest extends ApplicationTest {
         assertTrue(caret.getWidth() >= 14 && caret.getHeight() >= 14,
                 "caret hit target is " + caret.getWidth() + "x" + caret.getHeight());
         assertEquals("▾", caret.getText(), "expanded groups point down");
-        assertFalse(lookup(".result-match-line").queryAll().isEmpty(), "the group starts expanded");
+
+        Node lines = lookup(".result-match-lines").query();
+        assertTrue(lines.isVisible(), "the group starts expanded and is laid out");
 
         clickOn(caret);
         settle();
         assertEquals("▸", caret.getText(), "collapsed groups point right");
-        assertTrue(lookup(".result-match-line").queryAll().stream().noneMatch(Node::isVisible),
-                "…and the match lines are gone");
+        assertFalse(lines.isVisible(), "the match lines are hidden");
+        assertFalse(lines.isManaged(), "…and no longer take up space in the rail");
     }
 }

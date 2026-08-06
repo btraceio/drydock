@@ -607,9 +607,6 @@ final class SearchRail extends VBox {
                 caret.setText(expanded ? "▾" : "▸");
                 lines.setVisible(expanded);
                 lines.setManaged(expanded);
-                for (javafx.scene.Node child : lines.getChildren()) {
-                    child.setVisible(expanded);
-                }
             });
         }
         return group;
