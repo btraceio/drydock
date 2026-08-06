@@ -7,6 +7,7 @@ import javafx.scene.control.Label;
 import javafx.scene.input.ScrollEvent;
 import javafx.scene.layout.HBox;
 import javafx.stage.Stage;
+import org.fxmisc.richtext.CodeArea;
 import org.junit.jupiter.api.Test;
 import org.testfx.framework.junit5.ApplicationTest;
 
@@ -202,9 +203,9 @@ class SkimViewTest extends ApplicationTest {
         // span-clamp bug's snap-to-1 artifact just as easily as on a real
         // scroll. The VIEW is sized, never the shared stage.
         interact(() -> {
-            skim.setMinHeight(150);
-            skim.setPrefHeight(150);
-            skim.setMaxHeight(150);
+            skim.setMinHeight(100);
+            skim.setPrefHeight(100);
+            skim.setMaxHeight(100);
         });
         settle();
         // A paragraph's own line-number graphic, not the CodeArea itself:
@@ -277,5 +278,30 @@ class SkimViewTest extends ApplicationTest {
 
         assertEquals(before, skim.getVvalue(), 0.05,
                 "expanding a group must not throw the reader to the top");
+    }
+
+    @Test
+    void anExpandedMemberDoesNotRepeatItsSignature() {
+        show(Set.of(3, 4), Map.of());
+        CodeArea body = (CodeArea) lookup(".skim-code").query();
+        String firstLine = body.getText().lines().findFirst().orElse("").strip();
+        assertFalse(firstLine.equals("int width() {"),
+                "the header already says the signature; the body starts at the line after it: "
+                        + body.getText());
+        assertTrue(body.getText().contains("return clamp(raw);"), body.getText());
+    }
+
+    @Test
+    void aSingleLineMemberStillShowsItsOnlyLine() {
+        String source = """
+                interface Clock {
+                    Instant now();
+                }
+                """;
+        interact(() -> skim.show(Path.of("Clock.java"), source,
+                SourceOutline.parse(source), Set.of(2), Map.of()));
+        settle();
+        CodeArea body = (CodeArea) lookup(".skim-code").query();
+        assertFalse(body.getText().isBlank(), "a one-line member must not fold away to nothing");
     }
 }

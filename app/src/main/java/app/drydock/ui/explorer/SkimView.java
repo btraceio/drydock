@@ -288,8 +288,16 @@ final class SkimView extends ScrollPane {
     }
 
     private Region buildBody(SourceOutline.Member member) {
-        int from = Math.max(1, member.startLine());
+        int start = Math.max(1, member.startLine());
         int to = Math.min(lines.size(), member.endLine());
+        // The header row already shows the signature. Repeating it as the
+        // body's first line costs a row per open member and reads like a
+        // rendering fault -- so it is dropped, but only when line `start`
+        // really is the signature (a wrapped or annotated declaration is
+        // not) and only when something is left underneath it.
+        boolean repeatsSignature = to > start && start <= lines.size()
+                && lines.get(start - 1).strip().equals(member.signature());
+        int from = repeatsSignature ? start + 1 : start;
         StringBuilder text = new StringBuilder();
         for (int line = from; line <= to; line++) {
             text.append(lines.get(line - 1));
