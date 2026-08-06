@@ -611,10 +611,7 @@ final class SearchRail extends VBox {
             VBox lines = new VBox(1);
             lines.getStyleClass().add("result-match-lines");
             for (TextMatch match : matches) {
-                Region matchLine = buildMatchLine(file, entry.relative(), match, query);
-                matchLine.setVisible(expanded);
-                matchLine.setManaged(expanded);
-                lines.getChildren().add(matchLine);
+                lines.getChildren().add(buildMatchLine(file, entry.relative(), match, query));
             }
             lines.setVisible(expanded);
             lines.setManaged(expanded);
@@ -624,10 +621,6 @@ final class SearchRail extends VBox {
                 caret.setText(nowExpanded ? "▾" : "▸");
                 lines.setVisible(nowExpanded);
                 lines.setManaged(nowExpanded);
-                for (Node child : lines.getChildren()) {
-                    child.setVisible(nowExpanded);
-                    child.setManaged(nowExpanded);
-                }
                 if (nowExpanded) {
                     collapsedGroups.remove(entry.relative());
                 } else {

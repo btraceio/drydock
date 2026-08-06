@@ -408,8 +408,9 @@ class SearchRailViewTest extends ApplicationTest {
                 .filter(Node::isVisible)
                 .findFirst().orElseThrow();
         assertEquals("▸", afterRebuild.getText(), "the group is still collapsed after a rebuild");
-        assertTrue(lookup(".result-match-line").queryAll().stream().noneMatch(Node::isVisible),
-                "…and its match lines are still hidden");
+        Node lines = lookup(".result-match-lines").query();
+        assertFalse(lines.isVisible(), "…and its match lines are still hidden");
+        assertFalse(lines.isManaged(), "…and still take up no space");
     }
 
     @Test
