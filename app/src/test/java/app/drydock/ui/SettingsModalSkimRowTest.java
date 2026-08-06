@@ -16,6 +16,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * The Explorer row of the settings modal: it must show the STORED value,
@@ -61,7 +62,12 @@ class SettingsModalSkimRowTest extends ApplicationTest {
 
             @Override
             public CompletableFuture<Boolean> loadOpenChangedFilesInSkim() {
-                return CompletableFuture.completedFuture(false);
+                // A fresh CheckBox is already unselected, so the stored
+                // value must be true for applying it to be a real state
+                // transition -- otherwise a listener wired before the load
+                // lands would have nothing to fire on, and this test would
+                // pass against that bug.
+                return CompletableFuture.completedFuture(true);
             }
 
             @Override
@@ -82,12 +88,12 @@ class SettingsModalSkimRowTest extends ApplicationTest {
     void theSkimCheckboxReadsAndWritesThePreference() {
         WaitForAsyncUtils.waitForFxEvents();
         CheckBox box = (CheckBox) modal.lookup(".settings-check");
-        assertFalse(box.isSelected(), "the modal shows the stored preference, not the default");
+        assertTrue(box.isSelected(), "the modal shows the stored preference, not the default");
         assertFalse(box.isDisabled(), "…and is enabled once the value has arrived");
         assertEquals(null, saved.get(), "showing a value is not a reason to write it back");
 
-        interact(() -> box.setSelected(true));
+        interact(() -> box.setSelected(false));
         WaitForAsyncUtils.waitForFxEvents();
-        assertEquals(Boolean.TRUE, saved.get());
+        assertEquals(Boolean.FALSE, saved.get());
     }
 }

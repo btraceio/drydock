@@ -338,7 +338,21 @@ public final class SettingsModal extends VBox {
         settings.loadOpenChangedFilesInSkim().whenComplete((value, failure) -> Platform.runLater(() -> {
             box.setSelected(failure == null ? value : true);
             box.setDisable(false);
-            box.selectedProperty().addListener((obs, was, is) -> settings.saveOpenChangedFilesInSkim(is));
+            // Same shape as worktreesRow's commit: disable for the duration
+            // of the write (which also rules out an overlapping save, since
+            // a disabled checkbox cannot be clicked again) and surface a
+            // failure rather than leaving a ticked box that never reached
+            // disk.
+            box.selectedProperty().addListener((obs, was, is) -> {
+                box.setDisable(true);
+                settings.saveOpenChangedFilesInSkim(is).whenComplete((ignored, saveFailure) ->
+                        Platform.runLater(() -> {
+                            box.setDisable(false);
+                            if (saveFailure != null) {
+                                UiErrors.show("Could not save the Explorer preference", saveFailure);
+                            }
+                        }));
+            });
         }));
         return new VBox(4, box, hint);
     }
