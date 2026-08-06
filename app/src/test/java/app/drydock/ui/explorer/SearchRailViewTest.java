@@ -426,4 +426,23 @@ class SearchRailViewTest extends ApplicationTest {
         assertEquals(0.5, scroll.getVvalue(), 0.05,
                 "a refresh must not throw the reader back to the top of the list");
     }
+
+    @Test
+    void aScrollMadeDuringARebuildIsNotOverwrittenByTheRestore() {
+        interact(() -> rail.toggleScope());
+        settle();
+        ScrollPane scroll = (ScrollPane) lookup(".search-results-scroll").query();
+        interact(() -> scroll.setVvalue(0.5));
+        settle();
+
+        // The rebuild and the reader's scroll land in the same FX pulse, before
+        // the deferred restore runs.
+        interact(() -> {
+            rail.refresh();
+            scroll.setVvalue(0.9);
+        });
+        settle();
+        assertEquals(0.9, scroll.getVvalue(), 0.05,
+                "the reader's scroll outranks the position the rebuild captured");
+    }
 }

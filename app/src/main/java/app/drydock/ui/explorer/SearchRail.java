@@ -504,7 +504,15 @@ final class SearchRail extends VBox {
 
         // Deferred one pulse: the ScrollPane clamps vvalue against a content
         // height that is still zero until the new rows have been laid out.
-        Platform.runLater(() -> resultsScroll.setVvalue(scrollPosition));
+        Platform.runLater(() -> {
+            // Only if the rebuild's own clear is what left it here: emptying
+            // the rows collapses the content height and clamps vvalue to 0,
+            // so a non-zero value one pulse later is someone else's scroll
+            // and outranks the position we captured.
+            if (resultsScroll.getVvalue() == 0) {
+                resultsScroll.setVvalue(scrollPosition);
+            }
+        });
 
         int repoCount = Math.max(repoFiles.size(), shown.size());
         // A failed listing must not read as a small repo: "repo has 0 files"
