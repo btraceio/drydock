@@ -143,6 +143,16 @@ class SessionExplorerViewTest extends ApplicationTest {
                 "widening the window must not undo a collapse the reader asked for");
     }
 
+    @Test
+    void aRailTheReaderExpandedWhileNarrowStaysExpanded() {
+        widthOf(1000);                       // auto-collapses
+        interact(() -> view.diagExpandRail()); // the reader opens it anyway
+        waitForFxEvents();
+        widthOf(980);                        // still narrow, another width tick
+        assertFalse(onFx(() -> view.diagRailCollapsed()),
+                "a rail the reader opened is not taken away by the next resize tick");
+    }
+
     private List<String> trailChips() {
         return lookup(".trail-chip").queryAll().stream()
                 .map(node -> ((Button) node).getText())

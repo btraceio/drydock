@@ -55,8 +55,13 @@ public final class SessionExplorerView extends HBox {
     private ExplorerTrailStore trailStore;
     private String trailKey;
 
-    /** True when the reader collapsed the rail themselves, so widening must not undo it. */
-    private boolean collapsedByReader;
+    /**
+     * The reader's own «/⌕ choice, if any: {@code null} means "follow the
+     * window", otherwise the reader's choice wins while the window stays on
+     * one side of {@link #NARROW_WIDTH} -- and crossing that threshold hands
+     * control back to the window.
+     */
+    private Boolean railOverride;
 
     public SessionExplorerView(Path searchRoot, SessionSearchService searchService) {
         this(searchRoot, searchService, null);
@@ -163,22 +168,25 @@ public final class SessionExplorerView extends HBox {
         rail.setMinWidth(RAIL_EXPANDED_WIDTH);
         rail.setMaxWidth(RAIL_EXPANDED_WIDTH);
         rail.setOnCollapseRequested(() -> {
-            collapsedByReader = true;
+            railOverride = Boolean.TRUE;
             setRailCollapsed(true);
         });
         rail.setOnExpandRequested(() -> {
-            collapsedByReader = false;
+            railOverride = Boolean.FALSE;
             setRailCollapsed(false);
         });
         widthProperty().addListener((obs, was, width) -> {
-            if (width.doubleValue() <= 0) {
+            double newWidth = width.doubleValue();
+            double oldWidth = was.doubleValue();
+            if (newWidth <= 0) {
                 return;
             }
-            if (width.doubleValue() < NARROW_WIDTH) {
-                setRailCollapsed(true);
-            } else if (!collapsedByReader) {
-                setRailCollapsed(false);
+            boolean isNarrow = newWidth < NARROW_WIDTH;
+            if (oldWidth > 0 && isNarrow != (oldWidth < NARROW_WIDTH)) {
+                // Crossing the threshold hands control back to the window.
+                railOverride = null;
             }
+            setRailCollapsed(railOverride != null ? railOverride : isNarrow);
         });
 
         HBox.setHgrow(viewer, Priority.ALWAYS);
@@ -278,10 +286,16 @@ public final class SessionExplorerView extends HBox {
         return railCollapsed;
     }
 
-    /** Diagnostic- and test-only: the reader's own «, so a test can assert it survives a resize. */
+    /** Diagnostic- and test-only: the reader's own «, so a test can assert the collapse survives a resize. */
     public void diagCollapseRail() {
-        collapsedByReader = true;
+        railOverride = Boolean.TRUE;
         setRailCollapsed(true);
+    }
+
+    /** Diagnostic- and test-only: the reader's own ⌕, so a test can assert the expand survives a resize. */
+    public void diagExpandRail() {
+        railOverride = Boolean.FALSE;
+        setRailCollapsed(false);
     }
 
     /** Review-tab bridge: runs a Text-mode search for {@code token} (the "Search in Explorer" chip). */
