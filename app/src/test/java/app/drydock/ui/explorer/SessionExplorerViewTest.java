@@ -1,6 +1,7 @@
 package app.drydock.ui.explorer;
 
 import app.drydock.search.SessionSearchService;
+import javafx.geometry.Pos;
 import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
@@ -261,6 +262,20 @@ class SessionExplorerViewTest extends ApplicationTest {
                 "the card sits against the viewer's right edge: " + card_ + " in " + viewerBounds);
         assertTrue(card_.getMinY() > viewerBounds.getMinY() + viewerBounds.getHeight() / 3,
                 "…and its lower half: " + card_ + " in " + viewerBounds);
+    }
+
+    @Test
+    void aToastRaisedOverAnOpenPeekDoesNotSitOnItsActions() {
+        openFile("ui/Sidebar.java");
+        // The class's own helper: it waits for the card rather than sleeping,
+        // because resolution is a repository text search.
+        peek("clamp");
+        interact(() -> view.diagToast("hello"));
+        waitForFxEvents();
+
+        Node toast = lookup(".explorer-toast").query();
+        assertEquals(Pos.TOP_CENTER, StackPane.getAlignment(toast),
+                "with a peek open the toast moves out of the card's action row");
     }
 
     @Test

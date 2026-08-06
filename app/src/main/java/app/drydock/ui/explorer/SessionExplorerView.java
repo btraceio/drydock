@@ -241,6 +241,11 @@ public final class SessionExplorerView extends HBox {
         viewer.diagPeek(symbol);
     }
 
+    /** Diagnostic- and test-only: raises the viewer's toast. */
+    public void diagToast(String message) {
+        viewer.toast(message);
+    }
+
     /** {@code z}: skim ⇄ full text for the open file. */
     public void toggleSkim() {
         viewer.toggleSkim();

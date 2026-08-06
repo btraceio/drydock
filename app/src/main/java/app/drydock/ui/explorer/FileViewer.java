@@ -900,6 +900,10 @@ final class FileViewer extends BorderPane {
             // can clear is a permanent banner.
             return;
         }
+        // The peek card's action row lives at the bottom of the viewer, and
+        // it is the only place the peek's keys are advertised. A toast that
+        // covers it hides the answer to "what can I do here".
+        StackPane.setAlignment(toast, isPeekOpen() ? Pos.TOP_CENTER : Pos.BOTTOM_CENTER);
         toast.setText(message);
         toast.setVisible(true);
         toast.setManaged(true);
