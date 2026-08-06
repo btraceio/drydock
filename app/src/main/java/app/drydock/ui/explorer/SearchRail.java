@@ -80,6 +80,7 @@ final class SearchRail extends VBox {
     private final Button scopeRepo = new Button("repo");
     private final Button sortButton = new Button();
     private final VBox resultsBox = new VBox(3);
+    private final ScrollPane resultsScroll = new ScrollPane(resultsBox);
     private final Label selectedCount = new Label();
     private final Button openSelected = new Button();
     private final HBox footer = new HBox(8);
@@ -87,6 +88,14 @@ final class SearchRail extends VBox {
 
     private final VBox expandedContent = new VBox(8);
     private final VBox collapsedContent = new VBox(10);
+
+    /**
+     * Groups the reader has collapsed, by session-relative path. Held here
+     * rather than on the row because rebuild() destroys every row -- and it
+     * rebuilds on opening a file, on a findings or overlay refresh, and on
+     * every debounced keystroke, so row-local state survives almost nothing.
+     */
+    private final Set<Path> collapsedGroups = new LinkedHashSet<>();
 
     /** Checked file rows (multi-select), independent of row expansion. */
     private final ObservableSet<Path> checkedFiles = FXCollections.observableSet(new LinkedHashSet<>());
@@ -313,11 +322,10 @@ final class SearchRail extends VBox {
         fieldRow.getStyleClass().add("explorer-search-row");
 
         resultsBox.getStyleClass().add("search-results");
-        ScrollPane scroll = new ScrollPane(resultsBox);
-        scroll.setFitToWidth(true);
-        scroll.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
-        scroll.getStyleClass().add("search-results-scroll");
-        VBox.setVgrow(scroll, Priority.ALWAYS);
+        resultsScroll.setFitToWidth(true);
+        resultsScroll.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
+        resultsScroll.getStyleClass().add("search-results-scroll");
+        VBox.setVgrow(resultsScroll, Priority.ALWAYS);
 
         selectedCount.getStyleClass().add("open-selected-count");
         openSelected.getStyleClass().add("open-selected-button");
@@ -343,10 +351,10 @@ final class SearchRail extends VBox {
         funnelFooter.setAlignment(Pos.CENTER_LEFT);
         funnelFooter.setOnAction(e -> setScope(FileRailModel.Scope.REPO));
 
-        expandedContent.getChildren().setAll(headerRow, fieldRow, scroll, footer, funnelFooter);
+        expandedContent.getChildren().setAll(headerRow, fieldRow, resultsScroll, footer, funnelFooter);
         expandedContent.getStyleClass().add("search-rail-content");
         VBox.setVgrow(expandedContent, Priority.ALWAYS);
-        VBox.setVgrow(scroll, Priority.ALWAYS);
+        VBox.setVgrow(resultsScroll, Priority.ALWAYS);
     }
 
     private void buildCollapsedContent() {
@@ -451,6 +459,10 @@ final class SearchRail extends VBox {
     }
 
     private void rebuild() {
+        // Captured before the children go, restored after they are back: the
+        // reader's place in a 200-row list is not something a keystroke or a
+        // background findings refresh gets to discard.
+        double scrollPosition = resultsScroll.getVvalue();
         List<FileRailModel.Entry> all = entries();
         List<FileRailModel.Entry> shown = FileRailModel.visible(all, scope, sort, query, openFile);
 
@@ -490,6 +502,10 @@ final class SearchRail extends VBox {
             resultsBox.getChildren().add(empty);
         }
 
+        // Deferred one pulse: the ScrollPane clamps vvalue against a content
+        // height that is still zero until the new rows have been laid out.
+        Platform.runLater(() -> resultsScroll.setVvalue(scrollPosition));
+
         int repoCount = Math.max(repoFiles.size(), shown.size());
         // A failed listing must not read as a small repo: "repo has 0 files"
         // and "we could not look" are very different statements, and only one
@@ -524,10 +540,11 @@ final class SearchRail extends VBox {
         });
 
         boolean hasChildren = !matches.isEmpty();
-        ToggleButton caret = new ToggleButton("▾");
+        boolean expanded = !collapsedGroups.contains(entry.relative());
+        ToggleButton caret = new ToggleButton(expanded ? "▾" : "▸");
         caret.getStyleClass().add("result-caret");
         caret.setFocusTraversable(false);
-        caret.setSelected(true);
+        caret.setSelected(expanded);
         caret.setVisible(hasChildren);
         caret.setManaged(hasChildren);
 
@@ -594,19 +611,28 @@ final class SearchRail extends VBox {
             VBox lines = new VBox(1);
             lines.getStyleClass().add("result-match-lines");
             for (TextMatch match : matches) {
-                lines.getChildren().add(buildMatchLine(file, entry.relative(), match, query));
+                Region matchLine = buildMatchLine(file, entry.relative(), match, query);
+                matchLine.setVisible(expanded);
+                matchLine.setManaged(expanded);
+                lines.getChildren().add(matchLine);
             }
+            lines.setVisible(expanded);
+            lines.setManaged(expanded);
             group.getChildren().add(lines);
 
-            // The glyph is swapped, not rotated: these rows are rebuilt on
-            // every keystroke, so a RotateTransition would animate nodes that
-            // are already on their way out -- and a rotated glyph sits
-            // off-centre in its box. SkimView's rows have always done it this
-            // way.
-            caret.selectedProperty().addListener((obs, was, expanded) -> {
-                caret.setText(expanded ? "▾" : "▸");
-                lines.setVisible(expanded);
-                lines.setManaged(expanded);
+            caret.selectedProperty().addListener((obs, was, nowExpanded) -> {
+                caret.setText(nowExpanded ? "▾" : "▸");
+                lines.setVisible(nowExpanded);
+                lines.setManaged(nowExpanded);
+                for (Node child : lines.getChildren()) {
+                    child.setVisible(nowExpanded);
+                    child.setManaged(nowExpanded);
+                }
+                if (nowExpanded) {
+                    collapsedGroups.remove(entry.relative());
+                } else {
+                    collapsedGroups.add(entry.relative());
+                }
             });
         }
         return group;

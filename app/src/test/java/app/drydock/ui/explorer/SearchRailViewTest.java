@@ -6,6 +6,7 @@ import javafx.scene.Scene;
 import javafx.scene.control.Button;
 import javafx.scene.control.CheckBox;
 import javafx.scene.control.Label;
+import javafx.scene.control.ScrollPane;
 import javafx.scene.control.ToggleButton;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
@@ -381,5 +382,47 @@ class SearchRailViewTest extends ApplicationTest {
         assertEquals("▸", caret.getText(), "collapsed groups point right");
         assertFalse(lines.isVisible(), "the match lines are hidden");
         assertFalse(lines.isManaged(), "…and no longer take up space in the rail");
+    }
+
+    @Test
+    void aCollapsedGroupStaysCollapsedWhenTheRailRebuilds() {
+        interact(() -> rail.setSearch("lerp"));
+        waitForFooter("more file");
+        interact(() -> rail.toggleScope());
+        settle();
+
+        ToggleButton caret = lookup(".result-caret").queryAll().stream()
+                .map(ToggleButton.class::cast)
+                .filter(Node::isVisible)
+                .findFirst().orElseThrow();
+        clickOn(caret);
+        settle();
+        assertEquals("▸", caret.getText());
+
+        // Exactly what opening a file from the rail does.
+        interact(() -> rail.setOpenFile(Path.of("ui/LayoutMath.java")));
+        settle();
+
+        ToggleButton afterRebuild = lookup(".result-caret").queryAll().stream()
+                .map(ToggleButton.class::cast)
+                .filter(Node::isVisible)
+                .findFirst().orElseThrow();
+        assertEquals("▸", afterRebuild.getText(), "the group is still collapsed after a rebuild");
+        assertTrue(lookup(".result-match-line").queryAll().stream().noneMatch(Node::isVisible),
+                "…and its match lines are still hidden");
+    }
+
+    @Test
+    void theResultListKeepsItsScrollPositionAcrossARebuild() {
+        interact(() -> rail.toggleScope());
+        settle();
+        ScrollPane scroll = (ScrollPane) lookup(".search-results-scroll").query();
+        interact(() -> scroll.setVvalue(0.5));
+        settle();
+
+        interact(() -> rail.refresh());
+        settle();
+        assertEquals(0.5, scroll.getVvalue(), 0.05,
+                "a refresh must not throw the reader back to the top of the list");
     }
 }
