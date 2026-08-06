@@ -48,6 +48,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
 import java.util.function.IntFunction;
 
 /**
@@ -79,6 +80,9 @@ final class FileViewer extends BorderPane {
     private final Button skimToggle = new Button("skim");
     private final Button fullToggle = new Button("full");
     private final HBox skimSegment = new HBox(0);
+
+    /** Whether a changed file opens folded; see the Explorer setting (Task 7). */
+    private BooleanSupplier skimDefault = () -> true;
 
     /** Findings anchored in the open files; empty without a review scope. */
     private java.util.function.Function<Path, List<ExplorerFinding>> findingsProvider = path -> List.of();
@@ -1508,8 +1512,16 @@ final class FileViewer extends BorderPane {
                 // change, and its shape is the fastest way in. Everything
                 // else opens as text, because that is what "open a file"
                 // means everywhere else in the app.
-                if (!changedLinesFor(tab).isEmpty()) {
+                if (!changedLinesFor(tab).isEmpty() && skimDefault.getAsBoolean()) {
                     setSkim(tab, true);
+                    // setSkim anchors on currentLineOf(tab), which reads a
+                    // CodeArea that has not been laid out yet -- so a fresh
+                    // open landed mid-file with members above the viewport
+                    // and nothing saying so. An open has one honest anchor:
+                    // the line that was asked for, or the top.
+                    if (jumpToLine.isEmpty()) {
+                        skimView.scrollToTop();
+                    }
                 }
                 refreshMinimap(tab);
                 jumpToLine.ifPresent(line -> scrollTo(tab, line));

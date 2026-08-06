@@ -157,6 +157,19 @@ final class SkimView extends ScrollPane {
         });
     }
 
+    /**
+     * Puts the top of the file at the top of the viewport. Called when a
+     * file opens in skim mode with no line to jump to: {@code setSkim}'s
+     * anchor is read from a CodeArea that has not been laid out yet, and an
+     * arbitrary anchor leaves members above the viewport with nothing
+     * saying they are there.
+     */
+    void scrollToTop() {
+        applyCss();
+        layout();
+        setVvalue(0);
+    }
+
     private boolean isExpanded(SourceOutline.Member member) {
         Boolean explicit = expansion.get(member.startLine());
         // Default: changed members are open, everything else is folded.

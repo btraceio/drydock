@@ -321,6 +321,18 @@ class SkimViewTest extends ApplicationTest {
     }
 
     @Test
+    void scrollToTopPutsTheFirstMemberAtTheTop() {
+        show(Set.of(3, 4), Map.of());
+        interact(() -> skim.setVvalue(0.8));
+        settle();
+        interact(() -> skim.scrollToTop());
+        settle();
+        assertEquals(0.0, skim.getVvalue(), 0.001);
+        assertEquals(SOURCE.lines().toList().indexOf("    int width() {") + 1, skim.topLine(),
+                "the first member is what the reader sees first");
+    }
+
+    @Test
     void aSingleLineMemberStillShowsItsOnlyLine() {
         String source = """
                 interface Clock {
