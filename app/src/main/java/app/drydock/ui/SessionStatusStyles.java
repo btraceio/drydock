@@ -1,6 +1,7 @@
 package app.drydock.ui;
 
 import app.drydock.domain.SessionStatus;
+import app.drydock.domain.SessionStatusFacet;
 import javafx.animation.Animation;
 import javafx.animation.FadeTransition;
 import javafx.animation.ParallelTransition;
@@ -26,11 +27,11 @@ final class SessionStatusStyles {
     }
 
     static boolean isRunning(SessionStatus status) {
-        return status == SessionStatus.RUNNING || status == SessionStatus.STARTING;
+        return SessionStatusFacet.of(status) == SessionStatusFacet.RUNNING;
     }
 
     static boolean isError(SessionStatus status) {
-        return status == SessionStatus.FAILED || status == SessionStatus.MISSING_WORKING_DIRECTORY;
+        return SessionStatusFacet.of(status) == SessionStatusFacet.ERROR;
     }
 
     /** The design's three-value status label text. */
