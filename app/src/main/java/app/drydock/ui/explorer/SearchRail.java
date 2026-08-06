@@ -4,7 +4,6 @@ import app.drydock.search.SessionSearchService;
 import app.drydock.search.SessionSearchService.FileMatches;
 import app.drydock.search.SessionSearchService.TextMatch;
 import javafx.animation.PauseTransition;
-import javafx.animation.RotateTransition;
 import javafx.application.Platform;
 import javafx.collections.FXCollections;
 import javafx.collections.ObservableSet;
@@ -525,7 +524,7 @@ final class SearchRail extends VBox {
         });
 
         boolean hasChildren = !matches.isEmpty();
-        ToggleButton caret = new ToggleButton("▸");
+        ToggleButton caret = new ToggleButton("▾");
         caret.getStyleClass().add("result-caret");
         caret.setFocusTraversable(false);
         caret.setSelected(true);
@@ -599,14 +598,19 @@ final class SearchRail extends VBox {
             }
             group.getChildren().add(lines);
 
-            RotateTransition rotate = new RotateTransition(Duration.millis(120), caret);
+            // The glyph is swapped, not rotated: these rows are rebuilt on
+            // every keystroke, so a RotateTransition would animate nodes that
+            // are already on their way out -- and a rotated glyph sits
+            // off-centre in its box. SkimView's rows have always done it this
+            // way.
             caret.selectedProperty().addListener((obs, was, expanded) -> {
-                rotate.setToAngle(expanded ? 90 : 0);
-                rotate.playFromStart();
+                caret.setText(expanded ? "▾" : "▸");
                 lines.setVisible(expanded);
                 lines.setManaged(expanded);
+                for (javafx.scene.Node child : lines.getChildren()) {
+                    child.setVisible(expanded);
+                }
             });
-            caret.setRotate(90); // default expanded
         }
         return group;
     }

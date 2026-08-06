@@ -1016,10 +1016,18 @@
 }
 .result-caret {
     -fx-background-color: transparent;
-    -fx-text-fill: -drydock-text-faint;
-    -fx-font-size: 10px;
-    -fx-padding: 0 2 0 2;
+    -fx-background-radius: 3px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 11px;
+    -fx-padding: 0;
+    -fx-min-width: 16px;
+    -fx-min-height: 16px;
+    -fx-alignment: center;
     -fx-cursor: hand;
+}
+.result-caret:hover {
+    -fx-background-color: -drydock-active-bg;
+    -fx-text-fill: -drydock-text;
 }
 .filetype-badge {
     -fx-background-color: -drydock-active-bg;

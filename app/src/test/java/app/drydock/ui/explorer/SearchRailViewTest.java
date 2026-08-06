@@ -1,10 +1,12 @@
 package app.drydock.ui.explorer;
 
 import app.drydock.search.SessionSearchService;
+import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
 import javafx.scene.control.CheckBox;
 import javafx.scene.control.Label;
+import javafx.scene.control.ToggleButton;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -352,5 +354,30 @@ class SearchRailViewTest extends ApplicationTest {
             throw new AssertionError("footer never reported \"" + fragment + "\": " + footerText(), e);
         }
         settle();
+    }
+
+    @Test
+    void theMatchGroupCaretIsVisibleAndCollapsesTheGroup() {
+        interact(() -> rail.setSearch("lerp"));
+        waitForFooter("more file");
+        interact(() -> rail.toggleScope());
+        settle();
+
+        ToggleButton caret = lookup(".result-caret").queryAll().stream()
+                .map(ToggleButton.class::cast)
+                .filter(Node::isVisible)
+                .findFirst().orElseThrow(() -> new AssertionError("no visible caret on a row with matches"));
+        // A target the reader can actually hit: the design's rail rows are
+        // 324px wide and every other pixel of the row opens the file.
+        assertTrue(caret.getWidth() >= 14 && caret.getHeight() >= 14,
+                "caret hit target is " + caret.getWidth() + "x" + caret.getHeight());
+        assertEquals("▾", caret.getText(), "expanded groups point down");
+        assertFalse(lookup(".result-match-line").queryAll().isEmpty(), "the group starts expanded");
+
+        clickOn(caret);
+        settle();
+        assertEquals("▸", caret.getText(), "collapsed groups point right");
+        assertTrue(lookup(".result-match-line").queryAll().stream().noneMatch(Node::isVisible),
+                "…and the match lines are gone");
     }
 }
