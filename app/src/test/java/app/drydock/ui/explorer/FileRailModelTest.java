@@ -123,6 +123,35 @@ class FileRailModelTest {
     }
 
     @Test
+    void theOpenFileKeepsItsRowEvenWhenTheQueryDoesNotMatchIt() {
+        Path open = Path.of("ui/Strings.java");
+        List<FileRailModel.Entry> all = List.of(
+                new FileRailModel.Entry(Path.of("ui/OrderService.java"), 13, 0, true),
+                new FileRailModel.Entry(open, 0, 0, false));
+
+        List<Path> shownInRepo = FileRailModel.visible(all, FileRailModel.Scope.REPO,
+                        FileRailModel.Sort.NAME, "settled", open).stream()
+                .map(FileRailModel.Entry::relative).toList();
+        assertTrue(shownInRepo.contains(open), "the file on screen is never dropped: " + shownInRepo);
+
+        List<Path> shownInDiff = FileRailModel.visible(all, FileRailModel.Scope.DIFF,
+                        FileRailModel.Sort.NAME, "settled", open).stream()
+                .map(FileRailModel.Entry::relative).toList();
+        assertTrue(shownInDiff.contains(open), "…in either scope: " + shownInDiff);
+    }
+
+    @Test
+    void theOpenFileDoesNotInflateTheMatchCount() {
+        Path open = Path.of("ui/Strings.java");
+        List<FileRailModel.Entry> all = List.of(
+                new FileRailModel.Entry(Path.of("ui/OrderService.java"), 13, 0, true),
+                new FileRailModel.Entry(open, 0, 0, false));
+        assertEquals("1 match across the repo · out-of-change dimmed",
+                FileRailModel.footer(all, FileRailModel.Scope.REPO, FileRailModel.Sort.NAME,
+                        "settled", open, 6));
+    }
+
+    @Test
     void searchingContentInDiffScopeNeverDeadEnds() {
         // The delta's "done when": a content search in diff scope must never
         // leave an empty rail without the repo escape hatch in the footer.
