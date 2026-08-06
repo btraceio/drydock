@@ -19,6 +19,7 @@ import app.drydock.git.SshUnreachableException;
 import app.drydock.git.WorktreeLockedException;
 import app.drydock.git.WorktreeNotCleanException;
 import app.drydock.git.WorktreeService;
+import app.drydock.ui.model.SessionFilter;
 import app.drydock.ui.model.WorkspaceViewModel;
 import java.io.File;
 import javafx.animation.KeyFrame;
@@ -75,6 +76,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.Predicate;
 
 /**
  * The repository sidebar, rebuilt to the design handoff (README section 2)
@@ -885,6 +887,32 @@ public final class RepositorySidebar extends VBox {
                 return text.toLowerCase(Locale.ROOT).contains(query);
             });
         };
+    }
+
+    /**
+     * The facet half of the sidebar's filtering: session-scoped, and pure so
+     * it can be tested without an FX toolkit or a live sidebar.
+     *
+     * <p>An active facet filter turns the sidebar into a session list -- the
+     * unopened-worktree rows and the locked/stale buckets drop out, because a
+     * filter over sessions cannot say anything about a worktree that has
+     * none. {@code exempt} always survives; it is how the frontmost session
+     * stays on screen even when it fails the filter.
+     */
+    static List<SidebarNode> applyFacets(List<SidebarNode> children, SessionFilter filter,
+                                         Predicate<ManagedSessionId> exempt) {
+        if (!filter.isActive()) {
+            return children;
+        }
+        List<SidebarNode> kept = new ArrayList<>();
+        for (SidebarNode child : children) {
+            if (child instanceof SidebarNode.SessionNode sessionNode
+                    && (filter.matches(sessionNode.session())
+                            || exempt.test(sessionNode.session().id()))) {
+                kept.add(child);
+            }
+        }
+        return kept;
     }
 
     private List<ManagedAgentSession> sessionsFor(Repository repository) {
