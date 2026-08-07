@@ -183,7 +183,8 @@ class ReviewDestinationViewTest extends ApplicationTest {
                 java.time.Instant.EPOCH, List.of(), Optional.empty(), Optional.empty(), List.of(),
                 List.of(new app.drydock.review.ReviewAnnotation.Message("Claude",
                         java.time.Instant.EPOCH, "body of " + id)),
-                Optional.empty(), app.drydock.review.AnnotationStatus.OPEN);
+                Optional.empty(), app.drydock.review.AnnotationStatus.OPEN,
+                Optional.empty(), false);
     }
 
     @Test

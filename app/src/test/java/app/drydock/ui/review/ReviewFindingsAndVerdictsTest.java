@@ -171,7 +171,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
                 withAsk.confidence(), withAsk.title(), withAsk.author(), withAsk.at(),
                 withAsk.evidence(), withAsk.patch(), withAsk.deviatesFrom(),
                 List.of(new ReviewAnnotation.Ask("Why is it a leak?", "Explain why this leaks.")),
-                withAsk.thread(), Optional.empty(), withAsk.status());
+                withAsk.thread(), Optional.empty(), withAsk.status(), withAsk.github(), withAsk.postToPr());
         seed(asked);
 
         interact(() -> ((Button) lookup(".review-ask-chip").query()).fire());
@@ -190,7 +190,8 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
                 base.endKey(), base.severity(), base.confidence(), base.title(), base.author(),
                 base.at(), base.evidence(),
                 Optional.of(new ReviewAnnotation.Patch("--- a\n+++ b\n", "one line in onRelease")),
-                base.deviatesFrom(), base.asks(), base.thread(), Optional.empty(), base.status()));
+                base.deviatesFrom(), base.asks(), base.thread(), Optional.empty(), base.status(),
+                base.github(), base.postToPr()));
 
         assertTrue(host.handedOffPrompts.isEmpty());
         interact(() -> fire(".review-card-action", "Apply patch"));
@@ -348,7 +349,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
                 Severity.QUESTION, Confidence.HIGH, Optional.of("elsewhere"), "Claude",
                 Instant.EPOCH, List.of(), Optional.empty(), Optional.empty(), List.of(),
                 List.of(new ReviewAnnotation.Message("Claude", Instant.EPOCH, "elsewhere")),
-                Optional.empty(), AnnotationStatus.OPEN);
+                Optional.empty(), AnnotationStatus.OPEN, Optional.empty(), false);
         seed(finding("f1", Severity.QUESTION), other);
 
         assertEquals(1, lookup(".review-finding-card").queryAll().size(),
@@ -397,7 +398,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
                 Optional.of("Title " + id), "Claude", Instant.EPOCH, List.of(),
                 Optional.empty(), Optional.empty(), List.of(),
                 List.of(new ReviewAnnotation.Message("Claude", Instant.EPOCH, "body of " + id)),
-                Optional.empty(), AnnotationStatus.OPEN);
+                Optional.empty(), AnnotationStatus.OPEN, Optional.empty(), false);
     }
 
     private static UnifiedDiff.FileDiff file(String path) {

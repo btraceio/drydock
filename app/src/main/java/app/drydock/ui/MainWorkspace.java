@@ -1274,7 +1274,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                     Optional.empty(), "You", now,
                     List.of(), Optional.empty(), Optional.empty(), List.of(),
                     List.of(new ReviewAnnotation.Message("You", now, body)),
-                    Optional.empty(), AnnotationStatus.OPEN));
+                    Optional.empty(), AnnotationStatus.OPEN, Optional.empty(), false));
         }
 
         /**

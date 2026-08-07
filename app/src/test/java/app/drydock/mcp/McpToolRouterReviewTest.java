@@ -396,7 +396,7 @@ class McpToolRouterReviewTest {
                 severity, Confidence.HIGH, Optional.of("Title"), "Claude", Instant.EPOCH,
                 List.of(), Optional.empty(), Optional.empty(), List.of(),
                 List.of(new ReviewAnnotation.Message("Claude", Instant.EPOCH, "body")),
-                Optional.empty(), AnnotationStatus.OPEN);
+                Optional.empty(), AnnotationStatus.OPEN, Optional.empty(), false);
     }
 
     private static UnifiedDiff diff(int hunks) {

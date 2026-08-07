@@ -986,7 +986,7 @@ public final class DrydockApplication extends Application {
                         "The filter is added on every press and never removed on release -- one "
                                 + "leaked listener per drag. After a few minutes of resizing, every "
                                 + "mouse move runs dozens of stale trackers.")),
-                Optional.empty(), AnnotationStatus.OPEN));
+                Optional.empty(), AnnotationStatus.OPEN, Optional.empty(), false));
 
         annotationStore.upsert(new ReviewAnnotation(scopeId.get(), "f_clamp_2", Optional.empty(),
                 a1[0], a1[1], a1[1], Severity.QUESTION, Confidence.MEDIUM,
@@ -995,7 +995,7 @@ public final class DrydockApplication extends Application {
                 List.of(new ReviewAnnotation.Message("Claude", now,
                                 "This commits the raw width before the clamp runs. Deliberate?"),
                         new ReviewAnnotation.Message("You", now, "No -- good catch, I will fix it.")),
-                Optional.empty(), AnnotationStatus.OPEN));
+                Optional.empty(), AnnotationStatus.OPEN, Optional.empty(), false));
 
         annotationStore.upsert(new ReviewAnnotation(scopeId.get(), "f_dev_3", Optional.empty(),
                 a2[0], a2[1], a2[1], Severity.DEVIATION, Confidence.HIGH,
@@ -1005,14 +1005,14 @@ public final class DrydockApplication extends Application {
                 List.of(),
                 List.of(new ReviewAnnotation.Message("Claude", now,
                         "Step 5 set the clamp to 240; step 7 reverted it to 220.")),
-                Optional.empty(), AnnotationStatus.OPEN));
+                Optional.empty(), AnnotationStatus.OPEN, Optional.empty(), false));
 
         annotationStore.upsert(new ReviewAnnotation(scopeId.get(), "f_nit_4", Optional.empty(),
                 a3[0], a3[1], a3[1], Severity.NIT, Confidence.UNSURE,
                 Optional.of("Spelling in a comment"), "Claude", now,
                 List.of(), Optional.empty(), Optional.empty(), List.of(),
                 List.of(new ReviewAnnotation.Message("Claude", now, "\"recieve\" -> \"receive\".")),
-                Optional.empty(), AnnotationStatus.RESOLVED));
+                Optional.empty(), AnnotationStatus.RESOLVED, Optional.empty(), false));
 
         return "4 findings against " + scopeId.get();
     }
