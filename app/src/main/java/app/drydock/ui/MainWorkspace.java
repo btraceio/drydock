@@ -29,6 +29,7 @@ import app.drydock.git.GitBranchState;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.GitTarget;
 import app.drydock.git.WorktreeService;
+import app.drydock.github.GitHubReviewService;
 import app.drydock.mcp.McpActivityLog;
 import app.drydock.mcp.McpSessionContext.RenameKind;
 import app.drydock.mcp.McpSessionContext.RenameOutcome;
@@ -173,6 +174,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     private final WorktreeService worktreeService;
     private final SessionSearchService searchService;
     private final GhCliService ghCliService;
+    private final GitHubReviewService gitHubReviewService;
     private final DiffService diffService;
     private final ChangedLineService changedLineService;
     private final AnnotationStore annotationStore;
@@ -334,7 +336,8 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     public MainWorkspace(SessionManager sessionManager, AgentRegistry agentRegistry,
                           RepositoryManager repositoryManager,
                           GitStatusService gitStatusService, SessionSearchService searchService,
-                          GhCliService ghCliService, WorktreeService worktreeService, DiffService diffService,
+                          GhCliService ghCliService, GitHubReviewService gitHubReviewService,
+                          WorktreeService worktreeService, DiffService diffService,
                           ChangedLineService changedLineService, AnnotationStore annotationStore,
                           ReviewScopeRegistry reviewScopeRegistry, McpActivityLog activityLog,
                           ExplorerTrailStore explorerTrailStore,
@@ -346,6 +349,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         this.worktreeService = worktreeService;
         this.searchService = searchService;
         this.ghCliService = ghCliService;
+        this.gitHubReviewService = gitHubReviewService;
         this.diffService = diffService;
         this.changedLineService = changedLineService;
         this.annotationStore = annotationStore;

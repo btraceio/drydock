@@ -16,6 +16,7 @@ import app.drydock.git.DiffService;
 import app.drydock.git.GhCliService;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.WorktreeService;
+import app.drydock.github.GitHubReviewService;
 import app.drydock.github.GitHubService;
 import app.drydock.launcher.DockIcon;
 import app.drydock.mcp.McpConfigWriter;
@@ -126,6 +127,7 @@ public final class DrydockApplication extends Application {
     private DiffService diffService;
     private SessionSearchService searchService;
     private GhCliService ghCliService;
+    private GitHubReviewService gitHubReviewService;
     private AgentRegistry agentRegistry;
     private ExecutorService agentContextExecutor;
     private SessionActivityWatcher activityWatcher;
@@ -201,6 +203,7 @@ public final class DrydockApplication extends Application {
         diffService = new DiffService();
         searchService = new SessionSearchService();
         ghCliService = new GhCliService();
+        gitHubReviewService = new GitHubReviewService();
         Path stateDir = stateRepository.stateFile().getParent();
         Path activityDir = stateDir.resolve("activity");
         agentContextExecutor = Executors.newVirtualThreadPerTaskExecutor();
@@ -235,8 +238,8 @@ public final class DrydockApplication extends Application {
         mcpActivityLog = new McpActivityLog();
 
         mainWorkspace = new MainWorkspace(sessionManager, agentRegistry, repositoryManager, gitStatusService,
-                searchService, ghCliService, worktreeService, diffService, changedLineService, annotationStore,
-                reviewScopeRegistry, mcpActivityLog, explorerTrailStore, viewModel, primaryStage);
+                searchService, ghCliService, gitHubReviewService, worktreeService, diffService, changedLineService,
+                annotationStore, reviewScopeRegistry, mcpActivityLog, explorerTrailStore, viewModel, primaryStage);
         RepositorySidebar sidebar =
                 new RepositorySidebar(repositoryManager, gitStatusService, worktreeService, sessionManager,
                         agentRegistry, mainWorkspace, viewModel);
@@ -1165,6 +1168,9 @@ public final class DrydockApplication extends Application {
         }
         if (ghCliService != null) {
             closeQuietly("GhCliService", ghCliService::close);
+        }
+        if (gitHubReviewService != null) {
+            closeQuietly("GitHubReviewService", gitHubReviewService::close);
         }
     }
 
