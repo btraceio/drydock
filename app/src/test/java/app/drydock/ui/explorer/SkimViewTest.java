@@ -253,6 +253,7 @@ class SkimViewTest extends ApplicationTest {
                 "resolving forward does not open a member the reader never pointed at");
     }
 
+
     /**
      * Stands in for FileViewer's file-open sequence, using the same two
      * calls FileViewer.openFile actually makes for a skim tab opened with a

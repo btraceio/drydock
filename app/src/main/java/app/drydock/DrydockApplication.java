@@ -77,7 +77,6 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Optional;
 import java.util.function.Supplier;
-import java.util.function.UnaryOperator;
 
 /**
  * The main window: a {@link SplitPane} with the repository sidebar (plan
@@ -325,7 +324,9 @@ public final class DrydockApplication extends Application {
 
                 @Override
                 public CompletableFuture<Void> saveWorktreesDirectory(Optional<Path> directory) {
-                    return updateUserConfig(existing ->
+                    // Read-modify-write in one executor task: a record
+                    // built from one new value would reset the others.
+                    return UserConfig.updateAsync(existing ->
                             new UserConfig(directory, existing.openChangedFilesInSkim()));
                 }
 
@@ -336,7 +337,7 @@ public final class DrydockApplication extends Application {
 
                 @Override
                 public CompletableFuture<Void> saveOpenChangedFilesInSkim(boolean value) {
-                    return updateUserConfig(existing ->
+                    return UserConfig.updateAsync(existing ->
                             new UserConfig(existing.worktreesDirectory(), value));
                 }
             }, appShell.modalLayer()::close);
@@ -1509,17 +1510,6 @@ public final class DrydockApplication extends Application {
         }, "diag-snapshot");
         writer.setDaemon(true);
         writer.start();
-    }
-
-    /**
-     * Read-modify-write against {@code ~/.drydock/config.json}. Every setter
-     * goes through here: {@code UserConfig} is a record, so constructing one
-     * from a single new value silently resets every other preference in the
-     * file -- which is a bug each new field would otherwise get its own
-     * chance to introduce.
-     */
-    private static CompletableFuture<Void> updateUserConfig(UnaryOperator<UserConfig> mutate) {
-        return UserConfig.loadAsync().thenCompose(existing -> UserConfig.saveAsync(mutate.apply(existing)));
     }
 
     /** Diagnostic-only: runs {@code work} on the FX thread and waits for its result. */

@@ -282,8 +282,8 @@ public final class SettingsModal extends VBox {
             browse.setDisable(true);
             settings.saveWorktreesDirectory(directory).whenComplete((ignored, failure) ->
                     Platform.runLater(() -> {
-                        // saveWorktreesDirectory is a one-line delegation to
-                        // UserConfig.saveAsync: success and failure are its
+                        // saveWorktreesDirectory delegates to
+                        // UserConfig.updateAsync: success and failure are its
                         // only two completions, so both are handled here
                         // together, unconditionally re-enabling the row.
                         committing[0] = false;

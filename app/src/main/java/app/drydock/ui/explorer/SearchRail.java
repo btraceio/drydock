@@ -147,6 +147,9 @@ final class SearchRail extends VBox {
     /** The file the viewer is showing, which diff scope never hides. */
     private Path openFile;
 
+    /** A {@code /} that arrived while collapsed, waiting for the field to exist again. */
+    private boolean focusSearchOnExpand;
+
     SearchRail(Path searchRoot, SessionSearchService searchService, FileOpener opener) {
         this.searchRoot = searchRoot;
         this.searchService = searchService;
@@ -246,6 +249,20 @@ final class SearchRail extends VBox {
     /** Swaps to the full rail content (SessionExplorerView animates the width). */
     void showExpanded() {
         getChildren().setAll(expandedContent);
+        if (focusSearchOnExpand) {
+            focusSearchOnExpand = false;
+            focusSearch();
+        }
+    }
+
+    /**
+     * Focuses the query field once the rail is actually expanded. {@code /}
+     * pressed against a collapsed rail has nothing to focus -- the field is
+     * not in the scene graph until {@link #showExpanded} puts it back -- so
+     * the request is held until then rather than silently dropped.
+     */
+    void focusSearchWhenExpanded() {
+        focusSearchOnExpand = true;
     }
 
     /** Swaps to the 46px collapsed strip: a ⌕ expand button + vertical FILES label. */

@@ -17,6 +17,7 @@ import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.Optional;
+import java.util.function.UnaryOperator;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -222,6 +223,39 @@ public record UserConfig(Optional<Path> worktreesDirectory, boolean openChangedF
      * {@code @TempDir} is removed) so a write cannot leak into, or race, an
      * unrelated test.</p>
      */
+    /**
+     * Changes one preference and writes the result, without any other
+     * preference in the file getting lost on the way.
+     *
+     * <p>This is a read-modify-write, and doing it as {@code loadAsync()}
+     * followed by {@code saveAsync()} is not safe however carefully the
+     * caller writes it: those are two separate tasks, so two overlapping
+     * updates -- the Explorer checkbox and a worktrees-directory commit, both
+     * reachable from one modal -- can both read the same config before either
+     * writes, and the later write silently drops the earlier one's field. The
+     * whole read-mutate-write runs as ONE task on {@link #SAVE_EXECUTOR}
+     * instead, whose single thread is what makes it atomic against every
+     * other load and save.</p>
+     *
+     * <p>{@code mutate} runs on that thread: it must be a pure function of
+     * the config it is handed, and must not touch the UI.</p>
+     */
+    public static CompletableFuture<Void> updateAsync(UnaryOperator<UserConfig> mutate) {
+        CompletableFuture<Void> future = new CompletableFuture<>();
+        SAVE_EXECUTOR.execute(() -> {
+            try {
+                save(mutate.apply(load()), defaultConfigFile());
+                future.complete(null);
+            } catch (IOException | RuntimeException e) {
+                future.completeExceptionally(e);
+            } catch (Throwable t) {
+                future.completeExceptionally(t);
+                throw t;
+            }
+        });
+        return future;
+    }
+
     public static CompletableFuture<Void> saveAsync(UserConfig config) {
         CompletableFuture<Void> future = new CompletableFuture<>();
         PendingSave superseded = PENDING_SAVE.getAndSet(new PendingSave(config, future));

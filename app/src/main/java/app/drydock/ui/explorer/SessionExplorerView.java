@@ -334,7 +334,19 @@ public final class SessionExplorerView extends HBox {
             }
             switch (event.getCode()) {
                 case SLASH -> {
-                    rail.focusSearch();
+                    // Expand first: a collapsed rail has swapped its search
+                    // field out of the scene graph, so requestFocus() there is
+                    // a no-op while the consume() below still eats the key --
+                    // and the rail now collapses itself on any window under
+                    // NARROW_WIDTH, so that is an ordinary width, not a corner
+                    // case. The focus has to wait for showExpanded(), which
+                    // runs when the collapse animation finishes.
+                    if (railCollapsed) {
+                        readerSetRailCollapsed(false);
+                        rail.focusSearchWhenExpanded();
+                    } else {
+                        rail.focusSearch();
+                    }
                     event.consume();
                 }
                 case D -> {

@@ -503,11 +503,30 @@ final class FileViewer extends BorderPane {
      * whole of "z round-trips losslessly with scroll preserved".
      */
     private void setSkim(Tab tab, boolean skimming) {
+        setSkim(tab, skimming, true);
+    }
+
+    /**
+     * As {@link #setSkim(Tab, boolean)}, with {@code carryPlaceOver} false
+     * when there is no reader's place to carry.
+     *
+     * <p>On a fresh open there is not one: {@code currentLineOf} reads
+     * {@code firstVisibleParToAllParIndex()} from a CodeArea that has not
+     * been laid out and gets an arbitrary paragraph -- measured at line 42 of
+     * a 68-line file. Revealing that is not merely a wrong scroll the caller
+     * can correct afterwards: {@link SkimView#revealLine} EXPANDS the member
+     * it lands in and reports it through {@code onMemberRead}, so the file
+     * would open with a member nobody chose already unfolded and permanently
+     * marked read -- a minimap tick and a dwell signal for code no one has
+     * looked at. Not computing the anchor is the only version of this that
+     * cannot lie.</p>
+     */
+    private void setSkim(Tab tab, boolean skimming, boolean carryPlaceOver) {
         if (!(tab.getProperties().get("drydock.skim") instanceof SkimView skim)) {
             return;
         }
         CodeArea area = areaOf(tab);
-        int anchor = currentLineOf(tab);
+        int anchor = carryPlaceOver ? currentLineOf(tab) : 0;
         tab.getProperties().put("drydock.skimOn", skimming);
         skim.setVisible(skimming);
         skim.setManaged(skimming);
@@ -517,9 +536,9 @@ final class FileViewer extends BorderPane {
             area.getParent().setVisible(!skimming);
             area.getParent().setManaged(!skimming);
         }
-        if (skimming) {
+        if (skimming && carryPlaceOver) {
             skim.revealLine(anchor);
-        } else if (area != null) {
+        } else if (!skimming && area != null) {
             scrollTo(tab, anchor);
         }
         updateSkimToggle();
@@ -1539,17 +1558,11 @@ final class FileViewer extends BorderPane {
                 // else opens as text, because that is what "open a file"
                 // means everywhere else in the app.
                 if (!changedLinesFor(tab).isEmpty() && skimDefault.getAsBoolean()) {
-                    setSkim(tab, true);
-                    // ALWAYS, not only when no line was asked for: setSkim
-                    // anchors on currentLineOf(tab), which on a fresh open
-                    // reads firstVisibleParToAllParIndex() from a CodeArea
-                    // that has not been laid out, and gets an arbitrary
-                    // paragraph -- measured at line 42 of a 68-line file,
-                    // which revealLine then faithfully scrolled to. Guarding
-                    // this on jumpToLine.isEmpty() left every caller that
-                    // supplies a line (Review's ⤢, a rail match-line click)
-                    // stuck with that anchor. The jump below lands the
-                    // requested line on top of a known-good position.
+                    // No place to carry over on a fresh open, so setSkim does
+                    // not invent one (see its overload). This path says where
+                    // to land itself: the top, and then the requested line on
+                    // top of that if there was one.
+                    setSkim(tab, true, false);
                     skimView.scrollToTop();
                 }
                 refreshMinimap(tab);

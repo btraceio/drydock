@@ -7,6 +7,7 @@ import javafx.scene.control.Button;
 import javafx.scene.control.CheckBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.ScrollPane;
+import javafx.scene.control.TextField;
 import javafx.scene.control.ToggleButton;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
@@ -196,6 +197,34 @@ class SearchRailViewTest extends ApplicationTest {
         clickOn(sort);
         settle();
         assertEquals("⇅ a-z", sort.getText());
+    }
+
+    /**
+     * {@code /} pressed against a collapsed rail has no field to focus --
+     * showCollapsed() swapped it out of the scene graph -- and the rail now
+     * collapses itself on any window under 1100px, so that is an ordinary
+     * width rather than a corner case. The request has to survive until the
+     * expand animation puts the field back.
+     */
+    @Test
+    void aFocusRequestMadeWhileCollapsedLandsWhenTheRailExpands() {
+        // Held while the rail is still expanded: once it collapses, the field
+        // is out of the scene graph entirely and cannot even be looked up --
+        // which is the whole reason a `/` arriving then had nothing to focus.
+        TextField field = lookup(".explorer-search-field").query();
+
+        interact(() -> rail.showCollapsed());
+        settle();
+        assertTrue(lookup(".explorer-search-field").tryQuery().isEmpty(),
+                "the field really is gone from the scene while collapsed");
+
+        interact(() -> rail.focusSearchWhenExpanded());
+        settle();
+        assertFalse(field.isFocused(), "…so it cannot be focused before it comes back");
+
+        interact(() -> rail.showExpanded());
+        settle();
+        assertTrue(field.isFocused(), "the held request lands once the field exists again");
     }
 
     @Test

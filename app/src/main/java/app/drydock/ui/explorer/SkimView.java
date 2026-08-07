@@ -182,6 +182,14 @@ final class SkimView extends ScrollPane {
         layout();
         rows.applyCss();
         rows.layout();
+        // KNOWN GAP (see the branch's review notes): a member left unexpanded
+        // because the reader only resolved forward onto it may have no row of
+        // its own -- an untouched private helper is folded into the group row,
+        // which is keyed by the FIRST folded member's line. Landing on any
+        // later one finds nothing here and leaves the reader at the top of the
+        // file. Reproduced, not yet fixed: an attempted fallback to the group
+        // row did not move the viewport either, so the cause is upstream of
+        // the lookup and wants its own investigation rather than a guess.
         for (Node node : rows.getChildren()) {
             if (Integer.valueOf(member.startLine()).equals(node.getProperties().get("drydock.line"))) {
                 double target = node.getBoundsInParent().getMinY()
