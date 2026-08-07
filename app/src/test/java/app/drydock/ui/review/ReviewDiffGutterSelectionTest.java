@@ -93,7 +93,8 @@ class ReviewDiffGutterSelectionTest extends ApplicationTest {
     void aRealPointerClickOpensASingleLineComposer() {
         showDiff(oneHunkFile("src/Widget.java"));
 
-        clickUntil(() -> gutterForLine("4"), this::awaitComposerOpen);
+        clickOn(gutterForLine("4"));
+        awaitComposerOpen();
 
         ReviewDiffRow.Composer composer = openComposer();
         assertEquals("src/Widget.java", composer.file());
@@ -105,8 +106,11 @@ class ReviewDiffGutterSelectionTest extends ApplicationTest {
     void aRealSecondPointerClickOnTheSameLineClosesTheComposer() {
         showDiff(oneHunkFile("src/Widget.java"));
 
-        clickUntil(() -> gutterForLine("4"), this::awaitComposerOpen);
-        clickUntil(() -> gutterForLine("4"), this::awaitComposerClosed);
+        clickOn(gutterForLine("4"));
+        awaitComposerOpen();
+
+        clickOn(gutterForLine("4"));
+        awaitComposerClosed();
 
         assertFalse(column.composerOpen(), "the gutter is a toggle for a real click, same as before");
     }
@@ -115,10 +119,14 @@ class ReviewDiffGutterSelectionTest extends ApplicationTest {
     void aRealPointerShiftClickWidensTheAnchorToARangeAndReAnchorsTheComposer() {
         showDiff(oneHunkFile("src/Widget.java"));
 
-        clickUntil(() -> gutterForLine("2"), this::awaitComposerOpen);
+        clickOn(gutterForLine("2"));
+        awaitComposerOpen();
         assertEquals("n2", openComposer().endKey(), "the anchor click opens on line 2 alone");
 
-        shiftClickUntil(() -> gutterForLine("6"), () -> awaitComposerRange("n2", "n6"));
+        press(KeyCode.SHIFT);
+        clickOn(gutterForLine("6"));
+        release(KeyCode.SHIFT);
+        awaitComposerRange("n2", "n6");
 
         ReviewDiffRow.Composer composer = openComposer();
         assertNotEquals(composer.startKey(), composer.endKey(), "shift-click must widen to a range");
@@ -140,7 +148,13 @@ class ReviewDiffGutterSelectionTest extends ApplicationTest {
     void aRealPointerDragWidensTheAnchorToARange() {
         showDiff(oneHunkFile("src/Widget.java"));
 
-        dragUntil(() -> gutterForLine("2"), () -> gutterForLine("6"), () -> awaitComposerRange("n2", "n6"));
+        Node from = gutterForLine("2");
+        Node to = gutterForLine("6");
+        moveTo(from);
+        press(MouseButton.PRIMARY);
+        moveTo(to);
+        release(MouseButton.PRIMARY);
+        awaitComposerRange("n2", "n6");
 
         ReviewDiffRow.Composer composer = openComposer();
         assertEquals("n2", composer.startKey());
@@ -200,7 +214,8 @@ class ReviewDiffGutterSelectionTest extends ApplicationTest {
         Node stale = gutterForLine("2");
 
         showDiff(oneHunkFile("src/Zeta.java"));
-        clickUntil(() -> gutterForLine("2"), this::awaitComposerOpen);
+        clickOn(gutterForLine("2"));
+        awaitComposerOpen();
         int anchorBefore = column.diagSelectionAnchorIndex();
         assertTrue(anchorBefore >= 0, "the click must have set a real anchor");
 
@@ -273,123 +288,46 @@ class ReviewDiffGutterSelectionTest extends ApplicationTest {
     }
 
     /**
-     * Polls rather than sleeping a fixed amount: this suite was flaky under a
-     * fixed {@code sleep()} after a gesture -- the real robot press/release
-     * and this JVM's own event-queue draining are not on the same clock, so a
-     * duration long enough on one run was short on the next. Every
-     * real-pointer assertion in this class waits on an actual state change
-     * instead.
-     *
-     * <p>{@code attempts}/{@code delayMillis} are parameters (not the fixed
-     * 200x25ms baked into every earlier version of this helper) because
-     * {@link #clickUntil}, {@link #shiftClickUntil} and {@link #dragUntil}
-     * reuse this with a SHORT window per retry -- see their javadoc for why
-     * a short window and a re-issued gesture is the right response to a
-     * click that Monocle's headless robot silently failed to deliver at
-     * all, which a longer wait cannot fix because nothing is coming.</p>
+     * Polls for a state change rather than sleeping a fixed amount -- a real
+     * gesture's effect lands an unpredictable number of FX pulses later.
+     * There is deliberately no retry here: a real-pointer gesture is issued
+     * exactly once per assertion. An earlier version of this suite retried a
+     * missing click up to 5 times, which made the suite report green while
+     * silently masking a real bug (a routine layout pass rebuilding the
+     * pressed gutter's graphic out from under the gesture, fixed in {@link
+     * ReviewDiffColumn.DiffCell}) roughly a quarter of the time. One
+     * attempt, so a regression of that fix fails this suite instead of
+     * hiding behind a retry.
      */
-    private boolean awaitCondition(java.util.function.BooleanSupplier ready, int attempts, int delayMillis) {
-        for (int i = 0; i < attempts; i++) {
+    private void awaitCondition(java.util.function.BooleanSupplier ready, String failureMessage) {
+        for (int i = 0; i < 200; i++) {
             WaitForAsyncUtils.waitForFxEvents();
             boolean[] met = new boolean[1];
             interact(() -> met[0] = ready.getAsBoolean());
             if (met[0]) {
-                return true;
-            }
-            sleep(delayMillis);
-        }
-        return false;
-    }
-
-    private void awaitCondition(java.util.function.BooleanSupplier ready, String failureMessage) {
-        if (!awaitCondition(ready, 200, 25)) {
-            throw new AssertionError(failureMessage);
-        }
-    }
-
-    /**
-     * Re-issues a plain click on the node {@code target} supplies, up to a
-     * handful of times, until {@code ready} is satisfied.
-     *
-     * <p>Observed directly with a real-pointer probe (event filters on the
-     * gutter node, logged to stdout): a genuinely delivered click's effect
-     * shows up within a couple of FX pulses every time it lands at all --
-     * {@code PRESSED}, {@code RELEASED} ({@code isStillSincePress=true}),
-     * {@code CLICKED} all fire and the composer opens well under 200ms.
-     * Occasionally in this headless Monocle environment the robot's press
-     * and release are not delivered to the target node at all (no handler
-     * fires, confirmed the same way), and no amount of additional waiting
-     * produces a result because there is nothing left in flight to wait
-     * for. Re-clicking is therefore the correct response to a timeout here,
-     * not a longer timeout -- and a short per-attempt window keeps a
-     * genuinely-missed click from being mistaken for one that is just slow
-     * (which would otherwise risk a stray extra click landing after the
-     * first one WAS delivered late, toggling the composer straight back
-     * closed).</p>
-     */
-    private void clickUntil(java.util.function.Supplier<Node> target, Runnable readyOrThrow) {
-        gestureUntil(() -> clickOn(target.get()), readyOrThrow);
-    }
-
-    /** As {@link #clickUntil}, for a shift-click. */
-    private void shiftClickUntil(java.util.function.Supplier<Node> target, Runnable readyOrThrow) {
-        gestureUntil(() -> {
-            press(KeyCode.SHIFT);
-            clickOn(target.get());
-            release(KeyCode.SHIFT);
-        }, readyOrThrow);
-    }
-
-    /** As {@link #clickUntil}, for a press-move-release drag. */
-    private void dragUntil(java.util.function.Supplier<Node> from, java.util.function.Supplier<Node> to,
-                           Runnable readyOrThrow) {
-        gestureUntil(() -> {
-            moveTo(from.get());
-            press(MouseButton.PRIMARY);
-            moveTo(to.get());
-            release(MouseButton.PRIMARY);
-        }, readyOrThrow);
-    }
-
-    private void gestureUntil(Runnable gesture, Runnable readyOrThrow) {
-        AssertionError last = null;
-        for (int attempt = 0; attempt < 5; attempt++) {
-            gesture.run();
-            try {
-                readyOrThrow.run();
                 return;
-            } catch (AssertionError e) {
-                last = e;
             }
+            sleep(25);
         }
-        throw last;
+        throw new AssertionError(failureMessage);
     }
-
-    /** The per-attempt window {@link #clickUntil} and friends poll within before re-issuing the gesture. */
-    private static final int GESTURE_ATTEMPTS = 40;
-    private static final int GESTURE_DELAY_MILLIS = 25;
 
     private void awaitComposerOpen() {
-        if (!awaitCondition(() -> column.composerOpen(), GESTURE_ATTEMPTS, GESTURE_DELAY_MILLIS)) {
-            throw new AssertionError("the composer never opened; rows = " + column.diagRows());
-        }
+        awaitCondition(() -> column.composerOpen(),
+                "the composer never opened; rows = " + column.diagRows());
     }
 
     private void awaitComposerClosed() {
-        if (!awaitCondition(() -> !column.composerOpen(), GESTURE_ATTEMPTS, GESTURE_DELAY_MILLIS)) {
-            throw new AssertionError("the composer never closed");
-        }
+        awaitCondition(() -> !column.composerOpen(), "the composer never closed");
     }
 
     private void awaitComposerRange(String startKey, String endKey) {
-        if (!awaitCondition(() -> column.diagRows().stream()
+        awaitCondition(() -> column.diagRows().stream()
                         .filter(ReviewDiffRow.Composer.class::isInstance)
                         .map(ReviewDiffRow.Composer.class::cast)
                         .anyMatch(c -> c.startKey().equals(startKey) && c.endKey().equals(endKey)),
-                GESTURE_ATTEMPTS, GESTURE_DELAY_MILLIS)) {
-            throw new AssertionError("the composer never re-anchored to " + startKey + ".." + endKey
-                    + "; rows = " + column.diagRows());
-        }
+                "the composer never re-anchored to " + startKey + ".." + endKey
+                        + "; rows = " + column.diagRows());
     }
 
     private ReviewDiffRow.Composer openComposer() {

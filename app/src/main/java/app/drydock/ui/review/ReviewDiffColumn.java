@@ -606,8 +606,22 @@ final class ReviewDiffColumn extends BorderPane {
         }
     }
 
+    /**
+     * Bumped by {@link #refreshPins()} to invalidate {@link DiffCell}'s
+     * per-cell graphic cache. A row (a {@code record}) compares equal to
+     * itself across an unrelated rebuild whenever its fields happen to
+     * match, which is exactly what makes the cache safe to keep across a
+     * routine layout pass -- but a pin marker is read from {@link
+     * #pinSource} at build time, not stored on the row, so an unchanged row
+     * can still need a rebuild when the finding set under it changes. The
+     * generation counter is what tells the cache "rebuild anyway" without
+     * forcing every OTHER unrelated cell to rebuild too.
+     */
+    private long renderGeneration;
+
     /** Re-renders the rows so pin markers pick up a changed finding set. */
     void refreshPins() {
+        renderGeneration++;
         refreshRender();
     }
 
@@ -615,8 +629,10 @@ final class ReviewDiffColumn extends BorderPane {
      * Re-renders the rows in place -- a full swap is one list operation, and
      * the rows themselves are unchanged data, so a virtualized {@code
      * ListView} only pays for the currently visible cells, not the whole
-     * list. Used whenever something a cell reads (a pin, the selection
-     * paint) changed without the underlying row objects changing.
+     * list. Used whenever something a cell reads (a pin) changed without the
+     * underlying row objects changing; {@link DiffCell}'s cache (keyed on
+     * {@link #renderGeneration}) is what makes this cheap even though it
+     * still touches the whole {@link #rows} list.
      */
     private void refreshRender() {
         List<ReviewDiffRow> current = List.copyOf(rows);
@@ -1034,6 +1050,20 @@ final class ReviewDiffColumn extends BorderPane {
      */
     private final class DiffCell extends ListCell<ReviewDiffRow> {
 
+        /**
+         * The last row this cell actually built a graphic for, and that
+         * graphic -- so a redundant {@code updateItem} call for the SAME row
+         * can reuse it instead of rebuilding. See {@link #updateItem} for why
+         * this exists: a real bug, not an optimization. {@code Composer} rows
+         * are deliberately never cached here (see the switch below); {@code
+         * cachedGeneration} is compared against {@link #renderGeneration} so
+         * a pin refresh can still force a rebuild the cache would otherwise
+         * suppress.
+         */
+        private ReviewDiffRow cachedRow;
+        private long cachedGeneration = -1;
+        private Node cachedNode;
+
         DiffCell() {
             getStyleClass().add("review-diff-cell");
         }
@@ -1044,9 +1074,31 @@ final class ReviewDiffColumn extends BorderPane {
             getStyleClass().removeIf(styleClass -> styleClass.startsWith("card-"));
             if (empty || row == null) {
                 setGraphic(null);
+                cachedRow = null;
+                cachedGeneration = -1;
+                cachedNode = null;
                 return;
             }
             getStyleClass().add("card-" + row.edge().name().toLowerCase(java.util.Locale.ROOT));
+            // updateItem is called again for a row that has not changed at
+            // all -- confirmed by a real-pointer probe, from ordinary layout
+            // passes (VirtualFlow re-associating this cell, the viewport
+            // width binding firing), not only on a genuine row swap.
+            // Rebuilding unconditionally here discarded the exact gutter
+            // Label a click was mid-press on, so any layout pass landing
+            // between a real MOUSE_PRESSED and its MOUSE_RELEASED silently
+            // ate the click -- on main's single-line composer too, not just
+            // the range gutter added here. Row equality (a record, so this
+            // is a value comparison, not identity) is what makes reuse safe:
+            // a genuine content change never matches the cache and still
+            // rebuilds below. Composer is excluded because it already reuses
+            // the view-owned composerNode directly, and does so even across
+            // a DIFFERENT row (a re-anchor to a new range).
+            if (!(row instanceof ReviewDiffRow.Composer) && row.equals(cachedRow)
+                    && cachedGeneration == renderGeneration && cachedNode != null) {
+                setGraphic(cachedNode);
+                return;
+            }
             Node node = switch (row) {
                 case ReviewDiffRow.HunkHeader header -> buildHunkHeader(header);
                 case ReviewDiffRow.Line line -> buildLine(line);
@@ -1081,6 +1133,15 @@ final class ReviewDiffColumn extends BorderPane {
                 region.maxWidthProperty().bind(rowWidth);
             }
             setGraphic(node);
+            if (row instanceof ReviewDiffRow.Composer) {
+                cachedRow = null;
+                cachedGeneration = -1;
+                cachedNode = null;
+            } else {
+                cachedRow = row;
+                cachedGeneration = renderGeneration;
+                cachedNode = node;
+            }
         }
     }
 
