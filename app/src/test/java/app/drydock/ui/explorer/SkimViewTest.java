@@ -253,6 +253,37 @@ class SkimViewTest extends ApplicationTest {
                 "resolving forward does not open a member the reader never pointed at");
     }
 
+    /**
+     * The reveal has to survive the pulse after it. Expanding a member makes
+     * the content taller, and ScrollPaneSkin's next layout re-derives vvalue
+     * to preserve the previous ABSOLUTE offset -- which silently undid the
+     * scroll revealLine had just computed. Measured before the fix: a target
+     * of 0.41 came back as 0.05, the old offset against the taller content.
+     *
+     * <p>Two settles, therefore: one is the frame revealLine ran in, the
+     * second is the pass that used to overwrite it.</p>
+     */
+    @Test
+    void aRevealHoldsItsScrollThroughTheLayoutPassThatFollows() {
+        show(Set.of(), Map.of());
+        settle();
+        shrinkViewportToQuarterOfContent();
+
+        // Inside snapToGuide, so this one opens it -- which is what changes
+        // the content height and triggers the overwrite.
+        int insideSnapToGuide = SOURCE.lines().toList().indexOf("    private void snapToGuide() {") + 2;
+        interact(() -> skim.revealLine(insideSnapToGuide));
+        settle();
+        settle();
+
+        // vvalue, not topLine(): topLine() reports the row whose BOTTOM edge
+        // touches the viewport top, so the row above the target answers it.
+        // The scroll position is what the overwrite was destroying.
+        assertTrue(skim.getVvalue() > 0.3,
+                "the view is down at the revealed member, one pulse later too: vvalue=" + skim.getVvalue());
+    }
+
+
 
     /**
      * Stands in for FileViewer's file-open sequence, using the same two

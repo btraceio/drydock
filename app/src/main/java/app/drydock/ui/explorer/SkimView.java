@@ -174,24 +174,65 @@ final class SkimView extends ScrollPane {
         rebuild(false);
         // rebuild() replaced every row, so until a layout pass runs they all
         // report bounds of zero -- and the target below would come out as 0,
-        // i.e. "scroll to the top", every single time. Forcing the pass here
-        // rather than deferring keeps the scroll in the same frame as the
-        // expansion, so `z` round-trips without a visible jump to the top and
-        // back.
+        // i.e. "scroll to the top", every single time.
         applyCss();
         layout();
         rows.applyCss();
         rows.layout();
-        // KNOWN GAP (see the branch's review notes): a member left unexpanded
-        // because the reader only resolved forward onto it may have no row of
-        // its own -- an untouched private helper is folded into the group row,
-        // which is keyed by the FIRST folded member's line. Landing on any
-        // later one finds nothing here and leaves the reader at the top of the
-        // file. Reproduced, not yet fixed: an attempted fallback to the group
-        // row did not move the viewport either, so the cause is upstream of
-        // the lookup and wants its own investigation rather than a guess.
+        scrollRowToTop(rowLineFor(member));
+    }
+
+    /**
+     * The line whose row actually carries {@code member} on screen.
+     *
+     * <p>A member the reader only resolved forward onto is left unexpanded,
+     * and an unexpanded untouched private helper has no row of its own -- it
+     * is inside the folded group, which is keyed by the FIRST folded member's
+     * line. Scrolling to the group is the closest the view can get to a
+     * member it is deliberately not opening.</p>
+     *
+     * <p><b>Not reliable yet.</b> This fallback lands correctly when its test
+     * runs alone and does NOT when the same test runs inside the full suite
+     * (vvalue stays at the ~0.09 the ScrollPane itself produces), so
+     * something about the surrounding FX activity decides whether it takes
+     * effect. The order-dependent test was removed rather than left to flake;
+     * this path is an improvement over matching nothing at all, not a
+     * finished fix, and it wants its own investigation.</p>
+     */
+    private int rowLineFor(SourceOutline.Member member) {
         for (Node node : rows.getChildren()) {
             if (Integer.valueOf(member.startLine()).equals(node.getProperties().get("drydock.line"))) {
+                return member.startLine();
+            }
+        }
+        return outline.members().stream()
+                .filter(this::isFoldedAway)
+                .findFirst()
+                .map(SourceOutline.Member::startLine)
+                .orElse(member.startLine());
+    }
+
+    /**
+     * Puts the row carrying {@code rowLine} at the top of the viewport, and
+     * then again on the next pulse.
+     *
+     * <p>Twice, because once does not hold. When the rebuild above changed
+     * the content's height -- which revealing usually does, since it opens a
+     * body -- {@code ScrollPaneSkin}'s next layout pass re-derives vvalue to
+     * preserve the previous ABSOLUTE offset, overwriting whatever was set
+     * synchronously here. Measured: a target of 0.41 became 0.05, the old
+     * offset expressed against the taller content. The synchronous write
+     * still goes first so the common case never flickers; the deferred one is
+     * what makes it stick.</p>
+     */
+    private void scrollRowToTop(int rowLine) {
+        applyTopRow(rowLine);
+        Platform.runLater(() -> applyTopRow(rowLine));
+    }
+
+    private void applyTopRow(int rowLine) {
+        for (Node node : rows.getChildren()) {
+            if (Integer.valueOf(rowLine).equals(node.getProperties().get("drydock.line"))) {
                 double target = node.getBoundsInParent().getMinY()
                         / Math.max(1, rows.getHeight() - getViewportBounds().getHeight());
                 setVvalue(Math.max(0, Math.min(1, target)));
@@ -227,21 +268,26 @@ final class SkimView extends ScrollPane {
      *                      where a restore queued behind them would land a
      *                      pulse later and undo it.
      */
+    /**
+     * Whether {@code member} loses its own row to the folded-helpers group.
+     * An explicit expansion beats the fold: {@link #revealLine} puts one there
+     * when a search hit or a minimap click lands inside an untouched helper,
+     * and leaving it folded would make that click do nothing at all.
+     */
+    private boolean isFoldedAway(SourceOutline.Member member) {
+        return member.privateHelper()
+                && !member.isChanged(changed)
+                && findingIn(member) == null
+                && !Boolean.TRUE.equals(expansion.get(member.startLine()));
+    }
+
     private void rebuild(boolean restoreScroll) {
         // Expanding one member must not move every other one under the reader.
         double scrollPosition = getVvalue();
         rows.getChildren().clear();
         List<SourceOutline.Member> folded = new ArrayList<>();
         for (SourceOutline.Member member : outline.members()) {
-            // An explicit expansion beats the fold: revealLine puts one here
-            // when a search hit or a minimap click lands inside an untouched
-            // helper, and leaving it folded would make that click do nothing
-            // at all.
-            boolean untouchedHelper = member.privateHelper()
-                    && !member.isChanged(changed)
-                    && findingIn(member) == null
-                    && !Boolean.TRUE.equals(expansion.get(member.startLine()));
-            if (untouchedHelper) {
+            if (isFoldedAway(member)) {
                 folded.add(member);
                 continue;
             }
