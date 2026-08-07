@@ -177,6 +177,8 @@ class SubmitPlanTest {
         SubmitPlan plan = SubmitPlan.of(List.of(notPosting), List.of(), index);
 
         assertTrue(plan.comments().isEmpty());
+        assertTrue(plan.posting().isEmpty(), "an excluded finding must not be in posting either -- "
+                + "that list is what the host clears postToPr over after a successful post");
         assertTrue(plan.refusals().isEmpty());
     }
 

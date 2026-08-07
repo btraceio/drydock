@@ -1479,6 +1479,19 @@ final class ReviewDiffColumn extends BorderPane {
         return List.copyOf(rows);
     }
 
+    /**
+     * The real diff currently shown, in full -- unlike {@link #diagRows()},
+     * which is what the row-collapsing and truncation actually rendered. A
+     * long run of unchanged lines folds into a single {@code CollapsedRun}
+     * row and a large diff can be truncated outright, so a caller that needs
+     * to know whether a given line is genuinely in the diff (Submit's {@code
+     * DiffIndex}, built in {@code ReviewDestinationView}) must read this, not
+     * the rows.
+     */
+    UnifiedDiff displayedDiff() {
+        return displayedDiff;
+    }
+
     /** Diagnostic/test-only: the scope currently rendered. */
     Optional<ReviewScope> diagScope() {
         return Optional.ofNullable(scope);

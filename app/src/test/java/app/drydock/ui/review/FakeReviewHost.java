@@ -38,6 +38,10 @@ final class FakeReviewHost implements ReviewDestinationView.Host {
     final List<String> submittedScopes = new ArrayList<>();
     final List<Path> explorerJumps = new ArrayList<>();
 
+    /** What {@link #submit} was handed, keyed by scope id -- what the submit tests assert against. */
+    final java.util.Map<String, app.drydock.review.SubmitPlan.DiffIndex> submittedIndexes = new java.util.HashMap<>();
+    final java.util.Map<String, List<ReviewVerdict.Decision>> submittedDecisions = new java.util.HashMap<>();
+
     /** What {@link #intents} groups by when no reviewer has supplied a grouping. */
     UnifiedDiff diff = new UnifiedDiff(List.of());
 
@@ -157,6 +161,11 @@ final class FakeReviewHost implements ReviewDestinationView.Host {
     }
 
     @Override
+    public void setPostToPr(ReviewScope scope, ReviewAnnotation finding, boolean post) {
+        store.mutate(finding.key(), current -> current.withPostToPr(post));
+    }
+
+    @Override
     public void applyPatch(ReviewScope scope, ReviewAnnotation finding) {
         finding.patch().ifPresent(patch -> {
             handedOffPrompts.add(patch.unified());
@@ -178,8 +187,11 @@ final class FakeReviewHost implements ReviewDestinationView.Host {
     }
 
     @Override
-    public void submit(ReviewScope scope) {
+    public void submit(ReviewScope scope, app.drydock.review.SubmitPlan.DiffIndex index,
+                       List<ReviewVerdict.Decision> decisions) {
         submittedScopes.add(scope.id());
+        submittedIndexes.put(scope.id(), index);
+        submittedDecisions.put(scope.id(), decisions);
         store.markSubmitted(scope.id());
     }
 

@@ -5,6 +5,8 @@ import app.drydock.review.QueueAssembly;
 import app.drydock.review.ReviewItem;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
+import app.drydock.review.ReviewVerdict;
+import app.drydock.review.SubmitPlan;
 import javafx.scene.Node;
 import javafx.scene.Parent;
 import javafx.scene.Scene;
@@ -16,7 +18,10 @@ import javafx.scene.layout.Region;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.Test;
 import org.testfx.framework.junit5.ApplicationTest;
+import org.testfx.util.WaitForAsyncUtils;
 
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -607,5 +612,132 @@ class ReviewDestinationViewTest extends ApplicationTest {
                 .flatMap(graphic -> graphic.lookupAll(".review-queue-title").stream().findFirst())
                 .map(label -> ((Label) label).getText())
                 .orElse(null);
+    }
+
+    // ---- submit -------------------------------------------------------------
+
+    /**
+     * The whole reason {@code submitReview()} builds the {@code DiffIndex}
+     * from {@link ReviewDiffColumn#displayedDiff()} rather than from {@code
+     * diagRows()}: a run of unchanged lines longer than {@code
+     * ReviewDiffRows.COLLAPSE_THRESHOLD} is folded into a single {@code
+     * CollapsedRun} row and disappears from the rendered rows entirely, but
+     * every one of those lines is still a perfectly valid GitHub anchor.
+     */
+    @Test
+    void submitBuildsTheDiffIndexFromTheRealDiffNotTheCollapsedRows() throws Exception {
+        Path repo = repoWithALongUnchangedRun();
+        ReviewScopeRegistry registry = new ReviewScopeRegistry();
+        ReviewScope scope = registry.mint(ReviewScopeRegistry.spec(
+                ReviewScope.Kind.WORKING_TREE, repo, Optional.of(repo), "HEAD", "HEAD",
+                Optional.empty(), Optional.empty()));
+        interact(() -> view.setItems(new QueueAssembly(
+                List.of(new ReviewItem(scope, ReviewItem.Group.MINE, "working", "drydock · vs HEAD")),
+                true, true), List.of("repo")));
+
+        awaitDiffLoaded();
+
+        // field10 sits inside the collapsed run above the change at
+        // field20 (context either side of it) -- rendered as a folded
+        // "N unchanged" row, never as its own Line row.
+        assertTrue(lookup(".review-collapsed-run").tryQuery().isPresent(),
+                "the fixture must actually produce a collapsed run, or this test proves nothing");
+
+        // Settle the one intent this single-file diff produces, then submit.
+        type(KeyCode.A);
+        type(KeyCode.ENTER);
+
+        assertEquals(List.of(scope.id()), host.submittedScopes);
+        assertEquals(List.of(ReviewVerdict.Decision.APPROVED), host.submittedDecisions.get(scope.id()));
+
+        SubmitPlan.DiffIndex index = host.submittedIndexes.get(scope.id());
+        assertTrue(index.positionOfKey().containsKey("Big.java n10"),
+                "a line hidden behind a collapsed run must still be in the index built from the diff");
+        assertTrue(index.hunkOfKey().containsKey("Big.java n10"));
+        assertTrue(index.positionOfKey().containsKey("Big.java n20"),
+                "the changed line itself must be indexed too");
+    }
+
+    /**
+     * A scope with no PR is the merge-and-finish path (spec: Submit on an
+     * agent's worktree hands it to Finish). This view has no visibility into
+     * that fork -- it lives in {@code MainWorkspace.ReviewHost} -- but it
+     * must still always reach {@code host.submit(...)}, which is what the
+     * fork switches on.
+     */
+    @Test
+    void submitReachesTheHostForANonPrScope() throws Exception {
+        Path repo = repoWithALongUnchangedRun();
+        ReviewScopeRegistry registry = new ReviewScopeRegistry();
+        ReviewScope scope = registry.mint(ReviewScopeRegistry.spec(
+                ReviewScope.Kind.WORKING_TREE, repo, Optional.of(repo), "HEAD", "HEAD",
+                Optional.empty(), Optional.empty()));
+        assertTrue(scope.pr().isEmpty(), "this scope must not be a PR");
+        interact(() -> view.setItems(new QueueAssembly(
+                List.of(new ReviewItem(scope, ReviewItem.Group.MINE, "working", "drydock · vs HEAD")),
+                true, true), List.of("repo")));
+
+        awaitDiffLoaded();
+        type(KeyCode.A);
+        type(KeyCode.ENTER);
+
+        assertEquals(List.of(scope.id()), host.submittedScopes,
+                "a non-PR scope must still reach host.submit -- MainWorkspace forks on scope.pr() from there");
+    }
+
+    /**
+     * Polls until the real diff has landed in the column: a single {@code
+     * waitForFxEvents()} races the async {@code DiffService} call, which
+     * runs on its own executor and hops back via {@code Platform.runLater}.
+     */
+    private void awaitDiffLoaded() {
+        for (int i = 0; i < 200; i++) {
+            if (!view.diagAnchors(1).isEmpty()) {
+                WaitForAsyncUtils.waitForFxEvents();
+                return;
+            }
+            WaitForAsyncUtils.waitForFxEvents();
+            sleep(25);
+        }
+        throw new AssertionError("the diff never arrived");
+    }
+
+    /** A change with more than {@code ReviewDiffRows.COLLAPSE_THRESHOLD} unchanged lines around it. */
+    private static Path repoWithALongUnchangedRun() throws IOException, InterruptedException {
+        Path repo = initCommittedRepo(Files.createTempDirectory("drydock-review-view-run"));
+        StringBuilder original = new StringBuilder();
+        for (int i = 1; i <= 40; i++) {
+            original.append("int field").append(i).append(" = ").append(i).append(";\n");
+        }
+        Files.writeString(repo.resolve("Big.java"), original.toString());
+        runGit(repo, "add", "Big.java");
+        runGit(repo, "commit", "-m", "big");
+        Files.writeString(repo.resolve("Big.java"),
+                original.toString().replace("int field20 = 20;", "int field20 = 999;"));
+        return repo;
+    }
+
+    private static Path initCommittedRepo(Path parent) throws IOException, InterruptedException {
+        Path repo = Files.createDirectories(parent.resolve("repo"));
+        runGit(repo, "init", "-b", "main");
+        runGit(repo, "config", "user.name", "Test");
+        runGit(repo, "config", "user.email", "test@example.com");
+        Files.writeString(repo.resolve("README.md"), "hello\n");
+        runGit(repo, "add", "README.md");
+        runGit(repo, "commit", "-m", "initial commit");
+        return repo;
+    }
+
+    private static void runGit(Path repo, String... args) throws IOException, InterruptedException {
+        List<String> command = new ArrayList<>(List.of("git"));
+        command.addAll(List.of(args));
+        Process process = new ProcessBuilder(command)
+                .directory(repo.toFile())
+                .redirectErrorStream(true)
+                .start();
+        String output = new String(process.getInputStream().readAllBytes());
+        if (process.waitFor() != 0) {
+            throw new IllegalStateException("git " + String.join(" ", args) + ": " + output);
+        }
     }
 }

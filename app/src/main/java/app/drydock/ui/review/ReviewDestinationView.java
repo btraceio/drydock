@@ -9,6 +9,7 @@ import app.drydock.review.ReviewItem;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewVerdict;
 import app.drydock.review.Severity;
+import app.drydock.review.SubmitPlan;
 
 import javafx.application.Platform;
 import javafx.geometry.Pos;
@@ -150,6 +151,12 @@ public final class ReviewDestinationView extends BorderPane {
          */
         void addComment(ReviewScope scope, ReviewAnnotation annotation);
 
+        /**
+         * The card's include/exclude toggle, for any finding -- including one
+         * authored by "You"; see {@link ReviewFindingsMargin.Host#setPostToPr}.
+         */
+        void setPostToPr(ReviewScope scope, ReviewAnnotation finding, boolean post);
+
         /** {@code Apply patch} -- a human click; drydock never applies one on its own. */
         void applyPatch(ReviewScope scope, ReviewAnnotation finding);
 
@@ -159,8 +166,20 @@ public final class ReviewDestinationView extends BorderPane {
         /** Hands an intent's open findings to the scope's bound session. */
         void askAgentToFix(ReviewScope scope, ReviewIntent intent, List<ReviewAnnotation> findings);
 
-        /** Posts the review once every intent is settled. */
-        void submit(ReviewScope scope);
+        /**
+         * Posts the review once every intent is settled. {@code index}
+         * locates every finding's lines in the real diff (built from {@link
+         * ReviewDiffColumn#displayedDiff()}, not the rendered rows -- see
+         * {@link SubmitPlan.DiffIndex}), and {@code decisions} carries one
+         * {@link ReviewVerdict.Decision} per counted intent, in the same
+         * order {@link #submitReview()} already walked them in to confirm
+         * every one had a verdict. Both live here, rather than being
+         * recomputed by the host, because only this view can see a diff row
+         * at all: {@code MainWorkspace} (package {@code app.drydock.ui}) has
+         * no visibility into {@code app.drydock.ui.review}'s
+         * package-private types.
+         */
+        void submit(ReviewScope scope, SubmitPlan.DiffIndex index, List<ReviewVerdict.Decision> decisions);
 
         /** Diagnostic-only: runs {@code scope}'s diff and describes the result. */
         String diagDiffSummary(ReviewScope scope);
@@ -918,6 +937,11 @@ public final class ReviewDestinationView extends BorderPane {
         public void focusLine(ReviewAnnotation finding) {
             diffColumn.revealLine(finding.file(), finding.startKey());
         }
+
+        @Override
+        public void setPostToPr(ReviewAnnotation finding, boolean post) {
+            selectedScope().ifPresent(scope -> host.setPostToPr(scope, finding, post));
+        }
     }
 
     /** The verdict bar's window onto the host, with the scope filled in. */
@@ -982,15 +1006,48 @@ public final class ReviewDestinationView extends BorderPane {
         List<ReviewIntent> counted = intents().stream()
                 .filter(ReviewIntent::countsTowardProgress)
                 .toList();
+        List<ReviewVerdict.Decision> decisions = new java.util.ArrayList<>();
         for (int i = 0; i < counted.size(); i++) {
-            if (host.verdict(scope.get(), counted.get(i)).isEmpty()) {
+            Optional<ReviewVerdict> verdict = host.verdict(scope.get(), counted.get(i));
+            if (verdict.isEmpty()) {
                 intentIndex = intents().indexOf(counted.get(i));
                 refreshReviewState();
                 revealCurrentIntent();
                 return;
             }
+            decisions.add(verdict.get().decision());
         }
-        host.submit(scope.get());
+        host.submit(scope.get(), buildDiffIndex(diffColumn.displayedDiff()), decisions);
+    }
+
+    /**
+     * Locates every line of {@code diff} for {@link SubmitPlan#of}, walking
+     * the real diff rather than {@link ReviewDiffColumn#diagRows()}: a
+     * collapsed run, the context toggle, or truncation of a large diff can
+     * all leave a valid line out of the rendered rows, and validating
+     * against rows would refuse a comment GitHub would happily accept.
+     * {@code positionOfKey} is one running ordinal across the whole diff (the
+     * position {@code gh api} anchors a comment to); {@code hunkOfKey} is a
+     * per-{@link app.drydock.git.UnifiedDiff.Hunk} ordinal, which is what
+     * lets {@link SubmitPlan#of} refuse a comment whose start and end land in
+     * different hunks.
+     */
+    private static SubmitPlan.DiffIndex buildDiffIndex(app.drydock.git.UnifiedDiff diff) {
+        java.util.Map<String, Integer> positionOfKey = new java.util.HashMap<>();
+        java.util.Map<String, Integer> hunkOfKey = new java.util.HashMap<>();
+        int position = 0;
+        for (app.drydock.git.UnifiedDiff.FileDiff file : diff.files()) {
+            int hunkIndex = 0;
+            for (app.drydock.git.UnifiedDiff.Hunk hunk : file.hunks()) {
+                for (app.drydock.git.UnifiedDiff.Line line : hunk.lines()) {
+                    String key = file.path() + " " + line.lineKey();
+                    positionOfKey.put(key, position++);
+                    hunkOfKey.put(key, hunkIndex);
+                }
+                hunkIndex++;
+            }
+        }
+        return new SubmitPlan.DiffIndex(positionOfKey, hunkOfKey);
     }
 
     // ---- item rendering -----------------------------------------------------
