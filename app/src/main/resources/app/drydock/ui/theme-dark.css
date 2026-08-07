@@ -55,6 +55,15 @@
     -drydock-agent-codex: #5bb3ab;
     -drydock-agent-pi: #d977b0;
 
+    /* Sidebar row overlay fade. The hover-action strip floats above the row
+     * rather than reserving width, so the text it covers has to fade out
+     * into the row's own background -- which differs between a hovered row
+     * and the active one, hence two values rather than one. Solid, because
+     * a gradient stop cannot be a translucent overlay of an unknown
+     * backdrop. */
+    -drydock-row-fade: #171614;
+    -drydock-row-fade-active: #201f1d;
+
     /* Diff Review (design handoff section C): add/del rows, annotation
      * range selection, and the Explorer changed-line gutter overlay. */
     -drydock-add-bg: rgba(108, 192, 122, 0.10);

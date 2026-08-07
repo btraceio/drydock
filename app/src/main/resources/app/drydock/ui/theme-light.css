@@ -46,6 +46,10 @@
     -drydock-agent-codex: #3f8f88;
     -drydock-agent-pi: #b04a86;
 
+    /* Sidebar row overlay fade (light equivalents of the dark set). */
+    -drydock-row-fade: #f4f2ee;
+    -drydock-row-fade-active: #e9e6e0;
+
     /* Diff Review (light equivalents of the dark set). */
     -drydock-add-bg: rgba(76, 157, 94, 0.12);
     -drydock-add-bar: #4c9d5e;

@@ -285,6 +285,20 @@
     -fx-text-fill: -drydock-error;
 }
 
+/* The floating hover-action strip. It sits in an overlay layer so it costs
+   no layout width -- before this, three 22px buttons reserved 70px on every
+   session row whether or not the cursor was on it, on a row that had ~84px
+   left for the session name. */
+.row-overlay-actions {
+    -fx-padding: 0 8 0 24;
+    -fx-background-color: linear-gradient(to right, transparent 0%, -drydock-row-fade 24px);
+}
+
+.session-row.active .row-overlay-actions,
+.repo-row.active .row-overlay-actions {
+    -fx-background-color: linear-gradient(to right, transparent 0%, -drydock-row-fade-active 24px);
+}
+
 .session-row {
     -fx-background-radius: 8px;
     -fx-cursor: hand;
