@@ -655,8 +655,11 @@ final class ReviewDiffColumn extends BorderPane {
                 keys.add(line.file() + " " + line.lineKey());
             }
         }
+        if (keys.equals(selectedKeys)) {
+            return;
+        }
         selectedKeys = keys;
-        refreshRender();
+        applySelectionPaint();
     }
 
     private void clearSelectionPaint() {
@@ -664,7 +667,48 @@ final class ReviewDiffColumn extends BorderPane {
             return;
         }
         selectedKeys = Set.of();
-        refreshRender();
+        applySelectionPaint();
+    }
+
+    /**
+     * Toggles {@code review-line-selected} directly on the gutter {@code
+     * Label}s already in the scene, keyed by the {@code file + " " +
+     * lineKey} stamped into each one's {@link Node#userData} by {@link
+     * #buildLine}.
+     *
+     * <p>This is deliberately NOT {@link #refreshRender()}: that swaps
+     * {@link #rows} to empty and back, which detaches every cell's graphic
+     * -- including the gutter the pointer is currently pressed on. Do that
+     * from inside {@code setOnMousePressed} and the pressed {@code Label} is
+     * no longer in the scene when the button comes up, so JavaFX never
+     * delivers {@code MOUSE_CLICKED} to it, and a {@code DRAG_DETECTED} that
+     * follows throws {@code IllegalStateException} from {@code
+     * startFullDrag()} on a node that is not in the scene. Repainting live
+     * cells in place keeps the gesture's target node attached throughout.</p>
+     */
+    private void applySelectionPaint() {
+        // Deferred rather than applied synchronously: this runs from inside
+        // gesture handlers (setOnMousePressed, setOnMouseDragEntered), and
+        // mutating the PRESSED node's own style class while JavaFX is still
+        // in the middle of dispatching that same press was observed (via a
+        // real-pointer TestFX probe) to occasionally suppress the click or
+        // full-drag-gesture bookkeeping the press was starting -- the
+        // gesture's own target getting its CSS state (and therefore a CSS
+        // layout pass) touched out from under it, mid-dispatch. One pulse
+        // later, the press has already finished being handled, so the paint
+        // is invisible to the gesture that triggered it.
+        Platform.runLater(() -> {
+            for (Node node : list.lookupAll(".review-code-gutter")) {
+                boolean selected = node.getUserData() instanceof String key && selectedKeys.contains(key);
+                if (selected) {
+                    if (!node.getStyleClass().contains("review-line-selected")) {
+                        node.getStyleClass().add("review-line-selected");
+                    }
+                } else {
+                    node.getStyleClass().remove("review-line-selected");
+                }
+            }
+        });
     }
 
     private int indexOfLine(String file, String lineKey) {
@@ -711,6 +755,17 @@ final class ReviewDiffColumn extends BorderPane {
     /** Diagnostic/test-only: the gutter keys currently painted selected. */
     Set<String> diagSelectedKeys() {
         return Set.copyOf(selectedKeys);
+    }
+
+    /**
+     * Diagnostic/test-only: the current selection anchor's row index, or
+     * {@code -1} for none. Exists so a stale-index guard can be proven by
+     * what it PREVENTS -- a stale gesture event overwriting a valid anchor
+     * -- rather than by an incidental empty result that a missing guard
+     * would also happen to produce.
+     */
+    int diagSelectionAnchorIndex() {
+        return selectionAnchorIndex;
     }
 
     /** Scrolls to the row anchored at {@code lineKey} in {@code file} (card → line linkage). */
@@ -1105,9 +1160,14 @@ final class ReviewDiffColumn extends BorderPane {
         // depending on the press having already run: a synthesized click with
         // no preceding press -- exactly how the existing gutter tests dispatch
         // -- still has to work.
-        boolean selected = selectedKeys.contains(row.file() + " " + row.lineKey());
+        String selectionKey = row.file() + " " + row.lineKey();
+        boolean selected = selectedKeys.contains(selectionKey);
         for (Label gutter : List.of(oldNumber, newNumber)) {
             gutter.getStyleClass().add("commentable");
+            // Read back by applySelectionPaint() to repaint an already-built
+            // Label in place, without touching the rows list -- see its
+            // javadoc for why a live gesture cannot survive that.
+            gutter.setUserData(selectionKey);
             if (selected) {
                 gutter.getStyleClass().add("review-line-selected");
             }
