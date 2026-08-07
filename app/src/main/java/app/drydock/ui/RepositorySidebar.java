@@ -1721,6 +1721,7 @@ public final class RepositorySidebar extends VBox {
 
             HBox actions = new HBox(2, rescan, newSession);
             actions.setAlignment(Pos.CENTER_RIGHT);
+            actions.visibleProperty().bind(hoverProperty());
 
             HBox row = new HBox(7, caret, text, count);
             row.getStyleClass().add("repo-row");
@@ -2002,7 +2003,10 @@ public final class RepositorySidebar extends VBox {
                 for (WorktreeService.Worktree worktree : worktrees) {
                     Label path = new Label(shortPath(worktree.path()));
                     path.getStyleClass().add("stale-path");
-                    path.setPadding(new Insets(2, 8, 2, 48));
+                    // Line up under the summary label: .child-row padding-left
+                    // (16) + .child-row-status min-width (30) + this row's
+                    // HBox spacing (7) = 53.
+                    path.setPadding(new Insets(2, 8, 2, 53));
                     box.getChildren().add(path);
                 }
             }
@@ -2054,7 +2058,10 @@ public final class RepositorySidebar extends VBox {
                     Label path = new Label(shortPath(worktree.path())
                             + worktree.lockReason().map(reason -> "  (" + reason + ")").orElse(""));
                     path.getStyleClass().add("stale-path");
-                    path.setPadding(new Insets(2, 8, 2, 48));
+                    // Line up under the summary label: .child-row padding-left
+                    // (16) + .child-row-status min-width (30) + this row's
+                    // HBox spacing (7) = 53.
+                    path.setPadding(new Insets(2, 8, 2, 53));
                     box.getChildren().add(path);
                 }
             }
