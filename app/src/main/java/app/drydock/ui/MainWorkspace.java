@@ -111,6 +111,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.DoubleSupplier;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
@@ -266,6 +267,14 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * later (see {@code attachOpenedSession}).
      */
     private final Map<OpenSessionTab, SessionExplorerView> openExplorers = new LinkedHashMap<>();
+
+    /**
+     * The Explorer's skim-by-default preference, refreshed off-thread and
+     * read synchronously by the Explorer on every file open. Seeded with the
+     * delta's default so the very first open before the load lands behaves
+     * as designed.
+     */
+    private final AtomicBoolean skimDefaultCache = new AtomicBoolean(true);
 
     /** Where each session's Explorer trail is persisted; null in tests that build no store. */
     private final ExplorerTrailStore explorerTrailStore;
@@ -459,6 +468,14 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
         exitWatcher.setCycleCount(Animation.INDEFINITE);
         exitWatcher.play();
+
+        refreshExplorerPreferences();
+    }
+
+    /** Re-reads the Explorer's user preferences after the settings modal closes. */
+    public void refreshExplorerPreferences() {
+        UserConfig.loadAsync().thenAccept(config ->
+                skimDefaultCache.set(config.openChangedFilesInSkim()));
     }
 
     /**
@@ -2834,6 +2851,10 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 // store rather than snapshotted: the reviewer writes findings
                 // over MCP while the reader is reading.
                 explorer.setFindingsProvider(relative -> explorerFindings(openTab, relative));
+                // Read from a cached value, never UserConfig.load(): this
+                // runs on the FX thread on every file open (AGENTS.md,
+                // "Blocking work is async").
+                explorer.setSkimDefault(() -> skimDefaultCache.get());
                 openExplorers.put(openTab, explorer);
                 return explorer;
             });

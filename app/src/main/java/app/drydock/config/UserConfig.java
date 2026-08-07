@@ -3,6 +3,7 @@ package app.drydock.config;
 import app.drydock.state.json.JsonParseException;
 import app.drydock.state.json.JsonParser;
 import app.drydock.state.json.JsonValue;
+import app.drydock.state.json.JsonValue.JsonBoolean;
 import app.drydock.state.json.JsonValue.JsonObject;
 import app.drydock.state.json.JsonValue.JsonString;
 import app.drydock.state.json.JsonWriter;
@@ -16,6 +17,7 @@ import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.Optional;
+import java.util.function.UnaryOperator;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -27,22 +29,26 @@ import java.util.concurrent.atomic.AtomicReference;
 /**
  * User-editable settings read from {@code ~/.drydock/config.json}, separate
  * from the app's own {@code ApplicationState} (which the app writes itself
- * and never expects a human to hand-edit). Deliberately tiny: one field for
- * now, {@code worktreesDirectory} -- the directory new worktrees are
- * created under, in place of the {@code <home>/dev/wt} default (see
- * {@link app.drydock.git.WorktreeNaming}).
+ * and never expects a human to hand-edit). Deliberately tiny: {@code
+ * worktreesDirectory} -- the directory new worktrees are created under, in
+ * place of the {@code <home>/dev/wt} default (see {@link
+ * app.drydock.git.WorktreeNaming}) -- and {@code openChangedFilesInSkim},
+ * whether a file already part of the current change opens folded to its
+ * signatures.
  *
  * <p>{@link #load()} never throws for a missing or malformed config file:
  * it logs a warning for malformed input and falls back to {@link #empty()},
  * consistent with how {@code JsonApplicationStateRepository} treats a
  * corrupt state file.</p>
  */
-public record UserConfig(Optional<Path> worktreesDirectory) {
+public record UserConfig(Optional<Path> worktreesDirectory, boolean openChangedFilesInSkim) {
 
     private static final Logger LOG = System.getLogger(UserConfig.class.getName());
 
     public static UserConfig empty() {
-        return new UserConfig(Optional.empty());
+        // Skim-by-default is the Explorer delta's design (part 2); the
+        // setting exists to turn it off, not to opt into it.
+        return new UserConfig(Optional.empty(), true);
     }
 
     /** {@code ~/.drydock/config.json}. */
@@ -101,7 +107,9 @@ public record UserConfig(Optional<Path> worktreesDirectory) {
             Optional<Path> worktreesDirectory = root.get("worktreesDirectory") instanceof JsonString s
                     ? Optional.of(Path.of(s.value()).toAbsolutePath().normalize())
                     : Optional.empty();
-            return new UserConfig(worktreesDirectory);
+            boolean openChangedFilesInSkim = !(root.get("openChangedFilesInSkim") instanceof JsonBoolean b)
+                    || b.value();
+            return new UserConfig(worktreesDirectory, openChangedFilesInSkim);
         } catch (IOException | JsonParseException | InvalidPathException e) {
             LOG.log(Level.WARNING, "Config file " + configFile + " is missing, unreadable, or malformed; "
                     + "ignoring it and using defaults", e);
@@ -141,6 +149,8 @@ public record UserConfig(Optional<Path> worktreesDirectory) {
         JsonObject root = readExistingRootOrEmpty(resolvedConfigFile);
         root.members().remove("worktreesDirectory");
         config.worktreesDirectory().ifPresent(dir -> root.put("worktreesDirectory", new JsonString(dir.toString())));
+        root.members().remove("openChangedFilesInSkim");
+        root.put("openChangedFilesInSkim", new JsonBoolean(config.openChangedFilesInSkim()));
 
         Files.createDirectories(parent);
         Path temp = Files.createTempFile(parent, "config", ".json.tmp");
@@ -213,6 +223,39 @@ public record UserConfig(Optional<Path> worktreesDirectory) {
      * {@code @TempDir} is removed) so a write cannot leak into, or race, an
      * unrelated test.</p>
      */
+    /**
+     * Changes one preference and writes the result, without any other
+     * preference in the file getting lost on the way.
+     *
+     * <p>This is a read-modify-write, and doing it as {@code loadAsync()}
+     * followed by {@code saveAsync()} is not safe however carefully the
+     * caller writes it: those are two separate tasks, so two overlapping
+     * updates -- the Explorer checkbox and a worktrees-directory commit, both
+     * reachable from one modal -- can both read the same config before either
+     * writes, and the later write silently drops the earlier one's field. The
+     * whole read-mutate-write runs as ONE task on {@link #SAVE_EXECUTOR}
+     * instead, whose single thread is what makes it atomic against every
+     * other load and save.</p>
+     *
+     * <p>{@code mutate} runs on that thread: it must be a pure function of
+     * the config it is handed, and must not touch the UI.</p>
+     */
+    public static CompletableFuture<Void> updateAsync(UnaryOperator<UserConfig> mutate) {
+        CompletableFuture<Void> future = new CompletableFuture<>();
+        SAVE_EXECUTOR.execute(() -> {
+            try {
+                save(mutate.apply(load()), defaultConfigFile());
+                future.complete(null);
+            } catch (IOException | RuntimeException e) {
+                future.completeExceptionally(e);
+            } catch (Throwable t) {
+                future.completeExceptionally(t);
+                throw t;
+            }
+        });
+        return future;
+    }
+
     public static CompletableFuture<Void> saveAsync(UserConfig config) {
         CompletableFuture<Void> future = new CompletableFuture<>();
         PendingSave superseded = PENDING_SAVE.getAndSet(new PendingSave(config, future));

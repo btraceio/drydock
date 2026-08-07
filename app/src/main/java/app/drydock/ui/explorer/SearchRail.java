@@ -4,7 +4,6 @@ import app.drydock.search.SessionSearchService;
 import app.drydock.search.SessionSearchService.FileMatches;
 import app.drydock.search.SessionSearchService.TextMatch;
 import javafx.animation.PauseTransition;
-import javafx.animation.RotateTransition;
 import javafx.application.Platform;
 import javafx.collections.FXCollections;
 import javafx.collections.ObservableSet;
@@ -81,6 +80,7 @@ final class SearchRail extends VBox {
     private final Button scopeRepo = new Button("repo");
     private final Button sortButton = new Button();
     private final VBox resultsBox = new VBox(3);
+    private final ScrollPane resultsScroll = new ScrollPane(resultsBox);
     private final Label selectedCount = new Label();
     private final Button openSelected = new Button();
     private final HBox footer = new HBox(8);
@@ -88,6 +88,14 @@ final class SearchRail extends VBox {
 
     private final VBox expandedContent = new VBox(8);
     private final VBox collapsedContent = new VBox(10);
+
+    /**
+     * Groups the reader has collapsed, by session-relative path. Held here
+     * rather than on the row because rebuild() destroys every row -- and it
+     * rebuilds on opening a file, on a findings or overlay refresh, and on
+     * every debounced keystroke, so row-local state survives almost nothing.
+     */
+    private final Set<Path> collapsedGroups = new LinkedHashSet<>();
 
     /** Checked file rows (multi-select), independent of row expansion. */
     private final ObservableSet<Path> checkedFiles = FXCollections.observableSet(new LinkedHashSet<>());
@@ -138,6 +146,9 @@ final class SearchRail extends VBox {
     private Function<Path, List<ExplorerFinding>> findings = path -> List.of();
     /** The file the viewer is showing, which diff scope never hides. */
     private Path openFile;
+
+    /** A {@code /} that arrived while collapsed, waiting for the field to exist again. */
+    private boolean focusSearchOnExpand;
 
     SearchRail(Path searchRoot, SessionSearchService searchService, FileOpener opener) {
         this.searchRoot = searchRoot;
@@ -238,6 +249,20 @@ final class SearchRail extends VBox {
     /** Swaps to the full rail content (SessionExplorerView animates the width). */
     void showExpanded() {
         getChildren().setAll(expandedContent);
+        if (focusSearchOnExpand) {
+            focusSearchOnExpand = false;
+            focusSearch();
+        }
+    }
+
+    /**
+     * Focuses the query field once the rail is actually expanded. {@code /}
+     * pressed against a collapsed rail has nothing to focus -- the field is
+     * not in the scene graph until {@link #showExpanded} puts it back -- so
+     * the request is held until then rather than silently dropped.
+     */
+    void focusSearchWhenExpanded() {
+        focusSearchOnExpand = true;
     }
 
     /** Swaps to the 46px collapsed strip: a ⌕ expand button + vertical FILES label. */
@@ -285,6 +310,9 @@ final class SearchRail extends VBox {
         sortButton.setTooltip(new Tooltip("Sort: churn · findings · a-z (s)"));
         sortButton.setOnAction(e -> cycleSort());
 
+        Label sortKey = new Label("s");
+        sortKey.getStyleClass().add("rail-key-hint");
+
         Button collapse = new Button("«");
         collapse.getStyleClass().add("rail-collapse-button");
         collapse.setFocusTraversable(false);
@@ -292,7 +320,8 @@ final class SearchRail extends VBox {
 
         Region headerSpacer = new Region();
         HBox.setHgrow(headerSpacer, Priority.ALWAYS);
-        HBox headerRow = new HBox(6, header, scopeSegment, scopeKey, headerSpacer, sortButton, collapse);
+        HBox headerRow = new HBox(6, header, scopeSegment, scopeKey, headerSpacer,
+                sortButton, sortKey, collapse);
         headerRow.setAlignment(Pos.CENTER_LEFT);
         headerRow.getStyleClass().add("search-rail-header");
 
@@ -314,11 +343,10 @@ final class SearchRail extends VBox {
         fieldRow.getStyleClass().add("explorer-search-row");
 
         resultsBox.getStyleClass().add("search-results");
-        ScrollPane scroll = new ScrollPane(resultsBox);
-        scroll.setFitToWidth(true);
-        scroll.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
-        scroll.getStyleClass().add("search-results-scroll");
-        VBox.setVgrow(scroll, Priority.ALWAYS);
+        resultsScroll.setFitToWidth(true);
+        resultsScroll.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
+        resultsScroll.getStyleClass().add("search-results-scroll");
+        VBox.setVgrow(resultsScroll, Priority.ALWAYS);
 
         selectedCount.getStyleClass().add("open-selected-count");
         openSelected.getStyleClass().add("open-selected-button");
@@ -344,10 +372,10 @@ final class SearchRail extends VBox {
         funnelFooter.setAlignment(Pos.CENTER_LEFT);
         funnelFooter.setOnAction(e -> setScope(FileRailModel.Scope.REPO));
 
-        expandedContent.getChildren().setAll(headerRow, fieldRow, scroll, footer, funnelFooter);
+        expandedContent.getChildren().setAll(headerRow, fieldRow, resultsScroll, footer, funnelFooter);
         expandedContent.getStyleClass().add("search-rail-content");
         VBox.setVgrow(expandedContent, Priority.ALWAYS);
-        VBox.setVgrow(scroll, Priority.ALWAYS);
+        VBox.setVgrow(resultsScroll, Priority.ALWAYS);
     }
 
     private void buildCollapsedContent() {
@@ -452,6 +480,10 @@ final class SearchRail extends VBox {
     }
 
     private void rebuild() {
+        // Captured before the children go, restored after they are back: the
+        // reader's place in a 200-row list is not something a keystroke or a
+        // background findings refresh gets to discard.
+        double scrollPosition = resultsScroll.getVvalue();
         List<FileRailModel.Entry> all = entries();
         List<FileRailModel.Entry> shown = FileRailModel.visible(all, scope, sort, query, openFile);
 
@@ -491,6 +523,23 @@ final class SearchRail extends VBox {
             resultsBox.getChildren().add(empty);
         }
 
+        // Deferred one pulse: the ScrollPane clamps vvalue against a content
+        // height that is still zero until the new rows have been laid out.
+        // Nothing to put back when the reader was already at the top, which
+        // is the common case on a keystroke -- and this runs on every one of
+        // them, so the queued no-op is worth not enqueueing.
+        if (scrollPosition > 0) {
+            Platform.runLater(() -> {
+                // Only if the rebuild's own clear is what left it here:
+                // emptying the rows collapses the content height and clamps
+                // vvalue to 0, so a non-zero value one pulse later is someone
+                // else's scroll and outranks the position we captured.
+                if (resultsScroll.getVvalue() == 0) {
+                    resultsScroll.setVvalue(scrollPosition);
+                }
+            });
+        }
+
         int repoCount = Math.max(repoFiles.size(), shown.size());
         // A failed listing must not read as a small repo: "repo has 0 files"
         // and "we could not look" are very different statements, and only one
@@ -525,10 +574,11 @@ final class SearchRail extends VBox {
         });
 
         boolean hasChildren = !matches.isEmpty();
-        ToggleButton caret = new ToggleButton("▸");
+        boolean expanded = !collapsedGroups.contains(entry.relative());
+        ToggleButton caret = new ToggleButton(expanded ? "▾" : "▸");
         caret.getStyleClass().add("result-caret");
         caret.setFocusTraversable(false);
-        caret.setSelected(true);
+        caret.setSelected(expanded);
         caret.setVisible(hasChildren);
         caret.setManaged(hasChildren);
 
@@ -597,16 +647,20 @@ final class SearchRail extends VBox {
             for (TextMatch match : matches) {
                 lines.getChildren().add(buildMatchLine(file, entry.relative(), match, query));
             }
+            lines.setVisible(expanded);
+            lines.setManaged(expanded);
             group.getChildren().add(lines);
 
-            RotateTransition rotate = new RotateTransition(Duration.millis(120), caret);
-            caret.selectedProperty().addListener((obs, was, expanded) -> {
-                rotate.setToAngle(expanded ? 90 : 0);
-                rotate.playFromStart();
-                lines.setVisible(expanded);
-                lines.setManaged(expanded);
+            caret.selectedProperty().addListener((obs, was, nowExpanded) -> {
+                caret.setText(nowExpanded ? "▾" : "▸");
+                lines.setVisible(nowExpanded);
+                lines.setManaged(nowExpanded);
+                if (nowExpanded) {
+                    collapsedGroups.remove(entry.relative());
+                } else {
+                    collapsedGroups.add(entry.relative());
+                }
             });
-            caret.setRotate(90); // default expanded
         }
         return group;
     }

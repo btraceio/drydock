@@ -324,15 +324,34 @@ public final class DrydockApplication extends Application {
 
                 @Override
                 public CompletableFuture<Void> saveWorktreesDirectory(Optional<Path> directory) {
-                    return UserConfig.saveAsync(new UserConfig(directory));
+                    // Read-modify-write in one executor task: a record
+                    // built from one new value would reset the others.
+                    return UserConfig.updateAsync(existing ->
+                            new UserConfig(directory, existing.openChangedFilesInSkim()));
+                }
+
+                @Override
+                public CompletableFuture<Boolean> loadOpenChangedFilesInSkim() {
+                    return UserConfig.loadAsync().thenApply(UserConfig::openChangedFilesInSkim);
+                }
+
+                @Override
+                public CompletableFuture<Void> saveOpenChangedFilesInSkim(boolean value) {
+                    return UserConfig.updateAsync(existing ->
+                            new UserConfig(existing.worktreesDirectory(), value));
                 }
             }, appShell.modalLayer()::close);
             // onClosed, not just the Done/× onClose above: Esc and a
             // backdrop click hide the modal without moving focus off the
             // worktrees field, so its focus-lost commit never fires --
             // flushPendingEdit is the one seam every close path runs
-            // through (see ModalLayer.close's onClosed callback).
-            appShell.modalLayer().show(settingsModal, settingsModal::flushPendingEdit);
+            // through (see ModalLayer.close's onClosed callback). Chained
+            // after it so the Explorer's cached skim preference picks up
+            // whatever the modal just saved.
+            appShell.modalLayer().show(settingsModal, () -> {
+                settingsModal.flushPendingEdit();
+                mainWorkspace.refreshExplorerPreferences();
+            });
         });
 
         mainWorkspace.setModalLayer(appShell.modalLayer());

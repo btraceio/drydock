@@ -3,6 +3,7 @@ package app.drydock.ui.explorer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -58,6 +59,21 @@ public record SourceOutline(List<Member> members, int lineCount) {
     /** The member containing {@code line}, or empty between members (blank lines, imports). */
     public java.util.Optional<Member> memberAt(int line) {
         return members.stream().filter(member -> member.covers(line)).findFirst();
+    }
+
+    /**
+     * The member containing {@code line}; failing that, the nearest member
+     * starting after it; failing that (line is past the last member), empty.
+     * "Reveal line N" has to mean something even when N sits between members
+     * -- a blank line, an import, the class header -- or "go to line N" is a
+     * no-op for every such N, including a search hit that lands on one.
+     */
+    public Optional<Member> memberAtOrAfter(int line) {
+        Optional<Member> containing = memberAt(line);
+        if (containing.isPresent()) {
+            return containing;
+        }
+        return members.stream().filter(member -> member.startLine() > line).findFirst();
     }
 
     /** Language-independent enough for Java, Kotlin, JS/TS, C-likes; everything else falls back to one member. */
@@ -163,8 +179,16 @@ public record SourceOutline(List<Member> members, int lineCount) {
         return lower.startsWith("private ") || lower.startsWith("- ") || lower.startsWith("internal ");
     }
 
-    /** Drops a trailing line comment so {@code foo(); // note {} } does not move the brace depth. */
-    private static String stripComment(String line) {
+    /**
+     * Drops a trailing line comment so {@code foo(); // note {} } does not
+     * move the brace depth.
+     *
+     * <p>Package-visible because a signature is built from the stripped form:
+     * anything comparing a raw source line against {@link Member#signature()}
+     * has to strip it the same way, or a declaration with a trailing comment
+     * silently fails to match.</p>
+     */
+    static String stripComment(String line) {
         int at = line.indexOf("//");
         return at < 0 ? line : line.substring(0, at);
     }

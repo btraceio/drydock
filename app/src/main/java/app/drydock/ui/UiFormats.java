@@ -64,18 +64,41 @@ public final class UiFormats {
      * trailing chrome (read-only chip, gutter toggle) themselves.
      */
     public static List<Node> breadcrumbSegments(Path path) {
+        return breadcrumbSegments(path, Integer.MAX_VALUE);
+    }
+
+    /**
+     * As {@link #breadcrumbSegments(Path)}, keeping at most {@code
+     * maxSegments} trailing components and standing in for what it dropped
+     * with a leading {@code …}. Elides from the LEFT: the file name is the
+     * one segment a reader is never helped by losing.
+     */
+    public static List<Node> breadcrumbSegments(Path path, int maxSegments) {
+        List<Path> segments = new ArrayList<>();
+        path.forEach(segments::add);
+        boolean elided = segments.size() > maxSegments;
+        List<Path> kept = elided
+                ? segments.subList(segments.size() - maxSegments, segments.size())
+                : segments;
+
         List<Node> nodes = new ArrayList<>();
-        int i = 0;
-        for (Path segment : path) {
-            if (i++ > 0) {
+        if (elided) {
+            nodes.add(segment("…"));
+        }
+        for (Path part : kept) {
+            if (!nodes.isEmpty()) {
                 Label sep = new Label("›");
                 sep.getStyleClass().add("breadcrumb-separator");
                 nodes.add(sep);
             }
-            Label part = new Label(segment.toString());
-            part.getStyleClass().add("breadcrumb-segment");
-            nodes.add(part);
+            nodes.add(segment(part.toString()));
         }
         return nodes;
+    }
+
+    private static Label segment(String text) {
+        Label part = new Label(text);
+        part.getStyleClass().add("breadcrumb-segment");
+        return part;
     }
 }

@@ -1014,12 +1014,27 @@
 .result-check:selected .mark {
     -fx-background-color: white;
 }
+/* Full text colour, not the dim one, and big enough to read as a control
+ * rather than punctuation: this is the only thing in the row that does not
+ * open the file, so it has to look different from the row it sits in. It
+ * carries a resting plate for the same reason -- a bare glyph among the
+ * checkbox, the change dot and the filename reads as decoration. Only rows
+ * with content matches have one, so this is never many at once. */
 .result-caret {
-    -fx-background-color: transparent;
-    -fx-text-fill: -drydock-text-faint;
-    -fx-font-size: 10px;
-    -fx-padding: 0 2 0 2;
+    -fx-background-color: -drydock-active-bg;
+    -fx-background-radius: 3px;
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 13px;
+    -fx-font-weight: bold;
+    -fx-padding: 0;
+    -fx-min-width: 18px;
+    -fx-min-height: 18px;
+    -fx-alignment: center;
     -fx-cursor: hand;
+}
+.result-caret:hover {
+    -fx-background-color: -drydock-accent;
+    -fx-text-fill: white;
 }
 .filetype-badge {
     -fx-background-color: -drydock-active-bg;
@@ -2127,6 +2142,32 @@
 }
 .settings-radio:selected .dot {
     -fx-background-color: -drydock-accent;
+}
+/* Same reason as .settings-radio above: a stock CheckBox caption is
+ * near-black on the dark theme. Box styling follows .result-check, the
+ * established precedent for a checkbox in this app. */
+.settings-check {
+    -fx-text-fill: -drydock-text;
+}
+.settings-check .box {
+    -fx-background-color: -drydock-input-bg;
+    -fx-background-radius: 4px;
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 4px;
+}
+.settings-check:selected .box {
+    -fx-background-color: -drydock-accent;
+    -fx-border-color: -drydock-accent;
+}
+.settings-check:selected .mark {
+    -fx-background-color: white;
+}
+/* Not .settings-hint: that one is indented 132px to clear the caption
+ * column of the labelled rows, and this row has no caption column. */
+.settings-check-hint {
+    -fx-font-size: 11px;
+    -fx-text-fill: -drydock-text-faint;
+    -fx-padding: 0 0 0 22px;
 }
 .settings-slider .track {
     -fx-background-color: -drydock-border-strong;

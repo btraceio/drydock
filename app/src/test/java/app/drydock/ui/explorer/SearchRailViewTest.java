@@ -1,10 +1,14 @@
 package app.drydock.ui.explorer;
 
 import app.drydock.search.SessionSearchService;
+import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
 import javafx.scene.control.CheckBox;
 import javafx.scene.control.Label;
+import javafx.scene.control.ScrollPane;
+import javafx.scene.control.TextField;
+import javafx.scene.control.ToggleButton;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -195,6 +199,42 @@ class SearchRailViewTest extends ApplicationTest {
         assertEquals("⇅ a-z", sort.getText());
     }
 
+    /**
+     * {@code /} pressed against a collapsed rail has no field to focus --
+     * showCollapsed() swapped it out of the scene graph -- and the rail now
+     * collapses itself on any window under 1100px, so that is an ordinary
+     * width rather than a corner case. The request has to survive until the
+     * expand animation puts the field back.
+     */
+    @Test
+    void aFocusRequestMadeWhileCollapsedLandsWhenTheRailExpands() {
+        // Held while the rail is still expanded: once it collapses, the field
+        // is out of the scene graph entirely and cannot even be looked up --
+        // which is the whole reason a `/` arriving then had nothing to focus.
+        TextField field = lookup(".explorer-search-field").query();
+
+        interact(() -> rail.showCollapsed());
+        settle();
+        assertTrue(lookup(".explorer-search-field").tryQuery().isEmpty(),
+                "the field really is gone from the scene while collapsed");
+
+        interact(() -> rail.focusSearchWhenExpanded());
+        settle();
+        assertFalse(field.isFocused(), "…so it cannot be focused before it comes back");
+
+        interact(() -> rail.showExpanded());
+        settle();
+        assertTrue(field.isFocused(), "the held request lands once the field exists again");
+    }
+
+    @Test
+    void theSortButtonAdvertisesItsKeyLikeTheScopeToggleDoes() {
+        List<String> hints = lookup(".rail-key-hint").queryAll().stream()
+                .map(node -> ((Label) node).getText())
+                .toList();
+        assertEquals(List.of("d", "s"), hints, "both single-letter rail keys are on screen");
+    }
+
     @Test
     void everyRailControlIsFocusTraversable() {
         interact(() -> rail.refresh());
@@ -352,5 +392,94 @@ class SearchRailViewTest extends ApplicationTest {
             throw new AssertionError("footer never reported \"" + fragment + "\": " + footerText(), e);
         }
         settle();
+    }
+
+    @Test
+    void theMatchGroupCaretIsVisibleAndCollapsesTheGroup() {
+        interact(() -> rail.setSearch("lerp"));
+        waitForFooter("more file");
+        interact(() -> rail.toggleScope());
+        settle();
+
+        ToggleButton caret = lookup(".result-caret").queryAll().stream()
+                .map(ToggleButton.class::cast)
+                .filter(Node::isVisible)
+                .findFirst().orElseThrow(() -> new AssertionError("no visible caret on a row with matches"));
+        // A target the reader can actually hit: the design's rail rows are
+        // 324px wide and every other pixel of the row opens the file.
+        assertTrue(caret.getWidth() >= 14 && caret.getHeight() >= 14,
+                "caret hit target is " + caret.getWidth() + "x" + caret.getHeight());
+        assertEquals("▾", caret.getText(), "expanded groups point down");
+
+        Node lines = lookup(".result-match-lines").query();
+        assertTrue(lines.isVisible(), "the group starts expanded and is laid out");
+
+        clickOn(caret);
+        settle();
+        assertEquals("▸", caret.getText(), "collapsed groups point right");
+        assertFalse(lines.isVisible(), "the match lines are hidden");
+        assertFalse(lines.isManaged(), "…and no longer take up space in the rail");
+    }
+
+    @Test
+    void aCollapsedGroupStaysCollapsedWhenTheRailRebuilds() {
+        interact(() -> rail.setSearch("lerp"));
+        waitForFooter("more file");
+        interact(() -> rail.toggleScope());
+        settle();
+
+        ToggleButton caret = lookup(".result-caret").queryAll().stream()
+                .map(ToggleButton.class::cast)
+                .filter(Node::isVisible)
+                .findFirst().orElseThrow();
+        clickOn(caret);
+        settle();
+        assertEquals("▸", caret.getText());
+
+        // Exactly what opening a file from the rail does.
+        interact(() -> rail.setOpenFile(Path.of("ui/LayoutMath.java")));
+        settle();
+
+        ToggleButton afterRebuild = lookup(".result-caret").queryAll().stream()
+                .map(ToggleButton.class::cast)
+                .filter(Node::isVisible)
+                .findFirst().orElseThrow();
+        assertEquals("▸", afterRebuild.getText(), "the group is still collapsed after a rebuild");
+        Node lines = lookup(".result-match-lines").query();
+        assertFalse(lines.isVisible(), "…and its match lines are still hidden");
+        assertFalse(lines.isManaged(), "…and still take up no space");
+    }
+
+    @Test
+    void theResultListKeepsItsScrollPositionAcrossARebuild() {
+        interact(() -> rail.toggleScope());
+        settle();
+        ScrollPane scroll = (ScrollPane) lookup(".search-results-scroll").query();
+        interact(() -> scroll.setVvalue(0.5));
+        settle();
+
+        interact(() -> rail.refresh());
+        settle();
+        assertEquals(0.5, scroll.getVvalue(), 0.05,
+                "a refresh must not throw the reader back to the top of the list");
+    }
+
+    @Test
+    void aScrollMadeDuringARebuildIsNotOverwrittenByTheRestore() {
+        interact(() -> rail.toggleScope());
+        settle();
+        ScrollPane scroll = (ScrollPane) lookup(".search-results-scroll").query();
+        interact(() -> scroll.setVvalue(0.5));
+        settle();
+
+        // The rebuild and the reader's scroll land in the same FX pulse, before
+        // the deferred restore runs.
+        interact(() -> {
+            rail.refresh();
+            scroll.setVvalue(0.9);
+        });
+        settle();
+        assertEquals(0.9, scroll.getVvalue(), 0.05,
+                "the reader's scroll outranks the position the rebuild captured");
     }
 }
