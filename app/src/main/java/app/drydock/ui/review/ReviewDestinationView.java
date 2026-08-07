@@ -1652,22 +1652,33 @@ public final class ReviewDestinationView extends BorderPane {
      * assembled" is not evidence that each item can actually resolve it --
      * this is (see docs/architecture.md: no headless harness inside the
      * running app).
+     *
+     * <p>{@code queue.items()} is the same off-thread race {@link
+     * #diagItems()} guards against: it copies an {@link
+     * javafx.collections.ObservableList} the FX thread rebuilds via {@code
+     * ReviewQueueRail#setItems}. Its only caller today happens to already be
+     * on the FX thread, which is luck, not a guarantee this method can rely
+     * on -- routed through {@link ReviewDiagFxThread} so it stays correct
+     * regardless of who calls it next.</p>
      */
     public List<String> diagAllItemDiffs() {
-        List<String> report = new java.util.ArrayList<>();
-        for (ReviewItem item : queue.items()) {
-            ReviewScope itemScope = item.scope();
-            // A scope that is not diffable (no checkout: a PR the human has
-            // not started a session for) must never reach diffService.diff --
-            // this diagnostic exists to prove each item resolves its base,
-            // and running it anyway reports a fabricated file count for
-            // exactly the scopes the branch declares wrong-by-construction.
-            String summary = itemScope.diffable()
-                    ? host.diagDiffSummary(itemScope)
-                    : "not diffable (no checkout)";
-            report.add(item.title() + " [base=" + itemScope.base() + "] " + summary);
-        }
-        return report;
+        return ReviewDiagFxThread.call(() -> {
+            List<String> report = new java.util.ArrayList<>();
+            for (ReviewItem item : queue.items()) {
+                ReviewScope itemScope = item.scope();
+                // A scope that is not diffable (no checkout: a PR the human
+                // has not started a session for) must never reach
+                // diffService.diff -- this diagnostic exists to prove each
+                // item resolves its base, and running it anyway reports a
+                // fabricated file count for exactly the scopes the branch
+                // declares wrong-by-construction.
+                String summary = itemScope.diffable()
+                        ? host.diagDiffSummary(itemScope)
+                        : "not diffable (no checkout)";
+                report.add(item.title() + " [base=" + itemScope.base() + "] " + summary);
+            }
+            return report;
+        });
     }
 
     /**

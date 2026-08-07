@@ -1503,21 +1503,50 @@ final class ReviewDiffColumn extends BorderPane {
         });
     }
 
-    /** Diagnostic-only: opens the composer on the first changed line rendered. */
+    /**
+     * Diagnostic-only: opens the composer on the first changed line
+     * rendered.
+     *
+     * <p>Iterates {@code rows} directly and mutates composer state
+     * ({@link #toggleComposer}, which touches {@link #rows} itself via
+     * {@link #insertComposerRow}) -- the same FX-owned {@link ObservableList}
+     * {@link #diagRows} guards against reading off-thread. Routed through
+     * {@link ReviewDiagFxThread} for the same reason: a caller off the FX
+     * thread iterating {@code rows} while it is mid-{@code setAll} throws
+     * {@code ConcurrentModificationException}.</p>
+     */
     String diagOpenComposer() {
-        for (ReviewDiffRow row : rows) {
-            if (row instanceof ReviewDiffRow.Line line
-                    && line.line().kind() != UnifiedDiff.Line.Kind.CONTEXT) {
-                toggleComposer(line.file(), line.lineKey());
-                return "composer on " + line.file() + " " + line.lineKey();
+        return ReviewDiagFxThread.call(() -> {
+            for (ReviewDiffRow row : rows) {
+                if (row instanceof ReviewDiffRow.Line line
+                        && line.line().kind() != UnifiedDiff.Line.Kind.CONTEXT) {
+                    toggleComposer(line.file(), line.lineKey());
+                    return "composer on " + line.file() + " " + line.lineKey();
+                }
             }
-        }
-        return "no changed line to comment on";
+            return "no changed line to comment on";
+        });
     }
 
-    /** Diagnostic/test-only: the rows currently rendered. */
+    /**
+     * Diagnostic/test-only: the rows currently rendered.
+     *
+     * <p>{@code rows} is the {@link ObservableList} the FX Application
+     * Thread mutates with {@code setAll(...)} (see {@link #refreshRender},
+     * {@link #insertComposerRow}, {@link #closeComposer}) whenever an async
+     * diff load lands or the composer opens/closes. A caller off the FX
+     * thread (a test polling for the diff, or the diag driver) that called
+     * {@code List.copyOf(rows)} directly used to iterate {@code rows} while
+     * a concurrent {@code setAll} was in flight, which invalidates that
+     * iteration mid-copy and throws {@code ConcurrentModificationException}
+     * -- the exact failure that turned a full-suite run red on the source
+     * branch. {@link ReviewDiagFxThread#call} takes the snapshot ON the FX
+     * thread instead, so the copy and any concurrent mutation are strictly
+     * ordered. Do not simplify this back to a bare {@code
+     * List.copyOf(rows)}.</p>
+     */
     List<ReviewDiffRow> diagRows() {
-        return List.copyOf(rows);
+        return ReviewDiagFxThread.call(() -> List.copyOf(rows));
     }
 
     /**
