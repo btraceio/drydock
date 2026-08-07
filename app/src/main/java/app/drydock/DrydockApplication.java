@@ -694,6 +694,8 @@ public final class DrydockApplication extends Application {
         //   rename            start the inline rename (as a title double-click does)
         //   renamecancel      end it (as Esc does)
         //   filter:text       focus the sidebar filter and type into it (as ⌘F + typing does)
+        //   facet:name        toggle one sidebar filter chip (status name or agent persistedName)
+        //   expandstale       expand every repo's stale-worktree bucket (no pointer to click it)
         //   keys              print the keyboard-ownership dump
         //   shot:/tmp/a.png   snapshot the scene
         //   mark:label        print a marker to synchronise on
@@ -1341,6 +1343,10 @@ public final class DrydockApplication extends Application {
                     System.out.println("[diag] filter typed: " + arg);
                 }
                 case "facet" -> sidebar.diagToggleFacet(arg);
+                case "expandstale" -> {
+                    sidebar.diagExpandStaleBuckets();
+                    System.out.println("[diag] expandstale");
+                }
                 case "keys" -> System.out.println("[diag] keys " + mainWorkspace.diagKeyboardState()
                         + " focusOwner=" + describeFocusOwner());
                 case "shot" -> diagSnapshot(stage, Path.of(arg));

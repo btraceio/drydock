@@ -482,6 +482,19 @@ public final class RepositorySidebar extends VBox {
     }
 
     /**
+     * Diagnostic-only ({@code app.drydock.diag.tabScript}): expands every
+     * repository's stale-worktree bucket, standing in for the mouse click
+     * {@link #activateNode} normally uses to toggle {@link
+     * #staleBucketExpanded} -- the scripted diag driver has no pointer.
+     */
+    public void diagExpandStaleBuckets() {
+        for (Repository repository : repositoryManager.repositories()) {
+            staleBucketExpanded.add(repository.id());
+        }
+        requestRebuild();
+    }
+
+    /**
      * Re-fetches repo AND worktree statuses when the event was driven by an
      * actual session change (fetch-once caching left branch tags and dirty
      * dots permanently stale; see {@link #statusRefreshedFor}). The fetches
