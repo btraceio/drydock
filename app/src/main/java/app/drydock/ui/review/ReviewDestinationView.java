@@ -131,8 +131,8 @@ public final class ReviewDestinationView extends BorderPane {
         void postMessage(ReviewScope scope, ReviewAnnotation finding, String body);
 
         /**
-         * Records a comment the human wrote against a line, from the diff
-         * column's gutter composer.
+         * Records a comment the human wrote against a line or range, minted
+         * by the diff column's gutter composer.
          *
          * <p>A comment and a reviewer's finding are the same thing in this
          * model and differ only by author (see {@link ReviewAnnotation}), so
@@ -140,15 +140,15 @@ public final class ReviewDestinationView extends BorderPane {
          * already render from -- there is no second kind of note to keep in
          * sync.</p>
          *
-         * <p>{@code intentId} is resolved by the view, not looked up here,
-         * for the same reason {@link #intents} takes its diff as a parameter:
-         * the only correct grouping is the one the caller has already
+         * <p>{@code annotation} already carries its intent: the view stamps
+         * it with {@link ReviewAnnotation#withIntentId} before calling this,
+         * for the same reason {@link #intents} takes its diff as a parameter
+         * -- the only correct grouping is the one the caller has already
          * established belongs to this scope's current diff. Empty when no
          * intent covers the file, which costs the comment nothing -- the
          * margin falls back to matching it by file.</p>
          */
-        void addComment(ReviewScope scope, String file, String lineKey, String body,
-                        Optional<String> intentId);
+        void addComment(ReviewScope scope, ReviewAnnotation annotation);
 
         /** {@code Apply patch} -- a human click; drydock never applies one on its own. */
         void applyPatch(ReviewScope scope, ReviewAnnotation finding);
@@ -373,14 +373,14 @@ public final class ReviewDestinationView extends BorderPane {
         });
         margin.setOnFilterChanged(filter -> refreshReviewState());
         diffColumn.setPinSource(new PinSource());
-        diffColumn.setCommentSink((file, lineKey, body) -> selectedScope().ifPresent(scope -> {
+        diffColumn.setCommentSink(annotation -> selectedScope().ifPresent(scope -> {
             // The intent that owns this code, so the comment lands under it
             // rather than floating outside the grouping.
             Optional<String> intentId = intents().stream()
-                    .filter(intent -> intent.touches(file))
+                    .filter(intent -> intent.touches(annotation.file()))
                     .findFirst()
                     .map(ReviewIntent::id);
-            host.addComment(scope, file, lineKey, body, intentId);
+            host.addComment(scope, annotation.withIntentId(intentId));
             refreshReviewState();
             diffColumn.refreshPins();
         }));

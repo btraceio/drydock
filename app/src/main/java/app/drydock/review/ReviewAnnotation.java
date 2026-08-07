@@ -219,6 +219,19 @@ public record ReviewAnnotation(
                 Optional.ofNullable(override), status, github, postToPr);
     }
 
+    /**
+     * Files this finding under {@code newIntentId}. The gutter composer
+     * mints an annotation with no intent (it only knows a line range, never
+     * the grouping); the destination resolves which intent owns the file and
+     * stamps it here before storing, the same way it always has for a gutter
+     * comment.
+     */
+    public ReviewAnnotation withIntentId(Optional<String> newIntentId) {
+        return new ReviewAnnotation(scopeId, id, newIntentId, file, startKey, endKey, severity, confidence,
+                title, author, at, evidence, patch, deviatesFrom, asks, thread, severityOverride, status,
+                github, postToPr);
+    }
+
     /** Re-keys this finding onto another scope (see {@code AnnotationStore.adoptLegacy}). */
     public ReviewAnnotation withScopeId(String newScopeId) {
         return new ReviewAnnotation(newScopeId, id, intentId, file, startKey, endKey, severity, confidence,

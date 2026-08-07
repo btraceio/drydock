@@ -38,7 +38,6 @@ import app.drydock.config.UserConfig;
 import app.drydock.mcp.WorkspaceMcpSessionContext;
 import app.drydock.process.SshCommandBuilder;
 import app.drydock.review.AnnotationStore;
-import app.drydock.review.Confidence;
 import app.drydock.review.IntentGrouping;
 import app.drydock.review.QueueAssembly;
 import app.drydock.review.ReviewItem;
@@ -1256,29 +1255,16 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         }
 
         /**
-         * A comment the human wrote in the diff column's gutter composer.
-         *
-         * <p>Stored as a NIT: a human note is not a blocking finding, and
-         * anything that blocks approval would make leaving a remark on a line
-         * silently prevent the reviewer approving their own review. The
-         * intent is resolved from the file so the comment lands under the
-         * intent that owns that code rather than floating outside the
-         * grouping.</p>
+         * A comment minted by the diff column's gutter composer -- already a
+         * NIT-severity {@code ReviewAnnotation.human(...)} anchored to its
+         * range and stamped with the intent the view resolved from the file
+         * (see {@link ReviewDestinationView.Host#addComment}). This just
+         * re-keys it onto {@code scope} defensively and stores it; there is
+         * no second construction site for what a human comment is.
          */
         @Override
-        public void addComment(ReviewScope scope, String file, String lineKey, String body,
-                               Optional<String> intentId) {
-            Instant now = Instant.now();
-            annotationStore.upsert(new ReviewAnnotation(
-                    scope.id(),
-                    "c_" + java.util.UUID.randomUUID(),
-                    intentId,
-                    file, lineKey, lineKey,
-                    Severity.NIT, Confidence.HIGH,
-                    Optional.empty(), "You", now,
-                    List.of(), Optional.empty(), Optional.empty(), List.of(),
-                    List.of(new ReviewAnnotation.Message("You", now, body)),
-                    Optional.empty(), AnnotationStatus.OPEN, Optional.empty(), false));
+        public void addComment(ReviewScope scope, ReviewAnnotation annotation) {
+            annotationStore.upsert(annotation.withScopeId(scope.id()));
         }
 
         /**

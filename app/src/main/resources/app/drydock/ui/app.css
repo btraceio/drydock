@@ -2596,6 +2596,16 @@
     -fx-text-fill: -drydock-main;
     -fx-background-radius: 3px;
 }
+/* A shift-click or drag range in progress, or the range the open composer is
+   anchored to. Softer than the hover fill (which reads as "click me now")
+   because this can cover many lines at once and must not read as an error or
+   a hover on every one of them. Keyed by file + lineKey (ReviewDiffColumn),
+   so this never lights up the same line number in an unrelated file. */
+.review-code-gutter.review-line-selected {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-text-fill: -drydock-accent;
+    -fx-background-radius: 3px;
+}
 
 /* The inline comment composer, sitting under the line it is anchored to. */
 .review-composer {
