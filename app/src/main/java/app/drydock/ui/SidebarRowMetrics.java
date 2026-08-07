@@ -25,11 +25,12 @@ final class SidebarRowMetrics {
      * clamped to {@code minWidth 0}, they would share the squeeze and the
      * name would keep losing characters it cannot spare. Capping the branch
      * makes the name's share the remainder.
+     *
+     * <p>The cap grows smoothly from zero at the floor, measuring the branch's
+     * share of the width ABOVE the floor rather than of the whole row. This
+     * avoids popping the branch tag in and out as the sidebar is resized.
      */
     static double branchTagMaxWidth(double rowWidth) {
-        if (rowWidth < BRANCH_FLOOR_PX) {
-            return 0.0;
-        }
-        return rowWidth * BRANCH_SHARE;
+        return Math.max(0.0, (rowWidth - BRANCH_FLOOR_PX) * BRANCH_SHARE);
     }
 }

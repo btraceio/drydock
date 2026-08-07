@@ -10,8 +10,8 @@ class SidebarRowMetricsTest {
     /** The rule: the branch never takes more than a bounded share of the row. */
     @Test
     void branchTakesABoundedShareOfTheRow() {
-        assertEquals(96.0, SidebarRowMetrics.branchTagMaxWidth(240.0), 0.001);
-        assertEquals(128.0, SidebarRowMetrics.branchTagMaxWidth(320.0), 0.001);
+        assertEquals(67.2, SidebarRowMetrics.branchTagMaxWidth(240.0), 0.001);
+        assertEquals(99.2, SidebarRowMetrics.branchTagMaxWidth(320.0), 0.001);
     }
 
     /** The name is what is left, and it is always the larger share. */
@@ -38,5 +38,15 @@ class SidebarRowMetricsTest {
     @Test
     void aVeryNarrowRowGivesTheBranchNothing() {
         assertEquals(0.0, SidebarRowMetrics.branchTagMaxWidth(60.0), 0.001);
+    }
+
+    /**
+     * The cap grows smoothly from zero at the floor, so the branch tag does
+     * not snap into or out of existence as the sidebar is resized.
+     */
+    @Test
+    void theCapGrowsSmoothlyThroughTheFloor() {
+        assertEquals(0.0, SidebarRowMetrics.branchTagMaxWidth(72.0), 0.001);
+        assertEquals(0.4, SidebarRowMetrics.branchTagMaxWidth(73.0), 0.001);
     }
 }
