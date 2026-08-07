@@ -356,8 +356,16 @@ final class FileViewer extends BorderPane {
         });
         updateBreadcrumb(null);
         updateEmptyState();
-        widthProperty().addListener((obs, was, is) ->
-                updateBreadcrumb(fileTabs.getSelectionModel().getSelectedItem()));
+        // Only when the elision threshold actually flips. Width is the only
+        // thing a resize changes about the breadcrumb, and a rebuild clears
+        // and re-creates every label and re-parents three controls -- doing
+        // that on every tick of a drag, or all ten frames of the rail's
+        // collapse animation, is work whose output is identical.
+        widthProperty().addListener((obs, was, is) -> {
+            if (isNarrowBreadcrumb(was.doubleValue()) != isNarrowBreadcrumb(is.doubleValue())) {
+                updateBreadcrumb(fileTabs.getSelectionModel().getSelectedItem());
+            }
+        });
 
         // Poll only while the viewer is actually in the scene graph.
         // OpenSessionTab.showSubTab swaps the tab's center node, so leaving
@@ -2034,6 +2042,17 @@ final class FileViewer extends BorderPane {
         return graphic;
     }
 
+    /**
+     * Below this the breadcrumb's trailing controls start eating each other,
+     * so it keeps three trailing segments instead of the whole path -- that
+     * is what fits beside them at the narrowest width the window allows. A
+     * width of zero is the pre-layout state, which is not narrow, just
+     * unknown.
+     */
+    private static boolean isNarrowBreadcrumb(double width) {
+        return width > 0 && width < 900;
+    }
+
     private void updateBreadcrumb(Tab tab) {
         breadcrumb.getChildren().clear();
         if (tab == null) {
@@ -2044,10 +2063,7 @@ final class FileViewer extends BorderPane {
         if (shown == null) {
             return;
         }
-        // Below this the trailing controls start eating each other; three
-        // trailing segments is what fits beside them at the narrowest width
-        // the window allows.
-        int maxSegments = getWidth() > 0 && getWidth() < 900 ? 3 : Integer.MAX_VALUE;
+        int maxSegments = isNarrowBreadcrumb(getWidth()) ? 3 : Integer.MAX_VALUE;
         breadcrumb.getChildren().addAll(UiFormats.breadcrumbSegments(shown, maxSegments));
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);

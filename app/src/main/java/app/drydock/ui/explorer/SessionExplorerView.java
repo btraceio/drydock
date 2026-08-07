@@ -167,14 +167,8 @@ public final class SessionExplorerView extends HBox {
         rail.setPrefWidth(RAIL_EXPANDED_WIDTH);
         rail.setMinWidth(RAIL_EXPANDED_WIDTH);
         rail.setMaxWidth(RAIL_EXPANDED_WIDTH);
-        rail.setOnCollapseRequested(() -> {
-            railOverride = Boolean.TRUE;
-            setRailCollapsed(true);
-        });
-        rail.setOnExpandRequested(() -> {
-            railOverride = Boolean.FALSE;
-            setRailCollapsed(false);
-        });
+        rail.setOnCollapseRequested(() -> readerSetRailCollapsed(true));
+        rail.setOnExpandRequested(() -> readerSetRailCollapsed(false));
         widthProperty().addListener((obs, was, width) -> {
             double newWidth = width.doubleValue();
             double oldWidth = was.doubleValue();
@@ -293,23 +287,17 @@ public final class SessionExplorerView extends HBox {
 
     /** Diagnostic- and test-only: the reader's own «, so a test can assert the collapse survives a resize. */
     public void diagCollapseRail() {
-        railOverride = Boolean.TRUE;
-        setRailCollapsed(true);
+        readerSetRailCollapsed(true);
     }
 
     /** Diagnostic- and test-only: the reader's own ⌕, so a test can assert the expand survives a resize. */
     public void diagExpandRail() {
-        railOverride = Boolean.FALSE;
-        setRailCollapsed(false);
+        readerSetRailCollapsed(false);
     }
 
     /** Review-tab bridge: runs a Text-mode search for {@code token} (the "Search in Explorer" chip). */
     public void searchText(String token) {
-        // Claims the rail exactly like the manual ⌕ does (setOnExpandRequested
-        // above): leaving railOverride null here let the next width tick below
-        // the threshold take the rail away again right after this expanded it.
-        railOverride = Boolean.FALSE;
-        setRailCollapsed(false);
+        readerSetRailCollapsed(false);
         rail.setSearch(token);
     }
 
@@ -396,6 +384,20 @@ public final class SessionExplorerView extends HBox {
             return true;
         }
         return focused instanceof CodeArea area && area.isEditable();
+    }
+
+    /**
+     * The rail moved because the reader asked it to, so their choice outranks
+     * the window until the width crosses the threshold. Every manual entry
+     * point goes through here rather than pairing the two writes itself: the
+     * "Search in Explorer" bridge once set only the width and the next resize
+     * tick took the rail straight back, which is a bug that costs nothing to
+     * make unrepresentable. {@link #setRailCollapsed} stays the width-driven
+     * path, and is the one caller that must NOT claim.
+     */
+    private void readerSetRailCollapsed(boolean collapsed) {
+        railOverride = collapsed;
+        setRailCollapsed(collapsed);
     }
 
     private void setRailCollapsed(boolean collapsed) {

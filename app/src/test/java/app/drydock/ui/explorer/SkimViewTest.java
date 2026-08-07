@@ -76,6 +76,28 @@ class SkimViewTest extends ApplicationTest {
         org.testfx.util.WaitForAsyncUtils.waitForFxEvents();
     }
 
+    /**
+     * Shrinks the viewport to a quarter of the content's real, laid-out
+     * height, so the view genuinely overflows and one wheel notch or one
+     * reveal is a small proportional step.
+     *
+     * <p>Derived, not chosen: a hand-picked pixel height goes stale the
+     * moment a row's height, padding or count changes, and this class has
+     * already had to retune such a literal twice for unrelated reasons. Call
+     * after {@code show(...)} has settled -- the content has to be laid out
+     * before its height means anything.</p>
+     */
+    private void shrinkViewportToQuarterOfContent() {
+        Region rows = (Region) lookup(".skim-rows").query();
+        double viewportHeight = rows.getHeight() / 4;
+        interact(() -> {
+            skim.setMinHeight(viewportHeight);
+            skim.setPrefHeight(viewportHeight);
+            skim.setMaxHeight(viewportHeight);
+        });
+        settle();
+    }
+
     private List<String> rowSignatures() {
         return lookup(".skim-signature").queryAll().stream()
                 .map(node -> ((Label) node).getText())
@@ -216,16 +238,7 @@ class SkimViewTest extends ApplicationTest {
     void revealingALineBetweenMembersLandsOnTheNextMemberRatherThanDoingNothing() {
         show(Set.of(), Map.of());
         settle();
-        // Derived, not chosen: see theWheelOverAnExpandedBodyScrollsTheSkimViewProportionally
-        // for why a hand-picked literal here goes stale.
-        Region rows = (Region) lookup(".skim-rows").query();
-        double viewportHeight = rows.getHeight() / 4;
-        interact(() -> {
-            skim.setMinHeight(viewportHeight);
-            skim.setPrefHeight(viewportHeight);
-            skim.setMaxHeight(viewportHeight);
-        });
-        settle();
+        shrinkViewportToQuarterOfContent();
 
         int blankLineBeforeOnRelease = SOURCE.lines().toList().indexOf("    void onRelease(MouseEvent e) {");
         interact(() -> skim.revealLine(blankLineBeforeOnRelease));
@@ -255,14 +268,7 @@ class SkimViewTest extends ApplicationTest {
     void anOpenSequenceEndsAtTheFirstMemberEvenWithABogusAnchorFirst() {
         show(Set.of(), Map.of());
         settle();
-        Region rows = (Region) lookup(".skim-rows").query();
-        double viewportHeight = rows.getHeight() / 4;
-        interact(() -> {
-            skim.setMinHeight(viewportHeight);
-            skim.setPrefHeight(viewportHeight);
-            skim.setMaxHeight(viewportHeight);
-        });
-        settle();
+        shrinkViewportToQuarterOfContent();
 
         int lineDeepInTheFile = SOURCE.lines().toList().indexOf("        prefs.put(KEY, w);") + 1;
         interact(() -> skim.revealLine(lineDeepInTheFile));
@@ -301,21 +307,7 @@ class SkimViewTest extends ApplicationTest {
         // area left to misbehave in.
         show(Set.of(4, 8, 12, 16), Map.of());
         settle();
-        // Derived, not chosen: row height, padding, and per-member line count
-        // have all shifted this test's margins before (twice, across two
-        // unrelated changes) when the viewport was a hand-picked literal.
-        // Reading the real, already-laid-out content height and sizing the
-        // viewport to a quarter of it keeps ~3/4 of the content scrollable no
-        // matter what those numbers happen to be, so a single wheel notch
-        // always lands with room on both sides of the assertion below.
-        Region rows = (Region) lookup(".skim-rows").query();
-        double viewportHeight = rows.getHeight() / 4;
-        interact(() -> {
-            skim.setMinHeight(viewportHeight);
-            skim.setPrefHeight(viewportHeight);
-            skim.setMaxHeight(viewportHeight);
-        });
-        settle();
+        shrinkViewportToQuarterOfContent();
         // A paragraph's own line-number graphic, not the CodeArea itself:
         // Flowless's VirtualFlow is a private child *inside* the CodeArea, so
         // an event fired on the CodeArea as target never reaches it -- event
@@ -362,20 +354,7 @@ class SkimViewTest extends ApplicationTest {
     void expandingAMemberKeepsTheReadersPlace() {
         show(Set.of(3, 4), Map.of());
         settle();
-        // Derived, not chosen: same reasoning as the wheel-proportionality
-        // test below. A fixed literal here goes stale the moment row height,
-        // padding, or the shared SkimView's carried-over expansion state
-        // (it survives across show() calls by design) changes how tall this
-        // content actually renders; a quarter of the real height always
-        // leaves overflow to scroll into regardless.
-        Region rows = (Region) lookup(".skim-rows").query();
-        double viewportHeight = rows.getHeight() / 4;
-        interact(() -> {
-            skim.setMinHeight(viewportHeight);
-            skim.setPrefHeight(viewportHeight);
-            skim.setMaxHeight(viewportHeight);
-        });
-        settle();
+        shrinkViewportToQuarterOfContent();
         interact(() -> skim.setVvalue(0.4));
         settle();
         double before = skim.getVvalue();
@@ -423,17 +402,7 @@ class SkimViewTest extends ApplicationTest {
         // A restore queued by show()'s own rebuild must not undo the jump.
         show(Set.of(), Map.of());
         settle();
-        // Derived, not chosen: same reasoning as the other viewport-shrinking
-        // tests above -- a hand-picked literal goes stale the moment row
-        // height or padding changes.
-        Region rows = (Region) lookup(".skim-rows").query();
-        double viewportHeight = rows.getHeight() / 4;
-        interact(() -> {
-            skim.setMinHeight(viewportHeight);
-            skim.setPrefHeight(viewportHeight);
-            skim.setMaxHeight(viewportHeight);
-        });
-        settle();
+        shrinkViewportToQuarterOfContent();
 
         // persist() is the last member -- well down the file, so revealing it
         // only reads as success if the skim view is still looking at it.
@@ -464,17 +433,7 @@ class SkimViewTest extends ApplicationTest {
         // lands in the gap before it fires.
         show(Set.of(), Map.of());
         settle();
-        // Derived, not chosen: same reasoning as the other viewport-shrinking
-        // tests above -- a hand-picked literal goes stale the moment row
-        // height or padding changes.
-        Region rows = (Region) lookup(".skim-rows").query();
-        double viewportHeight = rows.getHeight() / 4;
-        interact(() -> {
-            skim.setMinHeight(viewportHeight);
-            skim.setPrefHeight(viewportHeight);
-            skim.setMaxHeight(viewportHeight);
-        });
-        settle();
+        shrinkViewportToQuarterOfContent();
 
         // A distinctive scroll position, well past where the reveal below
         // lands: refresh()'s rebuild captures THIS as the value to restore,

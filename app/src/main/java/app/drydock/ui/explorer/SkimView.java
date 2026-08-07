@@ -3,6 +3,7 @@ package app.drydock.ui.explorer;
 import app.drydock.ui.code.SyntaxHighlighter;
 import javafx.application.Platform;
 import javafx.geometry.Pos;
+import javafx.scene.Node;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
 import javafx.scene.control.ScrollPane;
@@ -19,6 +20,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
@@ -48,16 +50,6 @@ final class SkimView extends ScrollPane {
     /** Explicit expand/collapse per member start line; absent means "whatever the default says". */
     private final Map<Integer, Boolean> expansion = new java.util.HashMap<>();
     private boolean helpersExpanded;
-
-    /**
-     * Set while a caller has already decided (or is about to decide) the
-     * scroll position rebuild() would otherwise fight over: revealLine
-     * driving an anchor, or show() loading a brand new document, where the
-     * previous vvalue was measured against different content and restoring
-     * it is meaningless. refresh() -- the same document repainted -- leaves
-     * this false, because there the restore is the whole point.
-     */
-    private boolean scrollClaimed;
 
     private Consumer<Integer> onMemberRead = line -> { };
     private BiConsumer<CodeArea, Integer> onBodyBuilt = (area, startLine) -> { };
@@ -104,25 +96,25 @@ final class SkimView extends ScrollPane {
         // would be meaningless here. The caller decides where to land --
         // scrollToTop() or a revealLine() -- right after this returns; a
         // restore queued behind it would land a pulse later and undo it.
-        scrollClaimed = true;
-        try {
-            rebuild();
-        } finally {
-            scrollClaimed = false;
-        }
+        rebuild(false);
     }
 
-    /** Repaints against a new changed set / finding set without touching expansion state. */
+    /**
+     * Repaints against a new changed set / finding set without touching
+     * expansion state. The same document repainted, so the reader's place in
+     * it is worth keeping -- which is why this restores the scroll and
+     * {@link #show} does not.
+     */
     void refresh(Set<Integer> changed, Map<Integer, String> findingLabels) {
         this.changed = Set.copyOf(changed);
         this.findingLabels = Map.copyOf(findingLabels);
-        rebuild();
+        rebuild(true);
     }
 
     /** The line at the top of the skim viewport, so {@code z} can hand it to the full-text area. */
     int topLine() {
         double offset = getVvalue() * Math.max(1, rows.getHeight() - getViewportBounds().getHeight());
-        for (javafx.scene.Node node : rows.getChildren()) {
+        for (Node node : rows.getChildren()) {
             if (node.getBoundsInParent().getMaxY() >= offset
                     && node.getProperties().get("drydock.line") instanceof Integer line) {
                 return line;
@@ -169,41 +161,35 @@ final class SkimView extends ScrollPane {
      * member opens it.</p>
      */
     void revealLine(int line) {
-        if (outline.memberAtOrAfter(line).isEmpty()) {
+        Optional<SourceOutline.Member> resolved = outline.memberAtOrAfter(line);
+        if (resolved.isEmpty()) {
             scrollToTop();
             return;
         }
-        boolean pointedAt = outline.memberAt(line).isPresent();
-        outline.memberAtOrAfter(line).ifPresent(member -> {
-            if (pointedAt) {
-                expansion.put(member.startLine(), true);
-                onMemberRead.accept(member.startLine());
+        SourceOutline.Member member = resolved.get();
+        if (member.covers(line)) {
+            expansion.put(member.startLine(), true);
+            onMemberRead.accept(member.startLine());
+        }
+        rebuild(false);
+        // rebuild() replaced every row, so until a layout pass runs they all
+        // report bounds of zero -- and the target below would come out as 0,
+        // i.e. "scroll to the top", every single time. Forcing the pass here
+        // rather than deferring keeps the scroll in the same frame as the
+        // expansion, so `z` round-trips without a visible jump to the top and
+        // back.
+        applyCss();
+        layout();
+        rows.applyCss();
+        rows.layout();
+        for (Node node : rows.getChildren()) {
+            if (Integer.valueOf(member.startLine()).equals(node.getProperties().get("drydock.line"))) {
+                double target = node.getBoundsInParent().getMinY()
+                        / Math.max(1, rows.getHeight() - getViewportBounds().getHeight());
+                setVvalue(Math.max(0, Math.min(1, target)));
+                return;
             }
-            scrollClaimed = true;
-            try {
-                rebuild();
-            } finally {
-                scrollClaimed = false;
-            }
-            // rebuild() replaced every row, so until a layout pass runs they
-            // all report bounds of zero -- and the target below would come out
-            // as 0, i.e. "scroll to the top", every single time. Forcing the
-            // pass here rather than deferring keeps the scroll in the same
-            // frame as the expansion, so `z` round-trips without a visible
-            // jump to the top and back.
-            applyCss();
-            layout();
-            rows.applyCss();
-            rows.layout();
-            for (javafx.scene.Node node : rows.getChildren()) {
-                if (Integer.valueOf(member.startLine()).equals(node.getProperties().get("drydock.line"))) {
-                    double target = node.getBoundsInParent().getMinY()
-                            / Math.max(1, rows.getHeight() - getViewportBounds().getHeight());
-                    setVvalue(Math.max(0, Math.min(1, target)));
-                    return;
-                }
-            }
-        });
+        }
     }
 
     /**
@@ -225,12 +211,17 @@ final class SkimView extends ScrollPane {
         return explicit != null ? explicit : member.isChanged(changed);
     }
 
-    private void rebuild() {
-        // Expanding one member must not move every other one under the
-        // reader. Captured, not read in the lambda: `scrollClaimed` is
-        // already back to false by the time a deferred read would run.
+    /**
+     * @param restoreScroll whether to put the reader back where they were.
+     *                      False for callers that have already decided the
+     *                      position themselves -- {@link #show} loading a new
+     *                      document, {@link #revealLine} driving an anchor --
+     *                      where a restore queued behind them would land a
+     *                      pulse later and undo it.
+     */
+    private void rebuild(boolean restoreScroll) {
+        // Expanding one member must not move every other one under the reader.
         double scrollPosition = getVvalue();
-        boolean restoreScroll = !scrollClaimed;
         rows.getChildren().clear();
         List<SourceOutline.Member> folded = new ArrayList<>();
         for (SourceOutline.Member member : outline.members()) {
@@ -317,7 +308,7 @@ final class SkimView extends ScrollPane {
         row.setOnAction(e -> {
             expansion.put(member.startLine(), !isExpanded(member));
             onMemberRead.accept(member.startLine());
-            rebuild();
+            rebuild(true);
         });
 
         VBox group = new VBox(row);
@@ -348,7 +339,7 @@ final class SkimView extends ScrollPane {
         row.getStyleClass().add("skim-header");
         row.setOnAction(e -> {
             helpersExpanded = !helpersExpanded;
-            rebuild();
+            rebuild(true);
         });
 
         VBox group = new VBox(row);
