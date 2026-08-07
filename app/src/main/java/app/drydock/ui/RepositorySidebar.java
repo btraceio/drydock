@@ -299,7 +299,13 @@ public final class RepositorySidebar extends VBox {
         Button clearFilters = new Button("Clear filters");
         clearFilters.getStyleClass().add("sidebar-empty-clear");
         clearFilters.setOnAction(e -> {
+            // filterField.clear() re-arms filterDebounce (its text listener
+            // fires playFromStart()); left alone, it would fire again ~150ms
+            // later and call rebuildTree() directly, bypassing the
+            // requestRebuild() coalescing that filterBar.clear()'s callback
+            // already triggers -- two rebuilds instead of the required one.
             filterField.clear();
+            filterDebounce.stop();
             filterBar.clear();
         });
         emptyState = new VBox(8, emptyMessage, clearFilters);
@@ -675,10 +681,17 @@ public final class RepositorySidebar extends VBox {
 
         List<Repository> repositories = sorted(repositoryManager.repositories());
         List<TreeItem<SidebarNode>> repoItems = new ArrayList<>();
-        // Surviving NON-exempt session rows. The exempt row (the active
-        // session) can keep a repo -- and the tree -- non-empty on its own;
-        // it must not count as a "match" or the empty state would never
-        // show while a session is running, filter or no filter.
+        // Surviving rows of ANY kind (session, unopened worktree, stale/
+        // locked bucket), except a session row that is present only because
+        // {@code isExempt} accepted it despite failing the filter -- the
+        // active session can keep a repo, and the tree, non-empty on its
+        // own, and that must not count as a "match" or the empty state
+        // would never show while a session is running. A worktree/bucket
+        // row is never exempt, so it always counts when it survives: under
+        // an active chip filter those rows are already stripped by
+        // applyFacets, but a text-only query (chips inactive) leaves them
+        // in place, and a query that matches a branch or worktree path but
+        // no session is a real match, not an empty result.
         int matchCount = 0;
 
         for (Repository repository : repositories) {
@@ -696,8 +709,10 @@ public final class RepositorySidebar extends VBox {
                 continue;
             }
             for (SidebarNode child : children) {
-                if (child instanceof SidebarNode.SessionNode sessionNode
-                        && !isExempt(sessionNode.session().id())) {
+                boolean exemptOnly = child instanceof SidebarNode.SessionNode sessionNode
+                        && !filter.matches(sessionNode.session())
+                        && isExempt(sessionNode.session().id());
+                if (!exemptOnly) {
                     matchCount++;
                 }
             }
@@ -750,16 +765,17 @@ public final class RepositorySidebar extends VBox {
         boolean swap = nothingMatched && treeIsEmpty;
         boolean banner = nothingMatched && !treeIsEmpty;
 
+        Node focusOwner = getScene() == null ? null : getScene().getFocusOwner();
+
         if (swap && !getChildren().contains(emptyState)) {
-            boolean treeHadFocus = isInsideTree(getScene() == null ? null : getScene().getFocusOwner());
+            boolean treeHadFocus = isDescendantOf(focusOwner, tree);
             getChildren().set(getChildren().indexOf(tree), emptyState);
             VBox.setVgrow(emptyState, Priority.ALWAYS);
             if (treeHadFocus) {
                 emptyState.getChildren().get(1).requestFocus();
             }
         } else if (!swap && getChildren().contains(emptyState)) {
-            boolean buttonHadFocus = getScene() != null
-                    && emptyState.getChildren().get(1).equals(getScene().getFocusOwner());
+            boolean buttonHadFocus = isDescendantOf(focusOwner, emptyState);
             getChildren().set(getChildren().indexOf(emptyState), tree);
             VBox.setVgrow(tree, Priority.ALWAYS);
             if (buttonHadFocus) {
@@ -770,10 +786,10 @@ public final class RepositorySidebar extends VBox {
         emptyBanner.setManaged(banner);
     }
 
-    /** Whether {@code focusOwner} is {@link #tree} or a descendant of it. */
-    private boolean isInsideTree(Node focusOwner) {
-        for (Node node = focusOwner; node != null; node = node.getParent()) {
-            if (node == tree) {
+    /** Whether {@code node} is {@code ancestor} itself or a descendant of it. */
+    private static boolean isDescendantOf(Node node, Node ancestor) {
+        for (Node current = node; current != null; current = current.getParent()) {
+            if (current == ancestor) {
                 return true;
             }
         }
