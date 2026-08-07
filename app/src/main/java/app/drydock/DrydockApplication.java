@@ -45,6 +45,7 @@ import app.drydock.ui.UiErrors;
 import app.drydock.ui.model.WorkspaceViewModel;
 import javafx.application.Application;
 import javafx.application.Platform;
+import javafx.geometry.Bounds;
 import javafx.scene.Node;
 import javafx.scene.control.Alert;
 import javafx.scene.control.ButtonType;
@@ -58,6 +59,9 @@ import javafx.scene.input.KeyEvent;
 import javafx.stage.Stage;
 import javafx.stage.WindowEvent;
 
+import java.awt.AWTException;
+import java.awt.Robot;
+import java.awt.event.InputEvent;
 import java.awt.image.BufferedImage;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
@@ -66,6 +70,8 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Set;
 import javax.imageio.ImageIO;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
@@ -699,6 +705,14 @@ public final class DrydockApplication extends Application {
         //   keys              print the keyboard-ownership dump
         //   shot:/tmp/a.png   snapshot the scene
         //   mark:label        print a marker to synchronise on
+        //   hover:session:<n> real OS mouse move (java.awt.Robot) onto the
+        //                     nth .session-row/.repo-row ("repo:<n>" for the
+        //                     latter); hover:none parks the pointer away.
+        //                     Diag-only: the row-overlay hover fade has no
+        //                     other synthesis point (see diagHover).
+        //   clickedge:session:<n>  real OS click near the row's trailing
+        //                     edge, past the overlay's buttons -- proves
+        //                     pickOnBounds=false passthrough (see diagClickEdge).
         // Inert unless -Dapp.drydock.diag.tabScript is set.
         String tabScript = System.getProperty("app.drydock.diag.tabScript");
         if (tabScript != null) {
@@ -1350,6 +1364,24 @@ public final class DrydockApplication extends Application {
                 case "keys" -> System.out.println("[diag] keys " + mainWorkspace.diagKeyboardState()
                         + " focusOwner=" + describeFocusOwner());
                 case "shot" -> diagSnapshot(stage, Path.of(arg));
+                // DIAG-ONLY, added for the sidebar row-layout visual pass: the
+                // row-overlay's hover fade and pickOnBounds=false passthrough
+                // have no other observable hook (Node.hoverProperty is driven
+                // by Scene's real mouse-move picking, not by anything a
+                // fireEvent-style synthetic event reaches), so this drives an
+                // actual OS mouse move via java.awt.Robot over the nth
+                // ".session-row" or ".repo-row" node found in the sidebar
+                // (arg is "session:<n>" or "repo:<n>"; "none" parks the
+                // pointer at the stage's top-left corner so a later shot is a
+                // true resting state). Not reachable outside
+                // app.drydock.diag.tabScript.
+                case "hover" -> diagHover(stage, sidebar, arg);
+                // DIAG-ONLY, same rationale as "hover": a real OS click via
+                // Robot at the row's trailing edge -- inside the overlay's
+                // bounds but outside its buttons -- is the only way to prove
+                // pickOnBounds=false actually lets the click fall through to
+                // the row underneath. arg is "session:<n>".
+                case "clickedge" -> diagClickEdge(stage, sidebar, arg);
                 default -> System.out.println("[diag] mark " + arg);
             }
         } catch (RuntimeException e) {
@@ -1498,6 +1530,86 @@ public final class DrydockApplication extends Application {
         }, "diag-snapshot");
         writer.setDaemon(true);
         writer.start();
+    }
+
+    /**
+     * Diagnostic-only ({@code app.drydock.diag.tabScript} "hover" verb): moves
+     * the real OS pointer, via {@link Robot}, over the nth row matching
+     * {@code kind}'s CSS class ("session" -&gt; .session-row, "repo" -&gt;
+     * .repo-row), or parks it at the stage's top-left corner for
+     * {@code arg == "none"}. Fire-and-forget: the resulting Glass mouse-move
+     * event reaches the FX event queue on its own schedule, so callers should
+     * leave real wall-clock time (a later script step) before snapshotting.
+     */
+    private void diagHover(Stage stage, RepositorySidebar sidebar, String arg) {
+        try {
+            Robot robot = new Robot();
+            if ("none".equals(arg.strip())) {
+                robot.mouseMove((int) stage.getX() + 4, (int) stage.getY() + 4);
+                System.out.println("[diag] hover parked at stage corner");
+                return;
+            }
+            Bounds screen = diagRowBounds(sidebar, arg);
+            if (screen == null) {
+                System.out.println("[diag] hover: no row for '" + arg + "'");
+                return;
+            }
+            int x = (int) (screen.getMaxX() - 6);
+            int y = (int) (screen.getMinY() + screen.getHeight() / 2);
+            robot.mouseMove(x, y);
+            System.out.println("[diag] hover moved to (" + x + "," + y + ") for '" + arg + "'");
+        } catch (AWTException | RuntimeException e) {
+            System.out.println("[diag] hover failed: " + e);
+        }
+    }
+
+    /**
+     * Diagnostic-only ({@code app.drydock.diag.tabScript} "clickedge" verb): a
+     * real OS click, via {@link Robot}, a few pixels in from the row's
+     * trailing edge -- inside the overlay strip's bounds but past its last
+     * button -- proving {@code pickOnBounds = false} lets the click fall
+     * through to the row underneath rather than being swallowed by the
+     * overlay. arg is "session:&lt;n&gt;" or "repo:&lt;n&gt;".
+     */
+    private void diagClickEdge(Stage stage, RepositorySidebar sidebar, String arg) {
+        try {
+            Bounds screen = diagRowBounds(sidebar, arg);
+            if (screen == null) {
+                System.out.println("[diag] clickedge: no row for '" + arg + "'");
+                return;
+            }
+            Robot robot = new Robot();
+            int x = (int) (screen.getMaxX() - 2);
+            int y = (int) (screen.getMinY() + screen.getHeight() / 2);
+            robot.mouseMove(x, y);
+            robot.mousePress(InputEvent.BUTTON1_DOWN_MASK);
+            robot.mouseRelease(InputEvent.BUTTON1_DOWN_MASK);
+            System.out.println("[diag] clickedge clicked at (" + x + "," + y + ") for '" + arg + "'");
+        } catch (AWTException | RuntimeException e) {
+            System.out.println("[diag] clickedge failed: " + e);
+        }
+    }
+
+    /**
+     * Diagnostic-only: screen-space bounds of the nth realized row matching
+     * {@code arg} ("session:&lt;n&gt;" or "repo:&lt;n&gt;"), in the order the
+     * scene graph currently holds them (top-to-bottom for realized
+     * TreeView cells).
+     */
+    private static Bounds diagRowBounds(RepositorySidebar sidebar, String arg) {
+        String[] parts = arg.split(":", 2);
+        String cssClass = "repo".equals(parts[0]) ? ".repo-row" : ".session-row";
+        int index = parts.length > 1 ? Integer.parseInt(parts[1].strip()) : 0;
+        Set<Node> matches = sidebar.lookupAll(cssClass);
+        List<Node> rows = new ArrayList<>(matches);
+        rows.sort((a, b) -> Double.compare(
+                a.localToScreen(a.getBoundsInLocal()).getMinY(),
+                b.localToScreen(b.getBoundsInLocal()).getMinY()));
+        if (index < 0 || index >= rows.size()) {
+            return null;
+        }
+        Node row = rows.get(index);
+        return row.localToScreen(row.getBoundsInLocal());
     }
 
     /** Diagnostic-only: runs {@code work} on the FX thread and waits for its result. */
