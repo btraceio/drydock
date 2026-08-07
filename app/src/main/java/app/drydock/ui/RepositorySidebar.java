@@ -1620,7 +1620,7 @@ public final class RepositorySidebar extends VBox {
             }
         }
 
-        private HBox buildRepoRow(Repository repository) {
+        private StackPane buildRepoRow(Repository repository) {
             Label caret = new Label("▶");
             caret.getStyleClass().add("repo-caret");
             boolean expanded = getTreeItem() != null && getTreeItem().isExpanded();
@@ -1719,7 +1719,10 @@ public final class RepositorySidebar extends VBox {
             ContextMenu newMenu = newSessionMenu(repository);
             newSession.setOnAction(e -> newMenu.show(newSession, Side.BOTTOM, 0, 4));
 
-            HBox row = new HBox(7, caret, text, count, rescan, newSession);
+            HBox actions = new HBox(2, rescan, newSession);
+            actions.setAlignment(Pos.CENTER_RIGHT);
+
+            HBox row = new HBox(7, caret, text, count);
             row.getStyleClass().add("repo-row");
             row.setAlignment(Pos.CENTER_LEFT);
             row.setOnMouseClicked(event -> {
@@ -1732,7 +1735,7 @@ public final class RepositorySidebar extends VBox {
                     event.consume();
                 }
             });
-            return row;
+            return RowOverlay.wrap(row, actions);
         }
 
         /** Just the counts fragment: {@code · 3 wt · 2 locked · 1 stale}, or "" before discovery / when a note is showing. */
