@@ -98,6 +98,53 @@ class SkimViewTest extends ApplicationTest {
         settle();
     }
 
+    /**
+     * Waits for {@code condition} rather than for a fixed number of pulses.
+     *
+     * <p>How many layout passes a scroll takes to settle is not knowable from
+     * here, and it changes with how busy the machine is: two {@code settle()}
+     * calls were enough when this class ran alone and not when it ran inside
+     * the full suite. A timeout still fails the test, so this waits for the
+     * outcome without hiding its absence.</p>
+     */
+    private void waitUntil(String what, java.util.concurrent.Callable<Boolean> condition) {
+        try {
+            org.testfx.util.WaitForAsyncUtils.waitFor(5, java.util.concurrent.TimeUnit.SECONDS, condition);
+        } catch (java.util.concurrent.TimeoutException e) {
+            throw new AssertionError("timed out waiting until " + what, e);
+        }
+    }
+
+    /** The row keyed by {@code line}, or null while it is not rendered. */
+    private Node rowFor(int line) {
+        Region rows = (Region) lookup(".skim-rows").query();
+        return rows.getChildrenUnmodifiable().stream()
+                .filter(node -> Integer.valueOf(line).equals(node.getProperties().get("drydock.line")))
+                .findFirst().orElse(null);
+    }
+
+    /** How far the view is scrolled, in pixels. */
+    private double scrollOffset() {
+        Region rows = (Region) lookup(".skim-rows").query();
+        return skim.getVvalue() * (rows.getHeight() - skim.getViewportBounds().getHeight());
+    }
+
+    /**
+     * Asserts the row keyed by {@code line} sits at the top of the viewport.
+     *
+     * <p>Derived from that row's own laid-out position rather than compared
+     * against a chosen vvalue: a threshold is a guess about geometry, and the
+     * question here is only ever "is this row where the reader is looking".</p>
+     */
+    private void assertRowAtTop(int line, String because) {
+        waitUntil("row " + line + " is at the top", () -> {
+            Node row = rowFor(line);
+            return row != null && Math.abs(row.getBoundsInParent().getMinY() - scrollOffset()) < 2.0;
+        });
+        Node row = rowFor(line);
+        assertEquals(row.getBoundsInParent().getMinY(), scrollOffset(), 2.0, because);
+    }
+
     private List<String> rowSignatures() {
         return lookup(".skim-signature").queryAll().stream()
                 .map(node -> ((Label) node).getText())
@@ -208,21 +255,19 @@ class SkimViewTest extends ApplicationTest {
     @Test
     void revealingScrollsToTheMemberRatherThanTheTopOfTheFile() {
         show(Set.of(), Map.of());
-        // Short enough that the outline cannot fit: with no overflow there is
-        // nowhere to scroll and the bug cannot show itself. The VIEW is sized,
-        // never the shared stage.
-        interact(() -> {
-            skim.setMinHeight(140);
-            skim.setPrefHeight(140);
-            skim.setMaxHeight(140);
-        });
-        org.testfx.util.WaitForAsyncUtils.waitForFxEvents();
+        settle();
+        // Derived, like every other scroll test here: the 140px literal this
+        // used to hand-pick was TALLER than the folded outline, so there was
+        // no overflow until the reveal itself expanded a member -- and the
+        // assertion then passed on the few pixels that produced, whether or
+        // not the scroll had gone anywhere near the member.
+        shrinkViewportToQuarterOfContent();
 
         interact(() -> skim.revealLine(8));
-        org.testfx.util.WaitForAsyncUtils.waitForFxEvents();
+        settle();
+        settle();
 
-        assertTrue(skim.getVvalue() > 0.0,
-                "scrolled to the revealed member, not to the top: vvalue=" + skim.getVvalue());
+        assertRowAtTop(7, "scrolled to the revealed member, not to the top");
     }
 
     /**
@@ -254,6 +299,28 @@ class SkimViewTest extends ApplicationTest {
     }
 
     /**
+     * Resolving forward onto an untouched private helper is the case with no
+     * row of its own: the helpers share one folded group row, keyed by the
+     * FIRST of them. Landing on a later one matched nothing and left the
+     * reader wherever they happened to be.
+     */
+    @Test
+    void revealingForwardOntoAFoldedHelperScrollsToTheGroupThatHoldsIt() {
+        show(Set.of(), Map.of());
+        settle();
+        shrinkViewportToQuarterOfContent();
+
+        // Line 14: the blank line between snapToGuide (11..13) and persist
+        // (15..17). It resolves forward to persist, which is folded away.
+        int blankLineBeforePersist = SOURCE.lines().toList().indexOf("    private void persist() {");
+        interact(() -> skim.revealLine(blankLineBeforePersist));
+        settle();
+        settle();
+
+        assertRowAtTop(11, "scrolled to the group row that holds persist, not left at the top");
+    }
+
+    /**
      * The reveal has to survive the pulse after it. Expanding a member makes
      * the content taller, and ScrollPaneSkin's next layout re-derives vvalue
      * to preserve the previous ABSOLUTE offset -- which silently undid the
@@ -279,8 +346,7 @@ class SkimViewTest extends ApplicationTest {
         // vvalue, not topLine(): topLine() reports the row whose BOTTOM edge
         // touches the viewport top, so the row above the target answers it.
         // The scroll position is what the overwrite was destroying.
-        assertTrue(skim.getVvalue() > 0.3,
-                "the view is down at the revealed member, one pulse later too: vvalue=" + skim.getVvalue());
+        assertRowAtTop(11, "the view is down at the revealed member, one pulse later too");
     }
 
 

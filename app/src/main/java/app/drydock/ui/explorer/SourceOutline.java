@@ -179,8 +179,16 @@ public record SourceOutline(List<Member> members, int lineCount) {
         return lower.startsWith("private ") || lower.startsWith("- ") || lower.startsWith("internal ");
     }
 
-    /** Drops a trailing line comment so {@code foo(); // note {} } does not move the brace depth. */
-    private static String stripComment(String line) {
+    /**
+     * Drops a trailing line comment so {@code foo(); // note {} } does not
+     * move the brace depth.
+     *
+     * <p>Package-visible because a signature is built from the stripped form:
+     * anything comparing a raw source line against {@link Member#signature()}
+     * has to strip it the same way, or a declaration with a trailing comment
+     * silently fails to match.</p>
+     */
+    static String stripComment(String line) {
         int at = line.indexOf("//");
         return at < 0 ? line : line.substring(0, at);
     }

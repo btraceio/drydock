@@ -51,6 +51,17 @@ final class SkimView extends ScrollPane {
     private final Map<Integer, Boolean> expansion = new java.util.HashMap<>();
     private boolean helpersExpanded;
 
+    /**
+     * How many layout passes a reveal may spend trying to make its scroll
+     * stick. Generous enough for the several passes a rebuild can trigger,
+     * finite so an unreachable target cannot re-apply forever.
+     */
+    private static final int MAX_SCROLL_ATTEMPTS = 8;
+
+    /** The row a reveal is still trying to put at the top, or -1 for none. */
+    private int pendingTopRow = -1;
+    private int pendingAttempts;
+
     private Consumer<Integer> onMemberRead = line -> { };
     private BiConsumer<CodeArea, Integer> onBodyBuilt = (area, startLine) -> { };
 
@@ -60,6 +71,12 @@ final class SkimView extends ScrollPane {
         setHbarPolicy(ScrollBarPolicy.NEVER);
         rows.getStyleClass().add("skim-rows");
         setContent(rows);
+        // Every layout is a chance for a pending reveal to land: the pass
+        // that overwrites the scroll and the pass that finally reports real
+        // geometry are both layouts, and which one comes when is exactly what
+        // this class cannot predict.
+        rows.layoutBoundsProperty().addListener((obs, was, is) -> applyPendingTopRow());
+        viewportBoundsProperty().addListener((obs, was, is) -> applyPendingTopRow());
     }
 
     /** Called with the start line of a member the reader opened (it counts as read). */
@@ -111,11 +128,30 @@ final class SkimView extends ScrollPane {
         rebuild(true);
     }
 
-    /** The line at the top of the skim viewport, so {@code z} can hand it to the full-text area. */
+    /**
+     * How far the content can scroll, in pixels: the conversion between a
+     * vvalue fraction and an absolute offset. Floored at 1 so it is always
+     * safe to divide by; callers that care whether there is anything to
+     * scroll at all check the real overflow themselves.
+     */
+    private double scrollableSpan() {
+        return Math.max(1, rows.getHeight() - getViewportBounds().getHeight());
+    }
+
+    /**
+     * The line at the top of the skim viewport, so {@code z} can hand it to
+     * the full-text area.
+     *
+     * <p>Strictly greater than the offset: a row whose bottom edge lands
+     * exactly on the viewport's top edge shows no pixels and is not what the
+     * reader is looking at. Not covered by a test -- the rows carry 1px of
+     * spacing, so in this layout two edges never actually coincide, and a
+     * test for it could only pass by construction.</p>
+     */
     int topLine() {
-        double offset = getVvalue() * Math.max(1, rows.getHeight() - getViewportBounds().getHeight());
+        double offset = getVvalue() * scrollableSpan();
         for (Node node : rows.getChildren()) {
-            if (node.getBoundsInParent().getMaxY() >= offset
+            if (node.getBoundsInParent().getMaxY() > offset
                     && node.getProperties().get("drydock.line") instanceof Integer line) {
                 return line;
             }
@@ -138,6 +174,7 @@ final class SkimView extends ScrollPane {
             return;
         }
         event.consume();
+        cancelPendingTopRow();
         setVvalue(Math.max(0, Math.min(1, getVvalue() - event.getDeltaY() / overflow)));
     }
 
@@ -191,13 +228,6 @@ final class SkimView extends ScrollPane {
      * line. Scrolling to the group is the closest the view can get to a
      * member it is deliberately not opening.</p>
      *
-     * <p><b>Not reliable yet.</b> This fallback lands correctly when its test
-     * runs alone and does NOT when the same test runs inside the full suite
-     * (vvalue stays at the ~0.09 the ScrollPane itself produces), so
-     * something about the surrounding FX activity decides whether it takes
-     * effect. The order-dependent test was removed rather than left to flake;
-     * this path is an improvement over matching nothing at all, not a
-     * finished fix, and it wants its own investigation.</p>
      */
     private int rowLineFor(SourceOutline.Member member) {
         for (Node node : rows.getChildren()) {
@@ -213,32 +243,72 @@ final class SkimView extends ScrollPane {
     }
 
     /**
-     * Puts the row carrying {@code rowLine} at the top of the viewport, and
-     * then again on the next pulse.
+     * Asks for the row carrying {@code rowLine} to sit at the top of the
+     * viewport, and keeps asking until it does.
      *
-     * <p>Twice, because once does not hold. When the rebuild above changed
-     * the content's height -- which revealing usually does, since it opens a
-     * body -- {@code ScrollPaneSkin}'s next layout pass re-derives vvalue to
-     * preserve the previous ABSOLUTE offset, overwriting whatever was set
-     * synchronously here. Measured: a target of 0.41 became 0.05, the old
-     * offset expressed against the taller content. The synchronous write
-     * still goes first so the common case never flickers; the deferred one is
-     * what makes it stick.</p>
+     * <p>One write does not hold. When the rebuild above changed the
+     * content's height -- which revealing usually does, since it opens a body
+     * -- {@code ScrollPaneSkin}'s next layout re-derives vvalue to preserve
+     * the previous ABSOLUTE offset, overwriting whatever was set here.
+     * Measured: a target of 0.41 came back as 0.05, the old offset expressed
+     * against the taller content.</p>
+     *
+     * <p>How many layout passes that takes is not something this code can
+     * know -- a fixed "and again next pulse" landed when a test ran alone and
+     * missed when the same test ran inside the full suite. So the request is
+     * held and re-applied on each layout until the value sticks, rather than
+     * guessed at. It is bounded by {@link #MAX_SCROLL_ATTEMPTS} so an
+     * unreachable target cannot re-apply forever, and any deliberate scroll
+     * -- the wheel, {@code scrollToTop} -- drops it, so it can never fight
+     * the reader.</p>
      */
     private void scrollRowToTop(int rowLine) {
-        applyTopRow(rowLine);
-        Platform.runLater(() -> applyTopRow(rowLine));
+        pendingTopRow = rowLine;
+        pendingAttempts = MAX_SCROLL_ATTEMPTS;
+        applyPendingTopRow();
     }
 
-    private void applyTopRow(int rowLine) {
+    /**
+     * Called on every layout of the rows, until the pending request lands.
+     *
+     * <p>Success is only ever concluded from a LATER pass: reading vvalue
+     * back immediately after setting it always agrees, so treating that as
+     * "it held" cleared the request before the overwrite it exists to
+     * survive. Here, finding the value still on target at the start of a
+     * subsequent layout is what proves it stuck.</p>
+     */
+    private void applyPendingTopRow() {
+        if (pendingTopRow < 0) {
+            return;
+        }
+        Node row = null;
         for (Node node : rows.getChildren()) {
-            if (Integer.valueOf(rowLine).equals(node.getProperties().get("drydock.line"))) {
-                double target = node.getBoundsInParent().getMinY()
-                        / Math.max(1, rows.getHeight() - getViewportBounds().getHeight());
-                setVvalue(Math.max(0, Math.min(1, target)));
-                return;
+            if (Integer.valueOf(pendingTopRow).equals(node.getProperties().get("drydock.line"))) {
+                row = node;
+                break;
             }
         }
+        if (row == null || rows.getHeight() - getViewportBounds().getHeight() <= 0) {
+            // No row yet, not laid out yet, or nothing to scroll: this pass
+            // cannot answer, so keep the request for one that can. Attempts
+            // are not spent on a pass that was never able to try.
+            return;
+        }
+        double target = Math.max(0, Math.min(1, row.getBoundsInParent().getMinY() / scrollableSpan()));
+        if (Math.abs(getVvalue() - target) < 0.001) {
+            pendingTopRow = -1;
+            return;
+        }
+        if (pendingAttempts-- <= 0) {
+            pendingTopRow = -1;
+            return;
+        }
+        setVvalue(target);
+    }
+
+    /** Drops a pending reveal, so a deliberate scroll is never argued with. */
+    private void cancelPendingTopRow() {
+        pendingTopRow = -1;
     }
 
     /**
@@ -249,6 +319,7 @@ final class SkimView extends ScrollPane {
      * saying they are there.
      */
     void scrollToTop() {
+        cancelPendingTopRow();
         applyCss();
         layout();
         setVvalue(0);
@@ -282,8 +353,19 @@ final class SkimView extends ScrollPane {
     }
 
     private void rebuild(boolean restoreScroll) {
-        // Expanding one member must not move every other one under the reader.
-        double scrollPosition = getVvalue();
+        // Expanding one member must not move every other one under the
+        // reader -- so what is preserved is the PIXEL offset, not the vvalue
+        // fraction. Opening a body makes the content taller, and the same
+        // fraction of a taller document is a different place: restoring 0.4
+        // of 150px where it was 0.4 of 100px moves the reader 20px down,
+        // which is exactly what this claims not to do.
+        //
+        // Not covered by a test: one written against refresh() restored
+        // reliably on its own and timed out inside the full suite, the same
+        // FX-timing sensitivity this class keeps hitting. The arithmetic is
+        // the honest form of what the line above always claimed; verifying it
+        // wants a harness that can settle layout deterministically.
+        double scrollOffset = getVvalue() * scrollableSpan();
         rows.getChildren().clear();
         List<SourceOutline.Member> folded = new ArrayList<>();
         for (SourceOutline.Member member : outline.members()) {
@@ -310,7 +392,8 @@ final class SkimView extends ScrollPane {
             // outranks the position captured here.
             Platform.runLater(() -> {
                 if (getVvalue() == 0) {
-                    setVvalue(scrollPosition);
+                    double span = scrollableSpan();
+                    setVvalue(Math.max(0, Math.min(1, scrollOffset / span)));
                 }
             });
         }
@@ -419,9 +502,11 @@ final class SkimView extends ScrollPane {
         // body's first line costs a row per open member and reads like a
         // rendering fault -- so it is dropped, but only when line `start`
         // really is the signature (a wrapped or annotated declaration is
-        // not) and only when something is left underneath it.
+        // not) and only when something is left underneath it. Compared
+        // through stripComment because that is how the signature was built:
+        // `void run() { // see below` would not match its own line otherwise.
         boolean repeatsSignature = to > start && start <= lines.size()
-                && lines.get(start - 1).strip().equals(member.signature());
+                && SourceOutline.stripComment(lines.get(start - 1)).strip().equals(member.signature());
         int from = repeatsSignature ? start + 1 : start;
         StringBuilder text = new StringBuilder();
         for (int line = from; line <= to; line++) {
