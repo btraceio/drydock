@@ -9,6 +9,7 @@ import app.drydock.review.ReviewScopeRegistry;
 import javafx.event.EventType;
 import javafx.scene.Node;
 import javafx.scene.Scene;
+import javafx.scene.control.Button;
 import javafx.scene.control.Label;
 import javafx.scene.control.TextArea;
 import javafx.scene.input.KeyCode;
@@ -185,6 +186,44 @@ class ReviewDiffGutterSelectionTest extends ApplicationTest {
         assertEquals(expected.get().startKey(), composer.startKey());
         assertEquals(expected.get().endKey(), composer.endKey());
         assertNotEquals("n53", composer.endKey(), "the range must not reach the second hunk at all");
+    }
+
+    /**
+     * The stale-anchor regression this branch's review caught: {@code
+     * selectionAnchorIndex} used to be a plain position in {@link
+     * ReviewDiffColumn}'s row list, and {@link ReviewDiffColumn#expandRun}
+     * inserts rows in place without touching it. A real click anchors the
+     * selection on line 13; expanding the collapsed run sitting ABOVE it in
+     * the row list inserts rows before it, so the pre-fix index would come
+     * to point at whichever context line the expansion happened to land on
+     * -- not line 13. A shift-click on line 17 must still resolve a range
+     * that starts at 13, the line the human actually clicked, or the fix has
+     * regressed.
+     */
+    @Test
+    void expandingACollapsedRunAboveTheAnchorDoesNotMoveTheSelectionStart() {
+        showDiff(hunkWithACollapsedRunAboveASecondChange("src/Big.java"));
+
+        clickOn(gutterForLine("13"));
+        awaitComposerOpen();
+        assertEquals("n13", openComposer().endKey(), "the anchor click must land on the clicked line");
+
+        Node collapsedRun = lookup(".review-collapsed-run").queryAll().stream().findFirst()
+                .orElseThrow(() -> new AssertionError("expected a collapsed run in " + column.diagRows()));
+        interact(((Button) collapsedRun)::fire);
+        awaitCondition(
+                () -> column.diagRows().stream().noneMatch(ReviewDiffRow.CollapsedRun.class::isInstance),
+                "the collapsed run never expanded; rows = " + column.diagRows());
+
+        press(KeyCode.SHIFT);
+        clickOn(gutterForLine("17"));
+        release(KeyCode.SHIFT);
+        awaitComposerRange("n13", "n17");
+
+        ReviewDiffRow.Composer composer = openComposer();
+        assertEquals("n13", composer.startKey(), "the range must start where the human clicked -- "
+                + "not wherever the run expansion shifted a stale anchor index to");
+        assertEquals("n17", composer.endKey());
     }
 
     /**
@@ -415,6 +454,32 @@ class ReviewDiffGutterSelectionTest extends ApplicationTest {
         return new UnifiedDiff.FileDiff(path, "M", 2, 0, false, false, List.of(
                 new UnifiedDiff.Hunk("@@ -1,7 +1,7 @@", first),
                 new UnifiedDiff.Hunk("@@ -50,7 +50,7 @@", second)));
+    }
+
+    /**
+     * One hunk, lines 1-17: a change at 2, then 10 lines of untouched
+     * context (past {@code ReviewDiffRows.COLLAPSE_THRESHOLD}, so it renders
+     * as a single collapsed run), then a second change at 13 with the
+     * collapsed run sitting directly above it, then a third at 17 to
+     * shift-click toward. Kept short enough that every row -- collapsed or,
+     * after expansion, expanded -- stays inside the {@code ListView}'s
+     * viewport without a scroll, since {@link ReviewDiffColumn#expandRun}
+     * deliberately does not scroll to keep the reader where they were.
+     */
+    private static UnifiedDiff.FileDiff hunkWithACollapsedRunAboveASecondChange(String path) {
+        List<UnifiedDiff.Line> lines = new ArrayList<>();
+        lines.add(context(1));
+        lines.add(add(2));
+        for (int i = 3; i <= 12; i++) {
+            lines.add(context(i));
+        }
+        lines.add(add(13));
+        for (int i = 14; i <= 16; i++) {
+            lines.add(context(i));
+        }
+        lines.add(add(17));
+        return new UnifiedDiff.FileDiff(path, "M", 1, 0, false, false,
+                List.of(new UnifiedDiff.Hunk("@@ -1,17 +1,17 @@", lines)));
     }
 
     private static UnifiedDiff.Line context(int n) {

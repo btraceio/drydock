@@ -686,6 +686,92 @@ class ReviewDestinationViewTest extends ApplicationTest {
     }
 
     /**
+     * A PR scope whose diff FAILED to load (a real {@code DiffService} call
+     * against a directory that is not a git repository) has nothing to
+     * anchor a comment to, so Submit must keep refusing -- but visibly: the
+     * bug this pins is the guard doing nothing at all with no explanation,
+     * silently and for the rest of the session (see {@code
+     * ReviewDestinationView#submitReview}).
+     */
+    @Test
+    void submitOnAFailedDiffShowsAVisibleRefusalInsteadOfDoingNothing() throws Exception {
+        Path notARepo = Files.createTempDirectory("drydock-review-view-not-a-repo");
+        ReviewScopeRegistry registry = new ReviewScopeRegistry();
+        ReviewScope scope = registry.mint(ReviewScopeRegistry.spec(
+                ReviewScope.Kind.WORKING_TREE, notARepo, Optional.of(notARepo), "HEAD", "HEAD",
+                Optional.of(new ReviewScope.PullRequestRef(7, Optional.empty())), Optional.empty()));
+        interact(() -> view.setItems(new QueueAssembly(
+                List.of(new ReviewItem(scope, ReviewItem.Group.MINE, "working", "drydock · vs HEAD")),
+                true, true), List.of("repo")));
+
+        // Wait for the diff to actually FAIL (not merely still be loading)
+        // before pressing Submit, so this proves the FAILED branch of the
+        // guard specifically, not the ordinary "still Diffing" window.
+        awaitCondition(() -> lookup(".review-diff-message").queryAllAs(Label.class).stream()
+                        .anyMatch(label -> label.getText().startsWith("Could not diff")),
+                "the diff never failed; fixture must point at a non-repo directory");
+        type(KeyCode.ENTER);
+
+        Label refusal = awaitCondition(() -> {
+            java.util.Optional<Node> found = lookup(".review-verdict-submit-refusal").tryQuery();
+            return found.filter(Node::isVisible).map(Label.class::cast);
+        }, "Submit on a failed diff never showed a visible refusal");
+        assertTrue(refusal.getText().toLowerCase(java.util.Locale.ROOT).contains("diff"),
+                "the message must say why: " + refusal.getText());
+        assertTrue(host.submittedScopes.isEmpty(),
+                "a PR scope with no diff to anchor comments to must not reach host.submit");
+    }
+
+    /**
+     * The other half of the same fix: a non-PR scope posts no comments
+     * either way ({@code Host#submit} routes it straight to the Finish
+     * hand-off), so a FAILED diff must not leave it stuck refusing forever
+     * the way {@link #submitOnAFailedDiffShowsAVisibleRefusalInsteadOfDoingNothing}
+     * proves a PR scope correctly does.
+     */
+    @Test
+    void submitOnAFailedDiffStillReachesTheHostForANonPrScope() throws Exception {
+        Path notARepo = Files.createTempDirectory("drydock-review-view-not-a-repo-2");
+        ReviewScopeRegistry registry = new ReviewScopeRegistry();
+        ReviewScope scope = registry.mint(ReviewScopeRegistry.spec(
+                ReviewScope.Kind.WORKING_TREE, notARepo, Optional.of(notARepo), "HEAD", "HEAD",
+                Optional.empty(), Optional.empty()));
+        assertTrue(scope.pr().isEmpty(), "this scope must not be a PR");
+        interact(() -> view.setItems(new QueueAssembly(
+                List.of(new ReviewItem(scope, ReviewItem.Group.MINE, "working", "drydock · vs HEAD")),
+                true, true), List.of("repo")));
+
+        type(KeyCode.ENTER);
+
+        awaitCondition(() -> !host.submittedScopes.isEmpty(),
+                "a non-PR scope must still reach host.submit even after its diff failed to load");
+        assertEquals(List.of(scope.id()), host.submittedScopes);
+    }
+
+    private <T> T awaitCondition(java.util.function.Supplier<java.util.Optional<T>> ready, String failureMessage) {
+        for (int i = 0; i < 200; i++) {
+            WaitForAsyncUtils.waitForFxEvents();
+            java.util.Optional<T> result = ready.get();
+            if (result.isPresent()) {
+                return result.get();
+            }
+            sleep(25);
+        }
+        throw new AssertionError(failureMessage);
+    }
+
+    private void awaitCondition(java.util.function.BooleanSupplier ready, String failureMessage) {
+        for (int i = 0; i < 200; i++) {
+            WaitForAsyncUtils.waitForFxEvents();
+            if (ready.getAsBoolean()) {
+                return;
+            }
+            sleep(25);
+        }
+        throw new AssertionError(failureMessage);
+    }
+
+    /**
      * Polls until the real diff has landed in the column: a single {@code
      * waitForFxEvents()} races the async {@code DiffService} call, which
      * runs on its own executor and hops back via {@code Platform.runLater}.

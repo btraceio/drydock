@@ -998,22 +998,31 @@ public final class ReviewDestinationView extends BorderPane {
      * such intent rather than posting a partial review; once everything is
      * settled it posts ONE review.
      *
-     * <p>Refuses outright while {@link ReviewDiffColumn#displayedDiff()}
-     * belongs to a different scope than the one selected -- the window
-     * between selecting a scope and its diff actually landing. {@code
-     * displayedScopeId} lags {@code setScope}: it is left pointing at
-     * whatever scope's diff last finished loading until the new one
-     * resolves, so a Submit pressed during that "Diffing…" window would
-     * otherwise build the {@code DiffIndex} from the OUTGOING scope's diff
-     * under the INCOMING scope's id. A comment whose real anchor is not in
-     * that stale index gets refused as "not in this diff" even though it
-     * is; worse, one that happens to share a key by coincidence could be
-     * admitted with an anchor GitHub rejects, and since the whole review
-     * posts as one atomic call, a single bad anchor 422s every other
-     * comment in it. Nothing visible happens on this path: the diff column
-     * is already showing "Diffing…" for exactly this reason, and Submit
-     * simply does not fire until the id catches up -- pressing it again
-     * once the diff lands succeeds normally.</p>
+     * <p>Refuses while {@link ReviewDiffColumn#displayedDiff()} belongs to a
+     * different scope than the one selected -- the window between selecting
+     * a scope and its diff actually landing. {@code displayedScopeId} lags
+     * {@code setScope}: it is left pointing at whatever scope's diff last
+     * finished loading until the new one resolves, so a Submit pressed
+     * during that "Diffing…" window would otherwise build the {@code
+     * DiffIndex} from the OUTGOING scope's diff under the INCOMING scope's
+     * id. A comment whose real anchor is not in that stale index gets
+     * refused as "not in this diff" even though it is; worse, one that
+     * happens to share a key by coincidence could be admitted with an anchor
+     * GitHub rejects, and since the whole review posts as one atomic call, a
+     * single bad anchor 422s every other comment in it.</p>
+     *
+     * <p>Pressing it again once the diff lands succeeds normally only on the
+     * SUCCESS branch: {@link ReviewDiffColumn#reload} clears {@code
+     * displayedScopeId} on a FAILED diff too, and re-selecting the already-
+     * selected scope is a no-op ({@code setScope}), so nothing here ever
+     * retries it. A PR scope genuinely has nothing to post without a diff to
+     * anchor comments to, so it stays refused -- but visibly now, via {@link
+     * ReviewVerdictBar#showSubmitRefused}, rather than doing nothing with no
+     * explanation. A non-PR scope posts no comments either way ({@link
+     * Host#submit} takes it straight to the Finish hand-off; see {@link
+     * #diagSubmit}), so a failed diff must not leave IT stuck refusing for
+     * the rest of the session -- it falls through and submits with nothing
+     * to post.</p>
      */
     private void submitReview() {
         Optional<ReviewScope> scope = selectedScope();
@@ -1021,7 +1030,13 @@ public final class ReviewDestinationView extends BorderPane {
             return;
         }
         if (!diffColumn.displayedScopeId().map(id -> id.equals(scope.get().id())).orElse(false)) {
-            return;
+            boolean failed = selectedOutcome().orElse(null) instanceof DiffOutcome.Failed;
+            if (!(failed && scope.get().pr().isEmpty())) {
+                verdictBar.showSubmitRefused(failed
+                        ? "the diff failed to load; nothing to submit"
+                        : "the diff is still loading; try again in a moment");
+                return;
+            }
         }
         List<ReviewIntent> counted = intents().stream()
                 .filter(ReviewIntent::countsTowardProgress)
@@ -1810,9 +1825,19 @@ public final class ReviewDestinationView extends BorderPane {
         });
     }
 
-    /** Diagnostic-only: the scope the queue has selected. */
+    /**
+     * Diagnostic-only: the scope the queue has selected.
+     *
+     * <p>{@code selectedScope()} resolves through {@code queue.selected()},
+     * which streams the same plain {@code List} that {@link
+     * ReviewQueueRail#setItems} mutates in place with {@code clear()}/{@code
+     * addAll()} on the FX Application Thread -- the identical race {@link
+     * #diagItems()} guards against. Reading it from the JUnit thread while a
+     * rebuild is in flight can throw or observe a half-built list, so the
+     * read has to happen ON the FX thread too.</p>
+     */
     public Optional<String> diagSelectedScopeId() {
-        return selectedScope().map(ReviewScope::id);
+        return ReviewDiagFxThread.call(() -> selectedScope().map(ReviewScope::id));
     }
 
     /**
@@ -1845,12 +1870,25 @@ public final class ReviewDestinationView extends BorderPane {
         return drilledIn ? narrowPage.name().toLowerCase(java.util.Locale.ROOT) : "wide";
     }
 
-    /** Diagnostic-only: the widths the drill-in actually resolved to, for the visual pass. */
+    /**
+     * Diagnostic-only: the widths the drill-in actually resolved to, for the
+     * visual pass.
+     *
+     * <p>{@link ReviewIntentRail#diagCards()} iterates {@code cards.getChildren()},
+     * the {@code ObservableList} the FX thread replaces wholesale with {@code
+     * setAll} on every rebuild ({@link ReviewIntentRail#setIntents}) -- the
+     * same in-place-mutation hazard {@link #diagItems()} guards against, just
+     * on a scene-graph children list instead of a queue's plain {@code List}.
+     * This whole summary is called only from the off-FX-thread diag driver
+     * ({@code DrydockApplication}), never from a JUnit test, but that is
+     * exactly the caller with no toolkit thread of its own to fall back on.</p>
+     */
     public String diagLayoutWidths() {
-        return diagNarrowPage() + " view=" + (int) getWidth() + " rails=" + (int) rails.getWidth()
+        return ReviewDiagFxThread.call(() -> diagNarrowPage() + " view=" + (int) getWidth()
+                + " rails=" + (int) rails.getWidth()
                 + " queue=" + (int) queue.getWidth() + " intents=" + (int) intentRail.getWidth()
                 + " | diff " + diffColumn.diagWidths()
-                + " | rail " + intentRail.diagCards();
+                + " | rail " + intentRail.diagCards());
     }
 
     /**

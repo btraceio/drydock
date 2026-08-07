@@ -182,6 +182,43 @@ class SubmitPlanTest {
         assertTrue(plan.refusals().isEmpty());
     }
 
+    /**
+     * A finding resolved (or fixed) after {@code postToPr} was left {@code
+     * true} must not post: the margin's default filter hides resolved
+     * cards, so its toggle is not even reachable without switching to "all"
+     * -- posting it anyway would publish something the human never had a
+     * real chance to opt back out of.
+     */
+    @Test
+    void aResolvedFindingIsNeitherPostedNorRefusedEvenWithPostToPrTrue() {
+        ReviewAnnotation resolved = finding("f6", "src/Foo.java", "n40", "n40")
+                .withStatus(AnnotationStatus.RESOLVED);
+        assertTrue(resolved.postToPr(), "the fixture must actually exercise the resolved check, "
+                + "not postToPr already being false");
+        SubmitPlan.DiffIndex index = new SubmitPlan.DiffIndex(
+                Map.of("src/Foo.java n40", 1), Map.of("src/Foo.java n40", 0));
+
+        SubmitPlan plan = SubmitPlan.of(List.of(resolved), List.of(), index);
+
+        assertTrue(plan.comments().isEmpty());
+        assertTrue(plan.posting().isEmpty());
+        assertTrue(plan.refusals().isEmpty());
+    }
+
+    /** {@code FIXED} is the other resolved status ({@link ReviewAnnotation#resolved()}); both must be excluded. */
+    @Test
+    void aFixedFindingIsAlsoExcluded() {
+        ReviewAnnotation fixed = finding("f7", "src/Foo.java", "n40", "n40")
+                .withStatus(AnnotationStatus.FIXED);
+        SubmitPlan.DiffIndex index = new SubmitPlan.DiffIndex(
+                Map.of("src/Foo.java n40", 1), Map.of("src/Foo.java n40", 0));
+
+        SubmitPlan plan = SubmitPlan.of(List.of(fixed), List.of(), index);
+
+        assertTrue(plan.comments().isEmpty());
+        assertTrue(plan.posting().isEmpty());
+    }
+
     @Test
     void commentBodyIsTheHumanReplyNotTheAgentFinding() {
         ReviewAnnotation.Message agentMessage =

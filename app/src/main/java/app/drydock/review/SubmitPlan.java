@@ -84,6 +84,13 @@ public record SubmitPlan(Event preselected, List<Comment> comments, List<ReviewA
      * Builds the plan: every {@code postToPr} finding becomes a comment or a
      * refusal, in encounter order. A finding with {@code postToPr() == false}
      * is silently excluded from both -- it simply is not being posted.
+     *
+     * <p>A {@link ReviewAnnotation#resolved()} finding is excluded the same
+     * way, REGARDLESS of {@code postToPr}: the margin's default filter
+     * ({@code Filter.OPEN}) hides resolved cards, so a stale {@code
+     * postToPr} left over from before it was resolved has no visible toggle
+     * to opt back out with short of switching to "all" -- posting it anyway
+     * would be a publish the human never had a real chance to review.</p>
      */
     public static SubmitPlan of(List<ReviewAnnotation> findings, List<ReviewVerdict.Decision> decisions,
                                  DiffIndex index) {
@@ -92,7 +99,7 @@ public record SubmitPlan(Event preselected, List<Comment> comments, List<ReviewA
         List<Refusal> refusals = new ArrayList<>();
 
         for (ReviewAnnotation finding : findings) {
-            if (!finding.postToPr()) {
+            if (!finding.postToPr() || finding.resolved()) {
                 continue;
             }
             String startCompositeKey = index.key(finding.file(), finding.startKey());

@@ -241,15 +241,46 @@ final class ReviewDiffColumn extends BorderPane {
     private javafx.scene.control.TextArea composerInput;
 
     /**
-     * The gutter selection's anchor: the row index a plain click, the start
-     * of a shift-click, or the start of a drag began at. {@code -1} for none.
+     * The gutter selection's anchor: the file and line key a plain click, the
+     * start of a shift-click, or the start of a drag began at. {@code null}
+     * for none.
      *
-     * <p>Resolved against the {@link #rows} {@code ObservableList}, never
-     * against a {@code ListCell} index -- cell indices are reassigned as a
-     * virtualized {@code ListView} recycles cells, so they do not name a
-     * stable row the way a position in {@link #rows} does.</p>
+     * <p>Identified by {@code (file, lineKey)} rather than cached as a row
+     * index into {@link #rows}: {@link #rebuild()} and {@link
+     * #expandRun(ReviewDiffRow.CollapsedRun)} both replace {@link #rows}
+     * wholesale, and expanding a collapsed run above the anchor shifts every
+     * index after it -- a cached index would then resolve to whatever line
+     * happens to sit there now, ranging a selection over rows the human never
+     * clicked. Resolving the key fresh against the current {@link #rows} on
+     * every use (see {@link #selectionAnchorIndex()}) means a rebuild that
+     * drops the anchor's line entirely resolves to {@code -1} -- "selection
+     * gone," the same outcome {@link #finalizeSelection} already gives a
+     * stale {@code rows.indexOf(row)} miss -- instead of silently moving.</p>
      */
-    private int selectionAnchorIndex = -1;
+    private String selectionAnchorFile;
+
+    /** @see #selectionAnchorFile */
+    private String selectionAnchorLineKey;
+
+    /** The anchor's current position in {@link #rows}, or {@code -1} when unset or no longer present. */
+    private int selectionAnchorIndex() {
+        return selectionAnchorFile == null ? -1 : indexOfLine(selectionAnchorFile, selectionAnchorLineKey);
+    }
+
+    /** Anchors the selection at {@code rows.get(index)}, or clears it when {@code index} is not a line. */
+    private void setSelectionAnchor(int index) {
+        if (index >= 0 && index < rows.size() && rows.get(index) instanceof ReviewDiffRow.Line line) {
+            selectionAnchorFile = line.file();
+            selectionAnchorLineKey = line.lineKey();
+        } else {
+            clearSelectionAnchor();
+        }
+    }
+
+    private void clearSelectionAnchor() {
+        selectionAnchorFile = null;
+        selectionAnchorLineKey = null;
+    }
 
     /**
      * The gutter keys currently painted {@code review-line-selected}, as
@@ -460,7 +491,7 @@ final class ReviewDiffColumn extends BorderPane {
         composerNode = null;
         composerInput = null;
         rows.removeIf(ReviewDiffRow.Composer.class::isInstance);
-        selectionAnchorIndex = -1;
+        clearSelectionAnchor();
         clearSelectionPaint();
     }
 
@@ -644,16 +675,17 @@ final class ReviewDiffColumn extends BorderPane {
 
     /**
      * Extends the in-progress selection to {@code focusIndex} against {@link
-     * #selectionAnchorIndex}, resolves it through {@link DiffLineSelection}
+     * #selectionAnchorIndex()}, resolves it through {@link DiffLineSelection}
      * (which alone owns the one-file/one-hunk clamp -- GitHub rejects a
      * cross-hunk comment and the whole atomic review with it, so that rule
      * is never re-implemented here), and repaints {@link #selectedKeys}.
      */
     private void extendSelection(int focusIndex) {
-        if (selectionAnchorIndex < 0) {
+        int anchorIndex = selectionAnchorIndex();
+        if (anchorIndex < 0) {
             return;
         }
-        DiffLineSelection.resolve(rows, selectionAnchorIndex, focusIndex)
+        DiffLineSelection.resolve(rows, anchorIndex, focusIndex)
                 .ifPresentOrElse(this::paintSelection, this::clearSelectionPaint);
     }
 
@@ -754,10 +786,11 @@ final class ReviewDiffColumn extends BorderPane {
      */
     private void finalizeSelection(ReviewDiffRow.Line row) {
         int index = rows.indexOf(row);
-        if (index < 0 || selectionAnchorIndex < 0) {
+        int anchorIndex = selectionAnchorIndex();
+        if (index < 0 || anchorIndex < 0) {
             return;
         }
-        DiffLineSelection.resolve(rows, selectionAnchorIndex, index).ifPresent(range -> {
+        DiffLineSelection.resolve(rows, anchorIndex, index).ifPresent(range -> {
             if (composerRow != null && composerRow.file().equals(range.file())
                     && composerRow.startKey().equals(range.startKey())
                     && composerRow.endKey().equals(range.endKey())) {
@@ -781,7 +814,7 @@ final class ReviewDiffColumn extends BorderPane {
      * would also happen to produce.
      */
     int diagSelectionAnchorIndex() {
-        return selectionAnchorIndex;
+        return selectionAnchorIndex();
     }
 
     /** Scrolls to the row anchored at {@code lineKey} in {@code file} (card → line linkage). */
@@ -1237,8 +1270,8 @@ final class ReviewDiffColumn extends BorderPane {
                 if (index < 0) {
                     return;
                 }
-                if (!(e.isShiftDown() && selectionAnchorIndex >= 0)) {
-                    selectionAnchorIndex = index;
+                if (!(e.isShiftDown() && selectionAnchorIndex() >= 0)) {
+                    setSelectionAnchor(index);
                 }
                 extendSelection(index);
             });
@@ -1264,8 +1297,8 @@ final class ReviewDiffColumn extends BorderPane {
                     e.consume();
                     return;
                 }
-                if (!(e.isShiftDown() && selectionAnchorIndex >= 0)) {
-                    selectionAnchorIndex = index;
+                if (!(e.isShiftDown() && selectionAnchorIndex() >= 0)) {
+                    setSelectionAnchor(index);
                 }
                 extendSelection(index);
                 finalizeSelection(row);
@@ -1487,7 +1520,7 @@ final class ReviewDiffColumn extends BorderPane {
             if (startIndex < 0 || endIndex < 0) {
                 return false;
             }
-            selectionAnchorIndex = startIndex;
+            setSelectionAnchor(startIndex);
             extendSelection(endIndex);
             list.scrollTo(Math.max(0, Math.min(startIndex, endIndex) - 3));
             return DiffLineSelection.resolve(rows, startIndex, endIndex).map(range -> {
