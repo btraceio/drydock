@@ -1014,20 +1014,27 @@
 .result-check:selected .mark {
     -fx-background-color: white;
 }
+/* Full text colour, not the dim one, and big enough to read as a control
+ * rather than punctuation: this is the only thing in the row that does not
+ * open the file, so it has to look different from the row it sits in. It
+ * carries a resting plate for the same reason -- a bare glyph among the
+ * checkbox, the change dot and the filename reads as decoration. Only rows
+ * with content matches have one, so this is never many at once. */
 .result-caret {
-    -fx-background-color: transparent;
+    -fx-background-color: -drydock-active-bg;
     -fx-background-radius: 3px;
-    -fx-text-fill: -drydock-text-dim;
-    -fx-font-size: 11px;
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 13px;
+    -fx-font-weight: bold;
     -fx-padding: 0;
-    -fx-min-width: 16px;
-    -fx-min-height: 16px;
+    -fx-min-width: 18px;
+    -fx-min-height: 18px;
     -fx-alignment: center;
     -fx-cursor: hand;
 }
 .result-caret:hover {
-    -fx-background-color: -drydock-active-bg;
-    -fx-text-fill: -drydock-text;
+    -fx-background-color: -drydock-accent;
+    -fx-text-fill: white;
 }
 .filetype-badge {
     -fx-background-color: -drydock-active-bg;
