@@ -47,6 +47,20 @@ class RepositorySidebarFacetTest {
                 REPO);
     }
 
+    private static SidebarNode staleNode() {
+        return new SidebarNode.StaleWorktreesNode(
+                List.of(new Worktree(Path.of("/wt/stale"), Optional.of("stale"), false, false, true,
+                        false, Optional.empty())),
+                REPO);
+    }
+
+    private static SidebarNode lockedNode() {
+        return new SidebarNode.LockedWorktreesNode(
+                List.of(new Worktree(Path.of("/wt/locked"), Optional.of("locked"), false, false, false,
+                        true, Optional.empty())),
+                REPO);
+    }
+
     private static final SessionFilter RUNNING_ONLY =
             new SessionFilter(EnumSet.of(SessionStatusFacet.RUNNING), Set.of());
 
@@ -56,14 +70,15 @@ class RepositorySidebarFacetTest {
                 unopenedNode());
         List<SidebarNode> result =
                 RepositorySidebar.applyFacets(children, SessionFilter.none(), id -> false);
-        assertEquals(children, result);
+        assertSame(children, result);
     }
 
     @Test
     void anActiveFilterDropsEveryNonSessionRow() {
         ManagedAgentSession live = session(AgentKind.CLAUDE, SessionStatus.RUNNING);
         List<SidebarNode> result = RepositorySidebar.applyFacets(
-                List.of(sessionNode(live), unopenedNode()), RUNNING_ONLY, id -> false);
+                List.of(sessionNode(live), unopenedNode(), staleNode(), lockedNode()), RUNNING_ONLY,
+                id -> false);
         assertEquals(1, result.size());
         assertSame(live, ((SidebarNode.SessionNode) result.get(0)).session());
     }
