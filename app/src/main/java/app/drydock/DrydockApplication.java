@@ -1340,6 +1340,7 @@ public final class DrydockApplication extends Application {
                     sidebar.diagFilter(arg);
                     System.out.println("[diag] filter typed: " + arg);
                 }
+                case "facet" -> sidebar.diagToggleFacet(arg);
                 case "keys" -> System.out.println("[diag] keys " + mainWorkspace.diagKeyboardState()
                         + " focusOwner=" + describeFocusOwner());
                 case "shot" -> diagSnapshot(stage, Path.of(arg));

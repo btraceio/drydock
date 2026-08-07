@@ -253,7 +253,7 @@ public final class RepositorySidebar extends VBox {
         addButton.setMaxWidth(Double.MAX_VALUE);
 
         filterField.getStyleClass().add("filter-field");
-        filterField.setPromptText("⌕  Filter repos & worktrees…");
+        filterField.setPromptText("⌕  Filter repos & sessions…");
         filterDebounce.setOnFinished(e -> {
             filterChangedSinceLastRebuild = true;
             rebuildTree();
@@ -470,6 +470,15 @@ public final class RepositorySidebar extends VBox {
         focusFilter();
         filterField.setText(text);
         filterField.positionCaret(text.length());
+    }
+
+    /**
+     * Diagnostic-only ({@code app.drydock.diag.tabScript}): toggles one
+     * filter chip by name, so a scripted visual pass can capture filter
+     * combinations.
+     */
+    public void diagToggleFacet(String name) {
+        filterBar.diagToggleFacet(name);
     }
 
     /**
@@ -830,6 +839,11 @@ public final class RepositorySidebar extends VBox {
                 + (worktreeTotal == 1 ? " worktree" : " worktrees");
         if (unopenedTotal > 0) {
             footerText += " · " + unopenedTotal + " unopened";
+        }
+        if (filtering()) {
+            // The footer's job is "what exists" -- shrinking the totals would
+            // erase the only remaining evidence of what the filter hides.
+            footerText += " · filtered";
         }
         footerLabel.setText(footerText);
         SessionStatusStyles.updateDot(footerDot, runningTotal > 0 ? SessionStatus.RUNNING : SessionStatus.INACTIVE);
@@ -1633,7 +1647,18 @@ public final class RepositorySidebar extends VBox {
             counts.setMinWidth(Region.USE_PREF_SIZE);
 
             List<ManagedAgentSession> sessions = sessionsFor(repository);
-            boolean anyRunning = sessions.stream().anyMatch(s -> SessionStatusStyles.isRunning(s.status()));
+            // Composed children, minus any row present only by exemption: an
+            // exempt row did not match, so counting it would overstate the
+            // matches, and a repo present ONLY by exemption must show no
+            // count at all rather than a bare "0 of M".
+            List<ManagedAgentSession> shown = getTreeItem() == null ? sessions
+                    : getTreeItem().getChildren().stream()
+                            .map(TreeItem::getValue)
+                            .filter(SidebarNode.SessionNode.class::isInstance)
+                            .map(node -> ((SidebarNode.SessionNode) node).session())
+                            .filter(candidate -> !filter.isActive() || filter.matches(candidate))
+                            .toList();
+            boolean anyRunning = shown.stream().anyMatch(s -> SessionStatusStyles.isRunning(s.status()));
             HBox branchRow = new HBox(6, branch, counts);
             branchRow.setAlignment(Pos.CENTER_LEFT);
             if (anyRunning) {
@@ -1643,7 +1668,9 @@ public final class RepositorySidebar extends VBox {
             VBox text = new VBox(1, nameRow, branchRow);
             HBox.setHgrow(text, Priority.ALWAYS);
 
-            Label count = new Label(String.valueOf(sessions.size()));
+            Label count = new Label(!filtering() || shown.size() == sessions.size()
+                    ? String.valueOf(sessions.size())
+                    : shown.isEmpty() ? "" : shown.size() + " of " + sessions.size());
             count.getStyleClass().add("repo-count");
 
             Button rescan = new Button("⟳");
@@ -1698,6 +1725,9 @@ public final class RepositorySidebar extends VBox {
         /** Just the counts fragment: {@code · 3 wt · 2 locked · 1 stale}, or "" before discovery / when a note is showing. */
         private String repoCountsText(Repository repository) {
             if (rescanNotes.get(repository.id()) != null) {
+                return "";
+            }
+            if (filter.isActive()) {
                 return "";
             }
             SidebarChildren classified = childrenOf(repository);
