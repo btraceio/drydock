@@ -149,9 +149,24 @@ final class SkimView extends ScrollPane {
         setVvalue(Math.max(0, Math.min(1, getVvalue() - event.getDeltaY() / overflow)));
     }
 
-    /** Expands the member containing {@code line} and scrolls it into view (a minimap click, or {@code z} back). */
+    /**
+     * Expands the member {@code line} falls in and scrolls it into view (a
+     * minimap click, a search hit, or {@code z} back).
+     *
+     * <p>A line between members -- a blank line, an import, the class header
+     * -- resolves forward to the next member down rather than doing nothing:
+     * this used to be a silent no-op, which made "go to line N" a dead
+     * gesture for every such N, and left the file-open path sitting on
+     * whatever anchor {@code setSkim} had computed from a CodeArea that was
+     * not laid out yet. Past the last member there is nothing to reveal, so
+     * the honest answer is the top of the file.</p>
+     */
     void revealLine(int line) {
-        outline.memberAt(line).ifPresent(member -> {
+        if (outline.memberAtOrAfter(line).isEmpty()) {
+            scrollToTop();
+            return;
+        }
+        outline.memberAtOrAfter(line).ifPresent(member -> {
             expansion.put(member.startLine(), true);
             onMemberRead.accept(member.startLine());
             scrollClaimed = true;

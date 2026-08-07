@@ -1532,14 +1532,17 @@ final class FileViewer extends BorderPane {
                 // means everywhere else in the app.
                 if (!changedLinesFor(tab).isEmpty() && skimDefault.getAsBoolean()) {
                     setSkim(tab, true);
-                    // setSkim anchors on currentLineOf(tab), which reads a
-                    // CodeArea that has not been laid out yet -- so a fresh
-                    // open landed mid-file with members above the viewport
-                    // and nothing saying so. An open has one honest anchor:
-                    // the line that was asked for, or the top.
-                    if (jumpToLine.isEmpty()) {
-                        skimView.scrollToTop();
-                    }
+                    // ALWAYS, not only when no line was asked for: setSkim
+                    // anchors on currentLineOf(tab), which on a fresh open
+                    // reads firstVisibleParToAllParIndex() from a CodeArea
+                    // that has not been laid out, and gets an arbitrary
+                    // paragraph -- measured at line 42 of a 68-line file,
+                    // which revealLine then faithfully scrolled to. Guarding
+                    // this on jumpToLine.isEmpty() left every caller that
+                    // supplies a line (Review's ⤢, a rail match-line click)
+                    // stuck with that anchor. The jump below lands the
+                    // requested line on top of a known-good position.
+                    skimView.scrollToTop();
                 }
                 refreshMinimap(tab);
                 jumpToLine.ifPresent(line -> scrollTo(tab, line));

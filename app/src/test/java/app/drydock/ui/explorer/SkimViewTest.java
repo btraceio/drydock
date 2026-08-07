@@ -203,6 +203,87 @@ class SkimViewTest extends ApplicationTest {
                 "scrolled to the revealed member, not to the top: vvalue=" + skim.getVvalue());
     }
 
+    /**
+     * A line between members -- here, the blank line right before {@code
+     * onRelease} -- used to make revealLine() a no-op (memberAt() is empty
+     * there), which is exactly what left a fresh skim open sitting on
+     * setSkim's pre-layout anchor with nothing above the viewport explained.
+     * Checks both that the member opens AND that the view actually scrolled
+     * there -- opening without scrolling would still leave the reveal
+     * looking like it did nothing.
+     */
+    @Test
+    void revealingALineBetweenMembersLandsOnTheNextMemberRatherThanDoingNothing() {
+        show(Set.of(), Map.of());
+        settle();
+        // Derived, not chosen: see theWheelOverAnExpandedBodyScrollsTheSkimViewProportionally
+        // for why a hand-picked literal here goes stale.
+        Region rows = (Region) lookup(".skim-rows").query();
+        double viewportHeight = rows.getHeight() / 4;
+        interact(() -> {
+            skim.setMinHeight(viewportHeight);
+            skim.setPrefHeight(viewportHeight);
+            skim.setMaxHeight(viewportHeight);
+        });
+        settle();
+
+        int blankLineBeforeOnRelease = SOURCE.lines().toList().indexOf("    void onRelease(MouseEvent e) {");
+        interact(() -> skim.revealLine(blankLineBeforeOnRelease));
+        settle();
+
+        assertEquals(List.of("void onRelease(MouseEvent e) {"), openRowSignatures(),
+                "the nearest member starting after the line is what a reveal there means");
+        assertTrue(skim.getVvalue() > 0.0,
+                "scrolled toward that member, not left at rest: vvalue=" + skim.getVvalue());
+    }
+
+    /**
+     * Stands in for FileViewer's file-open sequence, using the same two
+     * calls FileViewer.openFile actually makes for a skim tab opened with a
+     * jumpToLine (the ⤢ from Review, a rail match-line click): setSkim's
+     * revealLine(anchor) with a bogus, pre-layout anchor deep in the file,
+     * followed by scrollTo's revealLine(jumpToLine) -- here jumpToLine=1,
+     * "package", which sits before every member. Before the fix, revealLine
+     * on a line no member contains did nothing at all, so the bogus anchor's
+     * scroll position survived untouched; this is the instrumented trace's
+     * revealLine(42) -> revealLine(1) -> NONE sequence, reproduced directly.
+     */
+    @Test
+    void anOpenSequenceEndsAtTheFirstMemberEvenWithABogusAnchorFirst() {
+        show(Set.of(), Map.of());
+        settle();
+        Region rows = (Region) lookup(".skim-rows").query();
+        double viewportHeight = rows.getHeight() / 4;
+        interact(() -> {
+            skim.setMinHeight(viewportHeight);
+            skim.setPrefHeight(viewportHeight);
+            skim.setMaxHeight(viewportHeight);
+        });
+        settle();
+
+        int lineDeepInTheFile = SOURCE.lines().toList().indexOf("        prefs.put(KEY, w);") + 1;
+        interact(() -> skim.revealLine(lineDeepInTheFile));
+        settle();
+        double bogusAnchorPosition = skim.getVvalue();
+        assertTrue(bogusAnchorPosition > 0.0, "sanity: the bogus anchor did scroll somewhere");
+
+        interact(() -> skim.revealLine(1));
+        settle();
+
+        assertEquals(SOURCE.lines().toList().indexOf("    int width() {") + 1, skim.topLine(),
+                "the first member is what the reader sees first, not wherever the bogus anchor landed");
+        // topLine() alone does not discriminate: with a quarter-height
+        // viewport it reports the first row even while the view sits
+        // scrolled well below it, so it passes against the unfixed code too.
+        // The scroll position is what the bug actually left wrong. Compared
+        // against the bogus position rather than against 0 because the first
+        // row starts below the rows container's padding, so "at the top" is
+        // not literally vvalue 0 and a fixed threshold would be a guess.
+        assertTrue(skim.getVvalue() < bogusAnchorPosition,
+                "the view moved back up to that member instead of staying where the bogus anchor left it: "
+                        + skim.getVvalue() + " vs " + bogusAnchorPosition);
+    }
+
     @Test
     void everySkimRowIsFocusTraversable() {
         show(Set.of(8), Map.of());
