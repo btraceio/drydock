@@ -1462,6 +1462,47 @@ final class ReviewDiffColumn extends BorderPane {
         return box;
     }
 
+    /**
+     * Diagnostic-only: drives the gutter's real selection path for {@code
+     * [file:startKey, file:endKey]} and opens the composer exactly as {@link
+     * #finalizeSelection} does on a gesture release. {@code rows} is
+     * virtualization's data model, not its rendered cells, so this reaches a
+     * key outside the viewport just as reliably as one already on screen --
+     * the real gesture handlers could not be reused directly because they
+     * are wired to a specific rendered hit box, which a key with no cell yet
+     * does not have.
+     *
+     * @return false when either key is not in the currently loaded diff, so
+     *         the visual pass can say so instead of silently selecting
+     *         nothing
+     */
+    boolean diagSelectRange(String file, String startKey, String endKey) {
+        // Mutates gutter selection state and the ListView's scroll position
+        // -- FX state that only the FX Application Thread may touch. Routed
+        // through ReviewDiagFxThread so a caller off that thread (a test,
+        // the diag driver) is safe rather than merely usually-fine.
+        return ReviewDiagFxThread.call(() -> {
+            int startIndex = indexOfLine(file, startKey);
+            int endIndex = indexOfLine(file, endKey);
+            if (startIndex < 0 || endIndex < 0) {
+                return false;
+            }
+            selectionAnchorIndex = startIndex;
+            extendSelection(endIndex);
+            list.scrollTo(Math.max(0, Math.min(startIndex, endIndex) - 3));
+            return DiffLineSelection.resolve(rows, startIndex, endIndex).map(range -> {
+                if (composerRow != null && composerRow.file().equals(range.file())
+                        && composerRow.startKey().equals(range.startKey())
+                        && composerRow.endKey().equals(range.endKey())) {
+                    closeComposer();
+                } else {
+                    openComposer(range.file(), range.startKey(), range.endKey());
+                }
+                return true;
+            }).orElse(false);
+        });
+    }
+
     /** Diagnostic-only: opens the composer on the first changed line rendered. */
     String diagOpenComposer() {
         for (ReviewDiffRow row : rows) {

@@ -1705,12 +1705,98 @@ public final class ReviewDestinationView extends BorderPane {
         return diffColumn.diagOpenComposer();
     }
 
+    /**
+     * Diagnostic-only: selects {@code [file:startKey, file:endKey]} in the
+     * gutter and opens the composer on it, through the real selection then
+     * compose-request wiring a click-then-shift-click (or drag) release
+     * uses -- see {@link ReviewDiffColumn#diagSelectRange}. Returns false
+     * when either key is not in the currently loaded diff, so the visual
+     * pass can say so instead of silently opening nothing.
+     */
+    public boolean diagSelectRange(String file, String startKey, String endKey) {
+        return diffColumn.diagSelectRange(file, startKey, endKey);
+    }
+
+    /**
+     * Diagnostic-only: approves every intent that counts toward progress and
+     * has no verdict yet, through the same {@code host.setVerdict} call the
+     * verdict bar's Approve button makes. {@link #submitReview} refuses to
+     * post while anything is unsettled (spec section 4.6), and a real diff of
+     * any size falls back to one intent per file with nothing supplied -- so
+     * the visual pass needs to settle all of them to reach Submit at all, not
+     * just the one the composer's comment happens to land on.
+     *
+     * <p>Guarded the same way {@link #diagSubmit} is: this stamps APPROVED
+     * straight into the real {@code AnnotationStore} with no undo, and an
+     * earlier diagnostic run on the source branch already once called
+     * {@code markSubmitted} on a real working-tree scope by mistake.
+     * Refusing on any scope without a PR keeps a driver typo from writing
+     * real verdicts onto whatever the human happens to be reviewing
+     * locally.</p>
+     *
+     * @return false when the selected scope has no PR, so the caller can say
+     *         why nothing happened instead of silently doing nothing
+     */
+    public boolean diagApproveAllIntents() {
+        // Stamps real verdicts and refreshes FX-owned review state, so this
+        // always runs on the FX Application Thread -- see
+        // ReviewDiagFxThread for why an off-thread caller cannot do this
+        // directly.
+        return ReviewDiagFxThread.call(() -> {
+            if (selectedScope().map(scope -> scope.pr().isEmpty()).orElse(true)) {
+                return false;
+            }
+            selectedScope().ifPresent(scope -> {
+                for (ReviewIntent intent : intents()) {
+                    if (intent.countsTowardProgress() && host.verdict(scope, intent).isEmpty()) {
+                        host.setVerdict(scope, intent, Optional.of(ReviewVerdict.Decision.APPROVED));
+                    }
+                }
+                refreshReviewState();
+            });
+            return true;
+        });
+    }
+
+    /**
+     * Diagnostic-only: submits exactly as the verdict bar's Submit action
+     * does -- but ONLY when the selected scope has a GitHub PR. {@code
+     * submitReview}'s {@code Host#submit} for a scope with no PR does not
+     * stop at posting: it hides Review and hands the worktree to the Finish
+     * flow (merge / open a PR / delete the worktree; spec section 4.6's
+     * "reviewing someone's pull request ends by reviewing it, not by
+     * merging it" is PR-only for exactly this reason). A diagnostic driver
+     * photographing the submit sheet must never be able to reach that arm,
+     * even on a scope nobody meant to submit.
+     *
+     * @return false when the selected scope has no PR, so the caller can
+     *         say why nothing happened instead of silently doing nothing
+     */
+    public boolean diagSubmit() {
+        // Drives the real submit path (dialogs, the Finish hand-off) on
+        // FX-owned state, so this always runs on the FX Application Thread
+        // -- see ReviewDiagFxThread for why an off-thread caller cannot do
+        // this directly.
+        return ReviewDiagFxThread.call(() -> {
+            if (selectedScope().map(scope -> scope.pr().isEmpty()).orElse(true)) {
+                return false;
+            }
+            submitReview();
+            return true;
+        });
+    }
+
     /** Diagnostic-only: selects the {@code index}-th queue item, for the visual pass. */
     public void diagSelectItem(int index) {
-        List<ReviewItem> items = queue.items();
-        if (index >= 0 && index < items.size()) {
-            queue.select(items.get(index).scope().id());
-        }
+        // Same off-thread race as diagItems(): queue.items() copies a list
+        // the FX thread can be mid-rebuild of.
+        ReviewDiagFxThread.<Void>call(() -> {
+            List<ReviewItem> items = queue.items();
+            if (index >= 0 && index < items.size()) {
+                queue.select(items.get(index).scope().id());
+            }
+            return null;
+        });
     }
 
     /** Diagnostic-only: the scope the queue has selected. */
@@ -1756,9 +1842,19 @@ public final class ReviewDestinationView extends BorderPane {
                 + " | rail " + intentRail.diagCards();
     }
 
-    /** Diagnostic-only: every queue item, filtered or not (visual verification harness). */
+    /**
+     * Diagnostic-only: every queue item, filtered or not (visual
+     * verification harness).
+     *
+     * <p>{@code queue.items()} copies the plain {@code List} the FX
+     * Application Thread rebuilds on every reassembly ({@code
+     * ReviewQueueRail#setItems}). Reading it from another thread while that
+     * rebuild is in flight is the same race {@link ReviewDiffColumn#diagRows}
+     * has -- see {@link ReviewDiagFxThread} for why the copy must happen ON
+     * the FX thread.</p>
+     */
     public List<ReviewItem> diagItems() {
-        return queue.items();
+        return ReviewDiagFxThread.call(queue::items);
     }
 
     /**
