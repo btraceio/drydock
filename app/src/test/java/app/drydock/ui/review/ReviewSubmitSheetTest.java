@@ -221,6 +221,42 @@ class ReviewSubmitSheetTest extends ApplicationTest {
         assertTrue(submitted.isEmpty(), "Cancel must never invoke onSubmit");
     }
 
+    /**
+     * Every other test in this class drives the toggle and the buttons
+     * through {@code fire()}, which invokes the {@code onAction} handler
+     * directly and bypasses real JavaFX event delivery entirely -- exactly
+     * the gap that let a total click regression through two review rounds on
+     * this branch (a detached node, or a node whose {@code setOnAction} was
+     * dropped, would still pass every {@code fire()}-based assertion here).
+     * This test drives the SAME sequence a human does: a real click focuses
+     * the summary field, real keystrokes fill it in, a real click on
+     * "Approve" changes the toggle, and a real click on "Submit review"
+     * fires it -- proving the whole chain is actually wired into the scene
+     * graph, not just that the lambda works when called directly.
+     */
+    @Test
+    void aRealPointerClickOnSubmitInvokesOnSubmitWithTheChosenEventAndSummary() {
+        Comment comment = new Comment("src/Foo.java", "existing finding",
+                new Anchor(12, Side.RIGHT, OptionalInt.empty(), Optional.empty()));
+        SubmitPlan plan = new SubmitPlan(Event.COMMENT, List.of(comment), List.of(), List.of());
+        rebuildSheet(plan);
+
+        clickOn(".review-composer-input");
+        write("Looks good, one nit addressed.");
+
+        clickOn("Approve");
+        WaitForAsyncUtils.waitForFxEvents();
+
+        clickOn("Submit review");
+        WaitForAsyncUtils.waitForFxEvents();
+
+        assertEquals(1, submitted.size(), "a real click on Submit must invoke onSubmit exactly once");
+        assertEquals(Event.APPROVE, submitted.get(0)[0],
+                "the event handed to onSubmit must be the one the real click selected");
+        assertEquals("Looks good, one nit addressed.", submitted.get(0)[1],
+                "the summary handed to onSubmit must be what was actually typed");
+    }
+
     // ---- helpers ------------------------------------------------------------
 
     private void rebuildSheet(SubmitPlan plan) {

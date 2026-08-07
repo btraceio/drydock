@@ -997,10 +997,30 @@ public final class ReviewDestinationView extends BorderPane {
      * Submit (spec §4.6): with anything unsettled this jumps to the first
      * such intent rather than posting a partial review; once everything is
      * settled it posts ONE review.
+     *
+     * <p>Refuses outright while {@link ReviewDiffColumn#displayedDiff()}
+     * belongs to a different scope than the one selected -- the window
+     * between selecting a scope and its diff actually landing. {@code
+     * displayedScopeId} lags {@code setScope}: it is left pointing at
+     * whatever scope's diff last finished loading until the new one
+     * resolves, so a Submit pressed during that "Diffing…" window would
+     * otherwise build the {@code DiffIndex} from the OUTGOING scope's diff
+     * under the INCOMING scope's id. A comment whose real anchor is not in
+     * that stale index gets refused as "not in this diff" even though it
+     * is; worse, one that happens to share a key by coincidence could be
+     * admitted with an anchor GitHub rejects, and since the whole review
+     * posts as one atomic call, a single bad anchor 422s every other
+     * comment in it. Nothing visible happens on this path: the diff column
+     * is already showing "Diffing…" for exactly this reason, and Submit
+     * simply does not fire until the id catches up -- pressing it again
+     * once the diff lands succeeds normally.</p>
      */
     private void submitReview() {
         Optional<ReviewScope> scope = selectedScope();
         if (scope.isEmpty()) {
+            return;
+        }
+        if (!diffColumn.displayedScopeId().map(id -> id.equals(scope.get().id())).orElse(false)) {
             return;
         }
         List<ReviewIntent> counted = intents().stream()

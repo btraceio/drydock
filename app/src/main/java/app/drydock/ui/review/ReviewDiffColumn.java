@@ -1492,6 +1492,20 @@ final class ReviewDiffColumn extends BorderPane {
         return displayedDiff;
     }
 
+    /**
+     * The scope {@link #displayedDiff()} actually belongs to -- empty while
+     * nothing has resolved yet, or while a diff failed. This lags behind
+     * {@link #setScope}: selecting a new scope does not clear it, so a
+     * caller who reads {@link #displayedDiff()} during the "Diffing…" window
+     * that follows a fresh selection would otherwise get the OUTGOING
+     * scope's diff under the INCOMING scope's name. Submit must compare this
+     * against the scope it thinks it is posting for before trusting the
+     * diff at all -- see {@code ReviewDestinationView#submitReview()}.
+     */
+    Optional<String> displayedScopeId() {
+        return Optional.ofNullable(displayedScopeId);
+    }
+
     /** Diagnostic/test-only: the scope currently rendered. */
     Optional<ReviewScope> diagScope() {
         return Optional.ofNullable(scope);

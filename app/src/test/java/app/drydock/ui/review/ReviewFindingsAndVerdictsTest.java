@@ -12,6 +12,7 @@ import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
 import app.drydock.review.ReviewVerdict;
 import app.drydock.review.Severity;
+import app.drydock.review.SubmitPlan;
 import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
@@ -30,6 +31,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
 
@@ -216,6 +218,36 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
                 "the strip is coloured by the worst severity: " + count.getStyleClass());
     }
 
+    /**
+     * The only control that can withdraw a comment before Submit publishes
+     * it to the pull request. {@code ReviewAnnotation.human} mints {@code
+     * postToPr = true} and that default is persisted -- a real pointer click
+     * on the card's toggle (not {@code Button.fire()}, which bypasses actual
+     * event delivery) must flip it to {@code false} in the store, and {@code
+     * SubmitPlan.of} must then drop the finding from both {@code comments}
+     * and {@code posting}.
+     */
+    @Test
+    void theIncludeExcludeToggleWithdrawsAHumanCommentFromTheStoreAndFromTheSubmitPlan() {
+        ReviewAnnotation human = ReviewAnnotation.human(scopeId(), "src/Main.java", "n1", "n1",
+                new ReviewAnnotation.Message("You", Instant.now(), "note to self"));
+        seed(human);
+        assertTrue(host.store.byId(scope.id(), human.key().id()).orElseThrow().postToPr(),
+                "precondition: ReviewAnnotation.human defaults to posting");
+
+        clickOn("Included in review");
+        WaitForAsyncUtils.waitForFxEvents();
+
+        ReviewAnnotation afterToggle = host.store.byId(scope.id(), human.key().id()).orElseThrow();
+        assertFalse(afterToggle.postToPr(), "a real click on the toggle must withdraw the comment");
+
+        SubmitPlan.DiffIndex index = new SubmitPlan.DiffIndex(
+                Map.of("src/Main.java n1", 0), Map.of("src/Main.java n1", 0));
+        SubmitPlan plan = SubmitPlan.of(List.of(afterToggle), List.of(), index);
+        assertTrue(plan.comments().isEmpty(), "an excluded finding must not become a SubmitPlan comment");
+        assertTrue(plan.posting().isEmpty(), "an excluded finding must not be marked as posting either");
+    }
+
     // ---- verdicts -----------------------------------------------------------
 
     @Test
@@ -388,6 +420,14 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
                 "feat", "drydock · vs master")), true, true), List.of("repo")));
         interact(() -> view.diagPublishOutcome(minted.id(),
                 new DiffOutcome.Loaded(host.diff)));
+        // setItems already asked the diff column for a real diff of the
+        // (nonexistent) worktree path, which fails asynchronously and
+        // otherwise leaves the column's displayedScopeId unset -- Submit's
+        // stale-diff guard (ReviewDestinationView#submitReview) would then
+        // refuse every submit in this file. diagShowDiff publishes the
+        // fake's synthetic diff as belonging to this scope, same as a real
+        // diff landing would, so that guard sees a match.
+        interact(() -> view.diagShowDiff(minted, host.diff));
         interact(view::refreshReviewState);
         WaitForAsyncUtils.waitForFxEvents();
     }
