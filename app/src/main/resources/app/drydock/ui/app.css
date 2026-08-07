@@ -147,6 +147,24 @@
     -fx-text-fill: -drydock-text-faint;
 }
 
+/* The empty state: swapped in for the tree when a filter leaves nothing to
+ * show, or shown as a compact banner above the tree when the active-session
+ * exemption keeps exactly one row on screen. */
+.sidebar-empty-state {
+    -fx-padding: 24 16 24 16;
+}
+
+.sidebar-empty-message {
+    -fx-font-size: 12px;
+    -fx-text-fill: -drydock-text-faint;
+}
+
+.sidebar-empty-banner {
+    -fx-font-size: 11px;
+    -fx-text-fill: -drydock-text-faint;
+    -fx-padding: 6 12 6 12;
+}
+
 /* The repository/session tree. Custom cells draw everything; strip all
  * built-in TreeView chrome (disclosure arrows are our own carets). */
 .repo-tree {

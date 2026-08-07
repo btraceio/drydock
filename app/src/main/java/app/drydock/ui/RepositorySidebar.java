@@ -30,6 +30,7 @@ import javafx.application.Platform;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.geometry.Side;
+import javafx.scene.Node;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Alert.AlertType;
 import javafx.scene.control.Button;
@@ -133,6 +134,16 @@ public final class RepositorySidebar extends VBox {
     private Map<Path, Integer> renderedFindingCounts = Map.of();
     private final TreeItem<SidebarNode> treeRoot = new TreeItem<>();
     private final TreeView<SidebarNode> tree = new TreeView<>(treeRoot);
+
+    /**
+     * The two forms of "nothing to show": {@code emptyState} swaps in for
+     * the tree when there is truly nothing left (see {@link #showEmptyState}
+     * for why that decision cannot be made from the filter alone), and
+     * {@code emptyBanner} sits above the tree when the active-session
+     * exemption leaves exactly one row standing.
+     */
+    private final VBox emptyState;
+    private final Label emptyBanner = new Label("Nothing matches your filters");
     private final Label footerLabel = new Label();
     private final Region footerDot = new Region();
 
@@ -282,12 +293,29 @@ public final class RepositorySidebar extends VBox {
             }
         });
 
+        // -- Empty state ------------------------------------------------------
+        Label emptyMessage = new Label("Nothing matches your filters");
+        emptyMessage.getStyleClass().add("sidebar-empty-message");
+        Button clearFilters = new Button("Clear filters");
+        clearFilters.getStyleClass().add("sidebar-empty-clear");
+        clearFilters.setOnAction(e -> {
+            filterField.clear();
+            filterBar.clear();
+        });
+        emptyState = new VBox(8, emptyMessage, clearFilters);
+        emptyState.getStyleClass().add("sidebar-empty-state");
+        emptyState.setAlignment(Pos.CENTER);
+
+        emptyBanner.getStyleClass().add("sidebar-empty-banner");
+        emptyBanner.setVisible(false);
+        emptyBanner.setManaged(false);
+
         // -- Footer ---------------------------------------------------------
         footerDot.getStyleClass().addAll("status-dot", "dot-5");
         HBox footer = new HBox(footerDot, footerLabel);
         footer.getStyleClass().add("sidebar-footer");
 
-        getChildren().addAll(collapseHeader.node(), header, tree, footer);
+        getChildren().addAll(collapseHeader.node(), header, emptyBanner, tree, footer);
 
         // Keep the displayed list in sync with EVERY repository mutation,
         // not just the ones initiated by this sidebar's own handlers. The
@@ -647,6 +675,11 @@ public final class RepositorySidebar extends VBox {
 
         List<Repository> repositories = sorted(repositoryManager.repositories());
         List<TreeItem<SidebarNode>> repoItems = new ArrayList<>();
+        // Surviving NON-exempt session rows. The exempt row (the active
+        // session) can keep a repo -- and the tree -- non-empty on its own;
+        // it must not count as a "match" or the empty state would never
+        // show while a session is running, filter or no filter.
+        int matchCount = 0;
 
         for (Repository repository : repositories) {
             List<SidebarNode> children = applyFacets(childNodesFor(repository), filter, this::isExempt);
@@ -661,6 +694,12 @@ public final class RepositorySidebar extends VBox {
             // sessions must keep showing itself (and its + and ⟳ buttons).
             if (children.isEmpty() && filtering()) {
                 continue;
+            }
+            for (SidebarNode child : children) {
+                if (child instanceof SidebarNode.SessionNode sessionNode
+                        && !isExempt(sessionNode.session().id())) {
+                    matchCount++;
+                }
             }
             TreeItem<SidebarNode> repoItem = new TreeItem<>(new SidebarNode.RepoNode(repository));
             for (SidebarNode child : children) {
@@ -683,8 +722,62 @@ public final class RepositorySidebar extends VBox {
 
         treeRoot.getChildren().setAll(repoItems);
 
+        // Two forms, because an exempt row can leave the tree non-empty while
+        // nothing actually matched. Swap only when there is nothing to show
+        // at all; otherwise the exempt row would be deleted from the screen,
+        // re-creating the failure the exemption exists to prevent.
+        boolean nothingMatched = filtering() && matchCount == 0;
+        boolean treeIsEmpty = treeRoot.getChildren().isEmpty();
+        boolean noRepositoriesAtAll = repositoryManager.repositories().isEmpty();
+        showEmptyState(nothingMatched && !noRepositoriesAtAll, treeIsEmpty);
+
         updateFooter();
         syncActiveSelection();
+    }
+
+    /**
+     * Chooses between the two empty-state forms. {@code nothingMatched} is
+     * already false when there are no repositories at all -- an empty
+     * workspace is not a filter problem, and Clear filters cannot help.
+     *
+     * <p>Focus moves only when the current focus owner sits inside the node
+     * being removed: an unconditional move would yank the caret out of the
+     * filter field on the 150ms debounce, swallowing the next keystroke and
+     * turning Space into "Clear filters". The banner form moves no focus at
+     * all, because nothing leaves the scene.
+     */
+    private void showEmptyState(boolean nothingMatched, boolean treeIsEmpty) {
+        boolean swap = nothingMatched && treeIsEmpty;
+        boolean banner = nothingMatched && !treeIsEmpty;
+
+        if (swap && !getChildren().contains(emptyState)) {
+            boolean treeHadFocus = isInsideTree(getScene() == null ? null : getScene().getFocusOwner());
+            getChildren().set(getChildren().indexOf(tree), emptyState);
+            VBox.setVgrow(emptyState, Priority.ALWAYS);
+            if (treeHadFocus) {
+                emptyState.getChildren().get(1).requestFocus();
+            }
+        } else if (!swap && getChildren().contains(emptyState)) {
+            boolean buttonHadFocus = getScene() != null
+                    && emptyState.getChildren().get(1).equals(getScene().getFocusOwner());
+            getChildren().set(getChildren().indexOf(emptyState), tree);
+            VBox.setVgrow(tree, Priority.ALWAYS);
+            if (buttonHadFocus) {
+                filterField.requestFocus();
+            }
+        }
+        emptyBanner.setVisible(banner);
+        emptyBanner.setManaged(banner);
+    }
+
+    /** Whether {@code focusOwner} is {@link #tree} or a descendant of it. */
+    private boolean isInsideTree(Node focusOwner) {
+        for (Node node = focusOwner; node != null; node = node.getParent()) {
+            if (node == tree) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
