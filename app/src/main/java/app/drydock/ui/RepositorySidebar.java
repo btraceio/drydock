@@ -118,6 +118,8 @@ public final class RepositorySidebar extends VBox {
     private final ExternalEditorLauncher editorLauncher = new ExternalEditorLauncher();
 
     private final TextField filterField = new TextField();
+    private SessionFilter filter = SessionFilter.none();
+    private final SessionFilterBar filterBar;
 
     /** Open findings for a worktree checkout, if any -- the per-row ◨n badge. */
     private Function<Path, Optional<Integer>> openFindingsAt = path -> Optional.empty();
@@ -232,7 +234,9 @@ public final class RepositorySidebar extends VBox {
         filterDebounce.setOnFinished(e -> rebuildTree());
         filterField.textProperty().addListener((obs, oldText, newText) -> filterDebounce.playFromStart());
 
-        VBox header = new VBox(addButton, filterField);
+        filterBar = new SessionFilterBar(agentRegistry, () -> onFilterChipsChanged());
+
+        VBox header = new VBox(addButton, filterField, filterBar);
         header.getStyleClass().add("sidebar-header");
 
         // The same collapse control the Review rails wear, in the same place.
@@ -532,22 +536,50 @@ public final class RepositorySidebar extends VBox {
         rebuildTree();
     }
 
+    /**
+     * Whether the sidebar is narrowed at all -- by chips or by text. Every
+     * filter-aware surface (empty state, footer suffix, repo aggregates, the
+     * childless-repo rule) keys on this one predicate, or they disagree with
+     * each other about what the user is looking at.
+     */
+    private boolean filtering() {
+        return filter.isActive() || !currentQuery().isEmpty();
+    }
+
+    /** Chip callback: re-reads {@link #filterBar} and coalesces into one rebuild. */
+    private void onFilterChipsChanged() {
+        filter = filterBar.filter();
+        requestRebuild();
+    }
+
+    private String currentQuery() {
+        return filterField.getText() == null ? "" : filterField.getText().strip().toLowerCase(Locale.ROOT);
+    }
+
+    /** The frontmost session is always rendered -- see {@link #applyFacets}. */
+    private boolean isExempt(ManagedSessionId sessionId) {
+        return viewModel.activeSession().filter(sessionId::equals).isPresent();
+    }
+
     private void rebuildTree() {
-        String query = filterField.getText() == null ? "" : filterField.getText().strip().toLowerCase(Locale.ROOT);
+        String query = currentQuery();
 
         List<Repository> repositories = sorted(repositoryManager.repositories());
         List<TreeItem<SidebarNode>> repoItems = new ArrayList<>();
 
         for (Repository repository : repositories) {
-            List<SidebarNode> children = childNodesFor(repository);
+            List<SidebarNode> children = applyFacets(childNodesFor(repository), filter, this::isExempt);
             // The filter matches the repo itself (name/branch) OR any of
             // its worktree/session rows; a repo matched only through its
             // children narrows to exactly the matching rows.
             if (!query.isEmpty() && !matchesRepo(repository, query)) {
                 children = children.stream().filter(child -> matchesNode(child, query)).toList();
-                if (children.isEmpty()) {
-                    continue;
-                }
+            }
+            // Only drop a childless repo while filtering: with no filter at
+            // all, a freshly added repository with no worktrees and no
+            // sessions must keep showing itself (and its + and ⟳ buttons).
+            if (children.isEmpty() && filtering()) {
+                continue;
             }
             TreeItem<SidebarNode> repoItem = new TreeItem<>(new SidebarNode.RepoNode(repository));
             for (SidebarNode child : children) {

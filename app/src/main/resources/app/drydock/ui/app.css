@@ -2765,6 +2765,19 @@
 }
 .review-filter-button:focused { -fx-border-color: -drydock-accent; }
 
+/* Sidebar filter chips. They reuse .review-filter-button's shape so the app
+ * grows no fourth chip language, but selection must be carried by the
+ * background fill and text color -- .review-filter-button:focused paints the
+ * same accent border as :selected, so a Tab-focused unselected chip would
+ * otherwise look selected. */
+.session-filter-bar {
+    -fx-padding: 6 10 2 10;
+}
+
+.session-filter-chip {
+    -fx-font-size: 11px;
+}
+
 .review-findings-scroll, .review-findings-scroll .viewport {
     -fx-background-color: transparent;
 }
