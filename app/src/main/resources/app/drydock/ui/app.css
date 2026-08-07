@@ -250,7 +250,7 @@
 .child-row { -fx-padding: 5 8 5 16; }
 .child-row-status {
     -fx-min-width: 30;
-    -fx-alignment: center;
+    -fx-alignment: center-left;
 }
 
 /* The per-agent mark in a session row's leading gutter. Identity is carried
@@ -258,7 +258,7 @@
  * grayscale. */
 .agent-mark {
     -fx-font-size: 11px;
-    -fx-min-width: -fx-pref-width;
+    -fx-min-width: 12px;
 }
 
 .agent-mark-claude { -fx-text-fill: -drydock-agent-claude; }
