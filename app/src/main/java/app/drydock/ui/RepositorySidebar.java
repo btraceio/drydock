@@ -1779,7 +1779,7 @@ public final class RepositorySidebar extends VBox {
             });
         }
 
-        private HBox buildSessionRow(ManagedAgentSession session, Repository repository) {
+        private StackPane buildSessionRow(ManagedAgentSession session, Repository repository) {
             boolean live = SessionStatusStyles.isRunning(session.status());
             Region dot = SessionStatusStyles.createDot(8, session.status(), live);
             // Leading gutter: status dot, then the agent mark. Two independent
@@ -1807,22 +1807,16 @@ public final class RepositorySidebar extends VBox {
                     .map(root -> viewModel.worktreeStatus(root).orElse(null))
                     .orElseGet(() -> viewModel.repoStatus(repository.id()).orElse(null));
             String branch = checkoutStatus != null ? UiFormats.branchText(checkoutStatus) : "…";
+
+            // One line, name-first: the branch is capped so it yields
+            // characters before the name does (see SidebarRowMetrics).
+            HBox.setHgrow(name, Priority.ALWAYS);
+
             Label branchTag = new Label((isWorktree ? "◫ " : "⎇ ") + branch);
             branchTag.getStyleClass().add(isWorktree ? "branch-tag-worktree" : "branch-tag");
-
-            HBox nameRow = new HBox(6, name, branchTag);
-            nameRow.setAlignment(Pos.CENTER_LEFT);
-            if (checkoutStatus != null && checkoutStatus.dirty()) {
-                Region dirtyDot = new Region();
-                dirtyDot.getStyleClass().add("dirty-dot");
-                nameRow.getChildren().add(dirtyDot);
-            }
-
-            Label meta = new Label(UiFormats.relativeTime(session.lastOpenedAt()));
-            meta.getStyleClass().add("session-meta");
-
-            VBox text = new VBox(1, nameRow, meta);
-            HBox.setHgrow(text, Priority.ALWAYS);
+            branchTag.setMinWidth(0);
+            branchTag.setTextOverrun(OverrunStyle.LEADING_ELLIPSIS);
+            HBox.setHgrow(branchTag, Priority.NEVER);
 
             // Right-aligned PR chip: `PR #n` while open, `merged` after.
             Label prChip = switch (session.prState()) {
@@ -1843,12 +1837,17 @@ public final class RepositorySidebar extends VBox {
             actions.setAlignment(Pos.CENTER_RIGHT);
             actions.visibleProperty().bind(hoverProperty());
 
-            HBox row = new HBox(8, statusCol, text, actions);
-            if (prChip != null) {
-                row.getChildren().add(row.getChildren().indexOf(actions), prChip);
+            HBox row = new HBox(8, statusCol, name);
+            if (checkoutStatus != null && checkoutStatus.dirty()) {
+                Region dirtyDot = new Region();
+                dirtyDot.getStyleClass().add("dirty-dot");
+                row.getChildren().add(dirtyDot);
             }
-            session.worktreeRoot().ifPresent(root -> findingsBadge(root)
-                    .ifPresent(badge -> row.getChildren().add(row.getChildren().indexOf(actions), badge)));
+            if (prChip != null) {
+                row.getChildren().add(prChip);
+            }
+            session.worktreeRoot().ifPresent(root ->
+                    findingsBadge(root).ifPresent(badge -> row.getChildren().add(badge)));
             // A session whose Claude is blocked on a human gets a badge: it
             // is the one state that makes no further progress until the user
             // comes back to it. Cleared by switching to the session.
@@ -1856,15 +1855,11 @@ public final class RepositorySidebar extends VBox {
             if (activity == SessionActivity.NEEDS_ATTENTION) {
                 Label attention = new Label("waiting");
                 attention.getStyleClass().add("attention-badge");
-                row.getChildren().add(row.getChildren().indexOf(actions), attention);
+                row.getChildren().add(attention);
             }
-            // An IDLE session advertises resumability with a ghost Resume
-            // pill (worktree handoff: clicking the row resumes it).
-            if (!SessionStatusStyles.isRunning(session.status())) {
-                Label resumePill = new Label("Resume");
-                resumePill.getStyleClass().add("resume-pill");
-                row.getChildren().add(row.getChildren().indexOf(actions), resumePill);
-            }
+            row.getChildren().add(branchTag);
+            branchTag.maxWidthProperty().bind(
+                    row.widthProperty().map(w -> SidebarRowMetrics.branchTagMaxWidth(w.doubleValue())));
             row.getStyleClass().addAll("session-row", "child-row");
             row.setAlignment(Pos.CENTER_LEFT);
             if (viewModel.activeSession().filter(session.id()::equals).isPresent()) {
@@ -1892,7 +1887,7 @@ public final class RepositorySidebar extends VBox {
                     event.consume();
                 }
             });
-            return row;
+            return RowOverlay.wrap(row, actions);
         }
 
         /** Human-facing wording for the tooltip's activity line. */
