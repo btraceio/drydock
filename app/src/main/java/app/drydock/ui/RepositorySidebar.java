@@ -139,6 +139,18 @@ public final class RepositorySidebar extends VBox {
     /** Which repository subtrees are expanded; new repositories start expanded. */
     private final Set<RepositoryId> collapsed = new HashSet<>();
 
+    /** The user's collapse set, stashed while a filter forces every repo open. */
+    private Set<RepositoryId> collapsedBeforeFilter;
+
+    /**
+     * Set in the two places a filter can change (the {@link SessionFilterBar}
+     * callback and the {@link #filterDebounce} handler) and consumed at the
+     * top of {@link #rebuildTree()}. Force-expansion must fire only on an
+     * actual filter change, not on every rebuild, or the disclosure triangle
+     * is a dead control for as long as a filter is on.
+     */
+    private boolean filterChangedSinceLastRebuild;
+
     /** Repos whose stale bucket is expanded. Distinct from {@code collapsed} (repo-level). */
     private final Set<RepositoryId> staleBucketExpanded = new HashSet<>();
 
@@ -231,7 +243,10 @@ public final class RepositorySidebar extends VBox {
 
         filterField.getStyleClass().add("filter-field");
         filterField.setPromptText("⌕  Filter repos & worktrees…");
-        filterDebounce.setOnFinished(e -> rebuildTree());
+        filterDebounce.setOnFinished(e -> {
+            filterChangedSinceLastRebuild = true;
+            rebuildTree();
+        });
         filterField.textProperty().addListener((obs, oldText, newText) -> filterDebounce.playFromStart());
 
         filterBar = new SessionFilterBar(agentRegistry, () -> onFilterChipsChanged());
@@ -293,7 +308,11 @@ public final class RepositorySidebar extends VBox {
             @Override
             public void sessionRowChanged(ManagedSessionId sessionId) {
                 maybeRefreshStatuses();
-                updateSessionRow(sessionId);
+                if (filter.isActive() && membershipChanged(sessionId)) {
+                    requestRebuild();
+                } else {
+                    updateSessionRow(sessionId);
+                }
             }
 
             @Override
@@ -310,6 +329,11 @@ public final class RepositorySidebar extends VBox {
             @Override
             public void activeSessionChanged(Optional<ManagedSessionId> previous,
                                              Optional<ManagedSessionId> current) {
+                if (filtering() && (membershipChanged(previous.orElse(null))
+                        || membershipChanged(current.orElse(null)))) {
+                    requestRebuild();
+                    return;
+                }
                 previous.ifPresent(RepositorySidebar.this::updateSessionRow);
                 current.ifPresent(RepositorySidebar.this::updateSessionRow);
                 syncActiveSelection();
@@ -497,7 +521,11 @@ public final class RepositorySidebar extends VBox {
         for (Repository repository : sorted(repositoryManager.repositories())) {
             SidebarChildren classified = childrenOf(repository);
             if (classified != null) {
-                live.addAll(classified.liveSessions());
+                for (ManagedAgentSession candidate : classified.liveSessions()) {
+                    if (filter.matches(candidate)) {
+                        live.add(candidate);
+                    }
+                }
             }
         }
         if (live.isEmpty()) {
@@ -526,6 +554,39 @@ public final class RepositorySidebar extends VBox {
         return null;
     }
 
+    /**
+     * Whether {@code sessionId} belongs in the tree but is missing, or is in
+     * the tree but no longer belongs. The {@code isExempt} term is not
+     * optional: an exempt row fails {@code matches} by definition while
+     * sitting in the tree, and it is the frontmost session -- the one
+     * emitting the most row events -- so testing {@code matches} alone would
+     * force a full rebuild on every one of them that could never resolve the
+     * mismatch it reacted to.
+     */
+    private boolean membershipChanged(ManagedSessionId sessionId) {
+        if (sessionId == null) {
+            return false;
+        }
+        ManagedAgentSession session = viewModel.sessionById(sessionId).orElse(null);
+        if (session == null) {
+            return false;
+        }
+        boolean belongs = filter.matches(session) || isExempt(sessionId);
+        return belongs != isInTree(sessionId);
+    }
+
+    private boolean isInTree(ManagedSessionId sessionId) {
+        for (TreeItem<SidebarNode> repoItem : treeRoot.getChildren()) {
+            for (TreeItem<SidebarNode> child : repoItem.getChildren()) {
+                if (child.getValue() instanceof SidebarNode.SessionNode sessionNode
+                        && sessionNode.session().id().equals(sessionId)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     private void onRepositoriesChanged() {
         for (Repository repository : repositoryManager.repositories()) {
             if (viewModel.repoStatus(repository.id()).isEmpty()
@@ -549,6 +610,7 @@ public final class RepositorySidebar extends VBox {
     /** Chip callback: re-reads {@link #filterBar} and coalesces into one rebuild. */
     private void onFilterChipsChanged() {
         filter = filterBar.filter();
+        filterChangedSinceLastRebuild = true;
         requestRebuild();
     }
 
@@ -562,6 +624,25 @@ public final class RepositorySidebar extends VBox {
     }
 
     private void rebuildTree() {
+        // A filter is a global question ("where are my errors?"); repo
+        // expansion is a local reading preference. Re-assert the expansion on
+        // every change to the filter -- not only on entry, or switching from
+        // `running` to `error` would leave the sole matching session inside a
+        // repo the user collapsed earlier.
+        if (filtering()) {
+            if (collapsedBeforeFilter == null) {
+                collapsedBeforeFilter = new HashSet<>(collapsed);
+            }
+            if (filterChangedSinceLastRebuild) {
+                collapsed.clear();
+            }
+        } else if (collapsedBeforeFilter != null) {
+            collapsed.clear();
+            collapsed.addAll(collapsedBeforeFilter);
+            collapsedBeforeFilter = null;
+        }
+        filterChangedSinceLastRebuild = false;
+
         String query = currentQuery();
 
         List<Repository> repositories = sorted(repositoryManager.repositories());
@@ -1648,6 +1729,10 @@ public final class RepositorySidebar extends VBox {
                                     + activityLabel(activity))
                     + "\nLast opened: " + session.lastOpenedAt()
                     + "\nWorking directory: " + workingDirectoryText);
+            if (filter.isActive() && !filter.matches(session) && isExempt(session.id())) {
+                rowTip.setText(rowTip.getText()
+                        + "\nShown because it is open — it does not match the current filter.");
+            }
             Tooltip.install(row, rowTip);
             row.setOnMouseClicked(event -> {
                 if (event.getButton() == MouseButton.PRIMARY) {
