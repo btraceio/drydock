@@ -160,15 +160,25 @@ final class SkimView extends ScrollPane {
      * whatever anchor {@code setSkim} had computed from a CodeArea that was
      * not laid out yet. Past the last member there is nothing to reveal, so
      * the honest answer is the top of the file.</p>
+     *
+     * <p>Resolving forward SCROLLS but does not open: expanding a member the
+     * reader never pointed at -- and counting it as read, which the trail and
+     * the dwell sampler both believe -- is the view deciding something on
+     * their behalf. Opening a file at line 1 would otherwise expand whatever
+     * declaration happens to come first. Only a line genuinely inside a
+     * member opens it.</p>
      */
     void revealLine(int line) {
         if (outline.memberAtOrAfter(line).isEmpty()) {
             scrollToTop();
             return;
         }
+        boolean pointedAt = outline.memberAt(line).isPresent();
         outline.memberAtOrAfter(line).ifPresent(member -> {
-            expansion.put(member.startLine(), true);
-            onMemberRead.accept(member.startLine());
+            if (pointedAt) {
+                expansion.put(member.startLine(), true);
+                onMemberRead.accept(member.startLine());
+            }
             scrollClaimed = true;
             try {
                 rebuild();

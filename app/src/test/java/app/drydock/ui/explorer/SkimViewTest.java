@@ -231,10 +231,13 @@ class SkimViewTest extends ApplicationTest {
         interact(() -> skim.revealLine(blankLineBeforeOnRelease));
         settle();
 
-        assertEquals(List.of("void onRelease(MouseEvent e) {"), openRowSignatures(),
-                "the nearest member starting after the line is what a reveal there means");
         assertTrue(skim.getVvalue() > 0.0,
-                "scrolled toward that member, not left at rest: vvalue=" + skim.getVvalue());
+                "scrolled toward the nearest member below, not left at rest: vvalue=" + skim.getVvalue());
+        // Scrolled to, NOT opened: the reader pointed at a blank line, not at
+        // onRelease. Opening it here would also mark it read, which the trail
+        // and the dwell sampler both take at face value.
+        assertEquals(List.of(), openRowSignatures(),
+                "resolving forward does not open a member the reader never pointed at");
     }
 
     /**
