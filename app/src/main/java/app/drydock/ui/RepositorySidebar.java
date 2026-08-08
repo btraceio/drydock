@@ -1919,15 +1919,20 @@ public final class RepositorySidebar extends VBox {
             String branch = worktree.branch().orElse(worktree.detached() ? "(detached)" : "(no branch)");
             Label name = new Label(branch);
             name.getStyleClass().add("worktree-unopened-branch");
-
-            Label meta = new Label(shortPath(worktree.path()));
-            meta.getStyleClass().add("session-meta");
-
-            VBox text = new VBox(1, name, meta);
-            HBox.setHgrow(text, Priority.ALWAYS);
+            // Single line, name-first: the name takes the remaining width
+            // (matching buildSessionRow). Without the min-width clamp, a
+            // Label's min width is its pref width, and a long branch name
+            // would set the row's -- and then the window's -- minimum width.
+            HBox.setHgrow(name, Priority.ALWAYS);
+            name.setMinWidth(0);
+            name.setMaxWidth(Double.MAX_VALUE);
+            name.setTextOverrun(OverrunStyle.ELLIPSIS);
 
             Label startPill = new Label("Start ▸");
             startPill.getStyleClass().add("start-pill");
+            // Never shrink below its own text -- an HGROW'd sibling must not
+            // be able to ellipsize this into "…".
+            startPill.setMinWidth(Region.USE_PREF_SIZE);
             startPill.setOnMouseClicked(event -> {
                 if (event.getButton() == MouseButton.PRIMARY) {
                     navigator.promptStartWorktreeSession(repository, worktree);
@@ -1935,7 +1940,7 @@ public final class RepositorySidebar extends VBox {
                 }
             });
 
-            HBox row = new HBox(8, statusCol, text, startPill);
+            HBox row = new HBox(8, statusCol, name, startPill);
             findingsBadge(worktree.path())
                     .ifPresent(badge -> row.getChildren().add(row.getChildren().indexOf(startPill), badge));
             if (!worktree.mainCheckout()) {
