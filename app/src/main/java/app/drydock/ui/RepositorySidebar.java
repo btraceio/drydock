@@ -1905,10 +1905,13 @@ public final class RepositorySidebar extends VBox {
         }
 
         /**
-         * A discovered worktree with no session (worktree handoff): faint
-         * icon, branch as the primary line, short path as the sub line, an
-         * accent Start ▸ pill and -- never on the main checkout -- a
-         * one-click 🗑 that removes worktree + branch.
+         * A discovered worktree with no session (worktree handoff), one
+         * line like a session row: faint icon, branch name taking the
+         * width, an accent Start ▸ pill and -- never on the main checkout
+         * -- a one-click 🗑 that removes worktree + branch. The path moved
+         * to the row's tooltip -- a second line would have broken the
+         * single-line shape shared with session rows, and the tooltip
+         * already carried it.
          */
         private HBox buildUnopenedRow(WorktreeService.Worktree worktree, Repository repository) {
             Label icon = new Label(worktree.mainCheckout() ? "⎇" : "◫");
