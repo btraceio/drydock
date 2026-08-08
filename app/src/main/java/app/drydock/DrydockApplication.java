@@ -934,6 +934,19 @@ public final class DrydockApplication extends Application {
                 }
                 return;
             }
+            // Review's keyboard backstop (see MainWorkspace#reviewKeyboardBackstop):
+            // catches Review's own shortcuts (j/k/[/]/a/r/... ) when focus has
+            // drifted off Review's subtree while it is still the showing tab,
+            // which the node-level filter installed on ReviewDestinationView
+            // itself cannot see happen. Gated on no modal showing -- a modal's
+            // own controls (a checkbox, a radio button) are not text inputs
+            // either, and must not be shadowed by Review's letters while they
+            // have focus.
+            if (!appShell.modalLayer().isShowingModal()
+                    && mainWorkspace.reviewKeyboardBackstop(event)) {
+                event.consume();
+                return;
+            }
             if (cmd && event.isShiftDown() && event.getCode() == KeyCode.L) {
                 // Gated like ⌘, below: the settings modal's theme radio reads
                 // the theme once at construction and has no listener on the
@@ -1505,6 +1518,52 @@ public final class DrydockApplication extends Application {
                             && diagReviewView.diagSelectRange(range[0], range[1], range[2]);
                     System.out.println("[diag] select " + arg + " -> " + found);
                 }
+                // Selects a specific queue item by index, unlike the "review"
+                // verb's own PR/BRANCH auto-select -- needed to land on a
+                // WORKTREE item with a real multi-file diff (several intents)
+                // for the issue-3 keyboard-routing evidence.
+                case "item" -> {
+                    if (diagReviewView == null) {
+                        System.out.println("[diag] item: no review view open");
+                    } else {
+                        diagReviewView.diagSelectItem(Integer.parseInt(arg.strip()));
+                        System.out.println("[diag] item " + arg + " selected");
+                    }
+                }
+                // Prints "index/count" for the intent [/]/n currently sit on
+                // -- the issue-3 evidence of whether a keystroke actually
+                // moved the reader.
+                case "intentidx" -> System.out.println("[diag] intentidx "
+                        + (diagReviewView == null ? "no review view open" : diagReviewView.diagIntentIndex()));
+                // Steals focus onto the sidebar's "+ Add repository" button --
+                // a real, focus-traversable control OUTSIDE ReviewDestinationView's
+                // subtree -- to reproduce hypothesis (a) from issue 3: focus
+                // landing somewhere Review's own node-level key filter cannot see.
+                case "stealfocus" -> {
+                    Node target = appShell.scene().lookup(".add-repo-button");
+                    if (target == null) {
+                        System.out.println("[diag] stealfocus: sidebar add-repo button not found");
+                    } else {
+                        target.requestFocus();
+                        Node owner = appShell.scene().getFocusOwner();
+                        System.out.println("[diag] stealfocus -> focus owner now "
+                                + (owner == null ? "null" : owner.getClass().getName()));
+                    }
+                }
+                // Same idea as "stealfocus" but a TEXT INPUT outside Review --
+                // the sidebar's own repo filter -- to prove the backstop
+                // yields to it rather than hijacking a letter typed there.
+                case "stealfocustext" -> {
+                    Node target = appShell.scene().lookup(".filter-field");
+                    if (target == null) {
+                        System.out.println("[diag] stealfocustext: sidebar filter field not found");
+                    } else {
+                        target.requestFocus();
+                        Node owner = appShell.scene().getFocusOwner();
+                        System.out.println("[diag] stealfocustext -> focus owner now "
+                                + (owner == null ? "null" : owner.getClass().getName()));
+                    }
+                }
                 case "compose" -> {
                     Node owner = appShell.scene().getFocusOwner();
                     if (owner instanceof TextInputControl field) {
@@ -1537,6 +1596,36 @@ public final class DrydockApplication extends Application {
                     }
                 }
                 case "shot" -> diagSnapshot(stage, Path.of(arg));
+                case "focus" -> {
+                    Node owner = appShell.scene().getFocusOwner();
+                    boolean underReview = owner != null && diagReviewView != null
+                            && diagReviewView.diagOwnsNode(owner);
+                    System.out.println("[diag] focus owner: "
+                            + (owner == null ? "null" : owner.getClass().getName())
+                            + " underReview=" + underReview);
+                }
+                // Fires a real key press+release at whatever the scene's
+                // focus owner actually is -- unlike diagFireKeyAtFocusOwner,
+                // which only fires into a focused TextInputControl (composer,
+                // filter field). This is the verb issue 3's diagnosis needed:
+                // it proves whether a Review shortcut fires the way a human's
+                // keystroke would, through the real focus owner, rather than
+                // by calling the handler method directly (which would "pass"
+                // even with the routing dead).
+                case "key" -> {
+                    Node owner = appShell.scene().getFocusOwner();
+                    if (owner == null) {
+                        System.out.println("[diag] key " + arg + ": no focus owner");
+                    } else {
+                        KeyCode code = KeyCode.valueOf(arg);
+                        owner.fireEvent(new KeyEvent(KeyEvent.KEY_PRESSED, "", "", code,
+                                false, false, false, false));
+                        owner.fireEvent(new KeyEvent(KeyEvent.KEY_RELEASED, "", "", code,
+                                false, false, false, false));
+                        System.out.println("[diag] key " + arg + " fired at "
+                                + owner.getClass().getName());
+                    }
+                }
                 default -> System.out.println("[diag] mark " + arg);
             }
         } catch (RuntimeException e) {

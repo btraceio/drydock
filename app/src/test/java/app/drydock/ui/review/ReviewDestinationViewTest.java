@@ -748,6 +748,130 @@ class ReviewDestinationViewTest extends ApplicationTest {
         assertEquals(List.of(scope.id()), host.submittedScopes);
     }
 
+    // ---- intent movement and the verdict-advance --------------------------
+
+    /**
+     * Pins the {@code [}/{@code ]} bindings with a real robot key press
+     * (never {@code view.handleShortcut(...)} called directly, which would
+     * green-light the routing being dead the way it was in the running app --
+     * see the {@code handleShortcut}/{@code MainWorkspace#reviewKeyboardBackstop}
+     * javadoc). {@code type()} still gives the view focus itself first, so
+     * this does NOT exercise the focus-routing bug reported live (dead
+     * shortcuts after a click elsewhere in Review) -- that needs the real
+     * {@code app.drydock.diag.reviewScript} driver against the whole
+     * workspace, which is where the {@code stealfocus}/{@code key}/{@code
+     * intentidx} verbs this fix added come in.
+     */
+    @Test
+    void openAndCloseBracketMoveBetweenIntentsWithARealKeyPress() throws Exception {
+        Path repo = repoWithTwoChangedFiles();
+        seedWorkingTreeScope(repo);
+        awaitDiffLoaded();
+        assertEquals(2, intentCount(), "the fixture must actually produce two intents, or this test proves nothing");
+        assertEquals(0, intentIndex());
+
+        type(KeyCode.CLOSE_BRACKET);
+        assertEquals(1, intentIndex());
+        type(KeyCode.CLOSE_BRACKET);
+        assertEquals(1, intentIndex(), "] must clamp at the last intent");
+
+        type(KeyCode.OPEN_BRACKET);
+        assertEquals(0, intentIndex());
+        type(KeyCode.OPEN_BRACKET);
+        assertEquals(0, intentIndex(), "[ must clamp at the first intent");
+    }
+
+    @Test
+    void settlingAnIntentAdvancesToTheNextUnsettledOne() throws Exception {
+        Path repo = repoWithTwoChangedFiles();
+        seedWorkingTreeScope(repo);
+        awaitDiffLoaded();
+        assertEquals(2, intentCount());
+        assertEquals(0, intentIndex());
+
+        type(KeyCode.A);
+        assertEquals(1, intentIndex(),
+                "approving the first intent must advance to the next unsettled one, the same walk 'n' makes");
+    }
+
+    @Test
+    void settlingTheLastUnsettledIntentLeavesTheIndexUnchanged() throws Exception {
+        Path repo = repoWithTwoChangedFiles();
+        seedWorkingTreeScope(repo);
+        awaitDiffLoaded();
+
+        type(KeyCode.A); // settles intent 0, advances to intent 1 (the only one left unsettled)
+        assertEquals(1, intentIndex());
+
+        type(KeyCode.A); // settles intent 1 -- nothing left unsettled to advance to
+        assertEquals(1, intentIndex(),
+                "settling the LAST unsettled intent must not jump anywhere -- the reader is about to Submit");
+    }
+
+    @Test
+    void undoDoesNotAdvance() throws Exception {
+        Path repo = repoWithTwoChangedFiles();
+        seedWorkingTreeScope(repo);
+        awaitDiffLoaded();
+
+        type(KeyCode.A); // settles intent 0, advances to intent 1
+        assertEquals(1, intentIndex());
+        type(KeyCode.OPEN_BRACKET); // back to intent 0
+        assertEquals(0, intentIndex());
+
+        type(KeyCode.U);
+        assertEquals(0, intentIndex(),
+                "undoing a verdict must leave the reader on the intent they just undid, not sweep them off it");
+    }
+
+    /**
+     * The sibling refusal to {@link #submitOnAFailedDiffShowsAVisibleRefusalInsteadOfDoingNothing}:
+     * an intent with no verdict used to make Submit silently jump and do
+     * nothing else, with no explanation (see {@code
+     * ReviewDestinationView#submitReview}).
+     */
+    @Test
+    void submitWithAnUnsettledIntentShowsAVisibleRefusalAndJumpsToIt() throws Exception {
+        Path repo = repoWithTwoChangedFiles();
+        seedWorkingTreeScope(repo);
+        awaitDiffLoaded();
+
+        type(KeyCode.A); // settle intent 0; auto-advances to intent 1, still unsettled
+        assertEquals(1, intentIndex());
+        type(KeyCode.OPEN_BRACKET); // step back to the settled intent so the jump below is observable
+        assertEquals(0, intentIndex());
+
+        type(KeyCode.ENTER);
+
+        Label refusal = awaitCondition(() -> {
+            java.util.Optional<Node> found = lookup(".review-verdict-submit-refusal").tryQuery();
+            return found.filter(Node::isVisible).map(Label.class::cast);
+        }, "Submit with an unsettled intent never showed a visible refusal");
+        assertTrue(refusal.getText().toLowerCase(java.util.Locale.ROOT).contains("verdict"),
+                "the message must say what is blocking: " + refusal.getText());
+        assertEquals(1, intentIndex(), "the refusal must jump to the intent still needing a verdict");
+        assertTrue(host.submittedScopes.isEmpty(), "must not reach host.submit with an unsettled intent");
+    }
+
+    private ReviewScope seedWorkingTreeScope(Path repo) {
+        ReviewScopeRegistry registry = new ReviewScopeRegistry();
+        ReviewScope scope = registry.mint(ReviewScopeRegistry.spec(
+                ReviewScope.Kind.WORKING_TREE, repo, Optional.of(repo), "HEAD", "HEAD",
+                Optional.empty(), Optional.empty()));
+        interact(() -> view.setItems(new QueueAssembly(
+                List.of(new ReviewItem(scope, ReviewItem.Group.MINE, "working", "drydock · vs HEAD")),
+                true, true), List.of("repo")));
+        return scope;
+    }
+
+    private int intentIndex() {
+        return Integer.parseInt(view.diagIntentIndex().split("/")[0]);
+    }
+
+    private int intentCount() {
+        return Integer.parseInt(view.diagIntentIndex().split("/")[1]);
+    }
+
     private <T> T awaitCondition(java.util.function.Supplier<java.util.Optional<T>> ready, String failureMessage) {
         for (int i = 0; i < 200; i++) {
             WaitForAsyncUtils.waitForFxEvents();
@@ -800,6 +924,28 @@ class ReviewDestinationViewTest extends ApplicationTest {
         runGit(repo, "commit", "-m", "big");
         Files.writeString(repo.resolve("Big.java"),
                 original.toString().replace("int field20 = 20;", "int field20 = 999;"));
+        return repo;
+    }
+
+    /**
+     * Two changed files in two different directories -- {@link
+     * app.drydock.review.FallbackIntents}, the grouping Review falls back to
+     * with no reviewer configured, clusters files by (kind, directory), so
+     * two files that share a directory collapse into ONE intent. Different
+     * directories is what actually earns two intents, which is what the
+     * {@code [}/{@code ]} and verdict-advance tests need to have somewhere
+     * to move or advance TO.
+     */
+    private static Path repoWithTwoChangedFiles() throws IOException, InterruptedException {
+        Path repo = initCommittedRepo(Files.createTempDirectory("drydock-review-view-two"));
+        Files.createDirectories(repo.resolve("src"));
+        Files.createDirectories(repo.resolve("lib"));
+        Files.writeString(repo.resolve("src/A.java"), "int a = 1;\n");
+        Files.writeString(repo.resolve("lib/B.java"), "int b = 1;\n");
+        runGit(repo, "add", "src/A.java", "lib/B.java");
+        runGit(repo, "commit", "-m", "two files");
+        Files.writeString(repo.resolve("src/A.java"), "int a = 2;\n");
+        Files.writeString(repo.resolve("lib/B.java"), "int b = 2;\n");
         return repo;
     }
 

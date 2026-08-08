@@ -1048,6 +1048,8 @@ public final class ReviewDestinationView extends BorderPane {
                 intentIndex = intents().indexOf(counted.get(i));
                 refreshReviewState();
                 revealCurrentIntent();
+                verdictBar.showSubmitRefused(
+                        "an intent still needs a verdict (approve or request changes); jumped to it");
                 return;
             }
             decisions.add(verdict.get().decision());
@@ -1481,11 +1483,24 @@ public final class ReviewDestinationView extends BorderPane {
         applyResponsiveLayout(getWidth());
     }
 
+    /**
+     * {@code a} / {@code r}: records a verdict and, once it actually took
+     * (the host still refuses APPROVED over a blocking finding -- see
+     * {@code MainWorkspace}'s {@code Host#setVerdict} -- so recording is not
+     * guaranteed), advances to the next unsettled intent via the same walk
+     * {@code n} uses. {@link #undoVerdict} deliberately does not call this:
+     * undoing should leave the reader on the intent they just undid, not
+     * sweep them off it.
+     */
     private void verdictAction(ReviewVerdict.Decision decision) {
         Optional<ReviewScope> scope = selectedScope();
         Optional<ReviewIntent> intent = currentIntent();
         if (scope.isPresent() && intent.isPresent()) {
             host.setVerdict(scope.get(), intent.get(), Optional.of(decision));
+            if (host.verdict(scope.get(), intent.get()).map(ReviewVerdict::decision)
+                    .filter(decision::equals).isPresent()) {
+                nextUnsettledIntent();
+            }
         }
     }
 
@@ -1568,11 +1583,31 @@ public final class ReviewDestinationView extends BorderPane {
      * filter in {@code DrydockApplication} owns both, and a scene filter runs
      * before a node filter, so binding them here would be dead code. {@code
      * Esc} unwinds topmost-first there -- modal, then Review.</p>
+     *
+     * <p>This is a thin wrapper over {@link #handleShortcut}, kept as the
+     * {@code addEventFilter} target below: it only ever sees an event whose
+     * target is a descendant of this view. {@code app.drydock.ui.MainWorkspace}'s
+     * keyboard backstop calls {@link #handleShortcut} directly for the case
+     * where the reader's focus has ended up somewhere else entirely while
+     * Review is still the showing tab -- see its Javadoc for why that is
+     * real.</p>
      */
     private void onKeyPressed(KeyEvent event) {
+        if (handleShortcut(event)) {
+            event.consume();
+        }
+    }
+
+    /**
+     * Review's keyboard table, minus the consume: returns whether {@code
+     * event} mapped to a shortcut and was acted on, so a caller outside the
+     * normal capturing chain (see {@link #onKeyPressed}) can tell whether to
+     * treat the event as handled.
+     */
+    public boolean handleShortcut(KeyEvent event) {
         if (event.isShortcutDown() || event.isAltDown()
                 || event.getTarget() instanceof TextInputControl) {
-            return;
+            return false;
         }
         boolean handled = switch (event.getCode()) {
             case J -> { queue.moveSelection(1); yield true; }
@@ -1614,9 +1649,7 @@ public final class ReviewDestinationView extends BorderPane {
             }
             default -> false;
         };
-        if (handled) {
-            event.consume();
-        }
+        return handled;
     }
 
     /**
@@ -1838,6 +1871,28 @@ public final class ReviewDestinationView extends BorderPane {
      */
     public Optional<String> diagSelectedScopeId() {
         return ReviewDiagFxThread.call(() -> selectedScope().map(ReviewScope::id));
+    }
+
+    /**
+     * Diagnostic-only: the intent {@code [/]}/{@code n} currently sit on,
+     * as {@code "index/count"}. Used to prove -- or disprove -- that a real
+     * keyboard shortcut fired at the scene's actual focus owner (not one
+     * invoked directly against the handler) actually moved the reader.
+     */
+    public String diagIntentIndex() {
+        return ReviewDiagFxThread.call(() -> intentIndex + "/" + intents().size());
+    }
+
+    /** Diagnostic-only: whether {@code node} is this view or a descendant of it. */
+    public boolean diagOwnsNode(javafx.scene.Node node) {
+        return ReviewDiagFxThread.call(() -> {
+            for (javafx.scene.Node n = node; n != null; n = n.getParent()) {
+                if (n == this) {
+                    return true;
+                }
+            }
+            return false;
+        });
     }
 
     /**

@@ -83,6 +83,7 @@ import javafx.scene.control.TabPane;
 import javafx.scene.control.TextInputControl;
 import javafx.scene.control.TextInputDialog;
 import javafx.scene.control.Tooltip;
+import javafx.scene.input.KeyEvent;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Region;
@@ -926,6 +927,52 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     /** Whether Review currently owns the centre (the Esc unwind order asks). */
     public boolean isReviewShowing() {
         return tabPane.getSelectionModel().getSelectedItem() == reviewTab;
+    }
+
+    /**
+     * Review's keyboard backstop, installed as a low-priority scene-level
+     * filter (see {@code DrydockApplication#installGlobalShortcuts}) behind
+     * every other global shortcut. {@code ReviewDestinationView} normally
+     * catches its own shortcuts with a node-level {@code
+     * addEventFilter(KEY_PRESSED, ...)}, which only ever sees an event whose
+     * target -- the scene's focus owner at dispatch time -- is a descendant
+     * of that view. Nothing in the workspace guarantees that stays true for
+     * the life of the Review tab: a click can leave focus on the sidebar,
+     * the tab header, or nowhere at all, and from then on every one of
+     * Review's shortcuts (reported live: {@code j}/{@code k}/{@code a}/
+     * {@code r}, and by extension {@code [}/{@code ]}, Enter/Submit, ...)
+     * is silently dead, because the node filter that is supposed to catch
+     * them is never reached.
+     *
+     * <p>Rather than chase every way focus can wander off Review's subtree,
+     * this repairs the symptom directly: whenever Review is the showing tab
+     * and the event's target is NOT already inside {@code reviewDestination}
+     * (in which case its own filter will see it, and handling it again here
+     * too would double-fire the shortcut -- moving the intent pointer twice,
+     * say), replay it through {@link ReviewDestinationView#handleShortcut}.
+     * That method's own {@code TextInputControl} guard still applies, so
+     * typing in some OTHER text field elsewhere in the workspace (the
+     * sidebar's repo filter, a rename field) is untouched -- only a stray,
+     * non-text-input focus owner gets the replay.</p>
+     *
+     * @return whether the event was handled (the caller consumes it)
+     */
+    public boolean reviewKeyboardBackstop(KeyEvent event) {
+        if (!isReviewShowing()) {
+            return false;
+        }
+        if (event.getTarget() instanceof Node target) {
+            for (Node n = target; n != null; n = n.getParent()) {
+                if (n == reviewDestination) {
+                    // Already a descendant of Review's own view -- its node
+                    // filter gets the first look, further up the capturing
+                    // chain though this backstop sits, so deferring here
+                    // avoids acting on the same keystroke twice.
+                    return false;
+                }
+            }
+        }
+        return reviewDestination.handleShortcut(event);
     }
 
     /** Whether {@code ⌘F} belongs to the Review queue's filter rather than the sidebar's. */
