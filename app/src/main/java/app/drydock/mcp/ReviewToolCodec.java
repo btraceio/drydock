@@ -315,7 +315,11 @@ final class ReviewToolCodec {
                 // The human's override and status survive a re-run: they are
                 // the human's, not the agent's, to restate.
                 existing.flatMap(ReviewAnnotation::severityOverride),
-                existing.map(ReviewAnnotation::status).orElse(AnnotationStatus.OPEN));
+                existing.map(ReviewAnnotation::status).orElse(AnnotationStatus.OPEN),
+                // Likewise GitHub state and the human's posting intent: an
+                // agent re-stating a finding must not un-post or un-link it.
+                existing.flatMap(ReviewAnnotation::github),
+                existing.map(ReviewAnnotation::postToPr).orElse(false));
     }
 
     private static List<ReviewAnnotation.Evidence> evidenceFromJson(JsonObject obj)

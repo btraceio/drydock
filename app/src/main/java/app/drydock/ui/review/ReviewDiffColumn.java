@@ -3,7 +3,9 @@ package app.drydock.ui.review;
 import app.drydock.git.DiffScope;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
+import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewScope;
+import app.drydock.review.Severity;
 import app.drydock.ui.UiErrors;
 import app.drydock.ui.code.SyntaxHighlighter;
 
@@ -30,6 +32,7 @@ import javafx.scene.text.TextFlow;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -70,11 +73,15 @@ final class ReviewDiffColumn extends BorderPane {
         boolean openFileAtLine(ReviewScope scope, Path file, int line);
     }
 
-    /** Where a comment written in the gutter composer goes. */
+    /** Where a comment minted by the gutter composer goes. */
     @FunctionalInterface
     interface CommentSink {
-        /** Records {@code body} as a human comment anchored to {@code lineKey} in {@code file}. */
-        void addComment(String file, String lineKey, String body);
+        /**
+         * Records {@code annotation}, freshly minted by {@link #submitComposer()}.
+         * The sink owns storage (id generation, intent assignment) -- the
+         * column only knows the range and the text, never the store.
+         */
+        void addComment(ReviewAnnotation annotation);
     }
 
     /** Findings anchored to a line, and what happens when their pin is clicked (spec §4.4). */
@@ -87,7 +94,7 @@ final class ReviewDiffColumn extends BorderPane {
     }
 
     /** One {@code ◆n} marker: its number, its severity style class, and its finding's key. */
-    record Pin(int number, String severityStyleClass, app.drydock.review.ReviewAnnotation.Key key,
+    record Pin(int number, String severityStyleClass, ReviewAnnotation.Key key,
                boolean dimmed) {
     }
 
@@ -211,7 +218,7 @@ final class ReviewDiffColumn extends BorderPane {
      */
     private app.drydock.review.ReviewIntent intentFilter;
 
-    private CommentSink commentSink = (file, lineKey, body) -> { };
+    private CommentSink commentSink = annotation -> { };
 
     /**
      * The open composer's anchor, or {@code null} for none. One at a time: a
@@ -232,6 +239,57 @@ final class ReviewDiffColumn extends BorderPane {
 
     /** The composer's text area, kept so Escape and submit can reach it. */
     private javafx.scene.control.TextArea composerInput;
+
+    /**
+     * The gutter selection's anchor: the file and line key a plain click, the
+     * start of a shift-click, or the start of a drag began at. {@code null}
+     * for none.
+     *
+     * <p>Identified by {@code (file, lineKey)} rather than cached as a row
+     * index into {@link #rows}: {@link #rebuild()} and {@link
+     * #expandRun(ReviewDiffRow.CollapsedRun)} both replace {@link #rows}
+     * wholesale, and expanding a collapsed run above the anchor shifts every
+     * index after it -- a cached index would then resolve to whatever line
+     * happens to sit there now, ranging a selection over rows the human never
+     * clicked. Resolving the key fresh against the current {@link #rows} on
+     * every use (see {@link #selectionAnchorIndex()}) means a rebuild that
+     * drops the anchor's line entirely resolves to {@code -1} -- "selection
+     * gone," the same outcome {@link #finalizeSelection} already gives a
+     * stale {@code rows.indexOf(row)} miss -- instead of silently moving.</p>
+     */
+    private String selectionAnchorFile;
+
+    /** @see #selectionAnchorFile */
+    private String selectionAnchorLineKey;
+
+    /** The anchor's current position in {@link #rows}, or {@code -1} when unset or no longer present. */
+    private int selectionAnchorIndex() {
+        return selectionAnchorFile == null ? -1 : indexOfLine(selectionAnchorFile, selectionAnchorLineKey);
+    }
+
+    /** Anchors the selection at {@code rows.get(index)}, or clears it when {@code index} is not a line. */
+    private void setSelectionAnchor(int index) {
+        if (index >= 0 && index < rows.size() && rows.get(index) instanceof ReviewDiffRow.Line line) {
+            selectionAnchorFile = line.file();
+            selectionAnchorLineKey = line.lineKey();
+        } else {
+            clearSelectionAnchor();
+        }
+    }
+
+    private void clearSelectionAnchor() {
+        selectionAnchorFile = null;
+        selectionAnchorLineKey = null;
+    }
+
+    /**
+     * The gutter keys currently painted {@code review-line-selected}, as
+     * {@code file + " " + lineKey}. The file is part of the key on purpose:
+     * two files can share a line number, and painting by a bare line key
+     * would tint that number in every file, not just the one being
+     * commented on.
+     */
+    private Set<String> selectedKeys = Set.of();
 
     /**
      * Set by the {@code whole scope} toggle: the reader has asked to see past
@@ -395,17 +453,28 @@ final class ReviewDiffColumn extends BorderPane {
     // ---- the gutter comment composer ---------------------------------------
 
     /**
-     * Opens the composer under {@code file}:{@code lineKey}, or closes it if
-     * it is already open there -- a second click on the same gutter is the
-     * reader changing their mind, not a request for a second composer.
+     * Opens a single-line composer at {@code file}:{@code lineKey}, or closes
+     * it if it is already open there exactly -- a second click on the same
+     * gutter is the reader changing their mind, not a request for a second
+     * composer. This is the plain-click path; a range comes from
+     * {@link #finalizeSelection}.
      */
     private void toggleComposer(String file, String lineKey) {
         if (composerRow != null && composerRow.file().equals(file)
-                && composerRow.lineKey().equals(lineKey)) {
+                && composerRow.startKey().equals(lineKey) && composerRow.endKey().equals(lineKey)) {
             closeComposer();
             return;
         }
-        composerRow = new ReviewDiffRow.Composer(file, lineKey);
+        openComposer(file, lineKey, lineKey);
+    }
+
+    /**
+     * Opens the composer anchored to {@code startKey}..{@code endKey} in
+     * {@code file}, replacing any composer already open elsewhere -- see
+     * {@link #composerRow}'s javadoc for why there is never a second one.
+     */
+    private void openComposer(String file, String startKey, String endKey) {
+        composerRow = new ReviewDiffRow.Composer(file, startKey, endKey);
         composerNode = buildComposer(composerRow);
         insertComposerRow();
         if (composerInput != null) {
@@ -422,6 +491,8 @@ final class ReviewDiffColumn extends BorderPane {
         composerNode = null;
         composerInput = null;
         rows.removeIf(ReviewDiffRow.Composer.class::isInstance);
+        clearSelectionAnchor();
+        clearSelectionPaint();
     }
 
     /** Whether a composer is open (Escape unwinds topmost-first). */
@@ -430,9 +501,11 @@ final class ReviewDiffColumn extends BorderPane {
     }
 
     /**
-     * Puts the composer row directly under the line it is anchored to. Any
-     * previously open one is removed first, so the row list can never carry
-     * two.
+     * Puts the composer row directly under the range's END line -- the line
+     * closest to where the reader's gesture finished, whether that was a
+     * plain click, the far end of a shift-click, or the far end of a drag.
+     * Any previously open composer is removed first, so the row list can
+     * never carry two.
      */
     private void insertComposerRow() {
         rows.removeIf(ReviewDiffRow.Composer.class::isInstance);
@@ -442,7 +515,7 @@ final class ReviewDiffColumn extends BorderPane {
         for (int i = 0; i < rows.size(); i++) {
             if (rows.get(i) instanceof ReviewDiffRow.Line line
                     && line.file().equals(composerRow.file())
-                    && line.lineKey().equals(composerRow.lineKey())) {
+                    && line.lineKey().equals(composerRow.endKey())) {
                 rows.add(i + 1, composerRow);
                 return;
             }
@@ -455,15 +528,25 @@ final class ReviewDiffColumn extends BorderPane {
         composerInput = null;
     }
 
-    private Region buildComposer(ReviewDiffRow.Composer row) {
+    /** The composer's {@code file line N} / {@code file lines N–M} label text. */
+    private static String composerWhere(ReviewDiffRow.Composer row) {
         // The file's name, not its path: the path is already on the hunk
         // header a few rows up, and spelling it out again here squeezed the
         // buttons down to "Can.." and "Comm..".
         String name = row.file().substring(row.file().lastIndexOf('/') + 1);
-        String line = row.lineKey().startsWith("n") || row.lineKey().startsWith("o")
-                ? " line " + row.lineKey().substring(1)
-                : " " + row.lineKey();
-        Label where = new Label(name + line);
+        if (row.startKey().equals(row.endKey())) {
+            return name + " line " + lineNumber(row.endKey());
+        }
+        return name + " lines " + lineNumber(row.startKey()) + "–" + lineNumber(row.endKey());
+    }
+
+    /** A stable line key's human-readable number, or the raw key if it is not one of {@code n}/{@code o}. */
+    private static String lineNumber(String lineKey) {
+        return lineKey.startsWith("n") || lineKey.startsWith("o") ? lineKey.substring(1) : lineKey;
+    }
+
+    private Region buildComposer(ReviewDiffRow.Composer row) {
+        Label where = new Label(composerWhere(row));
         where.getStyleClass().add("review-composer-where");
         // Truncates before the buttons do: the label is context, the buttons
         // are the actions.
@@ -514,7 +597,15 @@ final class ReviewDiffColumn extends BorderPane {
         return box;
     }
 
-    /** Sends the draft. A blank one is a no-op rather than an empty comment. */
+    /**
+     * Sends the draft. A blank one is a no-op rather than an empty comment.
+     *
+     * <p>{@link #displayedScopeId} rather than {@link #scope}, for the same
+     * reason {@link #toggleUntracked()} reads it: a composer can be open
+     * while showing a supplied patch-only diff, which deliberately leaves
+     * {@code scope} {@code null} (see {@link #showDiff}) while still
+     * publishing under the scope it was read for.</p>
+     */
     private void submitComposer() {
         if (composerRow == null || composerInput == null) {
             return;
@@ -524,7 +615,18 @@ final class ReviewDiffColumn extends BorderPane {
             closeComposer();
             return;
         }
-        commentSink.addComment(composerRow.file(), composerRow.lineKey(), body);
+        String scopeId = displayedScopeId;
+        if (scopeId == null) {
+            closeComposer();
+            return;
+        }
+        // NIT: a human note on a line is not a blocking finding, and any
+        // severity that blocks approval would let leaving a remark silently
+        // prevent the reviewer approving their own review.
+        ReviewAnnotation annotation = ReviewAnnotation.human(scopeId, composerRow.file(),
+                composerRow.startKey(), composerRow.endKey(),
+                new ReviewAnnotation.Message("You", Instant.now(), body), Severity.NIT);
+        commentSink.addComment(annotation);
         closeComposer();
     }
 
@@ -535,13 +637,184 @@ final class ReviewDiffColumn extends BorderPane {
         }
     }
 
+    /**
+     * Bumped by {@link #refreshPins()} to invalidate {@link DiffCell}'s
+     * per-cell graphic cache. A row (a {@code record}) compares equal to
+     * itself across an unrelated rebuild whenever its fields happen to
+     * match, which is exactly what makes the cache safe to keep across a
+     * routine layout pass -- but a pin marker is read from {@link
+     * #pinSource} at build time, not stored on the row, so an unchanged row
+     * can still need a rebuild when the finding set under it changes. The
+     * generation counter is what tells the cache "rebuild anyway" without
+     * forcing every OTHER unrelated cell to rebuild too.
+     */
+    private long renderGeneration;
+
     /** Re-renders the rows so pin markers pick up a changed finding set. */
     void refreshPins() {
-        // A full row swap is one list operation; the rows themselves are
-        // unchanged data, so this costs a re-render of the visible cells only.
+        renderGeneration++;
+        refreshRender();
+    }
+
+    /**
+     * Re-renders the rows in place -- a full swap is one list operation, and
+     * the rows themselves are unchanged data, so a virtualized {@code
+     * ListView} only pays for the currently visible cells, not the whole
+     * list. Used whenever something a cell reads (a pin) changed without the
+     * underlying row objects changing; {@link DiffCell}'s cache (keyed on
+     * {@link #renderGeneration}) is what makes this cheap even though it
+     * still touches the whole {@link #rows} list.
+     */
+    private void refreshRender() {
         List<ReviewDiffRow> current = List.copyOf(rows);
         rows.setAll(List.of());
         rows.setAll(current);
+    }
+
+    // ---- gutter range selection ---------------------------------------------
+
+    /**
+     * Extends the in-progress selection to {@code focusIndex} against {@link
+     * #selectionAnchorIndex()}, resolves it through {@link DiffLineSelection}
+     * (which alone owns the one-file/one-hunk clamp -- GitHub rejects a
+     * cross-hunk comment and the whole atomic review with it, so that rule
+     * is never re-implemented here), and repaints {@link #selectedKeys}.
+     */
+    private void extendSelection(int focusIndex) {
+        int anchorIndex = selectionAnchorIndex();
+        if (anchorIndex < 0) {
+            return;
+        }
+        DiffLineSelection.resolve(rows, anchorIndex, focusIndex)
+                .ifPresentOrElse(this::paintSelection, this::clearSelectionPaint);
+    }
+
+    /** Repaints {@link #selectedKeys} to every rendered line between a resolved range's ends. */
+    private void paintSelection(DiffLineSelection.Range range) {
+        int start = indexOfLine(range.file(), range.startKey());
+        int end = indexOfLine(range.file(), range.endKey());
+        if (start < 0 || end < 0) {
+            clearSelectionPaint();
+            return;
+        }
+        Set<String> keys = new HashSet<>();
+        for (int i = Math.min(start, end); i <= Math.max(start, end); i++) {
+            if (rows.get(i) instanceof ReviewDiffRow.Line line) {
+                keys.add(line.file() + " " + line.lineKey());
+            }
+        }
+        if (keys.equals(selectedKeys)) {
+            return;
+        }
+        selectedKeys = keys;
+        applySelectionPaint();
+    }
+
+    private void clearSelectionPaint() {
+        if (selectedKeys.isEmpty()) {
+            return;
+        }
+        selectedKeys = Set.of();
+        applySelectionPaint();
+    }
+
+    /**
+     * Toggles {@code review-line-selected} directly on the gutter {@code
+     * Label}s already in the scene, keyed by the {@code file + " " +
+     * lineKey} stamped into each one's {@link Node#userData} by {@link
+     * #buildLine}.
+     *
+     * <p>This is deliberately NOT {@link #refreshRender()}: that swaps
+     * {@link #rows} to empty and back, which detaches every cell's graphic
+     * -- including the gutter the pointer is currently pressed on. Do that
+     * from inside {@code setOnMousePressed} and the pressed {@code Label} is
+     * no longer in the scene when the button comes up, so JavaFX never
+     * delivers {@code MOUSE_CLICKED} to it, and a {@code DRAG_DETECTED} that
+     * follows throws {@code IllegalStateException} from {@code
+     * startFullDrag()} on a node that is not in the scene. Repainting live
+     * cells in place keeps the gesture's target node attached throughout.</p>
+     */
+    private void applySelectionPaint() {
+        // Deferred rather than applied synchronously: this runs from inside
+        // gesture handlers (setOnMousePressed, setOnMouseDragEntered), and
+        // mutating the PRESSED node's own style class while JavaFX is still
+        // in the middle of dispatching that same press was observed (via a
+        // real-pointer TestFX probe) to occasionally suppress the click or
+        // full-drag-gesture bookkeeping the press was starting -- the
+        // gesture's own target getting its CSS state (and therefore a CSS
+        // layout pass) touched out from under it, mid-dispatch. One pulse
+        // later, the press has already finished being handled, so the paint
+        // is invisible to the gesture that triggered it.
+        Platform.runLater(() -> {
+            for (Node node : list.lookupAll(".review-code-gutter")) {
+                boolean selected = node.getUserData() instanceof String key && selectedKeys.contains(key);
+                if (selected) {
+                    if (!node.getStyleClass().contains("review-line-selected")) {
+                        node.getStyleClass().add("review-line-selected");
+                    }
+                } else {
+                    node.getStyleClass().remove("review-line-selected");
+                }
+            }
+        });
+    }
+
+    private int indexOfLine(String file, String lineKey) {
+        for (int i = 0; i < rows.size(); i++) {
+            if (rows.get(i) instanceof ReviewDiffRow.Line line
+                    && line.file().equals(file) && line.lineKey().equals(lineKey)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * Ends a gutter gesture (a plain click, the release of a shift-click, or
+     * the release of a drag) against {@code row}: resolves the final range
+     * and opens the composer there, or closes it if the range is exactly
+     * where the composer already is -- the "second click on the same gutter
+     * is the reader changing their mind" rule, generalised to a range.
+     *
+     * <p>{@code rows.indexOf(row)} can legitimately miss: {@code row} is
+     * whatever line a gutter {@code Label}'s handler closed over when it was
+     * built, and a rebuild since (a filter, the context toggle, a re-diff)
+     * can have dropped that exact row object from {@link #rows} before this
+     * gesture's release arrives. Rather than coerce a miss to index 0 and
+     * silently re-anchor the comment to the hunk's first line, it is treated
+     * as nothing happened.</p>
+     */
+    private void finalizeSelection(ReviewDiffRow.Line row) {
+        int index = rows.indexOf(row);
+        int anchorIndex = selectionAnchorIndex();
+        if (index < 0 || anchorIndex < 0) {
+            return;
+        }
+        DiffLineSelection.resolve(rows, anchorIndex, index).ifPresent(range -> {
+            if (composerRow != null && composerRow.file().equals(range.file())
+                    && composerRow.startKey().equals(range.startKey())
+                    && composerRow.endKey().equals(range.endKey())) {
+                closeComposer();
+            } else {
+                openComposer(range.file(), range.startKey(), range.endKey());
+            }
+        });
+    }
+
+    /** Diagnostic/test-only: the gutter keys currently painted selected. */
+    Set<String> diagSelectedKeys() {
+        return Set.copyOf(selectedKeys);
+    }
+
+    /**
+     * Diagnostic/test-only: the current selection anchor's row index, or
+     * {@code -1} for none. Exists so a stale-index guard can be proven by
+     * what it PREVENTS -- a stale gesture event overwriting a valid anchor
+     * -- rather than by an incidental empty result that a missing guard
+     * would also happen to produce.
+     */
+    int diagSelectionAnchorIndex() {
+        return selectionAnchorIndex();
     }
 
     /** Scrolls to the row anchored at {@code lineKey} in {@code file} (card → line linkage). */
@@ -810,6 +1083,20 @@ final class ReviewDiffColumn extends BorderPane {
      */
     private final class DiffCell extends ListCell<ReviewDiffRow> {
 
+        /**
+         * The last row this cell actually built a graphic for, and that
+         * graphic -- so a redundant {@code updateItem} call for the SAME row
+         * can reuse it instead of rebuilding. See {@link #updateItem} for why
+         * this exists: a real bug, not an optimization. {@code Composer} rows
+         * are deliberately never cached here (see the switch below); {@code
+         * cachedGeneration} is compared against {@link #renderGeneration} so
+         * a pin refresh can still force a rebuild the cache would otherwise
+         * suppress.
+         */
+        private ReviewDiffRow cachedRow;
+        private long cachedGeneration = -1;
+        private Node cachedNode;
+
         DiffCell() {
             getStyleClass().add("review-diff-cell");
         }
@@ -820,9 +1107,31 @@ final class ReviewDiffColumn extends BorderPane {
             getStyleClass().removeIf(styleClass -> styleClass.startsWith("card-"));
             if (empty || row == null) {
                 setGraphic(null);
+                cachedRow = null;
+                cachedGeneration = -1;
+                cachedNode = null;
                 return;
             }
             getStyleClass().add("card-" + row.edge().name().toLowerCase(java.util.Locale.ROOT));
+            // updateItem is called again for a row that has not changed at
+            // all -- confirmed by a real-pointer probe, from ordinary layout
+            // passes (VirtualFlow re-associating this cell, the viewport
+            // width binding firing), not only on a genuine row swap.
+            // Rebuilding unconditionally here discarded the exact gutter
+            // Label a click was mid-press on, so any layout pass landing
+            // between a real MOUSE_PRESSED and its MOUSE_RELEASED silently
+            // ate the click -- on main's single-line composer too, not just
+            // the range gutter added here. Row equality (a record, so this
+            // is a value comparison, not identity) is what makes reuse safe:
+            // a genuine content change never matches the cache and still
+            // rebuilds below. Composer is excluded because it already reuses
+            // the view-owned composerNode directly, and does so even across
+            // a DIFFERENT row (a re-anchor to a new range).
+            if (!(row instanceof ReviewDiffRow.Composer) && row.equals(cachedRow)
+                    && cachedGeneration == renderGeneration && cachedNode != null) {
+                setGraphic(cachedNode);
+                return;
+            }
             Node node = switch (row) {
                 case ReviewDiffRow.HunkHeader header -> buildHunkHeader(header);
                 case ReviewDiffRow.Line line -> buildLine(line);
@@ -857,6 +1166,15 @@ final class ReviewDiffColumn extends BorderPane {
                 region.maxWidthProperty().bind(rowWidth);
             }
             setGraphic(node);
+            if (row instanceof ReviewDiffRow.Composer) {
+                cachedRow = null;
+                cachedGeneration = -1;
+                cachedNode = null;
+            } else {
+                cachedRow = row;
+                cachedGeneration = renderGeneration;
+                cachedNode = node;
+            }
         }
     }
 
@@ -927,13 +1245,66 @@ final class ReviewDiffColumn extends BorderPane {
         // line. Both, not just one: which of the two carries a number depends
         // on whether the line was added or deleted, and a reader aiming at
         // "the line numbers" should not have to know that.
+        //
+        // A plain click opens (or closes) a single line, exactly as before.
+        // Shift-click and drag extend the anchor into a range, resolved
+        // through DiffLineSelection so the one-file/one-hunk clamp is never
+        // duplicated here. The click itself is self-contained (it sets the
+        // anchor if this is not a shift-click, then finalizes) rather than
+        // depending on the press having already run: a synthesized click with
+        // no preceding press -- exactly how the existing gutter tests dispatch
+        // -- still has to work.
+        String selectionKey = row.file() + " " + row.lineKey();
+        boolean selected = selectedKeys.contains(selectionKey);
         for (Label gutter : List.of(oldNumber, newNumber)) {
             gutter.getStyleClass().add("commentable");
-            gutter.setOnMouseClicked(e -> {
-                toggleComposer(row.file(), row.lineKey());
+            // Read back by applySelectionPaint() to repaint an already-built
+            // Label in place, without touching the rows list -- see its
+            // javadoc for why a live gesture cannot survive that.
+            gutter.setUserData(selectionKey);
+            if (selected) {
+                gutter.getStyleClass().add("review-line-selected");
+            }
+            gutter.setOnMousePressed(e -> {
+                int index = rows.indexOf(row);
+                if (index < 0) {
+                    return;
+                }
+                if (!(e.isShiftDown() && selectionAnchorIndex() >= 0)) {
+                    setSelectionAnchor(index);
+                }
+                extendSelection(index);
+            });
+            // Must live in DRAG_DETECTED, never in the press handler above:
+            // startFullDrag() throws IllegalStateException unless the call
+            // is made from inside a DRAG_DETECTED handler, and calling it
+            // eagerly on press killed the very first gutter click.
+            gutter.setOnDragDetected(e -> {
+                gutter.startFullDrag();
                 e.consume();
             });
-            gutter.setTooltip(new Tooltip("Comment on this line"));
+            gutter.setOnMouseDragEntered(e -> {
+                int index = rows.indexOf(row);
+                if (index < 0) {
+                    return;
+                }
+                extendSelection(index);
+            });
+            gutter.setOnMouseDragReleased(e -> finalizeSelection(row));
+            gutter.setOnMouseClicked(e -> {
+                int index = rows.indexOf(row);
+                if (index < 0) {
+                    e.consume();
+                    return;
+                }
+                if (!(e.isShiftDown() && selectionAnchorIndex() >= 0)) {
+                    setSelectionAnchor(index);
+                }
+                extendSelection(index);
+                finalizeSelection(row);
+                e.consume();
+            });
+            gutter.setTooltip(new Tooltip("Comment on this line, or shift-click / drag to select a range"));
         }
 
         Label sign = new Label(switch (line.kind()) {
@@ -1124,21 +1495,118 @@ final class ReviewDiffColumn extends BorderPane {
         return box;
     }
 
-    /** Diagnostic-only: opens the composer on the first changed line rendered. */
-    String diagOpenComposer() {
-        for (ReviewDiffRow row : rows) {
-            if (row instanceof ReviewDiffRow.Line line
-                    && line.line().kind() != UnifiedDiff.Line.Kind.CONTEXT) {
-                toggleComposer(line.file(), line.lineKey());
-                return "composer on " + line.file() + " " + line.lineKey();
+    /**
+     * Diagnostic-only: drives the gutter's real selection path for {@code
+     * [file:startKey, file:endKey]} and opens the composer exactly as {@link
+     * #finalizeSelection} does on a gesture release. {@code rows} is
+     * virtualization's data model, not its rendered cells, so this reaches a
+     * key outside the viewport just as reliably as one already on screen --
+     * the real gesture handlers could not be reused directly because they
+     * are wired to a specific rendered hit box, which a key with no cell yet
+     * does not have.
+     *
+     * @return false when either key is not in the currently loaded diff, so
+     *         the visual pass can say so instead of silently selecting
+     *         nothing
+     */
+    boolean diagSelectRange(String file, String startKey, String endKey) {
+        // Mutates gutter selection state and the ListView's scroll position
+        // -- FX state that only the FX Application Thread may touch. Routed
+        // through ReviewDiagFxThread so a caller off that thread (a test,
+        // the diag driver) is safe rather than merely usually-fine.
+        return ReviewDiagFxThread.call(() -> {
+            int startIndex = indexOfLine(file, startKey);
+            int endIndex = indexOfLine(file, endKey);
+            if (startIndex < 0 || endIndex < 0) {
+                return false;
             }
-        }
-        return "no changed line to comment on";
+            setSelectionAnchor(startIndex);
+            extendSelection(endIndex);
+            list.scrollTo(Math.max(0, Math.min(startIndex, endIndex) - 3));
+            return DiffLineSelection.resolve(rows, startIndex, endIndex).map(range -> {
+                if (composerRow != null && composerRow.file().equals(range.file())
+                        && composerRow.startKey().equals(range.startKey())
+                        && composerRow.endKey().equals(range.endKey())) {
+                    closeComposer();
+                } else {
+                    openComposer(range.file(), range.startKey(), range.endKey());
+                }
+                return true;
+            }).orElse(false);
+        });
     }
 
-    /** Diagnostic/test-only: the rows currently rendered. */
+    /**
+     * Diagnostic-only: opens the composer on the first changed line
+     * rendered.
+     *
+     * <p>Iterates {@code rows} directly and mutates composer state
+     * ({@link #toggleComposer}, which touches {@link #rows} itself via
+     * {@link #insertComposerRow}) -- the same FX-owned {@link ObservableList}
+     * {@link #diagRows} guards against reading off-thread. Routed through
+     * {@link ReviewDiagFxThread} for the same reason: a caller off the FX
+     * thread iterating {@code rows} while it is mid-{@code setAll} throws
+     * {@code ConcurrentModificationException}.</p>
+     */
+    String diagOpenComposer() {
+        return ReviewDiagFxThread.call(() -> {
+            for (ReviewDiffRow row : rows) {
+                if (row instanceof ReviewDiffRow.Line line
+                        && line.line().kind() != UnifiedDiff.Line.Kind.CONTEXT) {
+                    toggleComposer(line.file(), line.lineKey());
+                    return "composer on " + line.file() + " " + line.lineKey();
+                }
+            }
+            return "no changed line to comment on";
+        });
+    }
+
+    /**
+     * Diagnostic/test-only: the rows currently rendered.
+     *
+     * <p>{@code rows} is the {@link ObservableList} the FX Application
+     * Thread mutates with {@code setAll(...)} (see {@link #refreshRender},
+     * {@link #insertComposerRow}, {@link #closeComposer}) whenever an async
+     * diff load lands or the composer opens/closes. A caller off the FX
+     * thread (a test polling for the diff, or the diag driver) that called
+     * {@code List.copyOf(rows)} directly used to iterate {@code rows} while
+     * a concurrent {@code setAll} was in flight, which invalidates that
+     * iteration mid-copy and throws {@code ConcurrentModificationException}
+     * -- the exact failure that turned a full-suite run red on the source
+     * branch. {@link ReviewDiagFxThread#call} takes the snapshot ON the FX
+     * thread instead, so the copy and any concurrent mutation are strictly
+     * ordered. Do not simplify this back to a bare {@code
+     * List.copyOf(rows)}.</p>
+     */
     List<ReviewDiffRow> diagRows() {
-        return List.copyOf(rows);
+        return ReviewDiagFxThread.call(() -> List.copyOf(rows));
+    }
+
+    /**
+     * The real diff currently shown, in full -- unlike {@link #diagRows()},
+     * which is what the row-collapsing and truncation actually rendered. A
+     * long run of unchanged lines folds into a single {@code CollapsedRun}
+     * row and a large diff can be truncated outright, so a caller that needs
+     * to know whether a given line is genuinely in the diff (Submit's {@code
+     * DiffIndex}, built in {@code ReviewDestinationView}) must read this, not
+     * the rows.
+     */
+    UnifiedDiff displayedDiff() {
+        return displayedDiff;
+    }
+
+    /**
+     * The scope {@link #displayedDiff()} actually belongs to -- empty while
+     * nothing has resolved yet, or while a diff failed. This lags behind
+     * {@link #setScope}: selecting a new scope does not clear it, so a
+     * caller who reads {@link #displayedDiff()} during the "Diffing…" window
+     * that follows a fresh selection would otherwise get the OUTGOING
+     * scope's diff under the INCOMING scope's name. Submit must compare this
+     * against the scope it thinks it is posting for before trusting the
+     * diff at all -- see {@code ReviewDestinationView#submitReview()}.
+     */
+    Optional<String> displayedScopeId() {
+        return Optional.ofNullable(displayedScopeId);
     }
 
     /** Diagnostic/test-only: the scope currently rendered. */

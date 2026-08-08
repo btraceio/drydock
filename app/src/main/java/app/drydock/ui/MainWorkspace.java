@@ -29,6 +29,8 @@ import app.drydock.git.GitBranchState;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.GitTarget;
 import app.drydock.git.WorktreeService;
+import app.drydock.github.GitHubReviewRequest.Event;
+import app.drydock.github.GitHubReviewService;
 import app.drydock.mcp.McpActivityLog;
 import app.drydock.mcp.McpSessionContext.RenameKind;
 import app.drydock.mcp.McpSessionContext.RenameOutcome;
@@ -37,7 +39,6 @@ import app.drydock.config.UserConfig;
 import app.drydock.mcp.WorkspaceMcpSessionContext;
 import app.drydock.process.SshCommandBuilder;
 import app.drydock.review.AnnotationStore;
-import app.drydock.review.Confidence;
 import app.drydock.review.IntentGrouping;
 import app.drydock.review.QueueAssembly;
 import app.drydock.review.ReviewItem;
@@ -49,12 +50,14 @@ import app.drydock.review.AnnotationStatus;
 import app.drydock.review.ReviewQueueService;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
+import app.drydock.review.SubmitPlan;
 import app.drydock.search.SessionSearchService;
 import app.drydock.ui.explorer.DiffOverlay;
 import app.drydock.ui.explorer.ExplorerFinding;
 import app.drydock.ui.explorer.ExplorerTrailStore;
 import app.drydock.ui.explorer.SessionExplorerView;
 import app.drydock.ui.review.ReviewDestinationView;
+import app.drydock.ui.review.ReviewSubmitSheet;
 import app.drydock.ui.model.WorkspaceViewModel;
 import app.drydock.terminal.TerminalFactory;
 import app.drydock.terminal.api.TerminalHostView;
@@ -74,6 +77,7 @@ import javafx.scene.control.ButtonType;
 import javafx.scene.control.Label;
 import javafx.scene.control.MenuButton;
 import javafx.scene.control.MenuItem;
+import javafx.scene.control.ProgressIndicator;
 import javafx.scene.control.Tab;
 import javafx.scene.control.TabPane;
 import javafx.scene.control.TextInputControl;
@@ -174,6 +178,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     private final WorktreeService worktreeService;
     private final SessionSearchService searchService;
     private final GhCliService ghCliService;
+    private final GitHubReviewService gitHubReviewService;
     private final DiffService diffService;
     private final ChangedLineService changedLineService;
     private final AnnotationStore annotationStore;
@@ -343,7 +348,8 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     public MainWorkspace(SessionManager sessionManager, AgentRegistry agentRegistry,
                           RepositoryManager repositoryManager,
                           GitStatusService gitStatusService, SessionSearchService searchService,
-                          GhCliService ghCliService, WorktreeService worktreeService, DiffService diffService,
+                          GhCliService ghCliService, GitHubReviewService gitHubReviewService,
+                          WorktreeService worktreeService, DiffService diffService,
                           ChangedLineService changedLineService, AnnotationStore annotationStore,
                           ReviewScopeRegistry reviewScopeRegistry, McpActivityLog activityLog,
                           ExplorerTrailStore explorerTrailStore,
@@ -355,6 +361,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         this.worktreeService = worktreeService;
         this.searchService = searchService;
         this.ghCliService = ghCliService;
+        this.gitHubReviewService = gitHubReviewService;
         this.diffService = diffService;
         this.changedLineService = changedLineService;
         this.annotationStore = annotationStore;
@@ -1148,6 +1155,15 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     /** The Review view's window onto the workspace (see {@link ReviewDestinationView.Host}). */
     private final class ReviewHost implements ReviewDestinationView.Host {
 
+        /**
+         * Scope ids with a {@code gh} availability check in flight for
+         * Submit. Guards the busy modal against a second Submit click while
+         * the first is still checking -- without it, a fast double-click
+         * would show a second "Checking GitHub…" that nothing ever closes,
+         * since only the first check's completion clears the scope.
+         */
+        private final java.util.Set<String> submitCheckInFlight = new java.util.HashSet<>();
+
         @Override
         public void refreshQueue() {
             refreshReviewQueue();
@@ -1269,29 +1285,16 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         }
 
         /**
-         * A comment the human wrote in the diff column's gutter composer.
-         *
-         * <p>Stored as a NIT: a human note is not a blocking finding, and
-         * anything that blocks approval would make leaving a remark on a line
-         * silently prevent the reviewer approving their own review. The
-         * intent is resolved from the file so the comment lands under the
-         * intent that owns that code rather than floating outside the
-         * grouping.</p>
+         * A comment minted by the diff column's gutter composer -- already a
+         * NIT-severity {@code ReviewAnnotation.human(...)} anchored to its
+         * range and stamped with the intent the view resolved from the file
+         * (see {@link ReviewDestinationView.Host#addComment}). This just
+         * re-keys it onto {@code scope} defensively and stores it; there is
+         * no second construction site for what a human comment is.
          */
         @Override
-        public void addComment(ReviewScope scope, String file, String lineKey, String body,
-                               Optional<String> intentId) {
-            Instant now = Instant.now();
-            annotationStore.upsert(new ReviewAnnotation(
-                    scope.id(),
-                    "c_" + java.util.UUID.randomUUID(),
-                    intentId,
-                    file, lineKey, lineKey,
-                    Severity.NIT, Confidence.HIGH,
-                    Optional.empty(), "You", now,
-                    List.of(), Optional.empty(), Optional.empty(), List.of(),
-                    List.of(new ReviewAnnotation.Message("You", now, body)),
-                    Optional.empty(), AnnotationStatus.OPEN));
+        public void addComment(ReviewScope scope, ReviewAnnotation annotation) {
+            annotationStore.upsert(annotation.withScopeId(scope.id()));
         }
 
         /**
@@ -1341,15 +1344,28 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             }
         }
 
+        @Override
+        public void setPostToPr(ReviewScope scope, ReviewAnnotation finding, boolean post) {
+            annotationStore.mutate(finding.key(), current -> current.withPostToPr(post));
+        }
+
         /**
-         * Records the submission and hands the worktree to the Finish flow --
-         * the review is over, and merging, opening a PR or deleting the
-         * worktree is exactly what that flow already does. A scope with no
-         * bound session has nothing to finish, and simply records the
-         * submission.
+         * A PR scope posts to GitHub and stays in Review -- reviewing
+         * someone else's pull request must never end by offering to merge
+         * it. Everything else keeps exactly today's behaviour: records the
+         * submission and hands the worktree to the Finish flow, since
+         * merging, opening a PR or deleting the worktree is exactly what
+         * that flow already does. A scope with no bound session has nothing
+         * to finish, and simply records the submission.
          */
         @Override
-        public void submit(ReviewScope scope) {
+        public void submit(ReviewScope scope, SubmitPlan.DiffIndex index,
+                           List<ReviewVerdict.Decision> decisions) {
+            Optional<ReviewScope.PullRequestRef> pr = scope.pr();
+            if (pr.isPresent()) {
+                showSubmitSheet(scope, pr.get(), index, decisions);
+                return;
+            }
             annotationStore.markSubmitted(scope.id());
             Optional<ManagedSessionId> session = scope.sessionId();
             Optional<Path> worktree = scope.worktree();
@@ -1357,6 +1373,153 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 hideReview();
                 worktreeLifecycle.finishAfterReview(session.get(), worktree.get());
             }
+        }
+
+        /**
+         * Opens the submit sheet. The {@code gh} availability check runs
+         * first and blocks the REAL sheet's appearance -- catching "not
+         * installed"/"not authenticated" at open time, rather than after the
+         * human has written a summary and pressed Submit into a failure, is
+         * the whole point of checking here instead of inside {@code submit}.
+         * The click still has to visibly do something immediately (AGENTS.md),
+         * so a busy modal goes up before the check starts and is swapped for
+         * the real sheet (or closed, on the defensive {@code modalLayer ==
+         * null} path elsewhere) once it resolves.
+         */
+        private void showSubmitSheet(ReviewScope scope, ReviewScope.PullRequestRef pr,
+                                     SubmitPlan.DiffIndex index, List<ReviewVerdict.Decision> decisions) {
+            if (modalLayer == null || !submitCheckInFlight.add(scope.id())) {
+                return;
+            }
+            // Esc closes the busy modal (ModalLayer's own key filter) without
+            // cancelling the future behind it -- so `cancelled` has to be
+            // captured HERE, tied to this specific busy modal's `onClosed`,
+            // not read from modalLayer's current state later: by the time the
+            // future resolves, modalLayer could be showing something the
+            // human opened in the meantime, and asking IT "was Esc pressed"
+            // would answer the wrong question.
+            boolean[] cancelled = {false};
+            modalLayer.show(busyModal("Checking GitHub…"), () -> cancelled[0] = true);
+            gitHubReviewService.unavailableReason(scope.diffRoot()).whenComplete((reason, error) ->
+                    Platform.runLater(() -> {
+                        submitCheckInFlight.remove(scope.id());
+                        if (cancelled[0]) {
+                            // The human moved on; popping the real sheet open
+                            // now would bury whatever they opened next.
+                            return;
+                        }
+                        openSubmitSheet(scope, pr, index, decisions,
+                                error != null ? Optional.of("Could not check gh: " + error.getMessage()) : reason);
+                    }));
+        }
+
+        private void openSubmitSheet(ReviewScope scope, ReviewScope.PullRequestRef pr,
+                                     SubmitPlan.DiffIndex index, List<ReviewVerdict.Decision> decisions,
+                                     Optional<String> unavailableReason) {
+            SubmitPlan plan = SubmitPlan.of(annotationStore.forScope(scope.id()), decisions, index);
+            ReviewSubmitSheet[] holder = new ReviewSubmitSheet[1];
+            holder[0] = new ReviewSubmitSheet(plan, pr,
+                    (event, summary) -> postReview(scope, pr, plan, event, summary, holder[0]),
+                    modalLayer::close);
+            modalLayer.show(holder[0]);
+            unavailableReason.ifPresent(holder[0]::showUnavailable);
+        }
+
+        /**
+         * Posts {@code plan} off the FX thread and hops back with {@link
+         * Platform#runLater}. Only {@code Posted} marks the scope submitted
+         * and clears {@code postToPr} on what it posted -- {@code Rejected}
+         * and {@code Unavailable} leave every draft exactly as the human left
+         * it, since nothing reached GitHub. Review stays open on every
+         * outcome: unlike the non-PR path, posting a review is not "finishing"
+         * anything drydock owns.
+         */
+        private void postReview(ReviewScope scope, ReviewScope.PullRequestRef pr, SubmitPlan plan,
+                                Event event, String summary, ReviewSubmitSheet sheet) {
+            gitHubReviewService.submit(scope.diffRoot(), pr.number(), event, summary, plan.comments())
+                    .whenComplete((outcome, error) -> Platform.runLater(() -> {
+                        if (error != null) {
+                            reportPostFailure(sheet, "Could not post review: " + error.getMessage());
+                            return;
+                        }
+                        switch (outcome) {
+                            case GitHubReviewService.Posted posted -> {
+                                annotationStore.markSubmitted(scope.id());
+                                for (ReviewAnnotation.Key key : plan.posting()) {
+                                    annotationStore.mutate(key, finding -> finding.withPostToPr(false));
+                                }
+                                // Gated the same way reportPostFailure gates its
+                                // sheet.showError: if the human pressed Esc
+                                // mid-post, `sheet` is detached and whatever
+                                // modal they opened next -- Finish, settings, a
+                                // confirm -- is what modalLayer is showing now.
+                                // An unconditional close() would tear THAT down
+                                // instead of the (already gone) submit sheet.
+                                if (sheet.getScene() != null) {
+                                    modalLayer.close();
+                                }
+                                showReviewPosted(pr.number(), posted.reviewUrl());
+                            }
+                            case GitHubReviewService.Rejected rejected ->
+                                    reportPostFailure(sheet, rejected.message());
+                            case GitHubReviewService.Unavailable unavailable ->
+                                    reportPostFailure(sheet, unavailable.message());
+                        }
+                    }));
+        }
+
+        /**
+         * Routes a post failure to the sheet, or to a plain alert when the
+         * sheet is no longer in the scene. Esc closes the modal layer
+         * unconditionally ({@code DrydockApplication}'s scene filter, spec
+         * §5's topmost-first unwind), and {@code ModalLayer.close()} detaches
+         * whatever it was showing -- but the 30-second POST this sheet
+         * started is not cancelled by that, so its outcome still has to land
+         * somewhere. {@link ReviewSubmitSheet#showError} on a detached node
+         * would silently do nothing: the disabled footer it flips back on is
+         * never rendered again, so the human who pressed Esc mid-post would
+         * be told nothing at all about a rejection. The alert is the same
+         * fallback {@link #showReviewPosted} already uses to confirm success
+         * outside the sheet.
+         */
+        private void reportPostFailure(ReviewSubmitSheet sheet, String message) {
+            if (sheet.getScene() != null) {
+                sheet.showError(message);
+                return;
+            }
+            Alert alert = new Alert(Alert.AlertType.ERROR);
+            alert.setTitle("Review not posted");
+            alert.setHeaderText("Could not post the review");
+            alert.setContentText(message);
+            alert.showAndWait();
+        }
+
+        /** Confirms the post the same way {@link #showNoAgentAvailable} confirms a failure -- a plain alert. */
+        private void showReviewPosted(int pr, String reviewUrl) {
+            Alert alert = new Alert(Alert.AlertType.INFORMATION);
+            alert.setTitle("Review posted");
+            alert.setHeaderText("Review posted on PR #" + pr);
+            alert.setContentText(reviewUrl);
+            alert.showAndWait();
+        }
+
+        /**
+         * A spinner plus a caption, shown the instant an async check starts
+         * so the click has visibly done something before the result arrives
+         * (AGENTS.md) -- mirrors {@code WorktreeLifecycleController}'s own
+         * {@code busyModal(String)}, which the same doc names as the pattern.
+         */
+        private Region busyModal(String message) {
+            ProgressIndicator spinner = new ProgressIndicator();
+            spinner.setPrefSize(28, 28);
+            Label label = new Label(message);
+            label.getStyleClass().add("finish-action-caption");
+            VBox box = new VBox(10, spinner, label);
+            box.setAlignment(Pos.CENTER);
+            box.getStyleClass().add("modal");
+            box.setMaxWidth(320);
+            box.setMaxHeight(Region.USE_PREF_SIZE);
+            return box;
         }
 
         /**

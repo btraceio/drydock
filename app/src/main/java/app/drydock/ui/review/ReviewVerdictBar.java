@@ -70,6 +70,16 @@ final class ReviewVerdictBar extends VBox {
     private final Region progressFill = new Region();
     private final Region progressTrack = new Region();
     private final Label hintLabel = new Label("press ? for shortcuts");
+    /**
+     * Why a Submit click did nothing -- distinct from {@link #refusalLabel},
+     * which explains why an INTENT cannot be approved. This one covers
+     * Submit itself refusing (see {@link #showSubmitRefused}): styled with
+     * the same {@code review-verdict-refusal} class so the two read as the
+     * same kind of message, but never both are the same {@link Label} --
+     * they can be true independently (a blocking finding AND a diff that
+     * has not landed) and each has its own place in the layout.
+     */
+    private final Label submitRefusalLabel = new Label();
     private final Button submitButton = new Button("Submit review ⏎");
     private final HBox actionRow = new HBox(10);
 
@@ -139,13 +149,21 @@ final class ReviewVerdictBar extends VBox {
         progressTrack.setMaxWidth(120);
 
         hintLabel.getStyleClass().add("review-verdict-hint");
+        // Both classes: "review-verdict-refusal" for the shared visual
+        // treatment, "review-verdict-submit-refusal" purely so a test can
+        // find THIS label rather than the blocking-finding one that shares
+        // the first class.
+        submitRefusalLabel.getStyleClass().addAll("review-verdict-refusal", "review-verdict-submit-refusal");
+        submitRefusalLabel.setVisible(false);
+        submitRefusalLabel.setManaged(false);
         submitButton.getStyleClass().addAll("review-verdict-action", "primary");
         submitButton.setTooltip(new Tooltip("Submit the review (⏎)"));
         submitButton.setOnAction(e -> host.submit());
 
         Region footerSpacer = new Region();
         HBox.setHgrow(footerSpacer, Priority.ALWAYS);
-        HBox footer = new HBox(10, progressLabel, progressBar, hintLabel, footerSpacer, submitButton);
+        HBox footer = new HBox(10, progressLabel, progressBar, hintLabel, submitRefusalLabel,
+                footerSpacer, submitButton);
         footer.setAlignment(Pos.CENTER_LEFT);
         footer.getStyleClass().add("review-verdict-footer");
 
@@ -171,7 +189,33 @@ final class ReviewVerdictBar extends VBox {
         this.blocked = blocked;
         this.settledCount = settled;
         this.totalCount = total;
+        // Whatever changed enough to call update() again supersedes a
+        // stale-diff refusal from an earlier click -- the reader has moved
+        // on (a different scope, a diff that landed), so the message would
+        // now be talking about a click that is no longer the most recent one.
+        clearSubmitRefused();
         render();
+    }
+
+    /**
+     * Told by the destination that {@link Host#submit()} could not run and
+     * why -- e.g. the selected scope's diff has not landed, or failed to
+     * load. Shown beside the button with the same visual language {@link
+     * #refusalLabel} uses for "approval refused," so a click that visibly
+     * does nothing (AGENTS.md) still tells the reader why rather than
+     * looking broken. Cleared by the next {@link #update}.
+     */
+    void showSubmitRefused(String reason) {
+        submitRefusalLabel.setText("⚠ " + reason);
+        submitRefusalLabel.setVisible(true);
+        submitRefusalLabel.setManaged(true);
+        submitButton.pseudoClassStateChanged(javafx.css.PseudoClass.getPseudoClass("refused"), true);
+    }
+
+    private void clearSubmitRefused() {
+        submitRefusalLabel.setVisible(false);
+        submitRefusalLabel.setManaged(false);
+        submitButton.pseudoClassStateChanged(javafx.css.PseudoClass.getPseudoClass("refused"), false);
     }
 
     private void render() {

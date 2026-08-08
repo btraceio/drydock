@@ -2637,6 +2637,16 @@
     -fx-text-fill: -drydock-main;
     -fx-background-radius: 3px;
 }
+/* A shift-click or drag range in progress, or the range the open composer is
+   anchored to. Softer than the hover fill (which reads as "click me now")
+   because this can cover many lines at once and must not read as an error or
+   a hover on every one of them. Keyed by file + lineKey (ReviewDiffColumn),
+   so this never lights up the same line number in an unrelated file. */
+.review-code-gutter.review-line-selected {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-text-fill: -drydock-accent;
+    -fx-background-radius: 3px;
+}
 
 /* The inline comment composer, sitting under the line it is anchored to. */
 .review-composer {
@@ -2967,6 +2977,14 @@
     -fx-border-color: -drydock-accent;
     -fx-text-fill: -drydock-accent;
 }
+/* The include/exclude toggle sets this pseudo-class by hand (it is a Button,
+   not a ToggleButton) -- without a rule here "included" and "excluded" are
+   indistinguishable except by the button's label text. */
+.review-card-action:selected {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-border-color: -drydock-accent;
+    -fx-text-fill: -drydock-accent;
+}
 
 /* The ◆n pin beside a diff line. Dims -- never disappears -- when its
    finding is filtered out: the line still carries one. */
@@ -3229,6 +3247,72 @@
 .review-readonly-banner {
     -fx-text-fill: -drydock-question;
     -fx-font-size: 11px;
+}
+
+/* ---- Submit sheet (Task 9): the last stop before a review posts --------- */
+
+.review-submit-sheet {
+    -fx-pref-width: 560px;
+}
+.review-submit-scroll,
+.review-submit-scroll > .viewport {
+    -fx-background-color: transparent;
+}
+.review-submit-event-row {
+    -fx-alignment: CENTER_LEFT;
+    -fx-spacing: 8;
+}
+.review-submit-event-button {
+    -fx-background-color: transparent;
+    -fx-background-radius: 8px;
+    -fx-border-color: -drydock-border;
+    -fx-border-radius: 8px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 12px;
+    -fx-padding: 6 14 6 14;
+    -fx-cursor: hand;
+}
+.review-submit-event-button:hover { -fx-text-fill: -drydock-text; }
+.review-submit-event-button:focused { -fx-border-color: -drydock-accent; }
+.review-submit-event-button:selected {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-border-color: -drydock-accent;
+    -fx-text-fill: -drydock-accent;
+    -fx-font-weight: 600;
+}
+.review-submit-comments-block,
+.review-submit-refusals {
+    -fx-spacing: 6;
+}
+.review-submit-comments {
+    -fx-spacing: 6;
+}
+.review-submit-comment-row {
+    -fx-background-color: -drydock-row-bg;
+    -fx-background-radius: 6px;
+    -fx-padding: 6 10 6 10;
+    -fx-spacing: 8;
+    -fx-alignment: CENTER_LEFT;
+}
+.review-submit-comment-location {
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 10.5px;
+    -fx-text-fill: -drydock-text-faint;
+}
+.review-submit-comment-body {
+    -fx-font-size: 11.5px;
+    -fx-text-fill: -drydock-text;
+}
+.review-submit-refusal {
+    -fx-font-size: 11px;
+    -fx-text-fill: -drydock-blocking;
+}
+.review-submit-progress {
+    -fx-padding: 0 0 4 0;
+}
+.review-submit-footer {
+    -fx-alignment: CENTER_RIGHT;
+    -fx-padding: 6 0 0 0;
 }
 
 /* ---- Symbol lens + MCP activity panel (handoff sections 4.4, 4.7) -------- */

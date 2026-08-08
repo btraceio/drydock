@@ -115,7 +115,7 @@ class McpToolRouterReplyTest {
         context.annotations.add(new ReviewAnnotation("rs_second", open.id(), Optional.empty(),
                 "other.java", "n1", "n1", Severity.QUESTION, Confidence.HIGH, Optional.empty(),
                 "You", Instant.EPOCH, List.of(), Optional.empty(), Optional.empty(), List.of(),
-                List.of(), Optional.empty(), AnnotationStatus.OPEN));
+                List.of(), Optional.empty(), AnnotationStatus.OPEN, Optional.empty(), false));
 
         McpToolException failure = assertThrows(McpToolException.class,
                 () -> router.call(caller, "review_reply", args("id", open.id(), "note", "done")));
@@ -130,7 +130,7 @@ class McpToolRouterReplyTest {
         context.annotations.add(new ReviewAnnotation("rs_second", open.id(), Optional.empty(),
                 "other.java", "n1", "n1", Severity.QUESTION, Confidence.HIGH, Optional.empty(),
                 "You", Instant.EPOCH, List.of(), Optional.empty(), Optional.empty(), List.of(),
-                List.of(), Optional.empty(), AnnotationStatus.OPEN));
+                List.of(), Optional.empty(), AnnotationStatus.OPEN, Optional.empty(), false));
 
         router.call(caller, "review_reply",
                 args("id", open.id(), "scopeId", SCOPE, "note", "done"));
