@@ -316,10 +316,15 @@
 }
 
 .row-overlay-fade {
-    -fx-background-color: linear-gradient(to right, transparent 0%, -drydock-row-fade 24px);
+    /* Proportional stops, not a px stop: JavaFX parses `-drydock-row-fade 24px`
+       into a PROPORTIONAL gradient whose opaque stop lands at 1.0, so the wash
+       ramped across the node's whole 102px width and the branch tag underneath
+       stayed legible through it. Measured, not guessed -- see the `fadeinfo`
+       diag verb. 30% is ~30px of ramp, opaque for the rest. */
+    -fx-background-color: linear-gradient(to right, transparent 0%, -drydock-row-fade 30%, -drydock-row-fade 100%);
 }
 .row-overlay-fade.active {
-    -fx-background-color: linear-gradient(to right, transparent 0%, -drydock-row-fade-active 24px);
+    -fx-background-color: linear-gradient(to right, transparent 0%, -drydock-row-fade-active 30%, -drydock-row-fade-active 100%);
 }
 
 .session-row {

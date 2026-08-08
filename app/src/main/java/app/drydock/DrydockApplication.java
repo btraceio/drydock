@@ -51,6 +51,12 @@ import javafx.css.PseudoClass;
 import javafx.geometry.Bounds;
 import javafx.geometry.Point2D;
 import javafx.scene.Node;
+import javafx.scene.paint.Stop;
+import javafx.scene.paint.Paint;
+import javafx.scene.paint.LinearGradient;
+import javafx.scene.layout.Region;
+import javafx.scene.layout.BackgroundFill;
+import javafx.scene.layout.Background;
 import javafx.scene.Parent;
 import javafx.scene.control.Alert;
 import javafx.scene.control.ButtonType;
@@ -1464,6 +1470,12 @@ public final class DrydockApplication extends Application {
                 // probe points instead of firing a click, so it works
                 // whether or not Robot has an Accessibility grant.
                 case "pick" -> diagPick(sidebar, arg);
+                // DIAG-ONLY: reports the overlay fade's measured geometry and
+                // its resolved paint, so "the fade is not covering the branch
+                // tag" can be diagnosed from data instead of guessed at from
+                // the code. Two rounds were lost to a plausible-but-wrong
+                // theory that the picture had already contradicted.
+                case "fadeinfo" -> diagFadeInfo(sidebar, arg);
                 // DIAG-ONLY: shuts the app down through the same
                 // closeAllSessions -> Stage.close() path a real window-close
                 // confirmation uses (see performOrderlyShutdown), so a
@@ -1914,6 +1926,79 @@ public final class DrydockApplication extends Application {
      * ("session:&lt;n&gt;" or "repo:&lt;n&gt;"), in screen top-to-bottom
      * order, or {@code null} when the index is out of range.
      */
+    /**
+     * Diagnostic-only: measures the overlay fade rather than reasoning about
+     * it. Prints the fade's scene bounds beside the row's, the branch tag's
+     * and the actions strip's, whether it is visible and what it is actually
+     * painting (background fills, and for a linear gradient its stops), plus
+     * the fade's z-order position among its siblings. Between them these
+     * answer the three ways the wash can silently fail: wrong size, never
+     * painted, or painted underneath what it is meant to cover.
+     */
+    private void diagFadeInfo(RepositorySidebar sidebar, String arg) {
+        Node row = diagRowNode(sidebar, arg);
+        if (row == null) {
+            System.out.println("[diag] fadeinfo " + arg + ": no row found");
+            return;
+        }
+        Node fade = diagOverlaySibling(row, ".row-overlay-fade");
+        Node actions = diagOverlaySibling(row, ".row-overlay-actions");
+        if (fade == null) {
+            System.out.println("[diag] fadeinfo " + arg + ": no .row-overlay-fade node");
+            return;
+        }
+        System.out.println("[diag] fadeinfo " + arg + " row     " + diagBounds(row));
+        System.out.println("[diag] fadeinfo " + arg + " fade    " + diagBounds(fade)
+                + " visible=" + fade.isVisible() + " opacity=" + fade.getOpacity()
+                + " inScene=" + (fade.getScene() != null));
+        System.out.println("[diag] fadeinfo " + arg + " actions " + diagBounds(actions));
+        Node tag = row instanceof Parent rowParent
+                ? firstNonNull(rowParent.lookup(".branch-tag"), rowParent.lookup(".branch-tag-worktree"))
+                : null;
+        System.out.println("[diag] fadeinfo " + arg + " tag     " + diagBounds(tag));
+        if (fade.getParent() != null) {
+            List<Node> siblings = fade.getParent().getChildrenUnmodifiable();
+            System.out.println("[diag] fadeinfo " + arg + " zorder  fadeIndex=" + siblings.indexOf(fade)
+                    + " of " + siblings.size() + " (higher paints later/on top)");
+        }
+        if (fade instanceof Region fadeRegion) {
+            Background bg = fadeRegion.getBackground();
+            if (bg == null || bg.getFills().isEmpty()) {
+                System.out.println("[diag] fadeinfo " + arg + " paint   NONE — background is "
+                        + (bg == null ? "null" : "empty") + "; the CSS rule did not apply");
+                return;
+            }
+            for (BackgroundFill fill : bg.getFills()) {
+                Paint paint = fill.getFill();
+                if (paint instanceof LinearGradient gradient) {
+                    StringBuilder stops = new StringBuilder();
+                    for (Stop stop : gradient.getStops()) {
+                        stops.append(String.format("%.2f:%s ", stop.getOffset(), stop.getColor()));
+                    }
+                    System.out.println("[diag] fadeinfo " + arg + " paint   linear-gradient proportional="
+                            + gradient.isProportional() + " startX=" + gradient.getStartX()
+                            + " endX=" + gradient.getEndX() + " stops=[ " + stops.toString().strip() + " ]");
+                } else {
+                    System.out.println("[diag] fadeinfo " + arg + " paint   " + paint);
+                }
+            }
+        }
+    }
+
+    private static Node firstNonNull(Node a, Node b) {
+        return a != null ? a : b;
+    }
+
+    /** Diagnostic-only: one node's scene-coordinate bounds, or {@code none} when absent. */
+    private static String diagBounds(Node node) {
+        if (node == null) {
+            return "none";
+        }
+        Bounds b = node.localToScene(node.getBoundsInLocal());
+        return String.format("x=%.1f..%.1f y=%.1f..%.1f w=%.1f h=%.1f",
+                b.getMinX(), b.getMaxX(), b.getMinY(), b.getMaxY(), b.getWidth(), b.getHeight());
+    }
+
     private static Node diagRowNode(RepositorySidebar sidebar, String arg) {
         String[] parts = arg.split(":", 2);
         String cssClass = "repo".equals(parts[0]) ? ".repo-row" : ".session-row";
