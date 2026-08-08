@@ -47,8 +47,11 @@ import app.drydock.ui.model.WorkspaceViewModel;
 import javafx.animation.PauseTransition;
 import javafx.application.Application;
 import javafx.application.Platform;
+import javafx.css.PseudoClass;
 import javafx.geometry.Bounds;
+import javafx.geometry.Point2D;
 import javafx.scene.Node;
+import javafx.scene.Parent;
 import javafx.scene.control.Alert;
 import javafx.scene.control.ButtonType;
 import javafx.scene.control.TextInputControl;
@@ -74,6 +77,7 @@ import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Set;
 import javax.imageio.ImageIO;
 import java.util.concurrent.CompletableFuture;
@@ -118,6 +122,9 @@ public final class DrydockApplication extends Application {
 
     private static final double DEFAULT_SCENE_WIDTH = 1100;
     private static final double DEFAULT_SCENE_HEIGHT = 720;
+
+    /** Diagnostic-only ({@code forcehover} verb): see {@link #diagForceHover}. */
+    private static final PseudoClass HOVER_PSEUDO_CLASS = PseudoClass.getPseudoClass("hover");
 
     /**
      * How long {@link #onCloseRequest} waits for the graceful
@@ -717,6 +724,25 @@ public final class DrydockApplication extends Application {
         //   clickedge:session:<n>  real OS click near the row's trailing
         //                     edge, past the overlay's buttons -- proves
         //                     pickOnBounds=false passthrough (see diagClickEdge).
+        //   forcehover:session:<n>  no pointer needed: forces the row's
+        //                     actions strip visible via a diag-only `.or(...)`
+        //                     on the same hoverProperty() binding (does not
+        //                     unbind it) and stamps the row's own CSS
+        //                     :hover pseudo-class, so the fade can be
+        //                     photographed against the hovered row
+        //                     background it is meant to match (see
+        //                     diagForceHover). "repo:<n>" for repo rows.
+        //   pick:session:<n>  no pointer needed: proves click-passthrough
+        //                     structurally, by calling the public
+        //                     Node.contains() on the actions strip, the fade,
+        //                     each action button, and the row itself at
+        //                     fixed probe points, instead of firing a real
+        //                     click (see diagPick). Prints one line per
+        //                     probe and a final PASS/FAIL VERDICT line.
+        //   quit              closes every open session, then the window,
+        //                     via the same path a real close confirmation
+        //                     uses (see performOrderlyShutdown) -- so a
+        //                     scripted run does not leak a process.
         //
         //   hover and clickedge both drive java.awt.Robot, which delivers OS
         //   mouse events to this process only if it holds a macOS
@@ -1120,7 +1146,18 @@ public final class DrydockApplication extends Application {
             return;
         }
 
-        Stage stage = (Stage) event.getSource();
+        performOrderlyShutdown((Stage) event.getSource());
+    }
+
+    /**
+     * Closes every open session, then the stage, the same way for a real
+     * window-close confirmation and for the diag-only {@code quit} verb (see
+     * {@link #diagQuit}): {@link MainWorkspace#closeAllSessions()} asks each
+     * running terminal to exit gracefully before {@link Stage#close()} runs,
+     * so services close and state is flushed via the normal {@link #stop()}
+     * path rather than a hard {@code System.exit}.
+     */
+    private void performOrderlyShutdown(Stage stage) {
         mainWorkspace.closeAllSessions()
                 .orTimeout(SHUTDOWN_CLOSE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
                 .whenComplete((v, ex) -> Platform.runLater(() -> {
@@ -1409,6 +1446,32 @@ public final class DrydockApplication extends Application {
                 // active session actually changed, not that the click was
                 // issued -- see diagClickEdge.
                 case "clickedge" -> diagClickEdge(stage, sidebar, arg);
+                // DIAG-ONLY: the strip's visibility is BOUND to
+                // hoverProperty(), which Robot cannot drive (see "hover"
+                // above) and which a diag path must not unbind -- that would
+                // stop exercising the real binding. Instead this stamps a
+                // diag-only override into the SAME `.or(...)` expression the
+                // binding already uses (see RepositorySidebar.
+                // diagForceHoverRow), so production behaviour is unchanged
+                // when it is never called. It also stamps the CSS :hover
+                // pseudo-class on the row itself, because the fade is meant
+                // to match the row's own hover background -- see
+                // diagForceHover.
+                case "forcehover" -> diagForceHover(sidebar, arg);
+                // DIAG-ONLY: proves pickOnBounds=false passthrough
+                // structurally, without a pointer -- see diagPick. Reports
+                // Node.contains() for the overlay's candidate nodes at fixed
+                // probe points instead of firing a click, so it works
+                // whether or not Robot has an Accessibility grant.
+                case "pick" -> diagPick(sidebar, arg);
+                // DIAG-ONLY: shuts the app down through the same
+                // closeAllSessions -> Stage.close() path a real window-close
+                // confirmation uses (see performOrderlyShutdown), so a
+                // scripted run does not leak a process after its last verb.
+                case "quit" -> {
+                    System.out.println("[diag] quit: closing all sessions and the window");
+                    performOrderlyShutdown(stage);
+                }
                 default -> System.out.println("[diag] mark " + arg);
             }
         } catch (RuntimeException e) {
@@ -1673,7 +1736,181 @@ public final class DrydockApplication extends Application {
     }
 
     /**
-     * Diagnostic-only: the nth realized row matching {@code arg}
+     * Diagnostic-only ({@code app.drydock.diag.tabScript} "forcehover"
+     * verb): renders the hovered state of {@code arg}'s row
+     * ("session:&lt;n&gt;" or "repo:&lt;n&gt;") without a pointer, so it can
+     * be photographed. The actions strip's visibility is bound to the
+     * cell's real {@code hoverProperty()} -- a bound property cannot be
+     * set, and unbinding it would make this diag path diverge from the
+     * production one it exists to check. Instead {@link
+     * RepositorySidebar#diagForceHoverRow} adds this row to a diag-only
+     * {@code .or(...)} clause already present in that same binding (see
+     * {@code buildSessionRow}/{@code buildRepoRow}), which is a no-op for
+     * every other row and a no-op entirely when never called.
+     *
+     * <p>The row's own CSS {@code :hover} background is a separate thing --
+     * driven by real mouse tracking, not by this override -- so this also
+     * stamps the {@code :hover} pseudo-class directly onto the row via the
+     * public {@link Node#pseudoClassStateChanged}, the same mechanism
+     * {@link app.drydock.ui.SessionStatusStyles#applyStatus} already uses
+     * for {@code :running}/{@code :error}. The fade is meant to match that
+     * background, so a shot taken without this would photograph the fade
+     * against the row's resting color and prove nothing.
+     */
+    private void diagForceHover(RepositorySidebar sidebar, String arg) {
+        Node row = diagRowNode(sidebar, arg);
+        if (row == null) {
+            System.out.println("[diag] forcehover: no row for '" + arg + "'");
+            return;
+        }
+        sidebar.diagForceHoverRow(row);
+        row.pseudoClassStateChanged(HOVER_PSEUDO_CLASS, true);
+        boolean rowHoverStamped = row.getPseudoClassStates().contains(HOVER_PSEUDO_CLASS);
+        Node actionsStrip = diagOverlaySibling(row, ".row-overlay-actions");
+        String actionsVisible = actionsStrip == null ? "not found" : String.valueOf(actionsStrip.isVisible());
+        System.out.println("[diag] forcehover " + arg + " -> actionsVisible=" + actionsVisible
+                + " rowHoverPseudoClass=" + rowHoverStamped);
+    }
+
+    /**
+     * Diagnostic-only ({@code app.drydock.diag.tabScript} "pick" verb):
+     * proves {@code arg}'s row ("session:&lt;n&gt;" or "repo:&lt;n&gt;")
+     * lets clicks fall through the overlay's gaps to the row beneath,
+     * without a pointer -- the regression this branch already shipped and
+     * fixed was that {@code pickOnBounds=false} only makes a {@link
+     * javafx.scene.layout.Region} click-through where it paints NO
+     * background; with one, the whole strip's bounding box is picked
+     * regardless of the flag (see {@link RowOverlay#wrap}).
+     *
+     * <p>Structurally, not by clicking: for four probe points along the
+     * row's trailing edge -- a gap between two action buttons, the strip's
+     * left padding over the fade, a point past the last button near the
+     * row's right edge, and the centre of one button as a positive control
+     * -- this converts the point to each candidate node's local coordinates
+     * ({@link Node#sceneToLocal(double, double)}) and calls the public
+     * {@link Node#contains(double, double)}. That method's own semantics do
+     * the real proving: for a {@link javafx.scene.layout.Region} with
+     * {@code pickOnBounds=false}, {@code contains()} is true only over area
+     * the region actually paints -- so the actions strip (no background)
+     * reports {@code false} everywhere except through its buttons, each of
+     * which is its own node with its own {@code contains()}. The row
+     * defaults to {@code pickOnBounds=true}, so it reports {@code true}
+     * across its whole bounding box, which is exactly "falls through to the
+     * row" for any point the strip does not claim.
+     */
+    private void diagPick(RepositorySidebar sidebar, String arg) {
+        Node row = diagRowNode(sidebar, arg);
+        if (row == null) {
+            System.out.println("[diag] pick " + arg + ": no row found");
+            return;
+        }
+        Node actions = diagOverlaySibling(row, ".row-overlay-actions");
+        Node fade = diagOverlaySibling(row, ".row-overlay-fade");
+        if (actions == null || fade == null || !(actions instanceof Parent actionsParent)) {
+            System.out.println("[diag] pick " + arg + ": overlay nodes not found (actions=" + actions
+                    + " fade=" + fade + ")");
+            return;
+        }
+        List<Node> buttons = new ArrayList<>(actionsParent.lookupAll(".row-action-button"));
+        buttons.sort(Comparator.comparingDouble(b -> b.localToScene(b.getBoundsInLocal()).getMinX()));
+        if (buttons.size() < 2) {
+            System.out.println("[diag] pick " + arg + ": expected >=2 action buttons, found " + buttons.size());
+            return;
+        }
+
+        Bounds rowScene = row.localToScene(row.getBoundsInLocal());
+        Bounds actionsScene = actions.localToScene(actions.getBoundsInLocal());
+        Bounds btn0Scene = buttons.get(0).localToScene(buttons.get(0).getBoundsInLocal());
+        Bounds btn1Scene = buttons.get(1).localToScene(buttons.get(1).getBoundsInLocal());
+        double midY = (btn0Scene.getMinY() + btn0Scene.getMaxY()) / 2;
+
+        boolean gapOk = diagPickProbe(arg, "gap", (btn0Scene.getMaxX() + btn1Scene.getMinX()) / 2, midY,
+                row, actions, fade, buttons, null);
+        boolean paddingOk = diagPickProbe(arg, "padding", actionsScene.getMinX() + 10, midY,
+                row, actions, fade, buttons, null);
+        boolean trailingOk = diagPickProbe(arg, "trailing", rowScene.getMaxX() - 2,
+                (rowScene.getMinY() + rowScene.getMaxY()) / 2, row, actions, fade, buttons, null);
+        boolean buttonOk = diagPickProbe(arg, "button", (btn0Scene.getMinX() + btn0Scene.getMaxX()) / 2,
+                (btn0Scene.getMinY() + btn0Scene.getMaxY()) / 2, row, actions, fade, buttons, buttons.get(0));
+
+        if (gapOk && paddingOk && trailingOk && buttonOk) {
+            System.out.println("[diag] pick " + arg + " VERDICT: PASS");
+        } else {
+            List<String> failed = new ArrayList<>();
+            if (!gapOk) {
+                failed.add("gap");
+            }
+            if (!paddingOk) {
+                failed.add("padding");
+            }
+            if (!trailingOk) {
+                failed.add("trailing");
+            }
+            if (!buttonOk) {
+                failed.add("button");
+            }
+            System.out.println("[diag] pick " + arg + " VERDICT: FAIL: " + String.join(", ", failed)
+                    + " probe was swallowed or missed its target");
+        }
+    }
+
+    /**
+     * One {@code diagPick} probe: converts the scene point {@code (sceneX,
+     * sceneY)} to each candidate's local coordinates and reports {@link
+     * Node#contains(double, double)}. {@code expectedButton} non-null marks
+     * this as the positive-control probe (pass iff that exact button claims
+     * the point); {@code null} marks it as a passthrough probe (pass iff no
+     * button claims the point and the row does).
+     */
+    private static boolean diagPickProbe(String target, String label, double sceneX, double sceneY,
+            Node row, Node actions, Node fade, List<Node> buttons, Node expectedButton) {
+        boolean actionsHit = diagContainsScene(actions, sceneX, sceneY);
+        boolean fadeHit = diagContainsScene(fade, sceneX, sceneY);
+        boolean rowHit = diagContainsScene(row, sceneX, sceneY);
+        Node claimingButton = null;
+        for (Node button : buttons) {
+            if (diagContainsScene(button, sceneX, sceneY)) {
+                claimingButton = button;
+                break;
+            }
+        }
+        Point2D local = row.sceneToLocal(sceneX, sceneY);
+        String coords = local == null ? "(?,?)"
+                : "(" + Math.round(local.getX()) + "," + Math.round(local.getY()) + ")";
+        boolean ok;
+        String verdict;
+        if (expectedButton != null) {
+            ok = claimingButton == expectedButton;
+            verdict = ok ? "PASS (button is the target)" : "FAIL (button did not claim its own centre)";
+            System.out.println("[diag] pick " + target + " " + label + coords + " -> actions=" + actionsHit
+                    + " button=" + (claimingButton != null) + " row=" + rowHit + "  " + verdict);
+        } else {
+            ok = claimingButton == null && rowHit;
+            verdict = ok ? "PASS (falls through to row)"
+                    : claimingButton != null ? "FAIL (swallowed by a button)" : "FAIL (row did not claim it either)";
+            System.out.println("[diag] pick " + target + " " + label + coords + " -> actions=" + actionsHit
+                    + " fade=" + fadeHit + "(mouseTransparent) row=" + rowHit + "  " + verdict);
+        }
+        return ok;
+    }
+
+    /** {@code candidate.contains(...)} at the given scene point, converted via {@code sceneToLocal}. */
+    private static boolean diagContainsScene(Node candidate, double sceneX, double sceneY) {
+        Point2D local = candidate.sceneToLocal(sceneX, sceneY);
+        return local != null && candidate.contains(local.getX(), local.getY());
+    }
+
+    /**
+     * Diagnostic-only: {@code row}'s sibling matching {@code styleClass}
+     * inside the {@link RowOverlay#wrap} StackPane, or {@code null} if
+     * {@code row} is not wrapped that way (e.g. mid-rebuild).
+     */
+    private static Node diagOverlaySibling(Node row, String styleClass) {
+        Parent stack = row.getParent();
+        return stack == null ? null : stack.lookup(styleClass);
+    }
+
+    /** Diagnostic-only: the nth realized row matching {@code arg}
      * ("session:&lt;n&gt;" or "repo:&lt;n&gt;"), in screen top-to-bottom
      * order, or {@code null} when the index is out of range.
      */

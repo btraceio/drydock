@@ -27,6 +27,9 @@ import javafx.animation.PauseTransition;
 import javafx.animation.RotateTransition;
 import javafx.animation.Timeline;
 import javafx.application.Platform;
+import javafx.beans.binding.Bindings;
+import javafx.beans.property.ObjectProperty;
+import javafx.beans.property.SimpleObjectProperty;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.geometry.Side;
@@ -161,6 +164,16 @@ public final class RepositorySidebar extends VBox {
      * is a dead control for as long as a filter is on.
      */
     private boolean filterChangedSinceLastRebuild;
+
+    /**
+     * Diagnostic-only ({@code app.drydock.diag.tabScript} "forcehover"
+     * verb): the row Node, if any, whose actions strip should render
+     * visible without a real hover. {@code null} in production and by
+     * default -- see {@link #diagForceHoverRow} and the {@code .or(...)}
+     * added to {@code actions.visibleProperty()}'s binding in
+     * {@code buildSessionRow}/{@code buildRepoRow}, which this drives.
+     */
+    private final ObjectProperty<Node> diagForcedHoverRow = new SimpleObjectProperty<>();
 
     /** Repos whose stale bucket is expanded. Distinct from {@code collapsed} (repo-level). */
     private final Set<RepositoryId> staleBucketExpanded = new HashSet<>();
@@ -492,6 +505,23 @@ public final class RepositorySidebar extends VBox {
             staleBucketExpanded.add(repository.id());
         }
         requestRebuild();
+    }
+
+    /**
+     * Diagnostic-only ({@code app.drydock.diag.tabScript} "forcehover"
+     * verb): makes {@code row}'s actions strip render visible even though
+     * nothing is actually hovering it. Does NOT unbind {@code
+     * actions.visibleProperty()} from the cell's real {@code
+     * hoverProperty()} -- {@code buildSessionRow}/{@code buildRepoRow} bind
+     * it to {@code hoverProperty().or(...this row is the forced one...)},
+     * so a real hover still works exactly as before and this call is a
+     * no-op for every row except {@code row}. Pass {@code null} to release
+     * whichever row was previously forced (a fresh sidebar rebuild also
+     * clears it implicitly, since the old row's binding is discarded with
+     * the row).
+     */
+    public void diagForceHoverRow(Node row) {
+        diagForcedHoverRow.set(row);
     }
 
     /**
@@ -1774,7 +1804,6 @@ public final class RepositorySidebar extends VBox {
 
             HBox actions = new HBox(2, rescan, newSession);
             actions.setAlignment(Pos.CENTER_RIGHT);
-            actions.visibleProperty().bind(hoverProperty());
 
             HBox row = new HBox(7, caret, text, count);
             row.getStyleClass().add("repo-row");
@@ -1789,6 +1818,10 @@ public final class RepositorySidebar extends VBox {
                     event.consume();
                 }
             });
+            // Diag-only override folded into the same binding, not a
+            // separate unbind path -- see diagForceHoverRow.
+            actions.visibleProperty().bind(hoverProperty().or(
+                    Bindings.createBooleanBinding(() -> row == diagForcedHoverRow.get(), diagForcedHoverRow)));
             return RowOverlay.wrap(row, actions);
         }
 
@@ -1892,7 +1925,6 @@ public final class RepositorySidebar extends VBox {
             Button delete = quickAction("×", "Delete session", true, () -> onDeleteSession(session));
             HBox actions = new HBox(2, open, stop, delete);
             actions.setAlignment(Pos.CENTER_RIGHT);
-            actions.visibleProperty().bind(hoverProperty());
 
             HBox row = new HBox(8, statusCol, name);
             if (checkoutStatus != null && checkoutStatus.dirty()) {
@@ -1944,6 +1976,10 @@ public final class RepositorySidebar extends VBox {
                     event.consume();
                 }
             });
+            // Diag-only override folded into the same binding, not a
+            // separate unbind path -- see diagForceHoverRow.
+            actions.visibleProperty().bind(hoverProperty().or(
+                    Bindings.createBooleanBinding(() -> row == diagForcedHoverRow.get(), diagForcedHoverRow)));
             return RowOverlay.wrap(row, actions);
         }
 
