@@ -454,6 +454,27 @@ class ReviewDestinationViewTest extends ApplicationTest {
                 "typing must never move the centre panel");
     }
 
+    /**
+     * {@code Shift+/} ("?") is the global shortcuts overlay, owned by
+     * {@code DrydockApplication}'s scene filter -- NOT Review's own key
+     * table, unlike plain {@code /}. {@link ReviewDestinationView#handleShortcut}'s
+     * own Javadoc used to claim this was already true; it was not; the
+     * {@code SLASH} case had no {@code isShiftDown()} check, so "?" got
+     * silently swallowed as "focus the queue filter" before the overlay's
+     * owner ever saw it. This view has no overlay to open, so the only
+     * thing provable here is the negative: the filter must not steal it.
+     */
+    @Test
+    void shiftSlashDoesNotFocusTheQueueFilter() {
+        seedMixedQueue();
+        interact(view::requestFocus);
+
+        press(KeyCode.SHIFT).press(KeyCode.SLASH).release(KeyCode.SLASH).release(KeyCode.SHIFT);
+
+        Node field = lookup(".review-queue-filter").query();
+        assertFalse(field.isFocused(), "'?' must fall through to the global shortcuts overlay, not focus the filter");
+    }
+
     @Test
     void enterInTheFieldSelectsTheFirstMatch() {
         seedMixedQueue();
@@ -822,6 +843,33 @@ class ReviewDestinationViewTest extends ApplicationTest {
         type(KeyCode.U);
         assertEquals(0, intentIndex(),
                 "undoing a verdict must leave the reader on the intent they just undid, not sweep them off it");
+    }
+
+    /**
+     * The exact human sequence issue 2's auto-advance made dangerous: press
+     * {@code r}, realise the diff was misread, press {@code u} -- without
+     * manually stepping back first, the way a reader actually would. {@code
+     * r} itself moves the cursor onto intent 2 (issue 2), so {@code u} MUST
+     * undo intent 1's verdict, the one just recorded, rather than whatever
+     * the cursor now sits on -- and land back on intent 1, so the reader
+     * sees what was undone rather than having to go hunting for it.
+     */
+    @Test
+    void undoUndoesTheLastRecordedVerdictNotWhateverIsUnderTheCursor() throws Exception {
+        Path repo = repoWithTwoChangedFiles();
+        ReviewScope scope = seedWorkingTreeScope(repo);
+        awaitDiffLoaded();
+
+        type(KeyCode.R); // records CHANGES on intent 1, advances to intent 2
+        assertEquals(1, intentIndex(), "'r' must have advanced off intent 1, or this test proves nothing");
+        assertEquals(1, host.store.verdictsFor(scope.id()).size(),
+                "exactly one verdict must exist yet, or this test cannot tell 'undid the right one' from "
+                        + "'undid nothing'");
+
+        type(KeyCode.U); // must undo intent 1, not intent 2 (which never had a verdict)
+
+        assertEquals(0, intentIndex(), "undo must land back on the intent it undid");
+        assertTrue(host.store.verdictsFor(scope.id()).isEmpty(), "the verdict 'r' recorded must be gone");
     }
 
     /**

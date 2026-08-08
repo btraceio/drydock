@@ -251,6 +251,17 @@ public final class ReviewDestinationView extends BorderPane {
     /** The intent the verdict bar is settling; {@code [} / {@code ]} / {@code n} move it. */
     private int intentIndex;
 
+    /**
+     * The id of the intent {@code a}/{@code r} last recorded a verdict on,
+     * so {@code u} can undo THAT one -- see {@link #undoVerdict}. Cleared
+     * once undone, so a second {@code u} with nothing left to undo is inert
+     * rather than reaching for an unrelated intent. Not touched by {@code
+     * [}/{@code ]}/{@code n}: moving the cursor around must not change what
+     * {@code u} targets, or "settle one, look at another, undo" would undo
+     * the wrong one.
+     */
+    private Optional<String> lastSettledIntentId = Optional.empty();
+
     /** Set by {@code m}/{@code f}; remembered independently of the responsive collapse. */
     private boolean marginCollapsedByUser;
 
@@ -1105,6 +1116,12 @@ public final class ReviewDestinationView extends BorderPane {
         setSessionRow(scope, sessionLineFor(scope), scope.sessionId().isPresent());
         body.getChildren().setAll(bodyFor(item));
         intentIndex = 0;
+        // Fallback intent ids are NOT scope-namespaced ("auto:change:src" is
+        // just (kind, directory)), so two different scopes with a similar
+        // layout can mint the identical id -- leaving this set across a
+        // scope switch could make u undo, and jump into, a same-named
+        // intent in the WRONG scope.
+        lastSettledIntentId = Optional.empty();
         refreshReviewState();
         // The diff usually has not arrived yet, in which case there is nothing
         // to reveal and the setOnDiffResolved handler does it when it lands.
@@ -1488,9 +1505,10 @@ public final class ReviewDestinationView extends BorderPane {
      * (the host still refuses APPROVED over a blocking finding -- see
      * {@code MainWorkspace}'s {@code Host#setVerdict} -- so recording is not
      * guaranteed), advances to the next unsettled intent via the same walk
-     * {@code n} uses. {@link #undoVerdict} deliberately does not call this:
-     * undoing should leave the reader on the intent they just undid, not
-     * sweep them off it.
+     * {@code n} uses. Also remembers this intent as the one {@code u} should
+     * undo (see {@link #undoVerdict}) -- recorded here, after the advance
+     * decision above, so it always names the intent a verdict was just
+     * placed ON, never wherever the cursor lands next.
      */
     private void verdictAction(ReviewVerdict.Decision decision) {
         Optional<ReviewScope> scope = selectedScope();
@@ -1499,17 +1517,49 @@ public final class ReviewDestinationView extends BorderPane {
             host.setVerdict(scope.get(), intent.get(), Optional.of(decision));
             if (host.verdict(scope.get(), intent.get()).map(ReviewVerdict::decision)
                     .filter(decision::equals).isPresent()) {
+                lastSettledIntentId = Optional.of(intent.get().id());
                 nextUnsettledIntent();
             }
         }
     }
 
+    /**
+     * {@code u}: undoes the verdict {@code a}/{@code r} last recorded --
+     * NOT whatever intent the cursor currently sits on. A human who presses
+     * {@code r}, realises they misread the diff, and presses {@code u}
+     * expects the verdict they just placed to disappear; since {@code r}
+     * itself advances the cursor (see {@link #verdictAction}), undoing
+     * "the current intent" would clear whatever {@code r} advanced TO
+     * instead -- the wrong one, and silently, since nothing before this
+     * looked wrong on screen. Snaps the cursor back to the undone intent
+     * too, so the human sees what changed rather than having to hunt for
+     * it. A second {@code u} with nothing left to undo does nothing, rather
+     * than reaching for an unrelated intent's verdict.
+     */
     private void undoVerdict() {
         Optional<ReviewScope> scope = selectedScope();
-        Optional<ReviewIntent> intent = currentIntent();
-        if (scope.isPresent() && intent.isPresent()) {
-            host.setVerdict(scope.get(), intent.get(), Optional.empty());
+        if (scope.isEmpty() || lastSettledIntentId.isEmpty()) {
+            return;
         }
+        List<ReviewIntent> current = intents();
+        int index = -1;
+        for (int i = 0; i < current.size(); i++) {
+            if (current.get(i).id().equals(lastSettledIntentId.get())) {
+                index = i;
+                break;
+            }
+        }
+        lastSettledIntentId = Optional.empty();
+        if (index < 0) {
+            // The grouping changed under us (a reviewer re-ran, say) and the
+            // intent this would have undone no longer exists -- nothing
+            // sane to undo or jump to.
+            return;
+        }
+        host.setVerdict(scope.get(), current.get(index), Optional.empty());
+        intentIndex = index;
+        refreshReviewState();
+        revealCurrentIntent();
     }
 
     /**
@@ -1613,7 +1663,21 @@ public final class ReviewDestinationView extends BorderPane {
             case J -> { queue.moveSelection(1); yield true; }
             case K -> { queue.moveSelection(-1); yield true; }
             case Q -> { setQueueCollapsed(!queue.collapsed()); yield true; }
-            case SLASH -> { queue.focusFilter(true); yield true; }
+            // Shift+/ is "?", the global shortcuts overlay -- owned by
+            // DrydockApplication's scene filter (see this method's own
+            // class-level Javadoc). Yielding false here lets it fall
+            // through, on OR off Review's subtree: MainWorkspace's keyboard
+            // backstop replays into this method too, and would otherwise
+            // consume "?" as "focus the queue filter" before the overlay's
+            // own handler -- the last branch of that scene filter -- ever
+            // sees it.
+            case SLASH -> {
+                if (event.isShiftDown()) {
+                    yield false;
+                }
+                queue.focusFilter(true);
+                yield true;
+            }
             case O -> { openBoundSession(); yield true; }
             case D -> { cycleDensity(); yield true; }
             case C -> { diffColumn.toggleContext(); yield true; }

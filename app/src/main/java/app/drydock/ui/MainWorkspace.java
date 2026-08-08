@@ -83,6 +83,7 @@ import javafx.scene.control.TabPane;
 import javafx.scene.control.TextInputControl;
 import javafx.scene.control.TextInputDialog;
 import javafx.scene.control.Tooltip;
+import javafx.scene.input.KeyCode;
 import javafx.scene.input.KeyEvent;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
@@ -955,15 +956,54 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * sidebar's repo filter, a rename field) is untouched -- only a stray,
      * non-text-input focus owner gets the replay.</p>
      *
+     * <p>Only {@link #REPLAYABLE_OFF_REVIEW_SUBTREE} key codes are eligible
+     * at all -- an explicit ALLOW-list, deliberately, rather than a
+     * deny-list that silently grows wrong as bindings are added. {@code
+     * ENTER} is the reason this exists: it is Review's Submit, but it is
+     * ALSO how {@code RepositorySidebar} activates the selected row. A
+     * reader who clicks a sidebar row (exactly the focus drift this
+     * backstop serves) and presses Enter to open it must get the row, not a
+     * surprise Submit on a review they never asked to send -- Submit has
+     * its own visible button, and by definition the reader is not looking
+     * at Review right now.</p>
+     *
      * @return whether the event was handled (the caller consumes it)
      */
     public boolean reviewKeyboardBackstop(KeyEvent event) {
-        if (!isReviewShowing()) {
+        return reviewKeyboardBackstop(isReviewShowing(), reviewDestination, event,
+                reviewDestination::handleShortcut);
+    }
+
+    /**
+     * The allow-list {@link #reviewKeyboardBackstop} restricts replay to.
+     * Every key {@code ReviewDestinationView.handleShortcut} binds while
+     * NOT also being some other control's own activation key -- which is
+     * exactly why {@code ENTER} is missing: {@code
+     * RepositorySidebar}'s row activation is Enter/Space too, and off
+     * Review's own subtree that binding, not Submit, is what a keypress
+     * ought to reach.
+     */
+    private static final java.util.Set<KeyCode> REPLAYABLE_OFF_REVIEW_SUBTREE = java.util.Set.of(
+            KeyCode.J, KeyCode.K, KeyCode.Q, KeyCode.SLASH, KeyCode.O, KeyCode.D, KeyCode.C,
+            KeyCode.M, KeyCode.I, KeyCode.BACK_SLASH, KeyCode.OPEN_BRACKET, KeyCode.CLOSE_BRACKET,
+            KeyCode.N, KeyCode.A, KeyCode.R, KeyCode.U, KeyCode.F);
+
+    /**
+     * The pure logic behind {@link #reviewKeyboardBackstop(KeyEvent)},
+     * pulled out as a static method taking {@code reviewRoot} and {@code
+     * replay} as parameters so it is unit-testable with a bare {@link Node}
+     * standing in for {@code reviewDestination} and a stub {@code replay} --
+     * neither a real {@code ReviewDestinationView} nor a TestFX harness is
+     * needed to exercise the routing decision itself.
+     */
+    static boolean reviewKeyboardBackstop(boolean reviewShowing, Node reviewRoot, KeyEvent event,
+                                          java.util.function.Predicate<KeyEvent> replay) {
+        if (!reviewShowing || !REPLAYABLE_OFF_REVIEW_SUBTREE.contains(event.getCode())) {
             return false;
         }
         if (event.getTarget() instanceof Node target) {
             for (Node n = target; n != null; n = n.getParent()) {
-                if (n == reviewDestination) {
+                if (n == reviewRoot) {
                     // Already a descendant of Review's own view -- its node
                     // filter gets the first look, further up the capturing
                     // chain though this backstop sits, so deferring here
@@ -972,7 +1012,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 }
             }
         }
-        return reviewDestination.handleShortcut(event);
+        return replay.test(event);
     }
 
     /** Whether {@code ⌘F} belongs to the Review queue's filter rather than the sidebar's. */
