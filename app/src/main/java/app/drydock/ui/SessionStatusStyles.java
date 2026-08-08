@@ -107,7 +107,7 @@ final class SessionStatusStyles {
     static void updateDot(Region dot, SessionStatus status) {
         applyStatus(dot, status);
         if (dot.getProperties().get("drydock.pulse") instanceof ParallelTransition pulse) {
-            boolean pulsing = status == SessionStatus.RUNNING || status == SessionStatus.STARTING;
+            boolean pulsing = isRunning(status);
             // Remembered separately from the transition's own state so the
             // scene listener in createDot can resume after a detach/attach.
             dot.getProperties().put("drydock.pulsing", pulsing);

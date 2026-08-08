@@ -1,7 +1,6 @@
 package app.drydock.ui;
 
 import javafx.geometry.Pos;
-import javafx.scene.Node;
 import javafx.scene.layout.Region;
 import javafx.scene.layout.StackPane;
 
@@ -23,27 +22,48 @@ final class RowOverlay {
     /**
      * {@code row} with {@code actions} floating over its trailing edge.
      *
-     * <p>The stack is {@code pickOnBounds = false} so only the buttons
-     * themselves are click targets: the rest of the strip's area passes
-     * clicks through to the row beneath, which is what opens the session.
-     * Without that, the right-hand third of every row would silently stop
-     * responding.
+     * <p>The strip is split into two nodes so the fade and the click target
+     * cannot fight each other. {@code pickOnBounds=false} only makes a
+     * Region click-through where it paints <em>no background</em> -- with
+     * one, the whole strip's bounding box is picked regardless of the flag.
+     * So {@code actions} itself carries no background at all: genuine gaps
+     * between its buttons then fall through to {@code row} beneath. The
+     * fade gradient lives on a second, separate Region that is {@code
+     * setMouseTransparent(true)} so it can never be a click target no
+     * matter what it paints; it is sized to track {@code actions} and
+     * shares its visibility, so the two appear and disappear together.
+     *
+     * <p>As a side effect, {@code row}'s max width is set to {@code
+     * Double.MAX_VALUE} so it fills the stack instead of reporting its own
+     * preferred width.
      */
-    static StackPane wrap(Region row, Node actions) {
+    static StackPane wrap(Region row, Region actions) {
         // The cell reports a preferred width of 1 so the virtual flow sizes
         // every cell to the viewport; the wrapper must not reintroduce a
         // preferred width of its own, and the row must be free to fill it.
         row.setMaxWidth(Double.MAX_VALUE);
 
-        StackPane stack = new StackPane(row, actions);
-        stack.setPickOnBounds(false);
-        stack.setMaxWidth(Double.MAX_VALUE);
-        StackPane.setAlignment(actions, Pos.CENTER_RIGHT);
-        if (actions instanceof Region region) {
-            region.setMaxWidth(Region.USE_PREF_SIZE);
-            region.setPickOnBounds(false);
-            region.getStyleClass().add("row-overlay-actions");
+        actions.setMaxWidth(Region.USE_PREF_SIZE);
+        actions.setPickOnBounds(false);
+        actions.getStyleClass().add("row-overlay-actions");
+
+        Region fade = new Region();
+        fade.getStyleClass().add("row-overlay-fade");
+        fade.setMouseTransparent(true);
+        fade.minWidthProperty().bind(actions.widthProperty());
+        fade.maxWidthProperty().bind(actions.widthProperty());
+        fade.visibleProperty().bind(actions.visibleProperty());
+        // The active/hovered row color the fade must match is not reachable
+        // from a descendant selector -- the strip is a StackPane sibling of
+        // `row`, not its child -- so mirror the class here instead.
+        if (row.getStyleClass().contains("active")) {
+            fade.getStyleClass().add("active");
         }
+
+        StackPane stack = new StackPane(row, fade, actions);
+        stack.setMaxWidth(Double.MAX_VALUE);
+        StackPane.setAlignment(fade, Pos.CENTER_RIGHT);
+        StackPane.setAlignment(actions, Pos.CENTER_RIGHT);
         return stack;
     }
 }

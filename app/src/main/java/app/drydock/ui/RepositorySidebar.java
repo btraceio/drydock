@@ -363,7 +363,7 @@ public final class RepositorySidebar extends VBox {
             @Override
             public void activeSessionChanged(Optional<ManagedSessionId> previous,
                                              Optional<ManagedSessionId> current) {
-                if (filtering() && (membershipChanged(previous.orElse(null))
+                if (filter.isActive() && (membershipChanged(previous.orElse(null))
                         || membershipChanged(current.orElse(null)))) {
                     requestRebuild();
                     return;
@@ -612,12 +612,17 @@ public final class RepositorySidebar extends VBox {
 
     /**
      * Whether {@code sessionId} belongs in the tree but is missing, or is in
-     * the tree but no longer belongs. The {@code isExempt} term is not
-     * optional: an exempt row fails {@code matches} by definition while
-     * sitting in the tree, and it is the frontmost session -- the one
-     * emitting the most row events -- so testing {@code matches} alone would
-     * force a full rebuild on every one of them that could never resolve the
-     * mismatch it reacted to.
+     * the tree but no longer belongs. Reasons about the chip filter only --
+     * {@link SessionFilter#matches} never looks at the text query -- so
+     * callers must gate on {@link SessionFilter#isActive()}, not {@link
+     * #filtering()}: a text-only query cannot change this method's answer,
+     * and gating on {@code filtering()} would trigger rebuilds that cannot
+     * change the outcome. The {@code isExempt} term is not optional: an
+     * exempt row fails {@code matches} by definition while sitting in the
+     * tree, and it is the frontmost session -- the one emitting the most
+     * row events -- so testing {@code matches} alone would force a full
+     * rebuild on every one of them that could never resolve the mismatch it
+     * reacted to.
      */
     private boolean membershipChanged(ManagedSessionId sessionId) {
         if (sessionId == null) {
@@ -721,14 +726,21 @@ public final class RepositorySidebar extends VBox {
             // The filter matches the repo itself (name/branch) OR any of
             // its worktree/session rows; a repo matched only through its
             // children narrows to exactly the matching rows.
-            if (!query.isEmpty() && !matchesRepo(repository, query)) {
+            boolean repoMatchedByName = !query.isEmpty() && matchesRepo(repository, query);
+            if (!query.isEmpty() && !repoMatchedByName) {
                 children = children.stream().filter(child -> matchesNode(child, query)).toList();
             }
             // Only drop a childless repo while filtering: with no filter at
             // all, a freshly added repository with no worktrees and no
             // sessions must keep showing itself (and its + and ⟳ buttons).
-            if (children.isEmpty() && filtering()) {
+            // A repo matched BY NAME survives even childless -- typing a
+            // repository's name before its worktree discovery has returned
+            // must show the repo, not "Nothing matches your filters".
+            if (children.isEmpty() && filtering() && !repoMatchedByName) {
                 continue;
+            }
+            if (children.isEmpty() && repoMatchedByName) {
+                matchCount++;
             }
             for (SidebarNode child : children) {
                 boolean exemptOnly = child instanceof SidebarNode.SessionNode sessionNode
@@ -828,7 +840,7 @@ public final class RepositorySidebar extends VBox {
     private void updateFooter() {
         int runningTotal = 0;
         for (ManagedAgentSession session : viewModel.sessions()) {
-            if (session.status() == SessionStatus.RUNNING || session.status() == SessionStatus.STARTING) {
+            if (SessionStatusStyles.isRunning(session.status())) {
                 runningTotal++;
             }
         }
@@ -930,6 +942,9 @@ public final class RepositorySidebar extends VBox {
         newSessionMenus.keySet().retainAll(repoIds);
         unopenedTooltips.keySet().retainAll(worktreePaths);
         collapsed.retainAll(repoIds);
+        if (collapsedBeforeFilter != null) {
+            collapsedBeforeFilter.retainAll(repoIds);
+        }
         staleBucketExpanded.retainAll(repoIds);
         lockedBucketExpanded.retainAll(repoIds);
     }
@@ -1632,6 +1647,7 @@ public final class RepositorySidebar extends VBox {
             // inside an HBox it would otherwise take preferred width and let a
             // long repo name blow out the row.
             HBox.setHgrow(name, Priority.ALWAYS);
+            name.setMinWidth(0);
             name.setMaxWidth(Double.MAX_VALUE);
             HBox nameRow = new HBox(6, name);
             nameRow.setAlignment(Pos.CENTER_LEFT);
@@ -1646,6 +1662,7 @@ public final class RepositorySidebar extends VBox {
             branch.getStyleClass().add("repo-branch");
             branch.setTextOverrun(OverrunStyle.LEADING_ELLIPSIS);
             HBox.setHgrow(branch, Priority.ALWAYS);
+            branch.setMinWidth(0);
             branch.setMaxWidth(Double.MAX_VALUE);
             Throwable failure = viewModel.repoStatusFailure(repository.id()).orElse(null);
             if (failure != null) {
@@ -1690,7 +1707,6 @@ public final class RepositorySidebar extends VBox {
             rescan.getStyleClass().add("row-action-button");
             rescan.setTooltip(new Tooltip("Rescan worktrees"));
             rescan.setFocusTraversable(false);
-            rescan.visibleProperty().bind(hoverProperty());
             if (scanning.contains(repository.id())) {
                 RotateTransition spin = new RotateTransition(Duration.seconds(0.8), rescan);
                 spin.setByAngle(360);
@@ -1715,7 +1731,6 @@ public final class RepositorySidebar extends VBox {
             newSession.getStyleClass().add("row-action-button");
             newSession.setTooltip(new Tooltip("New session or worktree…"));
             newSession.setFocusTraversable(false);
-            newSession.visibleProperty().bind(hoverProperty());
             ContextMenu newMenu = newSessionMenu(repository);
             newSession.setOnAction(e -> newMenu.show(newSession, Side.BOTTOM, 0, 4));
 

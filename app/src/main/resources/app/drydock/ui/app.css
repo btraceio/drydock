@@ -159,6 +159,24 @@
     -fx-text-fill: -drydock-text-faint;
 }
 
+/* "Clear filters" in the empty state: ghost-bordered like the app's other
+   secondary buttons (.header-icon-button, .worktree-refresh-button). */
+.sidebar-empty-clear {
+    -fx-background-color: transparent;
+    -fx-background-radius: 8px;
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 8px;
+    -fx-border-width: 1px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 12px;
+    -fx-padding: 5 14 5 14;
+    -fx-cursor: hand;
+}
+.sidebar-empty-clear:hover {
+    -fx-background-color: -drydock-hover;
+    -fx-text-fill: -drydock-text;
+}
+
 .sidebar-empty-banner {
     -fx-font-size: 11px;
     -fx-text-fill: -drydock-text-faint;
@@ -288,14 +306,19 @@
 /* The floating hover-action strip. It sits in an overlay layer so it costs
    no layout width -- before this, three 22px buttons reserved 70px on every
    session row whether or not the cursor was on it, on a row that had ~84px
-   left for the session name. */
+   left for the session name. NO background here: pickOnBounds=false only
+   passes clicks through where a Region paints nothing, and the buttons'
+   gaps must fall through to the row beneath. The fade lives on a separate
+   .row-overlay-fade sibling (see RowOverlay) that is mouse-transparent, so
+   it can carry the gradient without ever intercepting a click. */
 .row-overlay-actions {
     -fx-padding: 0 8 0 24;
-    -fx-background-color: linear-gradient(to right, transparent 0%, -drydock-row-fade 24px);
 }
 
-.session-row.active .row-overlay-actions,
-.repo-row.active .row-overlay-actions {
+.row-overlay-fade {
+    -fx-background-color: linear-gradient(to right, transparent 0%, -drydock-row-fade 24px);
+}
+.row-overlay-fade.active {
     -fx-background-color: linear-gradient(to right, transparent 0%, -drydock-row-fade-active 24px);
 }
 
@@ -1686,19 +1709,10 @@
     -fx-background-color: -drydock-accent;
     -fx-text-fill: white;
 }
-.resume-pill {
-    -fx-background-color: transparent;
-    -fx-background-radius: 100px;
-    -fx-border-color: -drydock-border-strong;
-    -fx-border-radius: 100px;
-    -fx-text-fill: -drydock-text-faint;
-    -fx-font-size: 10.5px;
-    -fx-padding: 1 8 1 8;
-}
 /* Session whose Claude is blocked on a human. Uses the accent token rather
-   than the ghost treatment of .resume-pill: this is a call to action, not an
-   affordance hint, and must read at a glance down a long session list. Bold
-   so it outweighs the neighbouring pr-chip it shares a shape with. */
+   than a ghost treatment: this is a call to action, not an affordance hint,
+   and must read at a glance down a long session list. Bold so it outweighs
+   the neighbouring pr-chip it shares a shape with. */
 .attention-badge {
     -fx-background-color: -drydock-accent-soft;
     -fx-background-radius: 100px;
