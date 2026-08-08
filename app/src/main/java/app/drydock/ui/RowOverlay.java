@@ -30,8 +30,9 @@ final class RowOverlay {
      * between its buttons then fall through to {@code row} beneath. The
      * fade gradient lives on a second, separate Region that is {@code
      * setMouseTransparent(true)} so it can never be a click target no
-     * matter what it paints; it is sized to track {@code actions} and
-     * shares its visibility, so the two appear and disappear together.
+     * matter what it paints; it tracks {@code actions}' width, stretches to
+     * the stack's full height, and shares {@code actions}' visibility, so
+     * the two appear and disappear together.
      *
      * <p>As a side effect, {@code row}'s max width is set to {@code
      * Double.MAX_VALUE} so it fills the stack instead of reporting its own
@@ -52,6 +53,14 @@ final class RowOverlay {
         fade.setMouseTransparent(true);
         fade.minWidthProperty().bind(actions.widthProperty());
         fade.maxWidthProperty().bind(actions.widthProperty());
+        // An empty Region's preferred height is 0, and StackPane sizes an
+        // unconstrained child to its preferred size -- a purely
+        // CSS-styled node with no content and no explicit height silently
+        // paints nothing, at zero pixels tall. Stretch it to the row's
+        // full height (not just the 22px action buttons') so the wash
+        // covers the row band those buttons sit on, not a sliver behind
+        // them.
+        fade.setMaxHeight(Double.MAX_VALUE);
         fade.visibleProperty().bind(actions.visibleProperty());
         // The active/hovered row color the fade must match is not reachable
         // from a descendant selector -- the strip is a StackPane sibling of
