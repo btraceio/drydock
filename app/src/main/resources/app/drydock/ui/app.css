@@ -147,6 +147,42 @@
     -fx-text-fill: -drydock-text-faint;
 }
 
+/* The empty state: swapped in for the tree when a filter leaves nothing to
+ * show, or shown as a compact banner above the tree when the active-session
+ * exemption keeps exactly one row on screen. */
+.sidebar-empty-state {
+    -fx-padding: 24 16 24 16;
+}
+
+.sidebar-empty-message {
+    -fx-font-size: 12px;
+    -fx-text-fill: -drydock-text-faint;
+}
+
+/* "Clear filters" in the empty state: ghost-bordered like the app's other
+   secondary buttons (.header-icon-button, .worktree-refresh-button). */
+.sidebar-empty-clear {
+    -fx-background-color: transparent;
+    -fx-background-radius: 8px;
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 8px;
+    -fx-border-width: 1px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 12px;
+    -fx-padding: 5 14 5 14;
+    -fx-cursor: hand;
+}
+.sidebar-empty-clear:hover {
+    -fx-background-color: -drydock-hover;
+    -fx-text-fill: -drydock-text;
+}
+
+.sidebar-empty-banner {
+    -fx-font-size: 11px;
+    -fx-text-fill: -drydock-text-faint;
+    -fx-padding: 6 12 6 12;
+}
+
 /* The repository/session tree. Custom cells draw everything; strip all
  * built-in TreeView chrome (disclosure arrows are our own carets). */
 .repo-tree {
@@ -230,7 +266,23 @@
 /* One fixed indent gutter shared by every child row (session / unopened
    worktree / stale summary) so their status columns line up. */
 .child-row { -fx-padding: 5 8 5 16; }
-.child-row-status { -fx-min-width: 16; -fx-alignment: center; }
+.child-row-status {
+    -fx-min-width: 30;
+    -fx-alignment: center-left;
+}
+
+/* The per-agent mark in a session row's leading gutter. Identity is carried
+ * by the glyph first and the color second, so the row still reads in
+ * grayscale. */
+.agent-mark {
+    -fx-font-size: 11px;
+    -fx-min-width: 12px;
+}
+
+.agent-mark-claude { -fx-text-fill: -drydock-agent-claude; }
+.agent-mark-codex { -fx-text-fill: -drydock-agent-codex; }
+.agent-mark-pi { -fx-text-fill: -drydock-agent-pi; }
+.agent-mark-unknown { -fx-text-fill: -drydock-text-faint; }
 
 /* Small square hover-action buttons on repo/session rows (22px). */
 .row-action-button {
@@ -249,6 +301,25 @@
 }
 .row-action-button.destructive:hover {
     -fx-text-fill: -drydock-error;
+}
+
+/* The floating hover-action strip. It sits in an overlay layer so it costs
+   no layout width -- before this, three 22px buttons reserved 70px on every
+   session row whether or not the cursor was on it, on a row that had ~84px
+   left for the session name. NO background here: pickOnBounds=false only
+   passes clicks through where a Region paints nothing, and the buttons'
+   gaps must fall through to the row beneath. The fade lives on a separate
+   .row-overlay-fade sibling (see RowOverlay) that is mouse-transparent, so
+   it can carry the gradient without ever intercepting a click. */
+.row-overlay-actions {
+    -fx-padding: 0 8 0 24;
+}
+
+.row-overlay-fade {
+    -fx-background-color: linear-gradient(to right, transparent 0%, -drydock-row-fade 24px);
+}
+.row-overlay-fade.active {
+    -fx-background-color: linear-gradient(to right, transparent 0%, -drydock-row-fade-active 24px);
 }
 
 .session-row {
@@ -1653,19 +1724,10 @@
     -fx-background-color: -drydock-accent;
     -fx-text-fill: white;
 }
-.resume-pill {
-    -fx-background-color: transparent;
-    -fx-background-radius: 100px;
-    -fx-border-color: -drydock-border-strong;
-    -fx-border-radius: 100px;
-    -fx-text-fill: -drydock-text-faint;
-    -fx-font-size: 10.5px;
-    -fx-padding: 1 8 1 8;
-}
 /* Session whose Claude is blocked on a human. Uses the accent token rather
-   than the ghost treatment of .resume-pill: this is a call to action, not an
-   affordance hint, and must read at a glance down a long session list. Bold
-   so it outweighs the neighbouring pr-chip it shares a shape with. */
+   than a ghost treatment: this is a call to action, not an affordance hint,
+   and must read at a glance down a long session list. Bold so it outweighs
+   the neighbouring pr-chip it shares a shape with. */
 .attention-badge {
     -fx-background-color: -drydock-accent-soft;
     -fx-background-radius: 100px;
@@ -2789,6 +2851,19 @@
     -fx-text-fill: -drydock-accent;
 }
 .review-filter-button:focused { -fx-border-color: -drydock-accent; }
+
+/* Sidebar filter chips. They reuse .review-filter-button's shape so the app
+ * grows no fourth chip language, but selection must be carried by the
+ * background fill and text color -- .review-filter-button:focused paints the
+ * same accent border as :selected, so a Tab-focused unselected chip would
+ * otherwise look selected. */
+.session-filter-bar {
+    -fx-padding: 6 10 2 10;
+}
+
+.session-filter-chip {
+    -fx-font-size: 11px;
+}
 
 .review-findings-scroll, .review-findings-scroll .viewport {
     -fx-background-color: transparent;

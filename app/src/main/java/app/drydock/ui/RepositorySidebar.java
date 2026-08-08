@@ -19,6 +19,7 @@ import app.drydock.git.SshUnreachableException;
 import app.drydock.git.WorktreeLockedException;
 import app.drydock.git.WorktreeNotCleanException;
 import app.drydock.git.WorktreeService;
+import app.drydock.ui.model.SessionFilter;
 import app.drydock.ui.model.WorkspaceViewModel;
 import java.io.File;
 import javafx.animation.KeyFrame;
@@ -29,6 +30,7 @@ import javafx.application.Platform;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.geometry.Side;
+import javafx.scene.Node;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Alert.AlertType;
 import javafx.scene.control.Button;
@@ -75,6 +77,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.Predicate;
 
 /**
  * The repository sidebar, rebuilt to the design handoff (README section 2)
@@ -116,6 +119,8 @@ public final class RepositorySidebar extends VBox {
     private final ExternalEditorLauncher editorLauncher = new ExternalEditorLauncher();
 
     private final TextField filterField = new TextField();
+    private SessionFilter filter = SessionFilter.none();
+    private final SessionFilterBar filterBar;
 
     /** Open findings for a worktree checkout, if any -- the per-row ◨n badge. */
     private Function<Path, Optional<Integer>> openFindingsAt = path -> Optional.empty();
@@ -129,11 +134,33 @@ public final class RepositorySidebar extends VBox {
     private Map<Path, Integer> renderedFindingCounts = Map.of();
     private final TreeItem<SidebarNode> treeRoot = new TreeItem<>();
     private final TreeView<SidebarNode> tree = new TreeView<>(treeRoot);
+
+    /**
+     * The two forms of "nothing to show": {@code emptyState} swaps in for
+     * the tree when there is truly nothing left (see {@link #showEmptyState}
+     * for why that decision cannot be made from the filter alone), and
+     * {@code emptyBanner} sits above the tree when the active-session
+     * exemption leaves exactly one row standing.
+     */
+    private final VBox emptyState;
+    private final Label emptyBanner = new Label("Nothing matches your filters");
     private final Label footerLabel = new Label();
     private final Region footerDot = new Region();
 
     /** Which repository subtrees are expanded; new repositories start expanded. */
     private final Set<RepositoryId> collapsed = new HashSet<>();
+
+    /** The user's collapse set, stashed while a filter forces every repo open. */
+    private Set<RepositoryId> collapsedBeforeFilter;
+
+    /**
+     * Set in the two places a filter can change (the {@link SessionFilterBar}
+     * callback and the {@link #filterDebounce} handler) and consumed at the
+     * top of {@link #rebuildTree()}. Force-expansion must fire only on an
+     * actual filter change, not on every rebuild, or the disclosure triangle
+     * is a dead control for as long as a filter is on.
+     */
+    private boolean filterChangedSinceLastRebuild;
 
     /** Repos whose stale bucket is expanded. Distinct from {@code collapsed} (repo-level). */
     private final Set<RepositoryId> staleBucketExpanded = new HashSet<>();
@@ -226,11 +253,16 @@ public final class RepositorySidebar extends VBox {
         addButton.setMaxWidth(Double.MAX_VALUE);
 
         filterField.getStyleClass().add("filter-field");
-        filterField.setPromptText("⌕  Filter repos & worktrees…");
-        filterDebounce.setOnFinished(e -> rebuildTree());
+        filterField.setPromptText("⌕  Filter repos & sessions…");
+        filterDebounce.setOnFinished(e -> {
+            filterChangedSinceLastRebuild = true;
+            rebuildTree();
+        });
         filterField.textProperty().addListener((obs, oldText, newText) -> filterDebounce.playFromStart());
 
-        VBox header = new VBox(addButton, filterField);
+        filterBar = new SessionFilterBar(agentRegistry, () -> onFilterChipsChanged());
+
+        VBox header = new VBox(addButton, filterField, filterBar);
         header.getStyleClass().add("sidebar-header");
 
         // The same collapse control the Review rails wear, in the same place.
@@ -261,12 +293,35 @@ public final class RepositorySidebar extends VBox {
             }
         });
 
+        // -- Empty state ------------------------------------------------------
+        Label emptyMessage = new Label("Nothing matches your filters");
+        emptyMessage.getStyleClass().add("sidebar-empty-message");
+        Button clearFilters = new Button("Clear filters");
+        clearFilters.getStyleClass().add("sidebar-empty-clear");
+        clearFilters.setOnAction(e -> {
+            // filterField.clear() re-arms filterDebounce (its text listener
+            // fires playFromStart()); left alone, it would fire again ~150ms
+            // later and call rebuildTree() directly, bypassing the
+            // requestRebuild() coalescing that filterBar.clear()'s callback
+            // already triggers -- two rebuilds instead of the required one.
+            filterField.clear();
+            filterDebounce.stop();
+            filterBar.clear();
+        });
+        emptyState = new VBox(8, emptyMessage, clearFilters);
+        emptyState.getStyleClass().add("sidebar-empty-state");
+        emptyState.setAlignment(Pos.CENTER);
+
+        emptyBanner.getStyleClass().add("sidebar-empty-banner");
+        emptyBanner.setVisible(false);
+        emptyBanner.setManaged(false);
+
         // -- Footer ---------------------------------------------------------
         footerDot.getStyleClass().addAll("status-dot", "dot-5");
         HBox footer = new HBox(footerDot, footerLabel);
         footer.getStyleClass().add("sidebar-footer");
 
-        getChildren().addAll(collapseHeader.node(), header, tree, footer);
+        getChildren().addAll(collapseHeader.node(), header, emptyBanner, tree, footer);
 
         // Keep the displayed list in sync with EVERY repository mutation,
         // not just the ones initiated by this sidebar's own handlers. The
@@ -287,7 +342,11 @@ public final class RepositorySidebar extends VBox {
             @Override
             public void sessionRowChanged(ManagedSessionId sessionId) {
                 maybeRefreshStatuses();
-                updateSessionRow(sessionId);
+                if (filter.isActive() && membershipChanged(sessionId)) {
+                    requestRebuild();
+                } else {
+                    updateSessionRow(sessionId);
+                }
             }
 
             @Override
@@ -304,6 +363,11 @@ public final class RepositorySidebar extends VBox {
             @Override
             public void activeSessionChanged(Optional<ManagedSessionId> previous,
                                              Optional<ManagedSessionId> current) {
+                if (filter.isActive() && (membershipChanged(previous.orElse(null))
+                        || membershipChanged(current.orElse(null)))) {
+                    requestRebuild();
+                    return;
+                }
                 previous.ifPresent(RepositorySidebar.this::updateSessionRow);
                 current.ifPresent(RepositorySidebar.this::updateSessionRow);
                 syncActiveSelection();
@@ -409,6 +473,66 @@ public final class RepositorySidebar extends VBox {
     }
 
     /**
+     * Diagnostic-only ({@code app.drydock.diag.tabScript}): toggles one
+     * filter chip by name, so a scripted visual pass can capture filter
+     * combinations.
+     */
+    public void diagToggleFacet(String name) {
+        filterBar.diagToggleFacet(name);
+    }
+
+    /**
+     * Diagnostic-only ({@code app.drydock.diag.tabScript}): expands every
+     * repository's stale-worktree bucket, standing in for the mouse click
+     * {@link #activateNode} normally uses to toggle {@link
+     * #staleBucketExpanded} -- the scripted diag driver has no pointer.
+     */
+    public void diagExpandStaleBuckets() {
+        for (Repository repository : repositoryManager.repositories()) {
+            staleBucketExpanded.add(repository.id());
+        }
+        requestRebuild();
+    }
+
+    /**
+     * Diagnostic-only ({@code app.drydock.diag.tabScript} "clickedge" verb):
+     * the session the workspace currently considers active, so the driver can
+     * capture it before a synthetic click and compare after -- the same
+     * accessor {@link #isExempt} uses to decide whether a filtered-out row
+     * still belongs in the tree.
+     */
+    public Optional<ManagedSessionId> diagActiveSession() {
+        return viewModel.activeSession();
+    }
+
+    /**
+     * Diagnostic-only ({@code app.drydock.diag.tabScript} "clickedge" verb):
+     * the {@link ManagedAgentSession} id backing the {@code index}th realized
+     * ".session-row", in the same top-to-bottom screen order the driver
+     * hovers and clicks in (see {@code diagRowBounds} in DrydockApplication).
+     * A CSS class alone carries no identity, so this walks up to the
+     * enclosing {@link TreeCell} to read the row's {@link SidebarNode}.
+     * Empty when the index is out of range or the row is not a session row.
+     */
+    public Optional<ManagedSessionId> diagSessionIdForRow(int index) {
+        List<Node> rows = new ArrayList<>(lookupAll(".session-row"));
+        rows.sort(Comparator.comparingDouble(
+                node -> node.localToScreen(node.getBoundsInLocal()).getMinY()));
+        if (index < 0 || index >= rows.size()) {
+            return Optional.empty();
+        }
+        Node node = rows.get(index);
+        while (node != null && !(node instanceof TreeCell<?>)) {
+            node = node.getParent();
+        }
+        if (node instanceof TreeCell<?> cell
+                && cell.getItem() instanceof SidebarNode.SessionNode sessionNode) {
+            return Optional.of(sessionNode.session().id());
+        }
+        return Optional.empty();
+    }
+
+    /**
      * Re-fetches repo AND worktree statuses when the event was driven by an
      * actual session change (fetch-once caching left branch tags and dirty
      * dots permanently stale; see {@link #statusRefreshedFor}). The fetches
@@ -491,7 +615,11 @@ public final class RepositorySidebar extends VBox {
         for (Repository repository : sorted(repositoryManager.repositories())) {
             SidebarChildren classified = childrenOf(repository);
             if (classified != null) {
-                live.addAll(classified.liveSessions());
+                for (ManagedAgentSession candidate : classified.liveSessions()) {
+                    if (filter.matches(candidate)) {
+                        live.add(candidate);
+                    }
+                }
             }
         }
         if (live.isEmpty()) {
@@ -520,6 +648,44 @@ public final class RepositorySidebar extends VBox {
         return null;
     }
 
+    /**
+     * Whether {@code sessionId} belongs in the tree but is missing, or is in
+     * the tree but no longer belongs. Reasons about the chip filter only --
+     * {@link SessionFilter#matches} never looks at the text query -- so
+     * callers must gate on {@link SessionFilter#isActive()}, not {@link
+     * #filtering()}: a text-only query cannot change this method's answer,
+     * and gating on {@code filtering()} would trigger rebuilds that cannot
+     * change the outcome. The {@code isExempt} term is not optional: an
+     * exempt row fails {@code matches} by definition while sitting in the
+     * tree, and it is the frontmost session -- the one emitting the most
+     * row events -- so testing {@code matches} alone would force a full
+     * rebuild on every one of them that could never resolve the mismatch it
+     * reacted to.
+     */
+    private boolean membershipChanged(ManagedSessionId sessionId) {
+        if (sessionId == null) {
+            return false;
+        }
+        ManagedAgentSession session = viewModel.sessionById(sessionId).orElse(null);
+        if (session == null) {
+            return false;
+        }
+        boolean belongs = filter.matches(session) || isExempt(sessionId);
+        return belongs != isInTree(sessionId);
+    }
+
+    private boolean isInTree(ManagedSessionId sessionId) {
+        for (TreeItem<SidebarNode> repoItem : treeRoot.getChildren()) {
+            for (TreeItem<SidebarNode> child : repoItem.getChildren()) {
+                if (child.getValue() instanceof SidebarNode.SessionNode sessionNode
+                        && sessionNode.session().id().equals(sessionId)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     private void onRepositoriesChanged() {
         for (Repository repository : repositoryManager.repositories()) {
             if (viewModel.repoStatus(repository.id()).isEmpty()
@@ -530,21 +696,96 @@ public final class RepositorySidebar extends VBox {
         rebuildTree();
     }
 
+    /**
+     * Whether the sidebar is narrowed at all -- by chips or by text. Every
+     * filter-aware surface (empty state, footer suffix, repo aggregates, the
+     * childless-repo rule) keys on this one predicate, or they disagree with
+     * each other about what the user is looking at.
+     */
+    private boolean filtering() {
+        return filter.isActive() || !currentQuery().isEmpty();
+    }
+
+    /** Chip callback: re-reads {@link #filterBar} and coalesces into one rebuild. */
+    private void onFilterChipsChanged() {
+        filter = filterBar.filter();
+        filterChangedSinceLastRebuild = true;
+        requestRebuild();
+    }
+
+    private String currentQuery() {
+        return filterField.getText() == null ? "" : filterField.getText().strip().toLowerCase(Locale.ROOT);
+    }
+
+    /** The frontmost session is always rendered -- see {@link #applyFacets}. */
+    private boolean isExempt(ManagedSessionId sessionId) {
+        return viewModel.activeSession().filter(sessionId::equals).isPresent();
+    }
+
     private void rebuildTree() {
-        String query = filterField.getText() == null ? "" : filterField.getText().strip().toLowerCase(Locale.ROOT);
+        // A filter is a global question ("where are my errors?"); repo
+        // expansion is a local reading preference. Re-assert the expansion on
+        // every change to the filter -- not only on entry, or switching from
+        // `running` to `error` would leave the sole matching session inside a
+        // repo the user collapsed earlier.
+        if (filtering()) {
+            if (collapsedBeforeFilter == null) {
+                collapsedBeforeFilter = new HashSet<>(collapsed);
+            }
+            if (filterChangedSinceLastRebuild) {
+                collapsed.clear();
+            }
+        } else if (collapsedBeforeFilter != null) {
+            collapsed.clear();
+            collapsed.addAll(collapsedBeforeFilter);
+            collapsedBeforeFilter = null;
+        }
+        filterChangedSinceLastRebuild = false;
+
+        String query = currentQuery();
 
         List<Repository> repositories = sorted(repositoryManager.repositories());
         List<TreeItem<SidebarNode>> repoItems = new ArrayList<>();
+        // Surviving rows of ANY kind (session, unopened worktree, stale/
+        // locked bucket), except a session row that is present only because
+        // {@code isExempt} accepted it despite failing the filter -- the
+        // active session can keep a repo, and the tree, non-empty on its
+        // own, and that must not count as a "match" or the empty state
+        // would never show while a session is running. A worktree/bucket
+        // row is never exempt, so it always counts when it survives: under
+        // an active chip filter those rows are already stripped by
+        // applyFacets, but a text-only query (chips inactive) leaves them
+        // in place, and a query that matches a branch or worktree path but
+        // no session is a real match, not an empty result.
+        int matchCount = 0;
 
         for (Repository repository : repositories) {
-            List<SidebarNode> children = childNodesFor(repository);
+            List<SidebarNode> children = applyFacets(childNodesFor(repository), filter, this::isExempt);
             // The filter matches the repo itself (name/branch) OR any of
             // its worktree/session rows; a repo matched only through its
             // children narrows to exactly the matching rows.
-            if (!query.isEmpty() && !matchesRepo(repository, query)) {
+            boolean repoMatchedByName = !query.isEmpty() && matchesRepo(repository, query);
+            if (!query.isEmpty() && !repoMatchedByName) {
                 children = children.stream().filter(child -> matchesNode(child, query)).toList();
-                if (children.isEmpty()) {
-                    continue;
+            }
+            // Only drop a childless repo while filtering: with no filter at
+            // all, a freshly added repository with no worktrees and no
+            // sessions must keep showing itself (and its + and ⟳ buttons).
+            // A repo matched BY NAME survives even childless -- typing a
+            // repository's name before its worktree discovery has returned
+            // must show the repo, not "Nothing matches your filters".
+            if (children.isEmpty() && filtering() && !repoMatchedByName) {
+                continue;
+            }
+            if (children.isEmpty() && repoMatchedByName) {
+                matchCount++;
+            }
+            for (SidebarNode child : children) {
+                boolean exemptOnly = child instanceof SidebarNode.SessionNode sessionNode
+                        && !filter.matches(sessionNode.session())
+                        && isExempt(sessionNode.session().id());
+                if (!exemptOnly) {
+                    matchCount++;
                 }
             }
             TreeItem<SidebarNode> repoItem = new TreeItem<>(new SidebarNode.RepoNode(repository));
@@ -568,8 +809,63 @@ public final class RepositorySidebar extends VBox {
 
         treeRoot.getChildren().setAll(repoItems);
 
+        // Two forms, because an exempt row can leave the tree non-empty while
+        // nothing actually matched. Swap only when there is nothing to show
+        // at all; otherwise the exempt row would be deleted from the screen,
+        // re-creating the failure the exemption exists to prevent.
+        boolean nothingMatched = filtering() && matchCount == 0;
+        boolean treeIsEmpty = treeRoot.getChildren().isEmpty();
+        boolean noRepositoriesAtAll = repositoryManager.repositories().isEmpty();
+        showEmptyState(nothingMatched && !noRepositoriesAtAll, treeIsEmpty);
+
         updateFooter();
         syncActiveSelection();
+    }
+
+    /**
+     * Chooses between the two empty-state forms. {@code nothingMatched} is
+     * already false when there are no repositories at all -- an empty
+     * workspace is not a filter problem, and Clear filters cannot help.
+     *
+     * <p>Focus moves only when the current focus owner sits inside the node
+     * being removed: an unconditional move would yank the caret out of the
+     * filter field on the 150ms debounce, swallowing the next keystroke and
+     * turning Space into "Clear filters". The banner form moves no focus at
+     * all, because nothing leaves the scene.
+     */
+    private void showEmptyState(boolean nothingMatched, boolean treeIsEmpty) {
+        boolean swap = nothingMatched && treeIsEmpty;
+        boolean banner = nothingMatched && !treeIsEmpty;
+
+        Node focusOwner = getScene() == null ? null : getScene().getFocusOwner();
+
+        if (swap && !getChildren().contains(emptyState)) {
+            boolean treeHadFocus = isDescendantOf(focusOwner, tree);
+            getChildren().set(getChildren().indexOf(tree), emptyState);
+            VBox.setVgrow(emptyState, Priority.ALWAYS);
+            if (treeHadFocus) {
+                emptyState.getChildren().get(1).requestFocus();
+            }
+        } else if (!swap && getChildren().contains(emptyState)) {
+            boolean buttonHadFocus = isDescendantOf(focusOwner, emptyState);
+            getChildren().set(getChildren().indexOf(emptyState), tree);
+            VBox.setVgrow(tree, Priority.ALWAYS);
+            if (buttonHadFocus) {
+                filterField.requestFocus();
+            }
+        }
+        emptyBanner.setVisible(banner);
+        emptyBanner.setManaged(banner);
+    }
+
+    /** Whether {@code node} is {@code ancestor} itself or a descendant of it. */
+    private static boolean isDescendantOf(Node node, Node ancestor) {
+        for (Node current = node; current != null; current = current.getParent()) {
+            if (current == ancestor) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -582,7 +878,7 @@ public final class RepositorySidebar extends VBox {
     private void updateFooter() {
         int runningTotal = 0;
         for (ManagedAgentSession session : viewModel.sessions()) {
-            if (session.status() == SessionStatus.RUNNING || session.status() == SessionStatus.STARTING) {
+            if (SessionStatusStyles.isRunning(session.status())) {
                 runningTotal++;
             }
         }
@@ -606,6 +902,11 @@ public final class RepositorySidebar extends VBox {
                 + (worktreeTotal == 1 ? " worktree" : " worktrees");
         if (unopenedTotal > 0) {
             footerText += " · " + unopenedTotal + " unopened";
+        }
+        if (filtering()) {
+            // The footer's job is "what exists" -- shrinking the totals would
+            // erase the only remaining evidence of what the filter hides.
+            footerText += " · filtered";
         }
         footerLabel.setText(footerText);
         SessionStatusStyles.updateDot(footerDot, runningTotal > 0 ? SessionStatus.RUNNING : SessionStatus.INACTIVE);
@@ -679,6 +980,9 @@ public final class RepositorySidebar extends VBox {
         newSessionMenus.keySet().retainAll(repoIds);
         unopenedTooltips.keySet().retainAll(worktreePaths);
         collapsed.retainAll(repoIds);
+        if (collapsedBeforeFilter != null) {
+            collapsedBeforeFilter.retainAll(repoIds);
+        }
         staleBucketExpanded.retainAll(repoIds);
         lockedBucketExpanded.retainAll(repoIds);
     }
@@ -885,6 +1189,32 @@ public final class RepositorySidebar extends VBox {
                 return text.toLowerCase(Locale.ROOT).contains(query);
             });
         };
+    }
+
+    /**
+     * The facet half of the sidebar's filtering: session-scoped, and pure so
+     * it can be tested without an FX toolkit or a live sidebar.
+     *
+     * <p>An active facet filter turns the sidebar into a session list -- the
+     * unopened-worktree rows and the locked/stale buckets drop out, because a
+     * filter over sessions cannot say anything about a worktree that has
+     * none. {@code exempt} always survives; it is how the frontmost session
+     * stays on screen even when it fails the filter.
+     */
+    static List<SidebarNode> applyFacets(List<SidebarNode> children, SessionFilter filter,
+                                         Predicate<ManagedSessionId> exempt) {
+        if (!filter.isActive()) {
+            return children;
+        }
+        List<SidebarNode> kept = new ArrayList<>();
+        for (SidebarNode child : children) {
+            if (child instanceof SidebarNode.SessionNode sessionNode
+                    && (filter.matches(sessionNode.session())
+                            || exempt.test(sessionNode.session().id()))) {
+                kept.add(child);
+            }
+        }
+        return kept;
     }
 
     private List<ManagedAgentSession> sessionsFor(Repository repository) {
@@ -1343,7 +1673,7 @@ public final class RepositorySidebar extends VBox {
             }
         }
 
-        private HBox buildRepoRow(Repository repository) {
+        private StackPane buildRepoRow(Repository repository) {
             Label caret = new Label("▶");
             caret.getStyleClass().add("repo-caret");
             boolean expanded = getTreeItem() != null && getTreeItem().isExpanded();
@@ -1355,6 +1685,7 @@ public final class RepositorySidebar extends VBox {
             // inside an HBox it would otherwise take preferred width and let a
             // long repo name blow out the row.
             HBox.setHgrow(name, Priority.ALWAYS);
+            name.setMinWidth(0);
             name.setMaxWidth(Double.MAX_VALUE);
             HBox nameRow = new HBox(6, name);
             nameRow.setAlignment(Pos.CENTER_LEFT);
@@ -1369,6 +1700,7 @@ public final class RepositorySidebar extends VBox {
             branch.getStyleClass().add("repo-branch");
             branch.setTextOverrun(OverrunStyle.LEADING_ELLIPSIS);
             HBox.setHgrow(branch, Priority.ALWAYS);
+            branch.setMinWidth(0);
             branch.setMaxWidth(Double.MAX_VALUE);
             Throwable failure = viewModel.repoStatusFailure(repository.id()).orElse(null);
             if (failure != null) {
@@ -1383,7 +1715,18 @@ public final class RepositorySidebar extends VBox {
             counts.setMinWidth(Region.USE_PREF_SIZE);
 
             List<ManagedAgentSession> sessions = sessionsFor(repository);
-            boolean anyRunning = sessions.stream().anyMatch(s -> SessionStatusStyles.isRunning(s.status()));
+            // Composed children, minus any row present only by exemption: an
+            // exempt row did not match, so counting it would overstate the
+            // matches, and a repo present ONLY by exemption must show no
+            // count at all rather than a bare "0 of M".
+            List<ManagedAgentSession> shown = getTreeItem() == null ? sessions
+                    : getTreeItem().getChildren().stream()
+                            .map(TreeItem::getValue)
+                            .filter(SidebarNode.SessionNode.class::isInstance)
+                            .map(node -> ((SidebarNode.SessionNode) node).session())
+                            .filter(candidate -> !filter.isActive() || filter.matches(candidate))
+                            .toList();
+            boolean anyRunning = shown.stream().anyMatch(s -> SessionStatusStyles.isRunning(s.status()));
             HBox branchRow = new HBox(6, branch, counts);
             branchRow.setAlignment(Pos.CENTER_LEFT);
             if (anyRunning) {
@@ -1393,14 +1736,15 @@ public final class RepositorySidebar extends VBox {
             VBox text = new VBox(1, nameRow, branchRow);
             HBox.setHgrow(text, Priority.ALWAYS);
 
-            Label count = new Label(String.valueOf(sessions.size()));
+            Label count = new Label(!filtering() || shown.size() == sessions.size()
+                    ? String.valueOf(sessions.size())
+                    : shown.isEmpty() ? "" : shown.size() + " of " + sessions.size());
             count.getStyleClass().add("repo-count");
 
             Button rescan = new Button("⟳");
             rescan.getStyleClass().add("row-action-button");
             rescan.setTooltip(new Tooltip("Rescan worktrees"));
             rescan.setFocusTraversable(false);
-            rescan.visibleProperty().bind(hoverProperty());
             if (scanning.contains(repository.id())) {
                 RotateTransition spin = new RotateTransition(Duration.seconds(0.8), rescan);
                 spin.setByAngle(360);
@@ -1425,11 +1769,14 @@ public final class RepositorySidebar extends VBox {
             newSession.getStyleClass().add("row-action-button");
             newSession.setTooltip(new Tooltip("New session or worktree…"));
             newSession.setFocusTraversable(false);
-            newSession.visibleProperty().bind(hoverProperty());
             ContextMenu newMenu = newSessionMenu(repository);
             newSession.setOnAction(e -> newMenu.show(newSession, Side.BOTTOM, 0, 4));
 
-            HBox row = new HBox(7, caret, text, count, rescan, newSession);
+            HBox actions = new HBox(2, rescan, newSession);
+            actions.setAlignment(Pos.CENTER_RIGHT);
+            actions.visibleProperty().bind(hoverProperty());
+
+            HBox row = new HBox(7, caret, text, count);
             row.getStyleClass().add("repo-row");
             row.setAlignment(Pos.CENTER_LEFT);
             row.setOnMouseClicked(event -> {
@@ -1442,12 +1789,15 @@ public final class RepositorySidebar extends VBox {
                     event.consume();
                 }
             });
-            return row;
+            return RowOverlay.wrap(row, actions);
         }
 
         /** Just the counts fragment: {@code · 3 wt · 2 locked · 1 stale}, or "" before discovery / when a note is showing. */
         private String repoCountsText(Repository repository) {
             if (rescanNotes.get(repository.id()) != null) {
+                return "";
+            }
+            if (filter.isActive()) {
                 return "";
             }
             SidebarChildren classified = childrenOf(repository);
@@ -1486,10 +1836,14 @@ public final class RepositorySidebar extends VBox {
             });
         }
 
-        private HBox buildSessionRow(ManagedAgentSession session, Repository repository) {
+        private StackPane buildSessionRow(ManagedAgentSession session, Repository repository) {
             boolean live = SessionStatusStyles.isRunning(session.status());
             Region dot = SessionStatusStyles.createDot(8, session.status(), live);
-            StackPane statusCol = new StackPane(dot);
+            // Leading gutter: status dot, then the agent mark. Two independent
+            // axes (is it running / what is it running), so two marks -- and
+            // an HBox, because the StackPane this used to be would have stacked
+            // the mark on top of the dot.
+            HBox statusCol = new HBox(3, dot, AgentMarks.createMark(session));
             statusCol.getStyleClass().add("child-row-status");
 
             Label name = new Label(session.displayName());
@@ -1510,22 +1864,16 @@ public final class RepositorySidebar extends VBox {
                     .map(root -> viewModel.worktreeStatus(root).orElse(null))
                     .orElseGet(() -> viewModel.repoStatus(repository.id()).orElse(null));
             String branch = checkoutStatus != null ? UiFormats.branchText(checkoutStatus) : "…";
+
+            // One line, name-first: the branch is capped so it yields
+            // characters before the name does (see SidebarRowMetrics).
+            HBox.setHgrow(name, Priority.ALWAYS);
+
             Label branchTag = new Label((isWorktree ? "◫ " : "⎇ ") + branch);
             branchTag.getStyleClass().add(isWorktree ? "branch-tag-worktree" : "branch-tag");
-
-            HBox nameRow = new HBox(6, name, branchTag);
-            nameRow.setAlignment(Pos.CENTER_LEFT);
-            if (checkoutStatus != null && checkoutStatus.dirty()) {
-                Region dirtyDot = new Region();
-                dirtyDot.getStyleClass().add("dirty-dot");
-                nameRow.getChildren().add(dirtyDot);
-            }
-
-            Label meta = new Label(UiFormats.relativeTime(session.lastOpenedAt()));
-            meta.getStyleClass().add("session-meta");
-
-            VBox text = new VBox(1, nameRow, meta);
-            HBox.setHgrow(text, Priority.ALWAYS);
+            branchTag.setMinWidth(0);
+            branchTag.setTextOverrun(OverrunStyle.LEADING_ELLIPSIS);
+            HBox.setHgrow(branchTag, Priority.NEVER);
 
             // Right-aligned PR chip: `PR #n` while open, `merged` after.
             Label prChip = switch (session.prState()) {
@@ -1546,12 +1894,17 @@ public final class RepositorySidebar extends VBox {
             actions.setAlignment(Pos.CENTER_RIGHT);
             actions.visibleProperty().bind(hoverProperty());
 
-            HBox row = new HBox(8, statusCol, text, actions);
-            if (prChip != null) {
-                row.getChildren().add(row.getChildren().indexOf(actions), prChip);
+            HBox row = new HBox(8, statusCol, name);
+            if (checkoutStatus != null && checkoutStatus.dirty()) {
+                Region dirtyDot = new Region();
+                dirtyDot.getStyleClass().add("dirty-dot");
+                row.getChildren().add(dirtyDot);
             }
-            session.worktreeRoot().ifPresent(root -> findingsBadge(root)
-                    .ifPresent(badge -> row.getChildren().add(row.getChildren().indexOf(actions), badge)));
+            if (prChip != null) {
+                row.getChildren().add(prChip);
+            }
+            session.worktreeRoot().ifPresent(root ->
+                    findingsBadge(root).ifPresent(badge -> row.getChildren().add(badge)));
             // A session whose Claude is blocked on a human gets a badge: it
             // is the one state that makes no further progress until the user
             // comes back to it. Cleared by switching to the session.
@@ -1559,15 +1912,11 @@ public final class RepositorySidebar extends VBox {
             if (activity == SessionActivity.NEEDS_ATTENTION) {
                 Label attention = new Label("waiting");
                 attention.getStyleClass().add("attention-badge");
-                row.getChildren().add(row.getChildren().indexOf(actions), attention);
+                row.getChildren().add(attention);
             }
-            // An IDLE session advertises resumability with a ghost Resume
-            // pill (worktree handoff: clicking the row resumes it).
-            if (!SessionStatusStyles.isRunning(session.status())) {
-                Label resumePill = new Label("Resume");
-                resumePill.getStyleClass().add("resume-pill");
-                row.getChildren().add(row.getChildren().indexOf(actions), resumePill);
-            }
+            row.getChildren().add(branchTag);
+            branchTag.maxWidthProperty().bind(
+                    row.widthProperty().map(w -> SidebarRowMetrics.branchTagMaxWidth(w.doubleValue())));
             row.getStyleClass().addAll("session-row", "child-row");
             row.setAlignment(Pos.CENTER_LEFT);
             if (viewModel.activeSession().filter(session.id()::equals).isPresent()) {
@@ -1578,11 +1927,16 @@ public final class RepositorySidebar extends VBox {
                     ? repository.remote().host() + ":" + repository.remote().remotePath()
                     : session.workingDirectory().toString();
             rowTip.setText("Status: " + session.status()
+                    + "\nAgent: " + AgentLabels.displayName(agentRegistry, session)
                     + (activity == SessionActivity.UNKNOWN ? ""
-                            : "\n" + AgentLabels.displayName(agentRegistry, session) + ": "
+                            : "\nActivity: "
                                     + activityLabel(activity))
                     + "\nLast opened: " + session.lastOpenedAt()
                     + "\nWorking directory: " + workingDirectoryText);
+            if (filter.isActive() && !filter.matches(session) && isExempt(session.id())) {
+                rowTip.setText(rowTip.getText()
+                        + "\nShown because it is open — it does not match the current filter.");
+            }
             Tooltip.install(row, rowTip);
             row.setOnMouseClicked(event -> {
                 if (event.getButton() == MouseButton.PRIMARY) {
@@ -1590,7 +1944,7 @@ public final class RepositorySidebar extends VBox {
                     event.consume();
                 }
             });
-            return row;
+            return RowOverlay.wrap(row, actions);
         }
 
         /** Human-facing wording for the tooltip's activity line. */
@@ -1604,10 +1958,13 @@ public final class RepositorySidebar extends VBox {
         }
 
         /**
-         * A discovered worktree with no session (worktree handoff): faint
-         * icon, branch as the primary line, short path as the sub line, an
-         * accent Start ▸ pill and -- never on the main checkout -- a
-         * one-click 🗑 that removes worktree + branch.
+         * A discovered worktree with no session (worktree handoff), one
+         * line like a session row: faint icon, branch name taking the
+         * width, an accent Start ▸ pill and -- never on the main checkout
+         * -- a one-click 🗑 that removes worktree + branch. The path moved
+         * to the row's tooltip -- a second line would have broken the
+         * single-line shape shared with session rows, and the tooltip
+         * already carried it.
          */
         private HBox buildUnopenedRow(WorktreeService.Worktree worktree, Repository repository) {
             Label icon = new Label(worktree.mainCheckout() ? "⎇" : "◫");
@@ -1618,15 +1975,20 @@ public final class RepositorySidebar extends VBox {
             String branch = worktree.branch().orElse(worktree.detached() ? "(detached)" : "(no branch)");
             Label name = new Label(branch);
             name.getStyleClass().add("worktree-unopened-branch");
-
-            Label meta = new Label(shortPath(worktree.path()));
-            meta.getStyleClass().add("session-meta");
-
-            VBox text = new VBox(1, name, meta);
-            HBox.setHgrow(text, Priority.ALWAYS);
+            // Single line, name-first: the name takes the remaining width
+            // (matching buildSessionRow). Without the min-width clamp, a
+            // Label's min width is its pref width, and a long branch name
+            // would set the row's -- and then the window's -- minimum width.
+            HBox.setHgrow(name, Priority.ALWAYS);
+            name.setMinWidth(0);
+            name.setMaxWidth(Double.MAX_VALUE);
+            name.setTextOverrun(OverrunStyle.ELLIPSIS);
 
             Label startPill = new Label("Start ▸");
             startPill.getStyleClass().add("start-pill");
+            // Never shrink below its own text -- an HGROW'd sibling must not
+            // be able to ellipsize this into "…".
+            startPill.setMinWidth(Region.USE_PREF_SIZE);
             startPill.setOnMouseClicked(event -> {
                 if (event.getButton() == MouseButton.PRIMARY) {
                     navigator.promptStartWorktreeSession(repository, worktree);
@@ -1634,7 +1996,7 @@ public final class RepositorySidebar extends VBox {
                 }
             });
 
-            HBox row = new HBox(8, statusCol, text, startPill);
+            HBox row = new HBox(8, statusCol, name, startPill);
             findingsBadge(worktree.path())
                     .ifPresent(badge -> row.getChildren().add(row.getChildren().indexOf(startPill), badge));
             if (!worktree.mainCheckout()) {
@@ -1702,7 +2064,10 @@ public final class RepositorySidebar extends VBox {
                 for (WorktreeService.Worktree worktree : worktrees) {
                     Label path = new Label(shortPath(worktree.path()));
                     path.getStyleClass().add("stale-path");
-                    path.setPadding(new Insets(2, 8, 2, 34));
+                    // Line up under the summary label: .child-row padding-left
+                    // (16) + .child-row-status min-width (30) + this row's
+                    // HBox spacing (7) = 53.
+                    path.setPadding(new Insets(2, 8, 2, 53));
                     box.getChildren().add(path);
                 }
             }
@@ -1754,7 +2119,10 @@ public final class RepositorySidebar extends VBox {
                     Label path = new Label(shortPath(worktree.path())
                             + worktree.lockReason().map(reason -> "  (" + reason + ")").orElse(""));
                     path.getStyleClass().add("stale-path");
-                    path.setPadding(new Insets(2, 8, 2, 34));
+                    // Line up under the summary label: .child-row padding-left
+                    // (16) + .child-row-status min-width (30) + this row's
+                    // HBox spacing (7) = 53.
+                    path.setPadding(new Insets(2, 8, 2, 53));
                     box.getChildren().add(path);
                 }
             }

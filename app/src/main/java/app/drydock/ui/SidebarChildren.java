@@ -4,6 +4,7 @@ import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.SessionActivity;
 import app.drydock.domain.SessionStatus;
+import app.drydock.domain.SessionStatusFacet;
 import app.drydock.git.WorktreeService.Worktree;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -141,6 +142,6 @@ record SidebarChildren(
     }
 
     private static boolean isRunning(SessionStatus status) {
-        return status == SessionStatus.RUNNING || status == SessionStatus.STARTING;
+        return SessionStatusFacet.of(status) == SessionStatusFacet.RUNNING;
     }
 }

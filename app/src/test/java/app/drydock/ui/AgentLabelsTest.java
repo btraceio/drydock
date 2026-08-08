@@ -53,21 +53,25 @@ class AgentLabelsTest {
     }
 
     @Test
-    void subTabLabelNamesTheSessionsOwnAgent() {
-        assertEquals("✳  Codex", AgentLabels.subTabLabel(registry(), AgentKind.CODEX));
-        assertEquals("✳  Claude", AgentLabels.subTabLabel(registry(), AgentKind.CLAUDE));
+    void subTabLabelPairsTheMarkWithTheAgentName() {
+        assertEquals("◈  Codex", AgentLabels.subTabLabel(AgentMarks.glyph(AgentKind.CODEX), "Codex"));
+        assertEquals("?  Unknown agent",
+                AgentLabels.subTabLabel(AgentMarks.unknownGlyph(), "Unknown agent"));
     }
 
     @Test
-    void tooltipNamesTheSessionsOwnAgent() {
-        assertEquals("Codex (⌘1)", AgentLabels.subTabTooltip(registry(), AgentKind.CODEX));
+    void subTabTooltipNamesTheAgentAndItsShortcut() {
+        assertEquals("Codex (⌘1)", AgentLabels.subTabTooltip("Codex"));
     }
 
+    /**
+     * Was asserted through the deleted kind-only subTabLabel overload; it is
+     * really a test of displayName's title-case fallback, so it points there
+     * now.
+     */
     @Test
-    void fallsBackToThePersistedNameWhenNoProviderIsRegistered() {
-        // A session persisted with an agent this build didn't discover must
-        // still name it -- never the previous hard-coded "Claude".
-        assertEquals("✳  Pi", AgentLabels.subTabLabel(registry(), AgentKind.PI));
+    void displayNameFallsBackToThePersistedNameWhenNoProviderIsRegistered() {
+        assertEquals("Pi", AgentLabels.displayName(registry(), AgentKind.PI));
     }
 
     @Test
