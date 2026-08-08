@@ -495,6 +495,44 @@ public final class RepositorySidebar extends VBox {
     }
 
     /**
+     * Diagnostic-only ({@code app.drydock.diag.tabScript} "clickedge" verb):
+     * the session the workspace currently considers active, so the driver can
+     * capture it before a synthetic click and compare after -- the same
+     * accessor {@link #isExempt} uses to decide whether a filtered-out row
+     * still belongs in the tree.
+     */
+    public Optional<ManagedSessionId> diagActiveSession() {
+        return viewModel.activeSession();
+    }
+
+    /**
+     * Diagnostic-only ({@code app.drydock.diag.tabScript} "clickedge" verb):
+     * the {@link ManagedAgentSession} id backing the {@code index}th realized
+     * ".session-row", in the same top-to-bottom screen order the driver
+     * hovers and clicks in (see {@code diagRowBounds} in DrydockApplication).
+     * A CSS class alone carries no identity, so this walks up to the
+     * enclosing {@link TreeCell} to read the row's {@link SidebarNode}.
+     * Empty when the index is out of range or the row is not a session row.
+     */
+    public Optional<ManagedSessionId> diagSessionIdForRow(int index) {
+        List<Node> rows = new ArrayList<>(lookupAll(".session-row"));
+        rows.sort(Comparator.comparingDouble(
+                node -> node.localToScreen(node.getBoundsInLocal()).getMinY()));
+        if (index < 0 || index >= rows.size()) {
+            return Optional.empty();
+        }
+        Node node = rows.get(index);
+        while (node != null && !(node instanceof TreeCell<?>)) {
+            node = node.getParent();
+        }
+        if (node instanceof TreeCell<?> cell
+                && cell.getItem() instanceof SidebarNode.SessionNode sessionNode) {
+            return Optional.of(sessionNode.session().id());
+        }
+        return Optional.empty();
+    }
+
+    /**
      * Re-fetches repo AND worktree statuses when the event was driven by an
      * actual session change (fetch-once caching left branch tags and dirty
      * dots permanently stale; see {@link #statusRefreshedFor}). The fetches

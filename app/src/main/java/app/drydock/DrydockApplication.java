@@ -8,6 +8,7 @@ import app.drydock.app.RepositoryManager;
 import app.drydock.app.SessionManager;
 import app.drydock.activity.SessionActivityWatcher;
 import app.drydock.config.UserConfig;
+import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.Repository;
 import app.drydock.domain.UiTheme;
 import app.drydock.domain.WorkspaceUiState;
@@ -43,6 +44,7 @@ import app.drydock.ui.SettingsModal;
 import app.drydock.ui.SizeSetting;
 import app.drydock.ui.UiErrors;
 import app.drydock.ui.model.WorkspaceViewModel;
+import javafx.animation.PauseTransition;
 import javafx.application.Application;
 import javafx.application.Platform;
 import javafx.geometry.Bounds;
@@ -58,6 +60,7 @@ import javafx.scene.input.KeyCode;
 import javafx.scene.input.KeyEvent;
 import javafx.stage.Stage;
 import javafx.stage.WindowEvent;
+import javafx.util.Duration;
 
 import java.awt.AWTException;
 import java.awt.Robot;
@@ -81,6 +84,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.Base64;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.function.Supplier;
 
@@ -713,6 +717,22 @@ public final class DrydockApplication extends Application {
         //   clickedge:session:<n>  real OS click near the row's trailing
         //                     edge, past the overlay's buttons -- proves
         //                     pickOnBounds=false passthrough (see diagClickEdge).
+        //
+        //   hover and clickedge both drive java.awt.Robot, which delivers OS
+        //   mouse events to this process only if it holds a macOS
+        //   Accessibility grant -- an agent-run session typically does not,
+        //   and without it these calls are silent no-ops: the Robot method
+        //   returns normally but JavaFX never sees a mouse-move or a click.
+        //   Because of that, neither verb prints what it DID as its verdict.
+        //   hover checks, after a short settle delay, whether the target
+        //   row's Node.isHover() actually flipped, and prints
+        //   "hover VERIFIED"/"hover FAILED". clickedge compares the
+        //   workspace's active session before and after the click and prints
+        //   "clickedge VERIFIED"/"clickedge FAILED"/"clickedge INCONCLUSIVE"
+        //   (the row clicked was already active, so no comparison is
+        //   possible). A line like "hover moved to (x,y)" or "clickedge
+        //   clicked at (x,y)" means only that the OS call was issued, not
+        //   that the app observed anything -- do not read either as a pass.
         // Inert unless -Dapp.drydock.diag.tabScript is set.
         String tabScript = System.getProperty("app.drydock.diag.tabScript");
         if (tabScript != null) {
@@ -1374,13 +1394,20 @@ public final class DrydockApplication extends Application {
                 // (arg is "session:<n>" or "repo:<n>"; "none" parks the
                 // pointer at the stage's top-left corner so a later shot is a
                 // true resting state). Not reachable outside
-                // app.drydock.diag.tabScript.
+                // app.drydock.diag.tabScript. Robot delivers nothing without
+                // a macOS Accessibility grant, so this prints a
+                // VERIFIED/FAILED verdict from Node.isHover(), not merely
+                // that the OS call was made -- see diagHover.
                 case "hover" -> diagHover(stage, sidebar, arg);
                 // DIAG-ONLY, same rationale as "hover": a real OS click via
                 // Robot at the row's trailing edge -- inside the overlay's
                 // bounds but outside its buttons -- is the only way to prove
                 // pickOnBounds=false actually lets the click fall through to
-                // the row underneath. arg is "session:<n>".
+                // the row underneath. arg is "session:<n>". Same Accessibility
+                // caveat as hover applies, so this prints a
+                // VERIFIED/FAILED/INCONCLUSIVE verdict from whether the
+                // active session actually changed, not that the click was
+                // issued -- see diagClickEdge.
                 case "clickedge" -> diagClickEdge(stage, sidebar, arg);
                 default -> System.out.println("[diag] mark " + arg);
             }
@@ -1537,9 +1564,16 @@ public final class DrydockApplication extends Application {
      * the real OS pointer, via {@link Robot}, over the nth row matching
      * {@code kind}'s CSS class ("session" -&gt; .session-row, "repo" -&gt;
      * .repo-row), or parks it at the stage's top-left corner for
-     * {@code arg == "none"}. Fire-and-forget: the resulting Glass mouse-move
-     * event reaches the FX event queue on its own schedule, so callers should
-     * leave real wall-clock time (a later script step) before snapshotting.
+     * {@code arg == "none"}. The Robot call is fire-and-forget -- the
+     * resulting Glass mouse-move event reaches the FX event queue on its own
+     * schedule -- so this waits out a {@link PauseTransition} (an FX-thread
+     * timer, not a blocking sleep: {@code diagTabStep} itself already runs on
+     * the FX thread via {@code Platform.runLater}, so blocking it here would
+     * freeze the whole app) before reading whether the row actually reports
+     * hover. That print is the entire point of this verb: {@code hover moved
+     * to (x,y)} only proves the OS call was issued, not that JavaFX ever
+     * heard about it -- and it does not, without a macOS Accessibility grant
+     * for the process sending the synthetic event.
      */
     private void diagHover(Stage stage, RepositorySidebar sidebar, String arg) {
         try {
@@ -1549,15 +1583,26 @@ public final class DrydockApplication extends Application {
                 System.out.println("[diag] hover parked at stage corner");
                 return;
             }
-            Bounds screen = diagRowBounds(sidebar, arg);
-            if (screen == null) {
+            Node row = diagRowNode(sidebar, arg);
+            if (row == null) {
                 System.out.println("[diag] hover: no row for '" + arg + "'");
                 return;
             }
+            Bounds screen = row.localToScreen(row.getBoundsInLocal());
             int x = (int) (screen.getMaxX() - 6);
             int y = (int) (screen.getMinY() + screen.getHeight() / 2);
             robot.mouseMove(x, y);
-            System.out.println("[diag] hover moved to (" + x + "," + y + ") for '" + arg + "'");
+            PauseTransition settle = new PauseTransition(Duration.millis(300));
+            settle.setOnFinished(e -> {
+                if (row.isHover()) {
+                    System.out.println("[diag] hover VERIFIED " + arg + " (row.isHover=true)");
+                } else {
+                    System.out.println("[diag] hover FAILED " + arg
+                            + " — row.isHover=false; Robot events are not reaching the app"
+                            + " (no Accessibility grant?)");
+                }
+            });
+            settle.play();
         } catch (AWTException | RuntimeException e) {
             System.out.println("[diag] hover failed: " + e);
         }
@@ -1567,36 +1612,72 @@ public final class DrydockApplication extends Application {
      * Diagnostic-only ({@code app.drydock.diag.tabScript} "clickedge" verb): a
      * real OS click, via {@link Robot}, a few pixels in from the row's
      * trailing edge -- inside the overlay strip's bounds but past its last
-     * button -- proving {@code pickOnBounds = false} lets the click fall
-     * through to the row underneath rather than being swallowed by the
+     * button -- meant to prove {@code pickOnBounds = false} lets the click
+     * fall through to the row underneath rather than being swallowed by the
      * overlay. arg is "session:&lt;n&gt;" or "repo:&lt;n&gt;".
+     *
+     * <p>"clicked at (x,y)" only proves the OS call was issued -- exactly the
+     * kind of claim that let a real click-swallowing regression print success
+     * while doing nothing. The consequence this checks instead is whichever
+     * session the workspace considers active ({@link
+     * RepositorySidebar#diagActiveSession}, the same accessor the sidebar's
+     * own filter-exemption logic uses): captured before the click, compared
+     * after a settle delay. If the clicked row was already active, that
+     * comparison cannot distinguish "click landed" from "click did nothing"
+     * so this reports INCONCLUSIVE instead of clicking blind.
      */
     private void diagClickEdge(Stage stage, RepositorySidebar sidebar, String arg) {
         try {
-            Bounds screen = diagRowBounds(sidebar, arg);
-            if (screen == null) {
+            Node row = diagRowNode(sidebar, arg);
+            if (row == null) {
                 System.out.println("[diag] clickedge: no row for '" + arg + "'");
                 return;
             }
+            String[] parts = arg.split(":", 2);
+            boolean isSessionRow = !"repo".equals(parts[0]);
+            int index = parts.length > 1 ? Integer.parseInt(parts[1].strip()) : 0;
+            Optional<ManagedSessionId> target = isSessionRow
+                    ? sidebar.diagSessionIdForRow(index) : Optional.empty();
+            ManagedSessionId before = sidebar.diagActiveSession().orElse(null);
+            if (target.isPresent() && target.get().equals(before)) {
+                System.out.println("[diag] clickedge INCONCLUSIVE " + arg
+                        + " — row was already active; pick another row");
+                return;
+            }
+            Bounds screen = row.localToScreen(row.getBoundsInLocal());
             Robot robot = new Robot();
             int x = (int) (screen.getMaxX() - 2);
             int y = (int) (screen.getMinY() + screen.getHeight() / 2);
             robot.mouseMove(x, y);
             robot.mousePress(InputEvent.BUTTON1_DOWN_MASK);
             robot.mouseRelease(InputEvent.BUTTON1_DOWN_MASK);
-            System.out.println("[diag] clickedge clicked at (" + x + "," + y + ") for '" + arg + "'");
+            if (target.isEmpty()) {
+                System.out.println("[diag] clickedge clicked at (" + x + "," + y + ") for '" + arg + "'");
+                return;
+            }
+            PauseTransition settle = new PauseTransition(Duration.millis(300));
+            settle.setOnFinished(e -> {
+                ManagedSessionId after = sidebar.diagActiveSession().orElse(null);
+                if (Objects.equals(after, before)) {
+                    System.out.println("[diag] clickedge FAILED " + arg
+                            + " — active session unchanged (" + before + "); the click did not land");
+                } else {
+                    System.out.println("[diag] clickedge VERIFIED " + arg
+                            + " — active session changed " + before + " -> " + after);
+                }
+            });
+            settle.play();
         } catch (AWTException | RuntimeException e) {
             System.out.println("[diag] clickedge failed: " + e);
         }
     }
 
     /**
-     * Diagnostic-only: screen-space bounds of the nth realized row matching
-     * {@code arg} ("session:&lt;n&gt;" or "repo:&lt;n&gt;"), in the order the
-     * scene graph currently holds them (top-to-bottom for realized
-     * TreeView cells).
+     * Diagnostic-only: the nth realized row matching {@code arg}
+     * ("session:&lt;n&gt;" or "repo:&lt;n&gt;"), in screen top-to-bottom
+     * order, or {@code null} when the index is out of range.
      */
-    private static Bounds diagRowBounds(RepositorySidebar sidebar, String arg) {
+    private static Node diagRowNode(RepositorySidebar sidebar, String arg) {
         String[] parts = arg.split(":", 2);
         String cssClass = "repo".equals(parts[0]) ? ".repo-row" : ".session-row";
         int index = parts.length > 1 ? Integer.parseInt(parts[1].strip()) : 0;
@@ -1608,8 +1689,7 @@ public final class DrydockApplication extends Application {
         if (index < 0 || index >= rows.size()) {
             return null;
         }
-        Node row = rows.get(index);
-        return row.localToScreen(row.getBoundsInLocal());
+        return rows.get(index);
     }
 
     /** Diagnostic-only: runs {@code work} on the FX thread and waits for its result. */
