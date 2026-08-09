@@ -41,6 +41,22 @@
     -drydock-merged-soft: rgba(138, 79, 181, 0.14);
     -drydock-match-bg: rgba(217, 119, 87, 0.28);
 
+    /* Agent identity (light equivalents of the dark set). */
+    -drydock-agent-claude: #9e5a3c;
+    -drydock-agent-codex: #3f8f88;
+    -drydock-agent-pi: #b04a86;
+
+    /* Sidebar row overlay fade (light equivalents of the dark set; see
+     * theme-dark.css for the compositing arithmetic). Composited from
+     * -drydock-sidebar against -hover / -active-bg:
+     *   sidebar #f4f2ee (244,242,238) + hover rgba(0,0,0,.04)
+     *     -> (244*.96, 242*.96, 238*.96) = (234,232,228) = #eae8e4
+     *   sidebar #f4f2ee (244,242,238) + active-bg rgba(0,0,0,.07)
+     *     -> (244*.93, 242*.93, 238*.93) = (227,225,221) = #e3e1dd
+     */
+    -drydock-row-fade: #eae8e4;
+    -drydock-row-fade-active: #e3e1dd;
+
     /* Diff Review (light equivalents of the dark set). */
     -drydock-add-bg: rgba(76, 157, 94, 0.12);
     -drydock-add-bar: #4c9d5e;

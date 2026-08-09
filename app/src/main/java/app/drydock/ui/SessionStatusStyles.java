@@ -1,6 +1,7 @@
 package app.drydock.ui;
 
 import app.drydock.domain.SessionStatus;
+import app.drydock.domain.SessionStatusFacet;
 import javafx.animation.Animation;
 import javafx.animation.FadeTransition;
 import javafx.animation.ParallelTransition;
@@ -13,9 +14,10 @@ import javafx.util.Duration;
 /**
  * Shared visual vocabulary for session status (design handoff: "Session
  * status drives the sidebar dot, tab dot, and header pill consistently").
- * The three design statuses map from the richer domain enum:
- * running/starting {@code -> :running}, failed/missing {@code -> :error},
- * inactive/exited {@code -> } neither (the design's "idle").
+ * The three design statuses ({@code :running}, {@code :error}, and neither
+ * for the design's "idle") are driven entirely by {@link SessionStatusFacet},
+ * the single status-to-facet mapping -- see that type for which
+ * {@link SessionStatus} values land in which bucket.
  */
 final class SessionStatusStyles {
 
@@ -26,11 +28,11 @@ final class SessionStatusStyles {
     }
 
     static boolean isRunning(SessionStatus status) {
-        return status == SessionStatus.RUNNING || status == SessionStatus.STARTING;
+        return SessionStatusFacet.of(status) == SessionStatusFacet.RUNNING;
     }
 
     static boolean isError(SessionStatus status) {
-        return status == SessionStatus.FAILED || status == SessionStatus.MISSING_WORKING_DIRECTORY;
+        return SessionStatusFacet.of(status) == SessionStatusFacet.ERROR;
     }
 
     /** The design's three-value status label text. */
@@ -105,7 +107,7 @@ final class SessionStatusStyles {
     static void updateDot(Region dot, SessionStatus status) {
         applyStatus(dot, status);
         if (dot.getProperties().get("drydock.pulse") instanceof ParallelTransition pulse) {
-            boolean pulsing = status == SessionStatus.RUNNING || status == SessionStatus.STARTING;
+            boolean pulsing = isRunning(status);
             // Remembered separately from the transition's own state so the
             // scene listener in createDot can resume after a detach/attach.
             dot.getProperties().put("drydock.pulsing", pulsing);

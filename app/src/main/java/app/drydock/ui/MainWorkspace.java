@@ -1753,6 +1753,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         // this pending tab instead of starting a second surface.
         ManagedAgentSession prepared = sessionManager.prepareSession(repository, agent);
         OpenSessionTab placeholderTab = showPendingTab(prepared.id(), "Starting...", AgentLabels.displayName(agentRegistry, prepared),
+                prepared.agentKind(), prepared.status() == SessionStatus.UNSUPPORTED_AGENT,
                 Optional.of(repository), repository.root());
 
         double scale = stage.getOutputScaleX();
@@ -1842,6 +1843,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         ManagedAgentSession prepared =
                 sessionManager.prepareWorktreeSession(repository, branch, worktreeRoot, branchCreatedHere, agent);
         OpenSessionTab placeholderTab = showPendingTab(prepared.id(), branch, AgentLabels.displayName(agentRegistry, prepared),
+                prepared.agentKind(), prepared.status() == SessionStatus.UNSUPPORTED_AGENT,
                 Optional.of(repository), worktreeRoot);
 
         double scale = stage.getOutputScaleX();
@@ -2042,6 +2044,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         }
 
         OpenSessionTab placeholderTab = showPendingTab(session.id(), session.displayName(), AgentLabels.displayName(agentRegistry, session),
+                session.agentKind(), session.status() == SessionStatus.UNSUPPORTED_AGENT,
                 repositoryFor(session), session.workingDirectory());
 
         double scale = stage.getOutputScaleX();
@@ -2227,6 +2230,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
         // Start fresh: reuse the managed session row, new claude conversation.
         OpenSessionTab placeholderTab = showPendingTab(session.id(), session.displayName(), AgentLabels.displayName(agentRegistry, session),
+                session.agentKind(), session.status() == SessionStatus.UNSUPPORTED_AGENT,
                 repositoryFor(session), session.workingDirectory());
         double scale = stage.getOutputScaleX();
         sessionManager.startFreshConversation(session.id(), placeholderTab.app(), placeholderTab.host(), scale)
@@ -2730,9 +2734,10 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * {@link #attachOpenedSession}/{@link #removeTab} de-register it.
      */
     private OpenSessionTab showPendingTab(ManagedSessionId sessionId, String displayName, String agentName,
+                                          AgentKind agentKind, boolean unsupportedAgent,
                                           Optional<Repository> repository, Path searchRoot) {
         OpenSessionTab placeholderTab =
-                createOpenSessionTab(sessionId, displayName, agentName, repository, searchRoot);
+                createOpenSessionTab(sessionId, displayName, agentName, agentKind, unsupportedAgent, repository, searchRoot);
         pendingTabs.put(sessionId, placeholderTab);
         addAndSelect(placeholderTab);
         return placeholderTab;
@@ -2748,6 +2753,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * before the {@link OpenSessionTab} it needs to call back into can exist.
      */
     private OpenSessionTab createOpenSessionTab(ManagedSessionId sessionId, String displayName, String agentName,
+                                                 AgentKind agentKind, boolean unsupportedAgent,
                                                  Optional<Repository> repository, Path searchRoot) {
         TerminalFactory.ensureProcessInitialized();
 
@@ -2777,7 +2783,8 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             app.close();
             throw e;
         }
-        OpenSessionTab openTab = new OpenSessionTab(sessionId, displayName, agentName, repository, stage, app, host);
+        OpenSessionTab openTab =
+                new OpenSessionTab(sessionId, displayName, agentName, agentKind, unsupportedAgent, repository, stage, app, host);
         holder[0] = openTab;
 
         // The ephemeral shell Terminal sub-tab (created lazily on first
