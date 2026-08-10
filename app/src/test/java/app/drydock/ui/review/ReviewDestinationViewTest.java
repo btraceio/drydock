@@ -5,6 +5,8 @@ import app.drydock.review.QueueAssembly;
 import app.drydock.review.ReviewItem;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
+import app.drydock.review.ReviewVerdict;
+import app.drydock.review.SubmitPlan;
 import javafx.scene.Node;
 import javafx.scene.Parent;
 import javafx.scene.Scene;
@@ -16,7 +18,10 @@ import javafx.scene.layout.Region;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.Test;
 import org.testfx.framework.junit5.ApplicationTest;
+import org.testfx.util.WaitForAsyncUtils;
 
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -183,7 +188,8 @@ class ReviewDestinationViewTest extends ApplicationTest {
                 java.time.Instant.EPOCH, List.of(), Optional.empty(), Optional.empty(), List.of(),
                 List.of(new app.drydock.review.ReviewAnnotation.Message("Claude",
                         java.time.Instant.EPOCH, "body of " + id)),
-                Optional.empty(), app.drydock.review.AnnotationStatus.OPEN);
+                Optional.empty(), app.drydock.review.AnnotationStatus.OPEN,
+                Optional.empty(), false);
     }
 
     @Test
@@ -448,6 +454,27 @@ class ReviewDestinationViewTest extends ApplicationTest {
                 "typing must never move the centre panel");
     }
 
+    /**
+     * {@code Shift+/} ("?") is the global shortcuts overlay, owned by
+     * {@code DrydockApplication}'s scene filter -- NOT Review's own key
+     * table, unlike plain {@code /}. {@link ReviewDestinationView#handleShortcut}'s
+     * own Javadoc used to claim this was already true; it was not; the
+     * {@code SLASH} case had no {@code isShiftDown()} check, so "?" got
+     * silently swallowed as "focus the queue filter" before the overlay's
+     * owner ever saw it. This view has no overlay to open, so the only
+     * thing provable here is the negative: the filter must not steal it.
+     */
+    @Test
+    void shiftSlashDoesNotFocusTheQueueFilter() {
+        seedMixedQueue();
+        interact(view::requestFocus);
+
+        press(KeyCode.SHIFT).press(KeyCode.SLASH).release(KeyCode.SLASH).release(KeyCode.SHIFT);
+
+        Node field = lookup(".review-queue-filter").query();
+        assertFalse(field.isFocused(), "'?' must fall through to the global shortcuts overlay, not focus the filter");
+    }
+
     @Test
     void enterInTheFieldSelectsTheFirstMatch() {
         seedMixedQueue();
@@ -606,5 +633,391 @@ class ReviewDestinationViewTest extends ApplicationTest {
                 .flatMap(graphic -> graphic.lookupAll(".review-queue-title").stream().findFirst())
                 .map(label -> ((Label) label).getText())
                 .orElse(null);
+    }
+
+    // ---- submit -------------------------------------------------------------
+
+    /**
+     * The whole reason {@code submitReview()} builds the {@code DiffIndex}
+     * from {@link ReviewDiffColumn#displayedDiff()} rather than from {@code
+     * diagRows()}: a run of unchanged lines longer than {@code
+     * ReviewDiffRows.COLLAPSE_THRESHOLD} is folded into a single {@code
+     * CollapsedRun} row and disappears from the rendered rows entirely, but
+     * every one of those lines is still a perfectly valid GitHub anchor.
+     */
+    @Test
+    void submitBuildsTheDiffIndexFromTheRealDiffNotTheCollapsedRows() throws Exception {
+        Path repo = repoWithALongUnchangedRun();
+        ReviewScopeRegistry registry = new ReviewScopeRegistry();
+        ReviewScope scope = registry.mint(ReviewScopeRegistry.spec(
+                ReviewScope.Kind.WORKING_TREE, repo, Optional.of(repo), "HEAD", "HEAD",
+                Optional.empty(), Optional.empty()));
+        interact(() -> view.setItems(new QueueAssembly(
+                List.of(new ReviewItem(scope, ReviewItem.Group.MINE, "working", "drydock · vs HEAD")),
+                true, true), List.of("repo")));
+
+        awaitDiffLoaded();
+
+        // field10 sits inside the collapsed run above the change at
+        // field20 (context either side of it) -- rendered as a folded
+        // "N unchanged" row, never as its own Line row.
+        assertTrue(lookup(".review-collapsed-run").tryQuery().isPresent(),
+                "the fixture must actually produce a collapsed run, or this test proves nothing");
+
+        // Settle the one intent this single-file diff produces, then submit.
+        type(KeyCode.A);
+        type(KeyCode.ENTER);
+
+        assertEquals(List.of(scope.id()), host.submittedScopes);
+        assertEquals(List.of(ReviewVerdict.Decision.APPROVED), host.submittedDecisions.get(scope.id()));
+
+        SubmitPlan.DiffIndex index = host.submittedIndexes.get(scope.id());
+        assertTrue(index.positionOfKey().containsKey("Big.java n10"),
+                "a line hidden behind a collapsed run must still be in the index built from the diff");
+        assertTrue(index.hunkOfKey().containsKey("Big.java n10"));
+        assertTrue(index.positionOfKey().containsKey("Big.java n20"),
+                "the changed line itself must be indexed too");
+    }
+
+    /**
+     * A scope with no PR is the merge-and-finish path (spec: Submit on an
+     * agent's worktree hands it to Finish). This view has no visibility into
+     * that fork -- it lives in {@code MainWorkspace.ReviewHost} -- but it
+     * must still always reach {@code host.submit(...)}, which is what the
+     * fork switches on.
+     */
+    @Test
+    void submitReachesTheHostForANonPrScope() throws Exception {
+        Path repo = repoWithALongUnchangedRun();
+        ReviewScopeRegistry registry = new ReviewScopeRegistry();
+        ReviewScope scope = registry.mint(ReviewScopeRegistry.spec(
+                ReviewScope.Kind.WORKING_TREE, repo, Optional.of(repo), "HEAD", "HEAD",
+                Optional.empty(), Optional.empty()));
+        assertTrue(scope.pr().isEmpty(), "this scope must not be a PR");
+        interact(() -> view.setItems(new QueueAssembly(
+                List.of(new ReviewItem(scope, ReviewItem.Group.MINE, "working", "drydock · vs HEAD")),
+                true, true), List.of("repo")));
+
+        awaitDiffLoaded();
+        type(KeyCode.A);
+        type(KeyCode.ENTER);
+
+        assertEquals(List.of(scope.id()), host.submittedScopes,
+                "a non-PR scope must still reach host.submit -- MainWorkspace forks on scope.pr() from there");
+    }
+
+    /**
+     * A PR scope whose diff FAILED to load (a real {@code DiffService} call
+     * against a directory that is not a git repository) has nothing to
+     * anchor a comment to, so Submit must keep refusing -- but visibly: the
+     * bug this pins is the guard doing nothing at all with no explanation,
+     * silently and for the rest of the session (see {@code
+     * ReviewDestinationView#submitReview}).
+     */
+    @Test
+    void submitOnAFailedDiffShowsAVisibleRefusalInsteadOfDoingNothing() throws Exception {
+        Path notARepo = Files.createTempDirectory("drydock-review-view-not-a-repo");
+        ReviewScopeRegistry registry = new ReviewScopeRegistry();
+        ReviewScope scope = registry.mint(ReviewScopeRegistry.spec(
+                ReviewScope.Kind.WORKING_TREE, notARepo, Optional.of(notARepo), "HEAD", "HEAD",
+                Optional.of(new ReviewScope.PullRequestRef(7, Optional.empty())), Optional.empty()));
+        interact(() -> view.setItems(new QueueAssembly(
+                List.of(new ReviewItem(scope, ReviewItem.Group.MINE, "working", "drydock · vs HEAD")),
+                true, true), List.of("repo")));
+
+        // Wait for the diff to actually FAIL (not merely still be loading)
+        // before pressing Submit, so this proves the FAILED branch of the
+        // guard specifically, not the ordinary "still Diffing" window.
+        awaitCondition(() -> lookup(".review-diff-message").queryAllAs(Label.class).stream()
+                        .anyMatch(label -> label.getText().startsWith("Could not diff")),
+                "the diff never failed; fixture must point at a non-repo directory");
+        type(KeyCode.ENTER);
+
+        Label refusal = awaitCondition(() -> {
+            java.util.Optional<Node> found = lookup(".review-verdict-submit-refusal").tryQuery();
+            return found.filter(Node::isVisible).map(Label.class::cast);
+        }, "Submit on a failed diff never showed a visible refusal");
+        assertTrue(refusal.getText().toLowerCase(java.util.Locale.ROOT).contains("diff"),
+                "the message must say why: " + refusal.getText());
+        assertTrue(host.submittedScopes.isEmpty(),
+                "a PR scope with no diff to anchor comments to must not reach host.submit");
+    }
+
+    /**
+     * The other half of the same fix: a non-PR scope posts no comments
+     * either way ({@code Host#submit} routes it straight to the Finish
+     * hand-off), so a FAILED diff must not leave it stuck refusing forever
+     * the way {@link #submitOnAFailedDiffShowsAVisibleRefusalInsteadOfDoingNothing}
+     * proves a PR scope correctly does.
+     */
+    @Test
+    void submitOnAFailedDiffStillReachesTheHostForANonPrScope() throws Exception {
+        Path notARepo = Files.createTempDirectory("drydock-review-view-not-a-repo-2");
+        ReviewScopeRegistry registry = new ReviewScopeRegistry();
+        ReviewScope scope = registry.mint(ReviewScopeRegistry.spec(
+                ReviewScope.Kind.WORKING_TREE, notARepo, Optional.of(notARepo), "HEAD", "HEAD",
+                Optional.empty(), Optional.empty()));
+        assertTrue(scope.pr().isEmpty(), "this scope must not be a PR");
+        interact(() -> view.setItems(new QueueAssembly(
+                List.of(new ReviewItem(scope, ReviewItem.Group.MINE, "working", "drydock · vs HEAD")),
+                true, true), List.of("repo")));
+
+        type(KeyCode.ENTER);
+
+        awaitCondition(() -> !host.submittedScopes.isEmpty(),
+                "a non-PR scope must still reach host.submit even after its diff failed to load");
+        assertEquals(List.of(scope.id()), host.submittedScopes);
+    }
+
+    // ---- intent movement and the verdict-advance --------------------------
+
+    /**
+     * Pins the {@code [}/{@code ]} bindings with a real robot key press
+     * (never {@code view.handleShortcut(...)} called directly, which would
+     * green-light the routing being dead the way it was in the running app --
+     * see the {@code handleShortcut}/{@code MainWorkspace#reviewKeyboardBackstop}
+     * javadoc). {@code type()} still gives the view focus itself first, so
+     * this does NOT exercise the focus-routing bug reported live (dead
+     * shortcuts after a click elsewhere in Review) -- that needs the real
+     * {@code app.drydock.diag.reviewScript} driver against the whole
+     * workspace, which is where the {@code stealfocus}/{@code key}/{@code
+     * intentidx} verbs this fix added come in.
+     */
+    @Test
+    void openAndCloseBracketMoveBetweenIntentsWithARealKeyPress() throws Exception {
+        Path repo = repoWithTwoChangedFiles();
+        seedWorkingTreeScope(repo);
+        awaitDiffLoaded();
+        assertEquals(2, intentCount(), "the fixture must actually produce two intents, or this test proves nothing");
+        assertEquals(0, intentIndex());
+
+        type(KeyCode.CLOSE_BRACKET);
+        assertEquals(1, intentIndex());
+        type(KeyCode.CLOSE_BRACKET);
+        assertEquals(1, intentIndex(), "] must clamp at the last intent");
+
+        type(KeyCode.OPEN_BRACKET);
+        assertEquals(0, intentIndex());
+        type(KeyCode.OPEN_BRACKET);
+        assertEquals(0, intentIndex(), "[ must clamp at the first intent");
+    }
+
+    @Test
+    void settlingAnIntentAdvancesToTheNextUnsettledOne() throws Exception {
+        Path repo = repoWithTwoChangedFiles();
+        seedWorkingTreeScope(repo);
+        awaitDiffLoaded();
+        assertEquals(2, intentCount());
+        assertEquals(0, intentIndex());
+
+        type(KeyCode.A);
+        assertEquals(1, intentIndex(),
+                "approving the first intent must advance to the next unsettled one, the same walk 'n' makes");
+    }
+
+    @Test
+    void settlingTheLastUnsettledIntentLeavesTheIndexUnchanged() throws Exception {
+        Path repo = repoWithTwoChangedFiles();
+        seedWorkingTreeScope(repo);
+        awaitDiffLoaded();
+
+        type(KeyCode.A); // settles intent 0, advances to intent 1 (the only one left unsettled)
+        assertEquals(1, intentIndex());
+
+        type(KeyCode.A); // settles intent 1 -- nothing left unsettled to advance to
+        assertEquals(1, intentIndex(),
+                "settling the LAST unsettled intent must not jump anywhere -- the reader is about to Submit");
+    }
+
+    @Test
+    void undoDoesNotAdvance() throws Exception {
+        Path repo = repoWithTwoChangedFiles();
+        seedWorkingTreeScope(repo);
+        awaitDiffLoaded();
+
+        type(KeyCode.A); // settles intent 0, advances to intent 1
+        assertEquals(1, intentIndex());
+        type(KeyCode.OPEN_BRACKET); // back to intent 0
+        assertEquals(0, intentIndex());
+
+        type(KeyCode.U);
+        assertEquals(0, intentIndex(),
+                "undoing a verdict must leave the reader on the intent they just undid, not sweep them off it");
+    }
+
+    /**
+     * The exact human sequence issue 2's auto-advance made dangerous: press
+     * {@code r}, realise the diff was misread, press {@code u} -- without
+     * manually stepping back first, the way a reader actually would. {@code
+     * r} itself moves the cursor onto intent 2 (issue 2), so {@code u} MUST
+     * undo intent 1's verdict, the one just recorded, rather than whatever
+     * the cursor now sits on -- and land back on intent 1, so the reader
+     * sees what was undone rather than having to go hunting for it.
+     */
+    @Test
+    void undoUndoesTheLastRecordedVerdictNotWhateverIsUnderTheCursor() throws Exception {
+        Path repo = repoWithTwoChangedFiles();
+        ReviewScope scope = seedWorkingTreeScope(repo);
+        awaitDiffLoaded();
+
+        type(KeyCode.R); // records CHANGES on intent 1, advances to intent 2
+        assertEquals(1, intentIndex(), "'r' must have advanced off intent 1, or this test proves nothing");
+        assertEquals(1, host.store.verdictsFor(scope.id()).size(),
+                "exactly one verdict must exist yet, or this test cannot tell 'undid the right one' from "
+                        + "'undid nothing'");
+
+        type(KeyCode.U); // must undo intent 1, not intent 2 (which never had a verdict)
+
+        assertEquals(0, intentIndex(), "undo must land back on the intent it undid");
+        assertTrue(host.store.verdictsFor(scope.id()).isEmpty(), "the verdict 'r' recorded must be gone");
+    }
+
+    /**
+     * The sibling refusal to {@link #submitOnAFailedDiffShowsAVisibleRefusalInsteadOfDoingNothing}:
+     * an intent with no verdict used to make Submit silently jump and do
+     * nothing else, with no explanation (see {@code
+     * ReviewDestinationView#submitReview}).
+     */
+    @Test
+    void submitWithAnUnsettledIntentShowsAVisibleRefusalAndJumpsToIt() throws Exception {
+        Path repo = repoWithTwoChangedFiles();
+        seedWorkingTreeScope(repo);
+        awaitDiffLoaded();
+
+        type(KeyCode.A); // settle intent 0; auto-advances to intent 1, still unsettled
+        assertEquals(1, intentIndex());
+        type(KeyCode.OPEN_BRACKET); // step back to the settled intent so the jump below is observable
+        assertEquals(0, intentIndex());
+
+        type(KeyCode.ENTER);
+
+        Label refusal = awaitCondition(() -> {
+            java.util.Optional<Node> found = lookup(".review-verdict-submit-refusal").tryQuery();
+            return found.filter(Node::isVisible).map(Label.class::cast);
+        }, "Submit with an unsettled intent never showed a visible refusal");
+        assertTrue(refusal.getText().toLowerCase(java.util.Locale.ROOT).contains("verdict"),
+                "the message must say what is blocking: " + refusal.getText());
+        assertEquals(1, intentIndex(), "the refusal must jump to the intent still needing a verdict");
+        assertTrue(host.submittedScopes.isEmpty(), "must not reach host.submit with an unsettled intent");
+    }
+
+    private ReviewScope seedWorkingTreeScope(Path repo) {
+        ReviewScopeRegistry registry = new ReviewScopeRegistry();
+        ReviewScope scope = registry.mint(ReviewScopeRegistry.spec(
+                ReviewScope.Kind.WORKING_TREE, repo, Optional.of(repo), "HEAD", "HEAD",
+                Optional.empty(), Optional.empty()));
+        interact(() -> view.setItems(new QueueAssembly(
+                List.of(new ReviewItem(scope, ReviewItem.Group.MINE, "working", "drydock · vs HEAD")),
+                true, true), List.of("repo")));
+        return scope;
+    }
+
+    private int intentIndex() {
+        return Integer.parseInt(view.diagIntentIndex().split("/")[0]);
+    }
+
+    private int intentCount() {
+        return Integer.parseInt(view.diagIntentIndex().split("/")[1]);
+    }
+
+    private <T> T awaitCondition(java.util.function.Supplier<java.util.Optional<T>> ready, String failureMessage) {
+        for (int i = 0; i < 200; i++) {
+            WaitForAsyncUtils.waitForFxEvents();
+            java.util.Optional<T> result = ready.get();
+            if (result.isPresent()) {
+                return result.get();
+            }
+            sleep(25);
+        }
+        throw new AssertionError(failureMessage);
+    }
+
+    private void awaitCondition(java.util.function.BooleanSupplier ready, String failureMessage) {
+        for (int i = 0; i < 200; i++) {
+            WaitForAsyncUtils.waitForFxEvents();
+            if (ready.getAsBoolean()) {
+                return;
+            }
+            sleep(25);
+        }
+        throw new AssertionError(failureMessage);
+    }
+
+    /**
+     * Polls until the real diff has landed in the column: a single {@code
+     * waitForFxEvents()} races the async {@code DiffService} call, which
+     * runs on its own executor and hops back via {@code Platform.runLater}.
+     */
+    private void awaitDiffLoaded() {
+        for (int i = 0; i < 200; i++) {
+            if (!view.diagAnchors(1).isEmpty()) {
+                WaitForAsyncUtils.waitForFxEvents();
+                return;
+            }
+            WaitForAsyncUtils.waitForFxEvents();
+            sleep(25);
+        }
+        throw new AssertionError("the diff never arrived");
+    }
+
+    /** A change with more than {@code ReviewDiffRows.COLLAPSE_THRESHOLD} unchanged lines around it. */
+    private static Path repoWithALongUnchangedRun() throws IOException, InterruptedException {
+        Path repo = initCommittedRepo(Files.createTempDirectory("drydock-review-view-run"));
+        StringBuilder original = new StringBuilder();
+        for (int i = 1; i <= 40; i++) {
+            original.append("int field").append(i).append(" = ").append(i).append(";\n");
+        }
+        Files.writeString(repo.resolve("Big.java"), original.toString());
+        runGit(repo, "add", "Big.java");
+        runGit(repo, "commit", "-m", "big");
+        Files.writeString(repo.resolve("Big.java"),
+                original.toString().replace("int field20 = 20;", "int field20 = 999;"));
+        return repo;
+    }
+
+    /**
+     * Two changed files in two different directories -- {@link
+     * app.drydock.review.FallbackIntents}, the grouping Review falls back to
+     * with no reviewer configured, clusters files by (kind, directory), so
+     * two files that share a directory collapse into ONE intent. Different
+     * directories is what actually earns two intents, which is what the
+     * {@code [}/{@code ]} and verdict-advance tests need to have somewhere
+     * to move or advance TO.
+     */
+    private static Path repoWithTwoChangedFiles() throws IOException, InterruptedException {
+        Path repo = initCommittedRepo(Files.createTempDirectory("drydock-review-view-two"));
+        Files.createDirectories(repo.resolve("src"));
+        Files.createDirectories(repo.resolve("lib"));
+        Files.writeString(repo.resolve("src/A.java"), "int a = 1;\n");
+        Files.writeString(repo.resolve("lib/B.java"), "int b = 1;\n");
+        runGit(repo, "add", "src/A.java", "lib/B.java");
+        runGit(repo, "commit", "-m", "two files");
+        Files.writeString(repo.resolve("src/A.java"), "int a = 2;\n");
+        Files.writeString(repo.resolve("lib/B.java"), "int b = 2;\n");
+        return repo;
+    }
+
+    private static Path initCommittedRepo(Path parent) throws IOException, InterruptedException {
+        Path repo = Files.createDirectories(parent.resolve("repo"));
+        runGit(repo, "init", "-b", "main");
+        runGit(repo, "config", "user.name", "Test");
+        runGit(repo, "config", "user.email", "test@example.com");
+        Files.writeString(repo.resolve("README.md"), "hello\n");
+        runGit(repo, "add", "README.md");
+        runGit(repo, "commit", "-m", "initial commit");
+        return repo;
+    }
+
+    private static void runGit(Path repo, String... args) throws IOException, InterruptedException {
+        List<String> command = new ArrayList<>(List.of("git"));
+        command.addAll(List.of(args));
+        Process process = new ProcessBuilder(command)
+                .directory(repo.toFile())
+                .redirectErrorStream(true)
+                .start();
+        String output = new String(process.getInputStream().readAllBytes());
+        if (process.waitFor() != 0) {
+            throw new IllegalStateException("git " + String.join(" ", args) + ": " + output);
+        }
     }
 }

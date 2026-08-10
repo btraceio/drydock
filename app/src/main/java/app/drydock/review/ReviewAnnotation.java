@@ -42,7 +42,9 @@ public record ReviewAnnotation(
         List<Ask> asks,
         List<Message> thread,
         Optional<Severity> severityOverride,
-        AnnotationStatus status
+        AnnotationStatus status,
+        Optional<GitHubComment> github,
+        boolean postToPr
 ) {
 
     /** One message of the thread; {@code author} is "You" or the reviewer's name. */
@@ -96,6 +98,18 @@ public record ReviewAnnotation(
         }
     }
 
+    /**
+     * What GitHub knows about this annotation. Present means the comment
+     * exists on the pull request -- whether drydock posted it or read it back
+     * -- and {@code id} is the REST numeric comment id (GraphQL's
+     * {@code databaseId}), because that is the id the replies endpoint takes.
+     */
+    public record GitHubComment(long id, String url, boolean resolved) {
+        public GitHubComment {
+            Objects.requireNonNull(url, "url");
+        }
+    }
+
     public ReviewAnnotation {
         Objects.requireNonNull(scopeId, "scopeId");
         Objects.requireNonNull(id, "id");
@@ -112,6 +126,7 @@ public record ReviewAnnotation(
         Objects.requireNonNull(deviatesFrom, "deviatesFrom");
         Objects.requireNonNull(severityOverride, "severityOverride");
         Objects.requireNonNull(status, "status");
+        Objects.requireNonNull(github, "github");
         if (scopeId.isBlank() || id.isBlank()) {
             throw new IllegalArgumentException("a finding is keyed by (scopeId, id); neither may be blank");
         }
@@ -136,10 +151,21 @@ public record ReviewAnnotation(
     /** A human annotation typed into the margin: a question at high confidence, authored by "You". */
     public static ReviewAnnotation human(String scopeId, String file, String startKey, String endKey,
                                          Message firstMessage) {
+        return human(scopeId, file, startKey, endKey, firstMessage, Severity.QUESTION);
+    }
+
+    /**
+     * A human annotation typed into the margin, with the severity the human
+     * chose from the composer's chip row rather than the {@code QUESTION}
+     * default.
+     */
+    public static ReviewAnnotation human(String scopeId, String file, String startKey, String endKey,
+                                         Message firstMessage, Severity severity) {
         return new ReviewAnnotation(scopeId, UUID.randomUUID().toString(), Optional.empty(),
-                file, startKey, endKey, Severity.QUESTION, Confidence.HIGH, Optional.empty(),
+                file, startKey, endKey, severity, Confidence.HIGH, Optional.empty(),
                 firstMessage.author(), firstMessage.at(), List.of(), Optional.empty(), Optional.empty(),
-                List.of(), List.of(firstMessage), Optional.empty(), AnnotationStatus.OPEN);
+                List.of(), List.of(firstMessage), Optional.empty(), AnnotationStatus.OPEN,
+                Optional.empty(), true);
     }
 
     /** The severity actually in force: the human's override when there is one, else the reviewer's. */
@@ -170,14 +196,16 @@ public record ReviewAnnotation(
 
     public ReviewAnnotation withStatus(AnnotationStatus newStatus) {
         return new ReviewAnnotation(scopeId, id, intentId, file, startKey, endKey, severity, confidence,
-                title, author, at, evidence, patch, deviatesFrom, asks, thread, severityOverride, newStatus);
+                title, author, at, evidence, patch, deviatesFrom, asks, thread, severityOverride, newStatus,
+                github, postToPr);
     }
 
     public ReviewAnnotation withReply(Message reply) {
         List<Message> extended = new ArrayList<>(thread);
         extended.add(reply);
         return new ReviewAnnotation(scopeId, id, intentId, file, startKey, endKey, severity, confidence,
-                title, author, at, evidence, patch, deviatesFrom, asks, extended, severityOverride, status);
+                title, author, at, evidence, patch, deviatesFrom, asks, extended, severityOverride, status,
+                github, postToPr);
     }
 
     /**
@@ -188,12 +216,40 @@ public record ReviewAnnotation(
     public ReviewAnnotation withSeverityOverride(Severity override) {
         return new ReviewAnnotation(scopeId, id, intentId, file, startKey, endKey, severity, confidence,
                 title, author, at, evidence, patch, deviatesFrom, asks, thread,
-                Optional.ofNullable(override), status);
+                Optional.ofNullable(override), status, github, postToPr);
+    }
+
+    /**
+     * Files this finding under {@code newIntentId}. The gutter composer
+     * mints an annotation with no intent (it only knows a line range, never
+     * the grouping); the destination resolves which intent owns the file and
+     * stamps it here before storing, the same way it always has for a gutter
+     * comment.
+     */
+    public ReviewAnnotation withIntentId(Optional<String> newIntentId) {
+        return new ReviewAnnotation(scopeId, id, newIntentId, file, startKey, endKey, severity, confidence,
+                title, author, at, evidence, patch, deviatesFrom, asks, thread, severityOverride, status,
+                github, postToPr);
     }
 
     /** Re-keys this finding onto another scope (see {@code AnnotationStore.adoptLegacy}). */
     public ReviewAnnotation withScopeId(String newScopeId) {
         return new ReviewAnnotation(newScopeId, id, intentId, file, startKey, endKey, severity, confidence,
-                title, author, at, evidence, patch, deviatesFrom, asks, thread, severityOverride, status);
+                title, author, at, evidence, patch, deviatesFrom, asks, thread, severityOverride, status,
+                github, postToPr);
+    }
+
+    /** Stamps the GitHub comment this annotation became (or came from). */
+    public ReviewAnnotation withGithub(GitHubComment comment) {
+        return new ReviewAnnotation(scopeId, id, intentId, file, startKey, endKey, severity, confidence,
+                title, author, at, evidence, patch, deviatesFrom, asks, thread, severityOverride, status,
+                Optional.of(comment), postToPr);
+    }
+
+    /** The human's intent to include (or stop including) this in the next submit. */
+    public ReviewAnnotation withPostToPr(boolean post) {
+        return new ReviewAnnotation(scopeId, id, intentId, file, startKey, endKey, severity, confidence,
+                title, author, at, evidence, patch, deviatesFrom, asks, thread, severityOverride, status,
+                github, post);
     }
 }

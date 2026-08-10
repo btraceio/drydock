@@ -9,6 +9,7 @@ import app.drydock.review.ReviewItem;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewVerdict;
 import app.drydock.review.Severity;
+import app.drydock.review.SubmitPlan;
 
 import javafx.application.Platform;
 import javafx.geometry.Pos;
@@ -131,8 +132,8 @@ public final class ReviewDestinationView extends BorderPane {
         void postMessage(ReviewScope scope, ReviewAnnotation finding, String body);
 
         /**
-         * Records a comment the human wrote against a line, from the diff
-         * column's gutter composer.
+         * Records a comment the human wrote against a line or range, minted
+         * by the diff column's gutter composer.
          *
          * <p>A comment and a reviewer's finding are the same thing in this
          * model and differ only by author (see {@link ReviewAnnotation}), so
@@ -140,15 +141,21 @@ public final class ReviewDestinationView extends BorderPane {
          * already render from -- there is no second kind of note to keep in
          * sync.</p>
          *
-         * <p>{@code intentId} is resolved by the view, not looked up here,
-         * for the same reason {@link #intents} takes its diff as a parameter:
-         * the only correct grouping is the one the caller has already
+         * <p>{@code annotation} already carries its intent: the view stamps
+         * it with {@link ReviewAnnotation#withIntentId} before calling this,
+         * for the same reason {@link #intents} takes its diff as a parameter
+         * -- the only correct grouping is the one the caller has already
          * established belongs to this scope's current diff. Empty when no
          * intent covers the file, which costs the comment nothing -- the
          * margin falls back to matching it by file.</p>
          */
-        void addComment(ReviewScope scope, String file, String lineKey, String body,
-                        Optional<String> intentId);
+        void addComment(ReviewScope scope, ReviewAnnotation annotation);
+
+        /**
+         * The card's include/exclude toggle, for any finding -- including one
+         * authored by "You"; see {@link ReviewFindingsMargin.Host#setPostToPr}.
+         */
+        void setPostToPr(ReviewScope scope, ReviewAnnotation finding, boolean post);
 
         /** {@code Apply patch} -- a human click; drydock never applies one on its own. */
         void applyPatch(ReviewScope scope, ReviewAnnotation finding);
@@ -159,8 +166,20 @@ public final class ReviewDestinationView extends BorderPane {
         /** Hands an intent's open findings to the scope's bound session. */
         void askAgentToFix(ReviewScope scope, ReviewIntent intent, List<ReviewAnnotation> findings);
 
-        /** Posts the review once every intent is settled. */
-        void submit(ReviewScope scope);
+        /**
+         * Posts the review once every intent is settled. {@code index}
+         * locates every finding's lines in the real diff (built from {@link
+         * ReviewDiffColumn#displayedDiff()}, not the rendered rows -- see
+         * {@link SubmitPlan.DiffIndex}), and {@code decisions} carries one
+         * {@link ReviewVerdict.Decision} per counted intent, in the same
+         * order {@link #submitReview()} already walked them in to confirm
+         * every one had a verdict. Both live here, rather than being
+         * recomputed by the host, because only this view can see a diff row
+         * at all: {@code MainWorkspace} (package {@code app.drydock.ui}) has
+         * no visibility into {@code app.drydock.ui.review}'s
+         * package-private types.
+         */
+        void submit(ReviewScope scope, SubmitPlan.DiffIndex index, List<ReviewVerdict.Decision> decisions);
 
         /** Diagnostic-only: runs {@code scope}'s diff and describes the result. */
         String diagDiffSummary(ReviewScope scope);
@@ -231,6 +250,17 @@ public final class ReviewDestinationView extends BorderPane {
 
     /** The intent the verdict bar is settling; {@code [} / {@code ]} / {@code n} move it. */
     private int intentIndex;
+
+    /**
+     * The id of the intent {@code a}/{@code r} last recorded a verdict on,
+     * so {@code u} can undo THAT one -- see {@link #undoVerdict}. Cleared
+     * once undone, so a second {@code u} with nothing left to undo is inert
+     * rather than reaching for an unrelated intent. Not touched by {@code
+     * [}/{@code ]}/{@code n}: moving the cursor around must not change what
+     * {@code u} targets, or "settle one, look at another, undo" would undo
+     * the wrong one.
+     */
+    private Optional<String> lastSettledIntentId = Optional.empty();
 
     /** Set by {@code m}/{@code f}; remembered independently of the responsive collapse. */
     private boolean marginCollapsedByUser;
@@ -373,14 +403,14 @@ public final class ReviewDestinationView extends BorderPane {
         });
         margin.setOnFilterChanged(filter -> refreshReviewState());
         diffColumn.setPinSource(new PinSource());
-        diffColumn.setCommentSink((file, lineKey, body) -> selectedScope().ifPresent(scope -> {
+        diffColumn.setCommentSink(annotation -> selectedScope().ifPresent(scope -> {
             // The intent that owns this code, so the comment lands under it
             // rather than floating outside the grouping.
             Optional<String> intentId = intents().stream()
-                    .filter(intent -> intent.touches(file))
+                    .filter(intent -> intent.touches(annotation.file()))
                     .findFirst()
                     .map(ReviewIntent::id);
-            host.addComment(scope, file, lineKey, body, intentId);
+            host.addComment(scope, annotation.withIntentId(intentId));
             refreshReviewState();
             diffColumn.refreshPins();
         }));
@@ -918,6 +948,11 @@ public final class ReviewDestinationView extends BorderPane {
         public void focusLine(ReviewAnnotation finding) {
             diffColumn.revealLine(finding.file(), finding.startKey());
         }
+
+        @Override
+        public void setPostToPr(ReviewAnnotation finding, boolean post) {
+            selectedScope().ifPresent(scope -> host.setPostToPr(scope, finding, post));
+        }
     }
 
     /** The verdict bar's window onto the host, with the scope filled in. */
@@ -973,24 +1008,94 @@ public final class ReviewDestinationView extends BorderPane {
      * Submit (spec §4.6): with anything unsettled this jumps to the first
      * such intent rather than posting a partial review; once everything is
      * settled it posts ONE review.
+     *
+     * <p>Refuses while {@link ReviewDiffColumn#displayedDiff()} belongs to a
+     * different scope than the one selected -- the window between selecting
+     * a scope and its diff actually landing. {@code displayedScopeId} lags
+     * {@code setScope}: it is left pointing at whatever scope's diff last
+     * finished loading until the new one resolves, so a Submit pressed
+     * during that "Diffing…" window would otherwise build the {@code
+     * DiffIndex} from the OUTGOING scope's diff under the INCOMING scope's
+     * id. A comment whose real anchor is not in that stale index gets
+     * refused as "not in this diff" even though it is; worse, one that
+     * happens to share a key by coincidence could be admitted with an anchor
+     * GitHub rejects, and since the whole review posts as one atomic call, a
+     * single bad anchor 422s every other comment in it.</p>
+     *
+     * <p>Pressing it again once the diff lands succeeds normally only on the
+     * SUCCESS branch: {@link ReviewDiffColumn#reload} clears {@code
+     * displayedScopeId} on a FAILED diff too, and re-selecting the already-
+     * selected scope is a no-op ({@code setScope}), so nothing here ever
+     * retries it. A PR scope genuinely has nothing to post without a diff to
+     * anchor comments to, so it stays refused -- but visibly now, via {@link
+     * ReviewVerdictBar#showSubmitRefused}, rather than doing nothing with no
+     * explanation. A non-PR scope posts no comments either way ({@link
+     * Host#submit} takes it straight to the Finish hand-off; see {@link
+     * #diagSubmit}), so a failed diff must not leave IT stuck refusing for
+     * the rest of the session -- it falls through and submits with nothing
+     * to post.</p>
      */
     private void submitReview() {
         Optional<ReviewScope> scope = selectedScope();
         if (scope.isEmpty()) {
             return;
         }
-        List<ReviewIntent> counted = intents().stream()
-                .filter(ReviewIntent::countsTowardProgress)
-                .toList();
-        for (int i = 0; i < counted.size(); i++) {
-            if (host.verdict(scope.get(), counted.get(i)).isEmpty()) {
-                intentIndex = intents().indexOf(counted.get(i));
-                refreshReviewState();
-                revealCurrentIntent();
+        if (!diffColumn.displayedScopeId().map(id -> id.equals(scope.get().id())).orElse(false)) {
+            boolean failed = selectedOutcome().orElse(null) instanceof DiffOutcome.Failed;
+            if (!(failed && scope.get().pr().isEmpty())) {
+                verdictBar.showSubmitRefused(failed
+                        ? "the diff failed to load; nothing to submit"
+                        : "the diff is still loading; try again in a moment");
                 return;
             }
         }
-        host.submit(scope.get());
+        List<ReviewIntent> counted = intents().stream()
+                .filter(ReviewIntent::countsTowardProgress)
+                .toList();
+        List<ReviewVerdict.Decision> decisions = new java.util.ArrayList<>();
+        for (int i = 0; i < counted.size(); i++) {
+            Optional<ReviewVerdict> verdict = host.verdict(scope.get(), counted.get(i));
+            if (verdict.isEmpty()) {
+                intentIndex = intents().indexOf(counted.get(i));
+                refreshReviewState();
+                revealCurrentIntent();
+                verdictBar.showSubmitRefused(
+                        "an intent still needs a verdict (approve or request changes); jumped to it");
+                return;
+            }
+            decisions.add(verdict.get().decision());
+        }
+        host.submit(scope.get(), buildDiffIndex(diffColumn.displayedDiff()), decisions);
+    }
+
+    /**
+     * Locates every line of {@code diff} for {@link SubmitPlan#of}, walking
+     * the real diff rather than {@link ReviewDiffColumn#diagRows()}: a
+     * collapsed run, the context toggle, or truncation of a large diff can
+     * all leave a valid line out of the rendered rows, and validating
+     * against rows would refuse a comment GitHub would happily accept.
+     * {@code positionOfKey} is one running ordinal across the whole diff (the
+     * position {@code gh api} anchors a comment to); {@code hunkOfKey} is a
+     * per-{@link app.drydock.git.UnifiedDiff.Hunk} ordinal, which is what
+     * lets {@link SubmitPlan#of} refuse a comment whose start and end land in
+     * different hunks.
+     */
+    private static SubmitPlan.DiffIndex buildDiffIndex(app.drydock.git.UnifiedDiff diff) {
+        java.util.Map<String, Integer> positionOfKey = new java.util.HashMap<>();
+        java.util.Map<String, Integer> hunkOfKey = new java.util.HashMap<>();
+        int position = 0;
+        for (app.drydock.git.UnifiedDiff.FileDiff file : diff.files()) {
+            int hunkIndex = 0;
+            for (app.drydock.git.UnifiedDiff.Hunk hunk : file.hunks()) {
+                for (app.drydock.git.UnifiedDiff.Line line : hunk.lines()) {
+                    String key = file.path() + " " + line.lineKey();
+                    positionOfKey.put(key, position++);
+                    hunkOfKey.put(key, hunkIndex);
+                }
+                hunkIndex++;
+            }
+        }
+        return new SubmitPlan.DiffIndex(positionOfKey, hunkOfKey);
     }
 
     // ---- item rendering -----------------------------------------------------
@@ -1011,6 +1116,12 @@ public final class ReviewDestinationView extends BorderPane {
         setSessionRow(scope, sessionLineFor(scope), scope.sessionId().isPresent());
         body.getChildren().setAll(bodyFor(item));
         intentIndex = 0;
+        // Fallback intent ids are NOT scope-namespaced ("auto:change:src" is
+        // just (kind, directory)), so two different scopes with a similar
+        // layout can mint the identical id -- leaving this set across a
+        // scope switch could make u undo, and jump into, a same-named
+        // intent in the WRONG scope.
+        lastSettledIntentId = Optional.empty();
         refreshReviewState();
         // The diff usually has not arrived yet, in which case there is nothing
         // to reveal and the setOnDiffResolved handler does it when it lands.
@@ -1389,20 +1500,66 @@ public final class ReviewDestinationView extends BorderPane {
         applyResponsiveLayout(getWidth());
     }
 
+    /**
+     * {@code a} / {@code r}: records a verdict and, once it actually took
+     * (the host still refuses APPROVED over a blocking finding -- see
+     * {@code MainWorkspace}'s {@code Host#setVerdict} -- so recording is not
+     * guaranteed), advances to the next unsettled intent via the same walk
+     * {@code n} uses. Also remembers this intent as the one {@code u} should
+     * undo (see {@link #undoVerdict}) -- recorded here, after the advance
+     * decision above, so it always names the intent a verdict was just
+     * placed ON, never wherever the cursor lands next.
+     */
     private void verdictAction(ReviewVerdict.Decision decision) {
         Optional<ReviewScope> scope = selectedScope();
         Optional<ReviewIntent> intent = currentIntent();
         if (scope.isPresent() && intent.isPresent()) {
             host.setVerdict(scope.get(), intent.get(), Optional.of(decision));
+            if (host.verdict(scope.get(), intent.get()).map(ReviewVerdict::decision)
+                    .filter(decision::equals).isPresent()) {
+                lastSettledIntentId = Optional.of(intent.get().id());
+                nextUnsettledIntent();
+            }
         }
     }
 
+    /**
+     * {@code u}: undoes the verdict {@code a}/{@code r} last recorded --
+     * NOT whatever intent the cursor currently sits on. A human who presses
+     * {@code r}, realises they misread the diff, and presses {@code u}
+     * expects the verdict they just placed to disappear; since {@code r}
+     * itself advances the cursor (see {@link #verdictAction}), undoing
+     * "the current intent" would clear whatever {@code r} advanced TO
+     * instead -- the wrong one, and silently, since nothing before this
+     * looked wrong on screen. Snaps the cursor back to the undone intent
+     * too, so the human sees what changed rather than having to hunt for
+     * it. A second {@code u} with nothing left to undo does nothing, rather
+     * than reaching for an unrelated intent's verdict.
+     */
     private void undoVerdict() {
         Optional<ReviewScope> scope = selectedScope();
-        Optional<ReviewIntent> intent = currentIntent();
-        if (scope.isPresent() && intent.isPresent()) {
-            host.setVerdict(scope.get(), intent.get(), Optional.empty());
+        if (scope.isEmpty() || lastSettledIntentId.isEmpty()) {
+            return;
         }
+        List<ReviewIntent> current = intents();
+        int index = -1;
+        for (int i = 0; i < current.size(); i++) {
+            if (current.get(i).id().equals(lastSettledIntentId.get())) {
+                index = i;
+                break;
+            }
+        }
+        lastSettledIntentId = Optional.empty();
+        if (index < 0) {
+            // The grouping changed under us (a reviewer re-ran, say) and the
+            // intent this would have undone no longer exists -- nothing
+            // sane to undo or jump to.
+            return;
+        }
+        host.setVerdict(scope.get(), current.get(index), Optional.empty());
+        intentIndex = index;
+        refreshReviewState();
+        revealCurrentIntent();
     }
 
     /**
@@ -1476,17 +1633,51 @@ public final class ReviewDestinationView extends BorderPane {
      * filter in {@code DrydockApplication} owns both, and a scene filter runs
      * before a node filter, so binding them here would be dead code. {@code
      * Esc} unwinds topmost-first there -- modal, then Review.</p>
+     *
+     * <p>This is a thin wrapper over {@link #handleShortcut}, kept as the
+     * {@code addEventFilter} target below: it only ever sees an event whose
+     * target is a descendant of this view. {@code app.drydock.ui.MainWorkspace}'s
+     * keyboard backstop calls {@link #handleShortcut} directly for the case
+     * where the reader's focus has ended up somewhere else entirely while
+     * Review is still the showing tab -- see its Javadoc for why that is
+     * real.</p>
      */
     private void onKeyPressed(KeyEvent event) {
+        if (handleShortcut(event)) {
+            event.consume();
+        }
+    }
+
+    /**
+     * Review's keyboard table, minus the consume: returns whether {@code
+     * event} mapped to a shortcut and was acted on, so a caller outside the
+     * normal capturing chain (see {@link #onKeyPressed}) can tell whether to
+     * treat the event as handled.
+     */
+    public boolean handleShortcut(KeyEvent event) {
         if (event.isShortcutDown() || event.isAltDown()
                 || event.getTarget() instanceof TextInputControl) {
-            return;
+            return false;
         }
         boolean handled = switch (event.getCode()) {
             case J -> { queue.moveSelection(1); yield true; }
             case K -> { queue.moveSelection(-1); yield true; }
             case Q -> { setQueueCollapsed(!queue.collapsed()); yield true; }
-            case SLASH -> { queue.focusFilter(true); yield true; }
+            // Shift+/ is "?", the global shortcuts overlay -- owned by
+            // DrydockApplication's scene filter (see this method's own
+            // class-level Javadoc). Yielding false here lets it fall
+            // through, on OR off Review's subtree: MainWorkspace's keyboard
+            // backstop replays into this method too, and would otherwise
+            // consume "?" as "focus the queue filter" before the overlay's
+            // own handler -- the last branch of that scene filter -- ever
+            // sees it.
+            case SLASH -> {
+                if (event.isShiftDown()) {
+                    yield false;
+                }
+                queue.focusFilter(true);
+                yield true;
+            }
             case O -> { openBoundSession(); yield true; }
             case D -> { cycleDensity(); yield true; }
             case C -> { diffColumn.toggleContext(); yield true; }
@@ -1522,9 +1713,7 @@ public final class ReviewDestinationView extends BorderPane {
             }
             default -> false;
         };
-        if (handled) {
-            event.consume();
-        }
+        return handled;
     }
 
     /**
@@ -1575,22 +1764,33 @@ public final class ReviewDestinationView extends BorderPane {
      * assembled" is not evidence that each item can actually resolve it --
      * this is (see docs/architecture.md: no headless harness inside the
      * running app).
+     *
+     * <p>{@code queue.items()} is the same off-thread race {@link
+     * #diagItems()} guards against: it copies an {@link
+     * javafx.collections.ObservableList} the FX thread rebuilds via {@code
+     * ReviewQueueRail#setItems}. Its only caller today happens to already be
+     * on the FX thread, which is luck, not a guarantee this method can rely
+     * on -- routed through {@link ReviewDiagFxThread} so it stays correct
+     * regardless of who calls it next.</p>
      */
     public List<String> diagAllItemDiffs() {
-        List<String> report = new java.util.ArrayList<>();
-        for (ReviewItem item : queue.items()) {
-            ReviewScope itemScope = item.scope();
-            // A scope that is not diffable (no checkout: a PR the human has
-            // not started a session for) must never reach diffService.diff --
-            // this diagnostic exists to prove each item resolves its base,
-            // and running it anyway reports a fabricated file count for
-            // exactly the scopes the branch declares wrong-by-construction.
-            String summary = itemScope.diffable()
-                    ? host.diagDiffSummary(itemScope)
-                    : "not diffable (no checkout)";
-            report.add(item.title() + " [base=" + itemScope.base() + "] " + summary);
-        }
-        return report;
+        return ReviewDiagFxThread.call(() -> {
+            List<String> report = new java.util.ArrayList<>();
+            for (ReviewItem item : queue.items()) {
+                ReviewScope itemScope = item.scope();
+                // A scope that is not diffable (no checkout: a PR the human
+                // has not started a session for) must never reach
+                // diffService.diff -- this diagnostic exists to prove each
+                // item resolves its base, and running it anyway reports a
+                // fabricated file count for exactly the scopes the branch
+                // declares wrong-by-construction.
+                String summary = itemScope.diffable()
+                        ? host.diagDiffSummary(itemScope)
+                        : "not diffable (no checkout)";
+                report.add(item.title() + " [base=" + itemScope.base() + "] " + summary);
+            }
+            return report;
+        });
     }
 
     /**
@@ -1628,17 +1828,135 @@ public final class ReviewDestinationView extends BorderPane {
         return diffColumn.diagOpenComposer();
     }
 
-    /** Diagnostic-only: selects the {@code index}-th queue item, for the visual pass. */
-    public void diagSelectItem(int index) {
-        List<ReviewItem> items = queue.items();
-        if (index >= 0 && index < items.size()) {
-            queue.select(items.get(index).scope().id());
-        }
+    /**
+     * Diagnostic-only: selects {@code [file:startKey, file:endKey]} in the
+     * gutter and opens the composer on it, through the real selection then
+     * compose-request wiring a click-then-shift-click (or drag) release
+     * uses -- see {@link ReviewDiffColumn#diagSelectRange}. Returns false
+     * when either key is not in the currently loaded diff, so the visual
+     * pass can say so instead of silently opening nothing.
+     */
+    public boolean diagSelectRange(String file, String startKey, String endKey) {
+        return diffColumn.diagSelectRange(file, startKey, endKey);
     }
 
-    /** Diagnostic-only: the scope the queue has selected. */
+    /**
+     * Diagnostic-only: approves every intent that counts toward progress and
+     * has no verdict yet, through the same {@code host.setVerdict} call the
+     * verdict bar's Approve button makes. {@link #submitReview} refuses to
+     * post while anything is unsettled (spec section 4.6), and a real diff of
+     * any size falls back to one intent per file with nothing supplied -- so
+     * the visual pass needs to settle all of them to reach Submit at all, not
+     * just the one the composer's comment happens to land on.
+     *
+     * <p>Guarded the same way {@link #diagSubmit} is: this stamps APPROVED
+     * straight into the real {@code AnnotationStore} with no undo, and an
+     * earlier diagnostic run on the source branch already once called
+     * {@code markSubmitted} on a real working-tree scope by mistake.
+     * Refusing on any scope without a PR keeps a driver typo from writing
+     * real verdicts onto whatever the human happens to be reviewing
+     * locally.</p>
+     *
+     * @return false when the selected scope has no PR, so the caller can say
+     *         why nothing happened instead of silently doing nothing
+     */
+    public boolean diagApproveAllIntents() {
+        // Stamps real verdicts and refreshes FX-owned review state, so this
+        // always runs on the FX Application Thread -- see
+        // ReviewDiagFxThread for why an off-thread caller cannot do this
+        // directly.
+        return ReviewDiagFxThread.call(() -> {
+            if (selectedScope().map(scope -> scope.pr().isEmpty()).orElse(true)) {
+                return false;
+            }
+            selectedScope().ifPresent(scope -> {
+                for (ReviewIntent intent : intents()) {
+                    if (intent.countsTowardProgress() && host.verdict(scope, intent).isEmpty()) {
+                        host.setVerdict(scope, intent, Optional.of(ReviewVerdict.Decision.APPROVED));
+                    }
+                }
+                refreshReviewState();
+            });
+            return true;
+        });
+    }
+
+    /**
+     * Diagnostic-only: submits exactly as the verdict bar's Submit action
+     * does -- but ONLY when the selected scope has a GitHub PR. {@code
+     * submitReview}'s {@code Host#submit} for a scope with no PR does not
+     * stop at posting: it hides Review and hands the worktree to the Finish
+     * flow (merge / open a PR / delete the worktree; spec section 4.6's
+     * "reviewing someone's pull request ends by reviewing it, not by
+     * merging it" is PR-only for exactly this reason). A diagnostic driver
+     * photographing the submit sheet must never be able to reach that arm,
+     * even on a scope nobody meant to submit.
+     *
+     * @return false when the selected scope has no PR, so the caller can
+     *         say why nothing happened instead of silently doing nothing
+     */
+    public boolean diagSubmit() {
+        // Drives the real submit path (dialogs, the Finish hand-off) on
+        // FX-owned state, so this always runs on the FX Application Thread
+        // -- see ReviewDiagFxThread for why an off-thread caller cannot do
+        // this directly.
+        return ReviewDiagFxThread.call(() -> {
+            if (selectedScope().map(scope -> scope.pr().isEmpty()).orElse(true)) {
+                return false;
+            }
+            submitReview();
+            return true;
+        });
+    }
+
+    /** Diagnostic-only: selects the {@code index}-th queue item, for the visual pass. */
+    public void diagSelectItem(int index) {
+        // Same off-thread race as diagItems(): queue.items() copies a list
+        // the FX thread can be mid-rebuild of.
+        ReviewDiagFxThread.<Void>call(() -> {
+            List<ReviewItem> items = queue.items();
+            if (index >= 0 && index < items.size()) {
+                queue.select(items.get(index).scope().id());
+            }
+            return null;
+        });
+    }
+
+    /**
+     * Diagnostic-only: the scope the queue has selected.
+     *
+     * <p>{@code selectedScope()} resolves through {@code queue.selected()},
+     * which streams the same plain {@code List} that {@link
+     * ReviewQueueRail#setItems} mutates in place with {@code clear()}/{@code
+     * addAll()} on the FX Application Thread -- the identical race {@link
+     * #diagItems()} guards against. Reading it from the JUnit thread while a
+     * rebuild is in flight can throw or observe a half-built list, so the
+     * read has to happen ON the FX thread too.</p>
+     */
     public Optional<String> diagSelectedScopeId() {
-        return selectedScope().map(ReviewScope::id);
+        return ReviewDiagFxThread.call(() -> selectedScope().map(ReviewScope::id));
+    }
+
+    /**
+     * Diagnostic-only: the intent {@code [/]}/{@code n} currently sit on,
+     * as {@code "index/count"}. Used to prove -- or disprove -- that a real
+     * keyboard shortcut fired at the scene's actual focus owner (not one
+     * invoked directly against the handler) actually moved the reader.
+     */
+    public String diagIntentIndex() {
+        return ReviewDiagFxThread.call(() -> intentIndex + "/" + intents().size());
+    }
+
+    /** Diagnostic-only: whether {@code node} is this view or a descendant of it. */
+    public boolean diagOwnsNode(javafx.scene.Node node) {
+        return ReviewDiagFxThread.call(() -> {
+            for (javafx.scene.Node n = node; n != null; n = n.getParent()) {
+                if (n == this) {
+                    return true;
+                }
+            }
+            return false;
+        });
     }
 
     /**
@@ -1671,17 +1989,40 @@ public final class ReviewDestinationView extends BorderPane {
         return drilledIn ? narrowPage.name().toLowerCase(java.util.Locale.ROOT) : "wide";
     }
 
-    /** Diagnostic-only: the widths the drill-in actually resolved to, for the visual pass. */
+    /**
+     * Diagnostic-only: the widths the drill-in actually resolved to, for the
+     * visual pass.
+     *
+     * <p>{@link ReviewIntentRail#diagCards()} iterates {@code cards.getChildren()},
+     * the {@code ObservableList} the FX thread replaces wholesale with {@code
+     * setAll} on every rebuild ({@link ReviewIntentRail#setIntents}) -- the
+     * same in-place-mutation hazard {@link #diagItems()} guards against, just
+     * on a scene-graph children list instead of a queue's plain {@code List}.
+     * This whole summary is called only from the off-FX-thread diag driver
+     * ({@code DrydockApplication}), never from a JUnit test, but that is
+     * exactly the caller with no toolkit thread of its own to fall back on.</p>
+     */
     public String diagLayoutWidths() {
-        return diagNarrowPage() + " view=" + (int) getWidth() + " rails=" + (int) rails.getWidth()
+        return ReviewDiagFxThread.call(() -> diagNarrowPage() + " view=" + (int) getWidth()
+                + " rails=" + (int) rails.getWidth()
                 + " queue=" + (int) queue.getWidth() + " intents=" + (int) intentRail.getWidth()
                 + " | diff " + diffColumn.diagWidths()
-                + " | rail " + intentRail.diagCards();
+                + " | rail " + intentRail.diagCards());
     }
 
-    /** Diagnostic-only: every queue item, filtered or not (visual verification harness). */
+    /**
+     * Diagnostic-only: every queue item, filtered or not (visual
+     * verification harness).
+     *
+     * <p>{@code queue.items()} copies the plain {@code List} the FX
+     * Application Thread rebuilds on every reassembly ({@code
+     * ReviewQueueRail#setItems}). Reading it from another thread while that
+     * rebuild is in flight is the same race {@link ReviewDiffColumn#diagRows}
+     * has -- see {@link ReviewDiagFxThread} for why the copy must happen ON
+     * the FX thread.</p>
+     */
     public List<ReviewItem> diagItems() {
-        return queue.items();
+        return ReviewDiagFxThread.call(queue::items);
     }
 
     /**

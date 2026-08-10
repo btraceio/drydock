@@ -7,6 +7,7 @@ import app.drydock.review.Severity;
 import javafx.animation.KeyFrame;
 import javafx.animation.KeyValue;
 import javafx.animation.Timeline;
+import javafx.css.PseudoClass;
 import javafx.geometry.Pos;
 import javafx.scene.Node;
 import javafx.scene.control.Button;
@@ -68,6 +69,15 @@ final class ReviewFindingsMargin extends VBox {
 
         /** Selecting a card focuses its line in the diff (two-way linkage, spec §4.4). */
         void focusLine(ReviewAnnotation finding);
+
+        /**
+         * The card's include/exclude toggle, for any finding -- including one
+         * authored by "You". {@code ReviewAnnotation.human} defaults new
+         * comments to {@code postToPr = true}, but "defaults to posting" is
+         * not "cannot be withdrawn": this is the only opt-out before Submit
+         * publishes every one of them.
+         */
+        void setPostToPr(ReviewAnnotation finding, boolean post);
     }
 
     /** {@code open} hides resolved findings; {@code all} widens to the whole review (F). */
@@ -535,6 +545,26 @@ final class ReviewFindingsMargin extends VBox {
             downgrade.setOnAction(e -> host.overrideSeverity(finding, Severity.QUESTION));
             buttons.getChildren().add(downgrade);
         }
+        // Every finding gets the toggle, "You"-authored ones included: a
+        // comment you typed defaults to posting (ReviewAnnotation.human sets
+        // postToPr true), but "defaults to posting" is not "cannot be
+        // withdrawn" -- second thoughts before Submit must have a way out
+        // that is not cancelling the whole review. The label differs by
+        // author because the toggle means something different for each: for
+        // a reviewer's finding it PROMOTES an agent's opinion onto the PR;
+        // for your own comment it merely keeps or drops what you already
+        // decided to write.
+        boolean own = "You".equals(finding.author());
+        Button postToPr = new Button(own
+                ? (finding.postToPr() ? "Included in review" : "Excluded from review")
+                : (finding.postToPr() ? "Posting to PR" : "Post to PR"));
+        postToPr.getStyleClass().add("review-card-action");
+        postToPr.pseudoClassStateChanged(PseudoClass.getPseudoClass("selected"), finding.postToPr());
+        postToPr.setTooltip(new Tooltip(own
+                ? "Include this comment when the review is submitted to the pull request"
+                : "Include this finding as a comment when the review is submitted to the pull request"));
+        postToPr.setOnAction(e -> host.setPostToPr(finding, !finding.postToPr()));
+        buttons.getChildren().add(postToPr);
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
         buttons.getChildren().addAll(spacer, send, resolve);

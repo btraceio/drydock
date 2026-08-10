@@ -5,6 +5,7 @@ import app.drydock.git.DiffScope;
 import app.drydock.state.json.JsonParser;
 import app.drydock.state.json.JsonValue;
 import app.drydock.state.json.JsonValue.JsonArray;
+import app.drydock.state.json.JsonValue.JsonBoolean;
 import app.drydock.state.json.JsonValue.JsonNumber;
 import app.drydock.state.json.JsonValue.JsonObject;
 import app.drydock.state.json.JsonValue.JsonString;
@@ -651,6 +652,16 @@ public final class AnnotationStore implements AutoCloseable {
         obj.put("status", new JsonString(finding.status().name()));
         finding.severityOverride().ifPresent(value ->
                 obj.put("severityOverride", new JsonString(value.wireName())));
+        finding.github().ifPresent(comment -> {
+            JsonObject githubObj = JsonObject.empty();
+            githubObj.put("id", JsonNumber.of(comment.id()));
+            githubObj.put("url", new JsonString(comment.url()));
+            githubObj.put("resolved", new JsonBoolean(comment.resolved()));
+            obj.put("github", githubObj);
+        });
+        if (finding.postToPr()) {
+            obj.put("postToPr", new JsonBoolean(true));
+        }
 
         if (!finding.evidence().isEmpty()) {
             obj.put("evidence", new JsonArray(finding.evidence().stream()
@@ -756,7 +767,19 @@ public final class AnnotationStore implements AutoCloseable {
                 asksFromJson(obj),
                 thread,
                 optionalString(obj, "severityOverride").flatMap(Severity::fromWire),
-                AnnotationStatus.fromPersisted(requireString(obj, "status")));
+                AnnotationStatus.fromPersisted(requireString(obj, "status")),
+                githubFromJson(obj),
+                obj.get("postToPr") instanceof JsonBoolean flag && flag.value());
+    }
+
+    private static Optional<ReviewAnnotation.GitHubComment> githubFromJson(JsonObject obj) {
+        if (!(obj.get("github") instanceof JsonObject github)
+                || !(github.get("id") instanceof JsonNumber id)
+                || !(github.get("url") instanceof JsonString url)) {
+            return Optional.empty();
+        }
+        return Optional.of(new ReviewAnnotation.GitHubComment(id.asLong(), url.value(),
+                github.get("resolved") instanceof JsonBoolean resolved && resolved.value()));
     }
 
     /**

@@ -38,6 +38,10 @@ final class FakeReviewHost implements ReviewDestinationView.Host {
     final List<String> submittedScopes = new ArrayList<>();
     final List<Path> explorerJumps = new ArrayList<>();
 
+    /** What {@link #submit} was handed, keyed by scope id -- what the submit tests assert against. */
+    final java.util.Map<String, app.drydock.review.SubmitPlan.DiffIndex> submittedIndexes = new java.util.HashMap<>();
+    final java.util.Map<String, List<ReviewVerdict.Decision>> submittedDecisions = new java.util.HashMap<>();
+
     /** What {@link #intents} groups by when no reviewer has supplied a grouping. */
     UnifiedDiff diff = new UnifiedDiff(List.of());
 
@@ -152,18 +156,14 @@ final class FakeReviewHost implements ReviewDestinationView.Host {
 
     /** Written into the same store the real host uses, so the margin and pins pick it up. */
     @Override
-    public void addComment(ReviewScope scope, String file, String lineKey, String body,
-                           Optional<String> intentId) {
-        Instant now = Instant.now();
-        store.upsert(new ReviewAnnotation(scope.id(), "c_" + (++commentCount), intentId,
-                file, lineKey, lineKey, Severity.NIT, app.drydock.review.Confidence.HIGH,
-                Optional.empty(), "You", now, List.of(), Optional.empty(), Optional.empty(),
-                List.of(), List.of(new ReviewAnnotation.Message("You", now, body)),
-                Optional.empty(), AnnotationStatus.OPEN));
+    public void addComment(ReviewScope scope, ReviewAnnotation annotation) {
+        store.upsert(annotation.withScopeId(scope.id()));
     }
 
-    /** Sequential rather than random, so a test can name the comment it just made. */
-    int commentCount;
+    @Override
+    public void setPostToPr(ReviewScope scope, ReviewAnnotation finding, boolean post) {
+        store.mutate(finding.key(), current -> current.withPostToPr(post));
+    }
 
     @Override
     public void applyPatch(ReviewScope scope, ReviewAnnotation finding) {
@@ -187,8 +187,11 @@ final class FakeReviewHost implements ReviewDestinationView.Host {
     }
 
     @Override
-    public void submit(ReviewScope scope) {
+    public void submit(ReviewScope scope, app.drydock.review.SubmitPlan.DiffIndex index,
+                       List<ReviewVerdict.Decision> decisions) {
         submittedScopes.add(scope.id());
+        submittedIndexes.put(scope.id(), index);
+        submittedDecisions.put(scope.id(), decisions);
         store.markSubmitted(scope.id());
     }
 

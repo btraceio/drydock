@@ -71,8 +71,8 @@ sealed interface ReviewDiffRow {
     }
 
     /**
-     * The open comment composer, sitting directly under the line it is
-     * anchored to.
+     * The open comment composer, sitting directly under the last line of the
+     * range it is anchored to.
      *
      * <p>A row rather than a popover, because a comment is about a place in
      * the code and the composer has to stay attached to that place while the
@@ -80,8 +80,12 @@ sealed interface ReviewDiffRow {
      * {@code ReviewDiffColumn.composerNode}), because this row is recreated
      * on every rebuild and a draft stored here would be lost the first time
      * a collapsed run was expanded.</p>
+     *
+     * <p>{@code startKey} and {@code endKey} are equal for a single-line
+     * comment -- exactly the shape {@code GitHubLineAnchor.of} expects, which
+     * omits {@code start_line} from the request when the two agree.</p>
      */
-    record Composer(String file, String lineKey) implements ReviewDiffRow {
+    record Composer(String file, String startKey, String endKey) implements ReviewDiffRow {
         @Override
         public Edge edge() {
             return Edge.BODY;
