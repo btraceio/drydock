@@ -335,6 +335,9 @@ public final class SettingsModal extends VBox {
         // The listener is attached only once the stored value has landed:
         // wiring it before would make the very act of showing the loaded
         // value fire a save of the value we just read.
+        // Set while the listener below puts a failed save's tick back, so the
+        // revert is not mistaken for the reader changing their mind again.
+        boolean[] reverting = {false};
         settings.loadOpenChangedFilesInSkim().whenComplete((value, failure) -> Platform.runLater(() -> {
             box.setSelected(failure == null ? value : true);
             box.setDisable(false);
@@ -344,11 +347,23 @@ public final class SettingsModal extends VBox {
             // failure rather than leaving a ticked box that never reached
             // disk.
             box.selectedProperty().addListener((obs, was, is) -> {
+                if (reverting[0]) {
+                    return;
+                }
                 box.setDisable(true);
                 settings.saveOpenChangedFilesInSkim(is).whenComplete((ignored, saveFailure) ->
                         Platform.runLater(() -> {
                             box.setDisable(false);
                             if (saveFailure != null) {
+                                // Put the tick back where disk still has it.
+                                // Leaving it on the value that failed to save
+                                // claims a setting that is not in effect, and
+                                // the reader would have to toggle twice to
+                                // retry. The guard stops the revert being
+                                // read as a fresh edit and saving again.
+                                reverting[0] = true;
+                                box.setSelected(was);
+                                reverting[0] = false;
                                 UiErrors.show("Could not save the Explorer preference", saveFailure);
                             }
                         }));

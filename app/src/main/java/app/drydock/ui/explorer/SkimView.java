@@ -113,7 +113,7 @@ final class SkimView extends ScrollPane {
         // would be meaningless here. The caller decides where to land --
         // scrollToTop() or a revealLine() -- right after this returns; a
         // restore queued behind it would land a pulse later and undo it.
-        rebuild(false);
+        rebuild();
     }
 
     /**
@@ -125,7 +125,7 @@ final class SkimView extends ScrollPane {
     void refresh(Set<Integer> changed, Map<Integer, String> findingLabels) {
         this.changed = Set.copyOf(changed);
         this.findingLabels = Map.copyOf(findingLabels);
-        rebuild(true);
+        rebuild();
     }
 
     /**
@@ -208,7 +208,7 @@ final class SkimView extends ScrollPane {
             expansion.put(member.startLine(), true);
             onMemberRead.accept(member.startLine());
         }
-        rebuild(false);
+        rebuild();
         // rebuild() replaced every row, so until a layout pass runs they all
         // report bounds of zero -- and the target below would come out as 0,
         // i.e. "scroll to the top", every single time.
@@ -227,7 +227,6 @@ final class SkimView extends ScrollPane {
      * is inside the folded group, which is keyed by the FIRST folded member's
      * line. Scrolling to the group is the closest the view can get to a
      * member it is deliberately not opening.</p>
-     *
      */
     private int rowLineFor(SourceOutline.Member member) {
         for (Node node : rows.getChildren()) {
@@ -332,14 +331,6 @@ final class SkimView extends ScrollPane {
     }
 
     /**
-     * @param restoreScroll whether to put the reader back where they were.
-     *                      False for callers that have already decided the
-     *                      position themselves -- {@link #show} loading a new
-     *                      document, {@link #revealLine} driving an anchor --
-     *                      where a restore queued behind them would land a
-     *                      pulse later and undo it.
-     */
-    /**
      * Whether {@code member} loses its own row to the folded-helpers group.
      * An explicit expansion beats the fold: {@link #revealLine} puts one there
      * when a search hit or a minimap click lands inside an untouched helper,
@@ -352,20 +343,15 @@ final class SkimView extends ScrollPane {
                 && !Boolean.TRUE.equals(expansion.get(member.startLine()));
     }
 
-    private void rebuild(boolean restoreScroll) {
-        // Expanding one member must not move every other one under the
-        // reader -- so what is preserved is the PIXEL offset, not the vvalue
-        // fraction. Opening a body makes the content taller, and the same
-        // fraction of a taller document is a different place: restoring 0.4
-        // of 150px where it was 0.4 of 100px moves the reader 20px down,
-        // which is exactly what this claims not to do.
-        //
-        // Not covered by a test: one written against refresh() restored
-        // reliably on its own and timed out inside the full suite, the same
-        // FX-timing sensitivity this class keeps hitting. The arithmetic is
-        // the honest form of what the line above always claimed; verifying it
-        // wants a harness that can settle layout deterministically.
-        double scrollOffset = getVvalue() * scrollableSpan();
+    /**
+     * Rebuilds the rows. Deliberately does no scroll bookkeeping: a
+     * ScrollPane keeps its vvalue across a children swap on its own
+     * (measured), so the capture-and-restore this used to carry never fired
+     * in any test that exercised it. Callers that DO want a particular
+     * position -- {@link #show}, {@link #revealLine}, {@link #scrollToTop} --
+     * say so themselves, right after this returns.
+     */
+    private void rebuild() {
         rows.getChildren().clear();
         List<SourceOutline.Member> folded = new ArrayList<>();
         for (SourceOutline.Member member : outline.members()) {
@@ -377,25 +363,6 @@ final class SkimView extends ScrollPane {
         }
         if (!folded.isEmpty()) {
             rows.getChildren().add(buildHelperGroup(folded));
-        }
-        // Deferred: the ScrollPane clamps vvalue against a content height
-        // that is still zero until the new rows have been laid out.
-        if (restoreScroll) {
-            // Same rule SearchRail.rebuild() uses for the identical race: a
-            // revealLine (minimap click, `z` back) can land in the pulse
-            // between this rebuild and its own deferred restore -- findings
-            // and diff-overlay refreshes arrive over MCP while the reader is
-            // reading, so refresh() and a reveal really are asynchronous
-            // with respect to each other. Clearing the rows just above
-            // collapses the content height and clamps vvalue to 0, so a
-            // non-zero value one pulse later is someone else's write and
-            // outranks the position captured here.
-            Platform.runLater(() -> {
-                if (getVvalue() == 0) {
-                    double span = scrollableSpan();
-                    setVvalue(Math.max(0, Math.min(1, scrollOffset / span)));
-                }
-            });
         }
     }
 
@@ -445,7 +412,7 @@ final class SkimView extends ScrollPane {
         row.setOnAction(e -> {
             expansion.put(member.startLine(), !isExpanded(member));
             onMemberRead.accept(member.startLine());
-            rebuild(true);
+            rebuild();
         });
 
         VBox group = new VBox(row);
@@ -476,7 +443,7 @@ final class SkimView extends ScrollPane {
         row.getStyleClass().add("skim-header");
         row.setOnAction(e -> {
             helpersExpanded = !helpersExpanded;
-            rebuild(true);
+            rebuild();
         });
 
         VBox group = new VBox(row);
@@ -505,7 +472,13 @@ final class SkimView extends ScrollPane {
         // not) and only when something is left underneath it. Compared
         // through stripComment because that is how the signature was built:
         // `void run() { // see below` would not match its own line otherwise.
+        // ...but never when the change is ON the signature line: a member
+        // whose declaration changed is tagged `· changed` and pre-expanded,
+        // and dropping that line would show the reader a body with no green
+        // marker anywhere in it. Telling someone a member changed and then
+        // highlighting nothing is worse than one repeated line.
         boolean repeatsSignature = to > start && start <= lines.size()
+                && !changed.contains(start)
                 && SourceOutline.stripComment(lines.get(start - 1)).strip().equals(member.signature());
         int from = repeatsSignature ? start + 1 : start;
         StringBuilder text = new StringBuilder();

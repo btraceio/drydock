@@ -256,7 +256,14 @@ public record UserConfig(Optional<Path> worktreesDirectory, boolean openChangedF
         return future;
     }
 
-    public static CompletableFuture<Void> saveAsync(UserConfig config) {
+    /**
+     * Package-visible, and deliberately not public any more: every setter
+     * goes through {@link #updateAsync}, because this one writes the WHOLE
+     * record and a caller building a {@code UserConfig} from a single new
+     * value silently resets every other preference in the file. Kept only
+     * for the tests that exercise the coalescing directly.
+     */
+    static CompletableFuture<Void> saveAsync(UserConfig config) {
         CompletableFuture<Void> future = new CompletableFuture<>();
         PendingSave superseded = PENDING_SAVE.getAndSet(new PendingSave(config, future));
         if (superseded == null) {

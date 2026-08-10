@@ -122,6 +122,22 @@ final class FileRailModel {
                 .toList();
     }
 
+    /**
+     * Whether every row on screen is only there because it is the open file.
+     *
+     * <p>The rail's "no file here matches" message is the honest answer to a
+     * query that found nothing, and keeping the open file visible must not
+     * take it away: one lone row, indistinguishable from a hit, beside a
+     * footer reading "0 matches" is a worse answer than the empty state.</p>
+     */
+    static boolean onlyTheOpenFileIsShown(List<Entry> all, Scope scope, Sort sort, String query, Path openFile) {
+        String needle = query == null ? "" : query.strip();
+        List<Entry> shown = visible(all, scope, sort, needle, openFile);
+        return !shown.isEmpty()
+                && shown.stream().allMatch(entry -> entry.relative().equals(openFile))
+                && matchCount(all, needle) == 0;
+    }
+
     /** How many entries the query actually matches — the open file is kept for orientation, not counted as a hit. */
     private static int matchCount(List<Entry> all, String needle) {
         return (int) all.stream().filter(entry -> entry.matches(needle)).count();
