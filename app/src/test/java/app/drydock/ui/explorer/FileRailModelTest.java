@@ -140,6 +140,22 @@ class FileRailModelTest {
         assertTrue(shownInDiff.contains(open), "…in either scope: " + shownInDiff);
     }
 
+
+    @Test
+    void aQueryThatMatchesNothingStillSaysSoWhileAFileIsOpen() {
+        Path open = Path.of("ui/Strings.java");
+        List<FileRailModel.Entry> all = List.of(
+                new FileRailModel.Entry(Path.of("ui/OrderService.java"), 13, 0, false),
+                new FileRailModel.Entry(open, 0, 0, false));
+
+        assertTrue(FileRailModel.onlyTheOpenFileIsShown(all, FileRailModel.Scope.REPO,
+                        FileRailModel.Sort.NAME, "nothingmatchesthis", open),
+                "the open file is kept for orientation, so the rail must not read as one hit");
+        assertFalse(FileRailModel.onlyTheOpenFileIsShown(all, FileRailModel.Scope.REPO,
+                        FileRailModel.Sort.NAME, "Order", open),
+                "…but a real match is not an empty result");
+    }
+
     @Test
     void theOpenFileDoesNotInflateTheMatchCount() {
         Path open = Path.of("ui/Strings.java");

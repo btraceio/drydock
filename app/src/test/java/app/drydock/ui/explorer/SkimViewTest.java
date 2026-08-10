@@ -472,7 +472,12 @@ class SkimViewTest extends ApplicationTest {
 
     @Test
     void anExpandedMemberDoesNotRepeatItsSignature() {
-        show(Set.of(3, 4), Map.of());
+        // Line 4, the body -- NOT line 3, the signature. A change on the
+        // declaration line keeps that line so its marker has somewhere to
+        // sit (see aChangeOnTheSignatureLineKeepsThatLineInTheBody); this
+        // test is about the ordinary case, and its old fixture happened to
+        // include the signature line.
+        show(Set.of(4), Map.of());
         CodeArea body = (CodeArea) lookup(".skim-code").query();
         String firstLine = body.getText().lines().findFirst().orElse("").strip();
         assertFalse(firstLine.equals("int width() {"),
@@ -588,6 +593,23 @@ class SkimViewTest extends ApplicationTest {
         assertEquals(List.of(), openRowSignatures(),
                 "a stale expansion keyed by line number must not leak into an unrelated member "
                         + "of the new document");
+    }
+
+    /**
+     * A change confined to the declaration line itself -- a parameter added,
+     * a return type changed -- tags the row `· changed` and pre-expands it.
+     * Dropping that line as a repeated signature would then show a body with
+     * no green marker anywhere in it: told the member changed, shown nothing.
+     */
+    @Test
+    void aChangeOnTheSignatureLineKeepsThatLineInTheBody() {
+        int signatureLine = SOURCE.lines().toList().indexOf("    int width() {") + 1;
+        show(Set.of(signatureLine), Map.of());
+
+        CodeArea body = (CodeArea) lookup(".skim-code").query();
+        String firstLine = body.getText().lines().findFirst().orElse("").strip();
+        assertEquals("int width() {", firstLine,
+                "the changed line is in the body so its marker has somewhere to sit");
     }
 
     @Test

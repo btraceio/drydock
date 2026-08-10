@@ -63,6 +63,9 @@ public final class SessionExplorerView extends HBox {
      */
     private Boolean railOverride;
 
+    /** The in-flight width animation, stopped before another one starts. */
+    private Timeline collapseAnimation;
+
     public SessionExplorerView(Path searchRoot, SessionSearchService searchService) {
         this(searchRoot, searchService, null);
     }
@@ -297,7 +300,17 @@ public final class SessionExplorerView extends HBox {
 
     /** Review-tab bridge: runs a Text-mode search for {@code token} (the "Search in Explorer" chip). */
     public void searchText(String token) {
+        // Same trap `/` hits: while collapsed the query field is out of the
+        // scene graph, and expanding only puts it back when the 160ms
+        // animation finishes -- so setSearch's requestFocus here would be
+        // dropped and the reader handed a query they cannot edit. The rail
+        // auto-collapses under NARROW_WIDTH now, so this is an ordinary
+        // window, not a corner case.
+        boolean wasCollapsed = railCollapsed;
         readerSetRailCollapsed(false);
+        if (wasCollapsed) {
+            rail.focusSearchWhenExpanded();
+        }
         rail.setSearch(token);
     }
 
@@ -421,15 +434,27 @@ public final class SessionExplorerView extends HBox {
         if (collapsed) {
             rail.showCollapsed();
         }
-        Timeline animation = new Timeline(new KeyFrame(COLLAPSE_ANIMATION,
+        // Stop whatever was still animating: each call used to start a fresh
+        // Timeline and leave the old one running, so a collapse overtaking an
+        // expand let the expand's onFinished swap the FULL content back in
+        // after the width had gone to 46px -- an expanded rail rendered
+        // inside the collapsed strip, with no ⌕ to get out of it. Reachable
+        // by dragging the window edge across the threshold faster than the
+        // animation, which the width listener now makes an ordinary gesture.
+        if (collapseAnimation != null) {
+            collapseAnimation.stop();
+        }
+        collapseAnimation = new Timeline(new KeyFrame(COLLAPSE_ANIMATION,
                 new KeyValue(rail.minWidthProperty(), target),
                 new KeyValue(rail.prefWidthProperty(), target),
                 new KeyValue(rail.maxWidthProperty(), target)));
-        animation.setOnFinished(e -> {
-            if (!collapsed) {
+        collapseAnimation.setOnFinished(e -> {
+            // Reads the CURRENT state, not the one captured when this
+            // animation started, so a superseded finish cannot contradict it.
+            if (!railCollapsed) {
                 rail.showExpanded();
             }
         });
-        animation.play();
+        collapseAnimation.play();
     }
 }

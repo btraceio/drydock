@@ -480,10 +480,12 @@ final class SearchRail extends VBox {
     }
 
     private void rebuild() {
-        // Captured before the children go, restored after they are back: the
-        // reader's place in a 200-row list is not something a keystroke or a
-        // background findings refresh gets to discard.
-        double scrollPosition = resultsScroll.getVvalue();
+        // No scroll bookkeeping here on purpose. Replacing the children does
+        // not move the ScrollPane: it keeps vvalue across the swap by itself,
+        // measured, which is why theResultListKeepsItsScrollPositionAcrossARebuild
+        // passes. An earlier capture-and-restore-a-pulse-later never once
+        // fired in that test, and the comment it carried claimed a mechanism
+        // that was not running.
         List<FileRailModel.Entry> all = entries();
         List<FileRailModel.Entry> shown = FileRailModel.visible(all, scope, sort, query, openFile);
 
@@ -514,30 +516,16 @@ final class SearchRail extends VBox {
             more.setWrapText(true);
             resultsBox.getChildren().add(more);
         }
-        if (shown.isEmpty()) {
+        // Also when the only row is the file being read: it is kept for
+        // orientation, not because it matched, so a query that found nothing
+        // still has to say so.
+        if (shown.isEmpty() || FileRailModel.onlyTheOpenFileIsShown(all, scope, sort, query, openFile)) {
             Label empty = new Label(query.isBlank()
                     ? "nothing in this scope yet"
                     : "no file here matches \"" + query + "\"");
             empty.getStyleClass().add("rail-empty");
             empty.setWrapText(true);
             resultsBox.getChildren().add(empty);
-        }
-
-        // Deferred one pulse: the ScrollPane clamps vvalue against a content
-        // height that is still zero until the new rows have been laid out.
-        // Nothing to put back when the reader was already at the top, which
-        // is the common case on a keystroke -- and this runs on every one of
-        // them, so the queued no-op is worth not enqueueing.
-        if (scrollPosition > 0) {
-            Platform.runLater(() -> {
-                // Only if the rebuild's own clear is what left it here:
-                // emptying the rows collapses the content height and clamps
-                // vvalue to 0, so a non-zero value one pulse later is someone
-                // else's scroll and outranks the position we captured.
-                if (resultsScroll.getVvalue() == 0) {
-                    resultsScroll.setVvalue(scrollPosition);
-                }
-            });
         }
 
         int repoCount = Math.max(repoFiles.size(), shown.size());
