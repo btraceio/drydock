@@ -1888,16 +1888,36 @@ Against the installed binaries — Codex at `/usr/local/bin/codex`, Pi
 - `codex mcp add <NAME> --url <URL>` confirms streamable-HTTP MCP servers are
   supported, which is what drydock runs (`McpConfigWriter:117-119` writes
   `type: "http"`, `url`, `headers`).
-- **The blocker is the auth header, and it is small.** Codex offers only
-  `--bearer-token-env-var <ENV_VAR>`, i.e. `Authorization: Bearer <token>`.
-  Drydock sends its token in a custom header, `X-Drydock-Session-Token`
-  (`McpConfigWriter.java:66`). For Codex to authenticate, drydock's MCP server
-  must **also** accept `Authorization: Bearer` carrying the same session
-  token. That is a contained change on the server side.
-- Trade-off to decide deliberately: the token then lives in the session
-  process's environment rather than in an owner-readable file. It is not on
-  disk, but it is visible to anything that can read that process's
-  environment.
+- **There is no auth blocker.** An earlier draft of this section claimed Codex
+  could only send `Authorization: Bearer`. That is true of `codex mcp add`'s
+  *flags*, not of the config schema. Probed against the installed binary with
+  a scratch `CODEX_HOME`, `codex mcp get` reports:
+
+  ```
+    transport: streamable_http
+    bearer_token_env_var: -
+    http_headers: X-Drydock-Session-Token=*****
+    env_http_headers: -
+  ```
+
+  So Codex sends **arbitrary custom headers with literal values** via
+  `mcp_servers.<name>.http_headers`, which is exactly what drydock already
+  writes for Claude. (A literal `bearer_token` is rejected outright:
+  *"bearer_token is not supported for streamable_http"*.) `env_http_headers`
+  takes header values from environment variables, if that is ever preferable.
+
+- The wiring is therefore one command line and no new server behaviour:
+
+  ```
+  codex -c 'mcp_servers.drydock.url="<endpointUrl>"' \
+        -c 'mcp_servers.drydock.http_headers={"X-Drydock-Session-Token"="<token>"}'
+  ```
+
+- Trade-off to decide deliberately: the token is then in the process's argv
+  rather than in an owner-only file. On macOS another user's argv is readable
+  only by root, so this matches the existing "same uid can already read a
+  sibling's config file" model — but confirm that before shipping, and prefer
+  `env_http_headers` if it turns out to be wrong.
 
 **Pi: no MCP by design, and it will not arrive.**
 
@@ -1948,12 +1968,22 @@ UI should say so rather than let it be discovered.
 
 ### Recommended order
 
-1. **Codex.** Accept `Authorization: Bearer` in drydock's MCP server alongside
-   `X-Drydock-Session-Token`, and teach `CodexAgentProvider` to emit the `-c`
-   flags. Note this is not `--mcp-config`, so `AgentProvider.supportsMcpConfig`
-   is the wrong name for the capability once two providers reach the server by
-   different mechanisms — expect to generalize it to something like
-   "how this provider is given drydock's tools".
+1. **Codex.** Teach `CodexAgentProvider` to emit the two `-c` flags above.
+   Drydock's MCP server already accepts a bearer credential as well as
+   `X-Drydock-Session-Token` (commit `20c63b9`) — that turned out **not** to be
+   required for Codex, and is kept only because it widens client compatibility
+   at no cost.
+
+   The real work is the SPI. `SessionManager.mcpConfigFor` returns an
+   `Optional<Path>` and `CreateContext`/`ResumeContext` carry
+   `mcpConfig: Optional<Path>`, but Codex needs the **endpoint URL and token**,
+   not a file. So `AgentProvider.supportsMcpConfig` is the wrong shape once two
+   providers reach the server by different mechanisms: generalize it to
+   something like "how this provider is handed drydock's tools", with the
+   context carrying the URL and token and each provider rendering them its own
+   way. Note `TerminalSpec` is `(command, workingDirectory)` with no
+   environment map — libghostty wraps the command in `exec -l <command>` — so
+   any design needing an environment variable needs a separate mechanism.
 2. **Tasks 1–8**, which at that point work fully on Claude and Codex and
    degrade honestly on Pi.
 3. **The `drydock handoff` CLI + Pi skill.** Worth doing on its own merits even
