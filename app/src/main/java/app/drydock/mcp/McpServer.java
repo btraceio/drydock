@@ -392,7 +392,12 @@ public final class McpServer implements AutoCloseable {
                 the work actually is, call session_rename with a short title naming the work -- not \
                 the branch. Re-title it if the work turns out to be something else. Two refusals are \
                 normal and both explain themselves: if the human has named the session, leave it \
-                alone; if another session here already has that title, pick one that tells them apart.\
+                alone; if another session here already has that title, pick one that tells them apart.
+
+                Keep session_handoff current as you work. This session may be handed to a different \
+                agent at any moment, and that brief is all your successor gets -- write it for them, \
+                not for the human, and especially record what you RULED OUT and why, which they \
+                cannot recover from the code.\
                 """;
 
         private JsonValue initializeResult(JsonValue params) {
@@ -493,7 +498,8 @@ public final class McpServer implements AutoCloseable {
      * purpose rather than by how it was named.</p>
      */
     private static final Set<String> AGENT_WRITE_TOOLS = Set.of(
-            "review_reply", "review_intents", "review_finding", "review_answer", "session_rename");
+            "review_reply", "review_intents", "review_finding", "review_answer", "session_rename",
+            "session_handoff");
 
     static McpActivityLog.Direction directionOf(String tool) {
         return AGENT_WRITE_TOOLS.contains(tool)

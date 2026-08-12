@@ -2,6 +2,7 @@ package app.drydock.mcp;
 
 import app.drydock.config.UserConfig;
 import app.drydock.domain.ManagedAgentSession;
+import app.drydock.domain.HandoffBrief;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.Repository;
 import app.drydock.domain.SessionStatus;
@@ -96,6 +97,14 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
      */
     public static final long RENAME_TIMEOUT_SECONDS = 25;
 
+    /**
+     * Bound on {@link #writeHandoff}: one FX-thread hop, one state transform,
+     * and one {@code git rev-parse} off the FX thread to stamp the brief with
+     * the commit it was written against. Slightly longer than a rename for
+     * that git call, which a rename does not make.
+     */
+    public static final long HANDOFF_TIMEOUT_SECONDS = 30;
+
     /** Excerpts come from source files; anything this large is not one. */
     private static final long MAX_EXCERPT_FILE_BYTES = 4L * 1024 * 1024;
 
@@ -111,6 +120,7 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
     private final Supplier<UserConfig> userConfig;
     private final BiFunction<Path, Optional<String>, CompletableFuture<ManagedSessionId>> sessionStarter;
     private final BiFunction<ManagedSessionId, String, CompletableFuture<RenameOutcome>> sessionRenamer;
+    private final BiFunction<ManagedSessionId, HandoffDraft, CompletableFuture<HandoffBrief>> handoffWriter;
 
     /**
      * @param sessionCatalog   every managed session, e.g. {@code SessionManager::sessions}
@@ -119,6 +129,7 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
      *                         reads a file, and the user may edit it while the app runs
      * @param sessionStarter   bound to {@code MainWorkspace.startAgentSession}
      * @param sessionRenamer   bound to {@code MainWorkspace.renameSessionFromAgent}
+     * @param handoffWriter    bound to {@code MainWorkspace.writeHandoffFromAgent}
      */
     public WorkspaceMcpSessionContext(Supplier<List<ManagedAgentSession>> sessionCatalog,
                                       Supplier<List<Repository>> repositoryCatalog,
@@ -133,7 +144,9 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
                                       BiFunction<Path, Optional<String>,
                                               CompletableFuture<ManagedSessionId>> sessionStarter,
                                       BiFunction<ManagedSessionId, String,
-                                              CompletableFuture<RenameOutcome>> sessionRenamer) {
+                                              CompletableFuture<RenameOutcome>> sessionRenamer,
+                                      BiFunction<ManagedSessionId, HandoffDraft,
+                                              CompletableFuture<HandoffBrief>> handoffWriter) {
         this.sessionCatalog = Objects.requireNonNull(sessionCatalog, "sessionCatalog");
         this.repositoryCatalog = Objects.requireNonNull(repositoryCatalog, "repositoryCatalog");
         this.annotationStore = Objects.requireNonNull(annotationStore, "annotationStore");
@@ -146,6 +159,7 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
         this.userConfig = Objects.requireNonNull(userConfig, "userConfig");
         this.sessionStarter = Objects.requireNonNull(sessionStarter, "sessionStarter");
         this.sessionRenamer = Objects.requireNonNull(sessionRenamer, "sessionRenamer");
+        this.handoffWriter = Objects.requireNonNull(handoffWriter, "handoffWriter");
     }
 
     // ---- caller lookup ------------------------------------------------------
@@ -544,6 +558,11 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
     @Override
     public RenameOutcome renameSession(ManagedSessionId caller, String title) throws McpToolException {
         return join(sessionRenamer.apply(caller, title), RENAME_TIMEOUT_SECONDS);
+    }
+
+    @Override
+    public HandoffBrief writeHandoff(ManagedSessionId caller, HandoffDraft draft) throws McpToolException {
+        return join(handoffWriter.apply(caller, draft), HANDOFF_TIMEOUT_SECONDS);
     }
 
     // ---- shared helpers -----------------------------------------------------

@@ -349,7 +349,9 @@ class WorkspaceMcpSessionContextTest {
                 UserConfig::empty,
                 (worktree, prompt) -> CompletableFuture.failedFuture(
                         new UnsupportedOperationException("no window in this test")),
-                (id, title) -> CompletableFuture.completedFuture(new RenameOutcome(RenameKind.RENAMED, title)));
+                (id, title) -> CompletableFuture.completedFuture(new RenameOutcome(RenameKind.RENAMED, title)),
+                (id, draft) -> CompletableFuture.failedFuture(
+                        new UnsupportedOperationException("no workspace in this test")));
     }
 
     // ---- git helpers (mirrors WorktreeServiceTest) ---------------------------

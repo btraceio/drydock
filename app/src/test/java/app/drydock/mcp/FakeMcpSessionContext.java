@@ -1,11 +1,13 @@
 package app.drydock.mcp;
 
+import app.drydock.domain.HandoffBrief;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.mcp.McpSessionContext.RenameKind;
 import app.drydock.mcp.McpSessionContext.RenameOutcome;
 import app.drydock.review.ReviewAnnotation;
 
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
@@ -227,6 +229,31 @@ final class FakeMcpSessionContext implements McpSessionContext {
     }
 
     private RenameOutcome renameOutcome = new RenameOutcome(RenameKind.RENAMED, "renamed");
+
+    /** The last brief written through {@link #writeHandoff}, if any. */
+    private HandoffBrief lastHandoff;
+
+    /** When set, {@link #writeHandoff} throws this instead of storing a brief. */
+    private McpToolException handoffFailure;
+
+    Optional<HandoffBrief> lastHandoff() {
+        return Optional.ofNullable(lastHandoff);
+    }
+
+    void failHandoffWith(McpToolException failure) {
+        this.handoffFailure = failure;
+    }
+
+    @Override
+    public HandoffBrief writeHandoff(ManagedSessionId caller, HandoffDraft draft) throws McpToolException {
+        if (handoffFailure != null) {
+            throw handoffFailure;
+        }
+        lastHandoff = new HandoffBrief(caller, draft.goal(), draft.nextStep(), draft.approach(),
+                draft.decisions(), draft.ruledOut(), draft.corrections(),
+                Instant.parse("2026-08-12T10:15:30Z"), Optional.of("abc1234"), HandoffBrief.Author.AGENT);
+        return lastHandoff;
+    }
     private final List<String> renameCalls = new ArrayList<>();
     private McpToolException renameFailure;
 

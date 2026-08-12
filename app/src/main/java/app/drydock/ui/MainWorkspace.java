@@ -11,6 +11,7 @@ import app.drydock.agent.api.ConversationSource;
 import app.drydock.agent.api.ConversationSource.Conversation;
 import app.drydock.activity.SessionActivityWatcher;
 import app.drydock.domain.ManagedAgentSession;
+import app.drydock.domain.HandoffBrief;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.Repository;
 import app.drydock.domain.SessionActivity;
@@ -32,6 +33,7 @@ import app.drydock.git.WorktreeService;
 import app.drydock.github.GitHubReviewRequest.Event;
 import app.drydock.github.GitHubReviewService;
 import app.drydock.mcp.McpActivityLog;
+import app.drydock.mcp.McpSessionContext.HandoffDraft;
 import app.drydock.mcp.McpSessionContext.RenameKind;
 import app.drydock.mcp.McpSessionContext.RenameOutcome;
 import app.drydock.mcp.McpSessionRegistry.Spawn;
@@ -2264,6 +2266,39 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             }
         });
         return renamed;
+    }
+
+    /**
+     * Applies an agent's {@code session_handoff} and republishes, so a stale
+     * brief's banner clears without waiting for anything else to redraw.
+     *
+     * <p>Called on an MCP request thread, never the FX thread, so the {@code
+     * git rev-parse} that stamps the brief with the commit it was written
+     * against happens here, before the hop. Resolving it is best-effort: a
+     * branch with no commits yet is an ordinary state, and a brief with no
+     * commit simply measures staleness in changed files alone.</p>
+     */
+    public CompletableFuture<HandoffBrief> writeHandoffFromAgent(ManagedSessionId id, HandoffDraft draft) {
+        Optional<Path> workingDirectory = sessionManager.sessions().stream()
+                .filter(session -> session.id().equals(id))
+                .map(ManagedAgentSession::workingDirectory)
+                .findFirst();
+        Optional<String> headCommit = workingDirectory.flatMap(gitStatusService::headCommitBlocking);
+
+        CompletableFuture<HandoffBrief> written = new CompletableFuture<>();
+        Platform.runLater(() -> {
+            try {
+                HandoffBrief brief = sessionManager.applyAgentHandoff(id, draft, headCommit);
+                publishSessions();
+                written.complete(brief);
+            } catch (RuntimeException e) {
+                // As for a rename: the session can vanish between the router's
+                // liveness check and this hop, and without this arm the future
+                // never completes and the HTTP handler blocks for the join.
+                written.completeExceptionally(e);
+            }
+        });
+        return written;
     }
 
     /** A worktree matched to the repository that owns it, plus its branch (for the tab title). */

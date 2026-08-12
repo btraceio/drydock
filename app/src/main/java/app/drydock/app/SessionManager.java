@@ -12,6 +12,7 @@ import app.drydock.agent.api.SessionIdStrategy;
 import app.drydock.agent.spi.AgentProvider;
 import app.drydock.domain.ApplicationState;
 import app.drydock.domain.BranchOwnership;
+import app.drydock.domain.HandoffBrief;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.PrState;
@@ -20,6 +21,7 @@ import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SshRemote;
 import app.drydock.mcp.McpConfigWriter;
+import app.drydock.mcp.McpSessionContext;
 import app.drydock.mcp.McpSessionContext.RenameKind;
 import app.drydock.mcp.McpSessionContext.RenameOutcome;
 import app.drydock.mcp.McpSessionRegistry;
@@ -718,6 +720,44 @@ public final class SessionManager implements AutoCloseable {
         return updateSession(sessionId, session -> pin
                 ? session.withDisplayName(newDisplayName).withNamePinned(true)
                 : session.withDisplayName(newDisplayName));
+    }
+
+    /**
+     * The {@code session_handoff} MCP tool's write.
+     *
+     * <p>One transform, like {@link #applyAgentRename}: the session lookup and
+     * the brief replacement happen under {@link ApplicationStateStore}'s single
+     * lock, so a concurrent human edit of the same brief cannot be silently
+     * overwritten by a read-then-write.</p>
+     *
+     * <p>Wholesale replacement -- any existing brief for this session is
+     * dropped, not merged, so an omitted optional slot is cleared. Every slot
+     * must already have been through {@link PromptSafety#checkHandoffSlot}.</p>
+     */
+    public HandoffBrief applyAgentHandoff(ManagedSessionId sessionId, McpSessionContext.HandoffDraft draft,
+                                          Optional<String> headCommit) {
+        HandoffBrief[] result = new HandoffBrief[1];
+        stateStore.update(state -> {
+            boolean known = state.sessions().stream().anyMatch(existing -> existing.id().equals(sessionId));
+            if (!known) {
+                throw new UnknownSessionException(sessionId);
+            }
+            HandoffBrief brief = new HandoffBrief(sessionId, draft.goal(), draft.nextStep(), draft.approach(),
+                    draft.decisions(), draft.ruledOut(), draft.corrections(), Instant.now(), headCommit,
+                    HandoffBrief.Author.AGENT);
+            result[0] = brief;
+            List<HandoffBrief> briefs = new ArrayList<>(state.handoffBriefs().stream()
+                    .filter(existing -> !existing.sessionId().equals(sessionId))
+                    .toList());
+            briefs.add(brief);
+            return state.withHandoffBriefs(List.copyOf(briefs));
+        });
+        return result[0];
+    }
+
+    /** Every session's handoff brief, for the banner and the fork seed. */
+    public List<HandoffBrief> handoffBriefs() {
+        return stateStore.state().handoffBriefs();
     }
 
     /**
