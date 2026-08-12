@@ -166,6 +166,14 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     private static final long AGENT_RENAME_BUDGET_SECONDS =
             WorkspaceMcpSessionContext.RENAME_TIMEOUT_SECONDS / 2;
 
+    /**
+     * How long {@link #runReviewWhenSessionReady} keeps waiting for a
+     * just-launched session's terminal. Generous: the launch it follows does
+     * a network checkout first, and giving up early would silently drop the
+     * review the user asked for.
+     */
+    private static final int REVIEW_LAUNCH_WAIT_SECONDS = 60;
+
     private final SessionManager sessionManager;
     private final AgentRegistry agentRegistry;
     private final RepositoryManager repositoryManager;
@@ -1500,12 +1508,22 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 return false;
             }
             reviewScopeRegistry.grant(scope.id(), session.get());
-            return sendToBoundSession(scope,
-                    "Review the changes in this worktree with the drydock review tools. "
-                            + "Read review_scope for handle " + scope.id()
-                            + ", then post review_intents and review_finding against it. "
-                            + "Call review_state first so already-settled findings are not re-flagged.");
+            return sendToBoundSession(scope, reviewInstruction(scope));
         }
+    }
+
+    /**
+     * What a reviewer is asked to do. One line (see {@link
+     * TerminalBridge#sendPrompt}), and shared by the two ways a review
+     * starts: the Review tab's "Run review", and the checkout gate's "Start
+     * session &amp; review", which would otherwise start a session that
+     * reviews nothing.
+     */
+    private static String reviewInstruction(ReviewScope scope) {
+        return "Review the changes in this worktree with the drydock review tools. "
+                + "Read review_scope for handle " + scope.id()
+                + ", then post review_intents and review_finding against it. "
+                + "Call review_state first so already-settled findings are not re-flagged.";
     }
 
     /**
@@ -1553,6 +1571,13 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             reviewScopeRegistry.grant(bound.id(), session);
             pendingReviewSelection = worktree;
             refreshReviewQueue();
+            // "Start session & review" -- so review. Without this the button
+            // only started a session, and the intents rail stayed on the
+            // by-file fallback because nothing ever asked an agent to group
+            // anything. The instruction cannot be handed to
+            // openWorktreeSession as its start task: it names the scope
+            // handle, which only exists once the session id above is known.
+            runReviewWhenSessionReady(session, bound);
         } catch (RuntimeException e) {
             LOG.log(Level.WARNING, "Could not start a session on the checked-out PR #" + prNumber, e);
             onFailure.accept("The pull request was checked out, but the session could not start: "
@@ -1746,6 +1771,41 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                         sendTaskWhenReady(placeholderTab, task.get());
                     }
                 }));
+    }
+
+    /**
+     * Sends {@code scope}'s review instruction as soon as the session's tab
+     * has a live terminal to type it into.
+     *
+     * <p>Polled rather than chained onto the launch future: the launch is
+     * started inside {@link #openWorktreeSession}, which hands back only the
+     * session id, and the tab does not enter {@link #openTabs} until its
+     * surface attaches. Polling on the FX thread is also what makes the
+     * "still starting" case free -- there is nothing to unregister if the
+     * user closes the tab first, because the tab simply never appears and
+     * the poll expires.</p>
+     */
+    private void runReviewWhenSessionReady(ManagedSessionId session, ReviewScope scope) {
+        Timeline poll = new Timeline();
+        int[] attemptsLeft = {REVIEW_LAUNCH_WAIT_SECONDS * 2};
+        poll.getKeyFrames().add(new KeyFrame(Duration.millis(500), e -> {
+            OpenSessionTab open = openTabs.get(session);
+            if (open != null) {
+                poll.stop();
+                // The surface exists, but the agent behind it has only just
+                // been exec'd; the same grace period every other start-task
+                // gets (see sendTaskWhenReady).
+                sendTaskWhenReady(open, reviewInstruction(scope));
+                return;
+            }
+            if (--attemptsLeft[0] <= 0) {
+                poll.stop();
+                LOG.log(Level.WARNING, "Gave up waiting for session " + session
+                        + " to start before running the review for scope " + scope.id());
+            }
+        }));
+        poll.setCycleCount(Animation.INDEFINITE);
+        poll.play();
     }
 
     /** Types a start-task into a freshly opened session once claude has had a moment to start up. */
@@ -2428,8 +2488,8 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * are the only machine-checkable evidence for the chip, the dirty dot
      * and the conflict/missing banners.
      */
-    public void diagOpenExplorerFile(Path relativeFile) {
-        currentlySelected().ifPresent(open -> open.openExplorerAt(relativeFile, 1));
+    public void diagOpenExplorerFile(Path relativeFile, int line) {
+        currentlySelected().ifPresent(open -> open.openExplorerAt(relativeFile, line));
     }
 
     /**

@@ -48,6 +48,7 @@ import javafx.application.Platform;
 import javafx.scene.Node;
 import javafx.scene.control.Alert;
 import javafx.scene.control.ButtonType;
+import javafx.scene.control.Slider;
 import javafx.scene.control.TextInputControl;
 import javafx.scene.control.Tooltip;
 import javafx.scene.image.PixelFormat;
@@ -497,7 +498,8 @@ public final class DrydockApplication extends Application {
         // Diagnostic hook for the editable-Explorer visual pass. Value is a
         // comma-separated script of "<delaySeconds>:<verb>[:<arg>]" steps,
         // e.g. "14:open:src/notes.txt,17:type:XX,21:mark:saved". Verbs:
-        // open (switch to the Explorer and open a repo-relative file), type
+        // open (switch to the Explorer and open a repo-relative file,
+        // optionally "path@line" to land on one line), type
         // (insert text through the real textProperty listener), shot (write a
         // scene snapshot), resize (WxH -- the only way to photograph Review's
         // narrow drill-in, whose whole behaviour is a width threshold),
@@ -525,9 +527,15 @@ public final class DrydockApplication extends Application {
                     String arg = parts.length > 2 ? parts[2] : "";
                     Platform.runLater(() -> {
                         switch (verb) {
+                            // "path" or "path@line" -- the line matters,
+                            // because landing ON it is exactly what the
+                            // Review ⤢ is supposed to do and did not.
                             case "open" -> {
-                                mainWorkspace.diagOpenExplorerFile(Path.of(arg));
-                                System.out.println("[diag] explorer opened " + arg);
+                                int at = arg.lastIndexOf('@');
+                                String path = at < 0 ? arg : arg.substring(0, at);
+                                int line = at < 0 ? 1 : Integer.parseInt(arg.substring(at + 1).strip());
+                                mainWorkspace.diagOpenExplorerFile(Path.of(path), line);
+                                System.out.println("[diag] explorer opened " + path + " at line " + line);
                             }
                             case "type" -> {
                                 mainWorkspace.diagTypeInExplorer(arg);
@@ -648,8 +656,10 @@ public final class DrydockApplication extends Application {
         // same shape as diag.explorerScript. Verbs:
         //   open            show the Settings modal (as the gear button does)
         //   theme:DARK      set the theme absolutely
-        //   uisize:15       drag the interface-size slider to 15
-        //   tsize:18        drag the terminal-size slider to 18
+        //   uisize:15       set the interface size through the theme manager
+        //   tsize:18        set the terminal size through persisted state
+        //   uislider:15     set it through the modal's own slider (the human path)
+        //   tslider:18      likewise for the terminal slider
         //   dirtext:/p      type into the worktrees-directory field
         //   esc             close via the SAME path the Esc key filter uses
         //   shot:/tmp/a.png snapshot the scene
@@ -1379,6 +1389,20 @@ public final class DrydockApplication extends Application {
                     mainWorkspace.applyTerminalTheme(appShell.themeManager().theme());
                     System.out.println("[diag] terminal size set to " + size);
                 }
+                // uisize/tsize drive the managers BEHIND the sliders, which
+                // proves the scaling works but not that the modal reaches
+                // it. uislider/tslider drive the control the human actually
+                // touches -- the difference between "the stylesheet scales"
+                // and "the settings modal changes the interface size".
+                case "uislider", "tslider" -> {
+                    Slider slider = diagSettingsSlider("uislider".equals(verb) ? 0 : 1);
+                    if (slider == null) {
+                        System.out.println("[diag] " + verb + ": no slider found (is the modal open?)");
+                    } else {
+                        slider.setValue(Double.parseDouble(arg.strip()));
+                        System.out.println("[diag] " + verb + " set to " + slider.getValue());
+                    }
+                }
                 case "dirtext" -> {
                     TextInputControl field = diagSettingsDirectoryField();
                     if (field == null) {
@@ -1440,6 +1464,17 @@ public final class DrydockApplication extends Application {
      * The Settings modal's worktrees-directory field, or {@code null} when the
      * modal is not showing. Located by type: it is the modal's only text input.
      */
+    /** The Settings modal's {@code index}-th slider (0 = interface, 1 = terminal), or null. */
+    private Slider diagSettingsSlider(int index) {
+        int seen = 0;
+        for (javafx.scene.Node node : appShell.modalLayer().lookupAll(".settings-slider")) {
+            if (node instanceof Slider slider && seen++ == index) {
+                return slider;
+            }
+        }
+        return null;
+    }
+
     private TextInputControl diagSettingsDirectoryField() {
         for (javafx.scene.Node node : appShell.modalLayer().lookupAll(".text-field")) {
             if (node instanceof TextInputControl field) {

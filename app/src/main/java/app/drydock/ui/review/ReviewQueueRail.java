@@ -11,11 +11,15 @@ import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.Node;
 import javafx.scene.control.Button;
+import javafx.scene.control.ContextMenu;
 import javafx.scene.control.Label;
+import javafx.scene.control.MenuItem;
 import javafx.scene.control.ScrollPane;
+import javafx.scene.control.SeparatorMenuItem;
 import javafx.scene.control.TextField;
 import javafx.scene.control.Tooltip;
 import javafx.scene.input.KeyEvent;
+import javafx.scene.input.MouseButton;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
@@ -82,7 +86,19 @@ final class ReviewQueueRail extends VBox {
     private FindingCount findingCount = item -> Optional.empty();
     private SessionDot sessionDot = item -> Optional.empty();
     private Consumer<ReviewItem> onSelected = item -> { };
+    private Consumer<ReviewItem> onOpened = item -> { };
+    private Consumer<ReviewItem> onOpenSession = item -> { };
+    private Consumer<ReviewItem> onRunReview = item -> { };
     private Runnable onToggleCollapse = () -> { };
+
+    /**
+     * Whether opening an item is a separate step from selecting it -- true on
+     * the narrow drill-in's Browse page, where the diff is a page away rather
+     * than beside the rail. Drives the rows' {@code ›} chevron and the
+     * header's {@code ↵} hint: the gesture is only worth advertising where it
+     * actually goes somewhere.
+     */
+    private boolean opensSeparately;
 
     private boolean collapsed;
     private boolean narrow;
@@ -141,6 +157,36 @@ final class ReviewQueueRail extends VBox {
 
     void setOnSelected(Consumer<ReviewItem> handler) {
         this.onSelected = handler == null ? item -> { } : handler;
+    }
+
+    /**
+     * "Open this item", as distinct from {@link #setOnSelected}'s "make this
+     * the current item": a double-click, the context menu's first entry, and
+     * -- on the narrow Browse page -- {@code Enter}. Selecting is what loads
+     * the diff; opening is what puts the reader in front of it.
+     */
+    void setOnOpened(Consumer<ReviewItem> handler) {
+        this.onOpened = handler == null ? item -> { } : handler;
+    }
+
+    /** The context menu's "Open the bound session" ({@code o} elsewhere in Review). */
+    void setOnOpenSession(Consumer<ReviewItem> handler) {
+        this.onOpenSession = handler == null ? item -> { } : handler;
+    }
+
+    /** The context menu's "Run the review on this item". */
+    void setOnRunReview(Consumer<ReviewItem> handler) {
+        this.onRunReview = handler == null ? item -> { } : handler;
+    }
+
+    /** See {@link #opensSeparately}. */
+    void setOpensSeparately(boolean separately) {
+        if (opensSeparately == separately) {
+            return;
+        }
+        opensSeparately = separately;
+        header.setHint(separately ? "j k · ↵ open" : "j k · q");
+        rebuild();
     }
 
     void setOnToggleCollapse(Runnable handler) {
@@ -350,9 +396,15 @@ final class ReviewQueueRail extends VBox {
         switch (event.getCode()) {
             case ENTER -> {
                 // One selection, one git diff -- Enter is what commits the
-                // filter, never a keystroke.
-                visibleItems().stream().findFirst()
-                        .ifPresent(item -> select(item.scope().id()));
+                // filter, never a keystroke. Where opening is a separate
+                // step it opens too: having narrowed the queue to the item
+                // they want, the reader means to go to it.
+                visibleItems().stream().findFirst().ifPresent(item -> {
+                    select(item.scope().id());
+                    if (opensSeparately) {
+                        onOpened.accept(item);
+                    }
+                });
                 event.consume();
             }
             case ESCAPE -> {
@@ -540,8 +592,21 @@ final class ReviewQueueRail extends VBox {
         Button row = new Button();
         row.getStyleClass().add("review-queue-item");
         row.setMaxWidth(Double.MAX_VALUE);
-        row.setTooltip(new Tooltip(item.tooltip()));
+        row.setTooltip(new Tooltip(item.tooltip()
+                + (opensSeparately ? "\nDouble-click or Enter to open it" : "")));
         row.setOnAction(e -> select(item.scope().id()));
+        // A double-click opens; the first of its two clicks has already
+        // selected through setOnAction, so this only ever adds the second
+        // step. Right-click puts the same action, and the two that used to be
+        // keyboard-only, where a reader looks for them.
+        row.setOnMouseClicked(e -> {
+            if (e.getButton() == MouseButton.PRIMARY && e.getClickCount() == 2) {
+                select(item.scope().id());
+                onOpened.accept(item);
+                e.consume();
+            }
+        });
+        row.setContextMenu(contextMenuFor(item));
 
         if (collapsed) {
             row.setGraphic(iconColumn);
@@ -568,6 +633,13 @@ final class ReviewQueueRail extends VBox {
         VBox text = new VBox(2, titleRow, subtitle);
         HBox.setHgrow(text, Priority.ALWAYS);
         HBox content = new HBox(7, iconColumn, text);
+        // The chevron says the row goes somewhere -- the missing half of
+        // "press Enter to open it", which nothing on this page used to say.
+        if (opensSeparately) {
+            Label chevron = new Label("›");
+            chevron.getStyleClass().add("review-queue-chevron");
+            content.getChildren().add(chevron);
+        }
         content.setAlignment(Pos.CENTER_LEFT);
         row.setGraphic(content);
         // The graphic must track the button's own width or the ellipsized
@@ -575,6 +647,33 @@ final class ReviewQueueRail extends VBox {
         content.prefWidthProperty().bind(row.widthProperty().subtract(20));
         content.maxWidthProperty().bind(content.prefWidthProperty());
         return row;
+    }
+
+    /**
+     * A row's right-click menu. Every entry is an action Review already has
+     * a key for; the menu exists because a key nobody has been told about is
+     * not an affordance. Actions that need a bound session say so by being
+     * disabled rather than by silently doing nothing.
+     */
+    private ContextMenu contextMenuFor(ReviewItem item) {
+        MenuItem open = new MenuItem("Open  ↵");
+        open.setOnAction(e -> {
+            select(item.scope().id());
+            onOpened.accept(item);
+        });
+        MenuItem session = new MenuItem("Open the bound session  o");
+        session.setDisable(item.scope().sessionId().isEmpty());
+        session.setOnAction(e -> {
+            select(item.scope().id());
+            onOpenSession.accept(item);
+        });
+        MenuItem review = new MenuItem("Run the review");
+        review.setDisable(item.scope().sessionId().isEmpty());
+        review.setOnAction(e -> {
+            select(item.scope().id());
+            onRunReview.accept(item);
+        });
+        return new ContextMenu(open, new SeparatorMenuItem(), session, review);
     }
 
     private void applySelectionStyles() {

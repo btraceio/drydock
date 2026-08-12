@@ -293,6 +293,15 @@ public final class ReviewDestinationView extends BorderPane {
     private final Label returnHint = new Label("⌘4 from that session returns here");
     private final Button densityButton = new Button();
     private final Button reviewerButton = new Button();
+
+    /**
+     * "Run review", out in the title bar rather than only inside the
+     * reviewer menu. An agentic review is the thing that fills the intents
+     * rail and the findings margin, and while it lived behind a menu on a
+     * chip labelled with an agent's name, nothing in the surface said it
+     * could be asked for at all -- so nothing ever grouped anything.
+     */
+    private final Button runReviewButton = new Button("▶  Run review");
     private final ContextMenu reviewerMenu = new ContextMenu();
     private final VBox body = new VBox();
 
@@ -351,6 +360,16 @@ public final class ReviewDestinationView extends BorderPane {
         setCenter(centre);
 
         queue.setOnSelected(this::showItem);
+        // Opening an item is only a separate step on the narrow Browse page;
+        // wide, the diff is already beside the rail, so "open" means "give
+        // the diff the keyboard" and nothing moves.
+        queue.setOnOpened(item -> {
+            if (drilledIn) {
+                showNarrowPage(NarrowPage.DETAIL);
+            }
+        });
+        queue.setOnOpenSession(item -> item.scope().sessionId().ifPresent(host::openSession));
+        queue.setOnRunReview(item -> host.runReview(item.scope()));
         queue.setOnToggleCollapse(() -> setQueueCollapsed(!queue.collapsed()));
         queue.setFindingCount(item -> host.openFindings(item.scope()));
         queue.setSessionDot(item -> host.sessionState(item.scope()));
@@ -428,6 +447,10 @@ public final class ReviewDestinationView extends BorderPane {
         reviewerButton.setTooltip(new Tooltip("Reviewer, and re-run the review on this scope"));
         reviewerButton.setOnAction(e -> showReviewerMenu());
 
+        runReviewButton.getStyleClass().add("review-chip-button");
+        runReviewButton.setOnAction(e -> runReviewOnSelection());
+        updateRunReviewButton();
+
         densityButton.getStyleClass().add("review-chip-button");
         densityButton.setTooltip(new Tooltip("Density: cozy · compact · dense (d)"));
         densityButton.setOnAction(e -> cycleDensity());
@@ -439,8 +462,8 @@ public final class ReviewDestinationView extends BorderPane {
         shortcuts.setTooltip(new Tooltip("Shortcuts (?)"));
         shortcuts.setOnAction(e -> host.showShortcuts());
 
-        HBox bar = new HBox(8, backButton, glyph, title, countsLabel, spacer, reviewerButton,
-                densityButton, shortcuts);
+        HBox bar = new HBox(8, backButton, glyph, title, countsLabel, spacer, runReviewButton,
+                reviewerButton, densityButton, shortcuts);
         bar.setAlignment(Pos.CENTER_LEFT);
         bar.getStyleClass().add("review-title-bar");
         return bar;
@@ -660,6 +683,7 @@ public final class ReviewDestinationView extends BorderPane {
      */
     public void refreshReviewState() {
         Optional<ReviewScope> scope = selectedScope();
+        updateRunReviewButton();
         if (scope.isEmpty()) {
             margin.setFindings(List.of());
             verdictBar.update(null, Optional.empty(), false, 0, 0);
@@ -1207,6 +1231,7 @@ public final class ReviewDestinationView extends BorderPane {
         // the window grows back, and one who did not gets it back.
         RailLayout.Layout layout = RailLayout.solve(width, queueCollapsedByUser,
                 intentsCollapsedByUser, marginCollapsedByUser);
+        queue.setOpensSeparately(false);
         queue.setNarrow(layout.narrow());
         queue.setCollapsed(layout.queueCollapsed());
         intentRail.setNarrow(layout.narrow());
@@ -1275,6 +1300,7 @@ public final class ReviewDestinationView extends BorderPane {
         // wide layout gets them back.
         queue.setCollapsed(false);
         intentRail.setCollapsed(false);
+        queue.setOpensSeparately(browsing);
         queue.setNarrow(true);
         intentRail.setNarrow(true);
         margin.setNarrow(true);
@@ -1403,6 +1429,33 @@ public final class ReviewDestinationView extends BorderPane {
         if (scope.isPresent() && intent.isPresent()) {
             host.setVerdict(scope.get(), intent.get(), Optional.empty());
         }
+    }
+
+    /**
+     * Asks the selected scope's agent for a review. Refuses the same case
+     * {@code host.runReview} refuses -- a scope with no session has no agent
+     * to ask -- but says so on the button beforehand rather than by doing
+     * nothing when clicked; see {@link #updateRunReviewButton}.
+     */
+    private void runReviewOnSelection() {
+        selectedScope().ifPresent(scope -> {
+            if (host.runReview(scope)) {
+                runReviewButton.setText("▶  Review running…");
+                // Only the label, and only until the next selection or state
+                // refresh: what the agent then does shows up as intents and
+                // findings, which are the real progress indication.
+            }
+        });
+    }
+
+    /** Enables "Run review" only where there is an agent to run it, and says why not. */
+    private void updateRunReviewButton() {
+        boolean runnable = selectedScope().flatMap(ReviewScope::sessionId).isPresent();
+        runReviewButton.setText("▶  Run review");
+        runReviewButton.setDisable(!runnable);
+        runReviewButton.setTooltip(new Tooltip(runnable
+                ? "Ask this item's agent to group the changes into intents and post findings"
+                : "Needs a session — start one for this item first"));
     }
 
     /**

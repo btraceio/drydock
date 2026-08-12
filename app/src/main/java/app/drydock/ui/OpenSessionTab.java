@@ -16,6 +16,7 @@ import javafx.css.PseudoClass;
 import javafx.event.ActionEvent;
 import javafx.geometry.Pos;
 import javafx.scene.control.Button;
+import javafx.scene.control.ButtonBase;
 import javafx.scene.control.ContentDisplay;
 import javafx.scene.control.Label;
 import javafx.scene.control.OverrunStyle;
@@ -118,6 +119,14 @@ final class OpenSessionTab {
     private final ToggleButton claudeSubTabButton = new ToggleButton();
     private final ToggleButton terminalSubTabButton = new ToggleButton("❯_  Terminal");
     private final ToggleButton explorerSubTabButton = new ToggleButton("▤  Explorer");
+
+    /**
+     * The ⌘4 affordance. A plain {@link Button}, not a {@link ToggleButton}
+     * beside the three sub-tabs: Review is a destination this session
+     * navigates TO, not a fourth view inside it, and a toggle that never
+     * shows a selected state next to three that do would say otherwise.
+     */
+    private final Button reviewButton = new Button("◨  Review");
     private final Label subTabContext = new Label();
     private SubTab activeSubTab = SubTab.CLAUDE;
     /** Built on first switch to Explorer, via {@link #setExplorerFactory}. */
@@ -328,16 +337,23 @@ final class OpenSessionTab {
         if (!isRemote) {
             showKeyHint(explorerSubTabButton, "⌘3");
         }
-        // No ⌘4 hint here: Review is no longer a sub-tab, so there is no
-        // button to put it on. It is advertised in the shortcuts overlay and
-        // on the sidebar's Review row instead.
+        // ⌘4 gets a button of its own. Review is not a sub-tab, but a key
+        // that is only advertised in the shortcuts overlay is a key nobody
+        // finds: the same argument that put ⌘1--⌘3 on their buttons rather
+        // than in their tooltips applies here.
+        reviewButton.getStyleClass().add("session-subtab");
+        reviewButton.setFocusTraversable(false);
+        reviewButton.setTooltip(new Tooltip("Review this session's changes (⌘4)"));
+        reviewButton.setOnAction(e -> onShowReview.run());
+        showKeyHint(reviewButton, "⌘4");
 
         subTabContext.getStyleClass().add("session-subtab-context");
 
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
 
-        HBox bar = new HBox(4, claudeSubTabButton, terminalSubTabButton, explorerSubTabButton, spacer, subTabContext);
+        HBox bar = new HBox(4, claudeSubTabButton, terminalSubTabButton, explorerSubTabButton,
+                reviewButton, spacer, subTabContext);
         bar.setAlignment(Pos.CENTER_LEFT);
         bar.getStyleClass().add("session-subtab-bar");
         return bar;
@@ -483,7 +499,7 @@ final class OpenSessionTab {
      * label, in the dimmer key style. A graphic (rather than more text) keeps
      * the label's own styling -- selected/{@code :keys} colouring -- untouched.
      */
-    private static void showKeyHint(ToggleButton button, String shortcut) {
+    private static void showKeyHint(ButtonBase button, String shortcut) {
         Label hint = new Label(shortcut);
         hint.getStyleClass().add("session-subtab-key");
         button.setGraphic(hint);

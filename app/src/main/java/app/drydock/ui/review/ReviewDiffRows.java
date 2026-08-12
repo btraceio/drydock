@@ -179,8 +179,30 @@ final class ReviewDiffRows {
         return first == last ? "L" + first : "L" + first + "–" + last;
     }
 
-    /** The line the card's {@code ⤢} jumps to: its first line in the new file. */
-    private static int startLine(UnifiedDiff.Hunk hunk) {
+    /**
+     * The line the card's {@code ⤢} jumps to: the hunk's first CHANGED line
+     * in the new file, not its first line.
+     *
+     * <p>A hunk opens with {@code REVIEW_CONTEXT_LINES} of unchanged code, so
+     * jumping to its first line landed the Explorer several lines above
+     * anything the reader clicked ⤢ to see -- "the top of the hunk" rather
+     * than the change. A pure deletion has no added line to aim at; the
+     * following context line is where the deleted code used to be, which is
+     * the closest thing to it that still exists in the file. Package-private
+     * so the rule is testable without a toolkit.</p>
+     */
+    static int startLine(UnifiedDiff.Hunk hunk) {
+        boolean sawChange = false;
+        for (UnifiedDiff.Line line : hunk.lines()) {
+            if (line.kind() != UnifiedDiff.Line.Kind.CONTEXT) {
+                sawChange = true;
+            }
+            if (sawChange && line.newLine().isPresent()) {
+                return line.newLine().getAsInt();
+            }
+        }
+        // No change with a new-file line at all (a deletion at end of file):
+        // fall back to the hunk's first line, which is what this used to do.
         for (UnifiedDiff.Line line : hunk.lines()) {
             if (line.newLine().isPresent()) {
                 return line.newLine().getAsInt();

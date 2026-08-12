@@ -9,8 +9,7 @@ import java.io.UncheckedIOException;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
@@ -20,9 +19,12 @@ import java.util.regex.Pattern;
 
 /**
  * Produces a copy of {@code app.css} with every {@code -fx-font-size} scaled
- * by the user's interface size, materialised as a temp file whose URL the
- * scene uses in place of the bundled sheet (the same extract-once-per-process
- * pattern {@link TerminalThemes} uses for ghostty configs).
+ * by the user's interface size, encoded into a {@code data:} URL the scene
+ * uses in place of the bundled sheet.
+ *
+ * <p>A {@code data:} URL rather than a temp file (which is what this did
+ * first) because the sheet must not depend on the filesystem: see {@link
+ * #dataUri} for the machine-specific silent failure that cost.</p>
  *
  * <p>Two tempting alternatives are wrong. Rewriting the declarations as
  * {@code em} compounds, because JavaFX resolves font-relative sizes against
@@ -86,12 +88,12 @@ final class UiFontScale {
      * any size that could fail to resolve is resolved here rather than
      * blocking subsequent launches.</p>
      *
-     * <p>Touches the filesystem on a cache miss, so this must only be called
-     * from the FX thread when the caller already knows the size is cached or
-     * default (e.g. {@code ThemeManager}'s constructor, which needs the sheet
-     * in place synchronously before the stage is shown). Any FX-thread caller
-     * that cannot make that guarantee -- a live slider drag, in particular --
-     * must go through {@link #stylesheetForAsync} instead.</p>
+     * <p>A cache miss reads the bundled sheet and rewrites it, so this is
+     * called from the FX thread only where the caller already knows the size
+     * is cached or default (e.g. {@code ThemeManager}'s constructor, which
+     * needs the sheet in place synchronously before the stage is shown). Any
+     * FX-thread caller that cannot make that guarantee -- a live slider drag,
+     * in particular -- goes through {@link #stylesheetForAsync} instead.</p>
      */
     static synchronized String stylesheetFor(double fontSize) {
         double clamped = Math.clamp(fontSize, MIN_FONT_SIZE, MAX_FONT_SIZE);
@@ -106,8 +108,8 @@ final class UiFontScale {
      * The fallback is cached alongside real results deliberately: it keeps
      * every size resolvable from the cache once it has been asked for, so
      * neither {@link #cachedStylesheetFor} nor an FX-thread re-application of
-     * an already-applied size can be surprised into retrying failed I/O
-     * inline. A failure that was transient therefore sticks for the rest of
+     * an already-applied size can be surprised into retrying a failed
+     * generation inline. A failure that was transient therefore sticks for the rest of
      * the process -- an acceptable trade for never blocking or throwing on
      * the FX thread.
      */
@@ -121,7 +123,7 @@ final class UiFontScale {
         }
     }
 
-    /** Already-cached or default stylesheet for {@code fontSize}, with no filesystem access at all. */
+    /** Already-cached or default stylesheet for {@code fontSize}, generating nothing. */
     private static synchronized Optional<String> cachedStylesheetFor(double fontSize) {
         double clamped = Math.clamp(fontSize, MIN_FONT_SIZE, MAX_FONT_SIZE);
         int key = keyFor(clamped);
@@ -138,7 +140,7 @@ final class UiFontScale {
     /**
      * As {@link #stylesheetFor}, but safe to call from the FX thread
      * unconditionally: a cache hit (or the default size) resolves {@code
-     * onReady} synchronously with no I/O, and a cache miss generates on a
+     * onReady} synchronously with no work at all, and a cache miss generates on a
      * virtual thread and hands the result back via {@link Platform#runLater}.
      * {@link #stylesheetFor} degrades a generation failure to the unscaled
      * sheet rather than throwing, so a failure shows up as an unscaled
@@ -166,15 +168,31 @@ final class UiFontScale {
             }
             String css = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
             String scaled = scaleCss(css, fontSize / WorkspaceUiState.DEFAULT_UI_FONT_SIZE);
-            Path dir = Files.createTempDirectory("drydock-ui-scale");
-            dir.toFile().deleteOnExit();
-            Path file = dir.resolve("app.css");
-            Files.writeString(file, scaled, StandardCharsets.UTF_8);
-            file.toFile().deleteOnExit();
-            return file.toUri().toURL().toExternalForm();
+            return dataUri(scaled);
         } catch (IOException e) {
             throw new UncheckedIOException("Could not generate the scaled stylesheet", e);
         }
+    }
+
+    /**
+     * The generated sheet as a {@code data:} URI, which is what JavaFX's
+     * stylesheet loader takes in place of a file or resource URL.
+     *
+     * <p>This used to be a temp file, and that was a per-machine failure
+     * waiting to happen: a {@code TMPDIR} that is unwritable, full, or
+     * missing (a translocated or sandboxed bundle) made {@link #generate}
+     * throw, and {@link #generateOrBase} then cached the UNSCALED sheet for
+     * that size -- silently, because the only report was a WARNING on stderr
+     * that a windowed app never shows anyone. The symptom was an interface
+     * size that appeared to do nothing at all, on one machine and not
+     * another, with the persisted value nonetheless correct. Encoding the
+     * sheet into the URL removes the filesystem from the path entirely, so
+     * there is no longer an environment in which scaling can fail while
+     * everything around it keeps working.</p>
+     */
+    private static String dataUri(String css) {
+        return "data:text/css;base64,"
+                + Base64.getEncoder().encodeToString(css.getBytes(StandardCharsets.UTF_8));
     }
 
     /**

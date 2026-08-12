@@ -45,7 +45,49 @@ class ReviewDiffRowsTest {
 
         assertEquals("Sidebar.java", header.file());
         assertEquals("L112–124", header.range());
-        assertEquals(112, header.startLine());
+        assertEquals(113, header.startLine(),
+                "the ⤢ jumps to the first CHANGED line, not to the leading context");
+    }
+
+    /**
+     * A hunk opens with several context lines, so jumping to its first line
+     * landed the Explorer above everything the reader clicked ⤢ to see.
+     */
+    @Test
+    void theJumpTargetSkipsTheLeadingContext() {
+        UnifiedDiff diff = diff(file("A.java", hunk(
+                context(40), context(41), context(42), add(43), context(44))));
+
+        ReviewDiffRow.HunkHeader header =
+                (ReviewDiffRow.HunkHeader) ReviewDiffRows.build(diff, defaults()).get(0);
+
+        assertEquals(43, header.startLine());
+    }
+
+    /**
+     * A deletion has no new-file line of its own; the context line that
+     * follows it is where the deleted code used to be, and the closest thing
+     * to it that still exists in the file.
+     */
+    @Test
+    void aPureDeletionJumpsToTheLineAfterIt() {
+        UnifiedDiff diff = diff(file("A.java", hunk(
+                context(10), del(11), del(12), context(11))));
+
+        ReviewDiffRow.HunkHeader header =
+                (ReviewDiffRow.HunkHeader) ReviewDiffRows.build(diff, defaults()).get(0);
+
+        assertEquals(11, header.startLine());
+    }
+
+    /** An all-context hunk has no change to aim at; the old behaviour stands. */
+    @Test
+    void aHunkWithNoChangeFallsBackToItsFirstLine() {
+        UnifiedDiff diff = diff(file("A.java", hunk(context(7), context(8))));
+
+        assertEquals(7, ReviewDiffRows.startLine(
+                new UnifiedDiff.Hunk("@@ @@", List.of(context(7), context(8)))));
+        assertFalse(ReviewDiffRows.build(diff, defaults()).isEmpty());
     }
 
     @Test

@@ -2,6 +2,8 @@ package app.drydock.ui;
 
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -93,17 +95,38 @@ class UiFontScaleTest {
 
     @Test
     void identityFactorReturnsTheOriginalResourceUrl() {
-        // The unscaled case must not write a temp file at all: it is both the
+        // The unscaled case must not generate anything at all: it is both the
         // default and the hot path at startup.
         assertEquals(UiFontScale.baseStylesheetUrl(), UiFontScale.stylesheetFor(13.0));
     }
 
+    /**
+     * The sheet is carried IN the URL, not written beside it. A temp file was
+     * the first implementation and it failed silently on a machine whose
+     * temp directory it could not write: generation threw, the unscaled sheet
+     * was cached in its place, and the interface size then did nothing at all
+     * with nothing on screen to say why. Asserting the scheme is asserting
+     * that no environment sits between choosing a size and applying it.
+     */
     @Test
     void scaledSizeProducesAUsableStylesheetUrl() {
         String url = UiFontScale.stylesheetFor(16.0);
 
-        assertTrue(url.startsWith("file:"), url);
+        assertTrue(url.startsWith("data:text/css;base64,"), url);
         assertFalse(url.equals(UiFontScale.baseStylesheetUrl()), url);
+    }
+
+    /** And what the URL carries is the scaled sheet, not merely a well-formed one. */
+    @Test
+    void theUrlCarriesTheScaledStylesheet() {
+        String url = UiFontScale.stylesheetFor(16.0);
+
+        String css = new String(Base64.getDecoder().decode(
+                url.substring("data:text/css;base64,".length())), StandardCharsets.UTF_8);
+
+        // .root is 13px unscaled; 16/13 of it, to two decimals.
+        assertTrue(css.contains("-fx-font-size: 16.0px;"), "the .root size must be the chosen one");
+        assertFalse(css.contains("-fx-font-size: 13px;"), "no declaration may be left unscaled");
     }
 
     @Test

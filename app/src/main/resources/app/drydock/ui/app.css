@@ -1263,6 +1263,9 @@
 .code-area .code-anno { -fx-fill: -drydock-code-anno; }
 .code-area .code-punct { -fx-fill: -drydock-code-punct; }
 .code-area .code-match { -rtfx-background-color: -drydock-match-bg; }
+/* The line a ⤢ jump landed on: a whole-paragraph wash, so the reader's eye
+ * finds it without a caret to look for. Cleared by the next jump. */
+.code-area .jump-target { -rtfx-background-color: -drydock-accent-soft; }
 
 /* ---- Worktree lifecycle: sidebar tags + chips ---------------------------- */
 
@@ -2356,6 +2359,16 @@
 .review-queue-subtitle {
     -fx-text-fill: -drydock-text-faint;
     -fx-font-size: 10.5px;
+}
+/* Shown only where opening the item is a step of its own (the narrow Browse
+ * page): the row leads somewhere, and nothing else on that page said so. */
+.review-queue-chevron {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 13px;
+    -fx-padding: 0 2 0 0;
+}
+.review-queue-item:selected .review-queue-chevron {
+    -fx-text-fill: -drydock-accent;
 }
 
 /* Item header -- two rows: what is being reviewed, and its session binding. */

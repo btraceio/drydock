@@ -1386,7 +1386,7 @@ final class FileViewer extends BorderPane {
         if (existing != null) {
             boolean alreadySelected = fileTabs.getSelectionModel().getSelectedItem() == existing;
             fileTabs.getSelectionModel().select(existing);
-            jumpToLine.ifPresent(line -> scrollTo(existing, line));
+            jumpToLine.ifPresent(line -> jumpToLine(existing, line));
             if (alreadySelected && !navigatingTrail) {
                 // Re-picking the file already on screen is not a tab-selection
                 // change, so the listener that normally pushes the waypoint
@@ -1508,11 +1508,15 @@ final class FileViewer extends BorderPane {
                 // change, and its shape is the fastest way in. Everything
                 // else opens as text, because that is what "open a file"
                 // means everywhere else in the app.
-                if (!changedLinesFor(tab).isEmpty()) {
+                //
+                // A jump target overrules it: the caller asked for one line,
+                // not for the file's shape, and skim cannot show a line (see
+                // jumpToLine).
+                if (jumpToLine.isEmpty() && !changedLinesFor(tab).isEmpty()) {
                     setSkim(tab, true);
                 }
                 refreshMinimap(tab);
-                jumpToLine.ifPresent(line -> scrollTo(tab, line));
+                jumpToLine.ifPresent(line -> jumpToLine(tab, line));
             });
         });
     }
@@ -1973,6 +1977,46 @@ final class FileViewer extends BorderPane {
         highlightDebounce = new PauseTransition(javafx.util.Duration.millis(HIGHLIGHT_DEBOUNCE.toMillis()));
         highlightDebounce.setOnFinished(e -> rehighlight(tab, area, area.getText()));
         highlightDebounce.play();
+    }
+
+    /**
+     * "Go to this line", as opposed to {@link #scrollTo}'s "restore this
+     * reader's place": leaves skim mode, centres the line and marks it.
+     *
+     * <p>The distinction is the whole fix for a ⤢ that "did not show the
+     * line". A changed file opens in skim mode by default, and skim can only
+     * reveal the MEMBER a line is in -- so a jump aimed at line 412 landed at
+     * the top of the method containing it, with nothing on screen saying
+     * which line had been asked for. An explicit line target is a request to
+     * see that line, so it wins over the default view; {@code z} still
+     * switches back afterwards.</p>
+     */
+    private void jumpToLine(Tab tab, int oneBasedLine) {
+        if (isSkimming(tab)) {
+            setSkim(tab, false);
+        }
+        scrollTo(tab, oneBasedLine);
+        markJumpTarget(tab, oneBasedLine);
+    }
+
+    /**
+     * Highlights the line a jump landed on, clearing the previous mark.
+     * Kept until the next jump rather than faded on a timer: the reader may
+     * take a while to look up from the diff they came from, and a highlight
+     * that has already expired by then is the same as none.
+     */
+    private void markJumpTarget(Tab tab, int oneBasedLine) {
+        CodeArea area = areaOf(tab);
+        if (area == null || area.getParagraphs().isEmpty()) {
+            return;
+        }
+        if (tab.getProperties().get("drydock.jumpLine") instanceof Integer previous
+                && previous - 1 < area.getParagraphs().size()) {
+            area.setParagraphStyle(previous - 1, List.of());
+        }
+        int paragraph = Math.max(0, Math.min(oneBasedLine - 1, area.getParagraphs().size() - 1));
+        area.setParagraphStyle(paragraph, List.of("jump-target"));
+        tab.getProperties().put("drydock.jumpLine", paragraph + 1);
     }
 
     private void scrollTo(Tab tab, int oneBasedLine) {
