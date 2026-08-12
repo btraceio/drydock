@@ -1874,22 +1874,66 @@ the first hop and break on the second — a Claude session forks to Codex, and
 the Codex session can never write a brief for the *next* hop. Shipping Tasks
 1–8 alone yields a one-way door.
 
-**Two ways forward, neither of them in this plan's scope:**
+### What the two CLIs actually offer (investigated 2026-08-12)
 
-1. **Give Codex and Pi a route to the MCP server.** Both have their own
-   configuration surfaces (Codex: `mcp_servers` in `~/.codex/config.toml` or
-   `--config`; Pi: its own equivalent). This needs its own investigation and
-   spec, because a per-session token in a user-global config file is a
-   different security shape than a per-session config file drydock owns and
-   writes.
-2. **Seed the instruction instead of relying on MCP `instructions`.** The
-   fork already writes the successor's first prompt, so it can carry "keep
-   `session_handoff` current" in the highest-attention position, with no
-   dependence on whether the client surfaces MCP server instructions. This
-   helps only where the tool is reachable at all, so it complements (1)
-   rather than replacing it.
+Against the installed binaries — Codex at `/usr/local/bin/codex`, Pi
+`@earendil-works/pi-coding-agent` 0.84.1.
 
-Do **not** start Task 1 without deciding which of these lands first.
+**Codex: reachable, per-session, with one contained server change.**
+
+- `codex -c/--config <key=value>` overrides any config value per invocation
+  using a dotted TOML path, so `mcp_servers.drydock` can be set **on the
+  command line** — no mutation of the user's `~/.codex/config.toml`, which
+  keeps the per-session shape drydock already relies on.
+- `codex mcp add <NAME> --url <URL>` confirms streamable-HTTP MCP servers are
+  supported, which is what drydock runs (`McpConfigWriter:117-119` writes
+  `type: "http"`, `url`, `headers`).
+- **The blocker is the auth header, and it is small.** Codex offers only
+  `--bearer-token-env-var <ENV_VAR>`, i.e. `Authorization: Bearer <token>`.
+  Drydock sends its token in a custom header, `X-Drydock-Session-Token`
+  (`McpConfigWriter.java:66`). For Codex to authenticate, drydock's MCP server
+  must **also** accept `Authorization: Bearer` carrying the same session
+  token. That is a contained change on the server side.
+- Trade-off to decide deliberately: the token then lives in the session
+  process's environment rather than in an owner-readable file. It is not on
+  disk, but it is visible to anything that can read that process's
+  environment.
+
+**Pi: not reachable, and not by a small change.**
+
+- Pi 0.84.1 has **no MCP support at all**. No `mcp` dependency in
+  `package.json`, no `mcp` config key, no flag, and the single occurrence of
+  the string in the whole of `dist/` is a comment in
+  `utils/tool-result-images.js` describing "MCP bridges" as a *kind of
+  extension* that might return images.
+- So MCP in Pi means authoring a Pi extension that hosts an MCP client and
+  bridges to drydock — TypeScript work in another repo, not a Java change
+  here.
+- Pi does offer `--append-system-prompt <text>`, which is a direct instruction
+  lever needing no MCP at all, and `--session-id`, which drydock already uses.
+
+### Consequence: the design already degrades correctly for Pi
+
+A Pi session cannot write a brief, so forking *from* Pi falls to the floor the
+design already specifies — drydock-derived facts plus the human's *Edit*
+verb — and the seed says outright that no brief was recorded. Forking *to* Pi
+is unaffected, since a seed is just a prompt. Pi is therefore a **degraded
+source and a full destination**, which is worth stating in the UI rather than
+discovering.
+
+### Recommended order
+
+1. Accept `Authorization: Bearer` in drydock's MCP server alongside
+   `X-Drydock-Session-Token`, and teach `CodexAgentProvider` to emit the `-c`
+   flags. Note this is not `--mcp-config`, so `AgentProvider.supportsMcpConfig`
+   is the wrong name for the capability once two providers reach the server by
+   different mechanisms — expect to generalize it.
+2. Then Tasks 1–8, which at that point work fully on Claude and Codex and
+   degrade honestly on Pi.
+3. A Pi MCP bridge extension, only if Pi turns out to be a harness you fork
+   *from* often enough to care.
+
+Do **not** start Task 1 without deciding whether step 1 lands first.
 
 ## Notes for the implementer
 
