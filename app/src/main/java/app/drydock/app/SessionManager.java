@@ -4,6 +4,8 @@ import app.drydock.agent.api.AgentKind;
 import app.drydock.agent.api.AgentRegistry;
 import app.drydock.agent.api.CreateContext;
 import app.drydock.agent.api.LaunchPlan;
+import app.drydock.agent.api.McpAccess;
+import app.drydock.agent.api.McpDelivery;
 import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdDiscovery;
 import app.drydock.agent.api.SessionIdStrategy;
@@ -177,34 +179,43 @@ public final class SessionManager implements AutoCloseable {
     }
 
     /**
-     * Mints this session's token and writes its MCP config file. Returns empty
-     * when MCP is not wired up, the session's provider cannot consume such a
-     * file, or the write failed: a session without Drydock tools is strictly
-     * better than one that fails to launch. Performs file I/O -- background
+     * Mints this session's token and, for a {@link McpDelivery#CONFIG_FILE}
+     * provider, writes its MCP config file. Returns empty when MCP is not
+     * wired up, the session's provider cannot reach drydock's tools at all, or
+     * the write failed: a session without Drydock tools is strictly better
+     * than one that fails to launch. May perform file I/O -- background
      * executor only.
      *
-     * <p>The support check lives HERE rather than only inside the provider's
+     * <p>The delivery check lives HERE rather than only inside the provider's
      * own flag builder: this method's result is an eagerly evaluated argument
      * to {@link CreateContext}/{@link ResumeContext}, so a check made
-     * downstream would still have minted a token and written a file that the
-     * builder then discards. {@link AgentProvider#supportsMcpConfig()} is the
+     * downstream would still have minted a token -- and written a file -- that
+     * the builder then discards. {@link AgentProvider#mcpDelivery()} is the
      * gate because the narrower "does the installed binary advertise the
      * flag" question is provider-internal (Claude's {@code
      * ClaudeCapabilities.supportsMcpConfig}).</p>
+     *
+     * <p>A {@link McpDelivery#COMMAND_LINE} provider gets a token but no file.
+     * Writing one would leave a credential on disk that nothing ever reads.</p>
      *
      * @param spawn whether this session may create worktrees and start further
      *              sessions. {@link Spawn#FORBIDDEN} for a session an agent
      *              started, which is what makes fan-out depth 1.
      */
-    private Optional<Path> mcpConfigFor(AgentProvider provider, ManagedSessionId sessionId, Spawn spawn) {
+    private Optional<McpAccess> mcpAccessFor(AgentProvider provider, ManagedSessionId sessionId, Spawn spawn) {
         Optional<McpWiring> wiring = mcpWiring;
-        if (wiring.isEmpty() || !provider.supportsMcpConfig()) {
+        McpDelivery delivery = provider.mcpDelivery();
+        if (wiring.isEmpty() || delivery == McpDelivery.NONE) {
             return Optional.empty();
         }
         McpWiring mcp = wiring.get();
+        String token = mcp.registry().mint(sessionId, spawn);
+        if (delivery == McpDelivery.COMMAND_LINE) {
+            return Optional.of(new McpAccess(mcp.endpointUrl(), token, Optional.empty()));
+        }
         try {
-            String token = mcp.registry().mint(sessionId, spawn);
-            return Optional.of(mcp.writer().writeFor(sessionId, mcp.endpointUrl(), token));
+            Path configFile = mcp.writer().writeFor(sessionId, mcp.endpointUrl(), token);
+            return Optional.of(new McpAccess(mcp.endpointUrl(), token, Optional.of(configFile)));
         } catch (IOException e) {
             // Never log the token or the endpoint URL (it carries the port).
             LOG.log(Level.WARNING, "Could not write MCP config for session " + sessionId
@@ -438,11 +449,11 @@ public final class SessionManager implements AutoCloseable {
                                                                   String surfaceWorkingDirectory,
                                                                   ManagedSessionId managedSessionId, Spawn spawn) {
         return CompletableFuture.supplyAsync(() -> {
-                    Optional<Path> mcpConfig = remote.isPresent() || hasDiagOverride(provider.kind())
+                    Optional<McpAccess> mcp = remote.isPresent() || hasDiagOverride(provider.kind())
                             ? Optional.empty()
-                            : mcpConfigFor(provider, managedSessionId, spawn);
+                            : mcpAccessFor(provider, managedSessionId, spawn);
                     CreateContext ctx = new CreateContext(displayName, sessionId, targetWorkingDirectory, remote,
-                            mcpConfig);
+                            mcp);
                     LaunchPlan plan = provider.buildCreateCommand(ctx);
                     if (!plan.supported()) {
                         throw new IllegalStateException(
@@ -553,11 +564,11 @@ public final class SessionManager implements AutoCloseable {
                                 // LAUNCH, not of the session, so a session an
                                 // agent started regains spawn rights if the
                                 // human later resumes it themselves.
-                                Optional<Path> mcpConfig = remote.isPresent()
+                                Optional<McpAccess> mcp = remote.isPresent()
                                         ? Optional.empty()
-                                        : mcpConfigFor(provider, session.id(), Spawn.ALLOWED);
+                                        : mcpAccessFor(provider, session.id(), Spawn.ALLOWED);
                                 ResumeContext ctx = new ResumeContext(session.agentSessionId(),
-                                        session.agentSessionName(), session.workingDirectory(), remote, mcpConfig);
+                                        session.agentSessionName(), session.workingDirectory(), remote, mcp);
                                 return provider.buildResumeCommand(ctx).command();
                             }, backgroundExecutor)
                             .thenCompose(command -> createSurfaceOnFxThread(app, host, scaleFactor, command,

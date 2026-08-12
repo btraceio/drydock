@@ -7,6 +7,7 @@ import app.drydock.agent.api.AgentKind;
 import app.drydock.agent.api.ConversationSource;
 import app.drydock.agent.api.CreateContext;
 import app.drydock.agent.api.LaunchPlan;
+import app.drydock.agent.api.McpDelivery;
 import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdDiscovery;
 import app.drydock.agent.api.SessionIdStrategy;
@@ -82,10 +83,16 @@ public final class PiAgentProvider implements AgentProvider {
         return false;
     }
 
-    /** No {@code --mcp-config} equivalent: Drydock's per-session MCP file is Claude-specific. */
+    /**
+     * Pi has no MCP support at all, and by design: its README says so
+     * outright ("No MCP. Build CLI tools with READMEs, or build an extension
+     * that adds MCP support"), alongside sub-agents and plan mode as things
+     * the core deliberately omits. So this is not a gap to wait out -- reaching
+     * drydock from Pi means a CLI plus a skill file, not a config flag.
+     */
     @Override
-    public boolean supportsMcpConfig() {
-        return false;
+    public McpDelivery mcpDelivery() {
+        return McpDelivery.NONE;
     }
 
     @Override

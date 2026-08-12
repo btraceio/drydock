@@ -36,7 +36,7 @@ class AgentRegistryTest {
         @Override public String describeSearched() { return "PATH"; }
         @Override public AgentCapabilities probeCapabilities() { return new AgentCapabilities(remoteCapable, true, "1"); }
         @Override public boolean supportsRemote() { return remoteCapable; }
-        @Override public boolean supportsMcpConfig() { return false; }
+        @Override public McpDelivery mcpDelivery() { return McpDelivery.NONE; }
         @Override public LaunchPlan buildCreateCommand(CreateContext c) { return LaunchPlan.of("x", false); }
         @Override public LaunchPlan buildResumeCommand(ResumeContext r) { return LaunchPlan.of("x", false); }
         @Override public SessionIdStrategy idStrategy() { return SessionIdStrategy.PRESET; }

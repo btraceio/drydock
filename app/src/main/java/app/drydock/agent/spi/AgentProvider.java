@@ -7,6 +7,7 @@ import app.drydock.agent.api.AgentKind;
 import app.drydock.agent.api.ConversationSource;
 import app.drydock.agent.api.CreateContext;
 import app.drydock.agent.api.LaunchPlan;
+import app.drydock.agent.api.McpDelivery;
 import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdDiscovery;
 import app.drydock.agent.api.SessionIdStrategy;
@@ -48,18 +49,24 @@ public interface AgentProvider {
     boolean supportsRemote();
 
     /**
-     * Whether this integration knows what to do with a per-session MCP config
-     * file (Claude's {@code --mcp-config}). A static fact about the integration,
-     * like {@link #supportsRemote()}, so implementations MUST make this CHEAP and
-     * non-blocking: no process spawns, no I/O. Safe on the JavaFX thread.
+     * How this integration is handed drydock's own MCP tools -- a file it
+     * points at, overrides on its command line, or not at all. A static fact
+     * about the integration, like {@link #supportsRemote()}, so implementations
+     * MUST make this CHEAP and non-blocking: no process spawns, no I/O. Safe on
+     * the JavaFX thread.
      *
-     * <p>Distinct from any probed CLI flag: this says the integration can consume
-     * such a file at all, not that the installed binary accepts the option. The
+     * <p>Distinct from any probed CLI flag: this says what the integration can
+     * consume at all, not that the installed binary accepts the option. The
      * binary check stays provider-internal (Claude's {@code
      * ClaudeCapabilities.supportsMcpConfig}), per this interface's rule that
      * provider-internal flag detail is not exposed here.</p>
+     *
+     * <p>This replaced a boolean {@code supportsMcpConfig}. The question it
+     * asked -- "does this understand Claude's config file" -- stopped being
+     * answerable yes/no once Codex reached the same server by a different
+     * mechanism and had no use for a file.</p>
      */
-    boolean supportsMcpConfig();
+    McpDelivery mcpDelivery();
 
     LaunchPlan buildCreateCommand(CreateContext c);
 

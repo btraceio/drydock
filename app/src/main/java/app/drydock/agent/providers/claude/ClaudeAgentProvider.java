@@ -7,6 +7,8 @@ import app.drydock.agent.api.AgentKind;
 import app.drydock.agent.api.ConversationSource;
 import app.drydock.agent.api.CreateContext;
 import app.drydock.agent.api.LaunchPlan;
+import app.drydock.agent.api.McpAccess;
+import app.drydock.agent.api.McpDelivery;
 import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdDiscovery;
 import app.drydock.agent.api.SessionIdStrategy;
@@ -86,9 +88,10 @@ public final class ClaudeAgentProvider implements AgentProvider {
         return true;
     }
 
+    /** Claude reads a config file drydock writes ({@code --mcp-config}). */
     @Override
-    public boolean supportsMcpConfig() {
-        return true;
+    public McpDelivery mcpDelivery() {
+        return McpDelivery.CONFIG_FILE;
     }
 
     @Override
@@ -107,7 +110,7 @@ public final class ClaudeAgentProvider implements AgentProvider {
             sessionIdUsed = true;
         }
         command.append(activitySettingsFlag(caps));
-        command.append(mcpConfigFlag(caps, c.mcpConfig()));
+        command.append(mcpConfigFlag(caps, c.mcp().flatMap(McpAccess::configFile)));
         return LaunchPlan.of(command.toString(), sessionIdUsed);
     }
 
@@ -123,7 +126,7 @@ public final class ClaudeAgentProvider implements AgentProvider {
             return LaunchPlan.of(SshCommandBuilder.interactiveSessionCommand(r.remote().get(), exec), false);
         }
         ClaudeCapabilities caps = detectCaps();
-        String suffix = activitySettingsFlag(caps) + mcpConfigFlag(caps, r.mcpConfig());
+        String suffix = activitySettingsFlag(caps) + mcpConfigFlag(caps, r.mcp().flatMap(McpAccess::configFile));
         if (r.agentSessionId().isPresent()) {
             return LaunchPlan.of(ENV_CLEANUP_PREFIX + "claude --resume " + AgentCommands.shellQuote(r.agentSessionId().get()) + suffix, false);
         }

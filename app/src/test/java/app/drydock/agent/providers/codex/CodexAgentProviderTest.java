@@ -4,6 +4,8 @@ import app.drydock.agent.api.AgentContext;
 import app.drydock.agent.api.AgentKind;
 import app.drydock.agent.api.CreateContext;
 import app.drydock.agent.api.LaunchPlan;
+import app.drydock.agent.api.McpAccess;
+import app.drydock.agent.api.McpDelivery;
 import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdStrategy;
 import app.drydock.agent.providers.codex.internal.CodexExecutableLocator;
@@ -72,5 +74,81 @@ class CodexAgentProviderTest {
         assertTrue(p.activity().isEmpty());
         assertTrue(p.conversations().isPresent());
         assertTrue(p.idDiscovery().isPresent());
+    }
+
+    // ---- drydock's MCP tools, delivered on the command line ------------------
+
+    private static final Optional<McpAccess> SOME_MCP = Optional.of(
+            new McpAccess("http://127.0.0.1:51234/mcp", "tok-abc", Optional.empty()));
+
+    @Test
+    void takesItsMcpAccessOnTheCommandLine() {
+        assertEquals(McpDelivery.COMMAND_LINE, provider().mcpDelivery());
+    }
+
+    @Test
+    void createCarriesTheEndpointAndTokenAsConfigOverrides() {
+        LaunchPlan plan = provider().buildCreateCommand(
+                new CreateContext("Session 1", "ignored-uuid", Path.of("/repo"), Optional.empty(), SOME_MCP));
+
+        assertTrue(plan.command().contains(
+                "-c 'mcp_servers.drydock.url=\"http://127.0.0.1:51234/mcp\"'"), plan.command());
+        assertTrue(plan.command().contains(
+                "-c 'mcp_servers.drydock.http_headers={\"X-Drydock-Session-Token\"=\"tok-abc\"}'"),
+                plan.command());
+    }
+
+    @Test
+    void theOverridesPrecedeTheSubcommandSoCodexParsesThemAsGlobalOptions() {
+        LaunchPlan plan = provider().buildResumeCommand(
+                new ResumeContext(Optional.of("019f9072-abc"), Optional.empty(), Path.of("/repo"),
+                        Optional.empty(), SOME_MCP));
+
+        assertTrue(plan.command().indexOf("-c 'mcp_servers") < plan.command().indexOf("resume"),
+                plan.command());
+        assertTrue(plan.command().endsWith("resume '019f9072-abc'"), plan.command());
+    }
+
+    @Test
+    void resumeWithoutAnIdStillCarriesTheOverrides() {
+        LaunchPlan plan = provider().buildResumeCommand(
+                new ResumeContext(Optional.empty(), Optional.empty(), Path.of("/repo"),
+                        Optional.empty(), SOME_MCP));
+
+        assertTrue(plan.command().contains("mcp_servers.drydock.url"), plan.command());
+        // Still the cwd-filtered picker, never --last -- the overrides sit
+        // between "codex" and "resume", so this no longer ends "codex resume".
+        assertTrue(plan.command().endsWith(" resume"), plan.command());
+        assertFalse(plan.command().contains("--last"), plan.command());
+    }
+
+    @Test
+    void noMcpAccessMeansNoOverridesAtAll() {
+        LaunchPlan plan = provider().buildCreateCommand(
+                new CreateContext("s", "x", Path.of("/repo"), Optional.empty(), Optional.empty()));
+
+        assertFalse(plan.command().contains("mcp_servers"), plan.command());
+        assertTrue(plan.command().endsWith("codex"), plan.command());
+    }
+
+    @Test
+    void aTokenWithTomlMetacharactersIsEscapedNotInjected() {
+        // The token is opaque to this provider; a quote or backslash in it must
+        // stay inside the TOML string rather than ending it.
+        Optional<McpAccess> nasty = Optional.of(
+                new McpAccess("http://127.0.0.1:1/mcp", "a\"b\\c", Optional.empty()));
+
+        String command = provider().buildCreateCommand(
+                new CreateContext("s", "x", Path.of("/repo"), Optional.empty(), nasty)).command();
+
+        assertTrue(command.contains("\\\"b\\\\c"), command);
+    }
+
+    @Test
+    void aRemoteContextStaysUnsupportedEvenWithMcpAccess() {
+        LaunchPlan plan = provider().buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
+                Optional.of(new SshRemote("host", "/remote/path")), SOME_MCP));
+
+        assertFalse(plan.supported());
     }
 }

@@ -1801,8 +1801,10 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      *
      * <p>The session runs the REPOSITORY'S agent, not a hard-coded one. What
      * that costs is worth stating: the {@code review_*} MCP surface reaches
-     * an agent only through the per-session MCP config, which today only
-     * Claude consumes ({@code AgentProvider.supportsMcpConfig}). A session on
+     * an agent only through drydock's MCP server, which an integration
+     * reaches only if its {@code AgentProvider.mcpDelivery} is not {@code
+     * NONE} -- Claude via a config file, Codex via config overrides, Pi not
+     * at all. A session on
      * another agent still reviews -- it reads the diff, answers questions,
      * and takes the "ask the agent to fix it" hand-off, all of which go
      * through its terminal -- but it cannot post findings back into the
@@ -2176,8 +2178,9 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * processes with no MCP way to remove them.
      *
      * <p>Always {@link AgentKind#CLAUDE}: the MCP tool surface carries no agent
-     * choice, and Claude is the integration that can actually consume the
-     * per-session MCP config (see {@code AgentProvider.supportsMcpConfig}).</p>
+     * choice, and Claude remains the default integration for a session drydock
+     * starts on an agent's behalf (see {@code AgentProvider.mcpDelivery} for
+     * which integrations can reach drydock's tools at all).</p>
      *
      * <p>Callable from any thread, unlike the rest of this class: its caller
      * is an MCP request thread. Which repository owns {@code worktree} is a
