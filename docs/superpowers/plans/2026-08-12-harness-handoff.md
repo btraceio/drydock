@@ -1899,39 +1899,66 @@ Against the installed binaries — Codex at `/usr/local/bin/codex`, Pi
   disk, but it is visible to anything that can read that process's
   environment.
 
-**Pi: not reachable, and not by a small change.**
+**Pi: no MCP by design, and it will not arrive.**
 
-- Pi 0.84.1 has **no MCP support at all**. No `mcp` dependency in
-  `package.json`, no `mcp` config key, no flag, and the single occurrence of
-  the string in the whole of `dist/` is a comment in
-  `utils/tool-result-images.js` describing "MCP bridges" as a *kind of
-  extension* that might return images.
-- So MCP in Pi means authoring a Pi extension that hosts an MCP client and
-  bridges to drydock — TypeScript work in another repo, not a Java change
-  here.
-- Pi does offer `--append-system-prompt <text>`, which is a direct instruction
-  lever needing no MCP at all, and `--session-id`, which drydock already uses.
+Pi's own README states it outright:
 
-### Consequence: the design already degrades correctly for Pi
+> **No MCP.** Build CLI tools with READMEs (see Skills), or build an extension
+> that adds MCP support.
 
-A Pi session cannot write a brief, so forking *from* Pi falls to the floor the
-design already specifies — drydock-derived facts plus the human's *Edit*
-verb — and the seed says outright that no brief was recorded. Forking *to* Pi
-is unaffected, since a seed is just a prompt. Pi is therefore a **degraded
-source and a full destination**, which is worth stating in the UI rather than
-discovering.
+and `docs/usage.md`: *"It intentionally does not include built-in MCP,
+sub-agents, permission popups, plan mode, to-dos, or background bash. You can
+build or install those workflows as extensions or packages."* The code agrees —
+no `mcp` dependency, no config key, no flag, and the only occurrence of the
+string in `dist/` is a comment about "MCP bridges" as a kind of extension.
+
+This is a design stance, not a gap, so waiting for it is not a plan.
+
+**But Pi documents the route drydock should take, and it is cheaper than MCP.**
+Pi's stated alternative is *CLI tools with READMEs*, surfaced through its
+skills mechanism (`--skill <path>`, plus discovery under
+`~/.pi/agent/` and `.pi/`). So the handoff reaches Pi as:
+
+- a small `drydock handoff` CLI that writes the same `HandoffBrief` through the
+  same path `session_handoff` uses, and
+- a skill file drydock passes with `--skill`, telling the agent when to call it.
+
+Authentication gets *simpler*, not harder: drydock spawns the process, so the
+CLI can take its session token from an environment variable or a file drydock
+wrote, with no HTTP auth negotiation at all.
+
+Pi also offers `--append-system-prompt <text>` — a direct instruction lever
+needing neither MCP nor a skill — and `--session-id`, which drydock already
+uses.
+
+Note the CLI route is **harness-agnostic**: any agent that can run bash can
+call it, so it doubles as the fallback for every future provider that does not
+speak MCP.
+
+### Consequence: writing a brief is not one mechanism
+
+Three harnesses reach drydock three ways — a config file (Claude), command-line
+config overrides (Codex), a CLI plus a skill (Pi) — and only the first exists
+today. Until they do, a Pi session cannot write a brief, so forking *from* Pi
+falls to the floor the design already specifies: drydock-derived facts plus the
+human's *Edit* verb, with the seed stating outright that no brief was recorded.
+Forking *to* Pi is unaffected, since a seed is just a prompt. Pi is a
+**degraded source and a full destination** until the CLI route lands, and the
+UI should say so rather than let it be discovered.
 
 ### Recommended order
 
-1. Accept `Authorization: Bearer` in drydock's MCP server alongside
+1. **Codex.** Accept `Authorization: Bearer` in drydock's MCP server alongside
    `X-Drydock-Session-Token`, and teach `CodexAgentProvider` to emit the `-c`
    flags. Note this is not `--mcp-config`, so `AgentProvider.supportsMcpConfig`
    is the wrong name for the capability once two providers reach the server by
-   different mechanisms — expect to generalize it.
-2. Then Tasks 1–8, which at that point work fully on Claude and Codex and
+   different mechanisms — expect to generalize it to something like
+   "how this provider is given drydock's tools".
+2. **Tasks 1–8**, which at that point work fully on Claude and Codex and
    degrade honestly on Pi.
-3. A Pi MCP bridge extension, only if Pi turns out to be a harness you fork
-   *from* often enough to care.
+3. **The `drydock handoff` CLI + Pi skill.** Worth doing on its own merits even
+   before Pi needs it, because it is harness-agnostic: it is the fallback for
+   every provider that will not speak MCP, and Pi is unlikely to be the last.
 
 Do **not** start Task 1 without deciding whether step 1 lands first.
 
