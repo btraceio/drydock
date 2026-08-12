@@ -3,6 +3,9 @@ package app.drydock.review;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.git.DiffScope;
 import app.drydock.state.json.JsonParser;
+import app.drydock.state.json.JsonValue.JsonArray;
+import app.drydock.state.json.JsonValue.JsonObject;
+import app.drydock.state.json.JsonValue.JsonString;
 import app.drydock.state.json.JsonWriter;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -41,7 +44,7 @@ class AnnotationStoreTest {
                 severity, Confidence.HIGH, Optional.of("Title"), "Claude", AT,
                 List.of(), Optional.empty(), Optional.empty(), List.of(),
                 List.of(new ReviewAnnotation.Message("Claude", AT, "body")),
-                Optional.empty(), AnnotationStatus.OPEN);
+                Optional.empty(), AnnotationStatus.OPEN, Optional.empty(), false);
     }
 
     @Test
@@ -181,7 +184,7 @@ class AnnotationStoreTest {
             ReviewAnnotation other = new ReviewAnnotation("rs_a", "f2", Optional.of("i2"),
                     "src/Other.java", "n1", "n1", Severity.NIT, Confidence.HIGH, Optional.empty(),
                     "Claude", AT, List.of(), Optional.empty(), Optional.empty(), List.of(),
-                    List.of(), Optional.empty(), AnnotationStatus.OPEN);
+                    List.of(), Optional.empty(), AnnotationStatus.OPEN, Optional.empty(), false);
             store.upsert(other);
 
             assertEquals(List.of("f1"), store.forIntent("rs_a", "i1").stream()
@@ -244,12 +247,57 @@ class AnnotationStoreTest {
                 List.of(new ReviewAnnotation.Ask("Why is it a leak?", "Explain the leak.")),
                 List.of(new ReviewAnnotation.Message("Claude", AT, "body",
                         Optional.of(new ReviewAnnotation.Evidence("here", "code", "java")))),
-                Optional.of(Severity.QUESTION), AnnotationStatus.ADDRESSED);
+                Optional.of(Severity.QUESTION), AnnotationStatus.ADDRESSED,
+                Optional.of(new ReviewAnnotation.GitHubComment(42L, "https://github.com/o/r/pull/1#discussion_r42",
+                        true)),
+                true);
 
         List<ReviewAnnotation> decoded = AnnotationStore.fromJson(JsonParser.parse(
                 JsonWriter.write(AnnotationStore.toJson(List.of(rich), List.of(), List.of()))));
 
         assertEquals(List.of(rich), decoded);
+    }
+
+    @Test
+    void githubStateSurvivesARoundTrip() {
+        ReviewAnnotation finding = ReviewAnnotation.human("scope-1", "Sidebar.java", "o55", "n58",
+                        new ReviewAnnotation.Message("You", Instant.parse("2026-08-05T10:00:00Z"), "why?"))
+                .withGithub(new ReviewAnnotation.GitHubComment(9001L,
+                        "https://github.com/o/r/pull/7#discussion_r9001", false));
+
+        List<ReviewAnnotation> decoded = AnnotationStore.fromJson(
+                AnnotationStore.toJson(List.of(finding), List.of(), List.of()));
+
+        assertEquals(1, decoded.size());
+        assertEquals(9001L, decoded.get(0).github().orElseThrow().id());
+        assertEquals("https://github.com/o/r/pull/7#discussion_r9001",
+                decoded.get(0).github().orElseThrow().url());
+        assertTrue(decoded.get(0).postToPr(), "a comment you authored posts by default");
+    }
+
+    @Test
+    void anEntryWrittenBeforeGithubStateExistedStillDecodes() {
+        // Lenient decode: an entry written before github/postToPr existed has
+        // neither key, and must load as a local-only, not-posting annotation
+        // rather than being skipped.
+        JsonObject entry = JsonObject.empty();
+        entry.put("scopeId", new JsonString("scope-1"));
+        entry.put("id", new JsonString("f_1"));
+        entry.put("file", new JsonString("Sidebar.java"));
+        entry.put("startKey", new JsonString("n40"));
+        entry.put("endKey", new JsonString("n40"));
+        entry.put("author", new JsonString("reviewer"));
+        entry.put("at", new JsonString("2026-08-05T10:00:00Z"));
+        entry.put("status", new JsonString("OPEN"));
+        entry.put("thread", new JsonArray(List.of()));
+        JsonObject root = JsonObject.empty();
+        root.put("annotations", new JsonArray(List.of(entry)));
+
+        List<ReviewAnnotation> decoded = AnnotationStore.fromJson(root);
+
+        assertEquals(1, decoded.size());
+        assertTrue(decoded.get(0).github().isEmpty());
+        assertFalse(decoded.get(0).postToPr(), "an agent's finding posts only once promoted");
     }
 
     @Test

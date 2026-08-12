@@ -1,10 +1,13 @@
 package app.drydock.ui.explorer;
 
 import app.drydock.ui.code.SyntaxHighlighter;
+import javafx.application.Platform;
 import javafx.geometry.Pos;
+import javafx.scene.Node;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
 import javafx.scene.control.ScrollPane;
+import javafx.scene.input.ScrollEvent;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
@@ -17,6 +20,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
@@ -47,6 +51,17 @@ final class SkimView extends ScrollPane {
     private final Map<Integer, Boolean> expansion = new java.util.HashMap<>();
     private boolean helpersExpanded;
 
+    /**
+     * How many layout passes a reveal may spend trying to make its scroll
+     * stick. Generous enough for the several passes a rebuild can trigger,
+     * finite so an unreachable target cannot re-apply forever.
+     */
+    private static final int MAX_SCROLL_ATTEMPTS = 8;
+
+    /** The row a reveal is still trying to put at the top, or -1 for none. */
+    private int pendingTopRow = -1;
+    private int pendingAttempts;
+
     private Consumer<Integer> onMemberRead = line -> { };
     private BiConsumer<CodeArea, Integer> onBodyBuilt = (area, startLine) -> { };
 
@@ -56,6 +71,12 @@ final class SkimView extends ScrollPane {
         setHbarPolicy(ScrollBarPolicy.NEVER);
         rows.getStyleClass().add("skim-rows");
         setContent(rows);
+        // Every layout is a chance for a pending reveal to land: the pass
+        // that overwrites the scroll and the pass that finally reports real
+        // geometry are both layouts, and which one comes when is exactly what
+        // this class cannot predict.
+        rows.layoutBoundsProperty().addListener((obs, was, is) -> applyPendingTopRow());
+        viewportBoundsProperty().addListener((obs, was, is) -> applyPendingTopRow());
     }
 
     /** Called with the start line of a member the reader opened (it counts as read). */
@@ -80,21 +101,57 @@ final class SkimView extends ScrollPane {
         this.lines = text.isEmpty() ? List.of() : List.of(text.split("\n", -1));
         this.changed = Set.copyOf(changed);
         this.findingLabels = Map.copyOf(findingLabels);
+        // expansion is keyed by line number, not by member identity: a stale
+        // TRUE surviving from the previous document would pull open whatever
+        // member happens to start at that line number in THIS one, and
+        // rebuild() consults expansion to override folding -- so this is not
+        // cosmetic, it decides what a fresh document looks like on arrival.
+        expansion.clear();
+        helpersExpanded = false;
+        // New content: there is no reader's place in this document to
+        // preserve, and a vvalue measured against the previous document
+        // would be meaningless here. The caller decides where to land --
+        // scrollToTop() or a revealLine() -- right after this returns; a
+        // restore queued behind it would land a pulse later and undo it.
         rebuild();
     }
 
-    /** Repaints against a new changed set / finding set without touching expansion state. */
+    /**
+     * Repaints against a new changed set / finding set without touching
+     * expansion state. The same document repainted, so the reader's place in
+     * it is worth keeping -- which is why this restores the scroll and
+     * {@link #show} does not.
+     */
     void refresh(Set<Integer> changed, Map<Integer, String> findingLabels) {
         this.changed = Set.copyOf(changed);
         this.findingLabels = Map.copyOf(findingLabels);
         rebuild();
     }
 
-    /** The line at the top of the skim viewport, so {@code z} can hand it to the full-text area. */
+    /**
+     * How far the content can scroll, in pixels: the conversion between a
+     * vvalue fraction and an absolute offset. Floored at 1 so it is always
+     * safe to divide by; callers that care whether there is anything to
+     * scroll at all check the real overflow themselves.
+     */
+    private double scrollableSpan() {
+        return Math.max(1, rows.getHeight() - getViewportBounds().getHeight());
+    }
+
+    /**
+     * The line at the top of the skim viewport, so {@code z} can hand it to
+     * the full-text area.
+     *
+     * <p>Strictly greater than the offset: a row whose bottom edge lands
+     * exactly on the viewport's top edge shows no pixels and is not what the
+     * reader is looking at. Not covered by a test -- the rows carry 1px of
+     * spacing, so in this layout two edges never actually coincide, and a
+     * test for it could only pass by construction.</p>
+     */
     int topLine() {
-        double offset = getVvalue() * Math.max(1, rows.getHeight() - getViewportBounds().getHeight());
-        for (javafx.scene.Node node : rows.getChildren()) {
-            if (node.getBoundsInParent().getMaxY() >= offset
+        double offset = getVvalue() * scrollableSpan();
+        for (Node node : rows.getChildren()) {
+            if (node.getBoundsInParent().getMaxY() > offset
                     && node.getProperties().get("drydock.line") instanceof Integer line) {
                 return line;
             }
@@ -102,31 +159,169 @@ final class SkimView extends ScrollPane {
         return outline.members().isEmpty() ? 1 : outline.members().get(0).startLine();
     }
 
-    /** Expands the member containing {@code line} and scrolls it into view (a minimap click, or {@code z} back). */
+    /**
+     * Applies a wheel event that landed on a member body to this scroller.
+     * Deltas are in pixels, so they are converted against the same
+     * scrollable span {@link #topLine()} uses.
+     */
+    private void redispatchWheel(ScrollEvent event) {
+        double overflow = rows.getHeight() - getViewportBounds().getHeight();
+        if (overflow <= 0) {
+            // Nothing to scroll: unlike topLine()'s multiplier, this value is
+            // a divisor, so flooring it at 1 would turn a ~120px wheel delta
+            // into a snap to vvalue 0 or 1 instead of a no-op. Left
+            // unconsumed so the event can still reach an enclosing scroller.
+            return;
+        }
+        event.consume();
+        cancelPendingTopRow();
+        setVvalue(Math.max(0, Math.min(1, getVvalue() - event.getDeltaY() / overflow)));
+    }
+
+    /**
+     * Expands the member {@code line} falls in and scrolls it into view (a
+     * minimap click, a search hit, or {@code z} back).
+     *
+     * <p>A line between members -- a blank line, an import, the class header
+     * -- resolves forward to the next member down rather than doing nothing:
+     * this used to be a silent no-op, which made "go to line N" a dead
+     * gesture for every such N, and left the file-open path sitting on
+     * whatever anchor {@code setSkim} had computed from a CodeArea that was
+     * not laid out yet. Past the last member there is nothing to reveal, so
+     * the honest answer is the top of the file.</p>
+     *
+     * <p>Resolving forward SCROLLS but does not open: expanding a member the
+     * reader never pointed at -- and counting it as read, which the trail and
+     * the dwell sampler both believe -- is the view deciding something on
+     * their behalf. Opening a file at line 1 would otherwise expand whatever
+     * declaration happens to come first. Only a line genuinely inside a
+     * member opens it.</p>
+     */
     void revealLine(int line) {
-        outline.memberAt(line).ifPresent(member -> {
+        Optional<SourceOutline.Member> resolved = outline.memberAtOrAfter(line);
+        if (resolved.isEmpty()) {
+            scrollToTop();
+            return;
+        }
+        SourceOutline.Member member = resolved.get();
+        if (member.covers(line)) {
             expansion.put(member.startLine(), true);
             onMemberRead.accept(member.startLine());
-            rebuild();
-            // rebuild() replaced every row, so until a layout pass runs they
-            // all report bounds of zero -- and the target below would come out
-            // as 0, i.e. "scroll to the top", every single time. Forcing the
-            // pass here rather than deferring keeps the scroll in the same
-            // frame as the expansion, so `z` round-trips without a visible
-            // jump to the top and back.
-            applyCss();
-            layout();
-            rows.applyCss();
-            rows.layout();
-            for (javafx.scene.Node node : rows.getChildren()) {
-                if (Integer.valueOf(member.startLine()).equals(node.getProperties().get("drydock.line"))) {
-                    double target = node.getBoundsInParent().getMinY()
-                            / Math.max(1, rows.getHeight() - getViewportBounds().getHeight());
-                    setVvalue(Math.max(0, Math.min(1, target)));
-                    return;
-                }
+        }
+        rebuild();
+        // rebuild() replaced every row, so until a layout pass runs they all
+        // report bounds of zero -- and the target below would come out as 0,
+        // i.e. "scroll to the top", every single time.
+        applyCss();
+        layout();
+        rows.applyCss();
+        rows.layout();
+        scrollRowToTop(rowLineFor(member));
+    }
+
+    /**
+     * The line whose row actually carries {@code member} on screen.
+     *
+     * <p>A member the reader only resolved forward onto is left unexpanded,
+     * and an unexpanded untouched private helper has no row of its own -- it
+     * is inside the folded group, which is keyed by the FIRST folded member's
+     * line. Scrolling to the group is the closest the view can get to a
+     * member it is deliberately not opening.</p>
+     */
+    private int rowLineFor(SourceOutline.Member member) {
+        for (Node node : rows.getChildren()) {
+            if (Integer.valueOf(member.startLine()).equals(node.getProperties().get("drydock.line"))) {
+                return member.startLine();
             }
-        });
+        }
+        return outline.members().stream()
+                .filter(this::isFoldedAway)
+                .findFirst()
+                .map(SourceOutline.Member::startLine)
+                .orElse(member.startLine());
+    }
+
+    /**
+     * Asks for the row carrying {@code rowLine} to sit at the top of the
+     * viewport, and keeps asking until it does.
+     *
+     * <p>One write does not hold. When the rebuild above changed the
+     * content's height -- which revealing usually does, since it opens a body
+     * -- {@code ScrollPaneSkin}'s next layout re-derives vvalue to preserve
+     * the previous ABSOLUTE offset, overwriting whatever was set here.
+     * Measured: a target of 0.41 came back as 0.05, the old offset expressed
+     * against the taller content.</p>
+     *
+     * <p>How many layout passes that takes is not something this code can
+     * know -- a fixed "and again next pulse" landed when a test ran alone and
+     * missed when the same test ran inside the full suite. So the request is
+     * held and re-applied on each layout until the value sticks, rather than
+     * guessed at. It is bounded by {@link #MAX_SCROLL_ATTEMPTS} so an
+     * unreachable target cannot re-apply forever, and any deliberate scroll
+     * -- the wheel, {@code scrollToTop} -- drops it, so it can never fight
+     * the reader.</p>
+     */
+    private void scrollRowToTop(int rowLine) {
+        pendingTopRow = rowLine;
+        pendingAttempts = MAX_SCROLL_ATTEMPTS;
+        applyPendingTopRow();
+    }
+
+    /**
+     * Called on every layout of the rows, until the pending request lands.
+     *
+     * <p>Success is only ever concluded from a LATER pass: reading vvalue
+     * back immediately after setting it always agrees, so treating that as
+     * "it held" cleared the request before the overwrite it exists to
+     * survive. Here, finding the value still on target at the start of a
+     * subsequent layout is what proves it stuck.</p>
+     */
+    private void applyPendingTopRow() {
+        if (pendingTopRow < 0) {
+            return;
+        }
+        Node row = null;
+        for (Node node : rows.getChildren()) {
+            if (Integer.valueOf(pendingTopRow).equals(node.getProperties().get("drydock.line"))) {
+                row = node;
+                break;
+            }
+        }
+        if (row == null || rows.getHeight() - getViewportBounds().getHeight() <= 0) {
+            // No row yet, not laid out yet, or nothing to scroll: this pass
+            // cannot answer, so keep the request for one that can. Attempts
+            // are not spent on a pass that was never able to try.
+            return;
+        }
+        double target = Math.max(0, Math.min(1, row.getBoundsInParent().getMinY() / scrollableSpan()));
+        if (Math.abs(getVvalue() - target) < 0.001) {
+            pendingTopRow = -1;
+            return;
+        }
+        if (pendingAttempts-- <= 0) {
+            pendingTopRow = -1;
+            return;
+        }
+        setVvalue(target);
+    }
+
+    /** Drops a pending reveal, so a deliberate scroll is never argued with. */
+    private void cancelPendingTopRow() {
+        pendingTopRow = -1;
+    }
+
+    /**
+     * Puts the top of the file at the top of the viewport. Called when a
+     * file opens in skim mode with no line to jump to: {@code setSkim}'s
+     * anchor is read from a CodeArea that has not been laid out yet, and an
+     * arbitrary anchor leaves members above the viewport with nothing
+     * saying they are there.
+     */
+    void scrollToTop() {
+        cancelPendingTopRow();
+        applyCss();
+        layout();
+        setVvalue(0);
     }
 
     private boolean isExpanded(SourceOutline.Member member) {
@@ -135,14 +330,32 @@ final class SkimView extends ScrollPane {
         return explicit != null ? explicit : member.isChanged(changed);
     }
 
+    /**
+     * Whether {@code member} loses its own row to the folded-helpers group.
+     * An explicit expansion beats the fold: {@link #revealLine} puts one there
+     * when a search hit or a minimap click lands inside an untouched helper,
+     * and leaving it folded would make that click do nothing at all.
+     */
+    private boolean isFoldedAway(SourceOutline.Member member) {
+        return member.privateHelper()
+                && !member.isChanged(changed)
+                && findingIn(member) == null
+                && !Boolean.TRUE.equals(expansion.get(member.startLine()));
+    }
+
+    /**
+     * Rebuilds the rows. Deliberately does no scroll bookkeeping: a
+     * ScrollPane keeps its vvalue across a children swap on its own
+     * (measured), so the capture-and-restore this used to carry never fired
+     * in any test that exercised it. Callers that DO want a particular
+     * position -- {@link #show}, {@link #revealLine}, {@link #scrollToTop} --
+     * say so themselves, right after this returns.
+     */
     private void rebuild() {
         rows.getChildren().clear();
         List<SourceOutline.Member> folded = new ArrayList<>();
         for (SourceOutline.Member member : outline.members()) {
-            boolean untouchedHelper = member.privateHelper()
-                    && !member.isChanged(changed)
-                    && findingIn(member) == null;
-            if (untouchedHelper) {
+            if (isFoldedAway(member)) {
                 folded.add(member);
                 continue;
             }
@@ -250,8 +463,24 @@ final class SkimView extends ScrollPane {
     }
 
     private Region buildBody(SourceOutline.Member member) {
-        int from = Math.max(1, member.startLine());
+        int start = Math.max(1, member.startLine());
         int to = Math.min(lines.size(), member.endLine());
+        // The header row already shows the signature. Repeating it as the
+        // body's first line costs a row per open member and reads like a
+        // rendering fault -- so it is dropped, but only when line `start`
+        // really is the signature (a wrapped or annotated declaration is
+        // not) and only when something is left underneath it. Compared
+        // through stripComment because that is how the signature was built:
+        // `void run() { // see below` would not match its own line otherwise.
+        // ...but never when the change is ON the signature line: a member
+        // whose declaration changed is tagged `· changed` and pre-expanded,
+        // and dropping that line would show the reader a body with no green
+        // marker anywhere in it. Telling someone a member changed and then
+        // highlighting nothing is worse than one repeated line.
+        boolean repeatsSignature = to > start && start <= lines.size()
+                && !changed.contains(start)
+                && SourceOutline.stripComment(lines.get(start - 1)).strip().equals(member.signature());
+        int from = repeatsSignature ? start + 1 : start;
         StringBuilder text = new StringBuilder();
         for (int line = from; line <= to; line++) {
             text.append(lines.get(line - 1));
@@ -304,6 +533,12 @@ final class SkimView extends ScrollPane {
         scroll.setPrefHeight(height);
         scroll.setMinHeight(height);
         VBox.setVgrow(scroll, Priority.NEVER);
+        // Flowless's VirtualFlow handles ScrollEvent.ANY and consumes it
+        // unconditionally -- even here, where the body is sized to its
+        // content and has nothing to scroll. Without this filter the wheel
+        // dies wherever the cursor sits over open code. A filter, not a
+        // handler: it has to win before the event reaches the flow.
+        scroll.addEventFilter(ScrollEvent.SCROLL, this::redispatchWheel);
         return scroll;
     }
 }

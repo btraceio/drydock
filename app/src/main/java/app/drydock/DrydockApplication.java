@@ -8,6 +8,7 @@ import app.drydock.app.RepositoryManager;
 import app.drydock.app.SessionManager;
 import app.drydock.activity.SessionActivityWatcher;
 import app.drydock.config.UserConfig;
+import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.Repository;
 import app.drydock.domain.UiTheme;
 import app.drydock.domain.WorkspaceUiState;
@@ -16,6 +17,7 @@ import app.drydock.git.DiffService;
 import app.drydock.git.GhCliService;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.WorktreeService;
+import app.drydock.github.GitHubReviewService;
 import app.drydock.github.GitHubService;
 import app.drydock.launcher.DockIcon;
 import app.drydock.mcp.McpConfigWriter;
@@ -29,6 +31,8 @@ import app.drydock.review.AnnotationStore;
 import app.drydock.ui.explorer.ExplorerTrailStore;
 import app.drydock.review.Confidence;
 import app.drydock.review.ReviewAnnotation;
+import app.drydock.review.ReviewItem;
+import app.drydock.review.ReviewScope;
 import app.drydock.review.Severity;
 import app.drydock.review.ReviewScopeRegistry;
 import app.drydock.search.SessionSearchService;
@@ -43,9 +47,20 @@ import app.drydock.ui.SettingsModal;
 import app.drydock.ui.SizeSetting;
 import app.drydock.ui.UiErrors;
 import app.drydock.ui.model.WorkspaceViewModel;
+import javafx.animation.PauseTransition;
 import javafx.application.Application;
 import javafx.application.Platform;
+import javafx.css.PseudoClass;
+import javafx.geometry.Bounds;
+import javafx.geometry.Point2D;
 import javafx.scene.Node;
+import javafx.scene.paint.Stop;
+import javafx.scene.paint.Paint;
+import javafx.scene.paint.LinearGradient;
+import javafx.scene.layout.Region;
+import javafx.scene.layout.BackgroundFill;
+import javafx.scene.layout.Background;
+import javafx.scene.Parent;
 import javafx.scene.control.Alert;
 import javafx.scene.control.ButtonType;
 import javafx.scene.control.Slider;
@@ -58,7 +73,11 @@ import javafx.scene.input.KeyCode;
 import javafx.scene.input.KeyEvent;
 import javafx.stage.Stage;
 import javafx.stage.WindowEvent;
+import javafx.util.Duration;
 
+import java.awt.AWTException;
+import java.awt.Robot;
+import java.awt.event.InputEvent;
 import java.awt.image.BufferedImage;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
@@ -67,6 +86,9 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.Set;
 import javax.imageio.ImageIO;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
@@ -76,6 +98,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.Base64;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.function.Supplier;
 
@@ -110,6 +133,9 @@ public final class DrydockApplication extends Application {
     private static final double DEFAULT_SCENE_WIDTH = 1100;
     private static final double DEFAULT_SCENE_HEIGHT = 720;
 
+    /** Diagnostic-only ({@code forcehover} verb): see {@link #diagForceHover}. */
+    private static final PseudoClass HOVER_PSEUDO_CLASS = PseudoClass.getPseudoClass("hover");
+
     /**
      * How long {@link #onCloseRequest} waits for the graceful
      * close-all-sessions sweep before force-closing the window anyway:
@@ -127,6 +153,7 @@ public final class DrydockApplication extends Application {
     private DiffService diffService;
     private SessionSearchService searchService;
     private GhCliService ghCliService;
+    private GitHubReviewService gitHubReviewService;
     private AgentRegistry agentRegistry;
     private ExecutorService agentContextExecutor;
     private SessionActivityWatcher activityWatcher;
@@ -143,6 +170,8 @@ public final class DrydockApplication extends Application {
     /** Shared by the MCP server (writer) and the Review activity panel (reader). */
     private McpActivityLog mcpActivityLog;
     private McpServer mcpServer;
+    /** Diagnostic-only: the Review view {@code app.drydock.diag.reviewScript} is driving, if any. */
+    private ReviewDestinationView diagReviewView;
 
     private boolean shutdownConfirmed;
 
@@ -202,6 +231,7 @@ public final class DrydockApplication extends Application {
         diffService = new DiffService();
         searchService = new SessionSearchService();
         ghCliService = new GhCliService();
+        gitHubReviewService = new GitHubReviewService();
         Path stateDir = stateRepository.stateFile().getParent();
         Path activityDir = stateDir.resolve("activity");
         agentContextExecutor = Executors.newVirtualThreadPerTaskExecutor();
@@ -236,8 +266,8 @@ public final class DrydockApplication extends Application {
         mcpActivityLog = new McpActivityLog();
 
         mainWorkspace = new MainWorkspace(sessionManager, agentRegistry, repositoryManager, gitStatusService,
-                searchService, ghCliService, worktreeService, diffService, changedLineService, annotationStore,
-                reviewScopeRegistry, mcpActivityLog, explorerTrailStore, viewModel, primaryStage);
+                searchService, ghCliService, gitHubReviewService, worktreeService, diffService, changedLineService,
+                annotationStore, reviewScopeRegistry, mcpActivityLog, explorerTrailStore, viewModel, primaryStage);
         RepositorySidebar sidebar =
                 new RepositorySidebar(repositoryManager, gitStatusService, worktreeService, sessionManager,
                         agentRegistry, mainWorkspace, viewModel);
@@ -325,15 +355,34 @@ public final class DrydockApplication extends Application {
 
                 @Override
                 public CompletableFuture<Void> saveWorktreesDirectory(Optional<Path> directory) {
-                    return UserConfig.saveAsync(new UserConfig(directory));
+                    // Read-modify-write in one executor task: a record
+                    // built from one new value would reset the others.
+                    return UserConfig.updateAsync(existing ->
+                            new UserConfig(directory, existing.openChangedFilesInSkim()));
+                }
+
+                @Override
+                public CompletableFuture<Boolean> loadOpenChangedFilesInSkim() {
+                    return UserConfig.loadAsync().thenApply(UserConfig::openChangedFilesInSkim);
+                }
+
+                @Override
+                public CompletableFuture<Void> saveOpenChangedFilesInSkim(boolean value) {
+                    return UserConfig.updateAsync(existing ->
+                            new UserConfig(existing.worktreesDirectory(), value));
                 }
             }, appShell.modalLayer()::close);
             // onClosed, not just the Done/× onClose above: Esc and a
             // backdrop click hide the modal without moving focus off the
             // worktrees field, so its focus-lost commit never fires --
             // flushPendingEdit is the one seam every close path runs
-            // through (see ModalLayer.close's onClosed callback).
-            appShell.modalLayer().show(settingsModal, settingsModal::flushPendingEdit);
+            // through (see ModalLayer.close's onClosed callback). Chained
+            // after it so the Explorer's cached skim preference picks up
+            // whatever the modal just saved.
+            appShell.modalLayer().show(settingsModal, () -> {
+                settingsModal.flushPendingEdit();
+                mainWorkspace.refreshExplorerPreferences();
+            });
         });
 
         mainWorkspace.setModalLayer(appShell.modalLayer());
@@ -704,9 +753,54 @@ public final class DrydockApplication extends Application {
         //   rename            start the inline rename (as a title double-click does)
         //   renamecancel      end it (as Esc does)
         //   filter:text       focus the sidebar filter and type into it (as ⌘F + typing does)
+        //   facet:name        toggle one sidebar filter chip (status name or agent persistedName)
+        //   expandstale       expand every repo's stale-worktree bucket (no pointer to click it)
         //   keys              print the keyboard-ownership dump
         //   shot:/tmp/a.png   snapshot the scene
         //   mark:label        print a marker to synchronise on
+        //   hover:session:<n> real OS mouse move (java.awt.Robot) onto the
+        //                     nth .session-row/.repo-row ("repo:<n>" for the
+        //                     latter); hover:none parks the pointer away.
+        //                     Diag-only: the row-overlay hover fade has no
+        //                     other synthesis point (see diagHover).
+        //   clickedge:session:<n>  real OS click near the row's trailing
+        //                     edge, past the overlay's buttons -- proves
+        //                     pickOnBounds=false passthrough (see diagClickEdge).
+        //   forcehover:session:<n>  no pointer needed: forces the row's
+        //                     actions strip visible via a diag-only `.or(...)`
+        //                     on the same hoverProperty() binding (does not
+        //                     unbind it) and stamps the row's own CSS
+        //                     :hover pseudo-class, so the fade can be
+        //                     photographed against the hovered row
+        //                     background it is meant to match (see
+        //                     diagForceHover). "repo:<n>" for repo rows.
+        //   pick:session:<n>  no pointer needed: proves click-passthrough
+        //                     structurally, by calling the public
+        //                     Node.contains() on the actions strip, the fade,
+        //                     each action button, and the row itself at
+        //                     fixed probe points, instead of firing a real
+        //                     click (see diagPick). Prints one line per
+        //                     probe and a final PASS/FAIL VERDICT line.
+        //   quit              closes every open session, then the window,
+        //                     via the same path a real close confirmation
+        //                     uses (see performOrderlyShutdown) -- so a
+        //                     scripted run does not leak a process.
+        //
+        //   hover and clickedge both drive java.awt.Robot, which delivers OS
+        //   mouse events to this process only if it holds a macOS
+        //   Accessibility grant -- an agent-run session typically does not,
+        //   and without it these calls are silent no-ops: the Robot method
+        //   returns normally but JavaFX never sees a mouse-move or a click.
+        //   Because of that, neither verb prints what it DID as its verdict.
+        //   hover checks, after a short settle delay, whether the target
+        //   row's Node.isHover() actually flipped, and prints
+        //   "hover VERIFIED"/"hover FAILED". clickedge compares the
+        //   workspace's active session before and after the click and prints
+        //   "clickedge VERIFIED"/"clickedge FAILED"/"clickedge INCONCLUSIVE"
+        //   (the row clicked was already active, so no comparison is
+        //   possible). A line like "hover moved to (x,y)" or "clickedge
+        //   clicked at (x,y)" means only that the OS call was issued, not
+        //   that the app observed anything -- do not read either as a pass.
         // Inert unless -Dapp.drydock.diag.tabScript is set.
         String tabScript = System.getProperty("app.drydock.diag.tabScript");
         if (tabScript != null) {
@@ -726,6 +820,98 @@ public final class DrydockApplication extends Application {
                     String verb = parts[1].strip();
                     String arg = parts.length > 2 ? parts[2] : "";
                     Platform.runLater(() -> diagTabStep(primaryStage, sidebar, verb, arg));
+                }
+            });
+            driver.setDaemon(true);
+            driver.start();
+        }
+
+        // Diagnostic hook for the three Review surfaces no test can reach:
+        // the gutter's drag, the composer and the submit sheet are all
+        // FX-only (there is no headless toolkit harness here), so this is
+        // their visual pass, not an unverified claim.
+        //
+        // Needs a registered repository with something to diff -- pair with
+        // -Dapp.drydock.diag.repo=<path> (plus autoCreateSession, or the
+        // queue stays empty) -- and a window wide enough that Review does
+        // not drill into its narrow single-page layout, which has no room
+        // for the diff column at all: -Dapp.drydock.diag.windowSize=1800x1000
+        // (see sceneWidth()/sceneHeight() below; Review's own drill-in
+        // threshold is ReviewDestinationView.DRILL_IN_WIDTH, measured
+        // against ITS width, which is the window width minus the app
+        // sidebar -- the default 1100px window leaves it well under that).
+        //
+        // Value is a comma-separated "<atSeconds>:<verb>[:<arg>]" script,
+        // same shape as diag.settingsScript. Verbs:
+        //   review               open Review, selecting a PR-kind scope if
+        //                        the queue has one, else a BRANCH-kind scope
+        //                        (a real diff against its base), else
+        //                        whatever the queue selected by default --
+        //                        every queue item is logged either way
+        //   select:<file>:<startKey>:<endKey>
+        //                        drive the gutter's real selection path and
+        //                        open the composer on it (a startKey/endKey
+        //                        spanning a deletion into its replacement is
+        //                        the most interesting case -- see
+        //                        ReviewDiffColumn.diagSelectRange)
+        //   compose:<text>       append text to the open composer's body
+        //   enter                fire a real KeyCode.ENTER at the focused
+        //                        text input -- NOT a literal \n in the arg,
+        //                        which this parser passes through verbatim
+        //                        (see diag.settingsScript's own split above)
+        //   commit               fire the composer's real commit shortcut
+        //                        (Cmd/Ctrl+Enter) at the focused text input
+        //   approveall           settle every counted intent so a real
+        //                        multi-file diff can reach Submit without
+        //                        the visual pass clicking each one by hand
+        //                        (submitReview refuses to post while
+        //                        anything is unsettled). Guarded exactly
+        //                        like sheet below -- refuses on a scope with
+        //                        no PR.
+        //   sheet                submit, exactly as the verdict bar's Submit
+        //                        action does -- but ONLY when the selected
+        //                        scope has a GitHub PR. A non-PR scope's
+        //                        submit() does not stop at posting: it hides
+        //                        Review and opens the Finish panel (merge /
+        //                        open a PR / delete the worktree), which a
+        //                        diagnostic driver must never be able to
+        //                        reach even by accident. See
+        //                        ReviewDestinationView.diagSubmit.
+        //   shot:<path>          snapshot the scene -- give it a session- or
+        //                        run-unique path (e.g. under this worktree's
+        //                        scratchpad) when more than one Drydock
+        //                        worktree might be capturing at once, or two
+        //                        runs racing the same /tmp path will
+        //                        overwrite each other's PNG
+        //   mark:label           print a marker to synchronise on
+        // Inert unless app.drydock.diag.reviewScript is set. Pass it as a
+        // GRADLE PROJECT property -- -Papp.drydock.diag.reviewScript=... --
+        // not -D: the run task forwards -P properties into the forked app
+        // JVM as system properties, while the Gradle client's own -D flags
+        // never reach it (see tasks.named<JavaExec>("run") in
+        // app/build.gradle.kts). A -D invocation is a silent no-op: the app
+        // opens, the driver never starts, and no PNG is written. (The
+        // comment blocks on the neighbouring settingsScript/tabScript/
+        // explorerScript hooks above say -D; that is misleading holdover --
+        // -P is what actually reaches this process for all of them.)
+        String reviewScript = System.getProperty("app.drydock.diag.reviewScript");
+        if (reviewScript != null) {
+            Thread driver = new Thread(() -> {
+                long start = System.nanoTime();
+                for (String step : reviewScript.split(",")) {
+                    String[] parts = step.split(":", 3);
+                    long atMillis = (long) (Double.parseDouble(parts[0].strip()) * 1000);
+                    long elapsed = (System.nanoTime() - start) / 1_000_000;
+                    if (elapsed < atMillis) {
+                        try {
+                            Thread.sleep(atMillis - elapsed);
+                        } catch (InterruptedException e) {
+                            return;
+                        }
+                    }
+                    String verb = parts[1].strip();
+                    String arg = parts.length > 2 ? parts[2] : "";
+                    Platform.runLater(() -> diagReviewStep(primaryStage, verb, arg));
                 }
             });
             driver.setDaemon(true);
@@ -843,6 +1029,19 @@ public final class DrydockApplication extends Application {
                     mainWorkspace.showPicker();
                     event.consume();
                 }
+                return;
+            }
+            // Review's keyboard backstop (see MainWorkspace#reviewKeyboardBackstop):
+            // catches Review's own shortcuts (j/k/[/]/a/r/... ) when focus has
+            // drifted off Review's subtree while it is still the showing tab,
+            // which the node-level filter installed on ReviewDestinationView
+            // itself cannot see happen. Gated on no modal showing -- a modal's
+            // own controls (a checkbox, a radio button) are not text inputs
+            // either, and must not be shadowed by Review's letters while they
+            // have focus.
+            if (!appShell.modalLayer().isShowingModal()
+                    && mainWorkspace.reviewKeyboardBackstop(event)) {
+                event.consume();
                 return;
             }
             if (cmd && event.isShiftDown() && event.getCode() == KeyCode.L) {
@@ -996,7 +1195,7 @@ public final class DrydockApplication extends Application {
                         "The filter is added on every press and never removed on release -- one "
                                 + "leaked listener per drag. After a few minutes of resizing, every "
                                 + "mouse move runs dozens of stale trackers.")),
-                Optional.empty(), AnnotationStatus.OPEN));
+                Optional.empty(), AnnotationStatus.OPEN, Optional.empty(), false));
 
         annotationStore.upsert(new ReviewAnnotation(scopeId.get(), "f_clamp_2", Optional.empty(),
                 a1[0], a1[1], a1[1], Severity.QUESTION, Confidence.MEDIUM,
@@ -1005,7 +1204,7 @@ public final class DrydockApplication extends Application {
                 List.of(new ReviewAnnotation.Message("Claude", now,
                                 "This commits the raw width before the clamp runs. Deliberate?"),
                         new ReviewAnnotation.Message("You", now, "No -- good catch, I will fix it.")),
-                Optional.empty(), AnnotationStatus.OPEN));
+                Optional.empty(), AnnotationStatus.OPEN, Optional.empty(), false));
 
         annotationStore.upsert(new ReviewAnnotation(scopeId.get(), "f_dev_3", Optional.empty(),
                 a2[0], a2[1], a2[1], Severity.DEVIATION, Confidence.HIGH,
@@ -1015,14 +1214,14 @@ public final class DrydockApplication extends Application {
                 List.of(),
                 List.of(new ReviewAnnotation.Message("Claude", now,
                         "Step 5 set the clamp to 240; step 7 reverted it to 220.")),
-                Optional.empty(), AnnotationStatus.OPEN));
+                Optional.empty(), AnnotationStatus.OPEN, Optional.empty(), false));
 
         annotationStore.upsert(new ReviewAnnotation(scopeId.get(), "f_nit_4", Optional.empty(),
                 a3[0], a3[1], a3[1], Severity.NIT, Confidence.UNSURE,
                 Optional.of("Spelling in a comment"), "Claude", now,
                 List.of(), Optional.empty(), Optional.empty(), List.of(),
                 List.of(new ReviewAnnotation.Message("Claude", now, "\"recieve\" -> \"receive\".")),
-                Optional.empty(), AnnotationStatus.RESOLVED));
+                Optional.empty(), AnnotationStatus.RESOLVED, Optional.empty(), false));
 
         return "4 findings against " + scopeId.get();
     }
@@ -1094,7 +1293,18 @@ public final class DrydockApplication extends Application {
             return;
         }
 
-        Stage stage = (Stage) event.getSource();
+        performOrderlyShutdown((Stage) event.getSource());
+    }
+
+    /**
+     * Closes every open session, then the stage, the same way for a real
+     * window-close confirmation and for the diag-only {@code quit} verb (see
+     * {@link #diagQuit}): {@link MainWorkspace#closeAllSessions()} asks each
+     * running terminal to exit gracefully before {@link Stage#close()} runs,
+     * so services close and state is flushed via the normal {@link #stop()}
+     * path rather than a hard {@code System.exit}.
+     */
+    private void performOrderlyShutdown(Stage stage) {
         mainWorkspace.closeAllSessions()
                 .orTimeout(SHUTDOWN_CLOSE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
                 .whenComplete((v, ex) -> Platform.runLater(() -> {
@@ -1175,6 +1385,9 @@ public final class DrydockApplication extends Application {
         }
         if (ghCliService != null) {
             closeQuietly("GhCliService", ghCliService::close);
+        }
+        if (gitHubReviewService != null) {
+            closeQuietly("GitHubReviewService", gitHubReviewService::close);
         }
     }
 
@@ -1350,9 +1563,71 @@ public final class DrydockApplication extends Application {
                     sidebar.diagFilter(arg);
                     System.out.println("[diag] filter typed: " + arg);
                 }
+                case "facet" -> sidebar.diagToggleFacet(arg);
+                case "expandstale" -> {
+                    sidebar.diagExpandStaleBuckets();
+                    System.out.println("[diag] expandstale");
+                }
                 case "keys" -> System.out.println("[diag] keys " + mainWorkspace.diagKeyboardState()
                         + " focusOwner=" + describeFocusOwner());
                 case "shot" -> diagSnapshot(stage, Path.of(arg));
+                // DIAG-ONLY, added for the sidebar row-layout visual pass: the
+                // row-overlay's hover fade and pickOnBounds=false passthrough
+                // have no other observable hook (Node.hoverProperty is driven
+                // by Scene's real mouse-move picking, not by anything a
+                // fireEvent-style synthetic event reaches), so this drives an
+                // actual OS mouse move via java.awt.Robot over the nth
+                // ".session-row" or ".repo-row" node found in the sidebar
+                // (arg is "session:<n>" or "repo:<n>"; "none" parks the
+                // pointer at the stage's top-left corner so a later shot is a
+                // true resting state). Not reachable outside
+                // app.drydock.diag.tabScript. Robot delivers nothing without
+                // a macOS Accessibility grant, so this prints a
+                // VERIFIED/FAILED verdict from Node.isHover(), not merely
+                // that the OS call was made -- see diagHover.
+                case "hover" -> diagHover(stage, sidebar, arg);
+                // DIAG-ONLY, same rationale as "hover": a real OS click via
+                // Robot at the row's trailing edge -- inside the overlay's
+                // bounds but outside its buttons -- is the only way to prove
+                // pickOnBounds=false actually lets the click fall through to
+                // the row underneath. arg is "session:<n>". Same Accessibility
+                // caveat as hover applies, so this prints a
+                // VERIFIED/FAILED/INCONCLUSIVE verdict from whether the
+                // active session actually changed, not that the click was
+                // issued -- see diagClickEdge.
+                case "clickedge" -> diagClickEdge(stage, sidebar, arg);
+                // DIAG-ONLY: the strip's visibility is BOUND to
+                // hoverProperty(), which Robot cannot drive (see "hover"
+                // above) and which a diag path must not unbind -- that would
+                // stop exercising the real binding. Instead this stamps a
+                // diag-only override into the SAME `.or(...)` expression the
+                // binding already uses (see RepositorySidebar.
+                // diagForceHoverRow), so production behaviour is unchanged
+                // when it is never called. It also stamps the CSS :hover
+                // pseudo-class on the row itself, because the fade is meant
+                // to match the row's own hover background -- see
+                // diagForceHover.
+                case "forcehover" -> diagForceHover(sidebar, arg);
+                // DIAG-ONLY: proves pickOnBounds=false passthrough
+                // structurally, without a pointer -- see diagPick. Reports
+                // Node.contains() for the overlay's candidate nodes at fixed
+                // probe points instead of firing a click, so it works
+                // whether or not Robot has an Accessibility grant.
+                case "pick" -> diagPick(sidebar, arg);
+                // DIAG-ONLY: reports the overlay fade's measured geometry and
+                // its resolved paint, so "the fade is not covering the branch
+                // tag" can be diagnosed from data instead of guessed at from
+                // the code. Two rounds were lost to a plausible-but-wrong
+                // theory that the picture had already contradicted.
+                case "fadeinfo" -> diagFadeInfo(sidebar, arg);
+                // DIAG-ONLY: shuts the app down through the same
+                // closeAllSessions -> Stage.close() path a real window-close
+                // confirmation uses (see performOrderlyShutdown), so a
+                // scripted run does not leak a process after its last verb.
+                case "quit" -> {
+                    System.out.println("[diag] quit: closing all sessions and the window");
+                    performOrderlyShutdown(stage);
+                }
                 default -> System.out.println("[diag] mark " + arg);
             }
         } catch (RuntimeException e) {
@@ -1364,6 +1639,204 @@ public final class DrydockApplication extends Application {
     private String describeFocusOwner() {
         Node owner = appShell.scene().getFocusOwner();
         return owner == null ? "none" : owner.getClass().getSimpleName();
+    }
+
+    /**
+     * Diagnostic-only: one step of {@code app.drydock.diag.reviewScript}.
+     * Drives the gutter, the composer and the submit sheet through the same
+     * entry points the UI uses -- {@code select} fires the real {@code
+     * onComposeRequested} callback a gutter release makes ({@link
+     * app.drydock.ui.review.ReviewDiffColumn#diagSelectRange} via {@link
+     * ReviewDestinationView#diagSelectRange}), {@code enter}/{@code commit}
+     * fire real {@link KeyEvent}s at whatever the scene's focus owner
+     * actually is, and {@code sheet} goes through the same {@code
+     * submitReview()} the verdict bar's Submit button calls -- so what this
+     * exercises is the real path, not a test-only shortcut past it.
+     */
+    private void diagReviewStep(Stage stage, String verb, String arg) {
+        try {
+            switch (verb) {
+                case "review" -> {
+                    diagReviewView = mainWorkspace.diagShowReview();
+                    List<ReviewItem> items = diagReviewView.diagItems();
+                    for (int i = 0; i < items.size(); i++) {
+                        ReviewScope scope = items.get(i).scope();
+                        System.out.println("[diag] queue item " + i + ": " + scope.kind()
+                                + " " + items.get(i).title() + " base=" + scope.base()
+                                + " head=" + scope.head());
+                    }
+                    // Prefer a real PR scope; a repository with no open PR
+                    // still has a BRANCH scope for whatever is checked out
+                    // against its base, which is the next best real diff to
+                    // drive the gutter/composer/sheet against.
+                    int index = indexOfKind(items, ReviewScope.Kind.PR);
+                    if (index < 0) {
+                        index = indexOfKind(items, ReviewScope.Kind.BRANCH);
+                    }
+                    if (index >= 0) {
+                        diagReviewView.diagSelectItem(index);
+                        System.out.println("[diag] review opened, selected item " + index
+                                + " (" + items.get(index).scope().kind() + ") of " + items.size());
+                    } else {
+                        System.out.println("[diag] review opened, no PR or BRANCH scope in queue ("
+                                + items.size() + " items) -- leaving the queue's own default selection");
+                    }
+                }
+                case "select" -> {
+                    String[] range = arg.split(":", 3);
+                    boolean found = diagReviewView != null
+                            && diagReviewView.diagSelectRange(range[0], range[1], range[2]);
+                    System.out.println("[diag] select " + arg + " -> " + found);
+                }
+                // Selects a specific queue item by index, unlike the "review"
+                // verb's own PR/BRANCH auto-select -- needed to land on a
+                // WORKTREE item with a real multi-file diff (several intents)
+                // for the issue-3 keyboard-routing evidence.
+                case "item" -> {
+                    if (diagReviewView == null) {
+                        System.out.println("[diag] item: no review view open");
+                    } else {
+                        diagReviewView.diagSelectItem(Integer.parseInt(arg.strip()));
+                        System.out.println("[diag] item " + arg + " selected");
+                    }
+                }
+                // Prints "index/count" for the intent [/]/n currently sit on
+                // -- the issue-3 evidence of whether a keystroke actually
+                // moved the reader.
+                case "intentidx" -> System.out.println("[diag] intentidx "
+                        + (diagReviewView == null ? "no review view open" : diagReviewView.diagIntentIndex()));
+                // Steals focus onto the sidebar's "+ Add repository" button --
+                // a real, focus-traversable control OUTSIDE ReviewDestinationView's
+                // subtree -- to reproduce hypothesis (a) from issue 3: focus
+                // landing somewhere Review's own node-level key filter cannot see.
+                case "stealfocus" -> {
+                    Node target = appShell.scene().lookup(".add-repo-button");
+                    if (target == null) {
+                        System.out.println("[diag] stealfocus: sidebar add-repo button not found");
+                    } else {
+                        target.requestFocus();
+                        Node owner = appShell.scene().getFocusOwner();
+                        System.out.println("[diag] stealfocus -> focus owner now "
+                                + (owner == null ? "null" : owner.getClass().getName()));
+                    }
+                }
+                // Same idea as "stealfocus" but a TEXT INPUT outside Review --
+                // the sidebar's own repo filter -- to prove the backstop
+                // yields to it rather than hijacking a letter typed there.
+                case "stealfocustext" -> {
+                    Node target = appShell.scene().lookup(".filter-field");
+                    if (target == null) {
+                        System.out.println("[diag] stealfocustext: sidebar filter field not found");
+                    } else {
+                        target.requestFocus();
+                        Node owner = appShell.scene().getFocusOwner();
+                        System.out.println("[diag] stealfocustext -> focus owner now "
+                                + (owner == null ? "null" : owner.getClass().getName()));
+                    }
+                }
+                case "compose" -> {
+                    Node owner = appShell.scene().getFocusOwner();
+                    if (owner instanceof TextInputControl field) {
+                        field.appendText(arg);
+                        System.out.println("[diag] composed: " + arg);
+                    } else {
+                        System.out.println("[diag] compose: no focused text input (is the composer open?)");
+                    }
+                }
+                case "enter" -> diagFireKeyAtFocusOwner(KeyCode.ENTER, false);
+                case "commit" -> diagFireKeyAtFocusOwner(KeyCode.ENTER, true);
+                case "approveall" -> {
+                    if (diagReviewView == null) {
+                        System.out.println("[diag] approveall: no review view open");
+                    } else if (!diagReviewView.diagApproveAllIntents()) {
+                        System.out.println("[diag] approveall: selected scope has no PR; "
+                                + "refusing to stamp real verdicts on it");
+                    } else {
+                        System.out.println("[diag] approved every counted intent");
+                    }
+                }
+                case "sheet" -> {
+                    if (diagReviewView == null) {
+                        System.out.println("[diag] sheet: no review view open");
+                    } else if (!diagReviewView.diagSubmit()) {
+                        System.out.println("[diag] sheet: selected scope has no PR; "
+                                + "refusing to take the merge-and-finish path");
+                    } else {
+                        System.out.println("[diag] submit requested");
+                    }
+                }
+                case "shot" -> diagSnapshot(stage, Path.of(arg));
+                case "focus" -> {
+                    Node owner = appShell.scene().getFocusOwner();
+                    boolean underReview = owner != null && diagReviewView != null
+                            && diagReviewView.diagOwnsNode(owner);
+                    System.out.println("[diag] focus owner: "
+                            + (owner == null ? "null" : owner.getClass().getName())
+                            + " underReview=" + underReview);
+                }
+                // Fires a real key press+release at whatever the scene's
+                // focus owner actually is -- unlike diagFireKeyAtFocusOwner,
+                // which only fires into a focused TextInputControl (composer,
+                // filter field). This is the verb issue 3's diagnosis needed:
+                // it proves whether a Review shortcut fires the way a human's
+                // keystroke would, through the real focus owner, rather than
+                // by calling the handler method directly (which would "pass"
+                // even with the routing dead).
+                case "key" -> {
+                    Node owner = appShell.scene().getFocusOwner();
+                    if (owner == null) {
+                        System.out.println("[diag] key " + arg + ": no focus owner");
+                    } else {
+                        KeyCode code = KeyCode.valueOf(arg);
+                        owner.fireEvent(new KeyEvent(KeyEvent.KEY_PRESSED, "", "", code,
+                                false, false, false, false));
+                        owner.fireEvent(new KeyEvent(KeyEvent.KEY_RELEASED, "", "", code,
+                                false, false, false, false));
+                        System.out.println("[diag] key " + arg + " fired at "
+                                + owner.getClass().getName());
+                    }
+                }
+                default -> System.out.println("[diag] mark " + arg);
+            }
+        } catch (RuntimeException e) {
+            System.out.println("[diag] review step '" + verb + "' failed: " + e);
+        }
+    }
+
+    /** The index of the first queue item of {@code kind}, or -1 when none matches. */
+    private static int indexOfKind(List<ReviewItem> items, ReviewScope.Kind kind) {
+        for (int i = 0; i < items.size(); i++) {
+            if (items.get(i).scope().kind() == kind) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * Fires a real {@code code} press+release at the scene's focus owner --
+     * {@code shortcut} sets both {@code controlDown} and {@code metaDown} so
+     * the event reads as a shortcut on either platform ({@link
+     * KeyEvent#isShortcutDown()} reads {@code metaDown} on macOS and {@code
+     * controlDown} everywhere else). A plain Enter (no modifiers) is left to
+     * the composer's own default {@code TextArea} handling, which is what
+     * inserts the newline -- this method never writes {@code \n} itself,
+     * which is why the {@code enter} verb exists at all (see the
+     * reviewScript comment block in {@link #startOnFxThread}: the script
+     * argument is never unescaped, so a literal {@code \n} in the property
+     * value stays a literal backslash-n).
+     */
+    private void diagFireKeyAtFocusOwner(KeyCode code, boolean shortcut) {
+        Node owner = appShell.scene().getFocusOwner();
+        if (!(owner instanceof TextInputControl field)) {
+            System.out.println("[diag] key " + code + ": no focused text input");
+            return;
+        }
+        field.fireEvent(new KeyEvent(KeyEvent.KEY_PRESSED, "\n", "\n", code,
+                false, shortcut, false, shortcut));
+        field.fireEvent(new KeyEvent(KeyEvent.KEY_RELEASED, "\n", "\n", code,
+                false, shortcut, false, shortcut));
+        System.out.println("[diag] key " + code + (shortcut ? " (shortcut)" : "") + " fired");
     }
 
     private void diagSettingsStep(Stage stage, String verb, String arg) {
@@ -1526,6 +1999,386 @@ public final class DrydockApplication extends Application {
         }, "diag-snapshot");
         writer.setDaemon(true);
         writer.start();
+    }
+
+    /**
+     * Diagnostic-only ({@code app.drydock.diag.tabScript} "hover" verb): moves
+     * the real OS pointer, via {@link Robot}, over the nth row matching
+     * {@code kind}'s CSS class ("session" -&gt; .session-row, "repo" -&gt;
+     * .repo-row), or parks it at the stage's top-left corner for
+     * {@code arg == "none"}. The Robot call is fire-and-forget -- the
+     * resulting Glass mouse-move event reaches the FX event queue on its own
+     * schedule -- so this waits out a {@link PauseTransition} (an FX-thread
+     * timer, not a blocking sleep: {@code diagTabStep} itself already runs on
+     * the FX thread via {@code Platform.runLater}, so blocking it here would
+     * freeze the whole app) before reading whether the row actually reports
+     * hover. That print is the entire point of this verb: {@code hover moved
+     * to (x,y)} only proves the OS call was issued, not that JavaFX ever
+     * heard about it -- and it does not, without a macOS Accessibility grant
+     * for the process sending the synthetic event.
+     */
+    private void diagHover(Stage stage, RepositorySidebar sidebar, String arg) {
+        try {
+            Robot robot = new Robot();
+            if ("none".equals(arg.strip())) {
+                robot.mouseMove((int) stage.getX() + 4, (int) stage.getY() + 4);
+                System.out.println("[diag] hover parked at stage corner");
+                return;
+            }
+            Node row = diagRowNode(sidebar, arg);
+            if (row == null) {
+                System.out.println("[diag] hover: no row for '" + arg + "'");
+                return;
+            }
+            Bounds screen = row.localToScreen(row.getBoundsInLocal());
+            int x = (int) (screen.getMaxX() - 6);
+            int y = (int) (screen.getMinY() + screen.getHeight() / 2);
+            robot.mouseMove(x, y);
+            PauseTransition settle = new PauseTransition(Duration.millis(300));
+            settle.setOnFinished(e -> {
+                if (row.isHover()) {
+                    System.out.println("[diag] hover VERIFIED " + arg + " (row.isHover=true)");
+                } else {
+                    System.out.println("[diag] hover FAILED " + arg
+                            + " — row.isHover=false; Robot events are not reaching the app"
+                            + " (no Accessibility grant?)");
+                }
+            });
+            settle.play();
+        } catch (AWTException | RuntimeException e) {
+            System.out.println("[diag] hover failed: " + e);
+        }
+    }
+
+    /**
+     * Diagnostic-only ({@code app.drydock.diag.tabScript} "clickedge" verb): a
+     * real OS click, via {@link Robot}, a few pixels in from the row's
+     * trailing edge -- inside the overlay strip's bounds but past its last
+     * button -- meant to prove {@code pickOnBounds = false} lets the click
+     * fall through to the row underneath rather than being swallowed by the
+     * overlay. arg is "session:&lt;n&gt;" or "repo:&lt;n&gt;".
+     *
+     * <p>"clicked at (x,y)" only proves the OS call was issued -- exactly the
+     * kind of claim that let a real click-swallowing regression print success
+     * while doing nothing. The consequence this checks instead is whichever
+     * session the workspace considers active ({@link
+     * RepositorySidebar#diagActiveSession}, the same accessor the sidebar's
+     * own filter-exemption logic uses): captured before the click, compared
+     * after a settle delay. If the clicked row was already active, that
+     * comparison cannot distinguish "click landed" from "click did nothing"
+     * so this reports INCONCLUSIVE instead of clicking blind.
+     */
+    private void diagClickEdge(Stage stage, RepositorySidebar sidebar, String arg) {
+        try {
+            Node row = diagRowNode(sidebar, arg);
+            if (row == null) {
+                System.out.println("[diag] clickedge: no row for '" + arg + "'");
+                return;
+            }
+            String[] parts = arg.split(":", 2);
+            boolean isSessionRow = !"repo".equals(parts[0]);
+            int index = parts.length > 1 ? Integer.parseInt(parts[1].strip()) : 0;
+            Optional<ManagedSessionId> target = isSessionRow
+                    ? sidebar.diagSessionIdForRow(index) : Optional.empty();
+            ManagedSessionId before = sidebar.diagActiveSession().orElse(null);
+            if (target.isPresent() && target.get().equals(before)) {
+                System.out.println("[diag] clickedge INCONCLUSIVE " + arg
+                        + " — row was already active; pick another row");
+                return;
+            }
+            Bounds screen = row.localToScreen(row.getBoundsInLocal());
+            Robot robot = new Robot();
+            int x = (int) (screen.getMaxX() - 2);
+            int y = (int) (screen.getMinY() + screen.getHeight() / 2);
+            robot.mouseMove(x, y);
+            robot.mousePress(InputEvent.BUTTON1_DOWN_MASK);
+            robot.mouseRelease(InputEvent.BUTTON1_DOWN_MASK);
+            if (target.isEmpty()) {
+                System.out.println("[diag] clickedge clicked at (" + x + "," + y + ") for '" + arg + "'");
+                return;
+            }
+            PauseTransition settle = new PauseTransition(Duration.millis(300));
+            settle.setOnFinished(e -> {
+                ManagedSessionId after = sidebar.diagActiveSession().orElse(null);
+                if (Objects.equals(after, before)) {
+                    System.out.println("[diag] clickedge FAILED " + arg
+                            + " — active session unchanged (" + before + "); the click did not land");
+                } else {
+                    System.out.println("[diag] clickedge VERIFIED " + arg
+                            + " — active session changed " + before + " -> " + after);
+                }
+            });
+            settle.play();
+        } catch (AWTException | RuntimeException e) {
+            System.out.println("[diag] clickedge failed: " + e);
+        }
+    }
+
+    /**
+     * Diagnostic-only ({@code app.drydock.diag.tabScript} "forcehover"
+     * verb): renders the hovered state of {@code arg}'s row
+     * ("session:&lt;n&gt;" or "repo:&lt;n&gt;") without a pointer, so it can
+     * be photographed. The actions strip's visibility is bound to the
+     * cell's real {@code hoverProperty()} -- a bound property cannot be
+     * set, and unbinding it would make this diag path diverge from the
+     * production one it exists to check. Instead {@link
+     * RepositorySidebar#diagForceHoverRow} adds this row to a diag-only
+     * {@code .or(...)} clause already present in that same binding (see
+     * {@code buildSessionRow}/{@code buildRepoRow}), which is a no-op for
+     * every other row and a no-op entirely when never called.
+     *
+     * <p>The row's own CSS {@code :hover} background is a separate thing --
+     * driven by real mouse tracking, not by this override -- so this also
+     * stamps the {@code :hover} pseudo-class directly onto the row via the
+     * public {@link Node#pseudoClassStateChanged}, the same mechanism
+     * {@link app.drydock.ui.SessionStatusStyles#applyStatus} already uses
+     * for {@code :running}/{@code :error}. The fade is meant to match that
+     * background, so a shot taken without this would photograph the fade
+     * against the row's resting color and prove nothing.
+     */
+    private void diagForceHover(RepositorySidebar sidebar, String arg) {
+        Node row = diagRowNode(sidebar, arg);
+        if (row == null) {
+            System.out.println("[diag] forcehover: no row for '" + arg + "'");
+            return;
+        }
+        sidebar.diagForceHoverRow(row);
+        row.pseudoClassStateChanged(HOVER_PSEUDO_CLASS, true);
+        boolean rowHoverStamped = row.getPseudoClassStates().contains(HOVER_PSEUDO_CLASS);
+        Node actionsStrip = diagOverlaySibling(row, ".row-overlay-actions");
+        String actionsVisible = actionsStrip == null ? "not found" : String.valueOf(actionsStrip.isVisible());
+        System.out.println("[diag] forcehover " + arg + " -> actionsVisible=" + actionsVisible
+                + " rowHoverPseudoClass=" + rowHoverStamped);
+    }
+
+    /**
+     * Diagnostic-only ({@code app.drydock.diag.tabScript} "pick" verb):
+     * proves {@code arg}'s row ("session:&lt;n&gt;" or "repo:&lt;n&gt;")
+     * lets clicks fall through the overlay's gaps to the row beneath,
+     * without a pointer -- the regression this branch already shipped and
+     * fixed was that {@code pickOnBounds=false} only makes a {@link
+     * javafx.scene.layout.Region} click-through where it paints NO
+     * background; with one, the whole strip's bounding box is picked
+     * regardless of the flag (see {@link RowOverlay#wrap}).
+     *
+     * <p>Structurally, not by clicking: for four probe points along the
+     * row's trailing edge -- a gap between two action buttons, the strip's
+     * left padding over the fade, a point past the last button near the
+     * row's right edge, and the centre of one button as a positive control
+     * -- this converts the point to each candidate node's local coordinates
+     * ({@link Node#sceneToLocal(double, double)}) and calls the public
+     * {@link Node#contains(double, double)}. That method's own semantics do
+     * the real proving: for a {@link javafx.scene.layout.Region} with
+     * {@code pickOnBounds=false}, {@code contains()} is true only over area
+     * the region actually paints -- so the actions strip (no background)
+     * reports {@code false} everywhere except through its buttons, each of
+     * which is its own node with its own {@code contains()}. The row
+     * defaults to {@code pickOnBounds=true}, so it reports {@code true}
+     * across its whole bounding box, which is exactly "falls through to the
+     * row" for any point the strip does not claim.
+     */
+    private void diagPick(RepositorySidebar sidebar, String arg) {
+        Node row = diagRowNode(sidebar, arg);
+        if (row == null) {
+            System.out.println("[diag] pick " + arg + ": no row found");
+            return;
+        }
+        Node actions = diagOverlaySibling(row, ".row-overlay-actions");
+        Node fade = diagOverlaySibling(row, ".row-overlay-fade");
+        if (actions == null || fade == null || !(actions instanceof Parent actionsParent)) {
+            System.out.println("[diag] pick " + arg + ": overlay nodes not found (actions=" + actions
+                    + " fade=" + fade + ")");
+            return;
+        }
+        List<Node> buttons = new ArrayList<>(actionsParent.lookupAll(".row-action-button"));
+        buttons.sort(Comparator.comparingDouble(b -> b.localToScene(b.getBoundsInLocal()).getMinX()));
+        if (buttons.size() < 2) {
+            System.out.println("[diag] pick " + arg + ": expected >=2 action buttons, found " + buttons.size());
+            return;
+        }
+
+        Bounds rowScene = row.localToScene(row.getBoundsInLocal());
+        Bounds actionsScene = actions.localToScene(actions.getBoundsInLocal());
+        Bounds btn0Scene = buttons.get(0).localToScene(buttons.get(0).getBoundsInLocal());
+        Bounds btn1Scene = buttons.get(1).localToScene(buttons.get(1).getBoundsInLocal());
+        double midY = (btn0Scene.getMinY() + btn0Scene.getMaxY()) / 2;
+
+        boolean gapOk = diagPickProbe(arg, "gap", (btn0Scene.getMaxX() + btn1Scene.getMinX()) / 2, midY,
+                row, actions, fade, buttons, null);
+        boolean paddingOk = diagPickProbe(arg, "padding", actionsScene.getMinX() + 10, midY,
+                row, actions, fade, buttons, null);
+        boolean trailingOk = diagPickProbe(arg, "trailing", rowScene.getMaxX() - 2,
+                (rowScene.getMinY() + rowScene.getMaxY()) / 2, row, actions, fade, buttons, null);
+        boolean buttonOk = diagPickProbe(arg, "button", (btn0Scene.getMinX() + btn0Scene.getMaxX()) / 2,
+                (btn0Scene.getMinY() + btn0Scene.getMaxY()) / 2, row, actions, fade, buttons, buttons.get(0));
+
+        if (gapOk && paddingOk && trailingOk && buttonOk) {
+            System.out.println("[diag] pick " + arg + " VERDICT: PASS");
+        } else {
+            List<String> failed = new ArrayList<>();
+            if (!gapOk) {
+                failed.add("gap");
+            }
+            if (!paddingOk) {
+                failed.add("padding");
+            }
+            if (!trailingOk) {
+                failed.add("trailing");
+            }
+            if (!buttonOk) {
+                failed.add("button");
+            }
+            System.out.println("[diag] pick " + arg + " VERDICT: FAIL: " + String.join(", ", failed)
+                    + " probe was swallowed or missed its target");
+        }
+    }
+
+    /**
+     * One {@code diagPick} probe: converts the scene point {@code (sceneX,
+     * sceneY)} to each candidate's local coordinates and reports {@link
+     * Node#contains(double, double)}. {@code expectedButton} non-null marks
+     * this as the positive-control probe (pass iff that exact button claims
+     * the point); {@code null} marks it as a passthrough probe (pass iff no
+     * button claims the point and the row does).
+     */
+    private static boolean diagPickProbe(String target, String label, double sceneX, double sceneY,
+            Node row, Node actions, Node fade, List<Node> buttons, Node expectedButton) {
+        boolean actionsHit = diagContainsScene(actions, sceneX, sceneY);
+        boolean fadeHit = diagContainsScene(fade, sceneX, sceneY);
+        boolean rowHit = diagContainsScene(row, sceneX, sceneY);
+        Node claimingButton = null;
+        for (Node button : buttons) {
+            if (diagContainsScene(button, sceneX, sceneY)) {
+                claimingButton = button;
+                break;
+            }
+        }
+        Point2D local = row.sceneToLocal(sceneX, sceneY);
+        String coords = local == null ? "(?,?)"
+                : "(" + Math.round(local.getX()) + "," + Math.round(local.getY()) + ")";
+        boolean ok;
+        String verdict;
+        if (expectedButton != null) {
+            ok = claimingButton == expectedButton;
+            verdict = ok ? "PASS (button is the target)" : "FAIL (button did not claim its own centre)";
+            System.out.println("[diag] pick " + target + " " + label + coords + " -> actions=" + actionsHit
+                    + " button=" + (claimingButton != null) + " row=" + rowHit + "  " + verdict);
+        } else {
+            ok = claimingButton == null && rowHit;
+            verdict = ok ? "PASS (falls through to row)"
+                    : claimingButton != null ? "FAIL (swallowed by a button)" : "FAIL (row did not claim it either)";
+            System.out.println("[diag] pick " + target + " " + label + coords + " -> actions=" + actionsHit
+                    + " fade=" + fadeHit + "(mouseTransparent) row=" + rowHit + "  " + verdict);
+        }
+        return ok;
+    }
+
+    /** {@code candidate.contains(...)} at the given scene point, converted via {@code sceneToLocal}. */
+    private static boolean diagContainsScene(Node candidate, double sceneX, double sceneY) {
+        Point2D local = candidate.sceneToLocal(sceneX, sceneY);
+        return local != null && candidate.contains(local.getX(), local.getY());
+    }
+
+    /**
+     * Diagnostic-only: {@code row}'s sibling matching {@code styleClass}
+     * inside the {@link RowOverlay#wrap} StackPane, or {@code null} if
+     * {@code row} is not wrapped that way (e.g. mid-rebuild).
+     */
+    private static Node diagOverlaySibling(Node row, String styleClass) {
+        Parent stack = row.getParent();
+        return stack == null ? null : stack.lookup(styleClass);
+    }
+
+    /** Diagnostic-only: the nth realized row matching {@code arg}
+     * ("session:&lt;n&gt;" or "repo:&lt;n&gt;"), in screen top-to-bottom
+     * order, or {@code null} when the index is out of range.
+     */
+    /**
+     * Diagnostic-only: measures the overlay fade rather than reasoning about
+     * it. Prints the fade's scene bounds beside the row's, the branch tag's
+     * and the actions strip's, whether it is visible and what it is actually
+     * painting (background fills, and for a linear gradient its stops), plus
+     * the fade's z-order position among its siblings. Between them these
+     * answer the three ways the wash can silently fail: wrong size, never
+     * painted, or painted underneath what it is meant to cover.
+     */
+    private void diagFadeInfo(RepositorySidebar sidebar, String arg) {
+        Node row = diagRowNode(sidebar, arg);
+        if (row == null) {
+            System.out.println("[diag] fadeinfo " + arg + ": no row found");
+            return;
+        }
+        Node fade = diagOverlaySibling(row, ".row-overlay-fade");
+        Node actions = diagOverlaySibling(row, ".row-overlay-actions");
+        if (fade == null) {
+            System.out.println("[diag] fadeinfo " + arg + ": no .row-overlay-fade node");
+            return;
+        }
+        System.out.println("[diag] fadeinfo " + arg + " row     " + diagBounds(row));
+        System.out.println("[diag] fadeinfo " + arg + " fade    " + diagBounds(fade)
+                + " visible=" + fade.isVisible() + " opacity=" + fade.getOpacity()
+                + " inScene=" + (fade.getScene() != null));
+        System.out.println("[diag] fadeinfo " + arg + " actions " + diagBounds(actions));
+        Node tag = row instanceof Parent rowParent
+                ? firstNonNull(rowParent.lookup(".branch-tag"), rowParent.lookup(".branch-tag-worktree"))
+                : null;
+        System.out.println("[diag] fadeinfo " + arg + " tag     " + diagBounds(tag));
+        if (fade.getParent() != null) {
+            List<Node> siblings = fade.getParent().getChildrenUnmodifiable();
+            System.out.println("[diag] fadeinfo " + arg + " zorder  fadeIndex=" + siblings.indexOf(fade)
+                    + " of " + siblings.size() + " (higher paints later/on top)");
+        }
+        if (fade instanceof Region fadeRegion) {
+            Background bg = fadeRegion.getBackground();
+            if (bg == null || bg.getFills().isEmpty()) {
+                System.out.println("[diag] fadeinfo " + arg + " paint   NONE — background is "
+                        + (bg == null ? "null" : "empty") + "; the CSS rule did not apply");
+                return;
+            }
+            for (BackgroundFill fill : bg.getFills()) {
+                Paint paint = fill.getFill();
+                if (paint instanceof LinearGradient gradient) {
+                    StringBuilder stops = new StringBuilder();
+                    for (Stop stop : gradient.getStops()) {
+                        stops.append(String.format("%.2f:%s ", stop.getOffset(), stop.getColor()));
+                    }
+                    System.out.println("[diag] fadeinfo " + arg + " paint   linear-gradient proportional="
+                            + gradient.isProportional() + " startX=" + gradient.getStartX()
+                            + " endX=" + gradient.getEndX() + " stops=[ " + stops.toString().strip() + " ]");
+                } else {
+                    System.out.println("[diag] fadeinfo " + arg + " paint   " + paint);
+                }
+            }
+        }
+    }
+
+    private static Node firstNonNull(Node a, Node b) {
+        return a != null ? a : b;
+    }
+
+    /** Diagnostic-only: one node's scene-coordinate bounds, or {@code none} when absent. */
+    private static String diagBounds(Node node) {
+        if (node == null) {
+            return "none";
+        }
+        Bounds b = node.localToScene(node.getBoundsInLocal());
+        return String.format("x=%.1f..%.1f y=%.1f..%.1f w=%.1f h=%.1f",
+                b.getMinX(), b.getMaxX(), b.getMinY(), b.getMaxY(), b.getWidth(), b.getHeight());
+    }
+
+    private static Node diagRowNode(RepositorySidebar sidebar, String arg) {
+        String[] parts = arg.split(":", 2);
+        String cssClass = "repo".equals(parts[0]) ? ".repo-row" : ".session-row";
+        int index = parts.length > 1 ? Integer.parseInt(parts[1].strip()) : 0;
+        Set<Node> matches = sidebar.lookupAll(cssClass);
+        List<Node> rows = new ArrayList<>(matches);
+        rows.sort((a, b) -> Double.compare(
+                a.localToScreen(a.getBoundsInLocal()).getMinY(),
+                b.localToScreen(b.getBoundsInLocal()).getMinY()));
+        if (index < 0 || index >= rows.size()) {
+            return null;
+        }
+        return rows.get(index);
     }
 
     /** Diagnostic-only: runs {@code work} on the FX thread and waits for its result. */

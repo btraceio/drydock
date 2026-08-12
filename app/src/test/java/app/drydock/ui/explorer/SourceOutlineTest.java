@@ -128,4 +128,45 @@ class SourceOutlineTest {
         assertTrue(outline.memberAt(1).isEmpty(), "the package line belongs to no member");
         assertEquals("int width() {", outline.memberAt(8).orElseThrow().signature());
     }
+
+    @Test
+    void memberAtOrAfterReturnsTheContainingMemberWhenThereIsOne() {
+        SourceOutline outline = SourceOutline.parse(SIDEBAR);
+        assertEquals("int width() {", outline.memberAtOrAfter(8).orElseThrow().signature(),
+                "line 8 is inside width()");
+    }
+
+    @Test
+    void memberAtOrAfterFallsForwardToTheNextMemberBetweenMembers() {
+        SourceOutline outline = SourceOutline.parse(SIDEBAR);
+        // Line 6 is the blank line between MIN_W and width() -- inside no
+        // member, so "reveal line 6" should mean the next one down.
+        assertEquals("int width() {", outline.memberAtOrAfter(6).orElseThrow().signature());
+    }
+
+    @Test
+    void memberAtOrAfterFindsTheFirstMemberFromBeforeTheFile() {
+        SourceOutline outline = SourceOutline.parse(SIDEBAR);
+        // Line 1 is `package ui;`, before every member -- exactly the open
+        // path's jumpToLine=1 case that used to reveal nothing at all.
+        assertEquals("private static final int MIN_W = 220;",
+                outline.memberAtOrAfter(1).orElseThrow().signature());
+    }
+
+    @Test
+    void memberAtOrAfterIsEmptyPastTheLastMember() {
+        SourceOutline outline = SourceOutline.parse(SIDEBAR);
+        assertTrue(outline.memberAtOrAfter(outline.lineCount() + 1).isEmpty(),
+                "nothing starts after the end of the file");
+    }
+
+    @Test
+    void memberAtOrAfterOnAnOutlineWithNoMembers() {
+        // parse() never actually produces an empty member list (a file with
+        // no braces still gets the "(whole file)" member), so this pins the
+        // lookup's behaviour directly against the degenerate case rather
+        // than relying on parse() to manufacture it.
+        SourceOutline outline = new SourceOutline(List.of(), 1);
+        assertTrue(outline.memberAtOrAfter(1).isEmpty());
+    }
 }

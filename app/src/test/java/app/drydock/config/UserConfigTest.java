@@ -17,6 +17,7 @@ import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -86,7 +87,7 @@ class UserConfigTest {
     void savedConfigLoadsBackUnchanged(@TempDir Path tempDir) throws Exception {
         Path configFile = tempDir.resolve("config.json");
 
-        UserConfig.save(new UserConfig(Optional.of(Path.of("/tmp/worktrees"))), configFile);
+        UserConfig.save(new UserConfig(Optional.of(Path.of("/tmp/worktrees")), true), configFile);
 
         assertEquals(Optional.of(Path.of("/tmp/worktrees")), UserConfig.load(configFile).worktreesDirectory());
     }
@@ -95,7 +96,7 @@ class UserConfigTest {
     void saveCreatesTheParentDirectory(@TempDir Path tempDir) throws Exception {
         Path configFile = tempDir.resolve("nested").resolve(".drydock").resolve("config.json");
 
-        UserConfig.save(new UserConfig(Optional.of(Path.of("/tmp/worktrees"))), configFile);
+        UserConfig.save(new UserConfig(Optional.of(Path.of("/tmp/worktrees")), true), configFile);
 
         assertTrue(Files.exists(configFile));
     }
@@ -105,7 +106,7 @@ class UserConfigTest {
         Path configFile = tempDir.resolve("config.json");
         Files.writeString(configFile, "{ this is not json");
 
-        UserConfig.save(new UserConfig(Optional.of(Path.of("/tmp/worktrees"))), configFile);
+        UserConfig.save(new UserConfig(Optional.of(Path.of("/tmp/worktrees")), true), configFile);
 
         assertEquals(Optional.of(Path.of("/tmp/worktrees")), UserConfig.load(configFile).worktreesDirectory());
         try (var entries = Files.list(tempDir)) {
@@ -124,7 +125,7 @@ class UserConfigTest {
         Path configFile = tempDir.resolve("config.json");
         Files.writeString(configFile, "{\"worktreesDirectory\":\"/old\",\"somethingElse\":42}");
 
-        UserConfig.save(new UserConfig(Optional.of(Path.of("/tmp/worktrees"))), configFile);
+        UserConfig.save(new UserConfig(Optional.of(Path.of("/tmp/worktrees")), true), configFile);
 
         String written = Files.readString(configFile);
         JsonValue parsed = JsonParser.parse(written);
@@ -138,11 +139,28 @@ class UserConfigTest {
     @Test
     void savingAnEmptyConfigClearsTheDirectory(@TempDir Path tempDir) throws Exception {
         Path configFile = tempDir.resolve("config.json");
-        UserConfig.save(new UserConfig(Optional.of(Path.of("/tmp/worktrees"))), configFile);
+        UserConfig.save(new UserConfig(Optional.of(Path.of("/tmp/worktrees")), true), configFile);
 
         UserConfig.save(UserConfig.empty(), configFile);
 
         assertEquals(Optional.empty(), UserConfig.load(configFile).worktreesDirectory());
+    }
+
+    @Test
+    void skimDefaultsOnAndSurvivesAWorktreesDirectoryEdit(@TempDir Path dir) throws Exception {
+        Path configFile = dir.resolve("config.json");
+        assertTrue(UserConfig.load(configFile).openChangedFilesInSkim(),
+                "a missing config still opens changed files folded — that is the delta's default");
+
+        UserConfig.save(new UserConfig(Optional.empty(), false), configFile);
+        assertFalse(UserConfig.load(configFile).openChangedFilesInSkim());
+
+        // The read-modify-write the settings modal must do.
+        UserConfig existing = UserConfig.load(configFile);
+        UserConfig.save(new UserConfig(Optional.of(dir), existing.openChangedFilesInSkim()), configFile);
+        UserConfig reloaded = UserConfig.load(configFile);
+        assertEquals(Optional.of(dir), reloaded.worktreesDirectory());
+        assertFalse(reloaded.openChangedFilesInSkim(), "…and the skim preference is still off");
     }
 
     // ---- saveAsync / flushPendingSaves ----
@@ -162,8 +180,8 @@ class UserConfigTest {
         String originalUserHome = System.getProperty("user.home");
         System.setProperty("user.home", tempDir.toString());
         try {
-            UserConfig.saveAsync(new UserConfig(Optional.of(Path.of("/tmp/worktrees-A"))));
-            UserConfig.saveAsync(new UserConfig(Optional.of(Path.of("/tmp/worktrees-B"))));
+            UserConfig.saveAsync(new UserConfig(Optional.of(Path.of("/tmp/worktrees-A")), true));
+            UserConfig.saveAsync(new UserConfig(Optional.of(Path.of("/tmp/worktrees-B")), true));
             UserConfig.flushPendingSaves();
 
             assertEquals(Optional.of(Path.of("/tmp/worktrees-B")),
@@ -184,7 +202,7 @@ class UserConfigTest {
         String originalUserHome = System.getProperty("user.home");
         System.setProperty("user.home", tempDir.toString());
         try {
-            UserConfig.saveAsync(new UserConfig(Optional.of(Path.of("/tmp/worktrees-fresh"))));
+            UserConfig.saveAsync(new UserConfig(Optional.of(Path.of("/tmp/worktrees-fresh")), true));
 
             UserConfig loaded = UserConfig.loadAsync().get();
 
@@ -203,7 +221,7 @@ class UserConfigTest {
         try {
             int calls = 50;
             for (int i = 0; i < calls; i++) {
-                UserConfig.saveAsync(new UserConfig(Optional.of(Path.of("/tmp/worktrees-" + i))));
+                UserConfig.saveAsync(new UserConfig(Optional.of(Path.of("/tmp/worktrees-" + i)), true));
             }
             UserConfig.flushPendingSaves();
 

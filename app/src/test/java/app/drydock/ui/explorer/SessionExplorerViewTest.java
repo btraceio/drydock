@@ -1,10 +1,12 @@
 package app.drydock.ui.explorer;
 
 import app.drydock.search.SessionSearchService;
+import javafx.geometry.Pos;
 import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
+import javafx.scene.layout.StackPane;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -68,7 +70,11 @@ class SessionExplorerViewTest extends ApplicationTest {
         }
         searchService = new SessionSearchService();
         view = new SessionExplorerView(root, searchService);
-        Scene scene = new Scene(view, 1200, 800);
+        // A wrapper root, so a test can size the VIEW itself. Resizing the
+        // stage instead leaks: TestFX shares one primary stage for the whole
+        // JVM (the same reason SkimViewTest wraps its subject).
+        StackPane wrapper = new StackPane(view);
+        Scene scene = new Scene(wrapper, 1600, 800);
         scene.getStylesheets().addAll(
                 SessionExplorerView.class.getResource("/app/drydock/ui/theme-dark.css").toExternalForm(),
                 SessionExplorerView.class.getResource("/app/drydock/ui/app.css").toExternalForm());
@@ -112,6 +118,40 @@ class SessionExplorerViewTest extends ApplicationTest {
 
     private void waitForFxEvents() {
         org.testfx.util.WaitForAsyncUtils.waitForFxEvents();
+    }
+
+    /** Sizes the view within the wrapper; a StackPane lays a child out at its max. */
+    private void widthOf(double width) {
+        interact(() -> view.setMaxWidth(width));
+        waitForFxEvents();
+    }
+
+    @Test
+    void theRailCollapsesItselfWhenTheWindowGetsNarrow() {
+        widthOf(1000);
+        assertTrue(onFx(() -> view.diagRailCollapsed()), "below the threshold the rail gets out of the way");
+
+        widthOf(1500);
+        assertFalse(onFx(() -> view.diagRailCollapsed()), "…and comes back when there is room again");
+    }
+
+    @Test
+    void aRailTheReaderCollapsedStaysCollapsedWhenTheWindowWidens() {
+        interact(() -> view.diagCollapseRail());
+        waitForFxEvents();
+        widthOf(1500);
+        assertTrue(onFx(() -> view.diagRailCollapsed()),
+                "widening the window must not undo a collapse the reader asked for");
+    }
+
+    @Test
+    void aRailTheReaderExpandedWhileNarrowStaysExpanded() {
+        widthOf(1000);                       // auto-collapses
+        interact(() -> view.diagExpandRail()); // the reader opens it anyway
+        waitForFxEvents();
+        widthOf(980);                        // still narrow, another width tick
+        assertFalse(onFx(() -> view.diagRailCollapsed()),
+                "a rail the reader opened is not taken away by the next resize tick");
     }
 
     private List<String> trailChips() {
@@ -222,6 +262,20 @@ class SessionExplorerViewTest extends ApplicationTest {
                 "the card sits against the viewer's right edge: " + card_ + " in " + viewerBounds);
         assertTrue(card_.getMinY() > viewerBounds.getMinY() + viewerBounds.getHeight() / 3,
                 "…and its lower half: " + card_ + " in " + viewerBounds);
+    }
+
+    @Test
+    void aToastRaisedOverAnOpenPeekDoesNotSitOnItsActions() {
+        openFile("ui/Sidebar.java");
+        // The class's own helper: it waits for the card rather than sleeping,
+        // because resolution is a repository text search.
+        peek("clamp");
+        interact(() -> view.diagToast("hello"));
+        waitForFxEvents();
+
+        Node toast = lookup(".explorer-toast").query();
+        assertEquals(Pos.TOP_CENTER, StackPane.getAlignment(toast),
+                "with a peek open the toast moves out of the card's action row");
     }
 
     @Test

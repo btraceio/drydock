@@ -4,6 +4,7 @@ import app.drydock.domain.UiTheme;
 import javafx.application.Platform;
 import javafx.geometry.Pos;
 import javafx.scene.control.Button;
+import javafx.scene.control.CheckBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.RadioButton;
 import javafx.scene.control.Slider;
@@ -53,6 +54,11 @@ public final class SettingsModal extends VBox {
         CompletableFuture<Optional<Path>> loadWorktreesDirectory();
 
         CompletableFuture<Void> saveWorktreesDirectory(Optional<Path> directory);
+
+        /** Whether a file in the current change opens folded to its signatures (Explorer delta, part 2). */
+        CompletableFuture<Boolean> loadOpenChangedFilesInSkim();
+
+        CompletableFuture<Void> saveOpenChangedFilesInSkim(boolean value);
     }
 
     private static final double MODAL_WIDTH = 520;
@@ -103,6 +109,8 @@ public final class SettingsModal extends VBox {
                         false, settings.terminalSize()),
                 sectionTitle("Worktrees"),
                 worktreesRow(settings),
+                sectionTitle("Explorer"),
+                skimRow(settings),
                 footer);
     }
 
@@ -274,8 +282,8 @@ public final class SettingsModal extends VBox {
             browse.setDisable(true);
             settings.saveWorktreesDirectory(directory).whenComplete((ignored, failure) ->
                     Platform.runLater(() -> {
-                        // saveWorktreesDirectory is a one-line delegation to
-                        // UserConfig.saveAsync: success and failure are its
+                        // saveWorktreesDirectory delegates to
+                        // UserConfig.updateAsync: success and failure are its
                         // only two completions, so both are handled here
                         // together, unconditionally re-enabling the row.
                         committing[0] = false;
@@ -311,5 +319,56 @@ public final class SettingsModal extends VBox {
         control.setAlignment(Pos.CENTER_LEFT);
         HBox.setHgrow(field, Priority.ALWAYS);
         return new VBox(4, labelled("Directory", control), hint);
+    }
+
+    /**
+     * Disabled until its value arrives, like every other async-backed row
+     * here: a checkbox that shows a default it has not read yet would let
+     * one click write that default back over the user's real preference.
+     */
+    private static Region skimRow(Settings settings) {
+        CheckBox box = new CheckBox("Open changed files folded to their signatures");
+        box.getStyleClass().add("settings-check");
+        box.setDisable(true);
+        Label hint = new Label("Skim mode. Press z in the Explorer to switch either way.");
+        hint.getStyleClass().add("settings-check-hint");
+        // The listener is attached only once the stored value has landed:
+        // wiring it before would make the very act of showing the loaded
+        // value fire a save of the value we just read.
+        // Set while the listener below puts a failed save's tick back, so the
+        // revert is not mistaken for the reader changing their mind again.
+        boolean[] reverting = {false};
+        settings.loadOpenChangedFilesInSkim().whenComplete((value, failure) -> Platform.runLater(() -> {
+            box.setSelected(failure == null ? value : true);
+            box.setDisable(false);
+            // Same shape as worktreesRow's commit: disable for the duration
+            // of the write (which also rules out an overlapping save, since
+            // a disabled checkbox cannot be clicked again) and surface a
+            // failure rather than leaving a ticked box that never reached
+            // disk.
+            box.selectedProperty().addListener((obs, was, is) -> {
+                if (reverting[0]) {
+                    return;
+                }
+                box.setDisable(true);
+                settings.saveOpenChangedFilesInSkim(is).whenComplete((ignored, saveFailure) ->
+                        Platform.runLater(() -> {
+                            box.setDisable(false);
+                            if (saveFailure != null) {
+                                // Put the tick back where disk still has it.
+                                // Leaving it on the value that failed to save
+                                // claims a setting that is not in effect, and
+                                // the reader would have to toggle twice to
+                                // retry. The guard stops the revert being
+                                // read as a fresh edit and saving again.
+                                reverting[0] = true;
+                                box.setSelected(was);
+                                reverting[0] = false;
+                                UiErrors.show("Could not save the Explorer preference", saveFailure);
+                            }
+                        }));
+            });
+        }));
+        return new VBox(4, box, hint);
     }
 }

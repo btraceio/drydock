@@ -8,6 +8,9 @@ import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
 import javafx.scene.layout.VBox;
 
+import java.util.Arrays;
+import java.util.List;
+
 /**
  * The keyboard-shortcuts modal (design handoff section 8): a centered
  * 440px panel listing every shortcut as a label &harr; keycap row, grouped
@@ -61,6 +64,9 @@ final class ShortcutsOverlay {
                     {"Narrow: open the diff / back to the queue", "⏎ esc"},
             }),
             new Section("IN THE EXPLORER", new String[][] {
+                    {"Focus the file search", "/"},
+                    {"Scope: this change / the whole worktree", "d"},
+                    {"Sort: churn · findings · a-z", "s"},
                     {"Skim / full text for this file", "z"},
                     {"Peek at a symbol in place", "click an underlined symbol"},
                     {"In a peek: open for real / usages / ask the agent", "⏎ / u / a"},
@@ -70,6 +76,16 @@ final class ShortcutsOverlay {
     };
 
     private ShortcutsOverlay() {
+    }
+
+    /** Test-only: the keycap column of one section, for the advertised↔bound parity check. */
+    static List<String> diagKeysFor(String sectionTitle) {
+        for (Section section : SECTIONS) {
+            if (section.title().equals(sectionTitle)) {
+                return Arrays.stream(section.shortcuts()).map(row -> row[1]).toList();
+            }
+        }
+        return List.of();
     }
 
     static Region create(Runnable onClose) {

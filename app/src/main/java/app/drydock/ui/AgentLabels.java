@@ -14,9 +14,6 @@ import app.drydock.domain.SessionStatus;
  */
 public final class AgentLabels {
 
-    /** Sub-tab mark for the agent surface, matching the ❯_/▤/◨ of its neighbours. */
-    private static final String AGENT_GLYPH = "✳";
-
     private AgentLabels() { }
 
     /** What an agent nobody can identify is called; see {@link #displayName(AgentRegistry, ManagedAgentSession)}. */
@@ -52,22 +49,12 @@ public final class AgentLabels {
                 : Character.toUpperCase(persistedName.charAt(0)) + persistedName.substring(1);
     }
 
-    /** Text of the agent sub-tab button, e.g. {@code ✳  Codex}. */
-    static String subTabLabel(AgentRegistry registry, AgentKind kind) {
-        return subTabLabel(displayName(registry, kind));
-    }
-
-    /** As {@link #subTabLabel(AgentRegistry, AgentKind)}, for a name already resolved. */
-    static String subTabLabel(String agentName) {
-        return AGENT_GLYPH + "  " + agentName;
+    /** Text of the agent sub-tab button, e.g. {@code ◈  Codex}. */
+    static String subTabLabel(String mark, String agentName) {
+        return mark + "  " + agentName;
     }
 
     /** Tooltip of the agent sub-tab button, e.g. {@code Codex (⌘1)}. */
-    static String subTabTooltip(AgentRegistry registry, AgentKind kind) {
-        return subTabTooltip(displayName(registry, kind));
-    }
-
-    /** As {@link #subTabTooltip(AgentRegistry, AgentKind)}, for a name already resolved. */
     static String subTabTooltip(String agentName) {
         return agentName + " (⌘1)";
     }

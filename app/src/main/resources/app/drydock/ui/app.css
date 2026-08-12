@@ -147,6 +147,42 @@
     -fx-text-fill: -drydock-text-faint;
 }
 
+/* The empty state: swapped in for the tree when a filter leaves nothing to
+ * show, or shown as a compact banner above the tree when the active-session
+ * exemption keeps exactly one row on screen. */
+.sidebar-empty-state {
+    -fx-padding: 24 16 24 16;
+}
+
+.sidebar-empty-message {
+    -fx-font-size: 12px;
+    -fx-text-fill: -drydock-text-faint;
+}
+
+/* "Clear filters" in the empty state: ghost-bordered like the app's other
+   secondary buttons (.header-icon-button, .worktree-refresh-button). */
+.sidebar-empty-clear {
+    -fx-background-color: transparent;
+    -fx-background-radius: 8px;
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 8px;
+    -fx-border-width: 1px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 12px;
+    -fx-padding: 5 14 5 14;
+    -fx-cursor: hand;
+}
+.sidebar-empty-clear:hover {
+    -fx-background-color: -drydock-hover;
+    -fx-text-fill: -drydock-text;
+}
+
+.sidebar-empty-banner {
+    -fx-font-size: 11px;
+    -fx-text-fill: -drydock-text-faint;
+    -fx-padding: 6 12 6 12;
+}
+
 /* The repository/session tree. Custom cells draw everything; strip all
  * built-in TreeView chrome (disclosure arrows are our own carets). */
 .repo-tree {
@@ -230,7 +266,23 @@
 /* One fixed indent gutter shared by every child row (session / unopened
    worktree / stale summary) so their status columns line up. */
 .child-row { -fx-padding: 5 8 5 16; }
-.child-row-status { -fx-min-width: 16; -fx-alignment: center; }
+.child-row-status {
+    -fx-min-width: 30;
+    -fx-alignment: center-left;
+}
+
+/* The per-agent mark in a session row's leading gutter. Identity is carried
+ * by the glyph first and the color second, so the row still reads in
+ * grayscale. */
+.agent-mark {
+    -fx-font-size: 11px;
+    -fx-min-width: 12px;
+}
+
+.agent-mark-claude { -fx-text-fill: -drydock-agent-claude; }
+.agent-mark-codex { -fx-text-fill: -drydock-agent-codex; }
+.agent-mark-pi { -fx-text-fill: -drydock-agent-pi; }
+.agent-mark-unknown { -fx-text-fill: -drydock-text-faint; }
 
 /* Small square hover-action buttons on repo/session rows (22px). */
 .row-action-button {
@@ -249,6 +301,30 @@
 }
 .row-action-button.destructive:hover {
     -fx-text-fill: -drydock-error;
+}
+
+/* The floating hover-action strip. It sits in an overlay layer so it costs
+   no layout width -- before this, three 22px buttons reserved 70px on every
+   session row whether or not the cursor was on it, on a row that had ~84px
+   left for the session name. NO background here: pickOnBounds=false only
+   passes clicks through where a Region paints nothing, and the buttons'
+   gaps must fall through to the row beneath. The fade lives on a separate
+   .row-overlay-fade sibling (see RowOverlay) that is mouse-transparent, so
+   it can carry the gradient without ever intercepting a click. */
+.row-overlay-actions {
+    -fx-padding: 0 8 0 24;
+}
+
+.row-overlay-fade {
+    /* Proportional stops, not a px stop: JavaFX parses `-drydock-row-fade 24px`
+       into a PROPORTIONAL gradient whose opaque stop lands at 1.0, so the wash
+       ramped across the node's whole 102px width and the branch tag underneath
+       stayed legible through it. Measured, not guessed -- see the `fadeinfo`
+       diag verb. 30% is ~30px of ramp, opaque for the rest. */
+    -fx-background-color: linear-gradient(to right, transparent 0%, -drydock-row-fade 30%, -drydock-row-fade 100%);
+}
+.row-overlay-fade.active {
+    -fx-background-color: linear-gradient(to right, transparent 0%, -drydock-row-fade-active 30%, -drydock-row-fade-active 100%);
 }
 
 .session-row {
@@ -1014,12 +1090,27 @@
 .result-check:selected .mark {
     -fx-background-color: white;
 }
+/* Full text colour, not the dim one, and big enough to read as a control
+ * rather than punctuation: this is the only thing in the row that does not
+ * open the file, so it has to look different from the row it sits in. It
+ * carries a resting plate for the same reason -- a bare glyph among the
+ * checkbox, the change dot and the filename reads as decoration. Only rows
+ * with content matches have one, so this is never many at once. */
 .result-caret {
-    -fx-background-color: transparent;
-    -fx-text-fill: -drydock-text-faint;
-    -fx-font-size: 10px;
-    -fx-padding: 0 2 0 2;
+    -fx-background-color: -drydock-active-bg;
+    -fx-background-radius: 3px;
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 13px;
+    -fx-font-weight: bold;
+    -fx-padding: 0;
+    -fx-min-width: 18px;
+    -fx-min-height: 18px;
+    -fx-alignment: center;
     -fx-cursor: hand;
+}
+.result-caret:hover {
+    -fx-background-color: -drydock-accent;
+    -fx-text-fill: white;
 }
 .filetype-badge {
     -fx-background-color: -drydock-active-bg;
@@ -1641,19 +1732,10 @@
     -fx-background-color: -drydock-accent;
     -fx-text-fill: white;
 }
-.resume-pill {
-    -fx-background-color: transparent;
-    -fx-background-radius: 100px;
-    -fx-border-color: -drydock-border-strong;
-    -fx-border-radius: 100px;
-    -fx-text-fill: -drydock-text-faint;
-    -fx-font-size: 10.5px;
-    -fx-padding: 1 8 1 8;
-}
 /* Session whose Claude is blocked on a human. Uses the accent token rather
-   than the ghost treatment of .resume-pill: this is a call to action, not an
-   affordance hint, and must read at a glance down a long session list. Bold
-   so it outweighs the neighbouring pr-chip it shares a shape with. */
+   than a ghost treatment: this is a call to action, not an affordance hint,
+   and must read at a glance down a long session list. Bold so it outweighs
+   the neighbouring pr-chip it shares a shape with. */
 .attention-badge {
     -fx-background-color: -drydock-accent-soft;
     -fx-background-radius: 100px;
@@ -2130,6 +2212,32 @@
 }
 .settings-radio:selected .dot {
     -fx-background-color: -drydock-accent;
+}
+/* Same reason as .settings-radio above: a stock CheckBox caption is
+ * near-black on the dark theme. Box styling follows .result-check, the
+ * established precedent for a checkbox in this app. */
+.settings-check {
+    -fx-text-fill: -drydock-text;
+}
+.settings-check .box {
+    -fx-background-color: -drydock-input-bg;
+    -fx-background-radius: 4px;
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 4px;
+}
+.settings-check:selected .box {
+    -fx-background-color: -drydock-accent;
+    -fx-border-color: -drydock-accent;
+}
+.settings-check:selected .mark {
+    -fx-background-color: white;
+}
+/* Not .settings-hint: that one is indented 132px to clear the caption
+ * column of the labelled rows, and this row has no caption column. */
+.settings-check-hint {
+    -fx-font-size: 11px;
+    -fx-text-fill: -drydock-text-faint;
+    -fx-padding: 0 0 0 22px;
 }
 .settings-slider .track {
     -fx-background-color: -drydock-border-strong;
@@ -2609,6 +2717,16 @@
     -fx-text-fill: -drydock-main;
     -fx-background-radius: 3px;
 }
+/* A shift-click or drag range in progress, or the range the open composer is
+   anchored to. Softer than the hover fill (which reads as "click me now")
+   because this can cover many lines at once and must not read as an error or
+   a hover on every one of them. Keyed by file + lineKey (ReviewDiffColumn),
+   so this never lights up the same line number in an unrelated file. */
+.review-code-gutter.review-line-selected {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-text-fill: -drydock-accent;
+    -fx-background-radius: 3px;
+}
 
 /* The inline comment composer, sitting under the line it is anchored to. */
 .review-composer {
@@ -2761,6 +2879,19 @@
     -fx-text-fill: -drydock-accent;
 }
 .review-filter-button:focused { -fx-border-color: -drydock-accent; }
+
+/* Sidebar filter chips. They reuse .review-filter-button's shape so the app
+ * grows no fourth chip language, but selection must be carried by the
+ * background fill and text color -- .review-filter-button:focused paints the
+ * same accent border as :selected, so a Tab-focused unselected chip would
+ * otherwise look selected. */
+.session-filter-bar {
+    -fx-padding: 6 10 2 10;
+}
+
+.session-filter-chip {
+    -fx-font-size: 11px;
+}
 
 .review-findings-scroll, .review-findings-scroll .viewport {
     -fx-background-color: transparent;
@@ -2935,6 +3066,14 @@
 .review-card-action:hover { -fx-text-fill: -drydock-text; }
 .review-card-action:focused { -fx-border-color: -drydock-accent; }
 .review-card-action.primary {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-border-color: -drydock-accent;
+    -fx-text-fill: -drydock-accent;
+}
+/* The include/exclude toggle sets this pseudo-class by hand (it is a Button,
+   not a ToggleButton) -- without a rule here "included" and "excluded" are
+   indistinguishable except by the button's label text. */
+.review-card-action:selected {
     -fx-background-color: -drydock-accent-soft;
     -fx-border-color: -drydock-accent;
     -fx-text-fill: -drydock-accent;
@@ -3201,6 +3340,72 @@
 .review-readonly-banner {
     -fx-text-fill: -drydock-question;
     -fx-font-size: 11px;
+}
+
+/* ---- Submit sheet (Task 9): the last stop before a review posts --------- */
+
+.review-submit-sheet {
+    -fx-pref-width: 560px;
+}
+.review-submit-scroll,
+.review-submit-scroll > .viewport {
+    -fx-background-color: transparent;
+}
+.review-submit-event-row {
+    -fx-alignment: CENTER_LEFT;
+    -fx-spacing: 8;
+}
+.review-submit-event-button {
+    -fx-background-color: transparent;
+    -fx-background-radius: 8px;
+    -fx-border-color: -drydock-border;
+    -fx-border-radius: 8px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 12px;
+    -fx-padding: 6 14 6 14;
+    -fx-cursor: hand;
+}
+.review-submit-event-button:hover { -fx-text-fill: -drydock-text; }
+.review-submit-event-button:focused { -fx-border-color: -drydock-accent; }
+.review-submit-event-button:selected {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-border-color: -drydock-accent;
+    -fx-text-fill: -drydock-accent;
+    -fx-font-weight: 600;
+}
+.review-submit-comments-block,
+.review-submit-refusals {
+    -fx-spacing: 6;
+}
+.review-submit-comments {
+    -fx-spacing: 6;
+}
+.review-submit-comment-row {
+    -fx-background-color: -drydock-row-bg;
+    -fx-background-radius: 6px;
+    -fx-padding: 6 10 6 10;
+    -fx-spacing: 8;
+    -fx-alignment: CENTER_LEFT;
+}
+.review-submit-comment-location {
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 10.5px;
+    -fx-text-fill: -drydock-text-faint;
+}
+.review-submit-comment-body {
+    -fx-font-size: 11.5px;
+    -fx-text-fill: -drydock-text;
+}
+.review-submit-refusal {
+    -fx-font-size: 11px;
+    -fx-text-fill: -drydock-blocking;
+}
+.review-submit-progress {
+    -fx-padding: 0 0 4 0;
+}
+.review-submit-footer {
+    -fx-alignment: CENTER_RIGHT;
+    -fx-padding: 6 0 0 0;
 }
 
 /* ---- Symbol lens + MCP activity panel (handoff sections 4.4, 4.7) -------- */

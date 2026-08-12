@@ -45,6 +45,33 @@
     -drydock-merged-soft: rgba(176, 122, 217, 0.16);
     -drydock-match-bg: rgba(217, 119, 87, 0.32);
 
+    /* Agent identity (harness marks). Claude is deliberately NOT
+     * -drydock-accent: accent is the app's universal emphasis color, and an
+     * accent mark on every Claude row would read as "these rows are
+     * special" rather than "these rows are Claude". Pi is magenta rather
+     * than purple so it cannot be confused with the `merged` PR chip that
+     * renders on the same rows. */
+    -drydock-agent-claude: #c98168;
+    -drydock-agent-codex: #5bb3ab;
+    -drydock-agent-pi: #d977b0;
+
+    /* Sidebar row overlay fade. The hover-action strip is only ever visible
+     * while its row is hovered, so the fade must match the HOVERED row
+     * color, not the resting sidebar background -- and the active row wins
+     * over hover (see .session-row.active in app.css), so a second value
+     * matches that state instead. Solid, because a gradient stop cannot be
+     * a translucent overlay of an unknown backdrop. Composited by hand
+     * (base*(1-a) + overlay*a) from -drydock-sidebar against the -hover /
+     * -active-bg translucent whites, since the row paints its state
+     * directly under the fade:
+     *   sidebar #1c1b1a (28,27,26) + hover rgba(255,255,255,.05)
+     *     -> (28*.95+255*.05, 27*.95+255*.05, 26*.95+255*.05) = (39,38,37) = #272625
+     *   sidebar #1c1b1a (28,27,26) + active-bg rgba(255,255,255,.09)
+     *     -> (28*.91+255*.09, 27*.91+255*.09, 26*.91+255*.09) = (48,48,47) = #30302F
+     */
+    -drydock-row-fade: #272625;
+    -drydock-row-fade-active: #30302f;
+
     /* Diff Review (design handoff section C): add/del rows, annotation
      * range selection, and the Explorer changed-line gutter overlay. */
     -drydock-add-bg: rgba(108, 192, 122, 0.10);

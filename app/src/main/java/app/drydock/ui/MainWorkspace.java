@@ -29,6 +29,8 @@ import app.drydock.git.GitBranchState;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.GitTarget;
 import app.drydock.git.WorktreeService;
+import app.drydock.github.GitHubReviewRequest.Event;
+import app.drydock.github.GitHubReviewService;
 import app.drydock.mcp.McpActivityLog;
 import app.drydock.mcp.McpSessionContext.RenameKind;
 import app.drydock.mcp.McpSessionContext.RenameOutcome;
@@ -37,7 +39,6 @@ import app.drydock.config.UserConfig;
 import app.drydock.mcp.WorkspaceMcpSessionContext;
 import app.drydock.process.SshCommandBuilder;
 import app.drydock.review.AnnotationStore;
-import app.drydock.review.Confidence;
 import app.drydock.review.IntentGrouping;
 import app.drydock.review.QueueAssembly;
 import app.drydock.review.ReviewItem;
@@ -49,12 +50,14 @@ import app.drydock.review.AnnotationStatus;
 import app.drydock.review.ReviewQueueService;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
+import app.drydock.review.SubmitPlan;
 import app.drydock.search.SessionSearchService;
 import app.drydock.ui.explorer.DiffOverlay;
 import app.drydock.ui.explorer.ExplorerFinding;
 import app.drydock.ui.explorer.ExplorerTrailStore;
 import app.drydock.ui.explorer.SessionExplorerView;
 import app.drydock.ui.review.ReviewDestinationView;
+import app.drydock.ui.review.ReviewSubmitSheet;
 import app.drydock.ui.model.WorkspaceViewModel;
 import app.drydock.terminal.TerminalFactory;
 import app.drydock.terminal.api.TerminalHostView;
@@ -74,11 +77,14 @@ import javafx.scene.control.ButtonType;
 import javafx.scene.control.Label;
 import javafx.scene.control.MenuButton;
 import javafx.scene.control.MenuItem;
+import javafx.scene.control.ProgressIndicator;
 import javafx.scene.control.Tab;
 import javafx.scene.control.TabPane;
 import javafx.scene.control.TextInputControl;
 import javafx.scene.control.TextInputDialog;
 import javafx.scene.control.Tooltip;
+import javafx.scene.input.KeyCode;
+import javafx.scene.input.KeyEvent;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Region;
@@ -111,6 +117,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.DoubleSupplier;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
@@ -181,6 +188,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     private final WorktreeService worktreeService;
     private final SessionSearchService searchService;
     private final GhCliService ghCliService;
+    private final GitHubReviewService gitHubReviewService;
     private final DiffService diffService;
     private final ChangedLineService changedLineService;
     private final AnnotationStore annotationStore;
@@ -275,6 +283,14 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      */
     private final Map<OpenSessionTab, SessionExplorerView> openExplorers = new LinkedHashMap<>();
 
+    /**
+     * The Explorer's skim-by-default preference, refreshed off-thread and
+     * read synchronously by the Explorer on every file open. Seeded with the
+     * delta's default so the very first open before the load lands behaves
+     * as designed.
+     */
+    private final AtomicBoolean skimDefaultCache = new AtomicBoolean(true);
+
     /** Where each session's Explorer trail is persisted; null in tests that build no store. */
     private final ExplorerTrailStore explorerTrailStore;
 
@@ -342,7 +358,8 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     public MainWorkspace(SessionManager sessionManager, AgentRegistry agentRegistry,
                           RepositoryManager repositoryManager,
                           GitStatusService gitStatusService, SessionSearchService searchService,
-                          GhCliService ghCliService, WorktreeService worktreeService, DiffService diffService,
+                          GhCliService ghCliService, GitHubReviewService gitHubReviewService,
+                          WorktreeService worktreeService, DiffService diffService,
                           ChangedLineService changedLineService, AnnotationStore annotationStore,
                           ReviewScopeRegistry reviewScopeRegistry, McpActivityLog activityLog,
                           ExplorerTrailStore explorerTrailStore,
@@ -354,6 +371,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         this.worktreeService = worktreeService;
         this.searchService = searchService;
         this.ghCliService = ghCliService;
+        this.gitHubReviewService = gitHubReviewService;
         this.diffService = diffService;
         this.changedLineService = changedLineService;
         this.annotationStore = annotationStore;
@@ -467,6 +485,14 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
         exitWatcher.setCycleCount(Animation.INDEFINITE);
         exitWatcher.play();
+
+        refreshExplorerPreferences();
+    }
+
+    /** Re-reads the Explorer's user preferences after the settings modal closes. */
+    public void refreshExplorerPreferences() {
+        UserConfig.loadAsync().thenAccept(config ->
+                skimDefaultCache.set(config.openChangedFilesInSkim()));
     }
 
     /**
@@ -929,6 +955,91 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         return tabPane.getSelectionModel().getSelectedItem() == reviewTab;
     }
 
+    /**
+     * Review's keyboard backstop, installed as a low-priority scene-level
+     * filter (see {@code DrydockApplication#installGlobalShortcuts}) behind
+     * every other global shortcut. {@code ReviewDestinationView} normally
+     * catches its own shortcuts with a node-level {@code
+     * addEventFilter(KEY_PRESSED, ...)}, which only ever sees an event whose
+     * target -- the scene's focus owner at dispatch time -- is a descendant
+     * of that view. Nothing in the workspace guarantees that stays true for
+     * the life of the Review tab: a click can leave focus on the sidebar,
+     * the tab header, or nowhere at all, and from then on every one of
+     * Review's shortcuts (reported live: {@code j}/{@code k}/{@code a}/
+     * {@code r}, and by extension {@code [}/{@code ]}, Enter/Submit, ...)
+     * is silently dead, because the node filter that is supposed to catch
+     * them is never reached.
+     *
+     * <p>Rather than chase every way focus can wander off Review's subtree,
+     * this repairs the symptom directly: whenever Review is the showing tab
+     * and the event's target is NOT already inside {@code reviewDestination}
+     * (in which case its own filter will see it, and handling it again here
+     * too would double-fire the shortcut -- moving the intent pointer twice,
+     * say), replay it through {@link ReviewDestinationView#handleShortcut}.
+     * That method's own {@code TextInputControl} guard still applies, so
+     * typing in some OTHER text field elsewhere in the workspace (the
+     * sidebar's repo filter, a rename field) is untouched -- only a stray,
+     * non-text-input focus owner gets the replay.</p>
+     *
+     * <p>Only {@link #REPLAYABLE_OFF_REVIEW_SUBTREE} key codes are eligible
+     * at all -- an explicit ALLOW-list, deliberately, rather than a
+     * deny-list that silently grows wrong as bindings are added. {@code
+     * ENTER} is the reason this exists: it is Review's Submit, but it is
+     * ALSO how {@code RepositorySidebar} activates the selected row. A
+     * reader who clicks a sidebar row (exactly the focus drift this
+     * backstop serves) and presses Enter to open it must get the row, not a
+     * surprise Submit on a review they never asked to send -- Submit has
+     * its own visible button, and by definition the reader is not looking
+     * at Review right now.</p>
+     *
+     * @return whether the event was handled (the caller consumes it)
+     */
+    public boolean reviewKeyboardBackstop(KeyEvent event) {
+        return reviewKeyboardBackstop(isReviewShowing(), reviewDestination, event,
+                reviewDestination::handleShortcut);
+    }
+
+    /**
+     * The allow-list {@link #reviewKeyboardBackstop} restricts replay to.
+     * Every key {@code ReviewDestinationView.handleShortcut} binds while
+     * NOT also being some other control's own activation key -- which is
+     * exactly why {@code ENTER} is missing: {@code
+     * RepositorySidebar}'s row activation is Enter/Space too, and off
+     * Review's own subtree that binding, not Submit, is what a keypress
+     * ought to reach.
+     */
+    private static final java.util.Set<KeyCode> REPLAYABLE_OFF_REVIEW_SUBTREE = java.util.Set.of(
+            KeyCode.J, KeyCode.K, KeyCode.Q, KeyCode.SLASH, KeyCode.O, KeyCode.D, KeyCode.C,
+            KeyCode.M, KeyCode.I, KeyCode.BACK_SLASH, KeyCode.OPEN_BRACKET, KeyCode.CLOSE_BRACKET,
+            KeyCode.N, KeyCode.A, KeyCode.R, KeyCode.U, KeyCode.F);
+
+    /**
+     * The pure logic behind {@link #reviewKeyboardBackstop(KeyEvent)},
+     * pulled out as a static method taking {@code reviewRoot} and {@code
+     * replay} as parameters so it is unit-testable with a bare {@link Node}
+     * standing in for {@code reviewDestination} and a stub {@code replay} --
+     * neither a real {@code ReviewDestinationView} nor a TestFX harness is
+     * needed to exercise the routing decision itself.
+     */
+    static boolean reviewKeyboardBackstop(boolean reviewShowing, Node reviewRoot, KeyEvent event,
+                                          java.util.function.Predicate<KeyEvent> replay) {
+        if (!reviewShowing || !REPLAYABLE_OFF_REVIEW_SUBTREE.contains(event.getCode())) {
+            return false;
+        }
+        if (event.getTarget() instanceof Node target) {
+            for (Node n = target; n != null; n = n.getParent()) {
+                if (n == reviewRoot) {
+                    // Already a descendant of Review's own view -- its node
+                    // filter gets the first look, further up the capturing
+                    // chain though this backstop sits, so deferring here
+                    // avoids acting on the same keystroke twice.
+                    return false;
+                }
+            }
+        }
+        return replay.test(event);
+    }
+
     /** Whether {@code ⌘F} belongs to the Review queue's filter rather than the sidebar's. */
     public boolean isReviewQueueFilterable() {
         return isReviewShowing() && reviewDestination.queueFilterAvailable();
@@ -1139,6 +1250,15 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     /** The Review view's window onto the workspace (see {@link ReviewDestinationView.Host}). */
     private final class ReviewHost implements ReviewDestinationView.Host {
 
+        /**
+         * Scope ids with a {@code gh} availability check in flight for
+         * Submit. Guards the busy modal against a second Submit click while
+         * the first is still checking -- without it, a fast double-click
+         * would show a second "Checking GitHub…" that nothing ever closes,
+         * since only the first check's completion clears the scope.
+         */
+        private final java.util.Set<String> submitCheckInFlight = new java.util.HashSet<>();
+
         @Override
         public void refreshQueue() {
             refreshReviewQueue();
@@ -1260,29 +1380,16 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         }
 
         /**
-         * A comment the human wrote in the diff column's gutter composer.
-         *
-         * <p>Stored as a NIT: a human note is not a blocking finding, and
-         * anything that blocks approval would make leaving a remark on a line
-         * silently prevent the reviewer approving their own review. The
-         * intent is resolved from the file so the comment lands under the
-         * intent that owns that code rather than floating outside the
-         * grouping.</p>
+         * A comment minted by the diff column's gutter composer -- already a
+         * NIT-severity {@code ReviewAnnotation.human(...)} anchored to its
+         * range and stamped with the intent the view resolved from the file
+         * (see {@link ReviewDestinationView.Host#addComment}). This just
+         * re-keys it onto {@code scope} defensively and stores it; there is
+         * no second construction site for what a human comment is.
          */
         @Override
-        public void addComment(ReviewScope scope, String file, String lineKey, String body,
-                               Optional<String> intentId) {
-            Instant now = Instant.now();
-            annotationStore.upsert(new ReviewAnnotation(
-                    scope.id(),
-                    "c_" + java.util.UUID.randomUUID(),
-                    intentId,
-                    file, lineKey, lineKey,
-                    Severity.NIT, Confidence.HIGH,
-                    Optional.empty(), "You", now,
-                    List.of(), Optional.empty(), Optional.empty(), List.of(),
-                    List.of(new ReviewAnnotation.Message("You", now, body)),
-                    Optional.empty(), AnnotationStatus.OPEN));
+        public void addComment(ReviewScope scope, ReviewAnnotation annotation) {
+            annotationStore.upsert(annotation.withScopeId(scope.id()));
         }
 
         /**
@@ -1332,15 +1439,28 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             }
         }
 
+        @Override
+        public void setPostToPr(ReviewScope scope, ReviewAnnotation finding, boolean post) {
+            annotationStore.mutate(finding.key(), current -> current.withPostToPr(post));
+        }
+
         /**
-         * Records the submission and hands the worktree to the Finish flow --
-         * the review is over, and merging, opening a PR or deleting the
-         * worktree is exactly what that flow already does. A scope with no
-         * bound session has nothing to finish, and simply records the
-         * submission.
+         * A PR scope posts to GitHub and stays in Review -- reviewing
+         * someone else's pull request must never end by offering to merge
+         * it. Everything else keeps exactly today's behaviour: records the
+         * submission and hands the worktree to the Finish flow, since
+         * merging, opening a PR or deleting the worktree is exactly what
+         * that flow already does. A scope with no bound session has nothing
+         * to finish, and simply records the submission.
          */
         @Override
-        public void submit(ReviewScope scope) {
+        public void submit(ReviewScope scope, SubmitPlan.DiffIndex index,
+                           List<ReviewVerdict.Decision> decisions) {
+            Optional<ReviewScope.PullRequestRef> pr = scope.pr();
+            if (pr.isPresent()) {
+                showSubmitSheet(scope, pr.get(), index, decisions);
+                return;
+            }
             annotationStore.markSubmitted(scope.id());
             Optional<ManagedSessionId> session = scope.sessionId();
             Optional<Path> worktree = scope.worktree();
@@ -1348,6 +1468,153 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 hideReview();
                 worktreeLifecycle.finishAfterReview(session.get(), worktree.get());
             }
+        }
+
+        /**
+         * Opens the submit sheet. The {@code gh} availability check runs
+         * first and blocks the REAL sheet's appearance -- catching "not
+         * installed"/"not authenticated" at open time, rather than after the
+         * human has written a summary and pressed Submit into a failure, is
+         * the whole point of checking here instead of inside {@code submit}.
+         * The click still has to visibly do something immediately (AGENTS.md),
+         * so a busy modal goes up before the check starts and is swapped for
+         * the real sheet (or closed, on the defensive {@code modalLayer ==
+         * null} path elsewhere) once it resolves.
+         */
+        private void showSubmitSheet(ReviewScope scope, ReviewScope.PullRequestRef pr,
+                                     SubmitPlan.DiffIndex index, List<ReviewVerdict.Decision> decisions) {
+            if (modalLayer == null || !submitCheckInFlight.add(scope.id())) {
+                return;
+            }
+            // Esc closes the busy modal (ModalLayer's own key filter) without
+            // cancelling the future behind it -- so `cancelled` has to be
+            // captured HERE, tied to this specific busy modal's `onClosed`,
+            // not read from modalLayer's current state later: by the time the
+            // future resolves, modalLayer could be showing something the
+            // human opened in the meantime, and asking IT "was Esc pressed"
+            // would answer the wrong question.
+            boolean[] cancelled = {false};
+            modalLayer.show(busyModal("Checking GitHub…"), () -> cancelled[0] = true);
+            gitHubReviewService.unavailableReason(scope.diffRoot()).whenComplete((reason, error) ->
+                    Platform.runLater(() -> {
+                        submitCheckInFlight.remove(scope.id());
+                        if (cancelled[0]) {
+                            // The human moved on; popping the real sheet open
+                            // now would bury whatever they opened next.
+                            return;
+                        }
+                        openSubmitSheet(scope, pr, index, decisions,
+                                error != null ? Optional.of("Could not check gh: " + error.getMessage()) : reason);
+                    }));
+        }
+
+        private void openSubmitSheet(ReviewScope scope, ReviewScope.PullRequestRef pr,
+                                     SubmitPlan.DiffIndex index, List<ReviewVerdict.Decision> decisions,
+                                     Optional<String> unavailableReason) {
+            SubmitPlan plan = SubmitPlan.of(annotationStore.forScope(scope.id()), decisions, index);
+            ReviewSubmitSheet[] holder = new ReviewSubmitSheet[1];
+            holder[0] = new ReviewSubmitSheet(plan, pr,
+                    (event, summary) -> postReview(scope, pr, plan, event, summary, holder[0]),
+                    modalLayer::close);
+            modalLayer.show(holder[0]);
+            unavailableReason.ifPresent(holder[0]::showUnavailable);
+        }
+
+        /**
+         * Posts {@code plan} off the FX thread and hops back with {@link
+         * Platform#runLater}. Only {@code Posted} marks the scope submitted
+         * and clears {@code postToPr} on what it posted -- {@code Rejected}
+         * and {@code Unavailable} leave every draft exactly as the human left
+         * it, since nothing reached GitHub. Review stays open on every
+         * outcome: unlike the non-PR path, posting a review is not "finishing"
+         * anything drydock owns.
+         */
+        private void postReview(ReviewScope scope, ReviewScope.PullRequestRef pr, SubmitPlan plan,
+                                Event event, String summary, ReviewSubmitSheet sheet) {
+            gitHubReviewService.submit(scope.diffRoot(), pr.number(), event, summary, plan.comments())
+                    .whenComplete((outcome, error) -> Platform.runLater(() -> {
+                        if (error != null) {
+                            reportPostFailure(sheet, "Could not post review: " + error.getMessage());
+                            return;
+                        }
+                        switch (outcome) {
+                            case GitHubReviewService.Posted posted -> {
+                                annotationStore.markSubmitted(scope.id());
+                                for (ReviewAnnotation.Key key : plan.posting()) {
+                                    annotationStore.mutate(key, finding -> finding.withPostToPr(false));
+                                }
+                                // Gated the same way reportPostFailure gates its
+                                // sheet.showError: if the human pressed Esc
+                                // mid-post, `sheet` is detached and whatever
+                                // modal they opened next -- Finish, settings, a
+                                // confirm -- is what modalLayer is showing now.
+                                // An unconditional close() would tear THAT down
+                                // instead of the (already gone) submit sheet.
+                                if (sheet.getScene() != null) {
+                                    modalLayer.close();
+                                }
+                                showReviewPosted(pr.number(), posted.reviewUrl());
+                            }
+                            case GitHubReviewService.Rejected rejected ->
+                                    reportPostFailure(sheet, rejected.message());
+                            case GitHubReviewService.Unavailable unavailable ->
+                                    reportPostFailure(sheet, unavailable.message());
+                        }
+                    }));
+        }
+
+        /**
+         * Routes a post failure to the sheet, or to a plain alert when the
+         * sheet is no longer in the scene. Esc closes the modal layer
+         * unconditionally ({@code DrydockApplication}'s scene filter, spec
+         * §5's topmost-first unwind), and {@code ModalLayer.close()} detaches
+         * whatever it was showing -- but the 30-second POST this sheet
+         * started is not cancelled by that, so its outcome still has to land
+         * somewhere. {@link ReviewSubmitSheet#showError} on a detached node
+         * would silently do nothing: the disabled footer it flips back on is
+         * never rendered again, so the human who pressed Esc mid-post would
+         * be told nothing at all about a rejection. The alert is the same
+         * fallback {@link #showReviewPosted} already uses to confirm success
+         * outside the sheet.
+         */
+        private void reportPostFailure(ReviewSubmitSheet sheet, String message) {
+            if (sheet.getScene() != null) {
+                sheet.showError(message);
+                return;
+            }
+            Alert alert = new Alert(Alert.AlertType.ERROR);
+            alert.setTitle("Review not posted");
+            alert.setHeaderText("Could not post the review");
+            alert.setContentText(message);
+            alert.showAndWait();
+        }
+
+        /** Confirms the post the same way {@link #showNoAgentAvailable} confirms a failure -- a plain alert. */
+        private void showReviewPosted(int pr, String reviewUrl) {
+            Alert alert = new Alert(Alert.AlertType.INFORMATION);
+            alert.setTitle("Review posted");
+            alert.setHeaderText("Review posted on PR #" + pr);
+            alert.setContentText(reviewUrl);
+            alert.showAndWait();
+        }
+
+        /**
+         * A spinner plus a caption, shown the instant an async check starts
+         * so the click has visibly done something before the result arrives
+         * (AGENTS.md) -- mirrors {@code WorktreeLifecycleController}'s own
+         * {@code busyModal(String)}, which the same doc names as the pattern.
+         */
+        private Region busyModal(String message) {
+            ProgressIndicator spinner = new ProgressIndicator();
+            spinner.setPrefSize(28, 28);
+            Label label = new Label(message);
+            label.getStyleClass().add("finish-action-caption");
+            VBox box = new VBox(10, spinner, label);
+            box.setAlignment(Pos.CENTER);
+            box.getStyleClass().add("modal");
+            box.setMaxWidth(320);
+            box.setMaxHeight(Region.USE_PREF_SIZE);
+            return box;
         }
 
         /**
@@ -1761,6 +2028,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         // this pending tab instead of starting a second surface.
         ManagedAgentSession prepared = sessionManager.prepareSession(repository, agent);
         OpenSessionTab placeholderTab = showPendingTab(prepared.id(), "Starting...", AgentLabels.displayName(agentRegistry, prepared),
+                prepared.agentKind(), prepared.status() == SessionStatus.UNSUPPORTED_AGENT,
                 Optional.of(repository), repository.root());
 
         double scale = stage.getOutputScaleX();
@@ -1885,6 +2153,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         ManagedAgentSession prepared =
                 sessionManager.prepareWorktreeSession(repository, branch, worktreeRoot, branchCreatedHere, agent);
         OpenSessionTab placeholderTab = showPendingTab(prepared.id(), branch, AgentLabels.displayName(agentRegistry, prepared),
+                prepared.agentKind(), prepared.status() == SessionStatus.UNSUPPORTED_AGENT,
                 Optional.of(repository), worktreeRoot);
 
         double scale = stage.getOutputScaleX();
@@ -2085,6 +2354,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         }
 
         OpenSessionTab placeholderTab = showPendingTab(session.id(), session.displayName(), AgentLabels.displayName(agentRegistry, session),
+                session.agentKind(), session.status() == SessionStatus.UNSUPPORTED_AGENT,
                 repositoryFor(session), session.workingDirectory());
 
         double scale = stage.getOutputScaleX();
@@ -2270,6 +2540,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
         // Start fresh: reuse the managed session row, new claude conversation.
         OpenSessionTab placeholderTab = showPendingTab(session.id(), session.displayName(), AgentLabels.displayName(agentRegistry, session),
+                session.agentKind(), session.status() == SessionStatus.UNSUPPORTED_AGENT,
                 repositoryFor(session), session.workingDirectory());
         double scale = stage.getOutputScaleX();
         sessionManager.startFreshConversation(session.id(), placeholderTab.app(), placeholderTab.host(), scale)
@@ -2773,9 +3044,10 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * {@link #attachOpenedSession}/{@link #removeTab} de-register it.
      */
     private OpenSessionTab showPendingTab(ManagedSessionId sessionId, String displayName, String agentName,
+                                          AgentKind agentKind, boolean unsupportedAgent,
                                           Optional<Repository> repository, Path searchRoot) {
         OpenSessionTab placeholderTab =
-                createOpenSessionTab(sessionId, displayName, agentName, repository, searchRoot);
+                createOpenSessionTab(sessionId, displayName, agentName, agentKind, unsupportedAgent, repository, searchRoot);
         pendingTabs.put(sessionId, placeholderTab);
         addAndSelect(placeholderTab);
         return placeholderTab;
@@ -2791,6 +3063,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * before the {@link OpenSessionTab} it needs to call back into can exist.
      */
     private OpenSessionTab createOpenSessionTab(ManagedSessionId sessionId, String displayName, String agentName,
+                                                 AgentKind agentKind, boolean unsupportedAgent,
                                                  Optional<Repository> repository, Path searchRoot) {
         TerminalFactory.ensureProcessInitialized();
 
@@ -2820,7 +3093,8 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             app.close();
             throw e;
         }
-        OpenSessionTab openTab = new OpenSessionTab(sessionId, displayName, agentName, repository, stage, app, host);
+        OpenSessionTab openTab =
+                new OpenSessionTab(sessionId, displayName, agentName, agentKind, unsupportedAgent, repository, stage, app, host);
         holder[0] = openTab;
 
         // The ephemeral shell Terminal sub-tab (created lazily on first
@@ -2894,6 +3168,10 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 // store rather than snapshotted: the reviewer writes findings
                 // over MCP while the reader is reading.
                 explorer.setFindingsProvider(relative -> explorerFindings(openTab, relative));
+                // Read from a cached value, never UserConfig.load(): this
+                // runs on the FX thread on every file open (AGENTS.md,
+                // "Blocking work is async").
+                explorer.setSkimDefault(() -> skimDefaultCache.get());
                 openExplorers.put(openTab, explorer);
                 return explorer;
             });

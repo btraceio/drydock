@@ -37,6 +37,9 @@ public final class SessionExplorerView extends HBox {
     private static final double RAIL_COLLAPSED_WIDTH = 46;
     private static final Duration COLLAPSE_ANIMATION = Duration.millis(160);
 
+    /** Below this the rail's 324px is most of a narrow window; it gets out of the way. */
+    private static final double NARROW_WIDTH = 1100;
+
     /**
      * Bounded so a stuck filesystem cannot hang application shutdown.
      * Fully-qualified because this class already imports {@link
@@ -51,6 +54,17 @@ public final class SessionExplorerView extends HBox {
     private boolean railCollapsed;
     private ExplorerTrailStore trailStore;
     private String trailKey;
+
+    /**
+     * The reader's own «/⌕ choice, if any: {@code null} means "follow the
+     * window", otherwise the reader's choice wins while the window stays on
+     * one side of {@link #NARROW_WIDTH} -- and crossing that threshold hands
+     * control back to the window.
+     */
+    private Boolean railOverride;
+
+    /** The in-flight width animation, stopped before another one starts. */
+    private Timeline collapseAnimation;
 
     public SessionExplorerView(Path searchRoot, SessionSearchService searchService) {
         this(searchRoot, searchService, null);
@@ -156,8 +170,21 @@ public final class SessionExplorerView extends HBox {
         rail.setPrefWidth(RAIL_EXPANDED_WIDTH);
         rail.setMinWidth(RAIL_EXPANDED_WIDTH);
         rail.setMaxWidth(RAIL_EXPANDED_WIDTH);
-        rail.setOnCollapseRequested(() -> setRailCollapsed(true));
-        rail.setOnExpandRequested(() -> setRailCollapsed(false));
+        rail.setOnCollapseRequested(() -> readerSetRailCollapsed(true));
+        rail.setOnExpandRequested(() -> readerSetRailCollapsed(false));
+        widthProperty().addListener((obs, was, width) -> {
+            double newWidth = width.doubleValue();
+            double oldWidth = was.doubleValue();
+            if (newWidth <= 0) {
+                return;
+            }
+            boolean isNarrow = newWidth < NARROW_WIDTH;
+            if (oldWidth > 0 && isNarrow != (oldWidth < NARROW_WIDTH)) {
+                // Crossing the threshold hands control back to the window.
+                railOverride = null;
+            }
+            setRailCollapsed(railOverride != null ? railOverride : isNarrow);
+        });
 
         HBox.setHgrow(viewer, Priority.ALWAYS);
         getChildren().setAll(rail, viewer);
@@ -211,6 +238,11 @@ public final class SessionExplorerView extends HBox {
         viewer.diagPeek(symbol);
     }
 
+    /** Diagnostic- and test-only: raises the viewer's toast. */
+    public void diagToast(String message) {
+        viewer.toast(message);
+    }
+
     /** {@code z}: skim ⇄ full text for the open file. */
     public void toggleSkim() {
         viewer.toggleSkim();
@@ -232,6 +264,15 @@ public final class SessionExplorerView extends HBox {
         rail.setFindings(provider);
     }
 
+    /**
+     * Whether a file in the current change opens folded. Read per open, not
+     * captured, so a change in Settings takes effect on the next file rather
+     * than the next session.
+     */
+    public void setSkimDefault(BooleanSupplier skimDefault) {
+        viewer.setSkimDefault(skimDefault);
+    }
+
     /** Diagnostic- and test-only: how many peek cards are stacked. */
     public int diagPeekDepth() {
         return viewer.diagPeekDepth();
@@ -242,9 +283,34 @@ public final class SessionExplorerView extends HBox {
         return viewer.trail().waypoints().stream().map(NavigationTrail.Waypoint::label).toList();
     }
 
+    /** Diagnostic- and test-only: whether the rail is showing its collapsed strip. */
+    public boolean diagRailCollapsed() {
+        return railCollapsed;
+    }
+
+    /** Diagnostic- and test-only: the reader's own «, so a test can assert the collapse survives a resize. */
+    public void diagCollapseRail() {
+        readerSetRailCollapsed(true);
+    }
+
+    /** Diagnostic- and test-only: the reader's own ⌕, so a test can assert the expand survives a resize. */
+    public void diagExpandRail() {
+        readerSetRailCollapsed(false);
+    }
+
     /** Review-tab bridge: runs a Text-mode search for {@code token} (the "Search in Explorer" chip). */
     public void searchText(String token) {
-        setRailCollapsed(false);
+        // Same trap `/` hits: while collapsed the query field is out of the
+        // scene graph, and expanding only puts it back when the 160ms
+        // animation finishes -- so setSearch's requestFocus here would be
+        // dropped and the reader handed a query they cannot edit. The rail
+        // auto-collapses under NARROW_WIDTH now, so this is an ordinary
+        // window, not a corner case.
+        boolean wasCollapsed = railCollapsed;
+        readerSetRailCollapsed(false);
+        if (wasCollapsed) {
+            rail.focusSearchWhenExpanded();
+        }
         rail.setSearch(token);
     }
 
@@ -281,7 +347,19 @@ public final class SessionExplorerView extends HBox {
             }
             switch (event.getCode()) {
                 case SLASH -> {
-                    rail.focusSearch();
+                    // Expand first: a collapsed rail has swapped its search
+                    // field out of the scene graph, so requestFocus() there is
+                    // a no-op while the consume() below still eats the key --
+                    // and the rail now collapses itself on any window under
+                    // NARROW_WIDTH, so that is an ordinary width, not a corner
+                    // case. The focus has to wait for showExpanded(), which
+                    // runs when the collapse animation finishes.
+                    if (railCollapsed) {
+                        readerSetRailCollapsed(false);
+                        rail.focusSearchWhenExpanded();
+                    } else {
+                        rail.focusSearch();
+                    }
                     event.consume();
                 }
                 case D -> {
@@ -333,6 +411,20 @@ public final class SessionExplorerView extends HBox {
         return focused instanceof CodeArea area && area.isEditable();
     }
 
+    /**
+     * The rail moved because the reader asked it to, so their choice outranks
+     * the window until the width crosses the threshold. Every manual entry
+     * point goes through here rather than pairing the two writes itself: the
+     * "Search in Explorer" bridge once set only the width and the next resize
+     * tick took the rail straight back, which is a bug that costs nothing to
+     * make unrepresentable. {@link #setRailCollapsed} stays the width-driven
+     * path, and is the one caller that must NOT claim.
+     */
+    private void readerSetRailCollapsed(boolean collapsed) {
+        railOverride = collapsed;
+        setRailCollapsed(collapsed);
+    }
+
     private void setRailCollapsed(boolean collapsed) {
         if (railCollapsed == collapsed) {
             return;
@@ -342,15 +434,27 @@ public final class SessionExplorerView extends HBox {
         if (collapsed) {
             rail.showCollapsed();
         }
-        Timeline animation = new Timeline(new KeyFrame(COLLAPSE_ANIMATION,
+        // Stop whatever was still animating: each call used to start a fresh
+        // Timeline and leave the old one running, so a collapse overtaking an
+        // expand let the expand's onFinished swap the FULL content back in
+        // after the width had gone to 46px -- an expanded rail rendered
+        // inside the collapsed strip, with no ⌕ to get out of it. Reachable
+        // by dragging the window edge across the threshold faster than the
+        // animation, which the width listener now makes an ordinary gesture.
+        if (collapseAnimation != null) {
+            collapseAnimation.stop();
+        }
+        collapseAnimation = new Timeline(new KeyFrame(COLLAPSE_ANIMATION,
                 new KeyValue(rail.minWidthProperty(), target),
                 new KeyValue(rail.prefWidthProperty(), target),
                 new KeyValue(rail.maxWidthProperty(), target)));
-        animation.setOnFinished(e -> {
-            if (!collapsed) {
+        collapseAnimation.setOnFinished(e -> {
+            // Reads the CURRENT state, not the one captured when this
+            // animation started, so a superseded finish cannot contradict it.
+            if (!railCollapsed) {
                 rail.showExpanded();
             }
         });
-        animation.play();
+        collapseAnimation.play();
     }
 }

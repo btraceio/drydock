@@ -107,17 +107,40 @@ final class FileRailModel {
     /**
      * The rows the rail renders.
      *
-     * <p>In {@code DIFF} scope the currently open file survives even when it
-     * is out of the change: the rail must not drop the row for the file the
-     * reader is looking at -- that is the dead-end the delta forbids.</p>
+     * <p>The currently open file survives every narrowing -- scope AND
+     * query. The rail must not drop the row for the file the reader is
+     * looking at: that is the dead-end the delta forbids, and it is worse
+     * than a hidden match because it leaves the rail's selection pointing at
+     * a file that is no longer on screen.</p>
      */
     static List<Entry> visible(List<Entry> all, Scope scope, Sort sort, String query, Path openFile) {
         String needle = query == null ? "" : query.strip();
         return all.stream()
-                .filter(entry -> entry.matches(needle))
-                .filter(entry -> scope == Scope.REPO || entry.inDiff() || entry.relative().equals(openFile))
+                .filter(entry -> entry.relative().equals(openFile)
+                        || (entry.matches(needle) && (scope == Scope.REPO || entry.inDiff())))
                 .sorted(comparator(sort))
                 .toList();
+    }
+
+    /**
+     * Whether every row on screen is only there because it is the open file.
+     *
+     * <p>The rail's "no file here matches" message is the honest answer to a
+     * query that found nothing, and keeping the open file visible must not
+     * take it away: one lone row, indistinguishable from a hit, beside a
+     * footer reading "0 matches" is a worse answer than the empty state.</p>
+     */
+    static boolean onlyTheOpenFileIsShown(List<Entry> all, Scope scope, Sort sort, String query, Path openFile) {
+        String needle = query == null ? "" : query.strip();
+        List<Entry> shown = visible(all, scope, sort, needle, openFile);
+        return !shown.isEmpty()
+                && shown.stream().allMatch(entry -> entry.relative().equals(openFile))
+                && matchCount(all, needle) == 0;
+    }
+
+    /** How many entries the query actually matches — the open file is kept for orientation, not counted as a hit. */
+    private static int matchCount(List<Entry> all, String needle) {
+        return (int) all.stream().filter(entry -> entry.matches(needle)).count();
     }
 
     private static Comparator<Entry> comparator(Sort sort) {
@@ -166,7 +189,8 @@ final class FileRailModel {
                     + " in the repo — show";
         }
         if (!needle.isBlank()) {
-            return shown.size() + (shown.size() == 1 ? " match" : " matches")
+            int matches = matchCount(all, needle);
+            return matches + (matches == 1 ? " match" : " matches")
                     + " across the repo · out-of-change dimmed";
         }
         return "whole repo · " + formatCount(repoFileCount) + " files, " + shown.size()

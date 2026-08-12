@@ -1,5 +1,6 @@
 package app.drydock.ui;
 
+import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.PrState;
 import app.drydock.domain.Repository;
@@ -196,6 +197,12 @@ final class OpenSessionTab {
     /** Display name of this session's agent; fixed at creation (a session never changes agent). */
     private final String agentName;
 
+    /** This session's agent kind, used to pick the sub-tab's mark; fixed at creation. */
+    private final AgentKind agentKind;
+
+    /** Whether this session's persisted agent name is one this build does not recognize. */
+    private final boolean unsupportedAgent;
+
     /**
      * Whether this tab's repository lives on a remote host (spec: SSH remote
      * repositories) -- derived once from the constructor's {@code
@@ -209,12 +216,19 @@ final class OpenSessionTab {
      * @param agentName display name of the agent this session runs (see
      *                  {@link AgentLabels}); it labels the agent sub-tab, which
      *                  must never claim "Claude" for a Codex or Pi session.
+     * @param agentKind this session's agent kind, used to pick the sub-tab's mark.
+     * @param unsupportedAgent whether this session's persisted agent name is
+     *                         one this build does not recognize -- the sub-tab
+     *                         then gets the unknown mark instead of a per-agent one.
      */
-    OpenSessionTab(ManagedSessionId sessionId, String displayName, String agentName, Optional<Repository> repository,
+    OpenSessionTab(ManagedSessionId sessionId, String displayName, String agentName, AgentKind agentKind,
+                   boolean unsupportedAgent, Optional<Repository> repository,
                    Stage stage, TerminalRuntime app, TerminalHostView host) {
         this.sessionId = sessionId;
         this.displayName = displayName;
         this.agentName = agentName;
+        this.agentKind = agentKind;
+        this.unsupportedAgent = unsupportedAgent;
         this.stage = stage;
         this.isRemote = repository.map(Repository::isRemote).orElse(false);
         this.bridge = new TerminalBridge(app, host, placeholder, stage::getOutputScaleX,
@@ -304,7 +318,8 @@ final class OpenSessionTab {
     private Region buildSubTabBar() {
         claudeSubTabButton.getStyleClass().add("session-subtab");
         claudeSubTabButton.setFocusTraversable(false);
-        claudeSubTabButton.setText(AgentLabels.subTabLabel(agentName));
+        String mark = unsupportedAgent ? AgentMarks.unknownGlyph() : AgentMarks.glyph(agentKind);
+        claudeSubTabButton.setText(AgentLabels.subTabLabel(mark, agentName));
         claudeSubTabButton.setTooltip(new Tooltip(AgentLabels.subTabTooltip(agentName)));
         claudeSubTabButton.setSelected(true);
         claudeSubTabButton.setOnAction(e -> showSubTab(SubTab.CLAUDE));

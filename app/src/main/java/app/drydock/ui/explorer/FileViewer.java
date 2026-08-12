@@ -48,6 +48,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
 import java.util.function.IntFunction;
 
 /**
@@ -79,6 +80,14 @@ final class FileViewer extends BorderPane {
     private final Button skimToggle = new Button("skim");
     private final Button fullToggle = new Button("full");
     private final HBox skimSegment = new HBox(0);
+
+    /** Whether a changed file opens folded; the Settings "Explorer" checkbox. */
+    private BooleanSupplier skimDefault = () -> true;
+
+    /** Wired by MainWorkspace from the user's config; read at every file open. */
+    void setSkimDefault(BooleanSupplier supplier) {
+        this.skimDefault = supplier == null ? () -> true : supplier;
+    }
 
     /** Findings anchored in the open files; empty without a review scope. */
     private java.util.function.Function<Path, List<ExplorerFinding>> findingsProvider = path -> List.of();
@@ -276,6 +285,13 @@ final class FileViewer extends BorderPane {
         editBannerPrimary.setMinWidth(Region.USE_PREF_SIZE);
         editBannerSecondary.setMinWidth(Region.USE_PREF_SIZE);
         editBannerLabel.setMinWidth(0);
+        // The same trap the edit banner hit: an HBox shrinks its rigid
+        // children before its growing one, so at 1000px the skim/full pair
+        // and the chip rendered as "…", "…", "e…" -- two identical
+        // unreadable buttons, one of which changes the reading mode.
+        skimSegment.setMinWidth(Region.USE_PREF_SIZE);
+        statusChip.setMinWidth(Region.USE_PREF_SIZE);
+        gutterToggle.setMinWidth(Region.USE_PREF_SIZE);
         HBox.setHgrow(editBannerLabel, Priority.ALWAYS);
         editBanner.getChildren().setAll(editBannerLabel, editBannerPrimary, editBannerSecondary);
         editBanner.setAlignment(Pos.CENTER_LEFT);
@@ -340,6 +356,16 @@ final class FileViewer extends BorderPane {
         });
         updateBreadcrumb(null);
         updateEmptyState();
+        // Only when the elision threshold actually flips. Width is the only
+        // thing a resize changes about the breadcrumb, and a rebuild clears
+        // and re-creates every label and re-parents three controls -- doing
+        // that on every tick of a drag, or all ten frames of the rail's
+        // collapse animation, is work whose output is identical.
+        widthProperty().addListener((obs, was, is) -> {
+            if (isNarrowBreadcrumb(was.doubleValue()) != isNarrowBreadcrumb(is.doubleValue())) {
+                updateBreadcrumb(fileTabs.getSelectionModel().getSelectedItem());
+            }
+        });
 
         // Poll only while the viewer is actually in the scene graph.
         // OpenSessionTab.showSubTab swaps the tab's center node, so leaving
@@ -477,11 +503,30 @@ final class FileViewer extends BorderPane {
      * whole of "z round-trips losslessly with scroll preserved".
      */
     private void setSkim(Tab tab, boolean skimming) {
+        setSkim(tab, skimming, true);
+    }
+
+    /**
+     * As {@link #setSkim(Tab, boolean)}, with {@code carryPlaceOver} false
+     * when there is no reader's place to carry.
+     *
+     * <p>On a fresh open there is not one: {@code currentLineOf} reads
+     * {@code firstVisibleParToAllParIndex()} from a CodeArea that has not
+     * been laid out and gets an arbitrary paragraph -- measured at line 42 of
+     * a 68-line file. Revealing that is not merely a wrong scroll the caller
+     * can correct afterwards: {@link SkimView#revealLine} EXPANDS the member
+     * it lands in and reports it through {@code onMemberRead}, so the file
+     * would open with a member nobody chose already unfolded and permanently
+     * marked read -- a minimap tick and a dwell signal for code no one has
+     * looked at. Not computing the anchor is the only version of this that
+     * cannot lie.</p>
+     */
+    private void setSkim(Tab tab, boolean skimming, boolean carryPlaceOver) {
         if (!(tab.getProperties().get("drydock.skim") instanceof SkimView skim)) {
             return;
         }
         CodeArea area = areaOf(tab);
-        int anchor = currentLineOf(tab);
+        int anchor = carryPlaceOver ? currentLineOf(tab) : 0;
         tab.getProperties().put("drydock.skimOn", skimming);
         skim.setVisible(skimming);
         skim.setManaged(skimming);
@@ -491,9 +536,9 @@ final class FileViewer extends BorderPane {
             area.getParent().setVisible(!skimming);
             area.getParent().setManaged(!skimming);
         }
-        if (skimming) {
+        if (skimming && carryPlaceOver) {
             skim.revealLine(anchor);
-        } else if (area != null) {
+        } else if (!skimming && area != null) {
             scrollTo(tab, anchor);
         }
         updateSkimToggle();
@@ -882,6 +927,10 @@ final class FileViewer extends BorderPane {
             // can clear is a permanent banner.
             return;
         }
+        // The peek card's action row lives at the bottom of the viewer, and
+        // it is the only place the peek's keys are advertised. A toast that
+        // covers it hides the answer to "what can I do here".
+        StackPane.setAlignment(toast, isPeekOpen() ? Pos.TOP_CENTER : Pos.BOTTOM_CENTER);
         toast.setText(message);
         toast.setVisible(true);
         toast.setManaged(true);
@@ -1512,8 +1561,13 @@ final class FileViewer extends BorderPane {
                 // A jump target overrules it: the caller asked for one line,
                 // not for the file's shape, and skim cannot show a line (see
                 // jumpToLine).
-                if (jumpToLine.isEmpty() && !changedLinesFor(tab).isEmpty()) {
-                    setSkim(tab, true);
+                if (jumpToLine.isEmpty() && !changedLinesFor(tab).isEmpty()
+                        && skimDefault.getAsBoolean()) {
+                    // No place to carry over on a fresh open, so setSkim does
+                    // not invent one (see its overload). This path says where
+                    // to land itself: the top of the outline.
+                    setSkim(tab, true, false);
+                    skimView.scrollToTop();
                 }
                 refreshMinimap(tab);
                 jumpToLine.ifPresent(line -> jumpToLine(tab, line));
@@ -1993,7 +2047,9 @@ final class FileViewer extends BorderPane {
      */
     private void jumpToLine(Tab tab, int oneBasedLine) {
         if (isSkimming(tab)) {
-            setSkim(tab, false);
+            // No place to carry over: the line below is the place, and
+            // scrolling to a remembered one first would only be undone.
+            setSkim(tab, false, false);
         }
         scrollTo(tab, oneBasedLine);
         markJumpTarget(tab, oneBasedLine);
@@ -2045,6 +2101,17 @@ final class FileViewer extends BorderPane {
         return graphic;
     }
 
+    /**
+     * Below this the breadcrumb's trailing controls start eating each other,
+     * so it keeps three trailing segments instead of the whole path -- that
+     * is what fits beside them at the narrowest width the window allows. A
+     * width of zero is the pre-layout state, which is not narrow, just
+     * unknown.
+     */
+    private static boolean isNarrowBreadcrumb(double width) {
+        return width > 0 && width < 900;
+    }
+
     private void updateBreadcrumb(Tab tab) {
         breadcrumb.getChildren().clear();
         if (tab == null) {
@@ -2055,7 +2122,8 @@ final class FileViewer extends BorderPane {
         if (shown == null) {
             return;
         }
-        breadcrumb.getChildren().addAll(UiFormats.breadcrumbSegments(shown));
+        int maxSegments = isNarrowBreadcrumb(getWidth()) ? 3 : Integer.MAX_VALUE;
+        breadcrumb.getChildren().addAll(UiFormats.breadcrumbSegments(shown, maxSegments));
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
         breadcrumb.getChildren().addAll(spacer, skimSegment, statusChip, gutterToggle);
