@@ -21,6 +21,7 @@ import app.drydock.agent.spi.AgentProvider;
 
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -37,6 +38,9 @@ public final class CodexAgentProvider implements AgentProvider {
 
     /** Kept in step with {@code McpConfigWriter} and {@code McpServer}. */
     private static final String TOKEN_HEADER = "X-Drydock-Session-Token";
+
+    /** Environment variable Codex reads the header value from; private to this launch. */
+    private static final String TOKEN_ENV_VAR = "DRYDOCK_SESSION_TOKEN";
 
     private final CodexExecutableLocator locator;
     private CodexConversationSource conversationSource;
@@ -107,7 +111,7 @@ public final class CodexAgentProvider implements AgentProvider {
             return LaunchPlan.unsupported();   // Codex declines remote
         }
         // DISCOVERED: no id; no --settings
-        return LaunchPlan.of(AgentCommands.envPrefix(ENV_SCRUB) + "codex" + mcpOverrides(c.mcp()), false);
+        return LaunchPlan.of(codexCommand(c.mcp()), false);
     }
 
     @Override
@@ -115,7 +119,7 @@ public final class CodexAgentProvider implements AgentProvider {
         if (r.remote().isPresent()) {
             return LaunchPlan.unsupported();
         }
-        String codex = AgentCommands.envPrefix(ENV_SCRUB) + "codex" + mcpOverrides(r.mcp());
+        String codex = codexCommand(r.mcp());
         if (r.agentSessionId().isPresent()) {
             return LaunchPlan.of(codex + " resume " + AgentCommands.shellQuote(r.agentSessionId().get()), false);
         }
@@ -124,30 +128,35 @@ public final class CodexAgentProvider implements AgentProvider {
     }
 
     /**
-     * The {@code -c} overrides that point Codex at drydock's MCP server, or
-     * {@code ""} when this launch has no access minted.
+     * The whole {@code codex} invocation up to (but not including) any
+     * subcommand: the env prefix, then the {@code -c} overrides that point
+     * Codex at drydock's MCP server.
      *
-     * <p>They are emitted before any subcommand because {@code -c} is a global
+     * <p>The overrides precede any subcommand because {@code -c} is a global
      * option ({@code codex [OPTIONS] <COMMAND>}); after {@code resume} they
      * would be the subcommand's arguments.</p>
      *
-     * <p>The token travels as a literal {@code http_headers} value rather than
-     * through {@code bearer_token_env_var}. Codex accepts custom headers with
-     * literal values, so drydock's own {@code X-Drydock-Session-Token} works
-     * unchanged; the env-var form would have to pass the value through this
-     * same command line anyway ({@code TerminalSpec} carries no environment
-     * map), so it would move nothing out of argv.</p>
+     * <p><strong>The token goes in the environment, not the command line.</strong>
+     * Codex would accept it as a literal {@code http_headers} value, which is
+     * simpler, but on macOS another user can read a process's argv via {@code
+     * ps} while its environment stays private to the owning uid. A literal
+     * would therefore make the session token world-readable for as long as the
+     * session runs -- strictly weaker than the owner-only config file Claude
+     * gets. {@code env_http_headers} names an environment variable instead, and
+     * {@code env} carries the value only until it execs {@code codex}.</p>
      */
-    private static String mcpOverrides(Optional<McpAccess> access) {
+    private static String codexCommand(Optional<McpAccess> access) {
         if (access.isEmpty()) {
-            return "";
+            return AgentCommands.envPrefix(ENV_SCRUB) + "codex";
         }
         McpAccess mcp = access.get();
-        return " -c " + AgentCommands.shellQuote(
+        return AgentCommands.envPrefix(ENV_SCRUB, Map.of(TOKEN_ENV_VAR, mcp.token()))
+                + "codex"
+                + " -c " + AgentCommands.shellQuote(
                         "mcp_servers." + SERVER_NAME + ".url=" + tomlString(mcp.endpointUrl()))
                 + " -c " + AgentCommands.shellQuote(
-                        "mcp_servers." + SERVER_NAME + ".http_headers={"
-                                + tomlString(TOKEN_HEADER) + "=" + tomlString(mcp.token()) + "}");
+                        "mcp_servers." + SERVER_NAME + ".env_http_headers={"
+                                + tomlString(TOKEN_HEADER) + "=" + tomlString(TOKEN_ENV_VAR) + "}");
     }
 
     /**

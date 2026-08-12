@@ -87,15 +87,33 @@ class CodexAgentProviderTest {
     }
 
     @Test
-    void createCarriesTheEndpointAndTokenAsConfigOverrides() {
+    void createCarriesTheEndpointAsAConfigOverride() {
         LaunchPlan plan = provider().buildCreateCommand(
                 new CreateContext("Session 1", "ignored-uuid", Path.of("/repo"), Optional.empty(), SOME_MCP));
 
         assertTrue(plan.command().contains(
                 "-c 'mcp_servers.drydock.url=\"http://127.0.0.1:51234/mcp\"'"), plan.command());
         assertTrue(plan.command().contains(
-                "-c 'mcp_servers.drydock.http_headers={\"X-Drydock-Session-Token\"=\"tok-abc\"}'"),
+                "-c 'mcp_servers.drydock.env_http_headers={\"X-Drydock-Session-Token\"=\"DRYDOCK_SESSION_TOKEN\"}'"),
                 plan.command());
+    }
+
+    /**
+     * The token must reach codex through the environment, never as a literal
+     * argument: on macOS another user can read a process's argv via {@code ps},
+     * but not its environment. A literal would make the session token
+     * world-readable for as long as the session runs.
+     */
+    @Test
+    void theTokenIsPassedInTheEnvironmentAndNeverAsAnArgument() {
+        String command = provider().buildCreateCommand(
+                new CreateContext("s", "x", Path.of("/repo"), Optional.empty(), SOME_MCP)).command();
+
+        assertTrue(command.startsWith("env "), command);
+        assertTrue(command.contains("DRYDOCK_SESSION_TOKEN='tok-abc'"), command);
+        // The only occurrence is the env assignment, which `env` drops on exec.
+        assertEquals(command.indexOf("tok-abc"), command.lastIndexOf("tok-abc"), command);
+        assertFalse(command.contains("-c 'mcp_servers.drydock.http_headers"), command);
     }
 
     @Test
@@ -132,16 +150,29 @@ class CodexAgentProviderTest {
     }
 
     @Test
-    void aTokenWithTomlMetacharactersIsEscapedNotInjected() {
-        // The token is opaque to this provider; a quote or backslash in it must
-        // stay inside the TOML string rather than ending it.
+    void aTokenWithShellMetacharactersIsQuotedNotInjected() {
+        // The token is opaque to this provider. It now travels as a shell
+        // assignment, so single-quoting is what has to hold.
         Optional<McpAccess> nasty = Optional.of(
-                new McpAccess("http://127.0.0.1:1/mcp", "a\"b\\c", Optional.empty()));
+                new McpAccess("http://127.0.0.1:1/mcp", "a'b;rm -rf /", Optional.empty()));
 
         String command = provider().buildCreateCommand(
                 new CreateContext("s", "x", Path.of("/repo"), Optional.empty(), nasty)).command();
 
-        assertTrue(command.contains("\\\"b\\\\c"), command);
+        assertTrue(command.contains("DRYDOCK_SESSION_TOKEN='a'\\''b;rm -rf /'"), command);
+    }
+
+    @Test
+    void anEndpointWithTomlMetacharactersIsEscapedNotInjected() {
+        // The URL still goes through TOML, so a quote in it must stay inside
+        // the string rather than ending it.
+        Optional<McpAccess> nasty = Optional.of(
+                new McpAccess("http://h/\"x\\y", "tok", Optional.empty()));
+
+        String command = provider().buildCreateCommand(
+                new CreateContext("s", "x", Path.of("/repo"), Optional.empty(), nasty)).command();
+
+        assertTrue(command.contains("\\\"x\\\\y"), command);
     }
 
     @Test
