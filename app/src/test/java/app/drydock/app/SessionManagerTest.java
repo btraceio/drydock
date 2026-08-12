@@ -123,7 +123,7 @@ class SessionManagerTest {
                 PrState.NONE,
                 Optional.empty(),
                 true,
-                false);
+                false, Optional.empty());
     }
 
     private Repository someRepository() {
@@ -300,7 +300,7 @@ class SessionManagerTest {
                 PrState.NONE,
                 Optional.empty(),
                 true,
-                false);
+                false, Optional.empty());
     }
 
     /** {@link SessionManager#sessions()} is public where {@code findSession} is not; use it to read state back. */

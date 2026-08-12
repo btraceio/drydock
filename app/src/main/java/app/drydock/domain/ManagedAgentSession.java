@@ -40,6 +40,12 @@ import java.util.Optional;
  * existed). The delete paths consult it before {@code git branch -D}: a
  * branch drydock did not create is never force-deleted.</p>
  *
+ * <p>{@link #forkedFrom()} names the session this one was forked from when
+ * the work was handed to a different agent, and is empty for every session
+ * a human started directly. It is never mutated after creation: that is the
+ * whole lineage model, so chain depth ("the third harness on this work") is
+ * derived by walking links rather than stored.</p>
+ *
  * <p>{@link #namePinned()} records that a human explicitly confirmed a
  * rename of this session. The {@code session_rename} MCP tool refuses once
  * it is set: a name the human typed is theirs. Set only by an explicit
@@ -62,7 +68,8 @@ public record ManagedAgentSession(
         PrState prState,
         Optional<Integer> prNumber,
         boolean branchCreatedHere,
-        boolean namePinned
+        boolean namePinned,
+        Optional<ManagedSessionId> forkedFrom
 ) {
 
     public ManagedAgentSession {
@@ -80,6 +87,7 @@ public record ManagedAgentSession(
         Objects.requireNonNull(lastExitCode, "lastExitCode");
         Objects.requireNonNull(prState, "prState");
         Objects.requireNonNull(prNumber, "prNumber");
+        Objects.requireNonNull(forkedFrom, "forkedFrom");
 
         if (displayName.isBlank()) {
             throw new IllegalArgumentException("ManagedAgentSession displayName must not be blank");
@@ -105,67 +113,74 @@ public record ManagedAgentSession(
     public ManagedAgentSession withDisplayName(String newDisplayName) {
         return new ManagedAgentSession(id, repositoryId, agentKind, newDisplayName, agentSessionId, agentSessionName,
                 workingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, lastExitCode, prState, prNumber,
-                branchCreatedHere, namePinned);
+                branchCreatedHere, namePinned, forkedFrom);
     }
 
     public ManagedAgentSession withAgentKind(AgentKind newAgentKind) {
         return new ManagedAgentSession(id, repositoryId, newAgentKind, displayName, agentSessionId, agentSessionName,
                 workingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, lastExitCode, prState, prNumber,
-                branchCreatedHere, namePinned);
+                branchCreatedHere, namePinned, forkedFrom);
     }
 
     public ManagedAgentSession withAgentSessionId(Optional<String> newAgentSessionId) {
         return new ManagedAgentSession(id, repositoryId, agentKind, displayName, newAgentSessionId, agentSessionName,
                 workingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, lastExitCode, prState, prNumber,
-                branchCreatedHere, namePinned);
+                branchCreatedHere, namePinned, forkedFrom);
     }
 
     public ManagedAgentSession withAgentSessionName(Optional<String> newAgentSessionName) {
         return new ManagedAgentSession(id, repositoryId, agentKind, displayName, agentSessionId, newAgentSessionName,
                 workingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, lastExitCode, prState, prNumber,
-                branchCreatedHere, namePinned);
+                branchCreatedHere, namePinned, forkedFrom);
     }
 
     public ManagedAgentSession withWorkingDirectory(Path newWorkingDirectory) {
         return new ManagedAgentSession(id, repositoryId, agentKind, displayName, agentSessionId, agentSessionName,
                 newWorkingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, lastExitCode, prState, prNumber,
-                branchCreatedHere, namePinned);
+                branchCreatedHere, namePinned, forkedFrom);
     }
 
     public ManagedAgentSession withStatus(SessionStatus newStatus) {
         return new ManagedAgentSession(id, repositoryId, agentKind, displayName, agentSessionId, agentSessionName,
                 workingDirectory, worktreeRoot, newStatus, createdAt, lastOpenedAt, lastExitCode, prState, prNumber,
-                branchCreatedHere, namePinned);
+                branchCreatedHere, namePinned, forkedFrom);
     }
 
     public ManagedAgentSession withLastOpenedAt(Instant newLastOpenedAt) {
         return new ManagedAgentSession(id, repositoryId, agentKind, displayName, agentSessionId, agentSessionName,
                 workingDirectory, worktreeRoot, status, createdAt, newLastOpenedAt, lastExitCode, prState, prNumber,
-                branchCreatedHere, namePinned);
+                branchCreatedHere, namePinned, forkedFrom);
     }
 
     public ManagedAgentSession withLastExitCode(Optional<Integer> newLastExitCode) {
         return new ManagedAgentSession(id, repositoryId, agentKind, displayName, agentSessionId, agentSessionName,
                 workingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, newLastExitCode, prState, prNumber,
-                branchCreatedHere, namePinned);
+                branchCreatedHere, namePinned, forkedFrom);
     }
 
     public ManagedAgentSession withWorktreeRoot(Optional<Path> newWorktreeRoot) {
         return new ManagedAgentSession(id, repositoryId, agentKind, displayName, agentSessionId, agentSessionName,
                 workingDirectory, newWorktreeRoot, status, createdAt, lastOpenedAt, lastExitCode, prState, prNumber,
-                branchCreatedHere, namePinned);
+                branchCreatedHere, namePinned, forkedFrom);
     }
 
     /** PR state and number always change together (a number is meaningless without OPEN/MERGED). */
     public ManagedAgentSession withPr(PrState newPrState, Optional<Integer> newPrNumber) {
         return new ManagedAgentSession(id, repositoryId, agentKind, displayName, agentSessionId, agentSessionName,
                 workingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, lastExitCode, newPrState, newPrNumber,
-                branchCreatedHere, namePinned);
+                branchCreatedHere, namePinned, forkedFrom);
     }
 
     public ManagedAgentSession withNamePinned(boolean newNamePinned) {
         return new ManagedAgentSession(id, repositoryId, agentKind, displayName, agentSessionId, agentSessionName,
                 workingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, lastExitCode, prState, prNumber,
-                branchCreatedHere, newNamePinned);
+                branchCreatedHere, newNamePinned, forkedFrom);
+    }
+
+    /** Set once, when a fork is created; never cleared. */
+    public ManagedAgentSession withForkedFrom(Optional<ManagedSessionId> newForkedFrom) {
+        return new ManagedAgentSession(id, repositoryId, agentKind, displayName, agentSessionId, agentSessionName,
+                workingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, lastExitCode, prState, prNumber,
+                branchCreatedHere, namePinned, newForkedFrom);
     }
 }

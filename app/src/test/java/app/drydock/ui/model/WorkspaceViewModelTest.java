@@ -76,7 +76,7 @@ class WorkspaceViewModelTest {
         Instant t = Instant.parse("2026-01-01T00:00:00Z");
         return new ManagedAgentSession(id, repositoryId, AgentKind.CLAUDE, name, Optional.empty(), Optional.empty(),
                 Path.of("/tmp/repo").toAbsolutePath(), Optional.empty(), SessionStatus.INACTIVE,
-                t, t, Optional.empty(), PrState.NONE, Optional.empty(), true, false);
+                t, t, Optional.empty(), PrState.NONE, Optional.empty(), true, false, Optional.empty());
     }
 
     private static GitStatus status(String branch, boolean dirty) {

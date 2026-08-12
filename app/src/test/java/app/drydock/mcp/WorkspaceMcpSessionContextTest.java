@@ -322,7 +322,7 @@ class WorkspaceMcpSessionContextTest {
         Instant now = Instant.now();
         return new ManagedAgentSession(ManagedSessionId.newId(), owner.id(), AgentKind.CLAUDE, "example session",
                 Optional.empty(), Optional.empty(), workingDirectory, Optional.empty(),
-                SessionStatus.RUNNING, now, now, Optional.empty(), PrState.NONE, Optional.empty(), true, false);
+                SessionStatus.RUNNING, now, now, Optional.empty(), PrState.NONE, Optional.empty(), true, false, Optional.empty());
     }
 
     private WorkspaceMcpSessionContext contextFor(Path root) throws IOException {

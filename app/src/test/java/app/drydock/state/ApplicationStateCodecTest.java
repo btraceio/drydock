@@ -2,6 +2,7 @@ package app.drydock.state;
 
 import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.ApplicationState;
+import app.drydock.domain.HandoffBrief;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.PrState;
@@ -134,7 +135,7 @@ class ApplicationStateCodecTest {
         SshRemote remote = new SshRemote("user@h", "/srv/app");
         Repository repo = new Repository(RepositoryId.newId(), remote.placeholderRoot(), "app",
                 Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT, remote);
-        ApplicationState state = new ApplicationState(List.of(repo), List.of(), WorkspaceUiState.empty());
+        ApplicationState state = new ApplicationState(List.of(repo), List.of(), WorkspaceUiState.empty(), List.of());
 
         ApplicationState decoded = ApplicationStateCodec.fromJson(ApplicationStateCodec.toJson(state));
 
@@ -148,7 +149,7 @@ class ApplicationStateCodecTest {
     void repositoryWithoutRemoteMemberDecodesAsLocal() {
         Repository repo = new Repository(RepositoryId.newId(), Path.of("/tmp/x"), "x",
                 Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT);
-        ApplicationState state = new ApplicationState(List.of(repo), List.of(), WorkspaceUiState.empty());
+        ApplicationState state = new ApplicationState(List.of(repo), List.of(), WorkspaceUiState.empty(), List.of());
         JsonValue json = ApplicationStateCodec.toJson(state);
 
         // A local repo writes no "remote" member at all (older builds must
@@ -165,7 +166,7 @@ class ApplicationStateCodecTest {
         // user their whole state file.
         Repository repo = new Repository(RepositoryId.newId(), Path.of("/tmp/x"), "x",
                 Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT);
-        ApplicationState state = new ApplicationState(List.of(repo), List.of(), WorkspaceUiState.empty());
+        ApplicationState state = new ApplicationState(List.of(repo), List.of(), WorkspaceUiState.empty(), List.of());
         JsonObject json = (JsonObject) ApplicationStateCodec.toJson(state);
         JsonObject repoObj = (JsonObject) ((JsonArray) json.get("repositories")).elements().getFirst();
         JsonObject badRemote = JsonObject.empty();
@@ -211,7 +212,7 @@ class ApplicationStateCodecTest {
                 ManagedSessionId.newId(), RepositoryId.of(REPO_ID), AgentKind.CODEX, "Session 1",
                 Optional.of("id"), Optional.empty(), Path.of("/tmp"), Optional.empty(),
                 SessionStatus.RUNNING, Instant.EPOCH, Instant.EPOCH, Optional.empty(),
-                PrState.NONE, Optional.empty(), true, false);
+                PrState.NONE, Optional.empty(), true, false, Optional.empty());
         ApplicationState state = ApplicationState.empty().withSessions(List.of(session));
         ApplicationState roundTripped = ApplicationStateCodec.fromJson(ApplicationStateCodec.toJson(state));
         assertEquals(AgentKind.CODEX, roundTripped.sessions().get(0).agentKind());
@@ -241,8 +242,8 @@ class ApplicationStateCodecTest {
                 PrState.NONE,
                 Optional.empty(),
                 false,
-                false);
-        ApplicationState state = new ApplicationState(List.of(repo), List.of(session), WorkspaceUiState.empty());
+                false, Optional.empty());
+        ApplicationState state = new ApplicationState(List.of(repo), List.of(session), WorkspaceUiState.empty(), List.of());
 
         ApplicationState decoded = ApplicationStateCodec.fromJson(ApplicationStateCodec.toJson(state));
 
@@ -269,8 +270,8 @@ class ApplicationStateCodecTest {
                 PrState.NONE,
                 Optional.empty(),
                 true,
-                true);
-        ApplicationState state = new ApplicationState(List.of(repo), List.of(pinned), WorkspaceUiState.empty());
+                true, Optional.empty());
+        ApplicationState state = new ApplicationState(List.of(repo), List.of(pinned), WorkspaceUiState.empty(), List.of());
 
         ApplicationState decoded = ApplicationStateCodec.fromJson(ApplicationStateCodec.toJson(state));
 
@@ -409,7 +410,7 @@ class ApplicationStateCodecTest {
     @Test
     void fontSizesRoundTrip() {
         ApplicationState state = new ApplicationState(List.of(), List.of(),
-                WorkspaceUiState.empty().withUiFontSize(15).withTerminalFontSize(11));
+                WorkspaceUiState.empty().withUiFontSize(15).withTerminalFontSize(11), List.of());
 
         ApplicationState decoded = ApplicationStateCodec.fromJson(
                 JsonParser.parse(JsonWriter.write(ApplicationStateCodec.toJson(state))));
@@ -466,5 +467,132 @@ class ApplicationStateCodecTest {
 
         assertEquals(900.0, ui.uiFontSize());
         assertEquals(0.0, ui.terminalFontSize());
+    }
+    // ---- handoff briefs and fork lineage -----------------------------------
+
+    private static ManagedAgentSession plainSession() {
+        return new ManagedAgentSession(
+                ManagedSessionId.newId(), RepositoryId.of(REPO_ID), AgentKind.CLAUDE, "Session 1",
+                Optional.empty(), Optional.empty(), Path.of("/tmp"), Optional.empty(),
+                SessionStatus.RUNNING, Instant.EPOCH, Instant.EPOCH, Optional.empty(),
+                PrState.NONE, Optional.empty(), true, false, Optional.empty());
+    }
+
+    private static HandoffBrief fullBrief(ManagedSessionId sessionId) {
+        return new HandoffBrief(
+                sessionId, "Ship the fork gesture", "Wire the banner",
+                Optional.of("Fork, never switch in place"),
+                Optional.of("Chose briefing over transcript translation"),
+                Optional.of("Rejected an API proxy: it buys nothing at this fidelity bar"),
+                Optional.of("Human said stop rewriting the parser"),
+                Instant.parse("2026-08-12T10:15:30Z"),
+                Optional.of("abc1234"),
+                HandoffBrief.Author.AGENT);
+    }
+
+    @Test
+    void handoffBriefRoundTrips() {
+        HandoffBrief brief = fullBrief(ManagedSessionId.newId());
+        ApplicationState state = ApplicationState.empty().withHandoffBriefs(List.of(brief));
+
+        assertEquals(List.of(brief),
+                ApplicationStateCodec.fromJson(ApplicationStateCodec.toJson(state)).handoffBriefs());
+    }
+
+    @Test
+    void absentOptionalSlotsRoundTripAsAbsentRatherThanBlank() {
+        HandoffBrief minimal = new HandoffBrief(
+                ManagedSessionId.newId(), "Goal", "Next",
+                Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(),
+                Instant.parse("2026-08-12T10:15:30Z"), Optional.empty(), HandoffBrief.Author.HUMAN);
+
+        HandoffBrief decoded = ApplicationStateCodec.fromJson(ApplicationStateCodec.toJson(
+                ApplicationState.empty().withHandoffBriefs(List.of(minimal)))).handoffBriefs().get(0);
+
+        assertEquals(Optional.empty(), decoded.approach());
+        assertEquals(Optional.empty(), decoded.writtenAtCommit());
+        assertEquals(HandoffBrief.Author.HUMAN, decoded.author());
+    }
+
+    @Test
+    void stateWrittenBeforeHandoffBriefsExistedDecodesToNone() {
+        String legacy = """
+                {"schemaVersion":2,"repositories":[],"sessions":[],"ui":{}}""";
+
+        assertEquals(List.of(),
+                ApplicationStateCodec.fromJson(JsonParser.parse(legacy)).handoffBriefs());
+    }
+
+    @Test
+    void anAuthorlessBriefDecodesAsAgentWritten() {
+        // Every brief written before the member existed came from session_handoff.
+        String noAuthor = """
+                {"schemaVersion":2,"repositories":[],"sessions":[],"ui":{},
+                 "handoffBriefs":[{"sessionId":"%s","goal":"g","nextStep":"n",
+                                   "writtenAt":"2026-08-12T10:15:30Z"}]}""".formatted(REPO_ID);
+
+        assertEquals(HandoffBrief.Author.AGENT,
+                ApplicationStateCodec.fromJson(JsonParser.parse(noAuthor)).handoffBriefs().get(0).author());
+    }
+
+    @Test
+    void aMalformedBriefIsDroppedWithoutCostingTheGoodOnes() {
+        // Unlike a malformed session, which still fails the decode: a session
+        // is the user's work, a brief is only a note about it.
+        String mixed = """
+                {"schemaVersion":2,"repositories":[],"sessions":[],"ui":{},
+                 "handoffBriefs":[{"sessionId":"not-a-uuid","goal":"g","nextStep":"n",
+                                   "writtenAt":"2026-08-12T10:15:30Z"},
+                                  {"sessionId":"%s","goal":"kept","nextStep":"n",
+                                   "writtenAt":"2026-08-12T10:15:30Z"}]}""".formatted(REPO_ID);
+
+        List<HandoffBrief> briefs = ApplicationStateCodec.fromJson(JsonParser.parse(mixed)).handoffBriefs();
+
+        assertEquals(1, briefs.size());
+        assertEquals("kept", briefs.get(0).goal());
+    }
+
+    @Test
+    void aBriefMissingARequiredSlotIsDroppedNotThrown() {
+        String noGoal = """
+                {"schemaVersion":2,"repositories":[],"sessions":[],"ui":{},
+                 "handoffBriefs":[{"sessionId":"%s","nextStep":"n",
+                                   "writtenAt":"2026-08-12T10:15:30Z"}]}""".formatted(REPO_ID);
+
+        assertEquals(List.of(), ApplicationStateCodec.fromJson(JsonParser.parse(noGoal)).handoffBriefs());
+    }
+
+    @Test
+    void forkedFromRoundTrips() {
+        ManagedSessionId parent = ManagedSessionId.newId();
+        ManagedAgentSession fork = plainSession().withForkedFrom(Optional.of(parent));
+
+        ApplicationState decoded = ApplicationStateCodec.fromJson(ApplicationStateCodec.toJson(
+                ApplicationState.empty().withSessions(List.of(fork))));
+
+        assertEquals(Optional.of(parent), decoded.sessions().get(0).forkedFrom());
+    }
+
+    @Test
+    void aSessionWrittenBeforeForkedFromExistedIsNotAFork() {
+        ApplicationState decoded = ApplicationStateCodec.fromJson(ApplicationStateCodec.toJson(
+                ApplicationState.empty().withSessions(List.of(plainSession()))));
+
+        assertEquals(Optional.empty(), decoded.sessions().get(0).forkedFrom());
+    }
+
+    @Test
+    void anUnparseableForkedFromCostsTheLineageNotTheSession() {
+        String badLineage = """
+                {"schemaVersion":2,"repositories":[],"sessions":[
+                  {"id":"%s","repositoryId":"%s","displayName":"s","agentKind":"claude",
+                   "workingDirectory":"/tmp","status":"RUNNING",
+                   "createdAt":"2026-08-12T10:15:30Z","lastOpenedAt":"2026-08-12T10:15:30Z",
+                   "forkedFrom":"not-a-uuid"}],"ui":{}}""".formatted(OTHER_ID, REPO_ID);
+
+        ApplicationState decoded = ApplicationStateCodec.fromJson(JsonParser.parse(badLineage));
+
+        assertEquals(1, decoded.sessions().size(), "the session itself must survive");
+        assertEquals(Optional.empty(), decoded.sessions().get(0).forkedFrom());
     }
 }

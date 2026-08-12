@@ -35,7 +35,7 @@ class ManagedAgentSessionTest {
                 PrState.NONE,
                 Optional.empty(),
                 true,
-                false);
+                false, Optional.empty());
     }
 
     @Test
@@ -63,7 +63,7 @@ class ManagedAgentSessionTest {
         assertThrows(IllegalArgumentException.class, () -> new ManagedAgentSession(
                 ManagedSessionId.newId(), RepositoryId.newId(), AgentKind.CLAUDE, "example", Optional.empty(),
                 Optional.empty(), dir, Optional.of(notNormalized), SessionStatus.INACTIVE, Instant.now(),
-                Instant.now(), Optional.empty(), PrState.NONE, Optional.empty(), true, false));
+                Instant.now(), Optional.empty(), PrState.NONE, Optional.empty(), true, false, Optional.empty()));
     }
 
     @Test
@@ -72,7 +72,7 @@ class ManagedAgentSessionTest {
         assertThrows(IllegalArgumentException.class, () -> new ManagedAgentSession(
                 ManagedSessionId.newId(), RepositoryId.newId(), AgentKind.CLAUDE, "   ", Optional.empty(),
                 Optional.empty(), dir, Optional.empty(), SessionStatus.INACTIVE, Instant.now(), Instant.now(),
-                Optional.empty(), PrState.NONE, Optional.empty(), true, false));
+                Optional.empty(), PrState.NONE, Optional.empty(), true, false, Optional.empty()));
     }
 
     @Test
@@ -172,7 +172,7 @@ class ManagedAgentSessionTest {
                 ManagedSessionId.newId(), RepositoryId.newId(), AgentKind.CLAUDE, "Session 1",
                 Optional.empty(), Optional.empty(), Path.of("/tmp"), Optional.empty(),
                 SessionStatus.INACTIVE, Instant.EPOCH, Instant.EPOCH, Optional.empty(),
-                PrState.NONE, Optional.empty(), true, false);
+                PrState.NONE, Optional.empty(), true, false, Optional.empty());
         assertEquals(AgentKind.CODEX, session.withAgentKind(AgentKind.CODEX).agentKind());
         assertEquals(Optional.of("x"), session.withAgentSessionId(Optional.of("x")).agentSessionId());
     }

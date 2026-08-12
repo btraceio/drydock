@@ -988,7 +988,8 @@ public final class SessionManager implements AutoCloseable {
                 PrState.NONE,
                 Optional.empty(),
                 branchCreatedHere,
-                false);
+                false,
+                Optional.empty());   // lineage is set by the fork path, never here
     }
 
     /**

@@ -1,6 +1,7 @@
 package app.drydock.state;
 
 import app.drydock.domain.ApplicationState;
+import app.drydock.domain.HandoffBrief;
 import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
@@ -64,7 +65,22 @@ import java.util.Set;
  *       "prState": "NONE" | "OPEN" | "MERGED",
  *       "prNumber": <int> | null,
  *       "branchCreatedHere": <boolean>,
- *       "namePinned": <boolean>
+ *       "namePinned": <boolean>,
+ *       "forkedFrom": "<uuid>" | null
+ *     }
+ *   ],
+ *   "handoffBriefs": [
+ *     {
+ *       "sessionId": "<uuid>",
+ *       "goal": "...",
+ *       "nextStep": "...",
+ *       "approach": "..." | null,
+ *       "decisions": "..." | null,
+ *       "ruledOut": "..." | null,
+ *       "corrections": "..." | null,
+ *       "writtenAt": "<ISO-8601 instant>",
+ *       "writtenAtCommit": "<sha>" | null,
+ *       "author": "AGENT" | "HUMAN"
  *     }
  *   ],
  *   "ui": {
@@ -116,7 +132,17 @@ import java.util.Set;
  * the new names. {@link #toJson}
  * always writes the current version. Any {@code schemaVersion} other than 1
  * or 2 is treated as malformed input (throws {@link StateDecodeException}),
- * consistent with how unknown versions were already rejected before this change.</p>
+ * consistent with how unknown versions were already rejected before this change.
+ * The {@code handoffBriefs} array and the session {@code forkedFrom} member
+ * were likewise added leniently within version 2: an absent {@code
+ * handoffBriefs} decodes to an empty list, an absent or unparseable {@code
+ * forkedFrom} to empty (a session persisted before it existed was not a fork),
+ * and {@code author} defaults to {@code AGENT} because every brief written
+ * before that member existed came from {@code session_handoff}. A malformed
+ * <em>brief</em> entry is dropped rather than throwing -- unlike a malformed
+ * session, which still fails the decode: a session is the user's work, a brief
+ * is only a note about it, so one bad note must not cost the whole state file.
+ * No version bump was needed and downgrades stay non-destructive.</p>
  */
 public final class ApplicationStateCodec {
 
@@ -145,6 +171,12 @@ public final class ApplicationStateCodec {
         root.put("sessions", new JsonArray(sessions));
 
         root.put("ui", uiToJson(state.ui()));
+
+        List<JsonValue> briefs = new ArrayList<>();
+        for (HandoffBrief brief : state.handoffBriefs()) {
+            briefs.add(handoffBriefToJson(brief));
+        }
+        root.put("handoffBriefs", new JsonArray(briefs));
         return root;
     }
 
@@ -192,6 +224,24 @@ public final class ApplicationStateCodec {
                 .orElse(JsonValue.JsonNull.INSTANCE));
         obj.put("branchCreatedHere", new JsonBoolean(session.branchCreatedHere()));
         obj.put("namePinned", new JsonBoolean(session.namePinned()));
+        obj.put("forkedFrom", session.forkedFrom()
+                .<JsonValue>map(parent -> new JsonString(parent.value().toString()))
+                .orElse(JsonValue.JsonNull.INSTANCE));
+        return obj;
+    }
+
+    private static JsonValue handoffBriefToJson(HandoffBrief brief) {
+        JsonObject obj = JsonObject.empty();
+        obj.put("sessionId", new JsonString(brief.sessionId().value().toString()));
+        obj.put("goal", new JsonString(brief.goal()));
+        obj.put("nextStep", new JsonString(brief.nextStep()));
+        obj.put("approach", optionalStringToJson(brief.approach()));
+        obj.put("decisions", optionalStringToJson(brief.decisions()));
+        obj.put("ruledOut", optionalStringToJson(brief.ruledOut()));
+        obj.put("corrections", optionalStringToJson(brief.corrections()));
+        obj.put("writtenAt", new JsonString(brief.writtenAt().toString()));
+        obj.put("writtenAtCommit", optionalStringToJson(brief.writtenAtCommit()));
+        obj.put("author", new JsonString(brief.author().name()));
         return obj;
     }
 
@@ -244,7 +294,61 @@ public final class ApplicationStateCodec {
                 ? uiFromJson(asObject(root.get("ui"), "ui"))
                 : WorkspaceUiState.empty();
 
-        return new ApplicationState(repositories, sessions, ui);
+        return new ApplicationState(repositories, sessions, ui, handoffBriefsFromJson(root));
+    }
+
+    /**
+     * Lenient, and unlike sessions it drops rather than throws. A session is
+     * the user's work and a malformed one is worth failing loudly over; a brief
+     * is a note about work, so one bad entry must not cost the whole state
+     * file. Absent member (state written before this feature) yields no briefs.
+     */
+    private static List<HandoffBrief> handoffBriefsFromJson(JsonObject root) {
+        if (!(root.get("handoffBriefs") instanceof JsonArray array)) {
+            return List.of();
+        }
+        List<HandoffBrief> briefs = new ArrayList<>();
+        for (JsonValue element : array.elements()) {
+            handoffBriefFromJson(element).ifPresent(briefs::add);
+        }
+        return List.copyOf(briefs);
+    }
+
+    private static Optional<HandoffBrief> handoffBriefFromJson(JsonValue element) {
+        if (!(element instanceof JsonObject obj)) {
+            return Optional.empty();
+        }
+        try {
+            return Optional.of(new HandoffBrief(
+                    ManagedSessionId.of(requireString(obj, "sessionId")),
+                    requireString(obj, "goal"),
+                    requireString(obj, "nextStep"),
+                    optionalString(obj, "approach"),
+                    optionalString(obj, "decisions"),
+                    optionalString(obj, "ruledOut"),
+                    optionalString(obj, "corrections"),
+                    Instant.parse(requireString(obj, "writtenAt")),
+                    optionalString(obj, "writtenAtCommit"),
+                    handoffAuthorFromJson(obj)));
+        } catch (IllegalArgumentException | DateTimeException | StateDecodeException e) {
+            return Optional.empty();   // a bad brief costs a brief, never the state
+        }
+    }
+
+    /**
+     * Absent or unrecognized decodes to {@link HandoffBrief.Author#AGENT}:
+     * every brief written before this member existed came from
+     * {@code session_handoff}.
+     */
+    private static HandoffBrief.Author handoffAuthorFromJson(JsonObject obj) {
+        if (obj.get("author") instanceof JsonString s) {
+            for (HandoffBrief.Author author : HandoffBrief.Author.values()) {
+                if (author.name().equals(s.value())) {
+                    return author;
+                }
+            }
+        }
+        return HandoffBrief.Author.AGENT;
     }
 
     private static Repository repositoryFromJson(JsonObject obj) {
@@ -342,11 +446,24 @@ public final class ApplicationStateCodec {
             // persisted before this member existed was never pinned, and a
             // malformed value must not silently lock a name.
             boolean namePinned = obj.get("namePinned") instanceof JsonBoolean pinned && pinned.value();
+            // Lenient like namePinned: a session persisted before this member
+            // existed was not a fork, and an unparseable id must not discard
+            // the session -- lineage is informational, the session is not.
+            Optional<ManagedSessionId> forkedFrom = optionalString(obj, "forkedFrom")
+                    .flatMap(ApplicationStateCodec::parseSessionId);
             return new ManagedAgentSession(id, repositoryId, agentKind, displayName, agentSessionId,
                     agentSessionName, workingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, lastExitCode,
-                    prState, prNumber, branchCreatedHere, namePinned);
+                    prState, prNumber, branchCreatedHere, namePinned, forkedFrom);
         } catch (IllegalArgumentException | DateTimeException e) {
             throw new StateDecodeException("Malformed session entry: " + e.getMessage());
+        }
+    }
+
+    private static Optional<ManagedSessionId> parseSessionId(String value) {
+        try {
+            return Optional.of(ManagedSessionId.of(value));
+        } catch (IllegalArgumentException e) {
+            return Optional.empty();
         }
     }
 
