@@ -267,6 +267,101 @@ class McpServerTest {
         assertEquals(401, response.statusCode());
     }
 
+    // ---- Authorization: Bearer, for clients that cannot send a custom header ----
+
+    @Test
+    void anAuthorizationBearerTokenIsAccepted() throws Exception {
+        // Codex sends only Authorization: Bearer (--bearer-token-env-var); it
+        // has no way to set X-Drydock-Session-Token.
+        HttpResponse<String> response = postWithAuthorization("""
+                {"jsonrpc":"2.0","id":20,"method":"tools/list","params":{}}""", "Bearer " + token);
+
+        assertEquals(200, response.statusCode());
+    }
+
+    @Test
+    void theBearerSchemeIsMatchedCaseInsensitively() throws Exception {
+        // RFC 7235: the auth-scheme token is case-insensitive.
+        HttpResponse<String> response = postWithAuthorization("""
+                {"jsonrpc":"2.0","id":21,"method":"tools/list","params":{}}""", "bearer " + token);
+
+        assertEquals(200, response.statusCode());
+    }
+
+    @Test
+    void anUnknownBearerTokenIsRejected() throws Exception {
+        HttpResponse<String> response = postWithAuthorization("""
+                {"jsonrpc":"2.0","id":22,"method":"tools/list","params":{}}""", "Bearer bogus-token");
+
+        assertEquals(401, response.statusCode());
+    }
+
+    @Test
+    void aNonBearerAuthorizationSchemeIsRejected() throws Exception {
+        HttpResponse<String> response = postWithAuthorization("""
+                {"jsonrpc":"2.0","id":23,"method":"tools/list","params":{}}""", "Basic " + token);
+
+        assertEquals(401, response.statusCode());
+    }
+
+    @Test
+    void aBearerHeaderWithNoTokenIsRejected() throws Exception {
+        HttpResponse<String> response = postWithAuthorization("""
+                {"jsonrpc":"2.0","id":24,"method":"tools/list","params":{}}""", "Bearer   ");
+
+        assertEquals(401, response.statusCode());
+    }
+
+    @Test
+    void theDrydockHeaderStillWinsWhenBothAreSent() throws Exception {
+        HttpRequest request = HttpRequest.newBuilder(URI.create(server.endpointUrl()))
+                .timeout(Duration.ofSeconds(5))
+                .header("Content-Type", "application/json")
+                .header(TOKEN_HEADER, token)
+                .header("Authorization", "Bearer bogus-token")
+                .POST(HttpRequest.BodyPublishers.ofString("""
+                        {"jsonrpc":"2.0","id":25,"method":"tools/list","params":{}}"""))
+                .build();
+
+        assertEquals(200, client.send(request, HttpResponse.BodyHandlers.ofString()).statusCode());
+    }
+
+    @Test
+    void aBearerTokenIsUsedWhenTheDrydockHeaderDoesNotResolve() throws Exception {
+        // Attribution, not a secret between sessions (see McpSessionRegistry):
+        // falling back costs nothing and spares a client that sets both.
+        HttpRequest request = HttpRequest.newBuilder(URI.create(server.endpointUrl()))
+                .timeout(Duration.ofSeconds(5))
+                .header("Content-Type", "application/json")
+                .header(TOKEN_HEADER, "bogus-token")
+                .header("Authorization", "Bearer " + token)
+                .POST(HttpRequest.BodyPublishers.ofString("""
+                        {"jsonrpc":"2.0","id":26,"method":"tools/list","params":{}}"""))
+                .build();
+
+        assertEquals(200, client.send(request, HttpResponse.BodyHandlers.ofString()).statusCode());
+    }
+
+    @Test
+    void aRevokedTokenStopsWorkingOverBearerToo() throws Exception {
+        registry.revoke(registry.resolve(token).orElseThrow());
+
+        HttpResponse<String> response = postWithAuthorization("""
+                {"jsonrpc":"2.0","id":27,"method":"tools/list","params":{}}""", "Bearer " + token);
+
+        assertEquals(401, response.statusCode());
+    }
+
+    private HttpResponse<String> postWithAuthorization(String body, String authorization) throws Exception {
+        HttpRequest request = HttpRequest.newBuilder(URI.create(server.endpointUrl()))
+                .timeout(Duration.ofSeconds(5))
+                .header("Content-Type", "application/json")
+                .header("Authorization", authorization)
+                .POST(HttpRequest.BodyPublishers.ofString(body))
+                .build();
+        return client.send(request, HttpResponse.BodyHandlers.ofString());
+    }
+
     @Test
     void aRevokedTokenStopsWorking() throws Exception {
         registry.revoke(registry.resolve(token).orElseThrow());
