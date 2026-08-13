@@ -738,6 +738,11 @@ public final class SessionManager implements AutoCloseable {
      */
     public HandoffBrief applyAgentHandoff(ManagedSessionId sessionId, McpSessionContext.HandoffDraft draft,
                                           Optional<String> headCommit) {
+        return storeHandoff(sessionId, draft, headCommit, HandoffBrief.Author.AGENT);
+    }
+
+    private HandoffBrief storeHandoff(ManagedSessionId sessionId, McpSessionContext.HandoffDraft draft,
+                                      Optional<String> headCommit, HandoffBrief.Author author) {
         HandoffBrief[] result = new HandoffBrief[1];
         stateStore.update(state -> {
             boolean known = state.sessions().stream().anyMatch(existing -> existing.id().equals(sessionId));
@@ -746,7 +751,7 @@ public final class SessionManager implements AutoCloseable {
             }
             HandoffBrief brief = new HandoffBrief(sessionId, draft.goal(), draft.nextStep(), draft.approach(),
                     draft.decisions(), draft.ruledOut(), draft.corrections(), Instant.now(), headCommit,
-                    HandoffBrief.Author.AGENT);
+                    author);
             result[0] = brief;
             List<HandoffBrief> briefs = new ArrayList<>(state.handoffBriefs().stream()
                     .filter(existing -> !existing.sessionId().equals(sessionId))
@@ -755,6 +760,21 @@ public final class SessionManager implements AutoCloseable {
             return state.withHandoffBriefs(List.copyOf(briefs));
         });
         return result[0];
+    }
+
+    /**
+     * The human's own handoff brief, written in the Edit dialog.
+     *
+     * <p>Identical to {@link #applyAgentHandoff} except for the attribution
+     * and who is allowed to make it: this path is never charged against the
+     * session's MCP budget, which exists to bound an agent looping and has
+     * nothing to say about a person correcting a brief. The stamp matters
+     * downstream -- the fork seed labels an agent brief as testimony, and that
+     * label would be wrong for one the human typed.</p>
+     */
+    public HandoffBrief applyHumanHandoff(ManagedSessionId sessionId, McpSessionContext.HandoffDraft draft,
+                                          Optional<String> headCommit) {
+        return storeHandoff(sessionId, draft, headCommit, HandoffBrief.Author.HUMAN);
     }
 
     /** Every session's handoff brief, for the banner and the fork seed. */
