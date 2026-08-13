@@ -114,6 +114,7 @@ final class OpenSessionTab {
     private final StackPane shellPlaceholder = new StackPane();
     private final Label statusLabel = new Label("Starting session...");
     private final BorderPane content = new BorderPane();
+    private final HandoffBanner handoffBanner = new HandoffBanner();
 
     // -- Bottom Agent/Terminal/Explorer sub-tab bar (handoff "Session Explorer") --
     /** Text set in the constructor: it names THIS session's agent (Claude, Codex, …). */
@@ -265,7 +266,10 @@ final class OpenSessionTab {
         tab.setClosable(false); // the graphic carries its own close button (17px ×, handoff 4)
         tab.setGraphic(buildTabGraphic(repository));
 
-        content.setTop(buildSessionHeader(repository));
+        // The banner sits under the header rather than inside it: it is absent
+        // most of the time (managed follows visible), and the header's own
+        // layout must not have to reserve space for something usually gone.
+        content.setTop(new VBox(buildSessionHeader(repository), handoffBanner));
         content.setCenter(placeholder);
         content.setBottom(buildSubTabBar());
         tab.setContent(content);
@@ -1152,4 +1156,10 @@ final class OpenSessionTab {
             }
         }
     }
+
+    /** The staleness banner for this session's handoff brief; the workspace drives it. */
+    HandoffBanner handoffBanner() {
+        return handoffBanner;
+    }
+
 }
