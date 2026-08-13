@@ -70,35 +70,39 @@ public final class WorktreeTransplant {
             return 0;
         }
 
-        ProcessResult diff = run(List.of(git.toString(), "-C", source.toString(), "diff", "HEAD", "--binary"));
-        if (diff.exitCode() != 0) {
-            throw new GitCommandFailedException(List.of("git", "diff", "HEAD", "--binary"),
-                    diff.exitCode(), ProcessRunner.excerpt(diff.stderr()));
-        }
-        if (diff.stdout().isBlank()) {
-            return 0;
-        }
-
-        // Via a temp file rather than stdin: ProcessRunner has no stdin
-        // channel, and it is the single place this codebase spawns processes.
-        // --binary output is base85, so it survives the String round trip.
+        // Via a temp file, and git writes it ITSELF (--output) rather than
+        // handing it back through stdout. ProcessRunner decodes a child's
+        // stdout as UTF-8, which replaces any invalid sequence with U+FFFD --
+        // and --binary only base85-encodes files git classifies as BINARY. A
+        // tracked file git calls text but whose bytes are not UTF-8 (a Latin-1
+        // .properties, say) has its content emitted raw, so a stdout round
+        // trip would either corrupt it silently or produce a patch git apply
+        // rejects. Bytes never enter the JVM this way.
         Path patch = null;
         try {
             patch = Files.createTempFile("drydock-transplant-", ".patch");
-            Files.writeString(patch, diff.stdout(), StandardCharsets.UTF_8);
+            ProcessResult diff = run(List.of(git.toString(), "-C", source.toString(),
+                    "diff", "HEAD", "--binary", "--output=" + patch));
+            if (diff.exitCode() != 0) {
+                throw new GitCommandFailedException(List.of("git", "diff", "HEAD", "--binary"),
+                        diff.exitCode(), ProcessRunner.excerpt(diff.stderr()));
+            }
+            if (Files.size(patch) == 0) {
+                return 0;
+            }
             ProcessResult apply = run(List.of(git.toString(), "-C", destination.toString(),
                     "apply", "--binary", patch.toString()));
             if (apply.exitCode() != 0) {
                 throw new GitCommandFailedException(List.of("git", "apply", "--binary"),
                         apply.exitCode(), ProcessRunner.excerpt(apply.stderr()));
             }
+            return countPatchedFiles(patch);
         } catch (IOException e) {
             throw new GitCommandFailedException(List.of("git", "apply", "--binary"), -1,
                     e.getMessage() == null ? "could not stage the patch" : e.getMessage());
         } finally {
             deleteQuietly(patch);
         }
-        return countPatchedFiles(diff.stdout());
     }
 
     private int copyUntracked(Path git, Path source, Path destination) {
@@ -131,10 +135,15 @@ public final class WorktreeTransplant {
         return copied;
     }
 
-    /** One {@code diff --git} header per file the patch touches. */
-    private static int countPatchedFiles(String patch) {
+    /**
+     * One {@code diff --git} header per file the patch touches. Read as
+     * ISO-8859-1 so every byte maps to exactly one char: this only counts
+     * ASCII headers, and a lossy decode of raw non-UTF-8 content elsewhere in
+     * the patch must not be able to fabricate or swallow one.
+     */
+    private static int countPatchedFiles(Path patch) throws IOException {
         int count = 0;
-        for (String line : patch.split("\n")) {
+        for (String line : Files.readAllLines(patch, StandardCharsets.ISO_8859_1)) {
             if (line.startsWith("diff --git ")) {
                 count++;
             }

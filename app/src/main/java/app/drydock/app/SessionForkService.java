@@ -48,6 +48,16 @@ public final class SessionForkService {
     private static final int MAX_BRANCH_SUFFIX = 100;
 
     /**
+     * Longest commit and changed-file lists the seed carries. The commit list
+     * was already bounded by {@code -n 20}; the file list was not, and {@code
+     * git status --porcelain} in a tree with thousands of untracked files
+     * would otherwise become thousands of bullet lines in the successor's very
+     * first prompt.
+     */
+    private static final int MAX_COMMIT_SUBJECTS = 20;
+    private static final int MAX_CHANGED_FILES = 50;
+
+    /**
      * Starts the forked session.
      *
      * <p>A seam rather than a direct call into the workspace, for the same
@@ -172,9 +182,25 @@ public final class SessionForkService {
     private ForkFacts factsFor(Path sourceWorktree, String branch, String baseBranch, Optional<String> head) {
         List<String> subjects = head.isEmpty()
                 ? List.of()
-                : lines(gitOut(sourceWorktree, "log", "--format=%s", "-n", "20", "HEAD"));
-        List<String> changed = lines(gitOut(sourceWorktree, "status", "--porcelain"));
+                : lines(gitOut(sourceWorktree, "log", "--format=%s",
+                        "-n", String.valueOf(MAX_COMMIT_SUBJECTS), "HEAD"));
+        List<String> changed = capped(lines(gitOut(sourceWorktree, "status", "--porcelain")),
+                MAX_CHANGED_FILES);
         return new ForkFacts(branch, baseBranch, subjects, changed, List.of());
+    }
+
+    /**
+     * The first {@code limit} entries, with a final line saying how many were
+     * left out -- a truncated list that does not say it is truncated would
+     * read to the successor as the whole of the tree's dirty state.
+     */
+    private static List<String> capped(List<String> items, int limit) {
+        if (items.size() <= limit) {
+            return items;
+        }
+        List<String> capped = new ArrayList<>(items.subList(0, limit));
+        capped.add("… and " + (items.size() - limit) + " more");
+        return List.copyOf(capped);
     }
 
     /**

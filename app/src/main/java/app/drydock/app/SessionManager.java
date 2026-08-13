@@ -861,9 +861,16 @@ public final class SessionManager implements AutoCloseable {
                     // Also covers a session that had no active surface, and so
                     // never went through onSurfaceClosed.
                     releaseMcpConfig(sessionId);
-                    stateStore.update(state -> state.withSessions(state.sessions().stream()
-                            .filter(session -> !session.id().equals(sessionId))
-                            .toList()));
+                    // The brief goes with the session it describes. Nothing
+                    // else ever removes one, so leaving it would grow the state
+                    // file by up to a full brief per deleted session, forever.
+                    stateStore.update(state -> state
+                            .withSessions(state.sessions().stream()
+                                    .filter(session -> !session.id().equals(sessionId))
+                                    .toList())
+                            .withHandoffBriefs(state.handoffBriefs().stream()
+                                    .filter(brief -> !brief.sessionId().equals(sessionId))
+                                    .toList()));
                 },
                 backgroundExecutor);
     }

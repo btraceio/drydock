@@ -686,7 +686,18 @@ public final class McpToolRouter {
      * and a missing key have to mean the same thing.
      */
     private static Optional<String> optionalSlot(JsonObject args, String key) throws McpToolException {
-        if (!(args.get(key) instanceof JsonString text) || text.value().isBlank()) {
+        JsonValue value = args.get(key);
+        if (value == null || value instanceof JsonNull) {
+            return Optional.empty();
+        }
+        // A present non-string is refused rather than read as "clear this
+        // slot": the tool replaces the whole brief, so silently dropping a
+        // ruledOut sent as an array would answer "written" for a brief that
+        // lost it.
+        if (!(value instanceof JsonString text)) {
+            throw new McpToolException(key + " must be a string.");
+        }
+        if (text.value().isBlank()) {
             return Optional.empty();
         }
         return Optional.of(PromptSafety.checkHandoffSlot(key, text.value()));

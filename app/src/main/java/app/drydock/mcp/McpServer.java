@@ -38,10 +38,12 @@ import java.util.logging.Logger;
  *
  * <p>The {@code X-Drydock-Session-Token} header identifies which managed
  * session is calling, so tools resolve to the right repository. The same token
- * is also accepted as {@code Authorization: Bearer}, because not every client
- * can set a custom header -- Codex can only be pointed at a bearer token in an
- * environment variable, so without that form it could not reach this server at
- * all. As {@link
+ * is also accepted as {@code Authorization: Bearer}, for clients that can only
+ * be pointed at a bearer token. No drydock provider needs that form today --
+ * Codex, the one that prompted it, turned out to support custom headers after
+ * all ({@code env_http_headers}) and uses {@code X-Drydock-Session-Token} like
+ * Claude -- but the form stays because it costs one branch and is what a
+ * bearer-only client would send. As {@link
  * McpSessionRegistry}'s Javadoc explains, the token is attribution, not a
  * secret between sessions: any process running as this user's uid can already
  * read a sibling session's config file -- which is also why accepting a second
@@ -57,10 +59,10 @@ public final class McpServer implements AutoCloseable {
     private static final String TOKEN_HEADER = "X-Drydock-Session-Token";
 
     /**
-     * The other accepted credential form. Codex can only be told to send
-     * {@code Authorization: Bearer} ({@code --bearer-token-env-var}); it has
-     * no way to set a custom header, so without this it cannot reach drydock
-     * at all.
+     * The other accepted credential form, for a client that can only be told
+     * to send {@code Authorization: Bearer}. Nothing drydock launches needs it
+     * today (see this class's Javadoc), so it is a compatibility affordance,
+     * not a route any provider depends on.
      */
     private static final String BEARER_SCHEME = "Bearer";
 
@@ -231,8 +233,7 @@ public final class McpServer implements AutoCloseable {
          *
          * <p>{@link #TOKEN_HEADER} is tried first because it is drydock's own
          * and unambiguous; {@code Authorization: Bearer} is the fallback for
-         * clients that cannot set an arbitrary header, which is why it exists
-         * at all -- Codex offers only {@code --bearer-token-env-var}.</p>
+         * clients that cannot set an arbitrary header.</p>
          *
          * <p>Falling back when the drydock header is present but does not
          * resolve is deliberate. The token is attribution, not a secret

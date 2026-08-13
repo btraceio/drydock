@@ -177,6 +177,22 @@ class SessionForkServiceTest {
     }
 
     @Test
+    void theSeedsChangedFileListIsCappedAndSaysHowManyItLeftOut() throws Exception {
+        // Thousands of untracked files must not become thousands of bullet
+        // lines in the successor's very first prompt.
+        for (int i = 0; i < 60; i++) {
+            Files.writeString(repositoryRoot.resolve("scratch-" + i + ".txt"), "x");
+        }
+
+        service.forkBlocking(outgoing, AgentKind.CODEX);
+
+        assertTrue(launcher.lastPrompt.contains("and 10 more"), launcher.lastPrompt);
+        // A truncated list that did not say so would read as the whole tree.
+        assertTrue(launcher.lastPrompt.lines().filter(l -> l.startsWith("- ")).count() < 60,
+                launcher.lastPrompt);
+    }
+
+    @Test
     void suffixesTheBranchNameWhenTheNaturalOneIsTaken() throws Exception {
         git(repositoryRoot, "branch", "feat/work-codex");
 

@@ -183,6 +183,18 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      */
     private static final int REVIEW_LAUNCH_WAIT_SECONDS = 60;
 
+    /**
+     * Whole budget for an agent-driven handoff write, and SMALLER than {@link
+     * WorkspaceMcpSessionContext#HANDOFF_TIMEOUT_SECONDS} for exactly the
+     * reason the rename budget is: if the context's join expired first, {@code
+     * McpToolRouter} would refund the handoff charge and tell the agent the
+     * write failed -- and then the queued hop would write the brief anyway,
+     * leaving the agent retrying against a brief it believes was rejected and
+     * the budget bounding nothing.
+     */
+    private static final long AGENT_HANDOFF_BUDGET_SECONDS =
+            WorkspaceMcpSessionContext.HANDOFF_TIMEOUT_SECONDS / 2;
+
     private final SessionManager sessionManager;
     private final AgentRegistry agentRegistry;
     private final RepositoryManager repositoryManager;
@@ -2285,8 +2297,19 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 .findFirst();
         Optional<String> headCommit = workingDirectory.flatMap(gitStatusService::headCommitBlocking);
 
+        // Started AFTER the git call, because that is where the context's own
+        // join clock starts too (it wraps the future this method returns).
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(AGENT_HANDOFF_BUDGET_SECONDS);
         CompletableFuture<HandoffBrief> written = new CompletableFuture<>();
         Platform.runLater(() -> {
+            // Re-checked ON the FX thread, as for a rename: a runLater queued
+            // behind a busy FX thread must refuse rather than write a brief
+            // whose caller has already timed out and had its charge refunded.
+            if (expired(deadlineNanos)) {
+                written.completeExceptionally(new IllegalStateException(
+                        "Drydock was too busy to record the handoff brief in time."));
+                return;
+            }
             try {
                 HandoffBrief brief = sessionManager.applyAgentHandoff(id, draft, headCommit);
                 publishSessions();

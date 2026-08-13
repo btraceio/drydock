@@ -87,6 +87,24 @@ class McpToolRouterSessionHandoffTest {
     }
 
     @Test
+    void refusesAPresentNonStringSlotRatherThanClearingIt() {
+        // The tool replaces the whole brief, so silently dropping a ruledOut
+        // sent as an array would answer "written" for a brief that lost it.
+        McpToolException e = assertThrows(McpToolException.class,
+                () -> handoff(minimal().put("ruledOut", new JsonValue.JsonArray(java.util.List.of()))));
+
+        assertTrue(e.getMessage().contains("ruledOut"), e.getMessage());
+        assertEquals(Optional.empty(), context.lastHandoff());
+    }
+
+    @Test
+    void anExplicitNullSlotStillMeansClearIt() throws Exception {
+        handoff(minimal().put("approach", JsonValue.JsonNull.INSTANCE));
+
+        assertEquals(Optional.empty(), context.lastHandoff().orElseThrow().approach());
+    }
+
+    @Test
     void refusesAMissingRequiredSlot() {
         McpToolException e = assertThrows(McpToolException.class,
                 () -> handoff(JsonObject.empty().put("goal", new JsonString("g"))));

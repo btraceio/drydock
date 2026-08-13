@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -88,6 +89,28 @@ class WorktreeTransplantTest {
         transplant.transplantBlocking(source, destination);
 
         assertArrayEquals(edited, Files.readAllBytes(destination.resolve("tracked.bin")));
+    }
+
+    @Test
+    void carriesAnEditToATrackedTextFileWhoseBytesAreNotUtf8(@TempDir Path dir) throws Exception {
+        // The case a binary-file test cannot reach. git classifies a file as
+        // binary only if it finds a NUL byte, so a Latin-1 .properties is
+        // TEXT: --binary does not base85 it, and its hunks are emitted raw.
+        // Routing that through a UTF-8 String would replace every high byte
+        // with U+FFFD and either corrupt the fork or produce a patch git apply
+        // rejects.
+        byte[] latin1 = "greeting=caf\u00e9 na\u00efve\n".getBytes(StandardCharsets.ISO_8859_1);
+        byte[] edited = "greeting=caf\u00e9 na\u00efve r\u00e9sum\u00e9\n".getBytes(StandardCharsets.ISO_8859_1);
+        Path source = committedRepo(dir.resolve("src"), "a.txt", "original");
+        Files.write(source.resolve("messages.properties"), latin1);
+        git(source, "add", "messages.properties");
+        commit(source, "add latin-1 properties");
+        Path destination = clone(source, dir.resolve("dst"));
+        Files.write(source.resolve("messages.properties"), edited);
+
+        transplant.transplantBlocking(source, destination);
+
+        assertArrayEquals(edited, Files.readAllBytes(destination.resolve("messages.properties")));
     }
 
     @Test
