@@ -7,6 +7,7 @@ import app.drydock.domain.ManagedSessionId;
 import app.drydock.git.GitCommandFailedException;
 import app.drydock.git.GitCommandInterruptedException;
 import app.drydock.git.GitExecutableLocator;
+import app.drydock.git.GitException;
 import app.drydock.git.GitExecutableNotFoundException;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.WorktreeTransplant;
@@ -15,6 +16,7 @@ import app.drydock.handoff.HandoffSeed;
 import app.drydock.handoff.HandoffStaleness;
 import app.drydock.process.ProcessResult;
 import app.drydock.process.ProcessRunner;
+import app.drydock.process.ProcessTimeoutException;
 
 import java.io.IOException;
 import java.lang.System.Logger;
@@ -160,7 +162,14 @@ public final class SessionForkService {
         }
         int commits = parseCountOrZero(gitOut(worktree, "rev-list", "--count",
                 "--end-of-options", since.get() + "..HEAD"));
-        int files = countLines(gitOut(worktree, "diff", "--name-only", "--end-of-options", since.get()));
+        // Tracked changes since the brief, PLUS untracked non-ignored files.
+        // git diff lists neither, and a session that spent an hour writing
+        // twenty brand-new files has moved exactly as far as one that edited
+        // twenty existing ones -- the unstamped branch above already counts
+        // both, so leaving them out here would make the two measurements
+        // disagree about what "work done" means.
+        int files = countLines(gitOut(worktree, "diff", "--name-only", "--end-of-options", since.get()))
+                + countLines(gitOut(worktree, "ls-files", "--others", "--exclude-standard"));
         return HandoffStaleness.of(brief, commits, files);
     }
 
@@ -261,16 +270,28 @@ public final class SessionForkService {
     }
 
     /**
-     * Runs git in {@code worktree} and returns stdout, or {@code ""} on a
-     * non-zero exit. Degrading rather than throwing is deliberate: a brief
-     * whose commit no longer exists (history rewritten under it) must read as
-     * "not stale" rather than break the tab it is drawn in.
+     * Runs git in {@code worktree} and returns stdout, or {@code ""} when the
+     * command does not succeed. Degrading rather than throwing is deliberate:
+     * a brief whose commit no longer exists (history rewritten under it) must
+     * read as "not stale" rather than break the tab it is drawn in.
+     *
+     * <p>"Does not succeed" has to cover a git that never ran, not only one
+     * that exited non-zero: a worktree on a stalled mount makes {@code run}
+     * throw (timeout, or a launch failure), and that exception would come out
+     * of {@link #stalenessBlocking} -- which the banner calls -- in exactly
+     * the case this method exists to absorb. Locating the binary stays
+     * outside: no git at all is a real failure, not a stale brief.</p>
      */
     private String gitOut(Path worktree, String... args) {
         List<String> command = new ArrayList<>(List.of(git().toString(), "-C", worktree.toString()));
         command.addAll(List.of(args));
-        ProcessResult result = run(command);
-        return result.exitCode() == 0 ? result.stdout() : "";
+        try {
+            ProcessResult result = run(command);
+            return result.exitCode() == 0 ? result.stdout() : "";
+        } catch (GitException e) {
+            LOG.log(Level.DEBUG, () -> "git did not run in " + worktree + ": " + e.getMessage());
+            return "";
+        }
     }
 
     private Path git() {
@@ -306,6 +327,12 @@ public final class SessionForkService {
             return ProcessRunner.run(command, new ProcessRunner.Options(null, PROCESS_TIMEOUT, true, Map.of()));
         } catch (IOException e) {
             throw new GitCommandFailedException(command, -1, e.getMessage() == null ? "" : e.getMessage());
+        } catch (ProcessTimeoutException e) {
+            // Translated like GitStatusService does: a hang that escaped as a
+            // raw ProcessTimeoutException would slip past every `catch
+            // (GitException)` in this package.
+            throw new GitCommandFailedException(command, -1,
+                    "timed out after " + PROCESS_TIMEOUT.toSeconds() + "s (killed)");
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new GitCommandInterruptedException(command);

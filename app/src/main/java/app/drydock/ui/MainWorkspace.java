@@ -23,6 +23,7 @@ import app.drydock.git.ChangedLineService;
 import app.drydock.git.DiffScope;
 import app.drydock.git.DiffService;
 import app.drydock.git.GhCliService;
+import app.drydock.git.GitException;
 import app.drydock.git.PrCheckoutService;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.git.WorktreeNaming;
@@ -2289,13 +2290,30 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * against happens here, before the hop. Resolving it is best-effort: a
      * branch with no commits yet is an ordinary state, and a brief with no
      * commit simply measures staleness in changed files alone.</p>
+     *
+     * <p>"Best-effort" has to include git <em>failing</em>, not just git
+     * reporting no commit: {@code headCommitBlocking} returns empty for an
+     * unborn branch, but still throws {@link GitException} when the binary
+     * cannot be launched, the call times out, or the thread is interrupted --
+     * a worktree on a stalled mount, say. Letting that escape would throw out
+     * of this method rather than through the returned future, so the router
+     * would never refund the handoff charge and the agent would be told only
+     * "internal error". An unstamped brief is the right answer instead.</p>
      */
     public CompletableFuture<HandoffBrief> writeHandoffFromAgent(ManagedSessionId id, HandoffDraft draft) {
         Optional<Path> workingDirectory = sessionManager.sessions().stream()
                 .filter(session -> session.id().equals(id))
                 .map(ManagedAgentSession::workingDirectory)
                 .findFirst();
-        Optional<String> headCommit = workingDirectory.flatMap(gitStatusService::headCommitBlocking);
+        Optional<String> headCommit;
+        try {
+            headCommit = workingDirectory.flatMap(gitStatusService::headCommitBlocking);
+        } catch (GitException e) {
+            LOG.log(Level.WARNING, () -> "Could not stamp the handoff brief for session " + id
+                    + " with a commit: " + e.getMessage());
+            headCommit = Optional.empty();
+        }
+        Optional<String> stamp = headCommit;
 
         // Started AFTER the git call, because that is where the context's own
         // join clock starts too (it wraps the future this method returns).
@@ -2311,7 +2329,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 return;
             }
             try {
-                HandoffBrief brief = sessionManager.applyAgentHandoff(id, draft, headCommit);
+                HandoffBrief brief = sessionManager.applyAgentHandoff(id, draft, stamp);
                 publishSessions();
                 written.complete(brief);
             } catch (RuntimeException e) {

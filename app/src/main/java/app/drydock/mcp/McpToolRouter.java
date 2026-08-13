@@ -670,8 +670,12 @@ public final class McpToolRouter {
         try {
             written = context.writeHandoff(caller, new McpSessionContext.HandoffDraft(
                     goal, nextStep, approach, decisions, ruledOut, corrections));
-        } catch (McpToolException e) {
-            registry.refundHandoff(caller);   // only an outright failure is refunded
+        } catch (McpToolException | RuntimeException e) {
+            // Only an outright failure is refunded -- but "outright" includes
+            // an unchecked one. The context reaches git and the FX thread, and
+            // a charge kept for a write that never happened would let a
+            // repeatable infrastructure failure burn the whole budget.
+            registry.refundHandoff(caller);
             throw e;
         }
 

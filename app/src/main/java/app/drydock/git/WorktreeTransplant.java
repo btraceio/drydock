@@ -2,6 +2,7 @@ package app.drydock.git;
 
 import app.drydock.process.ProcessResult;
 import app.drydock.process.ProcessRunner;
+import app.drydock.process.ProcessTimeoutException;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -167,6 +168,12 @@ public final class WorktreeTransplant {
             return ProcessRunner.run(command, new ProcessRunner.Options(null, PROCESS_TIMEOUT, true, Map.of()));
         } catch (IOException e) {
             throw new GitCommandFailedException(command, -1, e.getMessage() == null ? "" : e.getMessage());
+        } catch (ProcessTimeoutException e) {
+            // Translated like GitStatusService does. Throwing is the right
+            // outcome here either way, but as a GitException, so a caller
+            // catching this class's documented failure mode actually sees it.
+            throw new GitCommandFailedException(command, -1,
+                    "timed out after " + PROCESS_TIMEOUT.toSeconds() + "s (killed)");
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new GitCommandInterruptedException(command);

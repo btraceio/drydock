@@ -83,7 +83,7 @@ public final class HandoffEditDialog extends Dialog<HandoffEditDialog.Result> {
         // by the same rule the MCP tool applies -- so OK cannot produce a
         // brief that the store would then reject.
         BooleanBinding incomplete = Bindings.createBooleanBinding(
-                () -> goal.getText().isBlank() || nextStep.getText().isBlank() || anySlotTooLong(),
+                () -> goal.getText().isBlank() || nextStep.getText().isBlank() || anySlotUnacceptable(),
                 goal.textProperty(), nextStep.textProperty(), approach.textProperty(),
                 decisions.textProperty(), ruledOut.textProperty(), corrections.textProperty());
         getDialogPane().lookupButton(ButtonType.OK).disableProperty().bind(incomplete);
@@ -97,11 +97,38 @@ public final class HandoffEditDialog extends Dialog<HandoffEditDialog.Result> {
         });
     }
 
-    /** Package-private so the dialog's gating can be tested without driving a modal. */
-    boolean anySlotTooLong() {
+    /**
+     * Whether anything typed here would be refused by the rules {@code
+     * session_handoff} applies to an agent's brief. Package-private so the
+     * dialog's gating can be tested without driving a modal.
+     *
+     * <p>All three of the tool's rules, not just the per-slot length: the
+     * whole-record cap is the one that actually binds (six full slots are
+     * 12,000 code points against a 8,000 limit), and control characters
+     * matter most on this path, because a brief pasted out of terminal output
+     * is later flattened into the fork seed and <em>typed as keystrokes</em>
+     * into the successor's terminal. An ESC that survives to there drives
+     * escape sequences, which is exactly what {@link
+     * PromptSafety#checkInboundText} refuses on the agent's side.</p>
+     */
+    boolean anySlotUnacceptable() {
+        int total = 0;
         for (TextArea field : List.of(goal, nextStep, approach, decisions, ruledOut, corrections)) {
             String text = field.getText();
-            if (text.codePointCount(0, text.length()) > PromptSafety.MAX_HANDOFF_SLOT_CHARS) {
+            int codePoints = text.codePointCount(0, text.length());
+            if (codePoints > PromptSafety.MAX_HANDOFF_SLOT_CHARS || hasControlCharacter(text)) {
+                return true;
+            }
+            total += codePoints;
+        }
+        return total > PromptSafety.MAX_HANDOFF_RECORD_CHARS;
+    }
+
+    /** Newline, carriage return and tab are a body's own structure; nothing else is. */
+    private static boolean hasControlCharacter(String text) {
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (c != '\n' && c != '\r' && c != '\t' && Character.isISOControl(c)) {
                 return true;
             }
         }

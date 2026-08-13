@@ -61,7 +61,13 @@ public final class HandoffSeed {
         seed.append("## State (derived by drydock, checkable)\n\n");
         seed.append("**Branch:** ").append(facts.branch())
                 .append(" (forked from ").append(facts.baseBranch()).append(")\n\n");
-        appendList(seed, "Commits", facts.commitSubjects());
+        // "Recent commits", not "Commits": the caller lists the last N commits
+        // reachable from HEAD, which on a branch cut from a long-lived base is
+        // mostly that base's history. Calling it "Commits" directly under
+        // "Branch: X (forked from Y)" reads as "this is the work", and a
+        // successor would attribute a dozen unrelated mainline subjects to the
+        // session it is taking over.
+        appendList(seed, "Recent commits (newest first, including base history)", facts.commitSubjects());
         appendList(seed, "Uncommitted changes", facts.changedFiles());
         appendList(seed, "Open review intents", facts.openIntents());
     }
