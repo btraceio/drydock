@@ -19,7 +19,7 @@ already exists gets git's "branch already exists" and no way forward.
 
 This design makes the choice explicit in the modal and possible over MCP.
 
-> **Revision note.** Three adversarial review rounds, three reviewers each
+> **Revision note.** Four adversarial review rounds, three reviewers each
 > (fact-check, mechanism, spec quality). Every confirmed finding is
 > corrected in place; "What the adversarial review changed" at the end
 > records them, including two latent bugs in shipped code the review
@@ -116,35 +116,69 @@ Never a local branch being checked out.
 
 ### `BranchNameRules`: the whole rule set, not just the shadow clause
 
-The eleven checks in `BranchNames.validate` — the remote-shadow clause plus
-`refs/` prefix, `..`, `@{`, `//`, leading `-`, trailing `/` or `.`,
-`.lock` components, empty components, leading-dot components, and the
-forbidden character set — are all "is this name safe to mint". They move
-wholesale to `app.drydock.git.BranchNameRules`:
+`BranchNames.validate` throws in **thirteen** places
+(`BranchNames.java:51-106`). Twelve of them judge the name and move to
+`app.drydock.git.BranchNameRules`; the thirteenth — `remoteNames == null`
+— is an argument precondition about the *caller*, not the name, and stays
+in `validate` ahead of the delegation.
 
 ```java
-public record Refusal(Kind kind, String detail) {
-    public enum Kind { SHADOWS_REMOTE, REFNAME }
+public enum Clause {
+    BLANK, REFS_PREFIX, SHADOWS_REMOTE, DOT_DOT, AT_BRACE, DOUBLE_SLASH,
+    LEADING_DASH, TRAILING_SLASH_OR_DOT, FORBIDDEN_CHAR,
+    EMPTY_COMPONENT, COMPONENT_LEADING_DOT, COMPONENT_LOCK_SUFFIX
 }
+
+/** `token` is the matched remote, the offending character, or the offending component. */
+public record Refusal(Clause clause, String token) { }
 
 /** Empty when `name` is safe to create as a local branch. */
 public static Optional<Refusal> check(String name, Collection<String> remotes);
+
+/** Today's MCP wording, reproduced word for word. */
+public static String agentMessage(String name, Refusal refusal);
+
+/** The modal's phrasing of the same refusal. */
+public static String humanSentence(Refusal refusal);
 ```
 
-`SHADOWS_REMOTE` carries the matched remote; `REFNAME` carries the clause
-that failed. `BranchNames.validate` becomes a thin wrapper that maps a
-`Refusal` onto the `McpToolException` messages it throws today, **word for
-word**, so `BranchNamesTest` needs no change and the MCP error surface is
-untouched. Only the comparison logic moves — case-insensitivity and "a
-remote name may itself contain a slash" travel with it
+One `Kind` for every refname clause would not work: three of today's
+messages need both *which* clause failed and an offending fragment —
+`"branch name must not contain '" + c + "': " + branch` (`:91-92`), and
+the two component clauses that quote the **component** rather than the
+whole name (`:100`, `:103`). Hence a per-clause enum plus one `token`.
+
+**The clause order is normative**, and it is today's order exactly:
+`BLANK`, `REFS_PREFIX`, `SHADOWS_REMOTE`, then the whole-name clauses in
+source order, then the per-component ones. It has to be pinned because a
+name can violate two clauses — `origin/a..b` with a remote `origin`
+reports the shadow message today — and `BranchNamesTest` would not
+notice a flip: every case there is a bare `assertThrows` with at most one
+`contains`. `BranchNameRulesTest` pins the order with double-violating
+names.
+
+`BranchNames.validate` becomes a thin wrapper: null-remotes guard, then
+`check`, then `throw new McpToolException(agentMessage(name, refusal))`.
+Its messages are unchanged, so `BranchNamesTest` needs no edit and the MCP
+error surface is untouched. Only the judging moves — case-insensitivity
+and "a remote name may itself contain a slash" travel with it
 (`BranchNames.java:17-29`). `app.drydock.git` gains no dependency on
 `app.drydock.mcp`; the direction is the other way.
 
+`humanSentence` is the modal's copy, and it lives beside the rules rather
+than in the modal so the twelve clauses have one home — the same
+arrangement `dropdownLabel` already uses. Its wording drops the
+git-shaped `"branch name must not …: <name>"` frame for a sentence:
+`A branch name cannot contain '..'.`, `A branch name cannot contain the
+character '~'.`, `A branch name cannot start with '-'.`, and so on, one per
+clause, with `SHADOWS_REMOTE` rendered by h6 (below) because it needs the
+typed name as well.
+
 When two remotes both match, the **longest** wins, matching
 `BranchCatalog.localName`'s documented rule (`BranchCatalog.java:87-93`)
-rather than `BranchNames`' current first-element-of-a-`Set` scan, which is
-nondeterministic. That is a bug fix in passing; the message text is
-unchanged, only which remote it can name when several apply.
+rather than `BranchNames`' current first-match scan over a `Set` whose
+iteration order is salted per JVM run. That is a bug fix in passing; the
+message text is unchanged, only which remote it names when several apply.
 
 ## One classifier, two audiences: `BranchCheckout`
 
@@ -156,7 +190,8 @@ public sealed interface Outcome {
     record Ready(BranchRef ref, String localName, Optional<String> tracking) implements Outcome { }
     record NoSuchBranch(String text)                                         implements Outcome { }
     record Occupied(BranchRef ref)                                           implements Outcome { }
-    record Unmintable(String localName, BranchNameRules.Refusal refusal)     implements Outcome { }
+    record Unmintable(BranchRef ref, String localName,
+                      BranchNameRules.Refusal refusal)                       implements Outcome { }
 }
 
 /**
@@ -167,8 +202,12 @@ public sealed interface Outcome {
  */
 public static Outcome resolve(BranchCatalog catalog, String text);
 
-/** The dropdown row's full text: the name, plus why it cannot be picked. */
-public static String dropdownLabel(BranchRef branch);
+/**
+ * The dropdown row's full text: the name, plus why it cannot be picked.
+ * `refusal` is present only for a remote ref whose derived name is
+ * unmintable; the cell factory gets it from the resolved Outcome.
+ */
+public static String dropdownLabel(BranchRef branch, Optional<BranchNameRules.Refusal> refusal);
 ```
 
 All members are `public` — `app.drydock.ui` and `app.drydock.mcp` both
@@ -193,9 +232,10 @@ the bare name for an available branch, and
 
 A remote ref whose derived name is unmintable is `available()`, so it
 would otherwise sit enabled in the list and disable Create only after
-being picked. The cell factory therefore disables it too and appends
-`"  —  cannot be checked out (" + refusal detail + ")"`, so the dropdown
-and the hint agree.
+being picked. The cell factory therefore disables it too, and
+`dropdownLabel` appends `"  —  would create " + localName + ", which "` +
+the clause in its short form (`"shadows the remote 'origin'"`, `"is not a
+valid branch name"`), so the dropdown and the hint agree.
 
 ### Wording is per-audience, deliberately
 
@@ -256,7 +296,7 @@ paints `.radio-button > .radio` with the full button background stack
 -fx-body-color`), a 1em radius and 0.333em padding, and adds
 `-fx-label-padding` — so hiding only `.dot` leaves a circular button
 sitting beside the label. `app.css` already needed four rules just to
-recolour that control for settings (`:2110-2129`), and there is no
+recolour that control for settings (`:2117-2131`), and there is no
 hide-the-dot precedent to reuse. This adds, scoped under
 `.seg-toggle-button`: `> .radio { -fx-background-color: transparent;
 -fx-border-color: transparent; -fx-padding: 0; -fx-background-radius: 0; }`
@@ -325,7 +365,7 @@ but not necessarily the directory. So the inactive control's listener must
 not derive.
 
 Re-derivation is also **skipped while the newly active control is blank**:
-`WorktreeNaming.slug("")` returns `"worktree"` (`WorktreeNaming.java:22-33`),
+`WorktreeNaming.slug("")` returns `"worktree"` (`WorktreeNaming.java:24-34`),
 so typing `feat/login`, then `⌘E` into an untouched Existing picker, would
 rewrite `…/drydock-login` to `…/drydock-worktree` and back on the way out.
 The "unless manually edited" rule (`NewWorktreeModal.java:88-89`) is
@@ -354,47 +394,66 @@ first-match table would delete shipped behaviour: clear the directory
 field while an occupied branch is selected and the "Already checked out
 in …" hint would vanish, leaving a disabled button explaining nothing.
 
-**`hint`**, first match wins. `†` marks the rows that also block Create;
-they are the only hints referred to below as blocking.
+**`hint`**, first match wins. **Every row except h13 blocks Create**, and
+`†` marks them; the phrase "a blocking hint" below means exactly the `†`
+set. Branch names shown are the **catalog's** spelling where one resolved,
+and the typed text otherwise; `/x` is `checkedOutAt()`.
 
 | # | mode | condition | hint |
 |---|---|---|---|
-| h1 | either | catalog still loading | `Loading branches…` |
-| h2 | either | catalog load failed | — (the error line speaks) |
-| h3 | NEW | name is blank or ends `/` | — |
-| h4 | NEW | `Outcome` is `Ready` | † `feat/login already exists.` + **Check it out instead** |
-| h5 | NEW | `Outcome` is `Occupied` | † `feat/login already exists — checked out in /x.` |
-| h6 | NEW | `BranchNameRules.check(typed)` refuses | † the refusal, phrased for a human (below) |
-| h7 | NEW | **Fork from** blank | † `Pick a branch to fork from.` |
-| h8 | EXISTING | branch blank | `Pick a branch to check out.` |
-| h9 | EXISTING | `NoSuchBranch` | † `No branch named 'nope'.` |
-| h10 | EXISTING | `Occupied` | † today's `blockedHint` wording, unchanged |
-| h11 | EXISTING | `Unmintable` | † `Checking out origin/origin/main would create local origin/main, which shadows the remote 'origin'.` |
-| h12 | otherwise | | empty |
+| h1 | either | catalog still loading | † `Loading branches…` |
+| h2 | either | catalog load failed | † — (the error line speaks) |
+| h3 | NEW | name blank, or ends `/` | † `Finish the branch name.` |
+| h4 | NEW | name contains a space | † `A branch name cannot contain a space.` |
+| h5 | NEW | a **local** branch of that name exists, free | † `feat/login already exists.` + **Check it out instead** |
+| h6 | NEW | a **local** branch of that name exists, occupied | † `feat/login already exists — checked out in /x.` |
+| h7 | NEW | `BranchNameRules.check(typed)` refuses | † the refusal, phrased for a human (below) |
+| h8 | NEW | **Fork from** blank | † `Pick a branch to fork from.` |
+| h9 | EXISTING | branch blank | † `Pick a branch to check out.` |
+| h10 | EXISTING | `NoSuchBranch` | † `No branch named 'nope'.` |
+| h11 | EXISTING | `Occupied` | † today's `blockedHint` wording, unchanged |
+| h12 | EXISTING | `Unmintable` | † `Checking out origin/origin/main would create local origin/main, which shadows the remote 'origin'.` — or, for a refname clause, `…, which is not a valid branch name (cannot start with '-').` |
+| h13 | otherwise | | empty, Create enabled |
 
-h3 sits above h4-h6 so the seeded `feat/` does not open the modal in an
-error state. That matters concretely: `BranchNameRules` matches a whole
-first path component case-insensitively, so in a repository with a remote
-literally named `feat`, the seed `feat/` would otherwise greet the user
-with a shadow refusal on open. The shape rules already disable Create for
-a name ending in `/`, so nothing is lost by staying quiet until the name
-is well-formed.
+**`createDisabled`** is therefore exactly `!hint().isEmpty() ||`
+catalog absent or failed `||` directory blank `||` creation in flight.
+h2's hint is empty on screen but the row still blocks, so it is tracked as
+a blocking state rather than by the string — hence the first two OR terms.
+The rules carried forward from today are `NewWorktreeState.java:70-72`
+(directory, name shape, base) and `:75` (in flight); h3, h4 and h8 are
+those rules made audible instead of blocking silently.
 
-h6's wording is `A branch named <typed> would shadow the remote '<remote>'.`
-for `SHADOWS_REMOTE`, and for `REFNAME` the failing clause as a sentence
-(`A branch name cannot contain '..'.`). `<remote>` is the longest match.
+h3 replaces silence, deliberately. An earlier draft left it empty on the
+grounds that the shape rules already disable Create — but that is the
+modal's **opening** state, because the branch field is seeded `feat/`
+(`NewWorktreeModal.java:156`). The user would meet a filled-in form, a
+dead button and a blank hint line: exactly the defect h8 and h9 exist to
+remove. `Finish the branch name.` costs nothing and keeps the shadow
+refusal (h7) from firing on a half-typed name — which matters in a
+repository with a remote literally named `feat`, where `BranchNameRules`
+matches whole path components case-insensitively.
 
-**`createDisabled`** is the OR of: catalog absent or failed; directory
-blank; creation in flight; the hint is one of the `†` rows; and, per
-mode — NEW: branch blank, ends `/`, or contains a space; EXISTING:
-`Outcome` is not `Ready`. Rules carried forward from today are
-`NewWorktreeState.java:70-72` (directory, name shape, base) and `:75`
-(in flight); the base rule now surfaces as h7 rather than blocking
-silently.
+h7's wording is `A branch named <typed> would shadow the remote '<remote>'.`
+for `SHADOWS_REMOTE`, `<remote>` being the longest match, and
+`BranchNameRules.humanSentence` for every other clause.
 
-h5 and h8 are new. h5 closes the hole that carrying only `Ready` would
-have opened. h8 closes the same class of dead end h7 does, on the more
-common path: every `⌘E` into an untouched Existing picker lands there.
+### New mode only warns about *local* collisions
+
+h5 and h6 test for a local branch, not for any `Outcome`, and that is
+load-bearing. `BranchCatalog.lookup`'s fourth pass qualifies a bare name
+by each remote (`BranchCatalog.java:152-161`), so `login` resolves to
+`origin/login` when no local `login` exists. Keyed on the raw `Outcome`,
+New-branch mode would then refuse to create a local `login` at all —
+offering only "check it out" — while `worktree_create {branch: "login"}`
+runs `-b login` happily, because `BranchNames.validate` sees no shadow.
+Creating a local branch that a remote already has a ref for is ordinary
+git; the modal must not be stricter than the tool.
+
+So a remote-only match produces no hint and leaves Create enabled. The
+**Check it out instead** offer still appears — it is genuinely useful
+there — but as an offer beside an enabled Create, not as the only way
+forward. `switchOffer` is `mode == NEW && outcome instanceof Ready`; h5
+and h6 are the narrower local test.
 
 `Pick a branch to fork from.` is new wording for a dead end that already
 ships: `baseField` is filled asynchronously from `getStatus` and only when
@@ -407,10 +466,9 @@ is true, beside the hint label, with a new `.worktree-hint-action` rule in
 `app.css` — flat, link-coloured, no background, `-fx-font-size: 11.5px` to
 match `.worktree-hint` (`app.css:1426`). It copies the `Ready`'s
 `ref().name()` — the catalog's spelling, not the raw typed text — into the
-existing picker and calls `setMode(EXISTING)`. `switchOffer` is
-`mode == NEW && outcome instanceof Ready`: an occupied name gets h5's
-explanation but no offer, because checking it out is exactly what cannot
-happen.
+existing picker and calls `setMode(EXISTING)`. An occupied name (h6) gets
+its explanation but no offer, because checking it out is exactly what
+cannot happen.
 
 The mirror-image offer is deliberately **not** built: `NoSuchBranch` in
 Existing mode says so and disables Create, with no "create it instead"
@@ -584,7 +642,7 @@ in `McpToolRouterReadTest` asserts `existing` inside `worktree_create`'s
 `optionalBooleanArg` returns the default for **any** non-`JsonBoolean`
 value (`McpToolRouter.java:758-766`). The same file documents that some
 clients stringify every argument — that is why `optionalIntArg` exists
-(`:186-191`) — and `optionalStringArg` deliberately rejects a wrong-typed
+(`:186-192`) — and `optionalStringArg` deliberately rejects a wrong-typed
 argument rather than treating it as absent (`:736-755`).
 
 Reusing `optionalBooleanArg` would reintroduce the exact failure the
@@ -664,31 +722,60 @@ launched — and `prepareWorktreeParent` throws
 from inside both worktree calls (`:265-278`, called at `:245` and `:301`).
 Both provably created nothing. Keying the refund on `-1` would charge an
 agent for a read-only worktrees directory four times over and then tell it
-to go look for a worktree that does not exist. `WorktreeService` maps its
-own timeout the same way (`WorktreeService.java:755-761`), so the pre-add
-catalog load can produce `-1` too.
+to go look for a worktree that does not exist. `GitStatusService.run` maps
+its own timeout *and* interrupt to `-1` as well (`:719-724`), as does
+`WorktreeService` (`:757-759`), so the pre-add catalog load can produce
+`-1` too.
 
-That fact lives only where the process is spawned. So `ProcessRunner`'s
-kill-and-interrupt paths (`:100-105`) throw a distinct
-`ProcessOutcomeUnknownException`, and `GitStatusService.run` propagates it
-as `GitOutcomeUnknownException extends GitCommandFailedException` rather
-than flattening it — an `IOException` from `start()` stays an ordinary
-failure. Everything downstream tests the type, never the number.
+**The flag rides on the existing exception; no new type, no hierarchy
+edit.** A new type does not work here. `GitCommandFailedException` is
+`final` and `GitException` is `sealed … permits` (`GitException.java:20-23`,
+`GitCommandFailedException.java:12`), so a subclass needs surgery on a
+shipped hierarchy. And `ProcessTimeoutException` is itself `final` with
+**nine** catch sites; one of them is load-bearing in a way that is easy to
+miss — `WorktreeService.mergeBlocking` catches the timeout-derived
+`GitCommandFailedException` *on purpose*, because a killed `git merge`
+still leaves a verdict for `verify()` to establish (`:431-445`). A sibling
+exception would sail past it and turn a timed-out merge into a raw
+failure. `GitCommandInterruptedException` already exists in the `permits`
+list for the interrupt case, and `ProcessRunner.run`'s checked
+`InterruptedException` (`:109-112`) is what every caller uses to restore
+the interrupt flag.
 
-`WorkspaceMcpSessionContext` then wraps **only the add's future** in its
-own catch, ahead of the shared `joinBy`. This is required, not stylistic:
-`joinBy` routes every failure through the static `translate`, which
-collapses `GitCommandFailedException` to `"git failed: " + stderrExcerpt()`
-and discards both the type and the exit code (`:617-618,644-645`), and
-`translate` is shared by every tool in the class, so it cannot special-case
-the add without mislabelling `repos_list` and the rest. The wrapper also
-supplies the directory, which a static helper has no access to.
+So `GitCommandFailedException` gains one field —
+`Outcome { KNOWN_FAILED, UNKNOWN }`, defaulting to `KNOWN_FAILED` on the
+existing constructors — and `GitStatusService.run`'s three catch arms set
+it, which is exactly where the answer already is:
 
-A `GitOutcomeUnknownException` from the add, a deadline expiry after the
-add was issued, and `joinBy`'s own `InterruptedException` arm (`:612-614`)
-— the same unknown outcome by a third door — all become
-`McpWorktreeMayExistException`, a public top-level class in
-`app.drydock.mcp` extending `McpToolException`. It cannot be a sibling of
+| arm | meaning | outcome |
+|---|---|---|
+| `ProcessTimeoutException` (`:719-721`) | child started, then killed | `UNKNOWN` |
+| `InterruptedException` (`:722-724`) | child started, then interrupted | `UNKNOWN` |
+| `IOException` (`:715-718`) | `builder.start()` failed; git never ran | `KNOWN_FAILED` |
+| `prepareWorktreeParent` (`:265-278`) | no spawn at all | `KNOWN_FAILED` |
+
+`ProcessRunner` is untouched, `ProcessTimeoutException` keeps its nine
+callers, and `mergeBlocking` keeps its verdict.
+
+`WorkspaceMcpSessionContext` reads the flag in a private
+`joinAddBy(future, deadlineNanos, directory)` used **only** for the add.
+It cannot be done in the shared `joinBy`: that helper unwraps
+`ExecutionException` itself and hands the cause to the static `translate`,
+which collapses `GitCommandFailedException` to
+`"git failed: " + stderrExcerpt()` (`:617-618,644-645`) — and `translate`
+serves every tool in the class, so it cannot special-case the add without
+mislabelling `repos_list` and the rest. `joinAddBy` catches
+`ExecutionException` first, and on
+`GitCommandFailedException g && g.outcome() == UNKNOWN` throws
+`McpWorktreeMayExistException`; anything else it delegates to `translate`
+unchanged. Its own `InterruptedException` and expired-deadline arms throw
+the same thing — the same unknown outcome by two more doors — which is why
+`joinBy`'s bare-`McpToolException` interrupt arm (`:612-614`) does not need
+retyping. It also supplies the directory, which a static helper has no
+access to.
+
+`McpWorktreeMayExistException` is a public top-level class in
+`app.drydock.mcp` extending `McpToolException`; it cannot be a sibling of
 `DeadlineExceededException`, which is a *private nested* class of
 `WorkspaceMcpSessionContext` (`:623`). Its message:
 `git worktree add was interrupted; a worktree may exist at <dir> — check before retrying.`
@@ -696,6 +783,11 @@ The router catches it **without refunding** (Java enforces the catch
 order, since it is a subclass). The cost of being wrong is one of
 `MAX_WORKTREES_PER_SESSION = 4` (`McpSessionRegistry.java:34`); the cost
 of the alternative is a free worktree and a poisoned retry.
+
+Because the catalog wait and the add wait are separate call sites — the
+first `joinBy`, the second `joinAddBy` — *which one threw is the phase*.
+Expiry during the catalog load propagates uncaught and refunds; expiry
+during the add does not. No flag is needed to tell them apart.
 
 Everything else — a clean non-zero exit, a launch failure, an unknown
 branch, an occupied branch, a remote repository — refunds as today. One
@@ -732,10 +824,12 @@ the designed failure inside the window. Worst case is
 `listBranchesBlocking`'s two sequential spawns (`:545,550`) plus the add,
 each 15s plus up to 4s of reader-join after a kill —
 `READER_JOIN_AFTER_KILL_MILLIS = 2000` is per reader thread and both are
-joined in sequence (`ProcessRunner.java:38,103-104`) — so 3 × 19 ≈ 57s.
-That exceeds 50, deliberately: expiry is a designed, non-refunding path,
-and it is better for Drydock to answer at 50s than for the client to
-vanish at 60.
+joined in sequence (`ProcessRunner.java:38,103-104`) — so a naive
+3 × 19 ≈ 57s. The real ceiling is lower: a killed spawn throws
+immediately, so the two sequential listing spawns cannot both also pay the
+reader-join, putting the true worst case near 49s. Fifty is therefore a
+budget the honest path fits inside, and the expiry arm exists for the case
+where something outside this arithmetic hangs.
 
 `createWorktree` adopts the same non-refunding exception, since its own
 15s add under a 20s join has the identical hole. **That is a behaviour
@@ -774,11 +868,15 @@ forward; the four preview forms in lockstep with the commands
 reading would cause — occupied branch *plus* blank directory still shows
 the occupancy hint, and pressing Create does not wipe it.
 
-**New `BranchNameRulesTest`:** every clause, the longest-remote-wins tie
-break, case-insensitive whole-component matching, and slash-containing
-remote names — the cases inherited from `BranchNames`, duplicated rather
-than moved, because both the rule and its `McpToolException` wrapper need
-pinning.
+**New `BranchNameRulesTest`:** every clause; the **clause order**, with
+names that violate two at once (`origin/a..b`, `-origin/x`,
+`refs/heads/a..b`) asserting the message today's `validate` produces; the
+longest-remote-wins tie break; case-insensitive whole-component matching;
+slash-containing remote names; and `agentMessage` reproducing all twelve
+strings verbatim. The order test is the one that makes piece 1
+behaviour-preserving in fact rather than in intent — `BranchNamesTest`
+cannot catch a flip, since every case there is a bare `assertThrows` with
+at most one `contains`.
 
 **New `BranchCheckoutTest`:** the four outcomes; that a *local* branch
 named `origin/main` resolves `Ready`, not `Unmintable`; that the
@@ -789,9 +887,10 @@ blank, null and untrimmed text; and `dropdownLabel` reproducing
 plus the unmintable-row decoration.
 
 **Moved tests.** `BranchRefConverterTest`'s occupancy assertions move to
-`BranchCheckoutTest`; the class keeps one delegation test proving
-`describe` still returns `dropdownLabel`'s text, since the converter's
-identity contract is separately load-bearing. `BranchNamesTest` keeps
+`BranchCheckoutTest`. `describe` is deleted, so nothing delegation-tests
+it; what stays in `BranchRefConverterTest` is the identity contract
+(`toString`/`fromString`), which is separately load-bearing
+(`BranchRefConverter.java:12-18`). `BranchNamesTest` keeps
 every message assertion (the messages do not change) and gains nothing;
 the shadow *classification* cases are duplicated, not moved, because both
 the rule and its caller need pinning.
@@ -826,6 +925,20 @@ does not. `FakeMcpSessionContext` gains a settable canned
 expressed. A new `McpToolRouterReadTest` case asserts `existing` in
 `worktree_create`'s `properties`.
 
+**The refund discriminator — `GitStatusServiceTest` and
+`WorkspaceMcpSessionContextTest`.** The router test above only proves the
+catch order, since it runs on the fake. What has to be pinned where the
+real code is: that a `git worktree add` killed at `PROCESS_TIMEOUT` yields
+`Outcome.UNKNOWN` and reaches the agent as `McpWorktreeMayExistException`
+with no refund, and — the half that produced this finding — that
+`prepareWorktreeParent`'s mkdir failure and a failed `builder.start()`
+both stay `KNOWN_FAILED` and **do** refund. `createWorktree` gets the same
+pair, since it adopts the same rule.
+
+**Also pinned:** that the response's `branch` is the resolved local name
+rather than the raw argument; all three occupancy sentences (in use,
+locked, stale), not just one; and the mode-aware `onRefresh` wording.
+
 **`MainWorkspaceTest`** (or the nearest existing home) pins
 `branchCreatedHere == (mode == NEW)`, since it decides whether removing a
 worktree may delete the branch.
@@ -838,15 +951,21 @@ needs a wedged git to observe. Eyeball checks at review time.
 
 ## Landing order
 
-1. **`BranchNameRules` + `BranchCheckout`** — a behaviour-preserving
-   extraction. The rule set moves out of `BranchNames`, which keeps its
-   messages word for word; `dropdownLabel` replaces
-   `BranchRefConverter.describe`, whose only caller is the modal's cell
-   factory (`NewWorktreeModal.java:152`); `resolve` and `Outcome` are
-   added with no caller yet. It touches the modal, so it is not literally
-   a no-op diff, but nothing observable changes — the one deliberate
-   exception being that a tie between two matching remotes now resolves
-   to the longest rather than to an arbitrary set element.
+Pieces 2 and 3 both depend on piece 1; neither depends on the other.
+
+1. **`BranchNameRules` + `BranchCheckout`** — behaviour-preserving **if
+   the clause order is preserved**, which is why `BranchNameRulesTest`'s
+   order cases land here rather than later. This is the riskiest of the
+   three per line changed: it moves twelve message-producing clauses out
+   from behind a suite that only asserts *that* they throw. The rule set
+   leaves `BranchNames`, which keeps its messages word for word;
+   `dropdownLabel` replaces `BranchRefConverter.describe`, whose only
+   caller is the modal's cell factory (`NewWorktreeModal.java:152`);
+   `resolve` and `Outcome` arrive with no caller yet. It touches the
+   modal, so it is not a no-op diff, and one behaviour does change
+   deliberately: a tie between two matching remotes now resolves to the
+   longest rather than to an arbitrary element of a `Set` whose iteration
+   order is salted per JVM run.
 2. **MCP `existing`** — the descriptor, the strict reader, the SPI method,
    the deadline and the refund rule. Carries all the irreversible risk and
    is exercisable without touching the UI. The `createWorktree` refund
@@ -858,7 +977,7 @@ needs a wedged git to observe. Eyeball checks at review time.
 
 ## What the adversarial review changed
 
-Two rounds, three reviewers each (fact-check, mechanism, spec quality).
+Four rounds, three reviewers each (fact-check, mechanism, spec quality).
 Every finding was verified against the code before being accepted.
 
 **Five claims in earlier drafts were false.**
@@ -890,7 +1009,7 @@ Every finding was verified against the code before being accepted.
 7. The refund guard was keyed on deadline expiry — the failure that
    almost never fires, since `ProcessRunner` kills each spawn at 15s well
    inside the join. The reachable case is an add killed mid-write, which
-   refunded. Now keyed on outcome knowledge (`exitCode == -1`).
+   refunded. Re-keyed on outcome knowledge — first as `exitCode == -1`, which round 3 then overturned (see 24).
 8. The shadow rule was applied to the derived name *unconditionally*,
    refusing free local branches where no `-b` is emitted — a dead end with
    no rename, which would have made the branch created by finding 2
@@ -904,7 +1023,7 @@ Every finding was verified against the code before being accepted.
     states would preview the *other* mode's command, including `-b nope`.
 12. Nothing carried the resolved branch from `derive` to the button press,
     so the "second hidden oracle" the design abolishes came back. The
-    record now carries `Optional<Ready>`.
+    record was given `Optional<Ready>`, which round 3 then overturned as lossy (see 27).
 13. The `worktree_create` descriptor was never updated — the MCP half
     would have shipped inert.
 14. One `refusal(Outcome)` string could not serve both surfaces; the
@@ -940,7 +1059,7 @@ Every finding was verified against the code before being accepted.
 **Raised and refuted** — recorded so they are not re-opened: the package
 direction of the `BranchCheckout` extraction is fine (`app.drydock.git`
 gains no `mcp` dependency); the four `Outcome`s are exhaustive, and
-`Occupied`/`ShadowsRemote` are mutually exclusive by construction;
+`Occupied`/`Unmintable` are mutually exclusive by construction;
 `existing: true` skipping `BranchNames.validate` is safe because only
 catalog-listed refs reach git; `McpBudgetExhaustedException extends
 Exception`, not `McpToolException`, so the refund catch cannot swallow it;
@@ -1026,3 +1145,65 @@ avoids. A `git worktree add` killed by an external signal exits `128+n`
 and refunds while leaving admin state behind. Quitting Drydock mid-add
 abandons the handler after `CLOSE_AWAIT_TERMINATION_SECONDS = 2`. None is
 this change's business; all are worth their own fix.
+
+### Round 4
+
+36. **The new exception types did not compile.**
+    `GitCommandFailedException` is `final` and `GitException` is
+    `sealed … permits`, so `GitOutcomeUnknownException` needed surgery on
+    a shipped hierarchy; `ProcessTimeoutException` is `final` with nine
+    catch sites, one of which — `WorktreeService.mergeBlocking` — catches
+    the timeout-derived failure *on purpose* so `verify()` can still
+    establish a verdict. A sibling type would have turned a timed-out
+    merge into a raw failure. Replacing `ProcessRunner`'s checked
+    `InterruptedException` would also have stopped every caller restoring
+    the interrupt flag, and made the existing
+    `GitCommandInterruptedException` unreachable. The flag is now one
+    additive field on `GitCommandFailedException`, set by the three catch
+    arms that already know the answer.
+37. **The add-specific catch could not see what it was testing.** `joinBy`
+    unwraps `ExecutionException` itself and hands the cause to the static
+    `translate`, so the type is gone before any caller-side catch runs,
+    and `joinBy`'s interrupt arm throws a bare `McpToolException`
+    indistinguishable from an ordinary git failure. There is now a
+    `joinAddBy` used only for the add, which owns all three doors.
+38. **`validate` has thirteen refusals, not eleven.** The two omitted —
+    blank branch and null remotes — had no home in the two-constant `Kind`
+    enum, which also could not reproduce the three messages that quote an
+    offending character or component. `Refusal` is now a per-clause enum
+    plus a token, and the null-remotes precondition stays in `validate`.
+39. **The clause order is load-bearing and was unstated.** `origin/a..b`
+    reports the shadow message today; nothing in `BranchNamesTest` would
+    notice a flip. The order is now normative and tested.
+40. **h3 recreated the defect h8/h9 exist to remove — in the opening
+    state.** The seed `feat/` ends in `/`, so the modal would have opened
+    with a filled form, a dead Create and a blank hint.
+41. **New mode would have refused a create the MCP tool allows.**
+    `lookup` qualifies a bare name by each remote, so `login` with only
+    `origin/login` present resolved `Ready` and disabled Create, offering
+    only checkout — while `worktree_create {branch:"login"}` runs `-b
+    login` happily. h5/h6 now test for a *local* branch.
+42. **`Unmintable` could not produce its own message** (it lacked the
+    ref), and `dropdownLabel(BranchRef)` could not compute the decoration
+    the test list assigned to it. Both now take what they need.
+43. **The `†` legend did not mark the blocking set** — h1, h2 and h9 block
+    and were unmarked. Every row but the last blocks, and `createDisabled`
+    is now stated as a formula rather than a prose OR.
+44. **`describe` was deleted in the body and delegation-tested in the
+    Testing section** — round 3's finding 33 surviving half-applied.
+45. Corrections: the `~57s` worst case is unreachable (a killed spawn
+    throws immediately; the true ceiling is ~49s, under the budget);
+    `.settings-radio` is at `app.css:2117-2131`; `ProcessRunner`'s
+    interrupt path is `:109-112`, not `:100-105`; `optionalIntArg`'s body
+    starts at `:192`; `slug` is at `WorktreeNaming.java:24-34`; and the
+    appendix header said "two rounds" while carrying three.
+
+**Also refuted in round 4** — the `origin/-foo` chain was reproduced
+end-to-end against git 2.49 (`check-ref-format` accepts it, a plain clone
+creates it, and the command dies with ``error: unknown switch `o'``,
+exit 255, leaving nothing behind); a `GitCommandFailedException` subclass
+would not have broken any existing catch or pattern switch, only the
+declaration; no race exists in classifying which phase a deadline expired
+in, because the two waits are separate call sites; and `CreateHandler`'s
+`branch` really is used as both the `localName` argument and the session
+label today, so passing `Ready.localName()` changes nothing.
