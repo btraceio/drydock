@@ -1,5 +1,8 @@
 package app.drydock.domain;
 
+import app.drydock.domain.SessionWorkspace;
+import app.drydock.domain.PrLink;
+import app.drydock.domain.AgentBinding;
 import app.drydock.agent.api.AgentKind;
 import org.junit.jupiter.api.Test;
 
@@ -20,11 +23,11 @@ class BranchOwnershipTest {
     private static ManagedAgentSession session(Path worktreeRoot, boolean branchCreatedHere) {
         Instant now = Instant.parse("2026-07-22T00:00:00Z");
         return new ManagedAgentSession(
-                ManagedSessionId.newId(), RepositoryId.newId(), AgentKind.CLAUDE, "s",
-                Optional.empty(), Optional.empty(),
-                worktreeRoot, Optional.of(worktreeRoot),
+                ManagedSessionId.newId(), RepositoryId.newId(), "s",
+                new AgentBinding(AgentKind.CLAUDE, Optional.empty(), Optional.empty()),
+                new SessionWorkspace(worktreeRoot, Optional.of(worktreeRoot), branchCreatedHere),
                 SessionStatus.INACTIVE, now, now, Optional.empty(),
-                PrState.NONE, Optional.empty(), branchCreatedHere, false, Optional.empty());
+                PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty());
     }
 
     @Test

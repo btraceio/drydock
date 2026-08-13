@@ -1,5 +1,8 @@
 package app.drydock.app;
 
+import app.drydock.domain.SessionWorkspace;
+import app.drydock.domain.PrLink;
+import app.drydock.domain.AgentBinding;
 import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.HandoffBrief;
 import app.drydock.domain.ManagedAgentSession;
@@ -235,10 +238,12 @@ class SessionForkServiceTest {
     // ---- fixtures -----------------------------------------------------------
 
     private ManagedAgentSession session(Path workingDirectory) {
-        return new ManagedAgentSession(ManagedSessionId.newId(), RepositoryId.newId(), AgentKind.CLAUDE,
-                "Session 1", Optional.empty(), Optional.empty(), workingDirectory.toAbsolutePath().normalize(),
-                Optional.empty(), SessionStatus.RUNNING, Instant.EPOCH, Instant.EPOCH, Optional.empty(),
-                PrState.NONE, Optional.empty(), true, false, Optional.empty());
+        return new ManagedAgentSession(
+                ManagedSessionId.newId(), RepositoryId.newId(), "Session 1",
+                new AgentBinding(AgentKind.CLAUDE, Optional.empty(), Optional.empty()),
+                new SessionWorkspace(workingDirectory.toAbsolutePath().normalize(), Optional.empty(), true),
+                SessionStatus.RUNNING, Instant.EPOCH, Instant.EPOCH, Optional.empty(),
+                PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty());
     }
 
     private static HandoffBrief brief(ManagedSessionId id, String goal) {

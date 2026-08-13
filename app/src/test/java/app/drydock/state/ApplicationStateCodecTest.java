@@ -1,5 +1,8 @@
 package app.drydock.state;
 
+import app.drydock.domain.SessionWorkspace;
+import app.drydock.domain.PrLink;
+import app.drydock.domain.AgentBinding;
 import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.ApplicationState;
 import app.drydock.domain.HandoffBrief;
@@ -209,10 +212,11 @@ class ApplicationStateCodecTest {
     @Test
     void agentKindRoundTrips() {
         ManagedAgentSession session = new ManagedAgentSession(
-                ManagedSessionId.newId(), RepositoryId.of(REPO_ID), AgentKind.CODEX, "Session 1",
-                Optional.of("id"), Optional.empty(), Path.of("/tmp"), Optional.empty(),
+                ManagedSessionId.newId(), RepositoryId.of(REPO_ID), "Session 1",
+                new AgentBinding(AgentKind.CODEX, Optional.of("id"), Optional.empty()),
+                new SessionWorkspace(Path.of("/tmp"), Optional.empty(), true),
                 SessionStatus.RUNNING, Instant.EPOCH, Instant.EPOCH, Optional.empty(),
-                PrState.NONE, Optional.empty(), true, false, Optional.empty());
+                PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty());
         ApplicationState state = ApplicationState.empty().withSessions(List.of(session));
         ApplicationState roundTripped = ApplicationStateCodec.fromJson(ApplicationStateCodec.toJson(state));
         assertEquals(AgentKind.CODEX, roundTripped.sessions().get(0).agentKind());
@@ -227,22 +231,11 @@ class ApplicationStateCodecTest {
         Repository repo = new Repository(RepositoryId.newId(), Path.of("/tmp/repo"), "repo",
                 Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT);
         ManagedAgentSession session = new ManagedAgentSession(
-                ManagedSessionId.newId(),
-                repo.id(),
-                AgentKind.CLAUDE,
-                "test session",
-                Optional.empty(),
-                Optional.empty(),
-                Path.of("/tmp/repo/wd"),
-                Optional.empty(),
-                SessionStatus.INACTIVE,
-                Instant.EPOCH,
-                Instant.EPOCH,
-                Optional.empty(),
-                PrState.NONE,
-                Optional.empty(),
-                false,
-                false, Optional.empty());
+                ManagedSessionId.newId(), repo.id(), "test session",
+                new AgentBinding(AgentKind.CLAUDE, Optional.empty(), Optional.empty()),
+                new SessionWorkspace(Path.of("/tmp/repo/wd"), Optional.empty(), false),
+                SessionStatus.INACTIVE, Instant.EPOCH, Instant.EPOCH, Optional.empty(),
+                PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty());
         ApplicationState state = new ApplicationState(List.of(repo), List.of(session), WorkspaceUiState.empty(), List.of());
 
         ApplicationState decoded = ApplicationStateCodec.fromJson(ApplicationStateCodec.toJson(state));
@@ -255,22 +248,11 @@ class ApplicationStateCodecTest {
         Repository repo = new Repository(RepositoryId.newId(), Path.of("/tmp/repo"), "repo",
                 Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT);
         ManagedAgentSession pinned = new ManagedAgentSession(
-                ManagedSessionId.newId(),
-                repo.id(),
-                AgentKind.CLAUDE,
-                "test session",
-                Optional.empty(),
-                Optional.empty(),
-                Path.of("/tmp/repo/wd"),
-                Optional.empty(),
-                SessionStatus.INACTIVE,
-                Instant.EPOCH,
-                Instant.EPOCH,
-                Optional.empty(),
-                PrState.NONE,
-                Optional.empty(),
-                true,
-                true, Optional.empty());
+                ManagedSessionId.newId(), repo.id(), "test session",
+                new AgentBinding(AgentKind.CLAUDE, Optional.empty(), Optional.empty()),
+                new SessionWorkspace(Path.of("/tmp/repo/wd"), Optional.empty(), true),
+                SessionStatus.INACTIVE, Instant.EPOCH, Instant.EPOCH, Optional.empty(),
+                PrLink.of(PrState.NONE, Optional.empty()), true, Optional.empty());
         ApplicationState state = new ApplicationState(List.of(repo), List.of(pinned), WorkspaceUiState.empty(), List.of());
 
         ApplicationState decoded = ApplicationStateCodec.fromJson(ApplicationStateCodec.toJson(state));
@@ -472,10 +454,11 @@ class ApplicationStateCodecTest {
 
     private static ManagedAgentSession plainSession() {
         return new ManagedAgentSession(
-                ManagedSessionId.newId(), RepositoryId.of(REPO_ID), AgentKind.CLAUDE, "Session 1",
-                Optional.empty(), Optional.empty(), Path.of("/tmp"), Optional.empty(),
+                ManagedSessionId.newId(), RepositoryId.of(REPO_ID), "Session 1",
+                new AgentBinding(AgentKind.CLAUDE, Optional.empty(), Optional.empty()),
+                new SessionWorkspace(Path.of("/tmp"), Optional.empty(), true),
                 SessionStatus.RUNNING, Instant.EPOCH, Instant.EPOCH, Optional.empty(),
-                PrState.NONE, Optional.empty(), true, false, Optional.empty());
+                PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty());
     }
 
     private static HandoffBrief fullBrief(ManagedSessionId sessionId) {

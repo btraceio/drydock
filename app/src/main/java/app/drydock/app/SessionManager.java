@@ -10,6 +10,7 @@ import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdDiscovery;
 import app.drydock.agent.api.SessionIdStrategy;
 import app.drydock.agent.spi.AgentProvider;
+import app.drydock.domain.AgentBinding;
 import app.drydock.domain.ApplicationState;
 import app.drydock.domain.BranchOwnership;
 import app.drydock.domain.HandoffBrief;
@@ -19,6 +20,7 @@ import app.drydock.domain.PrState;
 import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionStatus;
+import app.drydock.domain.SessionWorkspace;
 import app.drydock.domain.SshRemote;
 import app.drydock.mcp.McpConfigWriter;
 import app.drydock.mcp.McpSessionContext;
@@ -1012,24 +1014,14 @@ public final class SessionManager implements AutoCloseable {
     private ManagedAgentSession newSessionMetadata(Repository repository, String displayName, AgentKind agentKind,
                                                     Optional<Path> worktreeRoot, boolean branchCreatedHere) {
         Instant now = Instant.now();
-        return new ManagedAgentSession(
+        return new ManagedAgentSession.Builder(
                 ManagedSessionId.newId(),
                 repository.id(),
-                agentKind,
                 displayName,
-                Optional.empty(),
-                Optional.empty(),
-                worktreeRoot.orElse(repository.root()),
-                worktreeRoot,
-                SessionStatus.INACTIVE,
-                now,
-                now,
-                Optional.empty(),
-                PrState.NONE,
-                Optional.empty(),
-                branchCreatedHere,
-                false,
-                Optional.empty());   // lineage is set by the fork path, never here
+                AgentBinding.unlaunched(agentKind),
+                new SessionWorkspace(worktreeRoot.orElse(repository.root()), worktreeRoot, branchCreatedHere),
+                now)
+                .build();   // lineage is set by the fork path, never here
     }
 
     /**

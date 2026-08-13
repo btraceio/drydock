@@ -1,5 +1,8 @@
 package app.drydock.domain;
 
+import app.drydock.domain.SessionWorkspace;
+import app.drydock.domain.PrLink;
+import app.drydock.domain.AgentBinding;
 import app.drydock.agent.api.AgentKind;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -20,22 +23,11 @@ class ManagedAgentSessionTest {
 
     private ManagedAgentSession sessionAt(Path workingDirectory) {
         return new ManagedAgentSession(
-                ManagedSessionId.newId(),
-                RepositoryId.newId(),
-                AgentKind.CLAUDE,
-                "example session",
-                Optional.empty(),
-                Optional.empty(),
-                workingDirectory,
-                Optional.empty(),
-                SessionStatus.INACTIVE,
-                Instant.now(),
-                Instant.now(),
-                Optional.empty(),
-                PrState.NONE,
-                Optional.empty(),
-                true,
-                false, Optional.empty());
+                ManagedSessionId.newId(), RepositoryId.newId(), "example session",
+                new AgentBinding(AgentKind.CLAUDE, Optional.empty(), Optional.empty()),
+                new SessionWorkspace(workingDirectory, Optional.empty(), true),
+                SessionStatus.INACTIVE, Instant.now(), Instant.now(), Optional.empty(),
+                PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty());
     }
 
     @Test
@@ -61,18 +53,22 @@ class ManagedAgentSessionTest {
         Path dir = tempDir.toAbsolutePath().normalize();
         Path notNormalized = tempDir.toAbsolutePath().resolve("child/../child");
         assertThrows(IllegalArgumentException.class, () -> new ManagedAgentSession(
-                ManagedSessionId.newId(), RepositoryId.newId(), AgentKind.CLAUDE, "example", Optional.empty(),
-                Optional.empty(), dir, Optional.of(notNormalized), SessionStatus.INACTIVE, Instant.now(),
-                Instant.now(), Optional.empty(), PrState.NONE, Optional.empty(), true, false, Optional.empty()));
+                ManagedSessionId.newId(), RepositoryId.newId(), "example",
+                new AgentBinding(AgentKind.CLAUDE, Optional.empty(), Optional.empty()),
+                new SessionWorkspace(dir, Optional.of(notNormalized), true),
+                SessionStatus.INACTIVE, Instant.now(), Instant.now(), Optional.empty(),
+                PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty()));
     }
 
     @Test
     void rejectsBlankDisplayName() {
         Path dir = tempDir.toAbsolutePath().normalize();
         assertThrows(IllegalArgumentException.class, () -> new ManagedAgentSession(
-                ManagedSessionId.newId(), RepositoryId.newId(), AgentKind.CLAUDE, "   ", Optional.empty(),
-                Optional.empty(), dir, Optional.empty(), SessionStatus.INACTIVE, Instant.now(), Instant.now(),
-                Optional.empty(), PrState.NONE, Optional.empty(), true, false, Optional.empty()));
+                ManagedSessionId.newId(), RepositoryId.newId(), "   ",
+                new AgentBinding(AgentKind.CLAUDE, Optional.empty(), Optional.empty()),
+                new SessionWorkspace(dir, Optional.empty(), true),
+                SessionStatus.INACTIVE, Instant.now(), Instant.now(), Optional.empty(),
+                PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty()));
     }
 
     @Test
@@ -169,10 +165,11 @@ class ManagedAgentSessionTest {
     @Test
     void agentKindDefaultsAreCarriedThroughWithers() {
         ManagedAgentSession session = new ManagedAgentSession(
-                ManagedSessionId.newId(), RepositoryId.newId(), AgentKind.CLAUDE, "Session 1",
-                Optional.empty(), Optional.empty(), Path.of("/tmp"), Optional.empty(),
+                ManagedSessionId.newId(), RepositoryId.newId(), "Session 1",
+                new AgentBinding(AgentKind.CLAUDE, Optional.empty(), Optional.empty()),
+                new SessionWorkspace(Path.of("/tmp"), Optional.empty(), true),
                 SessionStatus.INACTIVE, Instant.EPOCH, Instant.EPOCH, Optional.empty(),
-                PrState.NONE, Optional.empty(), true, false, Optional.empty());
+                PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty());
         assertEquals(AgentKind.CODEX, session.withAgentKind(AgentKind.CODEX).agentKind());
         assertEquals(Optional.of("x"), session.withAgentSessionId(Optional.of("x")).agentSessionId());
     }

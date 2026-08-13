@@ -1,15 +1,18 @@
 package app.drydock.state;
 
+import app.drydock.domain.AgentBinding;
 import app.drydock.domain.ApplicationState;
 import app.drydock.domain.HandoffBrief;
 import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.PrLink;
 import app.drydock.domain.PrState;
 import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.RepositorySettings;
 import app.drydock.domain.SessionStatus;
+import app.drydock.domain.SessionWorkspace;
 import app.drydock.domain.SshRemote;
 import app.drydock.domain.UiTheme;
 import app.drydock.domain.WorkspaceUiState;
@@ -451,9 +454,13 @@ public final class ApplicationStateCodec {
             // the session -- lineage is informational, the session is not.
             Optional<ManagedSessionId> forkedFrom = optionalString(obj, "forkedFrom")
                     .flatMap(ApplicationStateCodec::parseSessionId);
-            return new ManagedAgentSession(id, repositoryId, agentKind, displayName, agentSessionId,
-                    agentSessionName, workingDirectory, worktreeRoot, status, createdAt, lastOpenedAt, lastExitCode,
-                    prState, prNumber, branchCreatedHere, namePinned, forkedFrom);
+            // The persisted shape stays FLAT: grouping is a Java-side change,
+            // and schemaVersion must not move for it.
+            return new ManagedAgentSession(id, repositoryId, displayName,
+                    new AgentBinding(agentKind, agentSessionId, agentSessionName),
+                    new SessionWorkspace(workingDirectory, worktreeRoot, branchCreatedHere),
+                    status, createdAt, lastOpenedAt, lastExitCode,
+                    PrLink.fromPersisted(prState, prNumber), namePinned, forkedFrom);
         } catch (IllegalArgumentException | DateTimeException e) {
             throw new StateDecodeException("Malformed session entry: " + e.getMessage());
         }

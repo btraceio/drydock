@@ -1,5 +1,8 @@
 package app.drydock.ui;
 
+import app.drydock.domain.SessionWorkspace;
+import app.drydock.domain.PrLink;
+import app.drydock.domain.AgentBinding;
 import app.drydock.agent.api.AgentCapabilities;
 import app.drydock.agent.api.AgentContext;
 import app.drydock.agent.api.AgentKind;
@@ -87,8 +90,11 @@ class AgentLabelsTest {
     }
 
     private static ManagedAgentSession session(AgentKind kind, SessionStatus status) {
-        return new ManagedAgentSession(ManagedSessionId.newId(), RepositoryId.newId(), kind, "work",
-                Optional.empty(), Optional.empty(), Path.of("/tmp"), Optional.empty(), status,
-                Instant.EPOCH, Instant.EPOCH, Optional.empty(), PrState.NONE, Optional.empty(), false, false, Optional.empty());
+        return new ManagedAgentSession(
+                ManagedSessionId.newId(), RepositoryId.newId(), "work",
+                new AgentBinding(kind, Optional.empty(), Optional.empty()),
+                new SessionWorkspace(Path.of("/tmp"), Optional.empty(), false),
+                status, Instant.EPOCH, Instant.EPOCH, Optional.empty(),
+                PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty());
     }
 }
