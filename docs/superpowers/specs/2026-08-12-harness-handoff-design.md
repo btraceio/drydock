@@ -212,8 +212,31 @@ The operation:
 4. Transplant the outgoing worktree's dirty state — tracked edits, deletions
    and untracked files, excluding ignored ones — and leave it **uncommitted**,
    so the review rail sees a real diff.
-5. Start a session there with the chosen `AgentKind`, seeded with the composed
-   brief, with `forkedFrom` set.
+5. Write the composed seed to a file in drydock's state directory, and start a
+   session there with the chosen `AgentKind`, with `forkedFrom` set, whose
+   prompt is a **single line pointing at that file**.
+
+### Why the seed is a file and the prompt is a pointer
+
+A prompt reaches a session as real keystrokes, and an embedded newline submits
+the line before it -- which is why `MainWorkspace.sendTaskWhenReady` collapses
+whitespace before typing. Run the composed seed through that and its headings,
+blank lines and bullets become one run-on line, which destroys the separation
+of testimony from derived facts that the section above calls a mitigation
+rather than formatting.
+
+So the structure lives in a file and the prompt is one line pointing at it.
+The file is written **outside** the worktree, in drydock's own state
+directory: a file in the tree would appear in the fork's first diff and in the
+review rail, which is exactly why a worktree file was rejected as the brief's
+*home*. This is a delivery artifact for one launch, not the store -- a
+distinction worth keeping, because the two look alike and only one of them
+belongs in git's view.
+
+It is owner-only, since a brief can quote anything the previous session was
+working on. The successor is asked to delete it once read; because that is a
+request to an agent rather than a guarantee, drydock also sweeps seeds older
+than seven days.
 
 The chosen `AgentKind` may be the same one the outgoing session is running.
 Forking to the same harness is a legitimate rescue — the harness is fine, that

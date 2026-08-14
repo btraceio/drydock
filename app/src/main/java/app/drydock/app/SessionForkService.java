@@ -10,6 +10,7 @@ import app.drydock.git.GitExecutableLocator;
 import app.drydock.git.GitException;
 import app.drydock.git.GitExecutableNotFoundException;
 import app.drydock.git.GitStatusService;
+import app.drydock.git.WorktreeNaming;
 import app.drydock.git.WorktreeTransplant;
 import app.drydock.handoff.ForkFacts;
 import app.drydock.handoff.HandoffSeed;
@@ -19,6 +20,13 @@ import app.drydock.process.ProcessRunner;
 import app.drydock.process.ProcessTimeoutException;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.FileAlreadyExistsException;
+import java.nio.file.Files;
+import java.nio.file.attribute.FileAttribute;
+import java.nio.file.attribute.PosixFilePermissions;
+import java.time.Instant;
+import java.util.stream.Stream;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.Path;
@@ -48,6 +56,15 @@ public final class SessionForkService {
 
     /** How many suffixed branch names to try before giving up. */
     private static final int MAX_BRANCH_SUFFIX = 100;
+
+    /** How long an unread seed file survives before {@link #sweepStaleSeeds} removes it. */
+    private static final Duration SEED_RETENTION = Duration.ofDays(7);
+
+    private static final FileAttribute<?> OWNER_ONLY_FILE =
+            PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------"));
+
+    private static final FileAttribute<?> OWNER_ONLY_DIRECTORY =
+            PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------"));
 
     /**
      * Longest commit and changed-file lists the seed carries. The commit list
@@ -88,6 +105,7 @@ public final class SessionForkService {
     private final Function<ManagedSessionId, Optional<HandoffBrief>> briefLookup;
     private final Function<ManagedAgentSession, Path> repositoryRootLookup;
     private final Function<String, Path> worktreeDirectory;
+    private final Path seedDirectory;
     private final ExecutorService backgroundExecutor;
 
     public SessionForkService(GitStatusService gitStatusService,
@@ -97,6 +115,7 @@ public final class SessionForkService {
                               Function<ManagedSessionId, Optional<HandoffBrief>> briefLookup,
                               Function<ManagedAgentSession, Path> repositoryRootLookup,
                               Function<String, Path> worktreeDirectory,
+                              Path seedDirectory,
                               ExecutorService backgroundExecutor) {
         this.gitStatusService = gitStatusService;
         this.transplant = transplant;
@@ -105,6 +124,7 @@ public final class SessionForkService {
         this.briefLookup = briefLookup;
         this.repositoryRootLookup = repositoryRootLookup;
         this.worktreeDirectory = worktreeDirectory;
+        this.seedDirectory = seedDirectory;
         this.backgroundExecutor = backgroundExecutor;
     }
 
@@ -137,7 +157,7 @@ public final class SessionForkService {
             transplant.transplant(sourceWorktree, created);
             String seed = HandoffSeed.compose(briefLookup.apply(outgoing.id()),
                     factsFor(sourceWorktree, branch, baseBranch, head));
-            return launcher.start(created, target, seed, outgoing.id());
+            return launcher.start(created, target, seedPointer(seed, branch), outgoing.id());
         } catch (RuntimeException e) {
             rollback(repositoryRoot, created, branch);
             throw e;
@@ -210,6 +230,96 @@ public final class SessionForkService {
         List<String> capped = new ArrayList<>(items.subList(0, limit));
         capped.add("… and " + (items.size() - limit) + " more");
         return List.copyOf(capped);
+    }
+
+    /**
+     * Writes the seed to a file and returns the ONE LINE to type at the
+     * successor instead.
+     *
+     * <p>The seed cannot be delivered as the prompt itself. A prompt reaches a
+     * session as real keystrokes, and an embedded newline submits the line
+     * before it -- which is why {@code MainWorkspace.sendTaskWhenReady}
+     * collapses whitespace before typing. Run the seed through that and its
+     * headings, blank lines and bullets become one run-on line, destroying the
+     * separation of the previous session's testimony from the facts drydock
+     * derived, which is a mitigation rather than formatting.</p>
+     *
+     * <p>So the structure lives in a file and the prompt is a pointer. The
+     * file is written OUTSIDE the worktree, in drydock's own state directory:
+     * putting it in the tree would show up in the fork's very first diff and
+     * in the review rail, and the spec rejected a worktree file as the brief's
+     * home for that reason. This is a delivery artifact for one launch, not
+     * the store.</p>
+     *
+     * <p>Owner-only, like the MCP config: a brief can quote anything the
+     * previous session was working on.</p>
+     *
+     * <p>The successor is asked to delete it once read. That is a request to
+     * an agent, so it is not a guarantee -- {@link #sweepStaleSeeds} is the
+     * half that does not depend on cooperation.</p>
+     */
+    private String seedPointer(String seed, String branch) {
+        try {
+            Files.createDirectories(seedDirectory, OWNER_ONLY_DIRECTORY);
+        } catch (FileAlreadyExistsException existing) {
+            // Tighten a directory left by an earlier run (or by a version that
+            // inherited the umask) rather than trusting that it exists.
+            try {
+                Files.setPosixFilePermissions(seedDirectory, PosixFilePermissions.fromString("rwx------"));
+            } catch (IOException e) {
+                return undeliverableSeed(e);
+            }
+        } catch (IOException e) {
+            return undeliverableSeed(e);
+        }
+
+        try {
+            Path file = Files.createTempFile(seedDirectory, "handoff-" + WorktreeNaming.slug(branch) + "-",
+                    ".md", OWNER_ONLY_FILE);
+            Files.writeString(file, seed, StandardCharsets.UTF_8);
+            // Deliberately one line, with no tab or newline anywhere in it: it
+            // has to survive being whitespace-collapsed and typed.
+            return "Read your handoff brief at " + file + " -- it explains what this session inherited "
+                    + "and what to do next. Delete that file once you have read it, then take the next step.";
+        } catch (IOException e) {
+            return undeliverableSeed(e);
+        }
+    }
+
+    /**
+     * What to say when the brief could not be handed over at all. The fork
+     * itself is still worth having -- the tree, branch and commits are real --
+     * so this degrades to a session that knows it is missing context, rather
+     * than failing the whole operation.
+     */
+    private static String undeliverableSeed(IOException cause) {
+        LOG.log(Level.WARNING, () -> "Could not write the handoff seed: " + cause.getMessage());
+        return "You are continuing work another agent started, but drydock could not write its handoff "
+                + "brief to disk, so none is available. Read the diff before changing direction.";
+    }
+
+    /**
+     * Deletes seed files older than {@link #SEED_RETENTION}. The successor is
+     * asked to remove its own, but an agent that ignores the request, crashes,
+     * or never reads the file would otherwise leave a brief on disk forever.
+     */
+    public void sweepStaleSeeds(Instant now) {
+        if (!Files.isDirectory(seedDirectory)) {
+            return;
+        }
+        try (Stream<Path> files = Files.list(seedDirectory)) {
+            for (Path file : files.toList()) {
+                try {
+                    if (Files.getLastModifiedTime(file).toInstant().isBefore(now.minus(SEED_RETENTION))) {
+                        Files.deleteIfExists(file);
+                    }
+                } catch (IOException e) {
+                    LOG.log(Level.DEBUG, () -> "Could not sweep " + file + ": " + e.getMessage());
+                }
+            }
+        } catch (IOException e) {
+            LOG.log(Level.DEBUG, () -> "Could not list " + seedDirectory + ": " + e.getMessage());
+        }
     }
 
     /**

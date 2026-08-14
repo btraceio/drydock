@@ -21,11 +21,14 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ForkJoinPool;
@@ -45,6 +48,7 @@ class SessionForkServiceTest {
 
     private Path repositoryRoot;
     private Path worktreeParent;
+    private Path seedDirectory;
     private ManagedAgentSession outgoing;
 
     private final Map<ManagedSessionId, HandoffBrief> briefs = new HashMap<>();
@@ -90,6 +94,7 @@ class SessionForkServiceTest {
     void setUp(@TempDir Path dir) throws Exception {
         repositoryRoot = Files.createDirectories(dir.resolve("repo"));
         worktreeParent = Files.createDirectories(dir.resolve("worktrees"));
+        seedDirectory = dir.resolve("state").resolve("handoff-seeds");
         git(repositoryRoot, "init", "-b", "main");
         Files.writeString(repositoryRoot.resolve("README.md"), "hello\n");
         git(repositoryRoot, "add", ".");
@@ -110,6 +115,7 @@ class SessionForkServiceTest {
                 id -> Optional.ofNullable(briefs.get(id)),
                 ignored -> repositoryRoot,
                 branch -> worktreeParent.resolve(branch.replace('/', '-')),
+                seedDirectory,
                 ForkJoinPool.commonPool());
     }
 
@@ -153,27 +159,102 @@ class SessionForkServiceTest {
     }
 
     @Test
-    void seedsTheForkWithTheBriefWhenOneExists() {
+    void seedsTheForkWithTheBriefWhenOneExists() throws Exception {
         briefs.put(outgoing.id(), brief(outgoing.id(), "Ship the fork gesture"));
 
         service.forkBlocking(outgoing, AgentKind.CODEX);
 
-        assertTrue(launcher.lastPrompt.contains("Ship the fork gesture"), launcher.lastPrompt);
+        assertTrue(seedFileContents().contains("Ship the fork gesture"), seedFileContents());
+    }
+
+    /**
+     * The property this whole mechanism exists for. A prompt is TYPED as
+     * keystrokes and MainWorkspace.sendTaskWhenReady collapses whitespace
+     * first, because an embedded newline submits the line before it. A
+     * multi-line seed would arrive as one run-on line with its structure gone.
+     */
+    @Test
+    void thePromptIsASingleLineThatSurvivesWhitespaceCollapsing() {
+        briefs.put(outgoing.id(), brief(outgoing.id(), "Ship the fork gesture"));
+
+        service.forkBlocking(outgoing, AgentKind.CODEX);
+
+        assertFalse(launcher.lastPrompt.contains("\n"), launcher.lastPrompt);
+        assertFalse(launcher.lastPrompt.contains("\r"), launcher.lastPrompt);
+        assertFalse(launcher.lastPrompt.contains("\t"), launcher.lastPrompt);
+        assertEquals(launcher.lastPrompt, launcher.lastPrompt.replaceAll("\\s+", " ").strip());
     }
 
     @Test
-    void saysSoWhenNoBriefWasRecorded() {
+    void thePromptPointsAtTheSeedFileAndAsksForItsDeletion() {
         service.forkBlocking(outgoing, AgentKind.CODEX);
 
-        assertTrue(launcher.lastPrompt.contains("No handoff brief was recorded"), launcher.lastPrompt);
+        assertTrue(launcher.lastPrompt.contains(seedFile().toString()), launcher.lastPrompt);
+        assertTrue(launcher.lastPrompt.toLowerCase(Locale.ROOT).contains("delete"), launcher.lastPrompt);
     }
 
     @Test
-    void theSeedCarriesFactsDrydockDerivedItself() {
+    void theSeedFileLivesOutsideTheWorktreeSoItNeverEntersTheForksDiff() throws Exception {
         service.forkBlocking(outgoing, AgentKind.CODEX);
 
-        assertTrue(launcher.lastPrompt.contains("add a.txt"), launcher.lastPrompt);
-        assertTrue(launcher.lastPrompt.contains("derived by drydock"), launcher.lastPrompt);
+        assertFalse(seedFile().startsWith(launcher.lastWorktree), seedFile().toString());
+        assertEquals("", gitCapture(launcher.lastWorktree, "status", "--porcelain").strip());
+    }
+
+    @Test
+    void theSeedFileIsOwnerOnlyBecauseABriefCanQuoteAnything() throws Exception {
+        service.forkBlocking(outgoing, AgentKind.CODEX);
+
+        assertEquals("rw-------", PosixFilePermissions.toString(Files.getPosixFilePermissions(seedFile())));
+    }
+
+    @Test
+    void staleSeedsAreSweptEvenThoughTheAgentWasAskedToDeleteTheirs() throws Exception {
+        // The request to delete goes to an agent, so it is not a guarantee.
+        service.forkBlocking(outgoing, AgentKind.CODEX);
+        Path seed = seedFile();
+
+        service.sweepStaleSeeds(Instant.now().plus(Duration.ofDays(8)));
+
+        assertFalse(Files.exists(seed), "an unread seed must not sit on disk forever");
+    }
+
+    @Test
+    void aFreshSeedSurvivesTheSweep() throws Exception {
+        service.forkBlocking(outgoing, AgentKind.CODEX);
+        Path seed = seedFile();
+
+        service.sweepStaleSeeds(Instant.now());
+
+        assertTrue(Files.exists(seed));
+    }
+
+    private Path seedFile() {
+        try (var files = Files.list(seedDirectory)) {
+            return files.findFirst().orElseThrow(() -> new AssertionError("no seed file written"));
+        } catch (IOException e) {
+            throw new AssertionError(e);
+        }
+    }
+
+    private String seedFileContents() throws IOException {
+        return Files.readString(seedFile());
+    }
+
+    @Test
+    void saysSoWhenNoBriefWasRecorded() throws Exception {
+        service.forkBlocking(outgoing, AgentKind.CODEX);
+
+        assertTrue(seedFileContents().contains("No handoff brief was recorded"), seedFileContents());
+    }
+
+    @Test
+    void theSeedCarriesFactsDrydockDerivedItself() throws Exception {
+        service.forkBlocking(outgoing, AgentKind.CODEX);
+
+        String seed = seedFileContents();
+        assertTrue(seed.contains("add a.txt"), seed);
+        assertTrue(seed.contains("derived by drydock"), seed);
     }
 
     @Test
@@ -186,10 +267,10 @@ class SessionForkServiceTest {
 
         service.forkBlocking(outgoing, AgentKind.CODEX);
 
-        assertTrue(launcher.lastPrompt.contains("and 10 more"), launcher.lastPrompt);
+        String seed = seedFileContents();
+        assertTrue(seed.contains("and 10 more"), seed);
         // A truncated list that did not say so would read as the whole tree.
-        assertTrue(launcher.lastPrompt.lines().filter(l -> l.startsWith("- ")).count() < 60,
-                launcher.lastPrompt);
+        assertTrue(seed.lines().filter(l -> l.startsWith("- ")).count() < 60, seed);
     }
 
     @Test
