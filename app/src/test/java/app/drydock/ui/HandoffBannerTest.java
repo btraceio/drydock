@@ -5,6 +5,8 @@ import app.drydock.domain.ManagedSessionId;
 import app.drydock.handoff.HandoffStaleness;
 
 import javafx.scene.Scene;
+import javafx.scene.control.Label;
+import javafx.scene.paint.Color;
 import javafx.scene.layout.StackPane;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.Test;
@@ -15,6 +17,8 @@ import java.util.Locale;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -41,6 +45,54 @@ class HandoffBannerTest extends ApplicationTest {
                 Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(),
                 Instant.parse("2025-08-12T10:15:30Z"), Optional.of("abc1234"),
                 HandoffBrief.Author.AGENT));
+    }
+
+    /**
+     * The failure mode new CSS classes actually have is a selector that
+     * silently matches nothing, which no amount of looking at a passing test
+     * would reveal -- the component just renders with default JavaFX chrome
+     * inside a themed workspace. Attaching the real sheets and reading back
+     * the computed values is the check for that.
+     */
+    @Test
+    void theRealStylesheetsStyleTheBanner() {
+        interact(() -> {
+            banner.getScene().getStylesheets().setAll(
+                    HandoffBannerTest.class.getResource("/app/drydock/ui/theme-dark.css").toExternalForm(),
+                    HandoffBannerTest.class.getResource("/app/drydock/ui/app.css").toExternalForm());
+            banner.update(HandoffStaleness.of(brief(), 3, 3), true);
+            banner.applyCss();
+            banner.layout();
+        });
+
+        assertNotNull(banner.getBackground(), ".handoff-banner matched nothing in app.css");
+        assertFalse(banner.getBackground().getFills().isEmpty());
+        Color fill = (Color) banner.getBackground().getFills().get(0).getFill();
+        assertTrue(fill.getOpacity() > 0.0, "the banner must not be painted transparent");
+
+        Label message = (Label) banner.lookup(".handoff-banner-message");
+        assertNotNull(message, ".handoff-banner-message matched nothing");
+        assertNotEquals(Color.BLACK, message.getTextFill(),
+                "the message must take the theme's colour, not the default");
+    }
+
+    /**
+     * A disabled control still carrying its own reason has to stay readable.
+     * Faded to illegibility, it would hide the explanation it exists to give.
+     */
+    @Test
+    void disabledRefreshStaysLegible() {
+        interact(() -> {
+            banner.getScene().getStylesheets().setAll(
+                    HandoffBannerTest.class.getResource("/app/drydock/ui/theme-dark.css").toExternalForm(),
+                    HandoffBannerTest.class.getResource("/app/drydock/ui/app.css").toExternalForm());
+            banner.update(HandoffStaleness.of(brief(), 3, 3), false);
+            banner.applyCss();
+            banner.layout();
+        });
+
+        assertTrue(banner.refreshButton().getOpacity() >= 0.7,
+                "opacity was " + banner.refreshButton().getOpacity());
     }
 
     @Test
