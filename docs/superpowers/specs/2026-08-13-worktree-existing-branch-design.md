@@ -19,12 +19,12 @@ already exists gets git's "branch already exists" and no way forward.
 
 This design makes the choice explicit in the modal and possible over MCP.
 
-> **Revision note.** Nine revisions across eight adversarial review
+> **Revision note.** Ten revisions across nine adversarial review
 > rounds, three reviewers each
 > (fact-check, mechanism, spec quality). Every confirmed finding is
 > corrected in place; "What the adversarial review changed" at the end
 > records them. Four defects in shipped code are fixed along the way — the
-> remote-adoption shadow hole, the modal's complete absence of branch-name
+> remote-adoption shadow hole, the modal's absence of refname and shadow
 > validation, `BranchNames` picking an arbitrary remote when several
 > match, and `createWorktree` refunding a worktree that exists — and the
 > ones this change does not touch are listed at the end.
@@ -374,15 +374,25 @@ muscle memory survive unchanged. `Mode` is a two-constant enum nested in
 `NewWorktreeState`, shared by the record, `CreateHandler` and
 `MainWorkspace`. It lives in a field on the modal, written from four
 places — the two segment handlers, `⌘E`, and **Check it out instead** —
-each of which goes through one private `setMode(Mode)`. That method writes
-the field, sets the segment's selection so the two can never diverge,
-moves focus to the newly active branch control, and **ends in
-`refreshState()`**. Focus is a duty of `setMode`, not of the `⌘E` handler:
-the offer is the one control that hides itself as a consequence of being
-pressed — its handler ends in `setMode(EXISTING)`, whose `refreshState()`
-then computes `switchOffer == false` — so a keyboard user who activates it
-with Space would otherwise be left focused on a node that is no longer
-there. The last part is not decoration: `mode` is
+each of which goes through one private `setMode(Mode)`. That method does
+four things **in this order**: writes the field; sets the
+segment's selection so the two can never diverge; **swaps the two branch
+controls' `visible`/`managed`** and moves focus to the newly active one;
+and ends in `refreshState()`.
+
+The order is not arbitrary. `Scene.requestFocus` silently does nothing
+unless the target `isTreeVisible()`, so focusing before the swap is a
+no-op — which is why the swap belongs to `setMode` rather than to
+`refreshState()`, even though every *other* visibility swap in this modal
+(`baseGroup`, `hintLine`) is a `refreshState()` product and stays one.
+
+Focus is `setMode`'s duty rather than the `⌘E` handler's because the offer
+hides itself as a consequence of being pressed: its handler ends in
+`setMode(EXISTING)`, whose `refreshState()` then computes
+`switchOffer == false`. A hidden `Button` does not keep focus — the scene
+notices it can no longer receive focus and traverses to whatever is next —
+so without an explicit move, a keyboard user who activates the offer with
+Space lands somewhere arbitrary. The last part is not decoration: `mode` is
 the only input to `derive` with no listener behind it — `catalog` refreshes
 through `applyCatalog`/`applyCatalogFailure`, `creatingInFlight` through
 `showCreating`/`showError`, and the three text fields through their own
@@ -401,7 +411,8 @@ from under any bound property. That is the same class of trap already
 documented in the modal, where setting `promptText` on the editor rather
 than the `ComboBox` throws because the skin binds one to the other
 (`NewWorktreeModal.java:159-165`). So the two modes get two controls,
-swapped by `visible`/`managed`:
+swapped by `visible`/`managed` — a swap `setMode` performs, for the
+focus-ordering reason above:
 
 - **New branch**: a plain `TextField`, seeded `feat/`, plus the existing
   **Fork from** combo.
@@ -432,6 +443,14 @@ mode's** control. `onRefresh` is the easy one to miss: it calls
 (`NewWorktreeModal.java:289,313`), and left alone it would compare the
 *hidden* picker's leftover text and warn about a branch the user is not
 naming.
+
+Mode-awareness alone does not finish the job, because the two reads are
+separated by a fetch and the mode can change in between — nothing gates
+`⌘E` on `refreshInFlight`, only on `creatingInFlight`. So `onRefresh`
+captures the mode alongside `matchedBefore` and says nothing at all if it
+changed by the time the reload lands. Otherwise a ⟳ started in Existing
+mode and finished in New would warn about a branch the user has stopped
+naming, and the mirror case would swallow a genuine pruning.
 This is not cosmetic. `applyCatalog` does `items.setAll(…)` and repairs
 the editor on a later pulse, because the skin nulls a value that is not
 among the new items and re-syncs the editor from that null
@@ -661,11 +680,59 @@ resolves through pass 4 to the **remote** ref; re-resolving the string
 tracking, and nothing on screen would say so: `dropdownLabel` renders both
 rows as the bare name and `slug` derives the same directory either way.
 
-So Existing mode resolves from the picker's **selected value** whenever
-that value is non-null and its `name()` equals the editor text, and from
-the text only otherwise — i.e. once the user types something else, which
-clears the match. That rule is not just for the offer: it makes picking a
-duplicate-named row from the dropdown unambiguous too.
+So Existing mode uses the picker's selected value as a **disambiguator**,
+never as an authority:
+
+> When `branchField.getValue()` is non-null, its `name()` equals the
+> stripped editor text, **and the catalog still holds a ref with the same
+> `(name(), remote())` pair**, resolve from *the catalog's* instance of
+> that ref. Otherwise resolve from the text.
+
+Every clause of that is load-bearing, because a `ComboBox`'s value is not
+a catalog ref and is not kept fresh:
+
+- **ENTER fabricates one.** `ComboBoxPopupControl.handleKeyEvent` commits
+  on ENTER via `setTextFromTextFieldIntoComboBoxValue()`, which is
+  `setValue(converter.fromString(text))`, and then rewrites the editor
+  from that value. `BranchRefConverter.fromString` returns
+  `BranchRef.local(name)` for arbitrary text — always local, never
+  occupied — and its Javadoc says so outright: "the catalog lookup — not
+  this converter — decides what it means" (`BranchRefConverter.java:28-33`).
+  So after ENTER the name always matches, by construction. Without the
+  catalog clause, typing an occupied branch and pressing Enter would
+  resolve `Ready` instead of `Occupied` and enable Create; an unknown name
+  would resolve `Ready` instead of `NoSuchBranch`.
+- **A reload does not invalidate a stale selection.**
+  `ComboBoxSelectionModel`'s `setAll` recovery scans for an `equals` match
+  and, finding none, **does nothing** — the value keeps pointing at the
+  old snapshot. `BranchRef` is a record, so a branch that got checked out
+  elsewhere between loads is no longer `equals` its replacement. Pick a
+  free branch, let it be taken, press ⟳: without the catalog clause the
+  modal would keep the free snapshot and stay silent where today's
+  text-resolution flips to the occupancy hint.
+
+Resolving from the catalog's instance rather than the picker's is what
+makes both cases self-correcting. The rule is not just for the offer — it
+makes picking a duplicate-named row from the dropdown unambiguous too.
+After an ENTER commit the fabricated value is local, so `(name, remote)`
+finds the *local* ref and the text's own meaning wins; that is the right
+answer, because the user has just re-committed the text.
+
+### The plumbing this needs
+
+`derive` gains a nullable `BranchRef selected` alongside `Mode`, and
+`BranchCheckout` gains the ref-shaped entry point it otherwise lacks:
+
+```java
+/** As resolve(catalog, text), for a ref already identified — occupancy and mintability only. */
+public static Outcome resolve(BranchCatalog catalog, BranchRef ref);
+```
+
+Without both, the rule cannot be implemented from the API this document
+declares, and the path of least resistance —
+`resolve(catalog, selected.name())` — compiles, reads like the rule, and
+walks straight back into the local-exact-first defect the section exists
+to close.
 
 The mirror-image offer is deliberately **not** built: `NoSuchBranch` in
 Existing mode says so and disables Create, with no "create it instead"
@@ -1129,7 +1196,13 @@ disabled while a creation is in flight, and `⌘E` itself is inert then —
 disabling controls does not disable a `KEY_PRESSED` filter, so the gate
 needs its own case; that the offer selects the resolved `BranchRef` rather
 than round-tripping its name, asserted with a local `origin/foo` alongside
-a remote-tracking `origin/foo`; that focus lands on the newly active
+a remote-tracking `origin/foo` — and asserted on the **preview**
+(`-b foo --track origin/foo` versus `git worktree add <dir> origin/foo`),
+since checking the picker's value alone stays green while `derive`
+resolves the wrong ref; that an ENTER commit on an occupied name still
+yields the occupancy hint, and on an unknown name still yields
+`no-such`; that a ⟳ which takes the selected branch flips to the
+occupancy hint; that focus lands on the newly active
 control after every `setMode` path; the offer's label names its target when the
 resolved ref differs from the typed text and omits it when it does not,
 and clicking it lands in Existing mode with that ref selected; that the modal opens in New-branch mode; that **Fork from** is
@@ -1218,7 +1291,7 @@ Pieces 2 and 3 both depend on piece 1; neither depends on the other.
 
 ## What the adversarial review changed
 
-Eight rounds, three reviewers each (fact-check, mechanism, spec quality).
+Nine rounds, three reviewers each (fact-check, mechanism, spec quality).
 Every finding was verified against the code before being accepted.
 Entries below reference hint rows by the numbering in force at the time;
 the table has used stable names since round 6.
@@ -1661,6 +1734,65 @@ catalog-absent rows, `createDisabled`, the `Ready` cast and the preview
 all survive revision 8 unchanged — `setMode`'s new `refreshState()` closes
 round 7's stale-state route into the cast rather than opening one.
 
+### Round 9
+
+67. **The selected-value rule trusted a value JavaFX fabricates.**
+    `ComboBoxPopupControl` commits on ENTER through
+    `setValue(converter.fromString(text))`, and `BranchRefConverter`
+    returns a free local `BranchRef` for arbitrary text — then the skin
+    rewrites the editor from it, so the name always matches. Typing an
+    occupied branch and pressing Enter would have resolved `Ready` and
+    enabled Create; an unknown name would have resolved `Ready` instead of
+    `NoSuchBranch`. The converter's own Javadoc licenses this ("the
+    catalog lookup — not this converter — decides what it means"); the
+    rule broke that contract without amending it.
+68. **A reload does not invalidate a stale selection either.**
+    `ComboBoxSelectionModel`'s `setAll` recovery scans for an `equals`
+    match and does nothing when none is found, so a branch taken between
+    loads leaves the picker holding its free snapshot — silent where
+    today's text resolution flips to the occupancy hint. Both routes are
+    closed by requiring the catalog to still hold a ref with the same
+    `(name, remote)` and resolving from *the catalog's* instance.
+69. **The rule had no plumbing.** `derive` is a pure static over six
+    parameters with no `BranchRef` among them, and `BranchCheckout` had no
+    ref-shaped entry point — so the only implementable reading was
+    `resolve(catalog, selected.name())`, which is the local-exact-first
+    defect of finding 62 restored. `derive` takes the selected ref now,
+    and `resolve(catalog, ref)` exists.
+70. **`setMode` requested focus before the control it targets was
+    visible.** `Scene.requestFocus` does nothing unless the node
+    `isTreeVisible()`, and every other visibility swap in this modal is a
+    `refreshState()` product — which runs last. Following that precedent
+    would have made the focus move a silent no-op and left the offer path
+    landing on the modal root, the very state finding 65 closes. The swap
+    is `setMode`'s now, before the focus request.
+71. **`onRefresh` straddles a fetch.** Mode-awareness fixes which control
+    it reads but not that the mode can change between the two reads —
+    `⌘E` is gated on `creatingInFlight`, not `refreshInFlight`. It
+    captures the mode with `matchedBefore` and stays silent if it changed.
+72. Corrections: a hidden `Button` does **not** keep focus — the scene
+    traverses to the next node, so the argument for `setMode` owning focus
+    is that focus goes somewhere arbitrary, not that it sticks; the offer
+    test must assert the preview rather than the picker's value, which
+    stays green while `derive` resolves the wrong ref; and "the modal's
+    complete absence of branch-name validation" overstated — it does check
+    blank, trailing slash and space today, silently; what it lacks is
+    refname and shadow validation.
+
+**Also refuted in round 9** — `switchOffer` is untouched by the picker's
+value, since New mode never reads it. The `Ready` cast still cannot throw.
+The preview's four forms remain in lockstep with
+`addWorktreeForBranchBlocking`, which keys `-b … --track` off
+`branch.remote()`. Directory derivation is unchanged across both the offer
+and `⌘E`, because `slug` keeps only the last path segment. `setValue` and
+the editor cannot get durably out of sync, since `updateDisplayNode`
+writes the converter's string back. There is no `setMode` recursion:
+`setSelected` fires no `ActionEvent` and `RadioButton.fire()` guards the
+listener variant. `⌘E` collides with neither the ENTER commit nor the
+popup, and the constructor's initial focus request does not conflict with
+`setMode`. The `origin/foo` ambiguity, all four legs, and all four
+shipped-defect claims were re-verified against the code.
+
 ## Known, out of scope
 
 `⌘1`-`⌘4` switch the workspace view behind an
@@ -1678,5 +1810,6 @@ and will keep `KNOWN_FAILED` for a child that started and was killed;
 to `GitCommandInterruptedException`, so only its timeout is affected.
 Nothing reads the flag there today — only `joinAddBy` does — but if it ever spreads, those are the sites that
 need the same decision.
+
 
 
