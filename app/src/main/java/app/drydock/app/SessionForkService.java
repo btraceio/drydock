@@ -37,7 +37,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
-import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executor;
 import java.util.function.Function;
 
 /**
@@ -85,7 +85,18 @@ public final class SessionForkService {
      * on the FX thread.</p>
      */
     public interface Launcher {
-        ManagedSessionId start(Path worktree, AgentKind kind, String seedPrompt, ManagedSessionId forkedFrom);
+        /**
+         * Opens the forked session and completes with its id.
+         *
+         * <p>Asynchronous because opening a session is FX-thread work while
+         * {@link #forkBlocking} runs on a background thread. Returning a
+         * future rather than hopping and joining inside the implementation
+         * keeps the deadline in one place: this service already unwraps and
+         * joins, and a second join inside the launcher would be a second
+         * timeout to reason about.</p>
+         */
+        CompletableFuture<ManagedSessionId> start(Path worktree, AgentKind kind, String seedPrompt,
+                                                  ManagedSessionId forkedFrom);
     }
 
     /**
@@ -105,8 +116,9 @@ public final class SessionForkService {
     private final Function<ManagedSessionId, Optional<HandoffBrief>> briefLookup;
     private final Function<ManagedAgentSession, Path> repositoryRootLookup;
     private final Function<String, Path> worktreeDirectory;
+    private final Function<ManagedSessionId, List<String>> openIntentLookup;
     private final Path seedDirectory;
-    private final ExecutorService backgroundExecutor;
+    private final Executor backgroundExecutor;
 
     public SessionForkService(GitStatusService gitStatusService,
                               Transplanter transplant,
@@ -115,8 +127,9 @@ public final class SessionForkService {
                               Function<ManagedSessionId, Optional<HandoffBrief>> briefLookup,
                               Function<ManagedAgentSession, Path> repositoryRootLookup,
                               Function<String, Path> worktreeDirectory,
+                              Function<ManagedSessionId, List<String>> openIntentLookup,
                               Path seedDirectory,
-                              ExecutorService backgroundExecutor) {
+                              Executor backgroundExecutor) {
         this.gitStatusService = gitStatusService;
         this.transplant = transplant;
         this.locator = locator;
@@ -124,6 +137,7 @@ public final class SessionForkService {
         this.briefLookup = briefLookup;
         this.repositoryRootLookup = repositoryRootLookup;
         this.worktreeDirectory = worktreeDirectory;
+        this.openIntentLookup = openIntentLookup;
         this.seedDirectory = seedDirectory;
         this.backgroundExecutor = backgroundExecutor;
     }
@@ -156,8 +170,8 @@ public final class SessionForkService {
             initSubmodules(created);
             transplant.transplant(sourceWorktree, created);
             String seed = HandoffSeed.compose(briefLookup.apply(outgoing.id()),
-                    factsFor(sourceWorktree, branch, baseBranch, head));
-            return launcher.start(created, target, seedPointer(seed, branch), outgoing.id());
+                    factsFor(outgoing, sourceWorktree, branch, baseBranch, head));
+            return join(launcher.start(created, target, seedPointer(seed, branch), outgoing.id()));
         } catch (RuntimeException e) {
             rollback(repositoryRoot, created, branch);
             throw e;
@@ -208,14 +222,19 @@ public final class SessionForkService {
         }
     }
 
-    private ForkFacts factsFor(Path sourceWorktree, String branch, String baseBranch, Optional<String> head) {
+    private ForkFacts factsFor(ManagedAgentSession outgoing, Path sourceWorktree, String branch,
+                               String baseBranch, Optional<String> head) {
         List<String> subjects = head.isEmpty()
                 ? List.of()
                 : lines(gitOut(sourceWorktree, "log", "--format=%s",
                         "-n", String.valueOf(MAX_COMMIT_SUBJECTS), "HEAD"));
         List<String> changed = capped(lines(gitOut(sourceWorktree, "status", "--porcelain")),
                 MAX_CHANGED_FILES);
-        return new ForkFacts(branch, baseBranch, subjects, changed, List.of());
+        // The intents the human has not settled are the most concrete
+        // statement of what is still open; a successor that re-litigates a
+        // resolved one is doing the work twice.
+        return new ForkFacts(branch, baseBranch, subjects, changed,
+                capped(openIntentLookup.apply(outgoing.id()), MAX_CHANGED_FILES));
     }
 
     /**

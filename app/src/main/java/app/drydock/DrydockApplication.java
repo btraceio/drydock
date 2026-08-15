@@ -267,7 +267,8 @@ public final class DrydockApplication extends Application {
 
         mainWorkspace = new MainWorkspace(sessionManager, agentRegistry, repositoryManager, gitStatusService,
                 searchService, ghCliService, gitHubReviewService, worktreeService, diffService, changedLineService,
-                annotationStore, reviewScopeRegistry, mcpActivityLog, explorerTrailStore, viewModel, primaryStage);
+                annotationStore, reviewScopeRegistry, mcpActivityLog, explorerTrailStore, viewModel, primaryStage,
+                stateDir);
         RepositorySidebar sidebar =
                 new RepositorySidebar(repositoryManager, gitStatusService, worktreeService, sessionManager,
                         agentRegistry, mainWorkspace, viewModel);

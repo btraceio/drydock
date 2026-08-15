@@ -3408,6 +3408,52 @@
     -fx-padding: 6 0 0 0;
 }
 
+/* ---- Handoff brief: staleness banner + edit dialog ----------------------- */
+
+/* Same amber as the read-only review banner: both say "this is still fine to
+   use, but know something about it first", which is a different thing from an
+   error. Only the token is shared -- the row draws its own bottom border
+   because it sits under the session header rather than inside a rail. */
+.handoff-banner {
+    -fx-background-color: -drydock-question-soft;
+    -fx-border-color: transparent transparent -drydock-border transparent;
+    -fx-border-width: 0 0 1 0;
+}
+.handoff-banner-message {
+    -fx-text-fill: -drydock-question;
+    -fx-font-size: 11px;
+}
+/* Chip buttons, matching the review rail's, so a control that does something
+   reads the same wherever it appears. */
+.handoff-banner-button {
+    -fx-background-color: transparent;
+    -fx-background-radius: 12px;
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 12px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 11px;
+    -fx-padding: 3 10 3 10;
+    -fx-cursor: hand;
+}
+.handoff-banner-button:hover {
+    -fx-text-fill: -drydock-text;
+    -fx-border-color: -drydock-text-dim;
+}
+/* Disabled Refresh has to stay READABLE: it is carrying its own reason, and a
+   control faded to illegibility would hide the explanation it exists to give. */
+.handoff-banner-button:disabled {
+    -fx-opacity: 0.75;
+    -fx-cursor: default;
+}
+
+.handoff-edit-label {
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 11px;
+}
+.handoff-edit-field {
+    -fx-font-size: 12px;
+}
+
 /* ---- Symbol lens + MCP activity panel (handoff sections 4.4, 4.7) -------- */
 
 /* Identifiers the local index knows: a dotted underline, and nothing else --

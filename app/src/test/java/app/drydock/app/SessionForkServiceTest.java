@@ -31,6 +31,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ForkJoinPool;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -65,14 +66,14 @@ class SessionForkServiceTest {
         Path lastWorktree;
 
         @Override
-        public ManagedSessionId start(Path worktree, AgentKind kind, String seedPrompt,
-                                      ManagedSessionId forkedFrom) {
+        public CompletableFuture<ManagedSessionId> start(Path worktree, AgentKind kind, String seedPrompt,
+                                                         ManagedSessionId forkedFrom) {
             startCount++;
             lastWorktree = worktree;
             lastKind = kind;
             lastPrompt = seedPrompt;
             lastParent = forkedFrom;
-            return ManagedSessionId.newId();
+            return CompletableFuture.completedFuture(ManagedSessionId.newId());
         }
     }
 
@@ -115,6 +116,7 @@ class SessionForkServiceTest {
                 id -> Optional.ofNullable(briefs.get(id)),
                 ignored -> repositoryRoot,
                 branch -> worktreeParent.resolve(branch.replace('/', '-')),
+                id -> List.of("Rework the rail"),
                 seedDirectory,
                 ForkJoinPool.commonPool());
     }
@@ -271,6 +273,16 @@ class SessionForkServiceTest {
         assertTrue(seed.contains("and 10 more"), seed);
         // A truncated list that did not say so would read as the whole tree.
         assertTrue(seed.lines().filter(l -> l.startsWith("- ")).count() < 60, seed);
+    }
+
+    @Test
+    void theSeedCarriesTheOutgoingSessionsOpenReviewIntents() throws Exception {
+        // The most concrete statement of what is still open; a successor that
+        // re-litigates a settled intent does the work twice.
+        service.forkBlocking(outgoing, AgentKind.CODEX);
+
+        assertTrue(seedFileContents().contains("Rework the rail"), seedFileContents());
+        assertTrue(seedFileContents().contains("Open review intents"), seedFileContents());
     }
 
     @Test

@@ -329,7 +329,22 @@ public final class SessionManager implements AutoCloseable {
     /** As {@link #prepareSession}, for a session living inside an already-created worktree checkout. */
     public ManagedAgentSession prepareWorktreeSession(Repository repository, String displayName, Path worktreeRoot,
                                                         boolean branchCreatedHere, AgentKind agentKind) {
-        return newSessionMetadata(repository, displayName, agentKind, Optional.of(worktreeRoot), branchCreatedHere);
+        return prepareWorktreeSession(repository, displayName, worktreeRoot, branchCreatedHere, agentKind,
+                Optional.empty());
+    }
+
+    /**
+     * As above, recording that this session was forked from {@code forkedFrom}.
+     *
+     * <p>Lineage is set here rather than patched on after launch: it is part of
+     * what the session IS, and a window where a fork does not yet know its
+     * parent is a window where a crash loses the link entirely.</p>
+     */
+    public ManagedAgentSession prepareWorktreeSession(Repository repository, String displayName, Path worktreeRoot,
+                                                        boolean branchCreatedHere, AgentKind agentKind,
+                                                        Optional<ManagedSessionId> forkedFrom) {
+        return newSessionMetadata(repository, displayName, agentKind, Optional.of(worktreeRoot), branchCreatedHere)
+                .withForkedFrom(forkedFrom);
     }
 
     /**

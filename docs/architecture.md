@@ -66,9 +66,16 @@ milestones (Gate 0C onward) land.
   That permission has since been granted on the development machine, and
   `screencapture` works. Automated visual verification of the JavaFX layer
   is therefore possible and is the intended way to check UI that no test
-  harness covers — there is no headless-FX harness in `app/src/test`, so
-  screenshots of a real window are the only machine-checkable evidence for
-  chips, banners and other purely visual state. The
+  harness covers. **Correction (2026-08-15):** the claim this paragraph used
+  to make — that there is no headless-FX harness in `app/src/test` — is out of
+  date. TestFX's `ApplicationTest` runs a real scene headlessly and is already
+  used by `ReviewNarrowLayoutTest`, `HandoffBannerTest` and others, so
+  anything assertable as a property (visibility, disabled state, tooltip text,
+  wrapping behaviour) should be a JUnit test rather than a screenshot.
+  Screenshots remain the only evidence for what is genuinely *visual* —
+  whether a label truncates at a real width, whether contrast survives the
+  theme — and for the native Ghostty surface, which a scene snapshot renders
+  black. The
   `app.drydock.diag.explorerScript` hook (see `DrydockApplication`) drives
   the editable Explorer for exactly this purpose; the editor's
   conflict-banner button truncation was found this way and could not have

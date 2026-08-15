@@ -11,6 +11,9 @@ import app.drydock.agent.api.ConversationSource;
 import app.drydock.agent.api.ConversationSource.Conversation;
 import app.drydock.activity.SessionActivityWatcher;
 import app.drydock.domain.ManagedAgentSession;
+import app.drydock.app.SessionForkService;
+import app.drydock.git.GitExecutableLocator;
+import app.drydock.git.WorktreeTransplant;
 import app.drydock.domain.HandoffBrief;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.Repository;
@@ -173,6 +176,13 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * expire first, the router would refund the charge while the rename went
      * on to land, and the budget would stop bounding anything.
      */
+    /** Virtual threads for handoff git work; this class has no shared pool. */
+    private static final java.util.concurrent.Executor HANDOFF_EXECUTOR =
+            runnable -> Thread.ofVirtual().name("drydock-handoff").start(runnable);
+
+    /** Bound on diffing one scope to read its intents; the seed is not worth a hang. */
+    private static final long INTENT_DIFF_TIMEOUT_SECONDS = 10;
+
     private static final long AGENT_RENAME_BUDGET_SECONDS =
             WorkspaceMcpSessionContext.RENAME_TIMEOUT_SECONDS / 2;
 
@@ -197,6 +207,15 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             WorkspaceMcpSessionContext.HANDOFF_TIMEOUT_SECONDS / 2;
 
     private final SessionManager sessionManager;
+
+    /** Drydock's own state directory; the handoff seeds live under it, never in a worktree. */
+    private final Path stateDirectory;
+
+    /**
+     * Built on first use rather than in the constructor: it probes for the git
+     * executable, and workspace construction is on the FX thread.
+     */
+    private SessionForkService forkService;
     private final AgentRegistry agentRegistry;
     private final RepositoryManager repositoryManager;
     private final GitStatusService gitStatusService;
@@ -378,8 +397,9 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                           ChangedLineService changedLineService, AnnotationStore annotationStore,
                           ReviewScopeRegistry reviewScopeRegistry, McpActivityLog activityLog,
                           ExplorerTrailStore explorerTrailStore,
-                          WorkspaceViewModel viewModel, Stage stage) {
+                          WorkspaceViewModel viewModel, Stage stage, Path stateDirectory) {
         this.sessionManager = sessionManager;
+        this.stateDirectory = stateDirectory;
         this.agentRegistry = agentRegistry;
         this.repositoryManager = repositoryManager;
         this.gitStatusService = gitStatusService;
@@ -642,6 +662,12 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     /** Pushes the manager's current session snapshot into the view model (FX thread; no-op if unchanged). */
     private void publishSessions() {
         viewModel.setSessions(sessionManager.sessions());
+        // Only open tabs: staleness shells out to git, and a workspace-wide
+        // republish must not fan out one git call per session the human
+        // cannot even see.
+        for (ManagedSessionId open : List.copyOf(openTabs.keySet())) {
+            refreshHandoffBanner(open);
+        }
     }
 
     /** Re-reads one open tab's header facts (name, status dot, attention badge, PR chip) from the model. */
@@ -2165,10 +2191,18 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     private ManagedSessionId openWorktreeSession(Repository repository, String branch, Path worktreeRoot,
                                                  Optional<String> task, boolean branchCreatedHere, AgentKind agent,
                                                  Spawn spawn) {
+        return openWorktreeSession(repository, branch, worktreeRoot, task, branchCreatedHere, agent, spawn,
+                Optional.empty());
+    }
+
+    /** As above, recording the session this one was forked from. */
+    private ManagedSessionId openWorktreeSession(Repository repository, String branch, Path worktreeRoot,
+                                                 Optional<String> task, boolean branchCreatedHere, AgentKind agent,
+                                                 Spawn spawn, Optional<ManagedSessionId> forkedFrom) {
         // Keyed under the real session id for the same launch-race reason
         // as openNewSession.
-        ManagedAgentSession prepared =
-                sessionManager.prepareWorktreeSession(repository, branch, worktreeRoot, branchCreatedHere, agent);
+        ManagedAgentSession prepared = sessionManager.prepareWorktreeSession(
+                repository, branch, worktreeRoot, branchCreatedHere, agent, forkedFrom);
         OpenSessionTab placeholderTab = showPendingTab(prepared.id(), branch, AgentLabels.displayName(agentRegistry, prepared),
                 prepared.agentKind(), prepared.status() == SessionStatus.UNSUPPORTED_AGENT,
                 Optional.of(repository), worktreeRoot);
@@ -2340,6 +2374,238 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             }
         });
         return written;
+    }
+
+    // ---- handoff: driving the banner and its three verbs ---------------------
+
+    /**
+     * Connects one tab's banner to the three verbs and gives it its first
+     * reading. Done once per tab, when the tab is registered: the buttons
+     * outlive every republish, so re-binding them on each would be churn.
+     */
+    private void wireHandoffBanner(ManagedSessionId sessionId, OpenSessionTab tab) {
+        HandoffBanner banner = tab.handoffBanner();
+        banner.refreshButton().setOnAction(event -> requestHandoffRefresh(sessionId));
+        banner.editButton().setOnAction(event -> editHandoffBrief(sessionId));
+        banner.forkButton().setOnShowing(event -> populateForkMenu(banner.forkButton(), sessionId));
+        refreshHandoffBanner(sessionId);
+    }
+
+    private SessionForkService forkService() {
+        if (forkService == null) {
+            forkService = new SessionForkService(
+                    gitStatusService,
+                    new WorktreeTransplant()::transplantBlocking,
+                    new GitExecutableLocator(),
+                    this::launchForkedSession,
+                    id -> sessionManager.handoffBriefs().stream()
+                            .filter(brief -> brief.sessionId().equals(id))
+                            .findFirst(),
+                    session -> repositoryManager.repositories().stream()
+                            .filter(repository -> repository.id().equals(session.repositoryId()))
+                            .map(Repository::root)
+                            .findFirst()
+                            .orElseGet(() -> session.worktreeRoot().orElse(session.workingDirectory())),
+                    branch -> WorktreeNaming.defaultDirectory(Path.of(System.getProperty("user.home")),
+                            UserConfig.load().worktreesDirectory(), forkedWorktreeOwner(), branch),
+                    this::openIntentTitles,
+                    stateDirectory.resolve("handoff-seeds"),
+                    HANDOFF_EXECUTOR);
+            forkService.sweepStaleSeeds(Instant.now());
+        }
+        return forkService;
+    }
+
+    /** Repository folder name used for the fork's worktree directory. */
+    private String forkedWorktreeOwner() {
+        return repositoryManager.repositories().stream()
+                .findFirst()
+                .map(Repository::displayName)
+                .orElse("drydock");
+    }
+
+    /**
+     * Titles of the review intents on scopes bound to the outgoing session --
+     * the most concrete statement of what is still open, and something a
+     * successor would otherwise re-derive.
+     *
+     * <p>Reads the grouping the reviewer already recorded, which needs the
+     * scope's diff, so this runs git. Best-effort throughout: review state is a
+     * nicety in the seed and never a reason to fail a fork, so anything
+     * unavailable degrades to no intents rather than an exception.</p>
+     */
+    private List<String> openIntentTitles(ManagedSessionId sessionId) {
+        List<String> titles = new ArrayList<>();
+        for (ReviewScope scope : reviewScopeRegistry.scopes()) {
+            if (!scope.sessionId().equals(Optional.of(sessionId))
+                    || !intentGrouping.hasReviewerGrouping(scope.id())) {
+                continue;
+            }
+            if (!scope.diffable()) {
+                continue;   // a PR with no checkout has no diff; see reviewDiff
+            }
+            try {
+                DiffScope diffScope = scope.kind() == ReviewScope.Kind.WORKING_TREE
+                        ? DiffScope.WORKING_TREE
+                        : DiffScope.BASE;
+                UnifiedDiff diff = diffService
+                        .diff(scope.diffRoot(), diffScope, scope.base(), DiffService.REVIEW_CONTEXT_LINES)
+                        .get(INTENT_DIFF_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                for (ReviewIntent intent : intentGrouping.intentsFor(scope.id(), diff)) {
+                    if (!titles.contains(intent.title())) {
+                        titles.add(intent.title());
+                    }
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return List.copyOf(titles);
+            } catch (RuntimeException | ExecutionException | TimeoutException e) {
+                LOG.log(Level.DEBUG, () -> "No intents for scope " + scope.id() + ": " + e.getMessage());
+            }
+        }
+        return List.copyOf(titles);
+    }
+
+    /** Opens the forked session's tab. Hops to FX; the fork service waits on the future. */
+    private CompletableFuture<ManagedSessionId> launchForkedSession(Path worktree, AgentKind kind,
+                                                                    String seedPrompt,
+                                                                    ManagedSessionId forkedFrom) {
+        CompletableFuture<ManagedSessionId> opened = new CompletableFuture<>();
+        Platform.runLater(() -> {
+            try {
+                Optional<Repository> owner = repositoryManager.repositories().stream()
+                        .filter(repository -> worktree.startsWith(repository.root())
+                                || worktree.getFileName() != null)
+                        .findFirst();
+                if (owner.isEmpty()) {
+                    opened.completeExceptionally(new IllegalStateException(
+                            "No registered repository owns " + worktree));
+                    return;
+                }
+                String branch = worktree.getFileName().toString();
+                opened.complete(openWorktreeSession(owner.get(), branch, worktree, Optional.of(seedPrompt),
+                        true, kind, Spawn.ALLOWED, Optional.of(forkedFrom)));
+            } catch (RuntimeException e) {
+                opened.completeExceptionally(e);
+            }
+        });
+        return opened;
+    }
+
+    /**
+     * Recomputes a session's staleness off the FX thread and updates its
+     * banner. A no-op when the session has no open tab, so a workspace-wide
+     * republish costs git calls only for what the human can actually see.
+     */
+    public void refreshHandoffBanner(ManagedSessionId sessionId) {
+        OpenSessionTab tab = openTabs.get(sessionId);
+        Optional<ManagedAgentSession> session = sessionManager.sessions().stream()
+                .filter(candidate -> candidate.id().equals(sessionId))
+                .findFirst();
+        if (tab == null || session.isEmpty()) {
+            return;
+        }
+        boolean running = !tab.isProcessExited();
+        CompletableFuture
+                .supplyAsync(() -> forkService().stalenessBlocking(session.get()), HANDOFF_EXECUTOR)
+                .whenComplete((staleness, failure) -> Platform.runLater(() -> {
+                    if (failure == null) {
+                        tab.handoffBanner().update(staleness, running);
+                    }
+                }));
+    }
+
+    /**
+     * <em>Refresh</em>: asks the session's own agent to rewrite its brief.
+     *
+     * <p>A request, not a command. Nothing waits on it and the banner clears
+     * only when a brief actually lands, through the ordinary republish -- an
+     * agent may ignore it, and pretending otherwise would be the same lie as
+     * a button that does nothing.</p>
+     */
+    public void requestHandoffRefresh(ManagedSessionId sessionId) {
+        OpenSessionTab tab = openTabs.get(sessionId);
+        if (tab == null || tab.isProcessExited()) {
+            return;
+        }
+        tab.sendPrompt("Please call session_handoff now to bring this session's handoff brief up to date: "
+                + "goal, approach, decisions, what you ruled out and why, and the next step.");
+    }
+
+    /** <em>Edit</em>: the human writes the brief. Never charged to the MCP budget. */
+    public void editHandoffBrief(ManagedSessionId sessionId) {
+        Optional<ManagedAgentSession> session = sessionManager.sessions().stream()
+                .filter(candidate -> candidate.id().equals(sessionId))
+                .findFirst();
+        if (session.isEmpty()) {
+            return;
+        }
+        Optional<HandoffBrief> existing = sessionManager.handoffBriefs().stream()
+                .filter(brief -> brief.sessionId().equals(sessionId))
+                .findFirst();
+
+        new HandoffEditDialog(session.get().displayName(), existing).showAndWait().ifPresent(result -> {
+            HandoffDraft draft = new HandoffDraft(result.goal(), result.nextStep(), result.approach(),
+                    result.decisions(), result.ruledOut(), result.corrections());
+            Path workingDirectory = session.get().workingDirectory();
+            CompletableFuture
+                    .supplyAsync(() -> {
+                        try {
+                            return gitStatusService.headCommitBlocking(workingDirectory);
+                        } catch (GitException e) {
+                            return Optional.<String>empty();   // an unstamped brief beats none
+                        }
+                    }, HANDOFF_EXECUTOR)
+                    .whenComplete((head, failure) -> Platform.runLater(() -> {
+                        if (failure != null) {
+                            return;
+                        }
+                        sessionManager.applyHumanHandoff(sessionId, draft, head);
+                        publishSessions();
+                        refreshHandoffBanner(sessionId);
+                    }));
+        });
+    }
+
+    /** <em>Fork</em>: mint a sibling worktree running {@code target}, seeded from the brief. */
+    public void forkSessionTo(ManagedSessionId sessionId, AgentKind target) {
+        sessionManager.sessions().stream()
+                .filter(candidate -> candidate.id().equals(sessionId))
+                .findFirst()
+                .ifPresent(session -> forkService().fork(session, target)
+                        .whenComplete((forked, failure) -> Platform.runLater(() -> {
+                            if (failure != null) {
+                                // A failed fork is additive-only, so nothing was
+                                // lost -- but it must be visible, not silent.
+                                Alert alert = new Alert(Alert.AlertType.WARNING);
+                                alert.setTitle("Could not fork this session");
+                                alert.setHeaderText("Could not fork this session");
+                                alert.setContentText(String.valueOf(UiErrors.unwrap(failure).getMessage()));
+                                alert.showAndWait();
+                                return;
+                            }
+                            publishSessions();
+                        })));
+    }
+
+    /**
+     * Fills a fork control with the installed agents. An unavailable one is
+     * shown DISABLED with where drydock looked, rather than hidden: "Codex is
+     * not installed" is a fact the human can act on; an absent row is not.
+     */
+    public void populateForkMenu(MenuButton control, ManagedSessionId sessionId) {
+        control.getItems().clear();
+        for (Agent agent : agentRegistry.agents()) {
+            MenuItem item = new MenuItem(agent.displayName());
+            if (agent.isAvailable()) {
+                item.setOnAction(event -> forkSessionTo(sessionId, agent.kind()));
+            } else {
+                item.setText(agent.displayName() + " (not installed)");
+                item.setDisable(true);
+                Tooltip.install(control, new Tooltip(agent.describeSearched()));
+            }
+            control.getItems().add(item);
+        }
     }
 
     /** A worktree matched to the repository that owns it, plus its branch (for the tab title). */
@@ -2638,6 +2904,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         placeholderTab.setDisplayName(opened.session().displayName());
         placeholderTab.setStatus(opened.session().status());
         openTabs.put(opened.session().id(), placeholderTab);
+        wireHandoffBanner(opened.session().id(), placeholderTab);
         placeholderTab.setVisible(!terminalsObscured
                 && tabPane.getSelectionModel().getSelectedItem() == placeholderTab.tab);
         opened.session().worktreeRoot().ifPresent(root ->
