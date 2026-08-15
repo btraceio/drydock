@@ -19,8 +19,9 @@ already exists gets git's "branch already exists" and no way forward.
 
 This design makes the choice explicit in the modal and possible over MCP.
 
-> **Revision note.** Eleven revisions across ten adversarial review
-> rounds, three reviewers each
+> **Revision note.** Twelve revisions across eleven adversarial review
+> rounds, three reviewers each, ending in a round where all three
+> returned clean
 > (fact-check, mechanism, spec quality). Every confirmed finding is
 > corrected in place; "What the adversarial review changed" at the end
 > records them. Four defects in shipped code are fixed along the way — the
@@ -377,7 +378,8 @@ places — the two segment handlers, `⌘E`, and **Check it out instead** —
 each of which goes through one private `setMode(Mode)`. That method does
 five things **in this order**: writes the field; sets the segment's
 selection so the two can never diverge; **swaps the two branch controls'
-`visible`/`managed`** and moves focus to the newly active one's editor;
+`visible`/`managed`** and moves focus to the newly active one (the `ComboBox`'s editor, in
+Existing mode);
 re-derives the worktree directory from the newly active control, under the
 blank-and-manual-edit guards below; and ends in `refreshState()`.
 
@@ -435,7 +437,11 @@ focus-ordering reason above:
 
 Because the swap is `setMode`'s and `setMode` does not run at
 construction, the constructor establishes the opening state directly: the
-New-branch `TextField` visible and managed, the picker not.
+New-branch segment selected, the New-branch `TextField` visible and managed, the
+picker not. Selecting the segment matters for the same reason —
+`SettingsModal.themeRow` sets its opening selection explicitly
+(`SettingsModal.java:136`), and a bare `RadioButton` plus `setToggleGroup`
+leaves the group with nothing selected.
 
 The ⟳ refresh button stays visible in **both** modes: New-branch mode
 depends on a fresh catalog just as much, because that is what makes the
@@ -472,10 +478,14 @@ That closes the *mode* straddle only. The branch editor stays live during
 the fetch too, so a ⟳ that spans a change of branch within one mode can
 still name a branch the user has moved off — shipped behaviour, unchanged
 here, and listed at the end rather than fixed.
+
 This is not cosmetic. `applyCatalog` does `items.setAll(…)` and repairs
-the editor on a later pulse, because the skin nulls a value that is not
-among the new items and re-syncs the editor from that null
-(`NewWorktreeModal.java:335-351`). Both the wipe and the repair fire the
+the editor on a later pulse (`NewWorktreeModal.java:335-351`). The shipped
+comment there says the skin nulls a value absent from the new items; that
+is not quite what happens — the skin guards that path and the value
+survives as a stale snapshot, which is why the rule above has its
+catalog clause — but the editor wipe it describes is real, via the
+already-null-value path, and the repair is what keeps the text. Both the wipe and the repair fire the
 combo editor's text listener, which today calls `deriveDirectory`
 regardless of mode (`:166-171`, guarded only by `directoryManuallyEdited`).
 
@@ -1214,7 +1224,9 @@ behaviour-preserving in fact rather than in intent — `BranchNamesTest`
 cannot catch a flip, having eleven tests and exactly one `contains`
 assertion.
 
-**New `BranchCheckoutTest`:** the four outcomes; that a *local* branch
+**New `BranchCheckoutTest`:** the four outcomes, for **both** `resolve`
+overloads — including that the ref overload returns `Unmintable` for a
+remote row reachable by keyboard traversal, and never `NoSuchBranch`; that a *local* branch
 named `origin/main` resolves `Ready`, not `Unmintable`; that the
 `origin/origin/main` remote ref resolves `Unmintable`; that a remote ref
 named `origin/-foo` resolves `Unmintable` rather than reaching `-b -foo`;
@@ -1340,7 +1352,7 @@ Pieces 2 and 3 both depend on piece 1; neither depends on the other.
 
 ## What the adversarial review changed
 
-Ten rounds, three reviewers each (fact-check, mechanism, spec quality).
+Eleven rounds, three reviewers each (fact-check, mechanism, spec quality).
 Every finding was verified against the code before being accepted.
 Entries below reference hint rows by the numbering in force at the time;
 the table has used stable names since round 6.
@@ -1896,6 +1908,44 @@ rounds verified is broken: the `Ready` cast still cannot throw,
 every reader, the preview's four forms are unchanged, and `switchOffer`
 still never reads the picker's value.
 
+### Round 11
+
+All three reviewers returned clean: no factual errors, no defects, and
+"spec is actionable". What they attacked and could not break is recorded
+below, because a clean round is only worth as much as the attack behind
+it.
+
+**Mechanism** enumerated every way the picker's value can change and
+traced each in bytecode: the `valueProperty()` listener does not fire
+during `applyCatalog`'s `setAll` (the selection model's recovery scan
+falls through, and `ComboBoxListViewSkin.updateValue` holds
+`listSelectionLock` across the one branch that could propagate a clear);
+an equal-instance re-selection is suppressed by `ExpressionHelper`, so a ⟳
+never silently drops a remote-row disambiguation; the only null-catalog
+fire is the ENTER commit, which `derive` already handles. It also killed a
+candidate of its own — a focus-loss commit would have let `setMode`'s
+focus move fabricate a local ref and undo a disambiguation, but JavaFX 26
+has no such commit; the `focusedProperty` listener's whole body is
+`setFakeFocus`. And it confirmed the hidden `ComboBox` still gets a skin,
+without which the focus move would be a silent no-op.
+
+**Fact-check** confirmed `updateDisplayNode`'s early return by
+disassembly, and added a check nobody asked for:
+`setTextFromTextFieldIntoComboBoxValue` has exactly one call site in the
+entire controls jar, so selecting a popup row cannot re-commit the editor
+text over the disambiguating value. It also confirmed both halves of the
+`ListCell` claim — `Node.pickNode` returns early on `isDisable()`, while
+`ListViewBehavior` contains no disable references at all.
+
+78. Polish applied from the three clean reports: a sentence of this design
+    repeated a loose comment in shipped code, claiming the skin nulls a
+    value absent from the new items — it does not, and saying so
+    contradicted finding 68; the focus target is the `ComboBox`'s editor
+    only in Existing mode, a `TextField` having none; the constructor also
+    owns the opening *segment* selection, which has the same gap finding
+    75 closed for visibility; and `BranchCheckoutTest` now names both
+    `resolve` overloads.
+
 ## Known, out of scope
 
 `⌘1`-`⌘4` switch the workspace view behind an
@@ -1915,6 +1965,7 @@ and will keep `KNOWN_FAILED` for a child that started and was killed;
 to `GitCommandInterruptedException`, so only its timeout is affected.
 Nothing reads the flag there today — only `joinAddBy` does — but if it ever spreads, those are the sites that
 need the same decision.
+
 
 
 
