@@ -592,6 +592,15 @@ public final class DrydockApplication extends Application {
                                 System.out.println("[diag] explorer typed " + arg.length() + " chars");
                             }
                             case "shot" -> diagSnapshot(primaryStage, Path.of(arg));
+                            // handoff:<commits>/<files>, or handoff:none for a
+                            // session that never wrote a brief, or
+                            // handoff:<c>/<f>/dead for one whose agent has
+                            // exited (the disabled-Refresh case). Drives the
+                            // active tab's banner without needing a real stale
+                            // brief, which would otherwise mean a live agent
+                            // and a git history to go stale against.
+                            case "handoff" -> System.out.println("[diag] handoff banner -> "
+                                    + mainWorkspace.diagHandoffBanner(arg));
                             case "resize" -> {
                                 diagWindowSize(arg).ifPresent(size -> {
                                     primaryStage.setWidth(size[0]);

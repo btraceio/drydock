@@ -15,6 +15,7 @@ import app.drydock.app.SessionForkService;
 import app.drydock.git.GitExecutableLocator;
 import app.drydock.git.WorktreeTransplant;
 import app.drydock.domain.HandoffBrief;
+import app.drydock.handoff.HandoffStaleness;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.Repository;
 import app.drydock.domain.SessionActivity;
@@ -2606,6 +2607,36 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             }
             control.getItems().add(item);
         }
+    }
+
+    /**
+     * Diagnostic hook: forces the active tab's handoff banner into a given
+     * state so a screenshot driver can see it without a live agent and a
+     * history for a brief to go stale against.
+     *
+     * <p>Visual-only state is the one thing no JUnit assertion covers -- a
+     * computed colour says nothing about whether three buttons and a wrapping
+     * message actually fit at tab width.</p>
+     */
+    public String diagHandoffBanner(String spec) {
+        OpenSessionTab tab = openTabs.values().stream().findFirst().orElse(null);
+        if (tab == null) {
+            return "no open tab";
+        }
+        String[] parts = spec.split("/");
+        boolean running = parts.length < 3 || !"dead".equals(parts[2].strip());
+        HandoffStaleness staleness;
+        if (parts[0].strip().equals("none")) {
+            staleness = HandoffStaleness.of(Optional.empty(), 0, 0);
+        } else {
+            HandoffBrief stub = new HandoffBrief(ManagedSessionId.newId(), "diag", "diag",
+                    Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(),
+                    Instant.EPOCH, Optional.of("diag"), HandoffBrief.Author.AGENT);
+            staleness = HandoffStaleness.of(Optional.of(stub),
+                    Integer.parseInt(parts[0].strip()), Integer.parseInt(parts[1].strip()));
+        }
+        tab.handoffBanner().update(staleness, running);
+        return staleness.describe() + (running ? " (running)" : " (exited)");
     }
 
     /** A worktree matched to the repository that owns it, plus its branch (for the tab title). */
