@@ -19,7 +19,7 @@ already exists gets git's "branch already exists" and no way forward.
 
 This design makes the choice explicit in the modal and possible over MCP.
 
-> **Revision note.** Ten revisions across nine adversarial review
+> **Revision note.** Eleven revisions across ten adversarial review
 > rounds, three reviewers each
 > (fact-check, mechanism, spec quality). Every confirmed finding is
 > corrected in place; "What the adversarial review changed" at the end
@@ -375,16 +375,28 @@ muscle memory survive unchanged. `Mode` is a two-constant enum nested in
 `MainWorkspace`. It lives in a field on the modal, written from four
 places — the two segment handlers, `⌘E`, and **Check it out instead** —
 each of which goes through one private `setMode(Mode)`. That method does
-four things **in this order**: writes the field; sets the
-segment's selection so the two can never diverge; **swaps the two branch
-controls' `visible`/`managed`** and moves focus to the newly active one;
-and ends in `refreshState()`.
+five things **in this order**: writes the field; sets the segment's
+selection so the two can never diverge; **swaps the two branch controls'
+`visible`/`managed`** and moves focus to the newly active one's editor;
+re-derives the worktree directory from the newly active control, under the
+blank-and-manual-edit guards below; and ends in `refreshState()`.
+
+The directory step has to be explicit. A mode switch changes no editor
+text, so the listener at `NewWorktreeModal.java:166-171` never fires —
+without it, typing `feat/login` in New mode and then `⌘E` into an Existing
+picker holding `origin/feat/other` would run
+`-b feat/other --track origin/feat/other` into `…/drydock-login`, with the
+preview stating the mismatch and no hint anywhere. The guards still apply:
+nothing is re-derived while the newly active control is blank, or once the
+directory has been hand-edited.
 
 The order is not arbitrary. `Scene.requestFocus` silently does nothing
 unless the target `isTreeVisible()`, so focusing before the swap is a
 no-op — which is why the swap belongs to `setMode` rather than to
-`refreshState()`, even though every *other* visibility swap in this modal
-(`baseGroup`, `hintLine`) is a `refreshState()` product and stays one.
+`refreshState()`, even though `baseGroup` and `hintLine` are
+`refreshState()` products and stay so. (`errorLine` is already swapped
+outside it, in `showMessage`/`hideError` — precedent, if anything, for
+this.)
 
 Focus is `setMode`'s duty rather than the `⌘E` handler's because the offer
 hides itself as a consequence of being pressed: its handler ends in
@@ -421,6 +433,10 @@ focus-ordering reason above:
   every branch listed; occupied ones disabled and labelled by
   `BranchCheckout.dropdownLabel`. **Fork from** is hidden.
 
+Because the swap is `setMode`'s and `setMode` does not run at
+construction, the constructor establishes the opening state directly: the
+New-branch `TextField` visible and managed, the picker not.
+
 The ⟳ refresh button stays visible in **both** modes: New-branch mode
 depends on a fresh catalog just as much, because that is what makes the
 collision warning correct. Initial focus is the New-branch `TextField`,
@@ -451,6 +467,11 @@ captures the mode alongside `matchedBefore` and says nothing at all if it
 changed by the time the reload lands. Otherwise a ⟳ started in Existing
 mode and finished in New would warn about a branch the user has stopped
 naming, and the mirror case would swallow a genuine pruning.
+
+That closes the *mode* straddle only. The branch editor stays live during
+the fetch too, so a ⟳ that spans a change of branch within one mode can
+still name a branch the user has moved off — shipped behaviour, unchanged
+here, and listed at the end rather than fixed.
 This is not cosmetic. `applyCatalog` does `items.setAll(…)` and repairs
 the editor on a later pulse, because the skin nulls a value that is not
 among the new items and re-syncs the editor from that null
@@ -696,8 +717,9 @@ a catalog ref and is not kept fresh:
   `setValue(converter.fromString(text))`, and then rewrites the editor
   from that value. `BranchRefConverter.fromString` returns
   `BranchRef.local(name)` for arbitrary text — always local, never
-  occupied — and its Javadoc says so outright: "the catalog lookup — not
-  this converter — decides what it means" (`BranchRefConverter.java:28-33`).
+  occupied — and says so outright in a comment: "the catalog lookup —
+  not this converter — decides what it means"
+  (`BranchRefConverter.java:30-31`).
   So after ENTER the name always matches, by construction. Without the
   catalog clause, typing an occupied branch and pressing Enter would
   resolve `Ready` instead of `Occupied` and enable Create; an unknown name
@@ -720,11 +742,34 @@ answer, because the user has just re-committed the text.
 
 ### The plumbing this needs
 
-`derive` gains a nullable `BranchRef selected` alongside `Mode`, and
+`derive` gains a nullable `BranchRef selected` alongside `Mode`, read only
+when `mode == EXISTING`, and the picker's `valueProperty()` gets a
+listener into `refreshState()`.
+
+**That listener is not optional.** `ComboBoxPopupControl.updateDisplayNode`
+writes the editor only when `converter.toString(value)` differs from the
+text already there, and returns otherwise. So the one gesture this whole
+section exists to support — picking the *other* `origin/foo` row to
+disambiguate — changes the value, writes no text, fires no editor
+listener, and would leave the hint, the preview, Create's state and the
+held `NewWorktreeState` all describing the branch that was selected
+before. That is the wrong-branch checkout of the previous section,
+reintroduced through the trigger rather than the rule.
+
+It is also what keeps "held in a field, or recomputed at press time" the
+equivalence this document claims elsewhere: without the listener a
+press-time recompute would read the fresh value and the field would not,
+and the two would stop being interchangeable.
+
 `BranchCheckout` gains the ref-shaped entry point it otherwise lacks:
 
 ```java
-/** As resolve(catalog, text), for a ref already identified — occupancy and mintability only. */
+/**
+ * As resolve(catalog, text), for a ref the caller already found in the catalog:
+ * occupancy and mintability only. Never returns NoSuchBranch. It does need
+ * Unmintable -- a disabled ListCell blocks the mouse, not keyboard traversal
+ * of the popup, so an unmintable remote row can still become the value.
+ */
 public static Outcome resolve(BranchCatalog catalog, BranchRef ref);
 ```
 
@@ -1202,7 +1247,11 @@ since checking the picker's value alone stays green while `derive`
 resolves the wrong ref; that an ENTER commit on an occupied name still
 yields the occupancy hint, and on an unknown name still yields
 `no-such`; that a ⟳ which takes the selected branch flips to the
-occupancy hint; that focus lands on the newly active
+occupancy hint; that **picking the other duplicate-named row updates the
+preview** without any editor text changing — the value-listener case,
+which no offer test can catch because `setMode`'s own `refreshState()`
+masks it; that a `⌘E` re-derives the directory from the newly active
+control; that a ⟳ whose mode changed mid-fetch says nothing; that focus lands on the newly active
 control after every `setMode` path; the offer's label names its target when the
 resolved ref differs from the typed text and omits it when it does not,
 and clicking it lands in Existing mode with that ref selected; that the modal opens in New-branch mode; that **Fork from** is
@@ -1213,8 +1262,8 @@ editor-wipe sequence does not rewrite the visible directory.
 **MCP behaviour — `WorkspaceMcpSessionContextTest`,** which already stands
 up real git repositories: adoption of a free local branch; of a
 remote-only branch, asserting the `--track` command and the `tracking`
-field; refusal of an occupied branch; of an unknown branch; and of the
-`origin/origin/main` shadow case. These cannot live in
+field; refusal of an occupied branch; of an unknown branch; of a remote
+repository; and of the `origin/origin/main` shadow case. These cannot live in
 `McpToolRouterWorktreeTest`, which runs against `FakeMcpSessionContext` —
 it fabricates a path from the branch string and carries one canned
 `failure` field (`FakeMcpSessionContext.java:41-43,207-217`), so those
@@ -1291,7 +1340,7 @@ Pieces 2 and 3 both depend on piece 1; neither depends on the other.
 
 ## What the adversarial review changed
 
-Nine rounds, three reviewers each (fact-check, mechanism, spec quality).
+Ten rounds, three reviewers each (fact-check, mechanism, spec quality).
 Every finding was verified against the code before being accepted.
 Entries below reference hint rows by the numbering in force at the time;
 the table has used stable names since round 6.
@@ -1793,6 +1842,60 @@ popup, and the constructor's initial focus request does not conflict with
 `setMode`. The `origin/foo` ambiguity, all four legs, and all four
 shipped-defect claims were re-verified against the code.
 
+### Round 10
+
+73. **The new `selected` input had no listener, and the gesture it exists
+    for fires nothing.** `ComboBoxPopupControl.updateDisplayNode` writes
+    the editor only when the converter's string differs from the text
+    already there. Picking the *other* `origin/foo` row — the exact
+    disambiguation the rule advertises — changes the value, writes no
+    text, and would have left the hint, preview, button state and held
+    `NewWorktreeState` describing the previous branch: finding 62's
+    wrong-branch checkout, reintroduced through the trigger instead of the
+    rule. A `valueProperty()` listener closes it, and is also what keeps
+    "field or press-time recompute" the equivalence stated elsewhere.
+74. **`setMode`'s duty list omitted the directory re-derivation** that
+    two other sections presuppose. A mode switch changes no editor text,
+    so nothing fired; `⌘E` from `feat/login` into a picker holding
+    `origin/feat/other` would have run `-b feat/other --track …` into
+    `…/drydock-login`. The only pinned test was the negative one, which
+    passes trivially when no re-derivation happens at all.
+75. **The opening `visible`/`managed` state became unowned** when round 9
+    moved the swap out of `refreshState()` — which runs once before the
+    modal is shown — into `setMode`, which does not run at construction.
+    The constructor establishes it now.
+76. **A stated fix from round 8 never landed.** The appendix claimed the
+    SPI's remote-repository refusal had joined the context test list; the
+    edit did not apply and nobody noticed for two revisions. It is there
+    now, and edits are verified rather than assumed.
+77. Corrections: `onRefresh`'s mode capture closes the *mode* straddle
+    only — the editor stays live during a fetch, so a ⟳ spanning a change
+    of branch within one mode can still misname it; that is shipped
+    behaviour and is listed as out of scope rather than described as
+    fixed. `resolve(catalog, ref)` never returns `NoSuchBranch` but does
+    need `Unmintable`, since a disabled `ListCell` blocks the mouse and
+    not keyboard traversal. `selected` is read only when
+    `mode == EXISTING`. Focus targets the active control's editor.
+    `errorLine` was missing from the "swapped inside `refreshState()`"
+    enumeration — it is swapped outside, which is precedent for the swap
+    moving. And the converter's "the catalog lookup decides what it
+    means" line is an inline comment, not a Javadoc.
+
+**Also refuted in round 10** — the three-clause rule itself survived a
+direct attack across all five resolution rows, both duplicate rows, ENTER,
+ENTER-on-blank (`fromString` returns null, caught by clause 1),
+typing-after-selecting, and a reload mid-interaction: `(name, remote)` is
+unique in the catalog, so "the catalog's instance" is never ambiguous, and
+where clause 3 fails the text fallback lands on a documented `lookup` pass.
+Finding 68's mechanism was re-confirmed in bytecode. The two-overload
+`resolve` design is coherent. `setMode`'s swap-then-focus order is right —
+`treeVisible` updates synchronously, so the focus request is not a no-op,
+and there is no pulse between the steps to flicker. And nothing earlier
+rounds verified is broken: the `Ready` cast still cannot throw,
+`createDisabled` stays consistent, the catalog-absent rows still precede
+every reader, the preview's four forms are unchanged, and `switchOffer`
+still never reads the picker's value.
+
 ## Known, out of scope
 
 `⌘1`-`⌘4` switch the workspace view behind an
@@ -1801,7 +1904,9 @@ is lax at two other call sites (`McpToolRouter.java:312,422`).
 `AgentSelector` has the `ToggleButton` null-selection bug this design
 avoids. A `git worktree add` killed by an external signal exits `128+n`
 and refunds while leaving admin state behind. Quitting Drydock mid-add
-abandons the handler after `CLOSE_AWAIT_TERMINATION_SECONDS = 2`. None is
+abandons the handler after `CLOSE_AWAIT_TERMINATION_SECONDS = 2`. A ⟳
+that spans a change of branch within one mode can still warn about the
+branch the user has moved off. None is
 this change's business; all are worth their own fix.
 
 `DiffService` (`:505-511`) has the same IOException/timeout/interrupt shape
@@ -1810,6 +1915,7 @@ and will keep `KNOWN_FAILED` for a child that started and was killed;
 to `GitCommandInterruptedException`, so only its timeout is affected.
 Nothing reads the flag there today — only `joinAddBy` does — but if it ever spreads, those are the sites that
 need the same decision.
+
 
 
 
