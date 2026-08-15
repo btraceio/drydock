@@ -5,6 +5,7 @@ import app.drydock.agent.api.AgentRegistry;
 import app.drydock.config.UserConfig;
 import app.drydock.domain.Repository;
 import app.drydock.git.BranchCatalog;
+import app.drydock.git.BranchCheckout;
 import app.drydock.git.BranchRef;
 import app.drydock.git.GitBranchState;
 import app.drydock.git.GitStatusService;
@@ -149,7 +150,11 @@ final class NewWorktreeModal extends VBox {
             @Override
             protected void updateItem(BranchRef branch, boolean empty) {
                 super.updateItem(branch, empty);
-                setText(empty || branch == null ? null : BranchRefConverter.describe(branch));
+                // Optional.empty() until piece 3 wires the per-row unmintable
+                // verdict; today no row carries one, so this is what
+                // BranchRefConverter.describe rendered.
+                setText(empty || branch == null ? null
+                        : BranchCheckout.dropdownLabel(branch, Optional.empty()));
                 setDisable(branch != null && !branch.available());
             }
         });

@@ -158,7 +158,7 @@ public static String shortClause(Refusal refusal);
 |---|---|---|
 | `BLANK` | `Name the branch to create.` | `has no name` |
 | `REFS_PREFIX` | `A branch name cannot start with 'refs/'.` | `starts with 'refs/'` |
-| `SHADOWS_REMOTE` | `A branch named that would shadow the remote '<token>'.` | `shadows the remote '<token>'` |
+| `SHADOWS_REMOTE` | `A branch by that name would shadow the remote '<token>'.` | `shadows the remote '<token>'` |
 | `DOT_DOT` | `A branch name cannot contain '..'.` | `contains '..'` |
 | `AT_BRACE` | `A branch name cannot contain '@{'.` | `contains '@{'` |
 | `DOUBLE_SLASH` | `A branch name cannot contain two slashes in a row.` | `contains '//'` |

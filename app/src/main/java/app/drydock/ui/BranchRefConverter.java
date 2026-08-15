@@ -3,8 +3,6 @@ package app.drydock.ui;
 import app.drydock.git.BranchRef;
 import javafx.util.StringConverter;
 
-import java.nio.file.Path;
-
 /**
  * Converts between {@link BranchRef} and the create-worktree modal's
  * editable branch combo box.
@@ -14,8 +12,8 @@ import java.nio.file.Path;
  * writes {@code toString(item)} into the editor, and the modal derives
  * create-vs-checkout mode from that editor text -- so decoration here would
  * make picking a branch from the dropdown resolve to no branch at all.
- * Decoration belongs to {@link #describe}, which only the cell factory
- * calls.</p>
+ * Decoration belongs to {@code BranchCheckout.dropdownLabel}, which only the
+ * cell factory calls.</p>
  */
 final class BranchRefConverter extends StringConverter<BranchRef> {
 
@@ -30,24 +28,5 @@ final class BranchRefConverter extends StringConverter<BranchRef> {
         // Hand-typed text may name a branch that does not exist yet; the
         // catalog lookup -- not this converter -- decides what it means.
         return name.isEmpty() ? null : BranchRef.local(name);
-    }
-
-    /** The dropdown row's label: the name, plus why it cannot be selected. */
-    static String describe(BranchRef branch) {
-        if (branch.available()) {
-            return branch.name();
-        }
-        Path holder = branch.checkedOutAt().orElseThrow();
-        // Locked and stale read differently because they are escaped
-        // differently: `git worktree unlock` vs. `git worktree prune`.
-        String why;
-        if (branch.locked()) {
-            why = "locked worktree";
-        } else if (branch.prunable()) {
-            why = "stale worktree";
-        } else {
-            why = "in use";
-        }
-        return branch.name() + "  —  " + why + " (" + holder + ")";
     }
 }
