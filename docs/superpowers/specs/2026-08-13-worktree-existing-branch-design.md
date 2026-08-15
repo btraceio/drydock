@@ -22,8 +22,10 @@ This design makes the choice explicit in the modal and possible over MCP.
 > **Revision note.** Six adversarial review rounds, three reviewers each
 > (fact-check, mechanism, spec quality). Every confirmed finding is
 > corrected in place; "What the adversarial review changed" at the end
-> records them, including two latent bugs in shipped code the review
-> surfaced.
+> records them. Two latent bugs in shipped code are fixed here — the
+> remote-adoption shadow hole and the modal's complete absence of
+> branch-name validation — and two more the review surfaced are named as
+> out of scope.
 
 ## What "existing branch" means
 
@@ -370,8 +372,19 @@ muscle memory survive unchanged. `Mode` is a two-constant enum nested in
 `NewWorktreeState`, shared by the record, `CreateHandler` and
 `MainWorkspace`. It lives in a field on the modal, written from four
 places — the two segment handlers, `⌘E`, and **Check it out instead** —
-each of which writes the field *and* sets the segment's selection through
-one private `setMode(Mode)` so the field and the switch can never diverge.
+each of which goes through one private `setMode(Mode)`. That method writes
+the field, sets the segment's selection so the two can never diverge, and
+**ends in `refreshState()`**. The last part is not decoration: `mode` is
+the only input to `derive` with no listener behind it — `catalog` refreshes
+through `applyCatalog`/`applyCatalogFailure`, `creatingInFlight` through
+`showCreating`/`showError`, and the three text fields through their own
+listeners — and the directory re-derivation that might have refreshed
+incidentally is skipped while the new control is blank and never runs at
+all once the directory has been hand-edited
+(`NewWorktreeModal.java:88-89,166-171`). Without the explicit call, `⌘E`
+after a manual directory edit would leave the hint, the preview, **Fork
+from**'s visibility and the button state on the old mode — and Create, fed
+from the last computed state, would run the old mode's action.
 
 ### Two pickers, swapped — never one control reconfigured
 
@@ -438,12 +451,10 @@ same path.
 (the switch says that now; the branch row's label becomes a plain
 "Branch"), and gains two components: `switchOffer`, and the whole
 `Outcome` — not `Optional<Ready>`. Carrying only `Ready` would be a lossy
-projection: `resolve` answers `Occupied` for a branch that exists but is
-checked out elsewhere, so a `Ready`-only record could not tell "no such
-branch" from "exists, occupied", and New-branch mode pointed at an
-occupied name would fall through to an enabled Create running `-b` on a
-name git will reject — a state today's `derive` blocks correctly
-(`NewWorktreeState.java:64-70`). `baseVisible` collapses to `mode == NEW`.
+projection: Existing mode has to tell `NoSuchBranch`, `Occupied` and
+`Unmintable` apart, since each gets its own row and its own sentence, and
+an `Optional<Ready>` collapses all three into "empty" — one disabled
+button with three different explanations owed. `baseVisible` collapses to `mode == NEW`.
 
 **The hint and the disabled state are separate computations, not one
 ladder.** Today `hint` is derived from the branch alone, while
@@ -480,7 +491,7 @@ spelling where one resolved and the typed text otherwise; `/x` is
 (`NewWorktreeModal.java:373-379`), so a failed **first** load leaves
 `catalog == null && catalogFailed` — which today produces an empty hint,
 because the shipped condition is `catalog == null && !catalogFailed`
-(`NewWorktreeState.java:64-65`), with a comment at `:371-375` recording
+(`NewWorktreeState.java:64-65`), with a comment at `:375-376` recording
 that a failed first load must not keep claiming the branches are loading.
 Keying `loading` on `catalog == null` alone would say "Loading branches…"
 for ever beside an error line saying the listing failed.
@@ -521,7 +532,11 @@ components case-insensitively.
 While `catalog == null`, `derive` does not call `resolve` at all — its
 contract requires a non-null catalog — and the record's `Outcome`
 component is `NoSuchBranch(text)`. Both catalog-absent rows precede every
-row that reads it, so nothing observes the placeholder.
+hint row that reads it, and the three non-row readers all tolerate it:
+`switchOffer` is false (not `Ready`), the preview is empty, and the
+directory derivation falls back to the raw branch text exactly as the
+shipped code does, repairing itself when `applyCatalog` arrives
+(`NewWorktreeModal.java:79-86,362-364`).
 
 ### New mode only warns about *local* collisions
 
@@ -556,29 +571,47 @@ the remote 'origin'"* beside a **Check it out instead** button that
 silently switches to `main`, a name the hint never mentions. With the
 exact test, `exists-free`/`exists-busy` stay quiet, `unmintable-new` fires, and no offer appears.
 
-`switchOffer` is therefore
+### The offer names its target instead of hiding when it differs
+
+`switchOffer` is simply
 
 ```java
-mode == NEW && outcome instanceof Ready r && r.ref().name().equals(text.strip())
+mode == NEW && outcome instanceof Ready
 ```
 
-— the offer appears exactly when the branch it would switch to is the one
-the user typed. That covers both spellings that mean it: an exact local
-name (`feat/login`) and a full remote ref (`origin/feat/login`), the
-latter being the case today's derived mode handles and an exact-local test
-would have stranded behind a shadow refusal with no way forward.
+and the **button says which branch it will switch to**: `Check it out
+instead` when the resolved ref is named exactly what was typed, and
+`Check out <ref.name()> instead` whenever it differs.
 
-It also keeps round 5's fix intact. In the `origin/main`-with-local-`main`
-case the resolved ref is named `main`, which is *not* what was typed, so
-no offer appears and the hint stands alone — the button can never name a
-different branch than the hint, which was the defect.
+Suppressing the offer when the names differ — the obvious alternative —
+does not work, because `lookup` resolves four ways and only two of them
+produce a matching name:
 
-The offer is independent of the hint rows. A remote-only match
-(`login` with only `origin/login`) yields no hint and an enabled Create —
-`-b login` is ordinary git — with the offer beside it as an alternative,
-not a correction. A full remote spelling yields `unmintable-new`'s shadow
-refusal *and* the offer, which together say "that name would shadow the
-remote; check out the branch instead".
+| typed | catalog | resolves to | offer label |
+|---|---|---|---|
+| `feat/login` | local `feat/login`, free | pass 1, `feat/login` | `Check it out instead` |
+| `feat/login` | local `feat/login`, occupied | `Occupied`, not `Ready` | *none* |
+| `origin/feat/login` | remote ref of that name | pass 2, `origin/feat/login` | `Check it out instead` |
+| `origin/main` | local `main`; remote ref dropped | pass 3, `main` | `Check out main instead` |
+| `feat/login` | only remote `origin/feat/login` | pass 4, `origin/feat/login` | `Check out origin/feat/login instead` |
+
+The last row is the one that matters most: it is the ordinary
+fetch-then-check-out flow, and it is what today's derived mode handles. A
+name-must-match rule drops the offer there, leaving no hint, an enabled
+Create, and `-b feat/login <base>` — a fresh branch off the fork point
+rather than the remote's history, silently diverging from what the user
+asked for. Rows three and five also show that a matching name only ever
+arises from passes 1 and 2, both of which already produce a hint, so a
+name-must-match offer could never appear beside an enabled Create at all.
+
+Round 5's defect — the button switching to a branch the hint never
+mentions — is closed by the label, not by suppression. In the
+`origin/main` row the hint warns about `origin/main` and the button says
+`Check out main instead`; the two can no longer disagree, because the
+button states its own target.
+
+An occupied local branch yields `Occupied` rather than `Ready`, so no
+offer: checking it out is exactly what cannot happen.
 
 `Pick a branch to fork from.` is new wording for a dead end that already
 ships: `baseField` is filled asynchronously from `getStatus` and only when
@@ -586,14 +619,13 @@ the repo is `OnBranch` (`NewWorktreeModal.java:118-123`), so on a detached
 HEAD, an unborn branch, or a failed status call, Create is disabled today
 with nothing on screen explaining it.
 
-**Check it out instead** is a separate `Button`, shown when `switchOffer`
-is true, beside the hint label, with a new `.worktree-hint-action` rule in
-`app.css` — flat, link-coloured, no background, `-fx-font-size: 11.5px` to
-match `.worktree-hint` (`app.css:1426`). It copies the `Ready`'s
-`ref().name()` into the existing picker and calls `setMode(EXISTING)` —
-which, by `switchOffer`'s own condition, is the text the user already
-typed. An occupied name (`exists-busy`) gets its explanation but no offer,
-because checking it out is exactly what cannot happen.
+The offer is a separate `Button`, shown when `switchOffer` is true, beside
+the hint label, with a new `.worktree-hint-action` rule in `app.css` —
+flat, link-coloured, no background, `-fx-font-size: 11.5px` to match
+`.worktree-hint` (`app.css:1426`). It copies the `Ready`'s `ref().name()`
+into the existing picker and calls `setMode(EXISTING)`. It is the only
+control in the modal that can appear beside either an enabled or a
+disabled Create.
 
 The mirror-image offer is deliberately **not** built: `NoSuchBranch` in
 Existing mode says so and disables Create, with no "create it instead"
@@ -634,10 +666,14 @@ reader is meant to recognise.
 
 `onRefresh` currently says "That branch no longer exists on the remote —
 Create would now make a new one." when `--prune` removes the selected ref
-(`NewWorktreeModal.java:312-316`). Under an explicit mode that is false in
-Existing mode, where Create is disabled. New keeps today's wording;
-Existing reads "That branch no longer exists on the remote — pick
-another."
+(`NewWorktreeModal.java:312-316`). Under an explicit mode that sentence is
+wrong in **both** modes, not just one. Existing mode disables Create, so
+it will not "make a new one"; and New mode always makes a new one, so
+nothing about it is *now* true — under the old derived mode the sentence
+described a real flip, and there is no flip any more. Existing reads
+"That branch no longer exists on the remote — pick another." New reads
+"That branch no longer exists on the remote." and stops, because what
+Create would do has not changed.
 
 ### ⌘E flips the mode
 
@@ -1049,9 +1085,9 @@ segment does not clear the mode; the two pickers swap `visible`/`managed`;
 focus follows the mode; each control keeps its own text across a round
 trip; the directory does not re-derive into `drydock-worktree` when the
 newly active control is blank; segments and **Check it out instead** are
-disabled while a creation is in flight; **Check it out instead** copies
-the catalog's spelling rather than the typed text and lands in Existing
-mode; that the modal opens in New-branch mode; that **Fork from** is
+disabled while a creation is in flight; the offer's label names its target when the
+resolved ref differs from the typed text and omits it when it does not,
+and clicking it lands in Existing mode with that ref selected; that the modal opens in New-branch mode; that **Fork from** is
 hidden in Existing mode and shown in New; that ⟳ stays visible in both;
 the mode-aware `onRefresh` wording; and the catalog-reload
 editor-wipe sequence does not rewrite the visible directory.
@@ -1068,7 +1104,8 @@ assertions would only prove that a canned string echoes.
 
 **MCP argument handling — `McpToolRouterWorktreeTest`:** `existing:
 "true"` is refused rather than coerced; `existing` + `start_point` is
-refused *before* the charge, asserted by budget state; the default path is
+refused *before* the charge, asserted by budget state and by the verbatim
+conflict message; the default path is
 unchanged; ordinary failures refund and `McpWorktreeMayExistException`
 does not. `FakeMcpSessionContext` gains a settable canned
 `ExistingBranchWorktree` and a per-method failure so these outcomes can be
@@ -1099,9 +1136,10 @@ disabled, not merely relabelled.
 `branchCreatedHere == (mode == NEW)`, since it decides whether removing a
 worktree may delete the branch.
 
-**Not automated:** that the revived `.seg-toggle` styling, the hidden
-radio dot, the new focus ring and `.worktree-hint-action` read correctly
-in both themes; that the `⌘E` tooltip and overlay row say the same thing
+**Not automated:** that `⌘E` does not fire while the `ComboBox` popup is
+open (a documented limit, not a behaviour worth a robot test); that the
+revived `.seg-toggle` styling, the hidden radio dot, the new focus ring
+and `.worktree-hint-action` read correctly in both themes; that the `⌘E` tooltip and overlay row say the same thing
 as the binding; and the 50s budget against the client's 60s abort, which
 needs a wedged git to observe. Eyeball checks at review time.
 
@@ -1139,7 +1177,7 @@ Every finding was verified against the code before being accepted.
 Entries below reference hint rows by the numbering in force at the time;
 the table has used stable names since round 6.
 
-**Rounds 1-2**
+### Rounds 1-2
 
 **Five claims in earlier drafts were false.**
 
@@ -1298,14 +1336,6 @@ stale at press time, because every editor wipe fires `refreshState()`;
 mouse, Space or traversal; and Drydock's own `McpServer` imposes no
 request bound, so the 60s limit is purely client-side.
 
-**Known, out of scope.** `⌘1`-`⌘4` switch the workspace view behind an
-open modal, and `⇧/` replaces an open modal outright. `optionalBooleanArg`
-is lax at two other call sites (`McpToolRouter.java:312,422`).
-`AgentSelector` has the `ToggleButton` null-selection bug this design
-avoids. A `git worktree add` killed by an external signal exits `128+n`
-and refunds while leaving admin state behind. Quitting Drydock mid-add
-abandons the handler after `CLOSE_AWAIT_TERMINATION_SECONDS = 2`. None is
-this change's business; all are worth their own fix.
 
 ### Round 4
 
@@ -1428,13 +1458,6 @@ pre-empts h6 whenever the catalog is absent; `onRefresh`'s warning goes to
 the error line, not the hint, so it cannot disable Create; and the
 router's catch order is compiler-enforced.
 
-**Also out of scope, and worth naming since the field is semantic.**
-`DiffService` (`:505-511`) has the same IOException/timeout/interrupt shape
-and will keep `KNOWN_FAILED` for a child that started and was killed;
-`WorktreeService` (`:752-769`) shares the timeout arm but routes interrupts
-to `GitCommandInterruptedException`, so only its timeout is affected. Nothing reads the flag there today —
-only `joinAddBy` does — but if it ever spreads, those are the sites that
-need the same decision.
 
 ### Round 6
 
@@ -1443,7 +1466,7 @@ need the same decision.
     unmounted, a 15s timeout — would have shown "Loading branches…" for
     ever beside an error line saying the listing failed. Today's condition
     is `catalog == null && !catalogFailed` (`NewWorktreeState.java:64-65`),
-    and `NewWorktreeModal.java:371-375` carries a comment about exactly
+    and `NewWorktreeModal.java:375-376` carries a comment about exactly
     this state. Round 5's fix reasoned only about the
     loaded-then-failed-⟳ case and conflated the two. Narrowing the
     condition alone would have been wrong too: the state then falls
@@ -1492,3 +1515,70 @@ violating both a whole-name and a component clause. All four "unreachable"
 clauses are genuinely unreachable, including via paste, since
 `TextInputControl.filterInput` strips control characters. And every claim
 in the twelve-clause table matches `BranchNames` clause for clause.
+
+## Known, out of scope
+
+`⌘1`-`⌘4` switch the workspace view behind an
+open modal, and `⇧/` replaces an open modal outright. `optionalBooleanArg`
+is lax at two other call sites (`McpToolRouter.java:312,422`).
+`AgentSelector` has the `ToggleButton` null-selection bug this design
+avoids. A `git worktree add` killed by an external signal exits `128+n`
+and refunds while leaving admin state behind. Quitting Drydock mid-add
+abandons the handler after `CLOSE_AWAIT_TERMINATION_SECONDS = 2`. None is
+this change's business; all are worth their own fix.
+
+`DiffService` (`:505-511`) has the same IOException/timeout/interrupt shape
+and will keep `KNOWN_FAILED` for a child that started and was killed;
+`WorktreeService` (`:752-769`) shares the timeout arm but routes interrupts
+to `GitCommandInterruptedException`, so only its timeout is affected.
+Nothing reads the flag there today — only `joinAddBy` does — but if it ever spreads, those are the sites that
+need the same decision.
+
+## Round 7 (appendix)
+
+58. **The offer hid itself instead of naming its target.** Keyed on "the
+    resolved ref is named what the user typed", it vanished for the
+    commonest flow of all: typing `feat/login` after fetching, with only
+    `origin/feat/login` in the catalog, resolves through `lookup`'s fourth
+    pass to a ref named `origin/feat/login`. No hint, no offer, an enabled
+    Create — and `-b feat/login <base>`, a branch off the fork point
+    rather than the remote's history, where today's modal checks the
+    remote branch out. Two other places in the spec asserted the offer
+    would be there. A matching name can only arise from passes 1 and 2,
+    both of which already produce a hint, so the rule could never have
+    produced the "alternative, not a correction" state it described.
+    The button now states its own target, which closes round 5's
+    mismatch by construction rather than by suppression.
+59. **`setMode` never recomputed anything.** `mode` is the only input to
+    `derive` with no listener behind it, and the directory re-derivation
+    that might have refreshed incidentally is skipped while the new
+    control is blank and never runs after a manual directory edit. So
+    `⌘E` after hand-editing the directory would have left the hint, the
+    preview, **Fork from**'s visibility and the button state on the old
+    mode — and Create, fed from the last computed state, would have run
+    the old mode's action, which is also a live route to a
+    `ClassCastException` on the `Ready` cast.
+60. **`onRefresh`'s New-mode wording is false in every reachable case.**
+    "Create would now make a new one" described a real flip under the
+    derived mode; under an explicit one, New mode always creates, so
+    nothing is *now* true. Round 5 fixed only the Existing half.
+61. Corrections: three non-row readers do observe the placeholder
+    `Outcome` while the catalog is null — all tolerate it, and the
+    directory fallback is now named rather than claimed absent; the
+    whole-`Outcome` rationale is finally restated in Existing-mode terms,
+    which round 6 said it had done; the `NewWorktreeModal` comment about
+    a failed first load is at `:375-376`; the offer-copies-catalog-spelling
+    test is replaced by one that pins the label; the `start_point`
+    conflict message and the `ComboBox`-popup limit are now covered; and
+    the two out-of-scope lists are collected at the end instead of buried
+    inside round sections.
+
+**Also refuted in round 7** — the two catalog-absent rows partition
+`catalog == null` exhaustively under every ordering of load, ⟳, mode
+switch and typing, and ⟳ is disabled during the initial load so no fourth
+state exists. `createDisabled` remains consistent with the named rows, no
+numbered-row or `†` debris survives outside this appendix, whitespace and
+the literal-local-`origin/x` cases behave, and the twelve-clause table
+still matches `BranchNames` clause for clause — including that the shadow
+check is whole-component, so a remote named `origin` does not match a
+branch called `originals/x`.
