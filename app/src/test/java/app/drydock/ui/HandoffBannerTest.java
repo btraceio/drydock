@@ -5,6 +5,7 @@ import app.drydock.domain.ManagedSessionId;
 import app.drydock.handoff.HandoffStaleness;
 
 import javafx.scene.Scene;
+import javafx.scene.control.Control;
 import javafx.scene.control.Label;
 import javafx.scene.paint.Color;
 import javafx.scene.layout.StackPane;
@@ -13,6 +14,7 @@ import org.junit.jupiter.api.Test;
 import org.testfx.framework.junit5.ApplicationTest;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 
@@ -153,6 +155,38 @@ class HandoffBannerTest extends ApplicationTest {
         interact(() -> banner.update(HandoffStaleness.of(brief(), 0, 0), true));
 
         assertFalse(banner.isVisible(), "a refreshed brief must clear the warning");
+    }
+
+    /**
+     * Regression, found by screenshot: at ~435px of content the three buttons
+     * collapsed to "R..", "..." and "Fo..." -- HBox shrinks children by
+     * default, and "..." as a label for Edit tells the human nothing.
+     *
+     * <p>The squeeze only reproduces when the PARENT is resized, not the
+     * banner itself: resizing the banner directly leaves the layout pass with
+     * nothing to redistribute, which is why a first attempt at this test
+     * passed against the bug. Measured thresholds, unfixed: intact at 500px,
+     * truncating at 435px, Edit at zero width by 300px.</p>
+     */
+    @Test
+    void theButtonsKeepTheirLabelsWhenTheBannerIsSqueezed() {
+        for (double width : new double[]{435, 340, 300}) {
+            interact(() -> {
+                banner.getScene().getStylesheets().setAll(
+                        HandoffBannerTest.class.getResource("/app/drydock/ui/theme-dark.css").toExternalForm(),
+                        HandoffBannerTest.class.getResource("/app/drydock/ui/app.css").toExternalForm());
+                banner.update(HandoffStaleness.of(brief(), 129, 4021), true);
+                banner.getParent().resize(width, 120);
+                banner.getParent().applyCss();
+                banner.getParent().layout();
+            });
+
+            for (Control control : List.of(banner.refreshButton(), banner.editButton(), banner.forkButton())) {
+                assertTrue(control.getWidth() >= control.prefWidth(-1) - 0.5,
+                        "at " + width + "px a button squeezed to " + control.getWidth()
+                                + ", below its preferred " + control.prefWidth(-1));
+            }
+        }
     }
 
     @Test

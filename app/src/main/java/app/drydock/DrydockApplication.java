@@ -591,6 +591,15 @@ public final class DrydockApplication extends Application {
                                 mainWorkspace.diagTypeInExplorer(arg);
                                 System.out.println("[diag] explorer typed " + arg.length() + " chars");
                             }
+                            case "quit" -> {
+                                // Every script driver has one: without it a
+                                // screenshot run leaves a full JavaFX app (and
+                                // its native terminal surfaces) alive until
+                                // someone notices and kills it. Four of them
+                                // once ran for over an hour.
+                                System.out.println("[diag] quitting");
+                                Platform.exit();
+                            }
                             case "shot" -> diagSnapshot(primaryStage, Path.of(arg));
                             // handoff:<commits>/<files>, or handoff:none for a
                             // session that never wrote a brief, or
@@ -1581,6 +1590,11 @@ public final class DrydockApplication extends Application {
                 }
                 case "keys" -> System.out.println("[diag] keys " + mainWorkspace.diagKeyboardState()
                         + " focusOwner=" + describeFocusOwner());
+                case "quit" -> {
+                    // See the explorerScript driver for why every script has this.
+                    System.out.println("[diag] quitting");
+                    Platform.exit();
+                }
                 case "shot" -> diagSnapshot(stage, Path.of(arg));
                 // DIAG-ONLY, added for the sidebar row-layout visual pass: the
                 // row-overlay's hover fade and pickOnBounds=false passthrough
@@ -1924,6 +1938,11 @@ public final class DrydockApplication extends Application {
                         mainWorkspace.showClaudeSubTab();
                     }
                     System.out.println("[diag] view -> " + arg.strip());
+                }
+                case "quit" -> {
+                    // See the explorerScript driver for why every script has this.
+                    System.out.println("[diag] quitting");
+                    Platform.exit();
                 }
                 case "shot" -> diagSnapshot(stage, Path.of(arg));
                 case "dump" -> {

@@ -12,6 +12,8 @@ import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
 
+import java.util.List;
+
 /**
  * Tells the human how far a session's work has moved since its handoff brief
  * was written, and gives them something to do about it.
@@ -49,6 +51,16 @@ public final class HandoffBanner extends HBox {
         refresh.getStyleClass().add("handoff-banner-button");
         edit.getStyleClass().add("handoff-banner-button");
         fork.getStyleClass().add("handoff-banner-button");
+
+        // The buttons must never be the thing that gives. Found by screenshot
+        // at a narrow tab width: HBox shrinks children by default, so at ~435px
+        // of content these collapsed to "R..", "..." and "Fo..." -- and "..."
+        // as a label for Edit tells the human nothing at all. The message is
+        // the only element that should absorb a squeeze, which it does by
+        // wrapping, so pin the buttons to their preferred width.
+        for (javafx.scene.control.Control control : List.of(refresh, edit, fork)) {
+            control.setMinWidth(Region.USE_PREF_SIZE);
+        }
 
         getChildren().addAll(message, spacer(), refresh, edit, fork);
 

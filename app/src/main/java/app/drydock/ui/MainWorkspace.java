@@ -2619,9 +2619,15 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * message actually fit at tab width.</p>
      */
     public String diagHandoffBanner(String spec) {
-        OpenSessionTab tab = openTabs.values().stream().findFirst().orElse(null);
+        // pendingTabs too: a session that is still "Starting..." has a real
+        // tab with a real banner, and it is the state a screenshot driver
+        // reaches first -- looking only at openTabs made this verb report
+        // "no open tab" for a tab that was plainly on screen.
+        OpenSessionTab tab = openTabs.values().stream().findFirst()
+                .or(() -> pendingTabs.values().stream().findFirst())
+                .orElse(null);
         if (tab == null) {
-            return "no open tab";
+            return "no open or pending tab";
         }
         String[] parts = spec.split("/");
         boolean running = parts.length < 3 || !"dead".equals(parts[2].strip());
