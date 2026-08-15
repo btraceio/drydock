@@ -19,7 +19,7 @@ already exists gets git's "branch already exists" and no way forward.
 
 This design makes the choice explicit in the modal and possible over MCP.
 
-> **Revision note.** Four adversarial review rounds, three reviewers each
+> **Revision note.** Six adversarial review rounds, three reviewers each
 > (fact-check, mechanism, spec quality). Every confirmed finding is
 > corrected in place; "What the adversarial review changed" at the end
 > records them, including two latent bugs in shipped code the review
@@ -141,7 +141,7 @@ public static String agentMessage(String name, Refusal refusal);
 /** A standalone sentence, for the modal's hint line. */
 public static String humanSentence(Refusal refusal);
 
-/** A clause fragment that completes "…, which ": for dropdown rows and h12. */
+/** A clause fragment that completes "…, which ": for dropdown rows and the unmintable hints. */
 public static String shortClause(Refusal refusal);
 ```
 
@@ -164,11 +164,11 @@ public static String shortClause(Refusal refusal);
 | `COMPONENT_LEADING_DOT` | `A path component cannot start with '.' ('<token>').` | `has a component starting with '.'` |
 | `COMPONENT_LOCK_SUFFIX` | `A path component cannot end with '.lock' ('<token>').` | `has a component ending with '.lock'` |
 
-Four of these are unreachable from the modal and exist only for
-completeness of the enum: `BLANK` and the `/` half of
-`TRAILING_SLASH_OR_DOT` are pre-empted by h3, `FORBIDDEN_CHAR` with a
-space by h4, and `SHADOWS_REMOTE`'s sentence by h7's own frame. h4's copy
-is therefore the *only* space message; it does not duplicate
+Four are unreachable from the modal and exist only for completeness of the
+enum: `BLANK` and the `/` half of `TRAILING_SLASH_OR_DOT` are pre-empted by
+the `unfinished` row, `FORBIDDEN_CHAR` with a space by the `space` row, and
+`SHADOWS_REMOTE`'s sentence by `unmintable-new`'s own frame. The `space`
+row's copy is therefore the *only* space message; it does not duplicate
 `humanSentence(FORBIDDEN_CHAR, " ")`, which the modal never reaches.
 
 One `Kind` for every refname clause would not work: three of today's
@@ -218,7 +218,7 @@ arrangement `dropdownLabel` already uses. Its wording drops the
 git-shaped `"branch name must not …: <name>"` frame for a sentence:
 `A branch name cannot contain '..'.`, `A branch name cannot contain the
 character '~'.`, `A branch name cannot start with '-'.`, and so on, one per
-clause, with `SHADOWS_REMOTE` rendered by h6's own frame (below), which needs the
+clause, with `SHADOWS_REMOTE` rendered by `unmintable-new`'s own frame (below), which needs the
 typed name as well.
 
 When two remotes both match, the **longest** wins, matching
@@ -453,57 +453,79 @@ first-match table would delete shipped behaviour: clear the directory
 field while an occupied branch is selected and the "Already checked out
 in …" hint would vanish, leaving a disabled button explaining nothing.
 
-**`hint`**, first match wins. **Every row except h13 blocks Create**, and
-`†` marks them; the phrase "a blocking hint" below means exactly the `†`
-set. Branch names shown are the **catalog's** spelling where one resolved,
-and the typed text otherwise; `/x` is `checkedOutAt()`.
+**`hint`**, first match wins. Rows are named, not numbered: two rounds of
+review lost time to off-by-one references after a row was inserted or
+deleted, and a name survives that. Branch names shown are the **catalog's**
+spelling where one resolved and the typed text otherwise; `/x` is
+`checkedOutAt()`.
 
-| # | mode | condition | hint |
+| row | mode | condition | hint |
 |---|---|---|---|
-| h1 | either | catalog still loading (`catalog == null`) | `Loading branches…` |
-| h2 | NEW | name blank, or ends `/` | `Finish the branch name.` |
-| h3 | NEW | name contains a space | `A branch name cannot contain a space.` |
-| h4 | NEW | `localBranch(name)` present, free | `feat/login already exists.` + **Check it out instead** |
-| h5 | NEW | `localBranch(name)` present, occupied | `feat/login already exists — checked out in /x.` |
-| h6 | NEW | `BranchNameRules.check(name, remotes)` refuses | the refusal, phrased for a human (below) |
-| h7 | NEW | **Fork from** blank | `Pick a branch to fork from.` |
-| h8 | EXISTING | branch blank | `Pick a branch to check out.` |
-| h9 | EXISTING | `NoSuchBranch` | `No branch named 'nope'.` |
-| h10 | EXISTING | `Occupied` | today's `blockedHint` wording, unchanged |
-| h11 | EXISTING | `Unmintable` | `Checking out origin/origin/main would create local origin/main, which ` + `shortClause` |
-| h12 | otherwise | | no hint |
+| `loading` | either | `catalog == null && !catalogFailed` | `Loading branches…` |
+| `load-failed` | either | `catalog == null && catalogFailed` | — (the error line speaks) |
+| `unfinished` | NEW | name blank, or ends `/` | `Finish the branch name.` |
+| `space` | NEW | name contains a space | `A branch name cannot contain a space.` |
+| `exists-free` | NEW | `localBranch(name)` present, available | `feat/login already exists.` |
+| `exists-busy` | NEW | `localBranch(name)` present, occupied | `feat/login already exists — checked out in /x.` |
+| `unmintable-new` | NEW | `BranchNameRules.check(name, remotes)` refuses | the refusal, phrased for a human (below) |
+| `no-base` | NEW | **Fork from** blank | `Pick a branch to fork from.` |
+| `pick-branch` | EXISTING | branch blank | `Pick a branch to check out.` |
+| `no-such` | EXISTING | `NoSuchBranch` | `No branch named 'nope'.` |
+| `occupied` | EXISTING | `Occupied` | today's `blockedHint` wording, unchanged |
+| `unmintable-existing` | EXISTING | `Unmintable` | `Checking out origin/origin/main would create local origin/main, which ` + `shortClause` + `.` |
+| `none` | otherwise | | no hint |
 
-Every row above h12 blocks Create. A failed catalog load is deliberately
-**not** a row: `applyCatalogFailure` sets `catalogFailed` but never clears
-`catalog` (`NewWorktreeModal.java:373-379`), so after a successful load and
-a failed ⟳ the modal still holds a usable catalog and today still renders
-its occupancy hint (`NewWorktreeState.java:64-68`). Making "load failed" a
-first-match row above h4-h11 would blank that hint and leave a disabled
-button explaining nothing — the very defect h7 and h8 exist to remove. The
-error line already speaks for the failure.
+**Both catalog-absent rows are needed, and `load-failed` must sit second.**
+`applyCatalogFailure` sets `catalogFailed` and never assigns `catalog`
+(`NewWorktreeModal.java:373-379`), so a failed **first** load leaves
+`catalog == null && catalogFailed` — which today produces an empty hint,
+because the shipped condition is `catalog == null && !catalogFailed`
+(`NewWorktreeState.java:64-65`), with a comment at `:371-375` recording
+that a failed first load must not keep claiming the branches are loading.
+Keying `loading` on `catalog == null` alone would say "Loading branches…"
+for ever beside an error line saying the listing failed.
 
-**`createDisabled`** is therefore `!hint().isEmpty() || catalog == null ||
-catalogFailed || directory blank || creation in flight`. The rules carried
-forward from today are `NewWorktreeState.java:70-72` (directory, name
-shape, base) and `:75` (in flight); h2, h3 and h7 are those rules made
-audible instead of blocking silently. h12 means "no hint" — it says
-nothing about the button, which the last three OR terms still govern.
+Narrowing `loading` without adding `load-failed` is equally wrong: the
+state would fall through to `exists-free` and `unmintable-new`, which
+dereference a null catalog. Two rows, in this order.
 
-h2 says something rather than nothing because that is the modal's
+A load failure with a catalog *already in hand* is deliberately **not** a
+row. After a successful load and a failed ⟳ the modal still holds a usable
+catalog and still renders its occupancy hint (`NewWorktreeState.java:64-68`);
+a first-match row above `occupied` would blank that and leave a disabled
+button explaining nothing — the defect `no-base` and `pick-branch` exist to
+remove.
+
+**`createDisabled`** is `!hint().isEmpty() || catalog == null ||
+catalogFailed || directory blank || creation in flight`. Every row above
+`none` yields a non-empty hint except `load-failed`, which the second and
+third terms cover. The rules carried forward from today are
+`NewWorktreeState.java:70-72` (directory, name shape, base) and `:75`
+(in flight); `unfinished`, `space` and `no-base` are those rules made
+audible instead of blocking silently. `none` means "no hint" — it says
+nothing about the button, which the trailing terms still govern.
+
+`unfinished` says something rather than nothing because that is the modal's
 **opening** state: the branch field is seeded `feat/`
 (`NewWorktreeModal.java:156`), which ends in `/`. Silence there would mean
-a filled-in form, a dead button and a blank hint line. It also keeps the
-shadow refusal (h6) off a half-typed name, which matters in a repository
-with a remote literally named `feat`, since `BranchNameRules` matches
-whole path components case-insensitively.
+a filled-in form, a dead button and a blank hint line. It also keeps
+`unmintable-new` off a half-typed name, which matters in a repository with
+a remote literally named `feat`, since `BranchNameRules` matches whole path
+components case-insensitively.
 
-h6's wording is `A branch named <typed> would shadow the remote '<remote>'.`
-for `SHADOWS_REMOTE`, `<remote>` being the longest match, and
+`unmintable-new`'s wording is
+`A branch named <typed> would shadow the remote '<remote>'.` for
+`SHADOWS_REMOTE`, `<remote>` being the longest match, and
 `BranchNameRules.humanSentence` for every other clause.
+
+While `catalog == null`, `derive` does not call `resolve` at all — its
+contract requires a non-null catalog — and the record's `Outcome`
+component is `NoSuchBranch(text)`. Both catalog-absent rows precede every
+row that reads it, so nothing observes the placeholder.
 
 ### New mode only warns about *local* collisions
 
-h4 and h5 test for an exact local branch, not for any `Outcome`, and that
+`exists-free` and `exists-busy` test for an exact local branch, not for any `Outcome`, and that
 is load-bearing twice over. `BranchCatalog` gains the named accessor they
 need:
 
@@ -529,15 +551,34 @@ produces no hint and leaves Create enabled.
 `origin/main` onto local `main` when the remote ref was dropped as
 shadowed (`:140-151`, `:76`) — the ordinary case for any branch that
 exists both locally and on origin. Keyed on `Outcome`, typing
-`origin/main` would show h6's *"A branch named origin/main would shadow
+`origin/main` would show `unmintable-new`'s *"A branch named origin/main would shadow
 the remote 'origin'"* beside a **Check it out instead** button that
 silently switches to `main`, a name the hint never mentions. With the
-exact test, h4/h5 stay quiet, h6 fires, and no offer appears.
+exact test, `exists-free`/`exists-busy` stay quiet, `unmintable-new` fires, and no offer appears.
 
-`switchOffer` is therefore `mode == NEW && localBranch(name).isPresent()
-&& that branch is available` — the same test as h4, so the button and the
-hint can never name different branches. It copies that branch's `name()`,
-which is by construction what the user typed.
+`switchOffer` is therefore
+
+```java
+mode == NEW && outcome instanceof Ready r && r.ref().name().equals(text.strip())
+```
+
+— the offer appears exactly when the branch it would switch to is the one
+the user typed. That covers both spellings that mean it: an exact local
+name (`feat/login`) and a full remote ref (`origin/feat/login`), the
+latter being the case today's derived mode handles and an exact-local test
+would have stranded behind a shadow refusal with no way forward.
+
+It also keeps round 5's fix intact. In the `origin/main`-with-local-`main`
+case the resolved ref is named `main`, which is *not* what was typed, so
+no offer appears and the hint stands alone — the button can never name a
+different branch than the hint, which was the defect.
+
+The offer is independent of the hint rows. A remote-only match
+(`login` with only `origin/login`) yields no hint and an enabled Create —
+`-b login` is ordinary git — with the offer beside it as an alternative,
+not a correction. A full remote spelling yields `unmintable-new`'s shadow
+refusal *and* the offer, which together say "that name would shadow the
+remote; check out the branch instead".
 
 `Pick a branch to fork from.` is new wording for a dead end that already
 ships: `baseField` is filled asynchronously from `getStatus` and only when
@@ -549,10 +590,10 @@ with nothing on screen explaining it.
 is true, beside the hint label, with a new `.worktree-hint-action` rule in
 `app.css` — flat, link-coloured, no background, `-fx-font-size: 11.5px` to
 match `.worktree-hint` (`app.css:1426`). It copies the `Ready`'s
-`ref().name()` — the catalog's spelling, not the raw typed text — into the
-existing picker and calls `setMode(EXISTING)`. An occupied name (h6) gets
-its explanation but no offer, because checking it out is exactly what
-cannot happen.
+`ref().name()` into the existing picker and calls `setMode(EXISTING)` —
+which, by `switchOffer`'s own condition, is the text the user already
+typed. An occupied name (`exists-busy`) gets its explanation but no offer,
+because checking it out is exactly what cannot happen.
 
 The mirror-image offer is deliberately **not** built: `NoSuchBranch` in
 Existing mode says so and disables Create, with no "create it instead"
@@ -647,8 +688,9 @@ void create(Mode mode, Outcome outcome, String branch, String base,
             Path directory, Optional<String> task, AgentKind agent);
 ```
 
-fed from the `NewWorktreeState` that `refreshState()` last computed, which
-the modal holds in a field. Every wipe of either editor fires its text
+fed from the `NewWorktreeState` that `refreshState()` last computed —
+held in a field, or recomputed from the same inputs at press time, which is
+equivalent and not a second oracle. Every wipe of either editor fires its text
 listener into `refreshState()` — including `applyCatalog`'s `items.setAll`
 wipe and its later repair (`NewWorktreeModal.java:335-351`) — and
 `refreshState()` runs once before the modal is shown (`:236`), so the
@@ -949,7 +991,7 @@ agent is never told to run a repo-wide mutation:
 - In use: `'feat/login' is already checked out in the worktree at /x.`
 - Locked: `'feat/login' is checked out in the worktree at /x, which is locked; the human can unlock it from the UI.`
 - Stale: `'feat/login' is checked out in a stale worktree at /x; the human can prune it from the UI.`
-- Unmintable: `Checking out 'origin/origin/main' would create the local branch 'origin/main', which shadows the remote 'origin'.` — and, for a `REFNAME` refusal, the failing clause in the same shape.
+- Unmintable: `Checking out 'origin/origin/main' would create the local branch 'origin/main', which ` + `BranchNameRules.shortClause(refusal)` + `.` — the same frame for every clause, so a `LEADING_DASH` adoption reads `…, which starts with '-'.`
 - `start_point` conflict: `start_point cannot be combined with existing: true; an existing branch already has its history.`
 - Remote repository: the message `createWorktree` already gives.
 - Interrupted add: `McpWorktreeMayExistException`'s message above.
@@ -1009,7 +1051,9 @@ trip; the directory does not re-derive into `drydock-worktree` when the
 newly active control is blank; segments and **Check it out instead** are
 disabled while a creation is in flight; **Check it out instead** copies
 the catalog's spelling rather than the typed text and lands in Existing
-mode; the mode-aware `onRefresh` wording; and the catalog-reload
+mode; that the modal opens in New-branch mode; that **Fork from** is
+hidden in Existing mode and shown in New; that ⟳ stays visible in both;
+the mode-aware `onRefresh` wording; and the catalog-reload
 editor-wipe sequence does not rewrite the visible directory.
 
 **MCP behaviour — `WorkspaceMcpSessionContextTest`,** which already stands
@@ -1048,7 +1092,7 @@ just one; `joinAddBy`'s four arms, including the `TimeoutException` and
 interrupt doors, not just the `ExecutionException` one; that New mode with
 a remote-only match shows no hint, leaves Create enabled and still offers
 **Check it out instead**; that typing `origin/main` where local `main`
-exists produces h6 and *no* offer; and that an unmintable dropdown row is
+exists produces `unmintable-new` and *no* offer; and that an unmintable dropdown row is
 disabled, not merely relabelled.
 
 **`MainWorkspaceTest`** (or the nearest existing home) pins
@@ -1073,7 +1117,8 @@ Pieces 2 and 3 both depend on piece 1; neither depends on the other.
    leaves `BranchNames`, which keeps its messages word for word;
    `dropdownLabel` replaces `BranchRefConverter.describe`, whose only
    caller is the modal's cell factory (`NewWorktreeModal.java:152`);
-   `resolve` and `Outcome` arrive with no caller yet. It touches the
+   `resolve`, `Outcome`, `BranchCheckout.unmintable` and
+   `BranchCatalog.localBranch` arrive with no caller yet. It touches the
    modal, so it is not a no-op diff, and one behaviour does change
    deliberately: a tie between two matching remotes now resolves to the
    longest rather than to an arbitrary element of a `Set` whose iteration
@@ -1089,8 +1134,12 @@ Pieces 2 and 3 both depend on piece 1; neither depends on the other.
 
 ## What the adversarial review changed
 
-Four rounds, three reviewers each (fact-check, mechanism, spec quality).
+Six rounds, three reviewers each (fact-check, mechanism, spec quality).
 Every finding was verified against the code before being accepted.
+Entries below reference hint rows by the numbering in force at the time;
+the table has used stable names since round 6.
+
+**Rounds 1-2**
 
 **Five claims in earlier drafts were false.**
 
@@ -1380,8 +1429,66 @@ the error line, not the hint, so it cannot disable Create; and the
 router's catch order is compiler-enforced.
 
 **Also out of scope, and worth naming since the field is semantic.**
-`DiffService` (`:505-511`) and `WorktreeService` (`:752-759`) have the same
-IOException/timeout/interrupt shape and will keep `KNOWN_FAILED` for a
-child that started and was killed. Nothing reads the flag there today —
+`DiffService` (`:505-511`) has the same IOException/timeout/interrupt shape
+and will keep `KNOWN_FAILED` for a child that started and was killed;
+`WorktreeService` (`:752-769`) shares the timeout arm but routes interrupts
+to `GitCommandInterruptedException`, so only its timeout is affected. Nothing reads the flag there today —
 only `joinAddBy` does — but if it ever spreads, those are the sites that
 need the same decision.
+
+### Round 6
+
+53. **The `loading` row dropped a guard shipped code has.** Keyed on
+    `catalog == null` alone, a failed **first** load — git missing, repo
+    unmounted, a 15s timeout — would have shown "Loading branches…" for
+    ever beside an error line saying the listing failed. Today's condition
+    is `catalog == null && !catalogFailed` (`NewWorktreeState.java:64-65`),
+    and `NewWorktreeModal.java:371-375` carries a comment about exactly
+    this state. Round 5's fix reasoned only about the
+    loaded-then-failed-⟳ case and conflated the two. Narrowing the
+    condition alone would have been wrong too: the state then falls
+    through to rows that dereference a null catalog. Two rows now, in
+    order.
+54. **`switchOffer` contradicted its own test.** The exact-local rule
+    produced no offer for a remote-only match, while the test list
+    required one — and two adjacent paragraphs gave the button different
+    sources, stale text from before round 5's rewrite. The rule is now
+    "the resolved ref is named what the user typed", which covers both
+    spellings, keeps round 5's fix (the `origin/main`-with-local-`main`
+    case still yields no offer), and restores the route today's derived
+    mode gives for a full remote spelling — which the exact-local test
+    would have stranded behind a shadow refusal.
+55. **Renumbering debris, twice over.** Deleting a row in revision 6 left
+    six references one row too high, including `shortClause`'s Javadoc —
+    which an implementer copies verbatim — and a sentence claiming the
+    already-exists row carried the space message. A `†` legend survived
+    from revision 4 referring to markers no longer in the table and to an
+    "h13" that no longer existed, leaving "a blocking hint" undefined for
+    the second time. Rows are named now, which is the actual fix.
+56. **`REFNAME` outlived the enum that had it.** The MCP `Unmintable`
+    message specified only the shadow clause and deferred the rest to a
+    `Clause` constant round 4 had already replaced, leaving the live
+    `origin/-foo` path unspecified. One frame plus `shortClause` now
+    covers all twelve.
+57. Corrections: the record's `Outcome` while the catalog is null is
+    `NoSuchBranch(text)`, and `resolve` is not called there;
+    `unmintable-existing`'s hint ends with a period; `localBranch` lands
+    in piece 1; the whole-`Outcome` rationale is restated in
+    Existing-mode terms, since New mode no longer consults `lookup`;
+    `WorktreeService` routes interrupts to `GitCommandInterruptedException`
+    rather than `-1`, so only its timeout arm shares `DiffService`'s
+    exposure; holding the last state in a field is no longer specified as
+    the only option; and three untested claims — the modal opens in New
+    mode, **Fork from** hides, ⟳ stays — are now pinned.
+
+**Also refuted in round 6** — `joinAddBy` was written out against the real
+signatures and works: all three of `get`'s checked exceptions are covered,
+`translate` is reachable, `McpToolException` is non-final so the subclass
+is legal, the router's catch order is compiler-enforced, and `Path` serves
+both adds. The `Outcome` field is additive and its three-arm mapping
+exact; `createWorktree` adopts it through the same private `run`. The
+component-major order is implementable with no ambiguity, including a name
+violating both a whole-name and a component clause. All four "unreachable"
+clauses are genuinely unreachable, including via paste, since
+`TextInputControl.filterInput` strips control characters. And every claim
+in the twelve-clause table matches `BranchNames` clause for clause.
