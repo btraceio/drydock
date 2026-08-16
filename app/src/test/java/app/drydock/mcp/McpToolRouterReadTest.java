@@ -121,6 +121,27 @@ class McpToolRouterReadTest {
     }
 
     /**
+     * An optional property is invisible to the required-arguments test above,
+     * and {@code McpServerTest}'s tools/list assertion only loops over tool
+     * names -- so nothing else here would notice {@code existing} going
+     * missing from the schema, and a model cannot emit a property that is not
+     * in it. The whole existing-branch path would be inert.
+     */
+    @Test
+    void worktreeCreateOffersTheExistingFlagAsABoolean() {
+        JsonValue worktreeCreate = router.toolDescriptors().stream()
+                .filter(descriptor -> str(descriptor, "name").equals("worktree_create"))
+                .findFirst()
+                .orElseThrow();
+
+        JsonValue properties = JsonPeek.field(JsonPeek.field(worktreeCreate, "inputSchema"), "properties");
+        JsonValue existing = JsonPeek.field(properties, "existing");
+
+        assertTrue(existing != null, "worktree_create must describe 'existing'");
+        assertEquals("boolean", str(existing, "type"));
+    }
+
+    /**
      * A session whose {@code claude} has exited keeps its tab (so the human can
      * read the final output), so its token outlives the process until the exit
      * watcher notices. No tool may act in that window -- least of all the ones

@@ -739,19 +739,31 @@ public final class GitStatusService implements AutoCloseable {
         return run(command, new ProcessRunner.Options(null, PROCESS_TIMEOUT, false, Map.of()));
     }
 
-    private static ProcessResult run(List<String> command, ProcessRunner.Options options) {
+    /**
+     * Package-private rather than private so the three arms below can be
+     * pinned directly: which {@link GitCommandFailedException.Outcome} each
+     * one carries decides whether MCP refunds a charged worktree, and all
+     * three report the same exit code.
+     */
+    static ProcessResult run(List<String> command, ProcessRunner.Options options) {
         try {
             return ProcessRunner.run(command, options);
         } catch (IOException e) {
             // The executable existed at locate()-time but could not actually be
             // launched (permissions changed, removed between check and use, etc).
-            throw new GitCommandFailedException(command, -1, e.getMessage() == null ? "" : e.getMessage());
+            // builder.start() failed, so git never ran: nothing was touched.
+            throw new GitCommandFailedException(command, -1, e.getMessage() == null ? "" : e.getMessage(),
+                    GitCommandFailedException.Outcome.KNOWN_FAILED);
         } catch (ProcessTimeoutException e) {
+            // The child was alive and doing work when we killed it.
             throw new GitCommandFailedException(command, -1,
-                    "timed out after " + options.timeout().toSeconds() + "s (killed)");
+                    "timed out after " + options.timeout().toSeconds() + "s (killed)",
+                    GitCommandFailedException.Outcome.UNKNOWN);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new GitCommandFailedException(command, -1, "interrupted while waiting for git");
+            // Likewise: the wait was cut short, not the child's work.
+            throw new GitCommandFailedException(command, -1, "interrupted while waiting for git",
+                    GitCommandFailedException.Outcome.UNKNOWN);
         }
     }
 

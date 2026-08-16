@@ -23,6 +23,7 @@ import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SshRemote;
 import app.drydock.domain.UiTheme;
 import app.drydock.domain.WorkspaceUiState;
+import app.drydock.git.BranchCheckout;
 import app.drydock.git.ChangedLineService;
 import app.drydock.git.DiffScope;
 import app.drydock.git.DiffService;
@@ -2146,25 +2147,76 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             return;
         }
         NewWorktreeModal[] holder = new NewWorktreeModal[1];
+        // Diagnostic-only handle; the modal's own lifetime is the modal layer's.
+        openWorktreeModal = null;
         holder[0] = new NewWorktreeModal(repository, gitStatusService, worktreeService, agentRegistry,
                 defaultKind.get(), requireRemote, modalLayer::close,
-                (existing, branch, base, directory, task, agent) -> {
+                (mode, outcome, branch, base, directory, task, agent) -> {
                     holder[0].showCreating();
-                    CompletableFuture<Path> creation = existing
-                            .map(ref -> gitStatusService.addWorktreeForBranch(
-                                    repository.root(), directory, ref, branch))
-                            .orElseGet(() -> gitStatusService.createWorktree(
-                                    repository.root(), directory, branch, Optional.of(base)));
+                    // The mode alone, never a second lookup: the modal is the
+                    // authority on which of the two things the user asked for.
+                    // Create is only enabled in existing mode when the outcome
+                    // is Ready, so the cast cannot fail.
+                    CompletableFuture<Path> creation = mode == NewWorktreeState.Mode.EXISTING
+                            ? gitStatusService.addWorktreeForBranch(repository.root(), directory,
+                                    ((BranchCheckout.Outcome.Ready) outcome).ref(), branch)
+                            : gitStatusService.createWorktree(
+                                    repository.root(), directory, branch, Optional.of(base));
                     creation.whenComplete((created, ex) -> Platform.runLater(() -> {
                         if (ex != null) {
                             holder[0].showError(String.valueOf(UiErrors.unwrap(ex).getMessage()));
                             return;
                         }
                         modalLayer.close();
-                        openNewWorktreeSession(repository, branch, created, task, existing.isEmpty(), agent);
+                        // Adopting a remote-only branch does mint a local ref,
+                        // but it tracks a remote somebody else owns -- removing
+                        // the worktree must not offer to delete it.
+                        openNewWorktreeSession(repository, branch, created, task,
+                                mode == NewWorktreeState.Mode.NEW, agent);
                     }));
                 });
+        openWorktreeModal = holder[0];
         modalLayer.show(holder[0]);
+    }
+
+    /** The create-worktree modal while it is up, for the diagnostic verbs below. */
+    private NewWorktreeModal openWorktreeModal;
+
+    /**
+     * Diagnostic-only: types into the open create-worktree modal's active
+     * branch control, and reports what it actually did -- a verb that only
+     * says what it meant to do is not a check.
+     */
+    public String diagWorktreeText(String text) {
+        if (openWorktreeModal == null) {
+            return "no create-worktree modal is open";
+        }
+        openWorktreeModal.diagSetBranchText(text);
+        return "typed '" + text + "'";
+    }
+
+    /** Diagnostic-only: flips the open create-worktree modal through its real ⌘E binding. */
+    public String diagWorktreeSwitchMode() {
+        if (openWorktreeModal == null) {
+            return "no create-worktree modal is open";
+        }
+        return openWorktreeModal.diagSwitchMode();
+    }
+
+    /** Diagnostic-only: presses the modal's "check it out instead" offer. */
+    public String diagWorktreePressOffer() {
+        if (openWorktreeModal == null) {
+            return "no create-worktree modal is open";
+        }
+        return openWorktreeModal.diagPressOffer();
+    }
+
+    /** Diagnostic-only: presses the modal's Create button. */
+    public String diagWorktreePressCreate() {
+        if (openWorktreeModal == null) {
+            return "no create-worktree modal is open";
+        }
+        return openWorktreeModal.diagPressCreate();
     }
 
     /**

@@ -134,11 +134,17 @@ public final class McpToolRouter {
                         JsonObject.empty().put("scopeId", schemaString("Review scope handle.")),
                         "scopeId"),
                 descriptor("worktree_create",
-                        "Creates a new worktree for a branch in the caller's repository.",
+                        "Creates a worktree in the caller's repository: a new branch by default, or a "
+                                + "checkout of a branch that already exists when 'existing' is true. An existing "
+                                + "branch must not be checked out in another worktree.",
                         JsonObject.empty()
-                                .put("branch", schemaString("Branch name for the new worktree."))
-                                .put("start_point", schemaString("Optional start point (commit-ish) "
-                                        + "for the new branch.")),
+                                .put("branch", schemaString("Branch name. With existing=true, names a branch that "
+                                        + "already exists -- local, or remote-tracking, which is adopted as a local "
+                                        + "tracking branch."))
+                                .put("existing", schemaBoolean("Check out an existing branch instead of creating one. "
+                                        + "Defaults to false. Cannot be combined with start_point."))
+                                .put("start_point", schemaString("Optional start point (commit-ish) for the new "
+                                        + "branch. Only valid when existing is false.")),
                         "branch"),
                 descriptor("session_start",
                         "Starts a new managed session in a worktree of the caller's repository. The "
@@ -535,8 +541,22 @@ public final class McpToolRouter {
         JsonObject args = asObject(arguments);
         String branch = requiredStringArg(args, "branch");
         Optional<String> startPoint = optionalStringArg(args, "start_point");
+        boolean existing = strictBooleanArg(args, "existing", false);
 
-        BranchNames.validate(branch, context.remoteNames(caller));
+        if (existing && startPoint.isPresent()) {
+            // Before the charge, so nothing is spent and nothing refunded.
+            throw new McpToolException("start_point cannot be combined with existing: true; an existing "
+                    + "branch already has its history.");
+        }
+        if (!existing) {
+            // Deliberately not applied with existing: the refname rules vet a
+            // name being minted, and the shadow rule would reject
+            // origin/feat/x, which is a legitimate way to name a branch that
+            // exists. What guards that path is the catalog -- only refs git
+            // itself listed reach git -- plus a check on the derived local
+            // name, which these rules would never see.
+            BranchNames.validate(branch, context.remoteNames(caller));
+        }
 
         try {
             registry.chargeWorktree(caller);
@@ -544,17 +564,31 @@ public final class McpToolRouter {
             throw new McpToolException(e.getMessage());
         }
 
-        Path path;
         try {
-            path = context.createWorktree(caller, branch, startPoint);
+            if (existing) {
+                McpSessionContext.ExistingBranchWorktree adopted =
+                        context.createWorktreeOnExistingBranch(caller, branch);
+                return JsonObject.empty()
+                        .put("path", new JsonString(adopted.path().toString()))
+                        // The RESOLVED local name, unlike the create path's
+                        // echo of the argument: adopting origin/feat/x opens
+                        // feat/x, and that is the name session_start needs.
+                        .put("branch", new JsonString(adopted.branch()))
+                        .put("tracking", optionalString(adopted.tracking()));
+            }
+            Path path = context.createWorktree(caller, branch, startPoint);
+            return JsonObject.empty()
+                    .put("path", new JsonString(path.toString()))
+                    .put("branch", new JsonString(branch));
+        } catch (McpWorktreeMayExistException e) {
+            // No refund: the add may already have created the worktree, and a
+            // refunded retry would hit "already exists" with nothing spent and
+            // nothing said. Java enforces this arm coming first.
+            throw e;
         } catch (McpToolException e) {
             registry.refundWorktree(caller);
             throw e;
         }
-
-        return JsonObject.empty()
-                .put("path", new JsonString(path.toString()))
-                .put("branch", new JsonString(branch));
     }
 
     // ---- session_start ------------------------------------------------------
@@ -843,6 +877,30 @@ public final class McpToolRouter {
             return Optional.empty();
         }
         return Optional.of(text);
+    }
+
+    /**
+     * Optional boolean argument that refuses a wrong-typed value instead of
+     * falling back to {@code defaultValue}, as {@link #optionalStringArg}
+     * does.
+     *
+     * <p>Some clients stringify every argument -- that is why
+     * {@link #optionalIntArg} exists -- and a flag that decides between
+     * creating a branch and checking one out cannot be coerced quietly:
+     * {@code {"existing":"true"}} read as {@code false} creates a brand-new
+     * branch off the caller's HEAD with none of the branch's commits, and
+     * reports it exactly as it reports an adoption.</p>
+     */
+    private static boolean strictBooleanArg(JsonObject args, String key, boolean defaultValue)
+            throws McpToolException {
+        if (!args.has(key)) {
+            return defaultValue;
+        }
+        JsonValue value = args.get(key);
+        if (!(value instanceof JsonBoolean bool)) {
+            throw new McpToolException("Argument '" + key + "' must be a boolean (true or false).");
+        }
+        return bool.value();
     }
 
     /** Optional boolean argument; absent defaults to {@code defaultValue}. */

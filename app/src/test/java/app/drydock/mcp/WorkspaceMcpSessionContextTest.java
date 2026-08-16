@@ -13,8 +13,10 @@ import app.drydock.domain.RepositoryId;
 import app.drydock.domain.RepositorySettings;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SshRemote;
+import app.drydock.git.GitCommandFailedException;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.WorktreeService;
+import app.drydock.mcp.McpSessionContext.ExistingBranchWorktree;
 import app.drydock.mcp.McpSessionContext.RenameKind;
 import app.drydock.mcp.McpSessionContext.RenameOutcome;
 import app.drydock.review.AnnotationStore;
@@ -25,16 +27,20 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -300,10 +306,229 @@ class WorkspaceMcpSessionContextTest {
         assertTrue(failure.getMessage().contains("did not respond in time"), failure.getMessage());
     }
 
+    // ---- joinAddBy: the four ways an add can end without a verdict -----------
+    //
+    // joinBy has three exits and two of them are expiry; every one of the four
+    // has to say "may exist", because the future being awaited is an already
+    // submitted `git worktree add` and the router refunds anything that is not
+    // McpWorktreeMayExistException.
+
+    private static final Path ADD_DIR = Path.of("/wt/drydock-feat-x");
+
+    @Test
+    void anAlreadyExpiredDeadlineMayHaveLeftAWorktreeBecauseTheAddWasSubmittedFirst() {
+        McpWorktreeMayExistException failure = assertThrows(McpWorktreeMayExistException.class,
+                () -> WorkspaceMcpSessionContext.joinAddBy(
+                        new CompletableFuture<Path>(), System.nanoTime() - 1, ADD_DIR));
+
+        assertTrue(failure.getMessage().contains(ADD_DIR.toString()), failure.getMessage());
+    }
+
+    @Test
+    void expiryDuringTheWaitMayHaveLeftAWorktree() {
+        assertThrows(McpWorktreeMayExistException.class,
+                () -> WorkspaceMcpSessionContext.joinAddBy(new CompletableFuture<Path>(),
+                        System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(200), ADD_DIR));
+    }
+
+    @Test
+    void anInterruptedWaitMayHaveLeftAWorktree() throws Exception {
+        AtomicReference<Throwable> caught = new AtomicReference<>();
+        Thread worker = new Thread(() -> {
+            try {
+                WorkspaceMcpSessionContext.joinAddBy(new CompletableFuture<Path>(),
+                        System.nanoTime() + TimeUnit.SECONDS.toNanos(30), ADD_DIR);
+            } catch (Throwable e) {
+                caught.set(e);
+            }
+        });
+        worker.start();
+        Thread.sleep(200);
+        worker.interrupt();
+        worker.join(10_000);
+
+        assertInstanceOf(McpWorktreeMayExistException.class, caught.get());
+    }
+
+    @Test
+    void aKilledAddMayHaveLeftAWorktreeEvenWrappedInACompletionException() {
+        GitCommandFailedException killed = new GitCommandFailedException(
+                List.of("git", "worktree", "add"), -1, "timed out after 15s (killed)",
+                GitCommandFailedException.Outcome.UNKNOWN);
+
+        assertThrows(McpWorktreeMayExistException.class, () -> WorkspaceMcpSessionContext.joinAddBy(
+                CompletableFuture.failedFuture(killed), liveDeadline(), ADD_DIR));
+        // supplyAsync hands the cause over unwrapped today; the moment the add
+        // is composed it would arrive wrapped, and an instanceof test that
+        // missed that would fall through to the refunding path.
+        assertThrows(McpWorktreeMayExistException.class, () -> WorkspaceMcpSessionContext.joinAddBy(
+                CompletableFuture.failedFuture(new CompletionException(killed)), liveDeadline(), ADD_DIR));
+    }
+
+    @Test
+    void aGitFailureWithAVerdictStaysAnOrdinaryFailureSoTheRouterRefunds() {
+        GitCommandFailedException known = new GitCommandFailedException(
+                List.of("git", "worktree", "add"), 128, "fatal: 'feat/x' already exists");
+
+        McpToolException failure = assertThrows(McpToolException.class, () -> WorkspaceMcpSessionContext.joinAddBy(
+                CompletableFuture.failedFuture(known), liveDeadline(), ADD_DIR));
+
+        assertFalse(failure instanceof McpWorktreeMayExistException, failure.getMessage());
+        assertEquals("git failed: fatal: 'feat/x' already exists", failure.getMessage());
+    }
+
+    /**
+     * The other half of the discriminator, end to end: a parent directory that
+     * cannot be created fails before any process is spawned, so nothing can
+     * exist and the charge must come back.
+     */
+    @Test
+    void aWorktreeParentThatCannotBeCreatedIsAnOrdinaryFailure(@TempDir Path repoDir,
+                                                               @TempDir Path worktreesParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path readOnly = Files.createDirectory(worktreesParent.resolve("read-only"));
+        Files.setPosixFilePermissions(readOnly, PosixFilePermissions.fromString("r-xr-xr-x"));
+        userConfig = worktreesIn(readOnly.resolve("worktrees"));
+        WorkspaceMcpSessionContext context = contextFor(repo);
+        try {
+            McpToolException failure = assertThrows(McpToolException.class,
+                    () -> context.createWorktree(caller(repo), "feat/x", Optional.empty()));
+
+            assertFalse(failure instanceof McpWorktreeMayExistException, failure.getMessage());
+            // Pin that it failed for the reason under test, not on the way in.
+            assertTrue(failure.getMessage().startsWith("git failed: "), failure.getMessage());
+            assertTrue(failure.getMessage().contains(readOnly.toString()), failure.getMessage());
+        } finally {
+            Files.setPosixFilePermissions(readOnly, PosixFilePermissions.fromString("rwxr-xr-x"));
+        }
+    }
+
+    private static long liveDeadline() {
+        return System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+    }
+
+    // ---- createWorktreeOnExistingBranch --------------------------------------
+
+    @Test
+    void adoptingAFreeLocalBranchChecksItOutWithNoTracking(@TempDir Path repoDir, @TempDir Path worktrees)
+            throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        runGit(repo, "branch", "feat/login");
+        userConfig = worktreesIn(worktrees);
+
+        ExistingBranchWorktree created =
+                contextFor(repo).createWorktreeOnExistingBranch(caller(repo), "feat/login");
+
+        assertEquals("feat/login", created.branch());
+        assertEquals(Optional.empty(), created.tracking());
+        assertTrue(Files.exists(created.path().resolve("README.md")), String.valueOf(created.path()));
+    }
+
+    /**
+     * The response's branch is the RESOLVED local name, not the argument --
+     * deliberately unlike the create path, which echoes what it was given.
+     * Here they differ, and the agent needs the name that now exists to hand
+     * to {@code session_start}.
+     */
+    @Test
+    void adoptingARemoteOnlyBranchMintsATrackingLocalBranchAndReportsBothNames(@TempDir Path tmp) throws Exception {
+        Path upstream = Files.createDirectory(tmp.resolve("upstream"));
+        initCommittedRepo(upstream);
+        runGit(upstream, "branch", "feat/login");
+        Path clone = tmp.resolve("clone");
+        runGit(tmp, "clone", upstream.toString(), clone.toString());
+        userConfig = worktreesIn(tmp.resolve("worktrees"));
+
+        ExistingBranchWorktree created =
+                contextFor(clone).createWorktreeOnExistingBranch(caller(clone), "origin/feat/login");
+
+        assertEquals("feat/login", created.branch());
+        assertEquals(Optional.of("origin/feat/login"), created.tracking());
+        assertEquals("feat/login", gitOutput(created.path(), "rev-parse", "--abbrev-ref", "HEAD"));
+        assertEquals("origin", gitOutput(clone, "config", "branch.feat/login.remote"));
+    }
+
+    @Test
+    void aBranchAlreadyCheckedOutElsewhereIsRefusedAndNamesItsHolder(@TempDir Path repoDir, @TempDir Path worktrees)
+            throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        userConfig = worktreesIn(worktrees);
+
+        // "main" is checked out in the main checkout itself.
+        McpToolException failure = assertThrows(McpToolException.class,
+                () -> contextFor(repo).createWorktreeOnExistingBranch(caller(repo), "main"));
+
+        assertEquals("'main' is already checked out in the worktree at " + repo.toRealPath() + ".",
+                failure.getMessage());
+    }
+
+    @Test
+    void anUnknownBranchIsRefusedAndSaysHowToCreateOne(@TempDir Path repoDir, @TempDir Path worktrees)
+            throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        userConfig = worktreesIn(worktrees);
+
+        McpToolException failure = assertThrows(McpToolException.class,
+                () -> contextFor(repo).createWorktreeOnExistingBranch(caller(repo), "feat/nope"));
+
+        assertEquals("No branch named 'feat/nope' in this repository; omit existing to create it.",
+                failure.getMessage());
+    }
+
+    /**
+     * A branch literally named {@code origin/main}, pushed to origin, is listed
+     * as {@code origin/origin/main}; adopting it would mint local
+     * {@code refs/heads/origin/main}, which shadows the real remote for every
+     * short-name lookup thereafter.
+     */
+    @Test
+    void adoptingARemoteRefWhoseLocalNameWouldShadowARemoteIsRefused(@TempDir Path tmp) throws Exception {
+        Path upstream = Files.createDirectory(tmp.resolve("upstream"));
+        initCommittedRepo(upstream);
+        runGit(upstream, "branch", "origin/main");
+        Path clone = tmp.resolve("clone");
+        runGit(tmp, "clone", upstream.toString(), clone.toString());
+        userConfig = worktreesIn(tmp.resolve("worktrees"));
+
+        McpToolException failure = assertThrows(McpToolException.class,
+                () -> contextFor(clone).createWorktreeOnExistingBranch(caller(clone), "origin/origin/main"));
+
+        assertEquals("Checking out 'origin/origin/main' would create the local branch 'origin/main', "
+                + "which shadows the remote 'origin'.", failure.getMessage());
+    }
+
+    @Test
+    void aRemoteRepositoryCannotAdoptABranch(@TempDir Path repoDir) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        SshRemote unreachable = new SshRemote("nobody@invalid.invalid", "/srv/app");
+        repository = new Repository(RepositoryId.newId(), unreachable.placeholderRoot(), "remote-repo",
+                Instant.now(), Instant.now(), RepositorySettings.DEFAULT, unreachable);
+        WorkspaceMcpSessionContext context = contextWith(repo, List.of(repository));
+
+        McpToolException failure = assertThrows(McpToolException.class,
+                () -> context.createWorktreeOnExistingBranch(caller(repo), "main"));
+
+        assertEquals("This session's repository is remote; Drydock cannot create worktrees in it.",
+                failure.getMessage());
+    }
+
     // ---- fixtures -----------------------------------------------------------
 
     private Repository repository;
     private ManagedAgentSession session;
+
+    /** Where new worktrees go; overridden by tests that must not write into the real home. */
+    private UserConfig userConfig = UserConfig.empty();
+
+    /**
+     * Only the worktrees directory matters to these tests; every other
+     * setting keeps its default. Built through one helper so a new component
+     * on the record is a one-line change here rather than six.
+     */
+    private static UserConfig worktreesIn(Path directory) {
+        UserConfig defaults = UserConfig.empty();
+        return new UserConfig(Optional.of(directory), defaults.openChangedFilesInSkim());
+    }
 
     private Repository localRepository(Path root) throws IOException {
         if (repository == null) {
@@ -352,7 +577,7 @@ class WorkspaceMcpSessionContextTest {
                 new app.drydock.git.DiffService(),
                 gitStatusService,
                 worktreeService,
-                UserConfig::empty,
+                () -> userConfig,
                 (worktree, prompt) -> CompletableFuture.failedFuture(
                         new UnsupportedOperationException("no window in this test")),
                 (id, title) -> CompletableFuture.completedFuture(new RenameOutcome(RenameKind.RENAMED, title)),
@@ -370,6 +595,21 @@ class WorkspaceMcpSessionContextTest {
         runGit(directory, "add", ".");
         runGit(directory, "commit", "-m", "initial");
         return directory;
+    }
+
+    /** As {@link #runGit}, returning the stripped output for an assertion. */
+    private static String gitOutput(Path workingDirectory, String... arguments) throws Exception {
+        List<String> command = new ArrayList<>(List.of("git"));
+        command.addAll(List.of(arguments));
+        Process process = new ProcessBuilder(command)
+                .directory(workingDirectory.toFile())
+                .redirectErrorStream(true)
+                .start();
+        String output = new String(process.getInputStream().readAllBytes());
+        if (process.waitFor() != 0) {
+            throw new IllegalStateException("git " + String.join(" ", arguments) + " failed: " + output);
+        }
+        return output.strip();
     }
 
     private static void runGit(Path workingDirectory, String... arguments) throws Exception {

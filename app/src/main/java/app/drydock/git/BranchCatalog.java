@@ -110,6 +110,34 @@ public record BranchCatalog(List<BranchRef> branches, List<String> remotes) {
     }
 
     /**
+     * The local branch of exactly this name, if there is one. Text is
+     * stripped first.
+     *
+     * <p>Deliberately <em>not</em> {@link #lookup}, which answers a different
+     * question: what branch does this text name? This one answers what New
+     * mode needs -- would creating this branch collide? -- and the two differ
+     * in both directions. {@code lookup} qualifies a bare name by remote, so
+     * it resolves {@code login} to {@code origin/login} and would have New
+     * mode refuse to create a local {@code login} that {@code worktree_create}
+     * creates happily; and it strips remote prefixes, so it resolves
+     * {@code origin/main} to local {@code main} and would have the collision
+     * warning name one branch while the switch offer targets another.</p>
+     */
+    public Optional<BranchRef> localBranch(String name) {
+        if (name == null) {
+            return Optional.empty();
+        }
+        String needle = name.strip();
+        if (needle.isEmpty()) {
+            return Optional.empty();
+        }
+        return branches.stream()
+                .filter(ref -> !ref.remote())
+                .filter(ref -> ref.name().equals(needle))
+                .findFirst();
+    }
+
+    /**
      * Resolves picker text to a branch: an exact local match first (a local
      * branch may literally be named {@code origin/foo}), then an exact
      * remote-tracking match, then the typed text with a remote prefix

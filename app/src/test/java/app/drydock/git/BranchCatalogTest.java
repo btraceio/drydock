@@ -126,4 +126,55 @@ class BranchCatalogTest {
         assertTrue(catalog.lookup("").isEmpty());
         assertTrue(catalog.lookup(null).isEmpty());
     }
+
+    @Test
+    void localBranchDoesNotQualifyABareNameByRemoteTheWayLookupDoes() {
+        // Creating a local branch that a remote already has a ref for is
+        // ordinary git -- `worktree_create {branch: "login"}` runs -b login
+        // happily. Keyed on lookup, which qualifies "login" as origin/login,
+        // New-branch mode would refuse to create it at all.
+        BranchCatalog catalog = BranchCatalog.merge(
+                new BranchListing(List.of(BranchRef.remote("origin/login")), List.of("origin")),
+                List.of());
+
+        assertEquals("origin/login", catalog.lookup("login").orElseThrow().name());
+        assertTrue(catalog.localBranch("login").isEmpty());
+    }
+
+    @Test
+    void localBranchDoesNotStripARemotePrefixTheWayLookupDoes() {
+        // Keyed on lookup, typing origin/main where local main exists would
+        // warn about origin/main shadowing the remote while offering to check
+        // out main -- a name the warning never mentions.
+        BranchCatalog catalog = BranchCatalog.merge(
+                new BranchListing(List.of(
+                        BranchRef.local("main"),
+                        BranchRef.remote("origin/main")), List.of("origin")),
+                List.of());
+
+        assertEquals("main", catalog.lookup("origin/main").orElseThrow().name());
+        assertTrue(catalog.localBranch("origin/main").isEmpty());
+        assertEquals("main", catalog.localBranch("main").orElseThrow().name());
+    }
+
+    @Test
+    void localBranchFindsAnOccupiedLocalBranchBecauseTheHintNeedsItsHolder() {
+        BranchCatalog catalog = BranchCatalog.merge(
+                new BranchListing(List.of(BranchRef.local("feat/login")), List.of("origin")),
+                List.of(worktree("/src/olifer", "feat/login")));
+
+        BranchRef found = catalog.localBranch("  feat/login  ").orElseThrow();
+        assertEquals(Optional.of(Path.of("/src/olifer")), found.checkedOutAt());
+    }
+
+    @Test
+    void localBranchIsEmptyForTextNamingNothing() {
+        BranchCatalog catalog = BranchCatalog.merge(
+                new BranchListing(List.of(BranchRef.local("feat/login")), List.of("origin")),
+                List.of());
+
+        assertTrue(catalog.localBranch("brand-new-branch").isEmpty());
+        assertTrue(catalog.localBranch("   ").isEmpty());
+        assertTrue(catalog.localBranch(null).isEmpty());
+    }
 }

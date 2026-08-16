@@ -47,4 +47,16 @@ class ShortcutsOverlayParityTest {
                         + "a key present on only one side is either bound but not advertised, "
                         + "or advertised but bound to nothing");
     }
+
+    /**
+     * The modal binds one chord, in a KEY_PRESSED filter rather than the
+     * global chain -- {@code NewWorktreeModalTest} pins that ⌘E actually
+     * flips the mode; this pins that the overlay says so and says nothing
+     * else. The section is doubly worth pinning because ⇧/ cannot be used to
+     * read it while a modal is up.
+     */
+    @Test
+    void theNewWorktreeModalAdvertisesExactlyItsOneChord() {
+        assertEquals(List.of("⌘E"), ShortcutsOverlay.diagKeysFor("IN THE NEW-WORKTREE MODAL"));
+    }
 }

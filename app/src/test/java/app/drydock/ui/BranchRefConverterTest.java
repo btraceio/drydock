@@ -7,13 +7,12 @@ import java.nio.file.Path;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * The editable ComboBox writes {@code toString} into its editor, and the
  * modal derives create-vs-checkout mode from that editor text -- so the
  * converter must be the identity on the branch name. Decoration lives only
- * in {@link BranchRefConverter#describe}, used by the cell factory.
+ * in {@code BranchCheckout.dropdownLabel}, used by the cell factory.
  */
 class BranchRefConverterTest {
 
@@ -34,21 +33,5 @@ class BranchRefConverterTest {
 
         assertEquals(branch.name(), converter.fromString(converter.toString(branch)).name());
         assertEquals("typed-by-hand", converter.fromString("typed-by-hand").name());
-    }
-
-    @Test
-    void describeAnnotatesOccupiedStaleAndLockedBranchesForTheDropdownOnly() {
-        BranchRef occupied = new BranchRef("main", false, Optional.of(Path.of("/src/olifer")), false, false);
-        BranchRef stale = new BranchRef("ghost", false, Optional.of(Path.of("/gone")), true, false);
-        BranchRef locked = new BranchRef("held", false, Optional.of(Path.of("/held")), false, true);
-
-        assertTrue(BranchRefConverter.describe(occupied).contains("in use"));
-        assertTrue(BranchRefConverter.describe(occupied).contains("/src/olifer"));
-        assertTrue(BranchRefConverter.describe(stale).contains("stale worktree"));
-        // Locked reads apart from stale: it needs `git worktree unlock`, and
-        // `git worktree prune` would silently skip it.
-        assertTrue(BranchRefConverter.describe(locked).contains("locked worktree"));
-        assertTrue(BranchRefConverter.describe(locked).contains("/held"));
-        assertEquals("idle", BranchRefConverter.describe(BranchRef.local("idle")));
     }
 }

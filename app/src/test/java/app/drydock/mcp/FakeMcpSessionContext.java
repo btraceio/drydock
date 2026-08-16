@@ -218,6 +218,25 @@ final class FakeMcpSessionContext implements McpSessionContext {
         return created;
     }
 
+    /** Canned answer for {@link #createWorktreeOnExistingBranch}; the real resolution needs a real repository. */
+    ExistingBranchWorktree adopted;
+
+    /** Separate from {@link #failure} so a test can fail one path and not the other. */
+    McpToolException adoptFailure;
+
+    /** What was asked for, so a test can pin that the raw argument reached the SPI unmangled. */
+    final List<String> adoptedBranches = new ArrayList<>();
+
+    @Override
+    public ExistingBranchWorktree createWorktreeOnExistingBranch(ManagedSessionId caller, String branch)
+            throws McpToolException {
+        if (adoptFailure != null) {
+            throw adoptFailure;
+        }
+        adoptedBranches.add(branch);
+        return adopted;
+    }
+
     @Override
     public ManagedSessionId startSession(Path worktree, Optional<String> initialPrompt) throws McpToolException {
         if (failure != null) {
