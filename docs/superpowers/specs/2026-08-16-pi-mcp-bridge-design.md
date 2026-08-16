@@ -431,8 +431,9 @@ switch always emits `session_start` before any new turn can begin, so the commit
 below always wins the race.
 
 **`session_start` carrying a `previousSessionFile` commits the stand-down.**
-That is where the tools are dropped from the active set and the `instructions`
-injection stops.
+That is where the handler returns before registering, and the `instructions`
+injection stops. Nothing is removed, because in that instance nothing was ever
+added — see below.
 
 Neither pre-hook is relied on to name where the session is going, which is just
 as well: `targetSessionFile` is optional on `session_before_switch` and is
@@ -486,15 +487,20 @@ drydock's own `pi --session <id>` is a fresh process reporting
 reload above, and additionally `undefined` for a non-persisted session, where a
 comparison whose "equal" branch is the permissive one fails open.
 
-Standing down means dropping the tools from the active set and stopping the
-`instructions` injection — the latter because `McpServer.INSTRUCTIONS` otherwise
-keeps telling the model to call `session_rename` for the rest of the session,
-about a tool that is no longer there. Note "unregister" is not available:
-`ExtensionAPI` has `registerTool` and `setActiveTools` and **no
-`unregisterTool`** anywhere in `dist`. `setActiveTools` takes the whole active
-list, so standing down means name-filtering the current `getActiveTools()`, not
-passing a list of our own — otherwise it clobbers whatever the user or another
-extension had selected.
+Stopping the `instructions` injection matters on both seams, because
+`McpServer.INSTRUCTIONS` otherwise keeps telling the model to call
+`session_rename` for the rest of the session, about a tool it can no longer
+use.
+
+**No path removes a registered tool**, which is worth stating because the
+obvious third anti-pattern is to reach for one. A completed switch disposes the
+old instance and the new one never registers; an aborted switch should keep its
+tools; `/reload` is short-circuited by the `registered` flag; a failed handshake
+or a refused collision never registered. So the removal API is never needed —
+which is fortunate, since `ExtensionAPI` has no `unregisterTool` at all, and
+`setActiveTools` takes the whole active list, so using it would mean
+name-filtering the current `getActiveTools()` to avoid clobbering another
+extension's selection.
 
 **Where a failure becomes visible.** `ctx.ui.notify(…, "warning")` — the union
 is `"info" | "warning" | "error"`, and `"warn"` is not in it, which nothing in
@@ -594,14 +600,12 @@ method, and the difference is deliberate.
   tools — logged, not fatal, exactly as `ClaudeActivityReporter` gates
   `settingsFile()` behind an `installed` flag.
 
-The version probe and the file write are **two independent memos**, not one
-gate: a failed probe must not consume the installer's future, and a failed write
-must not discard a good version. Both live on the same background path and both
-retry on the next launch.
-
-Both are memoised futures, for the same concurrency reason: two tabs opened
-together run `buildCreateCommand` on different `backgroundExecutor` threads, and
-a bare boolean or a re-entered probe races.
+The version probe and the file write are **two independent memoised futures**,
+not one gate: a failed probe must not consume the installer's future, and a
+failed write must not discard a good version, and both retry on the next launch.
+Futures rather than booleans because two tabs opened together run
+`buildCreateCommand` on different `backgroundExecutor` threads, where a bare
+flag or a re-entered probe races.
 
 They run **concurrently**, and the builder joins both with a bound — the probe
 carries `PiVersionProbe`'s own 30-second timeout, and the write gets a 5-second
