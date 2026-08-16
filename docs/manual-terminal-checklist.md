@@ -307,7 +307,19 @@ a TUI command, and `ctx.ui` is a no-op UI outside the TUI — so the notificatio
 mechanism that six silent failure modes depend on is structurally unverifiable
 by `scripts/pi-bridge-smoke.sh`.
 
-- [ ] A Pi tab renames itself during real work, without being asked.
+- [ ] A Pi tab renames itself during real work, without being asked. Trigger:
+      start a session in a freshly created worktree and give it a few turns of
+      real work (e.g. "read this repo and summarize its structure"), without
+      ever mentioning renaming. Observable: within the first 3-5 turns, the
+      tab title and sidebar row change away from the placeholder to something
+      describing the work. This item cannot fail honestly on its own — a
+      model that simply declines to call `session_rename` looks identical to
+      a broken bridge. If no rename has happened by turn 5, check whether
+      `before_agent_start` actually injected the `instructions` text into the
+      system prompt (dump the prompt, or confirm `instructions` was non-empty
+      at load) before concluding anything: if it was injected and the model
+      still never calls the tool, that is model reluctance, not a bridge
+      failure, and this check cannot tell the two apart any further.
 - [ ] `-e` loads with **no trust prompt** in a real interactive tab, in a freshly
       created worktree.
 - [ ] A refused rename (rename the tab in drydock first, so it pins) surfaces to
@@ -319,8 +331,12 @@ by `scripts/pi-bridge-smoke.sh`.
       failure is total.)
 - [ ] `/new` inside a Pi tab: the drydock tools stop working in the new
       conversation, and the old tab's title is not touched by it.
-- [ ] `/fork` before the first assistant response (pi refuses it): the bridge
-      still works afterwards — this is the case the reversible gate exists for.
+- [ ] `/fork` before the first assistant response (pi refuses it): expect
+      drydock tool calls made in that SAME turn to still be refused with
+      "being handed over" — the gate stays armed for the rest of the turn,
+      since `before_agent_start` only clears it at the next prompt. Confirm
+      the bridge works again on the next prompt; this is the case the
+      reversible gate exists for.
 - [ ] `/resume` inside a Pi tab, picking a DIFFERENT conversation: the bridge
       stands down. This is the case that killed the reason-allow-list guard —
       in-TUI `/resume` reports `reason: "resume"` while drydock's own
