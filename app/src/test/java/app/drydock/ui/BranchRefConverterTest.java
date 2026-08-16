@@ -12,7 +12,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * The editable ComboBox writes {@code toString} into its editor, and the
  * modal derives create-vs-checkout mode from that editor text -- so the
  * converter must be the identity on the branch name. Decoration lives only
- * in {@link BranchRefConverter#describe}, used by the cell factory.
+ * in {@code BranchCheckout.dropdownLabel}, used by the cell factory.
  */
 class BranchRefConverterTest {
 
