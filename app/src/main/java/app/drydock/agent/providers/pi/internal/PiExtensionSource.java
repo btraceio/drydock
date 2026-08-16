@@ -25,6 +25,7 @@ public final class PiExtensionSource {
             const CONFIG_ENV = "DRYDOCK_MCP_CONFIG";
             const TOKEN_HEADER = "X-Drydock-Session-Token";
             const HANDSHAKE_MS = 2000;
+            const CALL_MS = 45000;
 
             type Wire = { url: string; token: string };
 
@@ -136,8 +137,6 @@ public final class PiExtensionSource {
                 return body?.result;
               }
 
-              const CALL_MS = 45000;
-
               async function call(wire: Wire, name: string, args: any, signal: AbortSignal): Promise<any> {
                 const res = await fetch(wire.url, {
                   method: "POST",
@@ -202,7 +201,7 @@ public final class PiExtensionSource {
                       // may have landed.
                       if (deadline.aborted) {
                         throw new Error(
-                          `${tool.name}: no response in 45s; the call may have completed -- do not retry`,
+                          `${tool.name}: no response in ${CALL_MS / 1000}s; the call may have completed -- do not retry`,
                         );
                       }
                       if (signal?.aborted) throw new Error(`${tool.name}: cancelled`);

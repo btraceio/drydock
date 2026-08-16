@@ -59,6 +59,14 @@ createServer((req, res) => {
       } else if (title === "SLOW") {
         // Never answers: the client's own budget must end this.
         return;
+      } else if (title === "BOOM") {
+        res.writeHead(500).end();
+      } else if (title === "HANGUP") {
+        req.socket.destroy();
+      } else if (title === "UNAUTH") {
+        // A mid-session revoke: the request's own header was valid (the top
+        // check passed), but THIS call is told the token no longer works.
+        res.writeHead(401).end();
       } else {
         reply({ content: [{ type: "text",
                  text: JSON.stringify({ outcome: "renamed", title }) }], isError: false });
@@ -111,6 +119,16 @@ TRANSCRIPT="$(find "$WORK/sessions" -name '*.jsonl' | head -1)"
 
 fail() { echo "FAIL: $1"; echo "--- pi output ---"; cat "$WORK/out.txt"; echo "--- transcript ---"; cat "$TRANSCRIPT"; exit 1; }
 
+# Checked against every transcript this script produces, not just the first:
+# the error paths are exactly where a leak would surface, so a check that only
+# looked at the all-success run would never see it.
+no_leak() {
+  [ -n "$1" ] || return 0
+  grep -q '127.0.0.1' "$1" && { echo "FAIL: the endpoint URL leaked into $2"; cat "$1"; exit 1; }
+  grep -q "$PORT" "$1" && { echo "FAIL: the port leaked into $2"; cat "$1"; exit 1; }
+  return 0
+}
+
 # Every assertion below depends on the model CHOOSING to call the tool, which is
 # not guaranteed: observed on this machine, a model answered "Done. Tab renamed"
 # without calling anything. So distinguish "the tool was not registered" from
@@ -153,6 +171,7 @@ grep -q 'DRYDOCK-BRIDGE-OK' "$WORK/out_instructions.txt" || {
   echo "return value to a file (NOT to stderr -- pi is drawing that terminal)."
   cat "$WORK/out_instructions.txt"; exit 3
 }
+no_leak "$(find "$WORK/sessions_instructions" -name '*.jsonl' | head -1)" "the instructions-run transcript"
 
 # The collision guard, checked by consequence rather than by registry: ask for
 # a real read and see whether pi's built-in answers it.
@@ -171,7 +190,8 @@ grep -q '"toolCall"' "$T_READ" || {
 grep -q 'canary-contents-9f3a' "$WORK/read.txt" \
   || { echo "FAIL: pi's built-in read did not survive -- the colliding drydock read shadowed it";
        cat "$WORK/read.txt"; exit 1; }
-grep -q '127.0.0.1' "$TRANSCRIPT" && fail "the endpoint URL leaked into the transcript"
+no_leak "$TRANSCRIPT" "the initial transcript"
+no_leak "$T_READ" "the read-guard transcript"
 
 # A dead endpoint must degrade, not kill the tab, and must not leak the port.
 # This exercises the FACTORY's catch, which is Task 5's code.
@@ -185,6 +205,7 @@ if ! DRYDOCK_MCP_CONFIG="$WORK/state/dead.json" \
   echo "FAIL: a dead endpoint took the tab down"; cat "$WORK/out_dead.txt"; exit 1
 fi
 grep -q '59999' "$WORK/out_dead.txt" && { echo "FAIL: the port leaked into pi's output"; exit 1; }
+no_leak "$(find "$WORK/sessions_dead" -name '*.jsonl' | head -1)" "the dead-endpoint transcript"
 
 # A refused rename must reach the model as an error, carrying the server's words.
 rm -rf "$WORK/sessions2"; mkdir -p "$WORK/sessions2"
@@ -194,6 +215,12 @@ DRYDOCK_MCP_CONFIG="$WORK/state/config.json" \
     < /dev/null > "$WORK/out2.txt" 2>&1 || true
 T2="$(find "$WORK/sessions2" -name '*.jsonl' | head -1)"
 grep -q 'named by the human' "$T2" || { echo "FAIL: a refusal did not reach the model"; cat "$T2"; exit 1; }
+# The text matching above is necessary but not sufficient: it would still pass
+# if execute stopped throwing and just returned the same words. The thing that
+# actually makes this a refusal -- pi recording the call as an error -- has to
+# be checked too, or deleting `if (result?.isError) throw ...` goes unnoticed.
+grep -q '"isError":true' "$T2" || { echo "FAIL: the refusal was not recorded as isError:true"; cat "$T2"; exit 1; }
+no_leak "$T2" "the refusal transcript"
 
 # The success payload is double-encoded, so details must be the DECODED outcome.
 grep -q '"details":{"outcome":"renamed"' "$TRANSCRIPT" \
@@ -209,5 +236,29 @@ DRYDOCK_MCP_CONFIG="$WORK/state/badtoken.json" \
     -p "Say OK." < /dev/null > "$WORK/out4.txt" 2>&1 || true
 # The handshake itself 401s, so the tab must start with no tools and no port in sight.
 grep -q "$PORT" "$WORK/out4.txt" && { echo "FAIL: the port leaked on the 401 path"; exit 1; }
+no_leak "$(find "$WORK/sessions4" -name '*.jsonl' | head -1)" "the bad-token transcript"
+
+# The three rejection arms in call()'s catch, each reachable only once a live
+# tool is registered -- unlike PINNED/badtoken above, these need a working
+# handshake (config.json) so tools/call itself is the thing that fails.
+run_error_case() {
+  # $1 = title, $2 = session-dir name, $3 = expected substring, $4 = label
+  rm -rf "$WORK/$2"; mkdir -p "$WORK/$2"
+  DRYDOCK_MCP_CONFIG="$WORK/state/config.json" \
+    env -u PI_CODING_AGENT pi --session-dir "$WORK/$2" --offline -e "$EXT" \
+      -p "Call session_rename with the title '$1'. Then tell me exactly what the tool said." \
+      < /dev/null > "$WORK/out_$2.txt" 2>&1 || true
+  t="$(find "$WORK/$2" -name '*.jsonl' | head -1)"
+  [ -n "$t" ] || { echo "FAIL: no session transcript written for $4"; cat "$WORK/out_$2.txt"; exit 1; }
+  grep -q '"toolCall"' "$t" || {
+    echo "INCONCLUSIVE: the model emitted no tool call for $4."
+    exit 3
+  }
+  grep -qF "$3" "$t" || { echo "FAIL: $4 did not reach the model as \"$3\""; cat "$t"; exit 1; }
+  no_leak "$t" "the $4 transcript"
+}
+run_error_case "BOOM" "sessions_boom" "session_rename: HTTP 500" "the HTTP-500 arm"
+run_error_case "HANGUP" "sessions_hangup" "session_rename: transport failure" "the transport-failure arm"
+run_error_case "UNAUTH" "sessions_unauth" "session_rename: this drydock session has ended" "the mid-session 401 arm"
 
 echo "PASS: handshake, registration and tools/call all reached the mock"
