@@ -56,6 +56,9 @@ createServer((req, res) => {
       const title = rpc.params?.arguments?.title ?? "";
       if (title === "PINNED") {
         reply({ content: [{ type: "text", text: "This session was named by the human." }], isError: true });
+      } else if (title === "SLOW") {
+        // Never answers: the client's own budget must end this.
+        return;
       } else {
         reply({ content: [{ type: "text",
                  text: JSON.stringify({ outcome: "renamed", title }) }], isError: false });
@@ -182,5 +185,29 @@ if ! DRYDOCK_MCP_CONFIG="$WORK/state/dead.json" \
   echo "FAIL: a dead endpoint took the tab down"; cat "$WORK/out_dead.txt"; exit 1
 fi
 grep -q '59999' "$WORK/out_dead.txt" && { echo "FAIL: the port leaked into pi's output"; exit 1; }
+
+# A refused rename must reach the model as an error, carrying the server's words.
+rm -rf "$WORK/sessions2"; mkdir -p "$WORK/sessions2"
+DRYDOCK_MCP_CONFIG="$WORK/state/config.json" \
+  env -u PI_CODING_AGENT pi --session-dir "$WORK/sessions2" --offline -e "$EXT" \
+    -p "Call session_rename with the title 'PINNED'. Then tell me exactly what the tool said." \
+    < /dev/null > "$WORK/out2.txt" 2>&1 || true
+T2="$(find "$WORK/sessions2" -name '*.jsonl' | head -1)"
+grep -q 'named by the human' "$T2" || { echo "FAIL: a refusal did not reach the model"; cat "$T2"; exit 1; }
+
+# The success payload is double-encoded, so details must be the DECODED outcome.
+grep -q '"details":{"outcome":"renamed"' "$TRANSCRIPT" \
+  || { echo "FAIL: the double-encoded result was not decoded into details"; cat "$TRANSCRIPT"; exit 1; }
+
+# A revoked token (wrong header) must produce the stable 401 message, once.
+cat > "$WORK/state/badtoken.json" <<BAD
+{"mcpServers":{"drydock":{"url":"http://127.0.0.1:$PORT/mcp","headers":{"X-Drydock-Session-Token":"wrong"}}}}
+BAD
+rm -rf "$WORK/sessions4"; mkdir -p "$WORK/sessions4"
+DRYDOCK_MCP_CONFIG="$WORK/state/badtoken.json" \
+  env -u PI_CODING_AGENT pi --session-dir "$WORK/sessions4" --offline -e "$EXT" \
+    -p "Say OK." < /dev/null > "$WORK/out4.txt" 2>&1 || true
+# The handshake itself 401s, so the tab must start with no tools and no port in sight.
+grep -q "$PORT" "$WORK/out4.txt" && { echo "FAIL: the port leaked on the 401 path"; exit 1; }
 
 echo "PASS: handshake, registration and tools/call all reached the mock"

@@ -136,6 +136,40 @@ public final class PiExtensionSource {
                 return body?.result;
               }
 
+              const CALL_MS = 45000;
+
+              async function call(wire: Wire, name: string, args: any, signal: AbortSignal): Promise<any> {
+                const res = await fetch(wire.url, {
+                  method: "POST",
+                  headers: { "content-type": "application/json", [TOKEN_HEADER]: wire.token },
+                  body: JSON.stringify({
+                    jsonrpc: "2.0", id: Date.now(), method: "tools/call",
+                    params: { name, arguments: args },
+                  }),
+                  signal,
+                });
+                if (!res.ok) {
+                  if (res.status === 401) throw new Error(`${name}: this drydock session has ended`);
+                  throw new Error(`${name}: HTTP ${res.status}`);
+                }
+                const body = await res.json();
+                if (body?.error) throw new Error(`${name}: ${body.error.message ?? "error"}`);
+                return body?.result;
+              }
+
+              /**
+               * McpServer double-encodes a success payload: content[0].text is the
+               * JSON-serialized result, so the outcome is one parse away. Reaching
+               * for result.title directly yields undefined.
+               */
+              function decode(text: string): any {
+                try {
+                  return JSON.parse(text);
+                } catch {
+                  return {};
+                }
+              }
+
               function registerProxy(tool: any) {
                 const label = String(tool.name)
                   .replace(/_/g, " ")
@@ -151,14 +185,42 @@ public final class PiExtensionSource {
                   // validator branches on the absence of TypeBox.Kind and runs a
                   // JSON-Schema coercion pass instead.
                   parameters: tool.inputSchema ?? { type: "object", properties: {} },
-                  async execute(_id: string, params: any) {
-                    const result = await rpc(wire!, "tools/call",
-                      { name: tool.name, arguments: params }, AbortSignal.timeout(45000));
+                  async execute(_id: string, params: any, signal?: AbortSignal) {
+                    // AbortSignal.any rejects on undefined, and pi types the
+                    // signal as optional and guards it as signal?.aborted itself.
+                    const deadline = AbortSignal.timeout(CALL_MS);
+                    const combined = signal ? AbortSignal.any([signal, deadline]) : deadline;
+                    let result: any;
+                    try {
+                      result = await call(wire!, tool.name, params, combined);
+                    } catch (e: any) {
+                      // Never rethrow, and never read e.cause: e.message is
+                      // "fetch failed" and is the only string undici gives us
+                      // that does not carry 127.0.0.1:<port>. The timeout arm is
+                      // checked FIRST, because both causes can be set at once and
+                      // a call that ran the full budget is exactly the one that
+                      // may have landed.
+                      if (deadline.aborted) {
+                        throw new Error(
+                          `${tool.name}: no response in 45s; the call may have completed -- do not retry`,
+                        );
+                      }
+                      if (signal?.aborted) throw new Error(`${tool.name}: cancelled`);
+                      // call() already prefixes with the tool name and yields only
+                      // a status or the stable 401 text, so rethrowing its message
+                      // verbatim would double the prefix. Anything else reaching
+                      // here is a transport error, whose message must NOT be
+                      // relayed: "fetch failed" is safe but a bad URL yields
+                      // "Failed to parse URL from http://127.0.0.1:<port>/mcp".
+                      const known = String(e?.message ?? "");
+                      if (known.startsWith(`${tool.name}: `)) throw new Error(known);
+                      throw new Error(`${tool.name}: transport failure`);
+                    }
                     const text = String(result?.content?.[0]?.text ?? "");
                     // A refusal must read as a refusal: AgentToolResult has no
                     // isError field, so an error is signalled by throwing.
                     if (result?.isError) throw new Error(text);
-                    return { content: [{ type: "text", text }], details: {} };
+                    return { content: [{ type: "text", text }], details: decode(text) };
                   },
                 } as any);
               }
