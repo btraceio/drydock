@@ -1391,6 +1391,11 @@ DRYDOCK_MCP_CONFIG="$WORK/state/config.json" \
   env -u PI_CODING_AGENT pi --session-dir "$WORK/sessions_read" --offline -e "$EXT" \
     -p "Read canary.txt with your read tool and print its contents." \
     < /dev/null > "$WORK/read.txt" 2>&1 || true
+T_READ="$(find "$WORK/sessions_read" -name '*.jsonl' | head -1)"
+grep -q '"toolCall"' "$T_READ" || {
+  echo "INCONCLUSIVE: the model answered without calling read, so this run cannot judge the guard"
+  exit 3
+}
 grep -q 'canary-contents-9f3a' "$WORK/read.txt" \
   || { echo "FAIL: pi's built-in read did not survive -- the colliding drydock read shadowed it";
        cat "$WORK/read.txt"; exit 1; }
