@@ -30,6 +30,7 @@ the part that moved:
 |---|---|---|
 | `pi.registerTool()` with full context | 0.35.0 | a tool the model can call |
 | async extension factory, awaited before startup | 0.38.0 | handshake before the first turn |
+| late registration in `session_start` refreshes immediately, without `/reload` | 0.55.4 | the registration path itself |
 | `before_agent_start` returning `systemPrompt` | 0.39.0 | injecting drydock's `instructions` |
 | `pi.setSessionName()` | 0.44.0 | keeping pi's `/resume` picker in step |
 | `promptSnippet` gates the "Available tools" section | 0.59.0 | tools listed in the system prompt |
@@ -191,11 +192,14 @@ nothing for a process that died; that was checked non-interactively only.
 
 *No floating promises.* pi installs **no `unhandledRejection` listener**
 anywhere, and its `uncaughtException` handler is `uncaughtCrash` →
-`process.exit(1)`. Since Node 15 the default routes an unhandled rejection
-there, so one floating rejection anywhere in this extension also terminates the
-tab. Every async call site is awaited inside a `try/catch`, including
-fire-and-forget-looking ones in event handlers, and a single `safe()` wrapper is
-the only way async work is started.
+`process.exit(1)`. Node has routed unhandled rejections there by default since
+Node 15, and pi's `package.json` declares `engines: { node: ">=22.19.0" }`, so
+this is not a version-contingent caveat: one floating rejection anywhere in this
+extension terminates the tab, in every environment pi runs in. (The same engine
+floor is why `AbortSignal.any`, used below, needs no guard.) Every async call
+site is awaited inside a `try/catch`, including fire-and-forget-looking ones in
+event handlers, and a single `safe()` wrapper is the only way async work is
+started.
 
 On 0.84.1 that discipline is provably sufficient for the code we do not own:
 pi voids exactly two emits of extension handlers (`agent-session.js:1288` and
@@ -266,17 +270,27 @@ the floating-promise shape the discipline rule bans.
 simultaneously with the server's own deadline and aborts calls the server is
 about to answer.
 
-**An abort is not a failure, and neither is a timeout.** Aborting the fetch
-cancels nothing server-side: `applyAgentRename` and `storeHandoff` have already
-mutated state under the store's lock by the time a join times out. So an abort
-propagates unchanged rather than becoming a tool error — otherwise a human
-pressing Esc writes a spurious "session_rename failed" into the transcript — and
-a timeout is reported to the model as *unknown outcome, do not retry blindly*,
-because `chargeRename` charges every attempt including refused and timed-out
-ones.
+**Three arms on rejection, chosen mechanically.** Aborting the fetch cancels
+nothing server-side: `applyAgentRename` and `storeHandoff` have already mutated
+state under the store's lock by the time a join times out. And the extension
+cannot avoid an error result either way — pi's agent loop writes
+`createErrorToolResult("Operation aborted")` around the tool call itself
+(`agent-loop.js:412`, `:431`) and converts any `execute` throw at `:476`. There
+is no "cancelled" arm in `AgentToolResult`. So the only thing in the extension's
+gift is the *text*, and `AbortSignal.any` collapses both causes into one
+rejection, so the arms are distinguished by inspecting the signal:
 
-Then three response rules, each of which the first draft of this spec got
-wrong:
+- `signal.aborted` (the human pressed Esc) → `throw new Error("<tool>:
+  cancelled")`.
+- the 45-second timer fired → `throw new Error("<tool>: no response in 45s; the
+  call may have completed — do not retry")`. Not "failed": `chargeRename` and
+  `chargeHandoff` charge every attempt, refused and timed-out alike, so a model
+  that retries a timeout burns budget on work that may already be done.
+- anything else → `throw new Error("<tool>: HTTP <status>")`.
+
+No arm reads `err.cause`.
+
+Then three response rules:
 
 - **Check `res.ok` before parsing.** 401/403/405 are sent with an empty body
   (`McpServer.sendEmpty`), so a naive `res.json()` reports "Unexpected end of
@@ -332,11 +346,11 @@ still-valid token, and a *different* pi conversation would then rename drydock's
 tab and write its handoff brief — describing work that `pi --session <old id>`
 will never reopen.
 
-**The discriminator is the session file, not the reason code.** The first draft
-of this paragraph said "any `session_start` whose reason is not `startup` or
-`resume`", which whitelists the one case it exists to catch: in-TUI `/resume` is
-`reason: "resume"` and switches conversations, while drydock's own resume form —
-`pi --session <id>`, a fresh process — fires `reason: "startup"`. Verified:
+**The discriminator is the session file, not the reason code.** The obvious
+rule — stand down on any `session_start` whose reason is not `startup` or
+`resume` — whitelists the one case it exists to catch. In-TUI `/resume` is
+`reason: "resume"` and switches conversations, while drydock's own resume form,
+`pi --session <id>`, is a fresh process and fires `reason: "startup"`. Verified:
 `pi --session <existing id> -p …` logs `reason=startup, previousSessionFile=
 undefined`. A reason allow-list also tears the bridge down on `/reload`, which
 changes nothing. So the extension records `sessionManager.getSessionFile()` when
@@ -369,8 +383,8 @@ the display pi is drawing.
 at **≥ 0.80.3**.
 
 That number is a deliberate simplification, and the honest reasoning is worth
-recording because the first draft got it wrong twice and the second draft got
-it wrong once more. The APIs the extension actually uses bind a floor of roughly
+recording, because two earlier attempts at this justification were wrong in
+ways a reader would otherwise repeat. The APIs the extension actually uses bind a floor of roughly
 **0.44.0**; the bridge was observed *working* on 0.55.4 and on 0.79.10 — tools
 and system-prompt override together — and loading on 0.50.0. The reason to
 stand above all of that is not a bug being avoided: it is that 0.80.3 is where
@@ -378,14 +392,14 @@ stand above all of that is not a bug being avoided: it is that 0.80.3 is where
 in drydock's CI will ever exercise buys compatibility we cannot claim. One
 number, tested at the top of it.
 
-A second justification appeared in the previous draft and is **withdrawn**: that
-0.80.3 "fixed extension tool changes applying without dropping
+One tempting second justification is **withdrawn**, and named so it is not
+re-added: that 0.80.3 "fixed extension tool changes applying without dropping
 `before_agent_start` system-prompt overrides". That changelog entry is scoped to
 tool changes *during* an agent run; this design registers once, before any run,
 so it never reaches that bug — as the working 0.79.10 run demonstrates. The
 floor stands on the first reason alone.
 
-Two mechanics the first draft left open:
+Two mechanics worth pinning down:
 
 - **Where it is probed, and what it costs.** `probeCapabilities()` has **no
   production caller today** — only tests. Putting the gate on the launch path
@@ -439,8 +453,8 @@ method, and the difference is deliberate.
   by a successful write, gives both mutual exclusion and the retry policy: a
   failed write is **not** latched, so the next launch tries again.
 - **Atomically, modelled on `McpConfigWriter.writeAtomically`** — temp file plus
-  rename. Not `ClaudeHookInstaller`, which the first draft cited: that one is a
-  plain `Files.writeString` under the umask. Without the rename, a second tab
+  rename. **Not** `ClaudeHookInstaller`, which is the obvious model and the wrong
+  one: that is a plain `Files.writeString` under the umask. Without the rename, a second tab
   launching while a first is `jiti`-loading the same path reads a truncated
   file, and the feature this design exists to deliver disappears
   intermittently.
@@ -456,6 +470,14 @@ gate: a failed probe must not consume the installer's future, and a failed write
 must not discard a good version. Both live on the same background path and both
 retry on the next launch.
 
+They run **concurrently**, and the builder joins both with a bound — the probe
+carries `PiVersionProbe`'s own 30-second timeout, and the write gets a 5-second
+join, because a hung filesystem must cost a tab its tools rather than its
+launch. That join happens inside the `supplyAsync` stage that gates surface
+creation, so the first Pi launch of an app run is measurably slower than the
+rest; per AGENTS.md the existing "Starting…" state must already be showing
+before it begins.
+
 One implementation tax worth naming: TypeScript in a Java text block means
 every backslash is doubled, as `ClaudeHookInstaller.HOOK_SCRIPT` already does
 for its `sed` expressions.
@@ -470,7 +492,7 @@ handoff and review.
 
 **Phase 2 — relaying `/name` into drydock (deferred, and it needs a router
 change first).** Forwarding the human's `/name` looked like a detail of the
-bridge and is not; it is the highest-risk part of the first draft, and it is
+bridge and is not; it is the highest-risk part of the feature, and it is
 optional relative to the goal:
 
 - It would spend the *agent's* rename budget. `chargeRename` charges refused
@@ -514,7 +536,8 @@ None of that is unsolvable. All of it is a second spec.
 | a tool name collides with a pi built-in | that tool is not registered; reported; others register. A collision on `session_rename` specifically means the goal silently does not happen while everything else reports healthy |
 | `tools/call` fails or times out | that call throws to the model; other tools keep working |
 | token revoked (session ended) | 401 → "this drydock session has ended" tool error |
-| human runs `/new`, `/fork`, `/resume` in the tab | tools unregister; notify; no cross-session writes |
+| a `session_start` arrives with a different session file (`/new`, `/fork`, in-TUI `/resume`) | tools dropped from the active set; instructions injection stops; reported; no cross-session writes |
+| a `session_start` arrives with the same session file (`/reload`) | bridge carries on unchanged |
 
 The invariant, restated now that it is defensible: **a broken bridge degrades to
 today's Pi**. It says so out loud via `ctx.ui.notify`, and it never takes the
@@ -567,12 +590,14 @@ Java, unit:
   containing a space surviving into the command**. Note the three existing
   `endsWith("pi")` / `endsWith("pi --session '…'")` / `endsWith("pi --resume")`
   assertions all break and become `contains`.
-- `PiCapabilitiesTest` — the 0.80.3 boundary, `"unknown"`, junk and
-  pre-release strings.
-- `PiExtensionInstallerTest` — file and directory permissions, atomic replace,
-  write-once per app run, and that a write failure omits the flag rather than
-  failing the launch. (The first draft's test line asserted the opposite of its
-  own design; the design wins.)
+- `PiCapabilitiesTest` — the 0.80.3 boundary, `"unknown"`, junk and pre-release
+  strings, and that **only a successful probe is memoised**: a failed probe
+  followed by a good one yields the good version.
+- `PiExtensionInstallerTest` — file and directory permissions; atomic replace;
+  **two concurrent launches produce one write and both receive the path**, which
+  is the property the memoised future exists for; and **a failed write is not
+  latched**, so the next launch retries rather than losing tools for the app
+  run.
 
 What is **not** automated, stated plainly rather than waved at:
 
@@ -688,6 +713,16 @@ design newly commits to:
   override together — which is what withdrew the second half of the version
   floor's justification.
 
+**Read, not run** — load-bearing claims established by reading pi's shipped
+source at 0.84.1, and scoped to that version: that pi voids exactly two emits of
+extension handlers (`agent-session.js:1288`, `:2290`) and that
+`ExtensionRunner.emit` cannot reject; that pi starts its UI before initialising
+extensions; that `agent-loop.js` writes its own aborted/errored tool results at
+`:412`, `:431`, `:476`; that `ExtensionAPI` has no `unregisterTool`; and
+drydock's four server-side join constants. The "exactly two" claim is an
+exhaustive negative over one version of someone else's codebase, which is
+precisely the kind of thing a later pi release can invalidate quietly.
+
 Still undemonstrated, and first to build: the proxy against a **running**
 drydock with a minted token. Also undemonstrated, and on the manual checklist
 because none of it can be reached from a non-interactive run: `-e` loading with
@@ -748,7 +783,9 @@ was found: four of the fixes from round 1 were themselves unbuildable.
   the agent's rename budget, has no surface for a refusal, accepts names
   drydock refuses, and cannot be de-echoed with a remembered string.
 - **The installer had no seam.** Pi has no `ActivityReporter`, so nothing would
-  ever have called it; it is now a lazy write-once on the launch path.
+  ever have called it; it moved to the launch path. *(Superseded in round 2 on
+  both halves: a seam does exist via `init(ctx)`, and the write-once flag became
+  a memoised future.)*
 - **"No temp file" specified a data race** — the atomic rename is back, and the
   cited model corrected from `ClaudeHookInstaller` (umask, non-atomic) to
   `McpConfigWriter`.
