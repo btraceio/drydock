@@ -79,6 +79,10 @@ public final class McpConfigWriter {
         return mcpDirectory().resolve(sessionId + ".json");
     }
 
+    private Path tokenFileFor(ManagedSessionId sessionId) {
+        return mcpDirectory().resolve(sessionId + ".token");
+    }
+
     /**
      * Writes (or idempotently rewrites) the {@code --mcp-config} file for a
      * session, returning the path to pass on the command line. Performs
@@ -127,14 +131,41 @@ public final class McpConfigWriter {
     }
 
     /**
+     * Writes the bare session token, returning the path the launch command
+     * reads it from. For a provider that takes its MCP wiring on the command
+     * line and so has no config file to put a credential in.
+     *
+     * <p>The file exists precisely so the token never becomes a command-line
+     * argument: the command reads it at exec time
+     * ({@code TOKEN="$(cat <path>)"}), which keeps it out of the argv of the
+     * long-lived {@code login} process libghostty spawns the session under.
+     * See {@code AgentCommands.envPrefixFromFiles}.</p>
+     *
+     * <p>No trailing newline, and none is needed: command substitution strips
+     * them. Owner-only like the JSON config, and purged by the same sweeps.
+     * Performs filesystem I/O; callers must invoke this off the JavaFX
+     * application thread (AGENTS.md).</p>
+     */
+    public Path writeTokenFor(ManagedSessionId sessionId, String token) throws IOException {
+        createMcpDirectory();
+        Path target = tokenFileFor(sessionId);
+        writeAtomically(target, token);
+        return target;
+    }
+
+    /**
      * Removes a session's config file, logging a WARNING rather than
      * throwing on failure: a leftover file is cosmetic next to failing a
      * session close. Performs filesystem I/O; callers must invoke this off
      * the JavaFX application thread (AGENTS.md).
      */
     public void delete(ManagedSessionId sessionId) {
+        // Both forms: a session has one or the other depending on its
+        // provider's delivery, and deleting only the JSON would leave the
+        // token file of every command-line session behind.
         try {
             Files.deleteIfExists(fileFor(sessionId));
+            Files.deleteIfExists(tokenFileFor(sessionId));
         } catch (IOException e) {
             LOG.log(Level.WARNING, "Could not delete mcp config for session " + sessionId + ": " + e.getMessage());
         }

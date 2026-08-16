@@ -199,8 +199,12 @@ public final class SessionManager implements AutoCloseable {
      * flag" question is provider-internal (Claude's {@code
      * ClaudeCapabilities.supportsMcpConfig}).</p>
      *
-     * <p>A {@link McpDelivery#COMMAND_LINE} provider gets a token but no file.
-     * Writing one would leave a credential on disk that nothing ever reads.</p>
+     * <p>Both wired deliveries get an owner-only file. A {@link
+     * McpDelivery#COMMAND_LINE} provider used to get a token and no file, on
+     * the reasoning that a file nothing reads is a credential on disk for
+     * nothing -- but the launch command was then carrying the token itself,
+     * and so was the argv of the long-lived {@code login} process the session
+     * runs under. The file is what the command reads instead of quoting.</p>
      *
      * @param spawn whether this session may create worktrees and start further
      *              sessions. {@link Spawn#FORBIDDEN} for a session an agent
@@ -214,12 +218,15 @@ public final class SessionManager implements AutoCloseable {
         }
         McpWiring mcp = wiring.get();
         String token = mcp.registry().mint(sessionId, spawn);
-        if (delivery == McpDelivery.COMMAND_LINE) {
-            return Optional.of(new McpAccess(mcp.endpointUrl(), token, Optional.empty()));
-        }
         try {
-            Path configFile = mcp.writer().writeFor(sessionId, mcp.endpointUrl(), token);
-            return Optional.of(new McpAccess(mcp.endpointUrl(), token, Optional.of(configFile)));
+            // Both deliveries get a file, for the same reason: a credential
+            // must never be a command-line argument. A COMMAND_LINE provider
+            // gets the bare token to read at exec time, so the only thing its
+            // launch command carries is the path.
+            Path credentialFile = delivery == McpDelivery.COMMAND_LINE
+                    ? mcp.writer().writeTokenFor(sessionId, token)
+                    : mcp.writer().writeFor(sessionId, mcp.endpointUrl(), token);
+            return Optional.of(new McpAccess(mcp.endpointUrl(), token, Optional.of(credentialFile)));
         } catch (IOException e) {
             // Never log the token or the endpoint URL (it carries the port).
             LOG.log(Level.WARNING, "Could not write MCP config for session " + sessionId

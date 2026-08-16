@@ -110,7 +110,7 @@ public final class ClaudeAgentProvider implements AgentProvider {
             sessionIdUsed = true;
         }
         command.append(activitySettingsFlag(caps));
-        command.append(mcpConfigFlag(caps, c.mcp().flatMap(McpAccess::configFile)));
+        command.append(mcpConfigFlag(caps, c.mcp().flatMap(McpAccess::credentialFile)));
         return LaunchPlan.of(command.toString(), sessionIdUsed);
     }
 
@@ -126,7 +126,7 @@ public final class ClaudeAgentProvider implements AgentProvider {
             return LaunchPlan.of(SshCommandBuilder.interactiveSessionCommand(r.remote().get(), exec), false);
         }
         ClaudeCapabilities caps = detectCaps();
-        String suffix = activitySettingsFlag(caps) + mcpConfigFlag(caps, r.mcp().flatMap(McpAccess::configFile));
+        String suffix = activitySettingsFlag(caps) + mcpConfigFlag(caps, r.mcp().flatMap(McpAccess::credentialFile));
         if (r.agentSessionId().isPresent()) {
             return LaunchPlan.of(ENV_CLEANUP_PREFIX + "claude --resume " + AgentCommands.shellQuote(r.agentSessionId().get()) + suffix, false);
         }

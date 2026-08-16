@@ -78,8 +78,10 @@ class CodexAgentProviderTest {
 
     // ---- drydock's MCP tools, delivered on the command line ------------------
 
+    private static final Path TOKEN_FILE = Path.of("/state/mcp/s.token");
+
     private static final Optional<McpAccess> SOME_MCP = Optional.of(
-            new McpAccess("http://127.0.0.1:51234/mcp", "tok-abc", Optional.empty()));
+            new McpAccess("http://127.0.0.1:51234/mcp", "tok-abc", Optional.of(TOKEN_FILE)));
 
     @Test
     void takesItsMcpAccessOnTheCommandLine() {
@@ -99,21 +101,41 @@ class CodexAgentProviderTest {
     }
 
     /**
-     * The token must reach codex through the environment, never as a literal
-     * argument: on macOS another user can read a process's argv via {@code ps},
-     * but not its environment. A literal would make the session token
-     * world-readable for as long as the session runs.
+     * The token must never appear in the command, in any form. On macOS
+     * another user can read a process's argv via {@code ps} but not its
+     * environment -- and the command is not just the agent's argv: libghostty
+     * runs it under a long-lived {@code login} parent whose own argv keeps the
+     * whole string for the life of the session. A live fork run found the
+     * token still readable there 21 seconds after launch. So the command names
+     * the file and the shell reads it at exec time.
      */
     @Test
-    void theTokenIsPassedInTheEnvironmentAndNeverAsAnArgument() {
+    void theTokenNeverAppearsInTheCommandInAnyForm() {
         String command = provider().buildCreateCommand(
                 new CreateContext("s", "x", Path.of("/repo"), Optional.empty(), SOME_MCP)).command();
 
+        assertFalse(command.contains("tok-abc"), command);
         assertTrue(command.startsWith("env "), command);
-        assertTrue(command.contains("DRYDOCK_SESSION_TOKEN='tok-abc'"), command);
-        // The only occurrence is the env assignment, which `env` drops on exec.
-        assertEquals(command.indexOf("tok-abc"), command.lastIndexOf("tok-abc"), command);
+        assertTrue(command.contains("DRYDOCK_SESSION_TOKEN=\"$(cat '/state/mcp/s.token')\""), command);
         assertFalse(command.contains("-c 'mcp_servers.drydock.http_headers"), command);
+    }
+
+    /**
+     * The guard rather than an expected path: SessionManager always mints the
+     * file when MCP is wired. If it ever did not, the session must launch
+     * without drydock's tools rather than with the token inlined.
+     */
+    @Test
+    void mcpAccessWithNoCredentialFileYieldsNoOverridesRatherThanAnInlinedToken() {
+        Optional<McpAccess> fileless = Optional.of(
+                new McpAccess("http://127.0.0.1:51234/mcp", "tok-abc", Optional.empty()));
+
+        String command = provider().buildCreateCommand(
+                new CreateContext("s", "x", Path.of("/repo"), Optional.empty(), fileless)).command();
+
+        assertFalse(command.contains("tok-abc"), command);
+        assertFalse(command.contains("mcp_servers"), command);
+        assertTrue(command.endsWith("codex"), command);
     }
 
     @Test
@@ -150,16 +172,14 @@ class CodexAgentProviderTest {
     }
 
     @Test
-    void aTokenWithShellMetacharactersIsQuotedNotInjected() {
-        // The token is opaque to this provider. It now travels as a shell
-        // assignment, so single-quoting is what has to hold.
+    void aTokenWithShellMetacharactersCannotInjectBecauseItIsNeverRendered() {
         Optional<McpAccess> nasty = Optional.of(
-                new McpAccess("http://127.0.0.1:1/mcp", "a'b;rm -rf /", Optional.empty()));
+                new McpAccess("http://127.0.0.1:1/mcp", "a'b;rm -rf /", Optional.of(TOKEN_FILE)));
 
         String command = provider().buildCreateCommand(
                 new CreateContext("s", "x", Path.of("/repo"), Optional.empty(), nasty)).command();
 
-        assertTrue(command.contains("DRYDOCK_SESSION_TOKEN='a'\\''b;rm -rf /'"), command);
+        assertFalse(command.contains("rm -rf"), command);
     }
 
     @Test
@@ -167,7 +187,7 @@ class CodexAgentProviderTest {
         // The URL still goes through TOML, so a quote in it must stay inside
         // the string rather than ending it.
         Optional<McpAccess> nasty = Optional.of(
-                new McpAccess("http://h/\"x\\y", "tok", Optional.empty()));
+                new McpAccess("http://h/\"x\\y", "tok", Optional.of(TOKEN_FILE)));
 
         String command = provider().buildCreateCommand(
                 new CreateContext("s", "x", Path.of("/repo"), Optional.empty(), nasty)).command();

@@ -136,21 +136,31 @@ public final class CodexAgentProvider implements AgentProvider {
      * option ({@code codex [OPTIONS] <COMMAND>}); after {@code resume} they
      * would be the subcommand's arguments.</p>
      *
-     * <p><strong>The token goes in the environment, not the command line.</strong>
-     * Codex would accept it as a literal {@code http_headers} value, which is
-     * simpler, but on macOS another user can read a process's argv via {@code
-     * ps} while its environment stays private to the owning uid. A literal
-     * would therefore make the session token world-readable for as long as the
-     * session runs -- strictly weaker than the owner-only config file Claude
-     * gets. {@code env_http_headers} names an environment variable instead, and
-     * {@code env} carries the value only until it execs {@code codex}.</p>
+     * <p><strong>The token reaches Codex without ever being written down
+     * here.</strong> Codex would take it as a literal {@code http_headers}
+     * value, which is simpler and wrong: on macOS another user can read a
+     * process's argv via {@code ps} while its environment stays private, so a
+     * literal is world-readable for as long as the session runs. {@code
+     * env_http_headers} names an environment variable instead -- but naming
+     * one is only half of it, because setting it from a literal puts the token
+     * straight back on the command line, where the session's {@code login}
+     * parent keeps it for the life of the tab. So the variable is filled from
+     * the owner-only file drydock minted, read by the shell at exec time; this
+     * command carries the path and nothing else. See {@code
+     * AgentCommands.envPrefixFromFiles}.</p>
+     *
+     * <p>Without that file there is no safe way to hand Codex the token, so
+     * the session launches with no Drydock tools rather than with a leaked
+     * credential. {@code SessionManager} always mints one when MCP is wired,
+     * so this is a guard, not an expected path.</p>
      */
     private static String codexCommand(Optional<McpAccess> access) {
-        if (access.isEmpty()) {
+        Optional<Path> tokenFile = access.flatMap(McpAccess::credentialFile);
+        if (access.isEmpty() || tokenFile.isEmpty()) {
             return AgentCommands.envPrefix(ENV_SCRUB) + "codex";
         }
         McpAccess mcp = access.get();
-        return AgentCommands.envPrefix(ENV_SCRUB, Map.of(TOKEN_ENV_VAR, mcp.token()))
+        return AgentCommands.envPrefixFromFiles(ENV_SCRUB, Map.of(TOKEN_ENV_VAR, tokenFile.get()))
                 + "codex"
                 + " -c " + AgentCommands.shellQuote(
                         "mcp_servers." + SERVER_NAME + ".url=" + tomlString(mcp.endpointUrl()))

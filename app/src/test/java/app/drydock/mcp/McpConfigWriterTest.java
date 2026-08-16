@@ -124,6 +124,58 @@ class McpConfigWriterTest {
         writer.delete(session);
     }
 
+    // ---- the bare token file, for a command-line provider -------------------
+
+    /**
+     * The whole point of this file is that the launch command can name it
+     * instead of carrying the token, so its content must be the token and
+     * nothing else -- no newline, no wrapper -- because a shell reads it with
+     * {@code $(cat …)} and hands the result straight to the agent.
+     */
+    @Test
+    void theTokenFileHoldsTheBareTokenWithNothingAroundIt(@TempDir Path base) throws Exception {
+        McpConfigWriter writer = new McpConfigWriter(base);
+
+        Path tokenFile = writer.writeTokenFor(ManagedSessionId.newId(), "tok-abc");
+
+        assertEquals("tok-abc", Files.readString(tokenFile));
+    }
+
+    @Test
+    void theTokenFileIsNotReadableByOtherUsers(@TempDir Path base) throws Exception {
+        McpConfigWriter writer = new McpConfigWriter(base);
+
+        Path tokenFile = writer.writeTokenFor(ManagedSessionId.newId(), "tok-abc");
+
+        Set<PosixFilePermission> permissions = Files.getPosixFilePermissions(tokenFile);
+        assertEquals(Set.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE), permissions);
+    }
+
+    /**
+     * A session has a JSON config or a token file, never both -- but delete()
+     * cannot know which, and removing only the JSON would leave the token of
+     * every command-line session on disk after it closed.
+     */
+    @Test
+    void deleteRemovesTheTokenFileToo(@TempDir Path base) throws Exception {
+        McpConfigWriter writer = new McpConfigWriter(base);
+        ManagedSessionId session = ManagedSessionId.newId();
+        Path tokenFile = writer.writeTokenFor(session, "tok-abc");
+
+        writer.delete(session);
+
+        assertFalse(Files.exists(tokenFile));
+    }
+
+    @Test
+    void purgeStaleDropsTokenFilesFromAPreviousRun(@TempDir Path base) throws Exception {
+        Path stale = new McpConfigWriter(base).writeTokenFor(ManagedSessionId.newId(), "old");
+
+        new McpConfigWriter(base).purgeStale();
+
+        assertFalse(Files.exists(stale));
+    }
+
     @Test
     void purgeStaleDropsConfigsFromAPreviousRun(@TempDir Path base) throws Exception {
         // No terminal process survives an app restart, so every file present at
