@@ -26,13 +26,26 @@ public final class AgentCommands {
      * As {@link #envPrefix(List)}, but also sets {@code assignments}:
      * {@code "env -u A NAME='value' "}. Both empty yields {@code ""}.
      *
-     * <p>Assignments exist to keep a credential out of the launched process's
-     * <em>argv</em>. The distinction is not cosmetic: on macOS another user's
-     * argv is readable via {@code ps} (36 of 206 root processes disclose theirs
-     * to an ordinary uid on this machine), while another user's environment is
-     * not. {@code env} does appear with the value in its own argv, but only
-     * until it execs the target -- after that the long-lived process holds the
-     * value in its environment alone.</p>
+     * <p>Assignments keep a credential out of the <em>launched agent's</em>
+     * argv, which matters because on macOS another user's argv is readable via
+     * {@code ps} (36 of 206 root processes disclose theirs to an ordinary uid
+     * on this machine) while their environment is not.</p>
+     *
+     * <p><strong>They do not keep it out of argv altogether.</strong> It is
+     * tempting to assume {@code env} holds the value only until it execs the
+     * target; a live fork run showed otherwise. libghostty spawns the command
+     * as {@code /usr/bin/login -flp <user> /bin/bash -c "exec -l <command>"}
+     * (see {@code GhosttySurface}), and that {@code login} process is the
+     * tab's long-lived parent. Its argv holds the whole command string --
+     * token and all -- for as long as the session lives: the token was still
+     * readable there 21 seconds after launch, and until the process was
+     * killed. Only the agent process itself is clean.</p>
+     *
+     * <p>So this is an improvement on a literal token in the agent's config,
+     * not a fix. Closing it means never putting the value on the command line:
+     * either a shell substitution that expands after {@code login} has its
+     * argv ({@code TOKEN="$(cat <owner-only file>)"}), or a config file the
+     * agent reads, as Claude's {@code --mcp-config} already does.</p>
      *
      * <p>Iteration order is the map's, so pass a {@link java.util.LinkedHashMap}
      * (or a single-entry {@link Map#of}) when the rendered command must be

@@ -75,6 +75,7 @@ import javafx.animation.PauseTransition;
 import javafx.animation.Timeline;
 import javafx.application.Platform;
 import javafx.collections.ListChangeListener;
+import javafx.event.EventHandler;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.Node;
@@ -2619,16 +2620,11 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * message actually fit at tab width.</p>
      */
     public String diagHandoffBanner(String spec) {
-        // pendingTabs too: a session that is still "Starting..." has a real
-        // tab with a real banner, and it is the state a screenshot driver
-        // reaches first -- looking only at openTabs made this verb report
-        // "no open tab" for a tab that was plainly on screen.
-        OpenSessionTab tab = openTabs.values().stream().findFirst()
-                .or(() -> pendingTabs.values().stream().findFirst())
-                .orElse(null);
-        if (tab == null) {
+        Map.Entry<ManagedSessionId, OpenSessionTab> active = activeDiagTab();
+        if (active == null) {
             return "no open or pending tab";
         }
+        OpenSessionTab tab = active.getValue();
         String[] parts = spec.split("/");
         boolean running = parts.length < 3 || !"dead".equals(parts[2].strip());
         HandoffStaleness staleness;
@@ -2643,6 +2639,80 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         }
         tab.handoffBanner().update(staleness, running);
         return staleness.describe() + (running ? " (running)" : " (exited)");
+    }
+
+    /**
+     * Diagnostic hook: recomputes the active tab's staleness against the real
+     * git history, rather than forcing a number as {@link #diagHandoffBanner}
+     * does. The recompute is asynchronous (it shells out to git), so the
+     * returned text is the message as it stands <em>now</em> -- a driver wants
+     * a step or two of gap before reading it.
+     */
+    public String diagRecomputeStaleness() {
+        Map.Entry<ManagedSessionId, OpenSessionTab> active = activeDiagTab();
+        if (active == null) {
+            return "no open or pending tab";
+        }
+        refreshHandoffBanner(active.getKey());
+        return "recomputing; banner currently reads "
+                + quoted(active.getValue().handoffBanner().messageText());
+    }
+
+    /**
+     * Diagnostic hook: performs the fork gesture on the active tab for the
+     * agent whose display name starts with {@code agentName}.
+     *
+     * <p>Drives the <em>wiring</em>, not the service: it fires the fork
+     * button's real {@code onShowing} handler to populate the menu and then
+     * the chosen item's real action. Calling {@link #forkSessionTo} here
+     * instead would let the verb pass with the menu unwired, which is exactly
+     * the failure a live run exists to catch. Robot input cannot reach the app
+     * in a diag run, so this is the only way to press this button without a
+     * human.</p>
+     */
+    public String diagFork(String agentName) {
+        Map.Entry<ManagedSessionId, OpenSessionTab> active = activeDiagTab();
+        if (active == null) {
+            return "no open or pending tab";
+        }
+        MenuButton fork = active.getValue().handoffBanner().forkButton();
+        // Fully qualified: GitHubReviewRequest.Event is imported here too.
+        EventHandler<javafx.event.Event> onShowing = fork.getOnShowing();
+        if (onShowing == null) {
+            return "the fork button has no onShowing handler, so its menu never populates";
+        }
+        onShowing.handle(new javafx.event.Event(MenuButton.ON_SHOWING));
+
+        String wanted = agentName.strip().toLowerCase(Locale.ROOT);
+        Optional<MenuItem> chosen = fork.getItems().stream()
+                .filter(item -> item.getText().toLowerCase(Locale.ROOT).startsWith(wanted))
+                .findFirst();
+        if (chosen.isEmpty()) {
+            return "no agent matching " + quoted(agentName) + " among "
+                    + fork.getItems().stream().map(MenuItem::getText).toList();
+        }
+        if (chosen.get().isDisable()) {
+            return quoted(chosen.get().getText()) + " cannot be forked to";
+        }
+        chosen.get().fire();
+        return "fired " + quoted(chosen.get().getText()) + " for session " + active.getKey();
+    }
+
+    /**
+     * The tab a diagnostic verb acts on: the first open one, else the first
+     * still starting. Pending counts because a session showing "Starting..."
+     * has a real tab with a real banner, and it is the state a screenshot
+     * driver reaches first -- looking only at {@code openTabs} once made these
+     * verbs report "no open tab" for a tab that was plainly on screen.
+     */
+    private Map.Entry<ManagedSessionId, OpenSessionTab> activeDiagTab() {
+        return openTabs.entrySet().stream().findFirst()
+                .or(() -> pendingTabs.entrySet().stream().findFirst())
+                .orElse(null);
+    }
+
+    private static String quoted(String text) {
+        return "'" + text + "'";
     }
 
     /** A worktree matched to the repository that owns it, plus its branch (for the tab title). */

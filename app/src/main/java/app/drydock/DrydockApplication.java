@@ -591,15 +591,12 @@ public final class DrydockApplication extends Application {
                                 mainWorkspace.diagTypeInExplorer(arg);
                                 System.out.println("[diag] explorer typed " + arg.length() + " chars");
                             }
-                            case "quit" -> {
-                                // Every script driver has one: without it a
-                                // screenshot run leaves a full JavaFX app (and
-                                // its native terminal surfaces) alive until
-                                // someone notices and kills it. Four of them
-                                // once ran for over an hour.
-                                System.out.println("[diag] quitting");
-                                Platform.exit();
-                            }
+                            // Every script driver ends with this: without it a
+                            // screenshot run leaves a full JavaFX app (and its
+                            // native terminal surfaces) alive until someone
+                            // notices and kills it. Four of them once ran for
+                            // over an hour.
+                            case "quit" -> diagQuit(primaryStage);
                             case "shot" -> diagSnapshot(primaryStage, Path.of(arg));
                             // handoff:<commits>/<files>, or handoff:none for a
                             // session that never wrote a brief, or
@@ -610,6 +607,16 @@ public final class DrydockApplication extends Application {
                             // and a git history to go stale against.
                             case "handoff" -> System.out.println("[diag] handoff banner -> "
                                     + mainWorkspace.diagHandoffBanner(arg));
+                            // staleness recomputes the banner from the real git
+                            // history instead of forcing a number, and fork:<agent>
+                            // performs the fork gesture through the button's own
+                            // handlers. Together they drive a live end-to-end fork,
+                            // which Robot input cannot: synthetic mouse events never
+                            // reach the app in a diag run.
+                            case "staleness" -> System.out.println("[diag] staleness -> "
+                                    + mainWorkspace.diagRecomputeStaleness());
+                            case "fork" -> System.out.println("[diag] fork -> "
+                                    + mainWorkspace.diagFork(arg));
                             case "resize" -> {
                                 diagWindowSize(arg).ifPresent(size -> {
                                     primaryStage.setWidth(size[0]);
@@ -1410,6 +1417,52 @@ public final class DrydockApplication extends Application {
         }
     }
 
+    /** How long {@link #diagQuit} lets the orderly shutdown finish before forcing the JVM down. */
+    private static final long DIAG_QUIT_GRACE_MILLIS = 10_000;
+
+    /**
+     * Ends a diagnostic run: shuts the app down the way a human's window-close
+     * does, then makes sure the JVM actually goes.
+     *
+     * <p>The shutdown itself goes through {@link #performOrderlyShutdown} --
+     * the same {@code closeAllSessions} -> {@code Stage.close()} path a real
+     * close confirmation uses -- so a scripted run exercises production
+     * shutdown rather than a diag-only shortcut, and the hosted agents are
+     * closed rather than abandoned.</p>
+     *
+     * <p>That is still not enough on its own, which a live fork run proved:
+     * the app sat there for minutes after printing "quitting", with {@code
+     * AWT-Shutdown} -- non-daemon, and alive because the dock icon and the
+     * snapshot verb both touch AWT -- as the only thing keeping {@code
+     * DestroyJavaVM} waiting. Nothing had failed; the JVM simply had a
+     * non-daemon thread left. The hosted agents outlived it too: their ptys
+     * stay open while the process holding them does, so orphaned {@code
+     * claude}/{@code codex} processes had to be killed by hand -- the exact
+     * leak this verb exists to prevent.</p>
+     *
+     * <p>Hence the daemon watchdog behind it, which halts the JVM if it is
+     * still up after the grace period. Confined to the diagnostic path:
+     * forcing an exit is right for a scripted run and wrong for a human's
+     * quit, which is why this wraps {@code performOrderlyShutdown} rather than
+     * changing it.</p>
+     */
+    private void diagQuit(Stage stage) {
+        System.out.println("[diag] quit: closing all sessions and the window");
+        Thread watchdog = new Thread(() -> {
+            try {
+                Thread.sleep(DIAG_QUIT_GRACE_MILLIS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+            System.out.println("[diag] still up after the orderly shutdown; forcing the JVM down");
+            Runtime.getRuntime().halt(0);
+        }, "diag-quit-watchdog");
+        watchdog.setDaemon(true);
+        watchdog.start();
+        performOrderlyShutdown(stage);
+    }
+
     /**
      * Installs every available agent's activity hooks (Plan A: Claude only),
      * then points the workspace at the one shared {@link
@@ -1590,11 +1643,8 @@ public final class DrydockApplication extends Application {
                 }
                 case "keys" -> System.out.println("[diag] keys " + mainWorkspace.diagKeyboardState()
                         + " focusOwner=" + describeFocusOwner());
-                case "quit" -> {
-                    // See the explorerScript driver for why every script has this.
-                    System.out.println("[diag] quitting");
-                    Platform.exit();
-                }
+                // See the explorerScript driver for why every script has this.
+                case "quit" -> diagQuit(stage);
                 case "shot" -> diagSnapshot(stage, Path.of(arg));
                 // DIAG-ONLY, added for the sidebar row-layout visual pass: the
                 // row-overlay's hover fade and pickOnBounds=false passthrough
@@ -1645,14 +1695,6 @@ public final class DrydockApplication extends Application {
                 // the code. Two rounds were lost to a plausible-but-wrong
                 // theory that the picture had already contradicted.
                 case "fadeinfo" -> diagFadeInfo(sidebar, arg);
-                // DIAG-ONLY: shuts the app down through the same
-                // closeAllSessions -> Stage.close() path a real window-close
-                // confirmation uses (see performOrderlyShutdown), so a
-                // scripted run does not leak a process after its last verb.
-                case "quit" -> {
-                    System.out.println("[diag] quit: closing all sessions and the window");
-                    performOrderlyShutdown(stage);
-                }
                 default -> System.out.println("[diag] mark " + arg);
             }
         } catch (RuntimeException e) {
@@ -1939,11 +1981,8 @@ public final class DrydockApplication extends Application {
                     }
                     System.out.println("[diag] view -> " + arg.strip());
                 }
-                case "quit" -> {
-                    // See the explorerScript driver for why every script has this.
-                    System.out.println("[diag] quitting");
-                    Platform.exit();
-                }
+                // See the explorerScript driver for why every script has this.
+                case "quit" -> diagQuit(stage);
                 case "shot" -> diagSnapshot(stage, Path.of(arg));
                 case "dump" -> {
                     WorkspaceUiState ui = repositoryManager.state().ui();
