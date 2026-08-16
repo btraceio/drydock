@@ -219,7 +219,21 @@ public final class PiExtensionSource {
                     // A refusal must read as a refusal: AgentToolResult has no
                     // isError field, so an error is signalled by throwing.
                     if (result?.isError) throw new Error(text);
-                    return { content: [{ type: "text", text }], details: decode(text) };
+                    const outcome = decode(text);
+                    // Dispatch is generic; session_rename alone has a post-call
+                    // hook, because only it has a name pi also stores. The title
+                    // comes from the OUTCOME, not the request: drydock may have
+                    // refused or altered it.
+                    if (tool.name === "session_rename" && typeof outcome?.title === "string") {
+                      try {
+                        pi.setSessionName(outcome.title);
+                      } catch {
+                        // A stale runtime after a session switch throws here.
+                        // The rename already landed in drydock; pi's picker
+                        // being out of step is not worth failing the call over.
+                      }
+                    }
+                    return { content: [{ type: "text", text }], details: outcome };
                   },
                 } as any);
               }

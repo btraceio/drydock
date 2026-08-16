@@ -261,4 +261,10 @@ run_error_case "BOOM" "sessions_boom" "session_rename: HTTP 500" "the HTTP-500 a
 run_error_case "HANGUP" "sessions_hangup" "session_rename: transport failure" "the transport-failure arm"
 run_error_case "UNAUTH" "sessions_unauth" "session_rename: this drydock session has ended" "the mid-session 401 arm"
 
+# An accepted rename must also set pi's own session name, from the OUTCOME.
+grep -q '"type":"session_info"' "$TRANSCRIPT" || { echo "FAIL: pi's session name was not set"; cat "$TRANSCRIPT"; exit 1; }
+grep -q '"name":"Smoke test"' "$TRANSCRIPT" || { echo "FAIL: session name did not come from the outcome"; cat "$TRANSCRIPT"; exit 1; }
+# A refused rename must NOT set it.
+grep -q '"type":"session_info"' "$T2" && { echo "FAIL: a refused rename still renamed the pi session"; cat "$T2"; exit 1; }
+
 echo "PASS: handshake, registration and tools/call all reached the mock"
