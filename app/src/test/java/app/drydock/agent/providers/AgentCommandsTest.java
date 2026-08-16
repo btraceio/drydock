@@ -55,8 +55,9 @@ class AgentCommandsTest {
 
     /**
      * The whole point of the file: the rendered command must be able to carry
-     * a path but never a secret, so there is deliberately no overload that
-     * takes a value.
+     * a path but never a secret. There is an overload that takes a path
+     * literal; there is deliberately none that takes a value, because a value
+     * is where a credential would go.
      */
     @Test
     void theRenderedCommandNamesTheFileAndNeverTheSecretItHolds() {
@@ -65,5 +66,28 @@ class AgentCommandsTest {
 
         assertTrue(rendered.contains("/s/tok"), rendered);
         assertTrue(rendered.contains("$(cat "), rendered);
+    }
+
+    @Test
+    void literalPathIsQuotedSoASpaceSurvives() {
+        String prefix = AgentCommands.envPrefix(
+                List.of("PI_CODING_AGENT"),
+                Map.of("DRYDOCK_MCP_CONFIG", Path.of("/Users/x/Library/Application Support/ClaudeProjectManager/mcp/s1.json")),
+                Map.of());
+        assertEquals("env -u PI_CODING_AGENT "
+                + "DRYDOCK_MCP_CONFIG='/Users/x/Library/Application Support/ClaudeProjectManager/mcp/s1.json' ",
+                prefix);
+    }
+
+    @Test
+    void fromFilesStillReadsTheFileAtExecTime() {
+        String prefix = AgentCommands.envPrefix(
+                List.of(), Map.of(), Map.of("TOKEN", Path.of("/state/mcp/s1.token")));
+        assertEquals("env TOKEN=\"$(cat '/state/mcp/s1.token')\" ", prefix);
+    }
+
+    @Test
+    void allEmptyYieldsEmpty() {
+        assertEquals("", AgentCommands.envPrefix(List.of(), Map.of(), Map.of()));
     }
 }
