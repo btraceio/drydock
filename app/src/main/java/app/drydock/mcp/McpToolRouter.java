@@ -547,6 +547,11 @@ public final class McpToolRouter {
         Path path;
         try {
             path = context.createWorktree(caller, branch, startPoint);
+        } catch (McpWorktreeMayExistException e) {
+            // No refund: the add may already have created the worktree, and a
+            // refunded retry would hit "already exists" with nothing spent and
+            // nothing said. Java enforces this arm coming first.
+            throw e;
         } catch (McpToolException e) {
             registry.refundWorktree(caller);
             throw e;

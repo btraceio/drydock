@@ -546,8 +546,8 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
         Path home = Path.of(System.getProperty("user.home"));
         Path directory = WorktreeNaming.defaultDirectory(home, userConfig.get().worktreesDirectory(),
                 repository.displayName(), branch);
-        return join(gitStatusService.createWorktree(repository.root(), directory, branch, startPoint),
-                JOIN_TIMEOUT_SECONDS);
+        return joinAddBy(gitStatusService.createWorktree(repository.root(), directory, branch, startPoint),
+                deadlineIn(JOIN_TIMEOUT_SECONDS), directory);
     }
 
     @Override
@@ -635,6 +635,49 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
             throw new DeadlineExceededException();
         } catch (ExecutionException e) {
             throw translate(e.getCause() == null ? e : e.getCause());
+        }
+    }
+
+    /**
+     * As {@link #joinBy}, for the one wait that must not be retried blindly:
+     * an already submitted {@code git worktree add} on {@code directory}.
+     *
+     * <p>Every exit that is not a verdict from git becomes
+     * {@link McpWorktreeMayExistException}, which the router does not refund.
+     * That is four arms, not three: {@link #joinBy} runs out of deadline in
+     * two places -- the entry check and {@code get}'s
+     * {@link TimeoutException} -- and both would otherwise hand back a plain
+     * {@code McpToolException} and refund while the add ran on.</p>
+     *
+     * <p>It cannot be folded into {@link #joinBy}, which hands its cause to
+     * {@link #translate}; {@code translate} serves every tool in this class,
+     * so it cannot special-case the add without mislabelling the rest.</p>
+     */
+    static Path joinAddBy(CompletableFuture<Path> future, long deadlineNanos, Path directory)
+            throws McpToolException {
+        long remainingNanos = deadlineNanos - System.nanoTime();
+        if (remainingNanos <= 0) {
+            throw new McpWorktreeMayExistException(directory);
+        }
+        try {
+            return future.get(remainingNanos, TimeUnit.NANOSECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new McpWorktreeMayExistException(directory);
+        } catch (TimeoutException e) {
+            throw new McpWorktreeMayExistException(directory);
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause() == null ? e : e.getCause();
+            // As translate does: a composed future would arrive wrapped, and
+            // an instanceof test that missed that would silently refund.
+            while (cause instanceof CompletionException && cause.getCause() != null) {
+                cause = cause.getCause();
+            }
+            if (cause instanceof GitCommandFailedException gitFailed
+                    && gitFailed.outcome() == GitCommandFailedException.Outcome.UNKNOWN) {
+                throw new McpWorktreeMayExistException(directory);
+            }
+            throw translate(cause);
         }
     }
 

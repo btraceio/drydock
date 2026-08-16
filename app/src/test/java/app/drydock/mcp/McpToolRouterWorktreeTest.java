@@ -133,4 +133,26 @@ class McpToolRouterWorktreeTest {
             router.call(caller, "worktree_create", args("branch", "feat/try-" + i));
         }
     }
+
+    /**
+     * The refund is what makes a retry possible, so it must not happen when
+     * the add may have already created the directory: the retry would hit
+     * {@code fatal: '<dir>' already exists} forever, charged nothing and told
+     * nothing. One of four worktrees is the price of being wrong; a free
+     * worktree and a permanently poisoned retry is the price of the other way
+     * round.
+     */
+    @Test
+    void anAddThatMayHaveCreatedAWorktreeKeepsTheCharge() throws Exception {
+        context.failure = new McpWorktreeMayExistException(Path.of("/wt/feat-x"));
+        assertThrows(McpWorktreeMayExistException.class,
+                () -> router.call(caller, "worktree_create", args("branch", "feat/x")));
+
+        context.failure = null;
+        for (int i = 0; i < McpSessionRegistry.MAX_WORKTREES_PER_SESSION - 1; i++) {
+            router.call(caller, "worktree_create", args("branch", "feat/try-" + i));
+        }
+        assertThrows(McpToolException.class,
+                () -> router.call(caller, "worktree_create", args("branch", "feat/one-too-many")));
+    }
 }

@@ -13,6 +13,7 @@ import app.drydock.domain.RepositoryId;
 import app.drydock.domain.RepositorySettings;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SshRemote;
+import app.drydock.git.GitCommandFailedException;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.WorktreeService;
 import app.drydock.mcp.McpSessionContext.RenameKind;
@@ -25,16 +26,20 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -300,10 +305,114 @@ class WorkspaceMcpSessionContextTest {
         assertTrue(failure.getMessage().contains("did not respond in time"), failure.getMessage());
     }
 
+    // ---- joinAddBy: the four ways an add can end without a verdict -----------
+    //
+    // joinBy has three exits and two of them are expiry; every one of the four
+    // has to say "may exist", because the future being awaited is an already
+    // submitted `git worktree add` and the router refunds anything that is not
+    // McpWorktreeMayExistException.
+
+    private static final Path ADD_DIR = Path.of("/wt/drydock-feat-x");
+
+    @Test
+    void anAlreadyExpiredDeadlineMayHaveLeftAWorktreeBecauseTheAddWasSubmittedFirst() {
+        McpWorktreeMayExistException failure = assertThrows(McpWorktreeMayExistException.class,
+                () -> WorkspaceMcpSessionContext.joinAddBy(
+                        new CompletableFuture<Path>(), System.nanoTime() - 1, ADD_DIR));
+
+        assertTrue(failure.getMessage().contains(ADD_DIR.toString()), failure.getMessage());
+    }
+
+    @Test
+    void expiryDuringTheWaitMayHaveLeftAWorktree() {
+        assertThrows(McpWorktreeMayExistException.class,
+                () -> WorkspaceMcpSessionContext.joinAddBy(new CompletableFuture<Path>(),
+                        System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(200), ADD_DIR));
+    }
+
+    @Test
+    void anInterruptedWaitMayHaveLeftAWorktree() throws Exception {
+        AtomicReference<Throwable> caught = new AtomicReference<>();
+        Thread worker = new Thread(() -> {
+            try {
+                WorkspaceMcpSessionContext.joinAddBy(new CompletableFuture<Path>(),
+                        System.nanoTime() + TimeUnit.SECONDS.toNanos(30), ADD_DIR);
+            } catch (Throwable e) {
+                caught.set(e);
+            }
+        });
+        worker.start();
+        Thread.sleep(200);
+        worker.interrupt();
+        worker.join(10_000);
+
+        assertInstanceOf(McpWorktreeMayExistException.class, caught.get());
+    }
+
+    @Test
+    void aKilledAddMayHaveLeftAWorktreeEvenWrappedInACompletionException() {
+        GitCommandFailedException killed = new GitCommandFailedException(
+                List.of("git", "worktree", "add"), -1, "timed out after 15s (killed)",
+                GitCommandFailedException.Outcome.UNKNOWN);
+
+        assertThrows(McpWorktreeMayExistException.class, () -> WorkspaceMcpSessionContext.joinAddBy(
+                CompletableFuture.failedFuture(killed), liveDeadline(), ADD_DIR));
+        // supplyAsync hands the cause over unwrapped today; the moment the add
+        // is composed it would arrive wrapped, and an instanceof test that
+        // missed that would fall through to the refunding path.
+        assertThrows(McpWorktreeMayExistException.class, () -> WorkspaceMcpSessionContext.joinAddBy(
+                CompletableFuture.failedFuture(new CompletionException(killed)), liveDeadline(), ADD_DIR));
+    }
+
+    @Test
+    void aGitFailureWithAVerdictStaysAnOrdinaryFailureSoTheRouterRefunds() {
+        GitCommandFailedException known = new GitCommandFailedException(
+                List.of("git", "worktree", "add"), 128, "fatal: 'feat/x' already exists");
+
+        McpToolException failure = assertThrows(McpToolException.class, () -> WorkspaceMcpSessionContext.joinAddBy(
+                CompletableFuture.failedFuture(known), liveDeadline(), ADD_DIR));
+
+        assertFalse(failure instanceof McpWorktreeMayExistException, failure.getMessage());
+        assertEquals("git failed: fatal: 'feat/x' already exists", failure.getMessage());
+    }
+
+    /**
+     * The other half of the discriminator, end to end: a parent directory that
+     * cannot be created fails before any process is spawned, so nothing can
+     * exist and the charge must come back.
+     */
+    @Test
+    void aWorktreeParentThatCannotBeCreatedIsAnOrdinaryFailure(@TempDir Path repoDir,
+                                                               @TempDir Path worktreesParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path readOnly = Files.createDirectory(worktreesParent.resolve("read-only"));
+        Files.setPosixFilePermissions(readOnly, PosixFilePermissions.fromString("r-xr-xr-x"));
+        userConfig = new UserConfig(Optional.of(readOnly.resolve("worktrees")));
+        WorkspaceMcpSessionContext context = contextFor(repo);
+        try {
+            McpToolException failure = assertThrows(McpToolException.class,
+                    () -> context.createWorktree(caller(repo), "feat/x", Optional.empty()));
+
+            assertFalse(failure instanceof McpWorktreeMayExistException, failure.getMessage());
+            // Pin that it failed for the reason under test, not on the way in.
+            assertTrue(failure.getMessage().startsWith("git failed: "), failure.getMessage());
+            assertTrue(failure.getMessage().contains(readOnly.toString()), failure.getMessage());
+        } finally {
+            Files.setPosixFilePermissions(readOnly, PosixFilePermissions.fromString("rwxr-xr-x"));
+        }
+    }
+
+    private static long liveDeadline() {
+        return System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+    }
+
     // ---- fixtures -----------------------------------------------------------
 
     private Repository repository;
     private ManagedAgentSession session;
+
+    /** Where new worktrees go; overridden by tests that must not write into the real home. */
+    private UserConfig userConfig = UserConfig.empty();
 
     private Repository localRepository(Path root) throws IOException {
         if (repository == null) {
@@ -352,7 +461,7 @@ class WorkspaceMcpSessionContextTest {
                 new app.drydock.git.DiffService(),
                 gitStatusService,
                 worktreeService,
-                UserConfig::empty,
+                () -> userConfig,
                 (worktree, prompt) -> CompletableFuture.failedFuture(
                         new UnsupportedOperationException("no window in this test")),
                 (id, title) -> CompletableFuture.completedFuture(new RenameOutcome(RenameKind.RENAMED, title)),
