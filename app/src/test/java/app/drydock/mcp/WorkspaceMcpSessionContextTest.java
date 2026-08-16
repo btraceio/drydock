@@ -388,7 +388,7 @@ class WorkspaceMcpSessionContextTest {
         Path repo = initCommittedRepo(repoDir);
         Path readOnly = Files.createDirectory(worktreesParent.resolve("read-only"));
         Files.setPosixFilePermissions(readOnly, PosixFilePermissions.fromString("r-xr-xr-x"));
-        userConfig = new UserConfig(Optional.of(readOnly.resolve("worktrees")));
+        userConfig = worktreesIn(readOnly.resolve("worktrees"));
         WorkspaceMcpSessionContext context = contextFor(repo);
         try {
             McpToolException failure = assertThrows(McpToolException.class,
@@ -414,7 +414,7 @@ class WorkspaceMcpSessionContextTest {
             throws Exception {
         Path repo = initCommittedRepo(repoDir);
         runGit(repo, "branch", "feat/login");
-        userConfig = new UserConfig(Optional.of(worktrees));
+        userConfig = worktreesIn(worktrees);
 
         ExistingBranchWorktree created =
                 contextFor(repo).createWorktreeOnExistingBranch(caller(repo), "feat/login");
@@ -437,7 +437,7 @@ class WorkspaceMcpSessionContextTest {
         runGit(upstream, "branch", "feat/login");
         Path clone = tmp.resolve("clone");
         runGit(tmp, "clone", upstream.toString(), clone.toString());
-        userConfig = new UserConfig(Optional.of(tmp.resolve("worktrees")));
+        userConfig = worktreesIn(tmp.resolve("worktrees"));
 
         ExistingBranchWorktree created =
                 contextFor(clone).createWorktreeOnExistingBranch(caller(clone), "origin/feat/login");
@@ -452,7 +452,7 @@ class WorkspaceMcpSessionContextTest {
     void aBranchAlreadyCheckedOutElsewhereIsRefusedAndNamesItsHolder(@TempDir Path repoDir, @TempDir Path worktrees)
             throws Exception {
         Path repo = initCommittedRepo(repoDir);
-        userConfig = new UserConfig(Optional.of(worktrees));
+        userConfig = worktreesIn(worktrees);
 
         // "main" is checked out in the main checkout itself.
         McpToolException failure = assertThrows(McpToolException.class,
@@ -466,7 +466,7 @@ class WorkspaceMcpSessionContextTest {
     void anUnknownBranchIsRefusedAndSaysHowToCreateOne(@TempDir Path repoDir, @TempDir Path worktrees)
             throws Exception {
         Path repo = initCommittedRepo(repoDir);
-        userConfig = new UserConfig(Optional.of(worktrees));
+        userConfig = worktreesIn(worktrees);
 
         McpToolException failure = assertThrows(McpToolException.class,
                 () -> contextFor(repo).createWorktreeOnExistingBranch(caller(repo), "feat/nope"));
@@ -488,7 +488,7 @@ class WorkspaceMcpSessionContextTest {
         runGit(upstream, "branch", "origin/main");
         Path clone = tmp.resolve("clone");
         runGit(tmp, "clone", upstream.toString(), clone.toString());
-        userConfig = new UserConfig(Optional.of(tmp.resolve("worktrees")));
+        userConfig = worktreesIn(tmp.resolve("worktrees"));
 
         McpToolException failure = assertThrows(McpToolException.class,
                 () -> contextFor(clone).createWorktreeOnExistingBranch(caller(clone), "origin/origin/main"));
@@ -519,6 +519,16 @@ class WorkspaceMcpSessionContextTest {
 
     /** Where new worktrees go; overridden by tests that must not write into the real home. */
     private UserConfig userConfig = UserConfig.empty();
+
+    /**
+     * Only the worktrees directory matters to these tests; every other
+     * setting keeps its default. Built through one helper so a new component
+     * on the record is a one-line change here rather than six.
+     */
+    private static UserConfig worktreesIn(Path directory) {
+        UserConfig defaults = UserConfig.empty();
+        return new UserConfig(Optional.of(directory), defaults.openChangedFilesInSkim());
+    }
 
     private Repository localRepository(Path root) throws IOException {
         if (repository == null) {
