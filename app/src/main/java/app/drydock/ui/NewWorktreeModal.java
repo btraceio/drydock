@@ -680,6 +680,37 @@ final class NewWorktreeModal extends VBox {
         return String.valueOf(mode);
     }
 
+    /**
+     * Diagnostic-only: presses the "check it out instead" offer, through the
+     * button's own action rather than {@code setMode}, so the verb fails if
+     * the offer is unwired. Reports what it did, and what the offer was.
+     */
+    String diagPressOffer() {
+        if (!switchOfferButton.isVisible()) {
+            return "no offer is showing (hint: " + hintLine.getText() + ")";
+        }
+        if (switchOfferButton.isDisabled()) {
+            return "offer is disabled";
+        }
+        String label = switchOfferButton.getText();
+        switchOfferButton.fire();
+        return "pressed '" + label + "' -> mode " + mode + ", value " + branchField.getValue();
+    }
+
+    /**
+     * Diagnostic-only: presses Create through the button's own action, and
+     * refuses to pretend when the button is disabled -- what Create would run
+     * is the whole point of the check.
+     */
+    String diagPressCreate() {
+        if (createButton.isDisabled()) {
+            return "Create is disabled (hint: " + hintLine.getText() + ")";
+        }
+        String willRun = commandPreview.getText();
+        createButton.fire();
+        return "pressed Create in mode " + mode + "; preview was: " + willRun;
+    }
+
     /** Marks the create action as in flight. */
     void showCreating() {
         hideError();

@@ -645,6 +645,10 @@ public final class DrydockApplication extends Application {
                                     + mainWorkspace.diagWorktreeText(arg));
                             case "worktreeswitch" -> System.out.println("[diag] new-worktree mode -> "
                                     + mainWorkspace.diagWorktreeSwitchMode());
+                            case "worktreeoffer" -> System.out.println("[diag] new-worktree offer -> "
+                                    + mainWorkspace.diagWorktreePressOffer());
+                            case "worktreecreate" -> System.out.println("[diag] new-worktree create -> "
+                                    + mainWorkspace.diagWorktreePressCreate());
                             case "resize" -> {
                                 diagWindowSize(arg).ifPresent(size -> {
                                     primaryStage.setWidth(size[0]);

@@ -2203,6 +2203,22 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         return openWorktreeModal.diagSwitchMode();
     }
 
+    /** Diagnostic-only: presses the modal's "check it out instead" offer. */
+    public String diagWorktreePressOffer() {
+        if (openWorktreeModal == null) {
+            return "no create-worktree modal is open";
+        }
+        return openWorktreeModal.diagPressOffer();
+    }
+
+    /** Diagnostic-only: presses the modal's Create button. */
+    public String diagWorktreePressCreate() {
+        if (openWorktreeModal == null) {
+            return "no create-worktree modal is open";
+        }
+        return openWorktreeModal.diagPressCreate();
+    }
+
     /**
      * Opens a new session living inside an already-created git worktree
      * (design handoff section B "Creating"): the session launches claude
