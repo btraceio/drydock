@@ -1030,11 +1030,39 @@
     -fx-text-fill: -drydock-text-dim;
     -fx-font-size: 12px;
     -fx-padding: 3 14 3 14;
+    -fx-label-padding: 0;
     -fx-cursor: hand;
 }
 .seg-toggle-button:selected {
     -fx-background-color: -drydock-accent-soft;
     -fx-text-fill: -drydock-text;
+}
+/*
+ * The segments are RadioButtons (only RadioButton.fire() guards against
+ * clicking a two-button group into no selection at all), so Modena's radio
+ * graphic has to go: it paints the full button background stack with a 1em
+ * radius, which would leave a circular button beside each label.
+ */
+.seg-toggle-button > .radio {
+    -fx-background-color: transparent;
+    -fx-border-color: transparent;
+    -fx-background-radius: 0;
+    -fx-padding: 0;
+}
+/* The mark itself is a separate region with its own paint, so clearing the
+   graphic's background above is not enough -- without this the selected
+   segment reads "⊙New branch". */
+.seg-toggle-button > .radio > .dot {
+    -fx-background-color: transparent;
+    -fx-background-insets: 0;
+    -fx-padding: 0;
+}
+/* Modena's only focus indicator for a radio is on that now-invisible graphic,
+   and the switch is keyboard-operable, so it needs one of its own. */
+.seg-toggle-button:focused {
+    -fx-border-color: -drydock-accent;
+    -fx-border-radius: 5px;
+    -fx-border-width: 1;
 }
 .explorer-search-row {
     -fx-background-color: -drydock-input-bg;
@@ -1520,6 +1548,15 @@
 .worktree-hint {
     -fx-text-fill: -drydock-text-dim;
     -fx-font-size: 11.5px;
+}
+/* Sits beside the hint and reads as part of it: flat, link-coloured, sized to
+   match .worktree-hint above. */
+.worktree-hint-action {
+    -fx-background-color: transparent;
+    -fx-text-fill: -drydock-accent;
+    -fx-font-size: 11.5px;
+    -fx-padding: 0 0 0 6;
+    -fx-cursor: hand;
 }
 .worktree-create-button {
     -fx-background-color: -drydock-accent;

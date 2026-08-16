@@ -617,6 +617,34 @@ public final class DrydockApplication extends Application {
                                     + mainWorkspace.diagRecomputeStaleness());
                             case "fork" -> System.out.println("[diag] fork -> "
                                     + mainWorkspace.diagFork(arg));
+                            // newworktree:<repo path> -- registers the repository
+                            // if it is not already known, then opens the
+                            // create-worktree modal on it. Deliberately does not
+                            // need autoCreateSession, which would spawn a real
+                            // agent this modal has nothing to do with.
+                            case "newworktree" -> {
+                                Path repoPath = Path.of(arg.strip()).toAbsolutePath().normalize();
+                                repositoryManager.repositories().stream()
+                                        .filter(candidate -> candidate.root().equals(repoPath))
+                                        .findFirst()
+                                        .ifPresentOrElse(
+                                                repository -> diagOpenNewWorktree(mainWorkspace, appShell,
+                                                        repository),
+                                                () -> repositoryManager.addRepository(repoPath)
+                                                        .whenComplete((repo, ex) -> Platform.runLater(() -> {
+                                                            if (ex != null) {
+                                                                System.out.println(
+                                                                        "[diag] newworktree: addRepository failed: "
+                                                                                + ex);
+                                                                return;
+                                                            }
+                                                            diagOpenNewWorktree(mainWorkspace, appShell, repo);
+                                                        })));
+                            }
+                            case "worktreetext" -> System.out.println("[diag] new-worktree branch text -> "
+                                    + mainWorkspace.diagWorktreeText(arg));
+                            case "worktreeswitch" -> System.out.println("[diag] new-worktree mode -> "
+                                    + mainWorkspace.diagWorktreeSwitchMode());
                             case "resize" -> {
                                 diagWindowSize(arg).ifPresent(size -> {
                                     primaryStage.setWidth(size[0]);
@@ -2040,6 +2068,14 @@ public final class DrydockApplication extends Application {
      * <p>Must be called on the FX thread; the snapshot itself is an FX-thread
      * operation, and only the PNG encoding is handed to a background thread.
      */
+    /** Opens the create-worktree modal and says which repository it opened on. */
+    private static void diagOpenNewWorktree(MainWorkspace mainWorkspace, AppShell appShell,
+                                            app.drydock.domain.Repository repository) {
+        mainWorkspace.promptNewWorktree(repository, appShell.modalLayer());
+        System.out.println("[diag] new-worktree modal opened on " + repository.displayName()
+                + " (" + repository.root() + ")");
+    }
+
     private static void diagSnapshot(Stage stage, Path target) {
         WritableImage image = stage.getScene().snapshot(null);
         int width = (int) image.getWidth();

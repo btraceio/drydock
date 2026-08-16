@@ -63,6 +63,9 @@ final class ShortcutsOverlay {
                     {"MCP activity log", "\\"},
                     {"Narrow: open the diff / back to the queue", "⏎ esc"},
             }),
+            new Section("IN THE NEW-WORKTREE MODAL", new String[][] {
+                    {"Switch new / existing branch", "⌘E"},
+            }),
             new Section("IN THE EXPLORER", new String[][] {
                     {"Focus the file search", "/"},
                     {"Scope: this change / the whole worktree", "d"},
