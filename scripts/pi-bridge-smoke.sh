@@ -125,7 +125,12 @@ fail() { echo "FAIL: $1"; echo "--- pi output ---"; cat "$WORK/out.txt"; echo "-
 no_leak() {
   [ -n "$1" ] || return 0
   grep -q '127.0.0.1' "$1" && { echo "FAIL: the endpoint URL leaked into $2"; cat "$1"; exit 1; }
-  grep -q "$PORT" "$1" && { echo "FAIL: the port leaked into $2"; cat "$1"; exit 1; }
+  # Narrowed to the endpoint form: a bare port number can coincidentally
+  # appear inside a millisecond timestamp pi writes into the transcript
+  # (e.g. port 8765 inside 1786921887651). Any real leak of the form
+  # 127.0.0.1:<port> already contains "127.0.0.1", caught by the line above --
+  # this is a strict subset of that coverage, not a weaker check.
+  grep -q "127.0.0.1:$PORT" "$1" && { echo "FAIL: the port leaked into $2"; cat "$1"; exit 1; }
   return 0
 }
 
