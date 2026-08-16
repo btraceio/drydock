@@ -298,3 +298,35 @@ plus a live `Stage`). Walk this with a human at the keyboard:
    `namePinned=true`, agent rename refused with "This session was named by
    the human ('Human named this')".)* Blur must never pin because an agent's
    `session_start` opens and selects a tab, which blurs any open editor.
+
+## Pi MCP bridge
+
+None of these can be reached from a non-interactive `pi -p` run: `project_trust`
+is only live in the TUI, every `session_start` reason above `startup` comes from
+a TUI command, and `ctx.ui` is a no-op UI outside the TUI — so the notification
+mechanism that six silent failure modes depend on is structurally unverifiable
+by `scripts/pi-bridge-smoke.sh`.
+
+- [ ] A Pi tab renames itself during real work, without being asked.
+- [ ] `-e` loads with **no trust prompt** in a real interactive tab, in a freshly
+      created worktree.
+- [ ] A refused rename (rename the tab in drydock first, so it pins) surfaces to
+      the model as a refusal it can read.
+- [ ] With drydock's MCP server stopped, the tab still starts, and a warning
+      notification appears rather than silence.
+- [ ] An extension that throws still lets the tab start — temporarily corrupt
+      `<state>/pi/drydock-mcp.ts` and confirm. (This is the invariant; its
+      failure is total.)
+- [ ] `/new` inside a Pi tab: the drydock tools stop working in the new
+      conversation, and the old tab's title is not touched by it.
+- [ ] `/fork` before the first assistant response (pi refuses it): the bridge
+      still works afterwards — this is the case the reversible gate exists for.
+- [ ] `/resume` inside a Pi tab, picking a DIFFERENT conversation: the bridge
+      stands down. This is the case that killed the reason-allow-list guard —
+      in-TUI `/resume` reports `reason: "resume"` while drydock's own
+      `pi --session <id>` reports `startup` — so it is the least skippable of
+      the four.
+- [ ] `/reload` inside a Pi tab: the bridge keeps working.
+- [ ] The timeout arm: with the smoke mock running, `-p "Call session_rename
+      with the title 'SLOW'"`. After 45s the model must be told the call *may
+      have completed* and not to retry — not that it failed.

@@ -40,6 +40,7 @@ public final class PiExtensionSource {
               let instructions = "";
               let loadError: string | null = null;
               let registered = false;
+              let handingOver = false;
 
               // Handlers first, synchronously, before any await: pi.on() only
               // asserts the runtime is active and cannot throw during load,
@@ -85,7 +86,14 @@ public final class PiExtensionSource {
                 }
               });
 
+              // Reversible: pi throws non-fatally between here and the teardown
+              // on three of four switch paths, and another extension can cancel
+              // the switch outright, so this must be undoable.
+              pi.on("session_before_switch", () => { handingOver = true; });
+              pi.on("session_before_fork", () => { handingOver = true; });
+
               pi.on("before_agent_start", async (event: any) => {
+                handingOver = false;
                 if (!instructions) return undefined;
                 return { systemPrompt: `${event.systemPrompt}\\n\\n${instructions}` };
               });
@@ -185,6 +193,9 @@ public final class PiExtensionSource {
                   // JSON-Schema coercion pass instead.
                   parameters: tool.inputSchema ?? { type: "object", properties: {} },
                   async execute(_id: string, params: any, signal?: AbortSignal) {
+                    if (handingOver) {
+                      throw new Error(`${tool.name}: this drydock session is being handed over`);
+                    }
                     // AbortSignal.any rejects on undefined, and pi types the
                     // signal as optional and guards it as signal?.aborted itself.
                     const deadline = AbortSignal.timeout(CALL_MS);
