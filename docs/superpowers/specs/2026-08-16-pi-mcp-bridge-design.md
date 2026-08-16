@@ -424,11 +424,27 @@ first canceller, so load order would decide it.
 
 So: **`session_before_switch` and `session_before_fork` arm a reversible gate**
 — a boolean checked at the top of `execute`, which refuses further calls with
-"this drydock session is being handed over". That closes the in-flight window,
-costs nothing to undo, and mutates no state another extension can observe. It is
-cleared on the next `before_agent_start`, which fires on every turn, and a real
-switch always emits `session_start` before any new turn can begin, so the commit
-below always wins the race.
+"this drydock session is being handed over". It costs nothing to undo and
+mutates no state another extension can observe. It is cleared on the next
+`before_agent_start`, which fires on every turn, and a real switch always emits
+`session_start` before any new turn can begin, so the commit below always wins
+the race.
+
+**The gate narrows the window; it does not close it.** A boolean cannot retract
+a request already on the wire, `session.abort()` cancels only the client's side,
+and the server has committed under its own lock — the same fact the rejection
+arms record. So a `session_rename` dispatched at the instant the human typed
+`/new` still lands, attributed to the conversation being abandoned. Nothing pi
+or drydock offers can prevent that; the residual is one write, bounded by a
+localhost round trip normally and by the server's own joins at worst. What the
+gate buys is every call *after* that one.
+
+**The pre-hook handler must not `await`.** Arming a boolean does not need to,
+and the reasoning above depends on it: `emit` awaits each handler, so a
+synchronous handler yields only a microtask — which Node drains before any I/O
+callback, leaving no room for a keypress between the pre-hook and the teardown.
+Add a `ctx.ui.notify` or a log write there and that gap becomes a real
+event-loop turn.
 
 **`session_start` carrying a `previousSessionFile` commits the stand-down.**
 That is where the handler returns before registering, and the `instructions`
@@ -681,7 +697,7 @@ None of that is unsolvable. All of it is a second spec.
 | a tool name collides with a pi built-in | that tool is not registered; reported; others register. A collision on `session_rename` specifically means the goal silently does not happen while everything else reports healthy |
 | `tools/call` fails or times out | that call throws to the model; other tools keep working |
 | token revoked (session ended) | 401 → "this drydock session has ended" tool error |
-| `session_before_switch` / `session_before_fork` fires (`/new`, `/resume`, `/fork`) | a reversible gate refuses further `tools/call`s **before** teardown, so an in-flight call cannot land in the outgoing conversation; cleared on the next `before_agent_start` if the switch never happens |
+| `session_before_switch` / `session_before_fork` fires (`/new`, `/resume`, `/fork`) | a reversible gate refuses further `tools/call`s **before** teardown; a call already on the wire still lands and cannot be retracted by anyone; cleared on the next `before_agent_start` if the switch never happens |
 | `session_start` carries a `previousSessionFile` (the switch did happen) | stand-down committed: no registration in the new conversation, instructions injection stops, reported |
 | `session_start` carries none (`/reload`, first launch) | bridge carries on; the `registered` flag stops a second registration pass |
 
