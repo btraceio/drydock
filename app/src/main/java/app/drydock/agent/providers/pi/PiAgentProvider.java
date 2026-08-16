@@ -30,7 +30,12 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
@@ -55,7 +60,7 @@ public final class PiAgentProvider implements AgentProvider {
     private static final Logger LOG = System.getLogger(PiAgentProvider.class.getName());
 
     private final PiExecutableLocator locator;
-    private final PiCapabilities injectedCapabilities;   // tests only; null in production
+    private final Supplier<PiCapabilities> probe;   // tests only; null in production
     private PiConversationSource conversationSource;
     private SessionIdDiscovery idDiscovery;
     private PiExtensionInstaller installer;
@@ -82,10 +87,10 @@ public final class PiAgentProvider implements AgentProvider {
         this(locator, null);
     }
 
-    /** For tests: also pin the capabilities, so the bridge form can be exercised without a real pi. */
-    PiAgentProvider(PiExecutableLocator locator, PiCapabilities capabilities) {
+    /** For tests: inject a version probe, so the bridge form can be exercised without a real pi. */
+    PiAgentProvider(PiExecutableLocator locator, Supplier<PiCapabilities> probe) {
         this.locator = locator;
-        this.injectedCapabilities = capabilities;
+        this.probe = probe;
     }
 
     @Override
@@ -193,12 +198,10 @@ public final class PiAgentProvider implements AgentProvider {
     }
 
     private CompletableFuture<PiCapabilities> capabilitiesFuture() {
-        if (injectedCapabilities != null) {
-            return CompletableFuture.completedFuture(injectedCapabilities);
-        }
-        return memoised(capabilities,
-                () -> PiCapabilities.of(PiVersionProbe.probe(locator.locate().orElse(null))),
-                probed -> !"unknown".equals(probed.version()));
+        Supplier<PiCapabilities> work = probe != null
+                ? probe
+                : () -> PiCapabilities.of(PiVersionProbe.probe(locator.locate().orElse(null)));
+        return memoised(capabilities, work, probed -> !"unknown".equals(probed.version()));
     }
 
     private CompletableFuture<Path> extensionFuture() {

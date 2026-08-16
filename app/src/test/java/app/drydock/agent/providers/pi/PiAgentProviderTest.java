@@ -24,6 +24,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -93,7 +94,7 @@ class PiAgentProviderTest {
     /** A provider whose version gate and extension file are both satisfied, for the bridge cases. */
     private PiAgentProvider bridgeProvider(Path state) {
         PiAgentProvider p = new PiAgentProvider(new PiExecutableLocator(Path.of("/nonexistent/pi")),
-                PiCapabilities.of("0.84.1"));
+                () -> PiCapabilities.of("0.84.1"));
         p.init(new AgentContext(state, state.resolve("activity"), ForkJoinPool.commonPool()));
         return p;
     }
@@ -144,12 +145,13 @@ class PiAgentProviderTest {
         assertTrue(command.contains("DRYDOCK_MCP_CONFIG='" + config + "'"), command);
         assertTrue(command.endsWith("--session '019f9072-abc'"), command);
         assertTrue(command.contains(" -e '"), command);
+        assertFalse(command.contains("tok-abc"), "the token must never reach the command line");
     }
 
     @Test
     void subFloorPiGetsNoFlagsEvenWithMcpAccess(@TempDir Path state) {
         PiAgentProvider p = new PiAgentProvider(new PiExecutableLocator(Path.of("/nonexistent/pi")),
-                PiCapabilities.of("0.79.10"));
+                () -> PiCapabilities.of("0.79.10"));
         p.init(new AgentContext(state, state.resolve("activity"), ForkJoinPool.commonPool()));
 
         String command = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
@@ -170,10 +172,9 @@ class PiAgentProviderTest {
      * The property the memoised future exists for: a failed write must not be
      * latched, or one transient IOException costs every Pi tab its tools for
      * the rest of the app run. This exercises the shared {@code memoised}
-     * helper -- NOT the probe's own {@code worthKeeping} predicate, which every
-     * bridge test bypasses via the injected capabilities. "A failed probe
-     * followed by a good one yields the good version" stays on the manual
-     * checklist until that injection becomes a supplier.
+     * helper via the extension-install slot; {@link
+     * #aFailedProbeIsNotLatchedAndTheNextLaunchRetries} exercises the same
+     * un-publish path via the capabilities slot.
      */
     @Test
     void aFailedWriteIsNotLatchedAndTheNextLaunchRetries(@TempDir Path parent) throws Exception {
@@ -198,13 +199,44 @@ class PiAgentProviderTest {
     }
 
     /**
-     * Two tabs opened together must both receive the path rather than one
-     * racing the other into a degraded launch. Note this does NOT count writes
-     * -- `memoised` guarantees one, but proving that needs a counting installer,
-     * and the property that matters at this seam is that no caller degrades.
+     * The capabilities-slot counterpart to {@link
+     * #aFailedWriteIsNotLatchedAndTheNextLaunchRetries}: a probe reporting
+     * {@code "unknown"} on its first call must not be latched, or one
+     * transient probe failure costs every Pi tab its tools for the rest of
+     * the app run. Also the only test that drives an injected probe through
+     * {@code memoised} instead of around it, so it is the one place the
+     * "start both, join both" path and the un-publish branch are both
+     * actually exercised for the capabilities slot.
      */
     @Test
-    void concurrentLaunchesShareOneInstall(@TempDir Path state) throws Exception {
+    void aFailedProbeIsNotLatchedAndTheNextLaunchRetries(@TempDir Path state) {
+        AtomicInteger calls = new AtomicInteger();
+        PiAgentProvider p = new PiAgentProvider(new PiExecutableLocator(Path.of("/nonexistent/pi")),
+                () -> PiCapabilities.of(calls.incrementAndGet() == 1 ? "unknown" : "0.84.1"));
+        p.init(new AgentContext(state, state.resolve("activity"), ForkJoinPool.commonPool()));
+        Path config = state.resolve("mcp").resolve("s1.json");
+
+        String firstAttempt = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
+                Optional.empty(), Optional.of(access(config)))).command();
+        assertTrue(firstAttempt.endsWith("pi"), "an \"unknown\" probe must not carry the bridge flags: " + firstAttempt);
+
+        String secondAttempt = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
+                Optional.empty(), Optional.of(access(config)))).command();
+        assertTrue(secondAttempt.contains(" -e '"),
+                "a probe that recovers must be retried, not latched to \"unknown\": " + secondAttempt);
+    }
+
+    /**
+     * Two tabs opened together must both receive the path rather than one
+     * racing the other into a degraded launch. This does NOT prove
+     * {@code memoised} de-duplicated the install to a single write --
+     * {@code PiExtensionInstaller} is safe under concurrency by construction
+     * (atomic, per-call temp names), so duplicate writes are harmless and not
+     * worth a test-only counting seam. What this checks is only that no
+     * concurrent caller degrades.
+     */
+    @Test
+    void concurrentLaunchesAllReceiveTheExtensionPath(@TempDir Path state) throws Exception {
         PiAgentProvider p = bridgeProvider(state);
         Path config = state.resolve("mcp").resolve("s1.json");
         ExecutorService pool = Executors.newFixedThreadPool(4);
