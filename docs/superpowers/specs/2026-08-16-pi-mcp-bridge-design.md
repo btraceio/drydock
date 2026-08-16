@@ -266,6 +266,22 @@ resolves extension-over-built-in by overwriting, so a post-registration
 `getAllTools()` shows one `read` — ours — and a name comparison finds nothing
 wrong.
 
+**The handler must not register twice.** `session_start` fires again on
+`/reload` (`reason: "reload"`, no `previousSessionFile`), so the backstop below
+passes it and the handler re-runs. If the instance survived — and `-e`
+extensions are documented as not reloadable, so it may — the collision snapshot
+now contains *our own* tools from the first pass, every drydock tool reads as
+"already present", and the guard refuses all of them: the bridge disables itself
+on a command that changed nothing. An instance-local `registered` flag, checked
+first, is the fix, and it is correct whether or not the instance is re-created.
+
+That flag does not reintroduce the memory the backstop rejects, and the
+distinction is worth being explicit about because the two rules look
+contradictory. Memorylessness is required because a *switch* hands the handler a
+fresh closure, so remembered state reads empty exactly when it must read full.
+Re-entry within one live instance is the opposite case: the flag is reliable
+precisely because the instance did not change.
+
 On expiry or any failure in either half: register nothing, report, return.
 
 **Registration.** Per advertised tool, `name`, `description` and `inputSchema`
@@ -308,12 +324,14 @@ is no "cancelled" arm in `AgentToolResult`. So the only thing in the extension's
 gift is the *text*, and `AbortSignal.any` collapses both causes into one
 rejection, so the arms are distinguished by inspecting the signal:
 
-- `signal.aborted` (the human pressed Esc) → `throw new Error("<tool>:
-  cancelled")`.
 - the 45-second timer fired → `throw new Error("<tool>: no response in 45s; the
   call may have completed — do not retry")`. Not "failed": `chargeRename` and
   `chargeHandoff` charge every attempt, refused and timed-out alike, so a model
-  that retries a timeout burns budget on work that may already be done.
+  that retries a timeout burns budget on work that may already be done. **This
+  arm is checked first**, because both causes can be set at once — a human
+  pressing Esc at ~45 seconds — and a call that ran the full budget is exactly
+  the one that may have landed. The tie goes to the conservative text.
+- `signal.aborted` → `throw new Error("<tool>: cancelled")`.
 - anything else → `throw new Error("<tool>: HTTP <status>")`.
 
 No arm reads `err.cause`.
@@ -380,21 +398,56 @@ still-valid token, and a *different* pi conversation would then rename drydock's
 tab and write its handoff brief — describing work that `pi --session <old id>`
 will never reopen.
 
-**Stand down before the switch, not after it.** pi emits cancellable pre-hooks —
-`session_before_switch` (`reason: "new" | "resume"`, carrying
-`targetSessionFile`) and `session_before_fork` — ahead of the teardown. Those
-are the primary seam: they fire before the new conversation exists, they name
-the target directly, and they cover `/new`, `/resume` and `/fork` without
-inference.
+**Close the window before the switch; commit the stand-down after it.** Two
+seams, doing two different jobs, because doing the whole job in either one is
+wrong.
 
-Reacting only to the *next* `session_start` would leave a window that matters.
+Reacting only to the *next* `session_start` leaves a window that matters.
 `teardownCurrent` calls `session.abort()` first, deliberately, "so the aborted
 turn (including tool results) is persisted to the outgoing session" — and an
 abort cancels nothing server-side, as the arms above establish. So a human
 typing `/new` while a `session_rename` or `session_handoff` is in flight would
 commit exactly the cross-session write this guard exists to prevent, from a
 conversation being abandoned, with the extension never learning the outcome.
-Dropping the tools in the pre-hook closes that.
+
+But doing the stand-down itself in the pre-hook is worse, because the switch may
+not happen. pi's own code throws *between* the pre-hook and the teardown on
+three of the four paths — `fork` rejects an invalid entry id and an unsaved
+session ("Wait for the first assistant response before cloning or forking it"),
+`switchSession` rejects an invalid session file and a missing cwd — and none of
+those throws is fatal: the TUI catches them and shows an error, so the tab lives
+on. A human pressing `/fork` before the first response, or `/resume`-ing onto a
+deleted worktree and cancelling the replacement-cwd prompt, would be left with a
+permanently disarmed bridge and no `session_start` to re-arm it. Another
+extension returning `{cancel: true}` does the same, and `emit` stops at the
+first canceller, so load order would decide it.
+
+So: **`session_before_switch` and `session_before_fork` arm a reversible gate**
+— a boolean checked at the top of `execute`, which refuses further calls with
+"this drydock session is being handed over". That closes the in-flight window,
+costs nothing to undo, and mutates no state another extension can observe. It is
+cleared on the next `before_agent_start`, which fires on every turn, and a real
+switch always emits `session_start` before any new turn can begin, so the commit
+below always wins the race.
+
+**`session_start` carrying a `previousSessionFile` commits the stand-down.**
+That is where the tools are dropped from the active set and the `instructions`
+injection stops.
+
+Neither pre-hook is relied on to name where the session is going, which is just
+as well: `targetSessionFile` is optional on `session_before_switch` and is
+absent for `/new`, and `session_before_fork` carries only `{entryId, position}`.
+The gate needs no target.
+
+`session_shutdown` was the third candidate and is the most uniform of the three
+— all five reasons, and it does name the target — but it fires inside
+`teardownCurrent` *after* `session.abort()`, which is too late for the window
+above.
+
+**The `session_start` handler must be idempotent in its reporting.** The
+stand-down and the `registered` flag already are. The deferred load-failure
+notification is not, by nature, so it is guarded by the same flag: a duplicate
+`session_start` must not double-post it.
 
 **The backstop must be memoryless**, and this is the subtlest constraint in the
 design. A switch reloads extensions, and `loadExtension` calls `factory(api)`
@@ -411,6 +464,18 @@ So the backstop reads the event, not a memory: **`session_start` carrying a
 documented, and observed, as present for exactly `new`, `resume` and `fork`, and
 absent for `startup` and `reload`. One condition, no remembered state, and it
 gets `/reload` right (no pre-switch event, and correctly must *not* tear down).
+All four runtime paths that reach a new conversation set it from the outgoing
+session's file, so none escapes the check; the field is absent on a real switch
+only when the *outgoing* session was non-persisted, which requires
+`--no-session`, which is CLI-only and which drydock's launch command never
+passes. That is a dependency on drydock's own command rather than a property of
+the predicate, so it is stated rather than assumed.
+
+In the backstop, "stand down" means **return before registering** — the instance
+is fresh and nothing of ours is in the active set yet, so filtering it is a
+no-op and falling through to registration is precisely the bug this paragraph
+exists to prevent. In the pre-hook gate it means refusing calls. Both stop the
+`instructions` injection.
 
 Two rules that look reasonable and are not, recorded so they are not reinvented:
 stand down on any reason that is not `startup` or `resume` — this whitelists the
@@ -612,8 +677,9 @@ None of that is unsolvable. All of it is a second spec.
 | a tool name collides with a pi built-in | that tool is not registered; reported; others register. A collision on `session_rename` specifically means the goal silently does not happen while everything else reports healthy |
 | `tools/call` fails or times out | that call throws to the model; other tools keep working |
 | token revoked (session ended) | 401 → "this drydock session has ended" tool error |
-| a `session_start` arrives with a different session file (`/new`, `/fork`, in-TUI `/resume`) | tools dropped from the active set; instructions injection stops; reported; no cross-session writes |
-| a `session_start` arrives with the same session file (`/reload`) | bridge carries on unchanged |
+| `session_before_switch` / `session_before_fork` fires (`/new`, `/resume`, `/fork`) | a reversible gate refuses further `tools/call`s **before** teardown, so an in-flight call cannot land in the outgoing conversation; cleared on the next `before_agent_start` if the switch never happens |
+| `session_start` carries a `previousSessionFile` (the switch did happen) | stand-down committed: no registration in the new conversation, instructions injection stops, reported |
+| `session_start` carries none (`/reload`, first launch) | bridge carries on; the `registered` flag stops a second registration pass |
 
 The invariant, restated now that it is defensible: **a broken bridge degrades to
 today's Pi**. It says so out loud via `ctx.ui.notify`, and it never takes the
@@ -795,6 +861,15 @@ design newly commits to:
 - **The whole phase-1 bridge works on 0.79.10**, tools and system-prompt
   override together — which is what withdrew the second half of the version
   floor's justification.
+- **The stand-down guard, driven over RPC** (the same
+  `AgentSessionRuntime.switchSession`/`fork` code the TUI uses): `startup`
+  carries no `previousSessionFile`; `resume` and `fork` carry it, in the
+  *reloaded* instance, naming the outgoing file. The module evaluates once while
+  the factory runs per load — two instance ids, one module evaluation — which is
+  the fact the memoryless design rests on. Pre-hooks reach handlers registered
+  inside `session_start`, and a filtered `setActiveTools` there takes effect.
+  `/new` and `/reload` were not exercised (no RPC command, and TUI-only
+  respectively) and are settled at source level.
 
 **Read, not run** — load-bearing claims established by reading pi's shipped
 source at 0.84.1, and scoped to that version: that pi voids exactly two emits of
@@ -834,8 +909,9 @@ was found: four of the fixes from round 1 were themselves unbuildable.
   `instructions` injection too.
 - **The stand-down guard whitelisted the case it existed to catch.** In-TUI
   `/resume` switches conversations and reports `reason: "resume"`; drydock's own
-  `pi --session <id>` reports `startup`. The predicate is now a session-file
-  comparison, which also gets `/reload` right.
+  `pi --session <id>` reports `startup`. The predicate became a session-file
+  comparison. *(Superseded in round 3: that comparison is defeated by factory
+  re-invocation; the predicate is `previousSessionFile` presence.)*
 - **The version floor's replacement justification was also false** — the 0.80.3
   changelog fix is scoped to tool changes during an agent run, which this design
   never reaches, and the bridge was then demonstrated working on 0.79.10. The
@@ -872,6 +948,26 @@ was found: four of the fixes from round 1 were themselves unbuildable.
   round 2's boolean; `err.cause` needed scoping to notifications as well as tool
   results; the body had accumulated enough draft archaeology to read as a
   changelog.
+
+**Round 4 — two seams, and the last decision:**
+
+- **The pre-hook disarmed irreversibly.** pi throws between the pre-hook and the
+  teardown on three of four switch paths — an unsaved session being forked, a
+  missing cwd on resume — and none of those throws is fatal, so the tab lives on
+  with a bridge that can never re-arm. The pre-hook now arms a *reversible gate*
+  and the stand-down commits on `session_start`.
+- **`/reload` would have disabled the bridge.** It re-enters the `session_start`
+  handler, whose collision snapshot then contains our own tools, so every
+  drydock tool reads as a collision and is refused. An instance-local
+  `registered` flag fixes it — and had to be explained against the memoryless
+  rule it appears to contradict.
+- **"Stand down" meant two different things** in the two seams; in the backstop
+  the tools are not registered yet, so filtering the active set is a no-op and
+  the handler falls through to registering into the new conversation.
+- Verified over RPC this round: the memoryless discriminator behaves as designed
+  *in the reloaded instance*, the module is cached while the factory re-runs
+  (the fact the whole guard rests on), and pre-hooks reach handlers registered
+  late.
 
 **Round 1 — findings that changed the design:**
 
