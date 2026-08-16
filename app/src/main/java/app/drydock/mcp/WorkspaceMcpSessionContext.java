@@ -6,6 +6,10 @@ import app.drydock.domain.HandoffBrief;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.Repository;
 import app.drydock.domain.SessionStatus;
+import app.drydock.git.BranchCatalog;
+import app.drydock.git.BranchCheckout;
+import app.drydock.git.BranchNameRules;
+import app.drydock.git.BranchRef;
 import app.drydock.git.GitBranchState;
 import app.drydock.git.GitCommandFailedException;
 import app.drydock.git.GitExecutableNotFoundException;
@@ -104,6 +108,22 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
      * that git call, which a rename does not make.
      */
     public static final long HANDOFF_TIMEOUT_SECONDS = 30;
+
+    /**
+     * Bound on {@link #createWorktreeOnExistingBranch}: the branch catalog and
+     * the add, sharing one deadline.
+     *
+     * <p>Fifty rather than the arithmetic worst case, because the client gives
+     * up first: Drydock's MCP reaches Claude only, {@code McpConfigWriter}
+     * writes an HTTP server with no per-server timeout, and that transport
+     * aborts the POST at a hard sixty seconds regardless of progress
+     * notifications. A budget past that is unreachable -- the reply would be
+     * written to a dead socket and the "a worktree may exist" warning would
+     * reach no one. The honest path fits: at most one of the three spawns can
+     * pay its reader-join after a kill, since a killed spawn aborts the
+     * chain.</p>
+     */
+    private static final long EXISTING_BRANCH_TIMEOUT_SECONDS = 50;
 
     /** Excerpts come from source files; anything this large is not one. */
     private static final long MAX_EXCERPT_FILE_BYTES = 4L * 1024 * 1024;
@@ -548,6 +568,63 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
                 repository.displayName(), branch);
         return joinAddBy(gitStatusService.createWorktree(repository.root(), directory, branch, startPoint),
                 deadlineIn(JOIN_TIMEOUT_SECONDS), directory);
+    }
+
+    @Override
+    public ExistingBranchWorktree createWorktreeOnExistingBranch(ManagedSessionId caller, String branch)
+            throws McpToolException {
+        Repository repository = requireRepository(caller);
+        if (repository.isRemote()) {
+            throw new McpToolException("This session's repository is remote; Drydock cannot create worktrees in it.");
+        }
+
+        // One deadline across the catalog load and the add, as the join
+        // contract requires. Which of the two waits threw is the phase: an
+        // expiry in the load propagates as an ordinary failure and the router
+        // refunds; an expiry in the add is McpWorktreeMayExistException and it
+        // does not. No flag is needed to tell them apart.
+        long deadlineNanos = deadlineIn(EXISTING_BRANCH_TIMEOUT_SECONDS);
+        BranchCatalog catalog =
+                joinBy(BranchCatalog.load(gitStatusService, worktreeService, repository.root()), deadlineNanos);
+
+        BranchCheckout.Outcome.Ready ready = switch (BranchCheckout.resolve(catalog, branch)) {
+            case BranchCheckout.Outcome.Ready found -> found;
+            case BranchCheckout.Outcome.NoSuchBranch missing -> throw new McpToolException("No branch named '"
+                    + missing.text() + "' in this repository; omit existing to create it.");
+            case BranchCheckout.Outcome.Occupied occupied -> throw new McpToolException(occupiedMessage(occupied.ref()));
+            case BranchCheckout.Outcome.Unmintable unmintable -> throw new McpToolException("Checking out '"
+                    + unmintable.ref().name() + "' would create the local branch '" + unmintable.localName()
+                    + "', which " + BranchNameRules.shortClause(unmintable.refusal()) + ".");
+        };
+
+        Path home = Path.of(System.getProperty("user.home"));
+        // The directory is named after the branch that will be checked out,
+        // not the ref that was asked for: adopting origin/feat/x opens feat/x.
+        Path directory = WorktreeNaming.defaultDirectory(home, userConfig.get().worktreesDirectory(),
+                repository.displayName(), ready.localName());
+        Path created = joinAddBy(gitStatusService.addWorktreeForBranch(
+                repository.root(), directory, ready.ref(), ready.localName()), deadlineNanos, directory);
+        return new ExistingBranchWorktree(created, ready.localName(), ready.tracking());
+    }
+
+    /**
+     * Why an occupied branch cannot be taken, in the agent's register: it
+     * names what the human would do, never a repo-wide mutation the agent
+     * might run itself. Locked outranks stale because {@code git worktree
+     * prune} silently skips a locked worktree, so calling it stale would be
+     * advice that does nothing.
+     */
+    private static String occupiedMessage(BranchRef branch) {
+        Path at = branch.checkedOutAt().orElseThrow();
+        if (branch.locked()) {
+            return "'" + branch.name() + "' is checked out in the worktree at " + at
+                    + ", which is locked; the human can unlock it from the UI.";
+        }
+        if (branch.prunable()) {
+            return "'" + branch.name() + "' is checked out in a stale worktree at " + at
+                    + "; the human can prune it from the UI.";
+        }
+        return "'" + branch.name() + "' is already checked out in the worktree at " + at + ".";
     }
 
     @Override

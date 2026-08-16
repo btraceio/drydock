@@ -184,6 +184,32 @@ public interface McpSessionContext {
     Path createWorktree(ManagedSessionId caller, String branch, Optional<String> startPoint)
             throws McpToolException;
 
+    /**
+     * A worktree opened on a branch that already existed.
+     *
+     * @param branch   the local branch now checked out there, which is the
+     *                 <em>resolved</em> name: adopting {@code origin/feat/x}
+     *                 produces {@code feat/x}. It is what the caller must use
+     *                 afterwards, so it is what gets reported.
+     * @param tracking the remote-tracking ref the branch was minted to follow,
+     *                 empty for a branch that was already local.
+     */
+    record ExistingBranchWorktree(Path path, String branch, Optional<String> tracking) { }
+
+    /**
+     * Opens a worktree on a branch that already exists, local or
+     * remote-tracking; the directory is named the same way
+     * {@link #createWorktree} names one.
+     *
+     * <p>{@code branch} is a lookup key, not a name being created, so the
+     * new-branch refname rules do not apply to it -- what constrains it is
+     * that it must resolve against the repository's own ref list.
+     * Implementations refuse a branch checked out elsewhere, and refuse
+     * adopting a remote ref whose derived local name could not be minted.</p>
+     */
+    ExistingBranchWorktree createWorktreeOnExistingBranch(ManagedSessionId caller, String branch)
+            throws McpToolException;
+
     /** Opens a session tab in {@code worktree}; returns the new session's id. */
     ManagedSessionId startSession(Path worktree, Optional<String> initialPrompt) throws McpToolException;
 

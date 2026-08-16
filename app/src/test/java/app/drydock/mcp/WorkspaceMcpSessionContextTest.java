@@ -16,6 +16,7 @@ import app.drydock.domain.SshRemote;
 import app.drydock.git.GitCommandFailedException;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.WorktreeService;
+import app.drydock.mcp.McpSessionContext.ExistingBranchWorktree;
 import app.drydock.mcp.McpSessionContext.RenameKind;
 import app.drydock.mcp.McpSessionContext.RenameOutcome;
 import app.drydock.review.AnnotationStore;
@@ -406,6 +407,111 @@ class WorkspaceMcpSessionContextTest {
         return System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
     }
 
+    // ---- createWorktreeOnExistingBranch --------------------------------------
+
+    @Test
+    void adoptingAFreeLocalBranchChecksItOutWithNoTracking(@TempDir Path repoDir, @TempDir Path worktrees)
+            throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        runGit(repo, "branch", "feat/login");
+        userConfig = new UserConfig(Optional.of(worktrees));
+
+        ExistingBranchWorktree created =
+                contextFor(repo).createWorktreeOnExistingBranch(caller(repo), "feat/login");
+
+        assertEquals("feat/login", created.branch());
+        assertEquals(Optional.empty(), created.tracking());
+        assertTrue(Files.exists(created.path().resolve("README.md")), String.valueOf(created.path()));
+    }
+
+    /**
+     * The response's branch is the RESOLVED local name, not the argument --
+     * deliberately unlike the create path, which echoes what it was given.
+     * Here they differ, and the agent needs the name that now exists to hand
+     * to {@code session_start}.
+     */
+    @Test
+    void adoptingARemoteOnlyBranchMintsATrackingLocalBranchAndReportsBothNames(@TempDir Path tmp) throws Exception {
+        Path upstream = Files.createDirectory(tmp.resolve("upstream"));
+        initCommittedRepo(upstream);
+        runGit(upstream, "branch", "feat/login");
+        Path clone = tmp.resolve("clone");
+        runGit(tmp, "clone", upstream.toString(), clone.toString());
+        userConfig = new UserConfig(Optional.of(tmp.resolve("worktrees")));
+
+        ExistingBranchWorktree created =
+                contextFor(clone).createWorktreeOnExistingBranch(caller(clone), "origin/feat/login");
+
+        assertEquals("feat/login", created.branch());
+        assertEquals(Optional.of("origin/feat/login"), created.tracking());
+        assertEquals("feat/login", gitOutput(created.path(), "rev-parse", "--abbrev-ref", "HEAD"));
+        assertEquals("origin", gitOutput(clone, "config", "branch.feat/login.remote"));
+    }
+
+    @Test
+    void aBranchAlreadyCheckedOutElsewhereIsRefusedAndNamesItsHolder(@TempDir Path repoDir, @TempDir Path worktrees)
+            throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        userConfig = new UserConfig(Optional.of(worktrees));
+
+        // "main" is checked out in the main checkout itself.
+        McpToolException failure = assertThrows(McpToolException.class,
+                () -> contextFor(repo).createWorktreeOnExistingBranch(caller(repo), "main"));
+
+        assertEquals("'main' is already checked out in the worktree at " + repo.toRealPath() + ".",
+                failure.getMessage());
+    }
+
+    @Test
+    void anUnknownBranchIsRefusedAndSaysHowToCreateOne(@TempDir Path repoDir, @TempDir Path worktrees)
+            throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        userConfig = new UserConfig(Optional.of(worktrees));
+
+        McpToolException failure = assertThrows(McpToolException.class,
+                () -> contextFor(repo).createWorktreeOnExistingBranch(caller(repo), "feat/nope"));
+
+        assertEquals("No branch named 'feat/nope' in this repository; omit existing to create it.",
+                failure.getMessage());
+    }
+
+    /**
+     * A branch literally named {@code origin/main}, pushed to origin, is listed
+     * as {@code origin/origin/main}; adopting it would mint local
+     * {@code refs/heads/origin/main}, which shadows the real remote for every
+     * short-name lookup thereafter.
+     */
+    @Test
+    void adoptingARemoteRefWhoseLocalNameWouldShadowARemoteIsRefused(@TempDir Path tmp) throws Exception {
+        Path upstream = Files.createDirectory(tmp.resolve("upstream"));
+        initCommittedRepo(upstream);
+        runGit(upstream, "branch", "origin/main");
+        Path clone = tmp.resolve("clone");
+        runGit(tmp, "clone", upstream.toString(), clone.toString());
+        userConfig = new UserConfig(Optional.of(tmp.resolve("worktrees")));
+
+        McpToolException failure = assertThrows(McpToolException.class,
+                () -> contextFor(clone).createWorktreeOnExistingBranch(caller(clone), "origin/origin/main"));
+
+        assertEquals("Checking out 'origin/origin/main' would create the local branch 'origin/main', "
+                + "which shadows the remote 'origin'.", failure.getMessage());
+    }
+
+    @Test
+    void aRemoteRepositoryCannotAdoptABranch(@TempDir Path repoDir) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        SshRemote unreachable = new SshRemote("nobody@invalid.invalid", "/srv/app");
+        repository = new Repository(RepositoryId.newId(), unreachable.placeholderRoot(), "remote-repo",
+                Instant.now(), Instant.now(), RepositorySettings.DEFAULT, unreachable);
+        WorkspaceMcpSessionContext context = contextWith(repo, List.of(repository));
+
+        McpToolException failure = assertThrows(McpToolException.class,
+                () -> context.createWorktreeOnExistingBranch(caller(repo), "main"));
+
+        assertEquals("This session's repository is remote; Drydock cannot create worktrees in it.",
+                failure.getMessage());
+    }
+
     // ---- fixtures -----------------------------------------------------------
 
     private Repository repository;
@@ -479,6 +585,21 @@ class WorkspaceMcpSessionContextTest {
         runGit(directory, "add", ".");
         runGit(directory, "commit", "-m", "initial");
         return directory;
+    }
+
+    /** As {@link #runGit}, returning the stripped output for an assertion. */
+    private static String gitOutput(Path workingDirectory, String... arguments) throws Exception {
+        List<String> command = new ArrayList<>(List.of("git"));
+        command.addAll(List.of(arguments));
+        Process process = new ProcessBuilder(command)
+                .directory(workingDirectory.toFile())
+                .redirectErrorStream(true)
+                .start();
+        String output = new String(process.getInputStream().readAllBytes());
+        if (process.waitFor() != 0) {
+            throw new IllegalStateException("git " + String.join(" ", arguments) + " failed: " + output);
+        }
+        return output.strip();
     }
 
     private static void runGit(Path workingDirectory, String... arguments) throws Exception {
