@@ -2,6 +2,7 @@ package app.drydock.agent.providers.pi.internal;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -81,11 +82,23 @@ public final class PiExtensionInstaller {
             Files.writeString(temp, content, StandardCharsets.UTF_8);
             try {
                 Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-            } catch (IOException atomicUnsupported) {
+            } catch (AtomicMoveNotSupportedException atomicUnsupported) {
+                // temp and target are siblings in the same directory, hence the same filesystem,
+                // so ATOMIC_MOVE is supported on anything real and this fallback is unreachable
+                // in practice. McpConfigWriter, the model for this class, writes one file per
+                // session id so no two writers contend for one target and a torn read is not
+                // reachable there. This installer has a single shared target that concurrent
+                // launches all write, so the hazard is live: we must not fall through to a
+                // non-atomic move on any error other than the atomicity being unsupported.
                 Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING);
             }
-        } finally {
-            Files.deleteIfExists(temp);
+        } catch (IOException writeOrMoveFailure) {
+            try {
+                Files.deleteIfExists(temp);
+            } catch (IOException cleanupFailure) {
+                writeOrMoveFailure.addSuppressed(cleanupFailure);
+            }
+            throw writeOrMoveFailure;
         }
     }
 }
