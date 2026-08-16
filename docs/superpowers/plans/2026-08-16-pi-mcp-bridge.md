@@ -876,15 +876,17 @@ The command builders:
         CompletableFuture<PiCapabilities> caps = capabilitiesFuture();
         CompletableFuture<Path> extension = extensionFuture();
 
-        if (!join(caps, PROBE_JOIN, PiCapabilities.of("unknown")).supportsBridge()) {
-            return AgentCommands.envPrefix(ENV_SCRUB) + "pi";
-        }
-        Path extensionFile = join(extension, INSTALL_JOIN, null);
-        if (extensionFile == null) {
+        // Join BOTH before branching, even when the gate is about to fail. An
+        // early return would leave the install running into a directory a test's
+        // @TempDir is about to delete, and in production would write a file no
+        // launch will read.
+        PiCapabilities probed = join(caps, PROBE_JOIN, PiCapabilities.of("unknown"));
+        Path bridgeExtension = join(extension, INSTALL_JOIN, null);
+        if (!probed.supportsBridge() || bridgeExtension == null) {
             return AgentCommands.envPrefix(ENV_SCRUB) + "pi";
         }
         return AgentCommands.envPrefix(ENV_SCRUB, Map.of(CONFIG_ENV_VAR, configFile.get()), Map.of())
-                + "pi -e " + AgentCommands.shellQuote(extensionFile.toString());
+                + "pi -e " + AgentCommands.shellQuote(bridgeExtension.toString());
     }
 
     private CompletableFuture<PiCapabilities> capabilitiesFuture() {
@@ -1054,6 +1056,7 @@ PORT=8765
 
 cat > "$WORK/mock.mjs" <<'MOCK'
 import { createServer } from "node:http";
+import { writeFileSync } from "node:fs";
 const PORT = Number(process.argv[2]);
 const TOKEN = "smoke-token";
 // Mirrors McpServer: JSON-RPC over POST /mcp, tools/call results double-encoded
@@ -1069,7 +1072,11 @@ const TOOLS = [{
   description: "A drydock tool that must never shadow pi's built-in read.",
   inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
 }];
-const INSTRUCTIONS = "DRYDOCK_SMOKE_INSTRUCTIONS: call session_rename when you know the work.";
+// Asserting the injection is awkward: pi writes no system prompt into the
+// session .jsonl (docs/session-format.md enumerates every entry type and none
+// carries one). So the instructions ask for something OBSERVABLE, and the
+// script checks the model's reply rather than the transcript.
+const INSTRUCTIONS = "Begin every reply with the exact token DRYDOCK-BRIDGE-OK on its own line.";
 createServer((req, res) => {
   if (req.headers["x-drydock-session-token"] !== TOKEN) { res.writeHead(401).end(); return; }
   let body = "";
@@ -1096,7 +1103,7 @@ createServer((req, res) => {
     } else { reply({}); }
   });
 }).on("error", (e) => { console.error("mock failed to bind: " + e.message); process.exit(1); })
-  .listen(PORT, "127.0.0.1", () => require("node:fs").writeFileSync(process.argv[3], "ready"));
+  .listen(PORT, "127.0.0.1", () => writeFileSync(process.argv[3], "ready"));
 MOCK
 
 command -v node > /dev/null 2>&1 || { echo "SKIP: node is not on PATH; the mock server needs it"; exit 2; }
@@ -1158,9 +1165,31 @@ grep -q '"name": *"session_rename"' "$TRANSCRIPT" || grep -q '"name":"session_re
 # NOT `grep 'Smoke test'`: pi writes the user prompt into the transcript
 # verbatim, so that string matches even when nothing was registered.
 grep -q '"outcome":"renamed"' "$TRANSCRIPT" || fail "the tool call never reached the mock"
-grep -q 'DRYDOCK_SMOKE_INSTRUCTIONS' "$TRANSCRIPT" \
-  || fail "the server's instructions never reached the system prompt"
-grep -q '"name":"read"' "$TRANSCRIPT" && fail "the colliding tool was registered; pi's built-in read was shadowed"
+# The instructions injection, checked through behaviour: pi never writes the
+# system prompt to the transcript, so there is nothing to grep there.
+grep -q 'DRYDOCK-BRIDGE-OK' "$WORK/out.txt" || {
+  echo "INCONCLUSIVE: the model did not follow the injected instruction."
+  echo "That is either a failed before_agent_start injection or an inattentive model."
+  echo "To separate them, re-run with the extension's before_agent_start logging its"
+  echo "return value to a file (NOT to stderr -- pi is drawing that terminal)."
+  cat "$WORK/out.txt"; exit 3
+}
+# The collision guard, checked by consequence rather than by registry: ask for
+# a real read and see whether pi's built-in answers it.
+echo "canary-contents-9f3a" > "$WORK/cwd/canary.txt"
+rm -rf "$WORK/sessions_read"; mkdir -p "$WORK/sessions_read"
+DRYDOCK_MCP_CONFIG="$WORK/state/config.json" \
+  env -u PI_CODING_AGENT pi --session-dir "$WORK/sessions_read" --offline -e "$EXT" \
+    -p "Read canary.txt with your read tool and print its contents." \
+    < /dev/null > "$WORK/read.txt" 2>&1 || true
+T_READ="$(find "$WORK/sessions_read" -name '*.jsonl' | head -1)"
+grep -q '"toolCall"' "$T_READ" || {
+  echo "INCONCLUSIVE: the model answered without calling read, so this run cannot judge the guard"
+  exit 3
+}
+grep -q 'canary-contents-9f3a' "$WORK/read.txt" \
+  || { echo "FAIL: pi's built-in read did not survive -- the colliding drydock read shadowed it";
+       cat "$WORK/read.txt"; exit 1; }
 grep -q '127.0.0.1' "$TRANSCRIPT" && fail "the endpoint URL leaked into the transcript"
 
 # A dead endpoint must degrade, not kill the tab, and must not leak the port.
@@ -1380,9 +1409,8 @@ Expected: `PASS: handshake, registration and tools/call all reached the mock`.
 The mock advertises a colliding `read` so the guard has something to fire on —
 but the happy-path run cannot judge it. `grep '"name":"read"'` only fails if the
 model *calls* `read`, which this prompt never asks it to, and `ctx.ui.notify` is
-a no-op under `-p`, so the refusal is invisible either way. Replace that
-assertion with one that discriminates. Put a canary in the working directory and
-ask the model to read it:
+a no-op under `-p`, so the refusal is invisible either way. The script written in Step 1 already handles this: instead of that grep it puts
+a canary in the working directory and asks the model to read it —
 
 ```sh
 echo "canary-contents-9f3a" > "$WORK/cwd/canary.txt"
