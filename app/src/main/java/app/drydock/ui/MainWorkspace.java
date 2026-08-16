@@ -1846,8 +1846,8 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * that costs is worth stating: the {@code review_*} MCP surface reaches
      * an agent only through drydock's MCP server, which an integration
      * reaches only if its {@code AgentProvider.mcpDelivery} is not {@code
-     * NONE} -- Claude via a config file, Codex via config overrides, Pi not
-     * at all. A session on
+     * NONE} -- Claude and Pi via a config file, Codex via config overrides.
+     * A session on
      * another agent still reviews -- it reads the diff, answers questions,
      * and takes the "ask the agent to fix it" hand-off, all of which go
      * through its terminal -- but it cannot post findings back into the

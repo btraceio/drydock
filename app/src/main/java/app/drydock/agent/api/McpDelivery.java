@@ -11,8 +11,9 @@ package app.drydock.agent.api;
  *
  * <ul>
  *   <li>{@code NONE} -- this integration cannot reach drydock's tools. Its
- *       sessions get no token minted, so no credential exists to leak. Pi is
- *       here because it has no MCP support by design.</li>
+ *       sessions get no token minted, so no credential exists to leak. Nothing
+ *       is here today; Pi used to be, before drydock shipped it a bridge
+ *       extension.</li>
  *   <li>{@code CONFIG_FILE} -- drydock writes an owner-only JSON config and
  *       the launch command points at it (Claude's {@code --mcp-config}).</li>
  *   <li>{@code COMMAND_LINE} -- the launch command carries the endpoint and
