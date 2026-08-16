@@ -1,18 +1,23 @@
 package app.drydock.git;
 
+import app.drydock.process.ProcessRunner;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -453,6 +458,81 @@ class GitStatusServiceTest {
         // "main" is checked out in the main checkout itself.
         assertThrows(GitCommandFailedException.class, () ->
                 service.addWorktreeForBranchBlocking(repo, tmp.resolve("wt"), BranchRef.local("main"), "main"));
+    }
+
+    // ---- the refund discriminator: was the child ever started? ----
+    //
+    // Every arm below reports exit code -1, which is why the exit code
+    // cannot be the test. What separates them is whether a process ran:
+    // MCP refunds a charged worktree only when nothing can have been
+    // created on disk.
+
+    @Test
+    void aKilledProcessIsUnknownBecauseTheChildRanBeforeItDied() {
+        GitCommandFailedException failure = assertThrows(GitCommandFailedException.class,
+                () -> GitStatusService.run(List.of("/bin/sleep", "30"),
+                        new ProcessRunner.Options(null, Duration.ofMillis(200), false, Map.of())));
+
+        assertEquals(-1, failure.exitCode());
+        assertEquals(GitCommandFailedException.Outcome.UNKNOWN, failure.outcome());
+    }
+
+    @Test
+    void anInterruptedWaitIsUnknownBecauseTheChildWasAlreadyRunning() throws Exception {
+        AtomicReference<GitCommandFailedException> caught = new AtomicReference<>();
+        Thread worker = new Thread(() -> {
+            try {
+                GitStatusService.run(List.of("/bin/sleep", "30"),
+                        new ProcessRunner.Options(null, Duration.ofSeconds(30), false, Map.of()));
+            } catch (GitCommandFailedException e) {
+                caught.set(e);
+            }
+        });
+        worker.start();
+        Thread.sleep(200);
+        worker.interrupt();
+        worker.join(10_000);
+
+        assertEquals(GitCommandFailedException.Outcome.UNKNOWN, caught.get().outcome());
+    }
+
+    @Test
+    void aLaunchFailureIsKnownFailedBecauseGitNeverRan(@TempDir Path tmp) {
+        // The executable existed at locate()-time and is gone (or was never
+        // executable) by the time it is spawned: builder.start() throws and
+        // nothing at all happened.
+        GitCommandFailedException failure = assertThrows(GitCommandFailedException.class,
+                () -> GitStatusService.run(List.of(tmp.resolve("not-an-executable").toString()),
+                        new ProcessRunner.Options(null, Duration.ofSeconds(5), false, Map.of())));
+
+        assertEquals(-1, failure.exitCode());
+        assertEquals(GitCommandFailedException.Outcome.KNOWN_FAILED, failure.outcome());
+    }
+
+    @Test
+    void anUncreatableWorktreeParentIsKnownFailedBecauseNothingWasSpawned(@TempDir Path tmp) throws Exception {
+        Path repo = tmp.resolve("repo");
+        Files.createDirectory(repo);
+        initRepo(repo, "main");
+        writeFile(repo, "README.md", "hello\n");
+        runGit(repo, "add", "README.md");
+        commit(repo, "initial commit");
+        runGit(repo, "branch", "existing");
+
+        Path readOnly = tmp.resolve("read-only");
+        Files.createDirectory(readOnly);
+        Files.setPosixFilePermissions(readOnly, PosixFilePermissions.fromString("r-xr-xr-x"));
+        try {
+            GitCommandFailedException failure = assertThrows(GitCommandFailedException.class,
+                    () -> service.addWorktreeForBranchBlocking(repo, readOnly.resolve("nested/wt"),
+                            BranchRef.local("existing"), "existing"));
+
+            assertEquals(-1, failure.exitCode());
+            assertEquals("mkdir", failure.command().get(0));
+            assertEquals(GitCommandFailedException.Outcome.KNOWN_FAILED, failure.outcome());
+        } finally {
+            Files.setPosixFilePermissions(readOnly, PosixFilePermissions.fromString("rwxr-xr-x"));
+        }
     }
 
     @Test
