@@ -1,5 +1,6 @@
 package app.drydock.mcp;
 
+import java.util.List;
 import java.util.Objects;
 
 /**
@@ -30,6 +31,16 @@ public final class PromptSafety {
      * one such call from making the margin unusable.
      */
     private static final int MAX_INBOUND_TEXT = 8000;
+
+    /**
+     * Per-slot cap for a handoff brief, in code points. Chosen so a full brief
+     * costs a fraction of a file read -- the whole point of a living brief is
+     * that keeping it current is cheaper than reconstructing it later.
+     */
+    public static final int MAX_HANDOFF_SLOT_CHARS = 2000;
+
+    /** Whole-record cap, in code points. Binds before six full slots would. */
+    public static final int MAX_HANDOFF_RECORD_CHARS = 8000;
 
     /** Longest session title, in code points. Bounds what can enter a confirm dialog. */
     private static final int MAX_TITLE_CODE_POINTS = 60;
@@ -83,6 +94,44 @@ public final class PromptSafety {
             }
         }
         return text;
+    }
+
+    /**
+     * Validates one {@code session_handoff} slot and returns it unchanged.
+     *
+     * <p>A slot is a body, not a title: {@code \n}, {@code \r} and {@code \t}
+     * are permitted exactly as for finding bodies, and nothing is folded --
+     * a brief's line structure is meaningful to the successor reading it,
+     * where a tab in a tab label is not.</p>
+     *
+     * <p>Refuses rather than truncates. A silently clipped {@code nextStep} is
+     * a brief that lies, and the agent that wrote it has no way to notice.</p>
+     */
+    public static String checkHandoffSlot(String field, String text) throws McpToolException {
+        checkInboundText(text, field);
+        int codePoints = text.codePointCount(0, text.length());
+        if (codePoints > MAX_HANDOFF_SLOT_CHARS) {
+            throw new McpToolException(field + " is " + codePoints + " characters; the limit is "
+                    + MAX_HANDOFF_SLOT_CHARS + ". Shorten it -- drydock will not truncate a brief, "
+                    + "because a clipped slot is a brief that lies.");
+        }
+        return text;
+    }
+
+    /**
+     * Refuses a brief whose slots each fit but which together exceed {@link
+     * #MAX_HANDOFF_RECORD_CHARS}. Six full slots would be 12,000 code points,
+     * so this cap is the one that actually binds.
+     */
+    public static void checkHandoffRecordSize(List<String> slots) throws McpToolException {
+        int total = 0;
+        for (String slot : slots) {
+            total += slot.codePointCount(0, slot.length());
+        }
+        if (total > MAX_HANDOFF_RECORD_CHARS) {
+            throw new McpToolException("The whole brief is " + total + " characters; the limit is "
+                    + MAX_HANDOFF_RECORD_CHARS + ". Shorten the longest slots.");
+        }
     }
 
     /**

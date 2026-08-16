@@ -4,20 +4,26 @@ import app.drydock.agent.api.AgentKind;
 import app.drydock.agent.api.AgentRegistry;
 import app.drydock.agent.api.CreateContext;
 import app.drydock.agent.api.LaunchPlan;
+import app.drydock.agent.api.McpAccess;
+import app.drydock.agent.api.McpDelivery;
 import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdDiscovery;
 import app.drydock.agent.api.SessionIdStrategy;
 import app.drydock.agent.spi.AgentProvider;
+import app.drydock.domain.AgentBinding;
 import app.drydock.domain.ApplicationState;
 import app.drydock.domain.BranchOwnership;
+import app.drydock.domain.HandoffBrief;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.PrState;
 import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionStatus;
+import app.drydock.domain.SessionWorkspace;
 import app.drydock.domain.SshRemote;
 import app.drydock.mcp.McpConfigWriter;
+import app.drydock.mcp.McpSessionContext;
 import app.drydock.mcp.McpSessionContext.RenameKind;
 import app.drydock.mcp.McpSessionContext.RenameOutcome;
 import app.drydock.mcp.McpSessionRegistry;
@@ -177,34 +183,50 @@ public final class SessionManager implements AutoCloseable {
     }
 
     /**
-     * Mints this session's token and writes its MCP config file. Returns empty
-     * when MCP is not wired up, the session's provider cannot consume such a
-     * file, or the write failed: a session without Drydock tools is strictly
-     * better than one that fails to launch. Performs file I/O -- background
+     * Mints this session's token and, for a {@link McpDelivery#CONFIG_FILE}
+     * provider, writes its MCP config file. Returns empty when MCP is not
+     * wired up, the session's provider cannot reach drydock's tools at all, or
+     * the write failed: a session without Drydock tools is strictly better
+     * than one that fails to launch. May perform file I/O -- background
      * executor only.
      *
-     * <p>The support check lives HERE rather than only inside the provider's
+     * <p>The delivery check lives HERE rather than only inside the provider's
      * own flag builder: this method's result is an eagerly evaluated argument
      * to {@link CreateContext}/{@link ResumeContext}, so a check made
-     * downstream would still have minted a token and written a file that the
-     * builder then discards. {@link AgentProvider#supportsMcpConfig()} is the
+     * downstream would still have minted a token -- and written a file -- that
+     * the builder then discards. {@link AgentProvider#mcpDelivery()} is the
      * gate because the narrower "does the installed binary advertise the
      * flag" question is provider-internal (Claude's {@code
      * ClaudeCapabilities.supportsMcpConfig}).</p>
+     *
+     * <p>Both wired deliveries get an owner-only file. A {@link
+     * McpDelivery#COMMAND_LINE} provider used to get a token and no file, on
+     * the reasoning that a file nothing reads is a credential on disk for
+     * nothing -- but the launch command was then carrying the token itself,
+     * and so was the argv of the long-lived {@code login} process the session
+     * runs under. The file is what the command reads instead of quoting.</p>
      *
      * @param spawn whether this session may create worktrees and start further
      *              sessions. {@link Spawn#FORBIDDEN} for a session an agent
      *              started, which is what makes fan-out depth 1.
      */
-    private Optional<Path> mcpConfigFor(AgentProvider provider, ManagedSessionId sessionId, Spawn spawn) {
+    private Optional<McpAccess> mcpAccessFor(AgentProvider provider, ManagedSessionId sessionId, Spawn spawn) {
         Optional<McpWiring> wiring = mcpWiring;
-        if (wiring.isEmpty() || !provider.supportsMcpConfig()) {
+        McpDelivery delivery = provider.mcpDelivery();
+        if (wiring.isEmpty() || delivery == McpDelivery.NONE) {
             return Optional.empty();
         }
         McpWiring mcp = wiring.get();
+        String token = mcp.registry().mint(sessionId, spawn);
         try {
-            String token = mcp.registry().mint(sessionId, spawn);
-            return Optional.of(mcp.writer().writeFor(sessionId, mcp.endpointUrl(), token));
+            // Both deliveries get a file, for the same reason: a credential
+            // must never be a command-line argument. A COMMAND_LINE provider
+            // gets the bare token to read at exec time, so the only thing its
+            // launch command carries is the path.
+            Path credentialFile = delivery == McpDelivery.COMMAND_LINE
+                    ? mcp.writer().writeTokenFor(sessionId, token)
+                    : mcp.writer().writeFor(sessionId, mcp.endpointUrl(), token);
+            return Optional.of(new McpAccess(mcp.endpointUrl(), token, Optional.of(credentialFile)));
         } catch (IOException e) {
             // Never log the token or the endpoint URL (it carries the port).
             LOG.log(Level.WARNING, "Could not write MCP config for session " + sessionId
@@ -314,7 +336,22 @@ public final class SessionManager implements AutoCloseable {
     /** As {@link #prepareSession}, for a session living inside an already-created worktree checkout. */
     public ManagedAgentSession prepareWorktreeSession(Repository repository, String displayName, Path worktreeRoot,
                                                         boolean branchCreatedHere, AgentKind agentKind) {
-        return newSessionMetadata(repository, displayName, agentKind, Optional.of(worktreeRoot), branchCreatedHere);
+        return prepareWorktreeSession(repository, displayName, worktreeRoot, branchCreatedHere, agentKind,
+                Optional.empty());
+    }
+
+    /**
+     * As above, recording that this session was forked from {@code forkedFrom}.
+     *
+     * <p>Lineage is set here rather than patched on after launch: it is part of
+     * what the session IS, and a window where a fork does not yet know its
+     * parent is a window where a crash loses the link entirely.</p>
+     */
+    public ManagedAgentSession prepareWorktreeSession(Repository repository, String displayName, Path worktreeRoot,
+                                                        boolean branchCreatedHere, AgentKind agentKind,
+                                                        Optional<ManagedSessionId> forkedFrom) {
+        return newSessionMetadata(repository, displayName, agentKind, Optional.of(worktreeRoot), branchCreatedHere)
+                .withForkedFrom(forkedFrom);
     }
 
     /**
@@ -438,11 +475,11 @@ public final class SessionManager implements AutoCloseable {
                                                                   String surfaceWorkingDirectory,
                                                                   ManagedSessionId managedSessionId, Spawn spawn) {
         return CompletableFuture.supplyAsync(() -> {
-                    Optional<Path> mcpConfig = remote.isPresent() || hasDiagOverride(provider.kind())
+                    Optional<McpAccess> mcp = remote.isPresent() || hasDiagOverride(provider.kind())
                             ? Optional.empty()
-                            : mcpConfigFor(provider, managedSessionId, spawn);
+                            : mcpAccessFor(provider, managedSessionId, spawn);
                     CreateContext ctx = new CreateContext(displayName, sessionId, targetWorkingDirectory, remote,
-                            mcpConfig);
+                            mcp);
                     LaunchPlan plan = provider.buildCreateCommand(ctx);
                     if (!plan.supported()) {
                         throw new IllegalStateException(
@@ -553,11 +590,11 @@ public final class SessionManager implements AutoCloseable {
                                 // LAUNCH, not of the session, so a session an
                                 // agent started regains spawn rights if the
                                 // human later resumes it themselves.
-                                Optional<Path> mcpConfig = remote.isPresent()
+                                Optional<McpAccess> mcp = remote.isPresent()
                                         ? Optional.empty()
-                                        : mcpConfigFor(provider, session.id(), Spawn.ALLOWED);
+                                        : mcpAccessFor(provider, session.id(), Spawn.ALLOWED);
                                 ResumeContext ctx = new ResumeContext(session.agentSessionId(),
-                                        session.agentSessionName(), session.workingDirectory(), remote, mcpConfig);
+                                        session.agentSessionName(), session.workingDirectory(), remote, mcp);
                                 return provider.buildResumeCommand(ctx).command();
                             }, backgroundExecutor)
                             .thenCompose(command -> createSurfaceOnFxThread(app, host, scaleFactor, command,
@@ -710,6 +747,64 @@ public final class SessionManager implements AutoCloseable {
     }
 
     /**
+     * The {@code session_handoff} MCP tool's write.
+     *
+     * <p>One transform, like {@link #applyAgentRename}: the session lookup and
+     * the brief replacement happen under {@link ApplicationStateStore}'s single
+     * lock, so a concurrent human edit of the same brief cannot be silently
+     * overwritten by a read-then-write.</p>
+     *
+     * <p>Wholesale replacement -- any existing brief for this session is
+     * dropped, not merged, so an omitted optional slot is cleared. Every slot
+     * must already have been through {@link PromptSafety#checkHandoffSlot}.</p>
+     */
+    public HandoffBrief applyAgentHandoff(ManagedSessionId sessionId, McpSessionContext.HandoffDraft draft,
+                                          Optional<String> headCommit) {
+        return storeHandoff(sessionId, draft, headCommit, HandoffBrief.Author.AGENT);
+    }
+
+    private HandoffBrief storeHandoff(ManagedSessionId sessionId, McpSessionContext.HandoffDraft draft,
+                                      Optional<String> headCommit, HandoffBrief.Author author) {
+        HandoffBrief[] result = new HandoffBrief[1];
+        stateStore.update(state -> {
+            boolean known = state.sessions().stream().anyMatch(existing -> existing.id().equals(sessionId));
+            if (!known) {
+                throw new UnknownSessionException(sessionId);
+            }
+            HandoffBrief brief = new HandoffBrief(sessionId, draft.goal(), draft.nextStep(), draft.approach(),
+                    draft.decisions(), draft.ruledOut(), draft.corrections(), Instant.now(), headCommit,
+                    author);
+            result[0] = brief;
+            List<HandoffBrief> briefs = new ArrayList<>(state.handoffBriefs().stream()
+                    .filter(existing -> !existing.sessionId().equals(sessionId))
+                    .toList());
+            briefs.add(brief);
+            return state.withHandoffBriefs(List.copyOf(briefs));
+        });
+        return result[0];
+    }
+
+    /**
+     * The human's own handoff brief, written in the Edit dialog.
+     *
+     * <p>Identical to {@link #applyAgentHandoff} except for the attribution
+     * and who is allowed to make it: this path is never charged against the
+     * session's MCP budget, which exists to bound an agent looping and has
+     * nothing to say about a person correcting a brief. The stamp matters
+     * downstream -- the fork seed labels an agent brief as testimony, and that
+     * label would be wrong for one the human typed.</p>
+     */
+    public HandoffBrief applyHumanHandoff(ManagedSessionId sessionId, McpSessionContext.HandoffDraft draft,
+                                          Optional<String> headCommit) {
+        return storeHandoff(sessionId, draft, headCommit, HandoffBrief.Author.HUMAN);
+    }
+
+    /** Every session's handoff brief, for the banner and the fork seed. */
+    public List<HandoffBrief> handoffBriefs() {
+        return stateStore.state().handoffBriefs();
+    }
+
+    /**
      * The {@code session_rename} MCP tool's write.
      *
      * <p>One transform, deliberately: the pin test, the unchanged test, the
@@ -808,9 +903,16 @@ public final class SessionManager implements AutoCloseable {
                     // Also covers a session that had no active surface, and so
                     // never went through onSurfaceClosed.
                     releaseMcpConfig(sessionId);
-                    stateStore.update(state -> state.withSessions(state.sessions().stream()
-                            .filter(session -> !session.id().equals(sessionId))
-                            .toList()));
+                    // The brief goes with the session it describes. Nothing
+                    // else ever removes one, so leaving it would grow the state
+                    // file by up to a full brief per deleted session, forever.
+                    stateStore.update(state -> state
+                            .withSessions(state.sessions().stream()
+                                    .filter(session -> !session.id().equals(sessionId))
+                                    .toList())
+                            .withHandoffBriefs(state.handoffBriefs().stream()
+                                    .filter(brief -> !brief.sessionId().equals(sessionId))
+                                    .toList()));
                 },
                 backgroundExecutor);
     }
@@ -961,23 +1063,14 @@ public final class SessionManager implements AutoCloseable {
     private ManagedAgentSession newSessionMetadata(Repository repository, String displayName, AgentKind agentKind,
                                                     Optional<Path> worktreeRoot, boolean branchCreatedHere) {
         Instant now = Instant.now();
-        return new ManagedAgentSession(
+        return new ManagedAgentSession.Builder(
                 ManagedSessionId.newId(),
                 repository.id(),
-                agentKind,
                 displayName,
-                Optional.empty(),
-                Optional.empty(),
-                worktreeRoot.orElse(repository.root()),
-                worktreeRoot,
-                SessionStatus.INACTIVE,
-                now,
-                now,
-                Optional.empty(),
-                PrState.NONE,
-                Optional.empty(),
-                branchCreatedHere,
-                false);
+                AgentBinding.unlaunched(agentKind),
+                new SessionWorkspace(worktreeRoot.orElse(repository.root()), worktreeRoot, branchCreatedHere),
+                now)
+                .build();   // lineage is set by the fork path, never here
     }
 
     /**

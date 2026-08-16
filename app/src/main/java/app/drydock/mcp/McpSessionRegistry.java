@@ -43,6 +43,14 @@ public final class McpSessionRegistry {
      */
     public static final int MAX_RENAMES_PER_SESSION = 20;
 
+    /**
+     * Twice {@link #MAX_RENAMES_PER_SESSION}: a brief is rewritten at every
+     * checkpoint by design, where a name is written once or twice. Still
+     * bounded, because an agent that has written forty briefs is looping
+     * rather than working.
+     */
+    public static final int MAX_HANDOFFS_PER_SESSION = 40;
+
     /** Whether a session may create worktrees and start further sessions. */
     public enum Spawn {
         /** A session the human started. */
@@ -58,6 +66,7 @@ public final class McpSessionRegistry {
     private final Map<ManagedSessionId, AtomicInteger> worktreesCreated = new ConcurrentHashMap<>();
     private final Map<ManagedSessionId, AtomicInteger> sessionsStarted = new ConcurrentHashMap<>();
     private final Map<ManagedSessionId, AtomicInteger> renamesApplied = new ConcurrentHashMap<>();
+    private final Map<ManagedSessionId, AtomicInteger> handoffsApplied = new ConcurrentHashMap<>();
 
     /** Returns this session's token, minting one on first call. Idempotent per session. */
     public String mint(ManagedSessionId sessionId, Spawn spawn) {
@@ -139,6 +148,25 @@ public final class McpSessionRegistry {
     /** Releases a charge whose call then failed outright. Never drops below zero. */
     public void refundRename(ManagedSessionId sessionId) {
         refund(renamesApplied, sessionId);
+    }
+
+    /**
+     * Charges one handoff write. Like {@link #chargeRename}, a refused attempt
+     * is charged: it costs the same FX hop and turn under the state lock, and
+     * it explains itself, so the budget bounds looping rather than learning.
+     */
+    public void chargeHandoff(ManagedSessionId sessionId) throws McpBudgetExhaustedException {
+        AtomicInteger counter = handoffsApplied.computeIfAbsent(sessionId, id -> new AtomicInteger());
+        if (counter.incrementAndGet() > MAX_HANDOFFS_PER_SESSION) {
+            counter.decrementAndGet();
+            throw new McpBudgetExhaustedException("This session has already written its handoff brief "
+                    + MAX_HANDOFFS_PER_SESSION + " times.");
+        }
+    }
+
+    /** Releases a handoff charge whose call then failed outright. */
+    public void refundHandoff(ManagedSessionId sessionId) {
+        refund(handoffsApplied, sessionId);
     }
 
     private static void refund(Map<ManagedSessionId, AtomicInteger> counters, ManagedSessionId sessionId) {

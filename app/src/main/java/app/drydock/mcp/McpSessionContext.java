@@ -1,5 +1,6 @@
 package app.drydock.mcp;
 
+import app.drydock.domain.HandoffBrief;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.review.ReviewAnnotation;
@@ -185,6 +186,29 @@ public interface McpSessionContext {
 
     /** Opens a session tab in {@code worktree}; returns the new session's id. */
     ManagedSessionId startSession(Path worktree, Optional<String> initialPrompt) throws McpToolException;
+
+    /**
+     * What an agent supplies to {@code session_handoff}. The stamps are
+     * drydock's: {@code writtenAt}, {@code writtenAtCommit} and {@code author}
+     * are set by the implementation, never by the caller, so an agent cannot
+     * backdate its own brief or claim the human wrote it.
+     */
+    record HandoffDraft(String goal, String nextStep, Optional<String> approach, Optional<String> decisions,
+                        Optional<String> ruledOut, Optional<String> corrections) {
+    }
+
+    /**
+     * Replaces the caller's handoff brief with {@code draft} and persists it,
+     * stamping {@code writtenAt}, {@code writtenAtCommit} (the caller's current
+     * HEAD, empty when its branch has no commits) and {@code author = AGENT}.
+     *
+     * <p>Wholesale replacement: an absent optional slot in {@code draft} clears
+     * whatever was stored there. There is no refusal outcome, unlike {@link
+     * #renameSession} -- a brief cannot collide with a sibling or be pinned by
+     * a human, so the only failures are a timeout or a session that vanished
+     * mid-call, and those throw.</p>
+     */
+    HandoffBrief writeHandoff(ManagedSessionId caller, HandoffDraft draft) throws McpToolException;
 
     /**
      * Renames the caller's own session to an already-validated title.

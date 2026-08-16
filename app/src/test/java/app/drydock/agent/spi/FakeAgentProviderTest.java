@@ -7,6 +7,7 @@ import app.drydock.agent.api.ActivityReporter;
 import app.drydock.agent.api.ConversationSource;
 import app.drydock.agent.api.CreateContext;
 import app.drydock.agent.api.LaunchPlan;
+import app.drydock.agent.api.McpDelivery;
 import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdDiscovery;
 import app.drydock.agent.api.SessionIdStrategy;
@@ -31,7 +32,7 @@ class FakeAgentProviderTest {
         @Override public String describeSearched() { return "PATH"; }
         @Override public AgentCapabilities probeCapabilities() { return new AgentCapabilities(true, true, "1.0"); }
         @Override public boolean supportsRemote() { return true; }
-        @Override public boolean supportsMcpConfig() { return false; }
+        @Override public McpDelivery mcpDelivery() { return McpDelivery.NONE; }
         @Override public LaunchPlan buildCreateCommand(CreateContext c) { return LaunchPlan.of("fake " + c.sessionId(), true); }
         @Override public LaunchPlan buildResumeCommand(ResumeContext r) { return LaunchPlan.of("fake --resume", false); }
         @Override public SessionIdStrategy idStrategy() { return SessionIdStrategy.PRESET; }

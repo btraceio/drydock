@@ -1,5 +1,8 @@
 package app.drydock.mcp;
 
+import app.drydock.domain.SessionWorkspace;
+import app.drydock.domain.PrLink;
+import app.drydock.domain.AgentBinding;
 import app.drydock.agent.api.AgentKind;
 import app.drydock.config.UserConfig;
 import app.drydock.domain.ManagedAgentSession;
@@ -320,9 +323,12 @@ class WorkspaceMcpSessionContextTest {
 
     private static ManagedAgentSession sessionIn(Repository owner, Path workingDirectory) {
         Instant now = Instant.now();
-        return new ManagedAgentSession(ManagedSessionId.newId(), owner.id(), AgentKind.CLAUDE, "example session",
-                Optional.empty(), Optional.empty(), workingDirectory, Optional.empty(),
-                SessionStatus.RUNNING, now, now, Optional.empty(), PrState.NONE, Optional.empty(), true, false);
+        return new ManagedAgentSession(
+                ManagedSessionId.newId(), owner.id(), "example session",
+                new AgentBinding(AgentKind.CLAUDE, Optional.empty(), Optional.empty()),
+                new SessionWorkspace(workingDirectory, Optional.empty(), true),
+                SessionStatus.RUNNING, now, now, Optional.empty(),
+                PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty());
     }
 
     private WorkspaceMcpSessionContext contextFor(Path root) throws IOException {
@@ -349,7 +355,9 @@ class WorkspaceMcpSessionContextTest {
                 UserConfig::empty,
                 (worktree, prompt) -> CompletableFuture.failedFuture(
                         new UnsupportedOperationException("no window in this test")),
-                (id, title) -> CompletableFuture.completedFuture(new RenameOutcome(RenameKind.RENAMED, title)));
+                (id, title) -> CompletableFuture.completedFuture(new RenameOutcome(RenameKind.RENAMED, title)),
+                (id, draft) -> CompletableFuture.failedFuture(
+                        new UnsupportedOperationException("no workspace in this test")));
     }
 
     // ---- git helpers (mirrors WorktreeServiceTest) ---------------------------

@@ -175,4 +175,70 @@ class PromptSafetyTest {
     void blankIsRefused() {
         assertThrows(McpToolException.class, () -> PromptSafety.validate("   "));
     }
+    // ---- handoff brief slots ------------------------------------------------
+
+    @Test
+    void aHandoffSlotAcceptsAMultilineBody() throws Exception {
+        // Unlike a title, a slot is a body: newlines and tabs are meaningful
+        // to the successor reading it, so they survive unchanged.
+        String body = "line one\nline two\twith a tab";
+        assertEquals(body, PromptSafety.checkHandoffSlot("goal", body));
+    }
+
+    @Test
+    void aHandoffSlotRejectsControlCharacters() {
+        McpToolException e = assertThrows(McpToolException.class,
+                () -> PromptSafety.checkHandoffSlot("goal", "before\u0007after"));
+
+        assertTrue(e.getMessage().contains("goal"), e.getMessage());
+    }
+
+    @Test
+    void anOversizeSlotIsRefusedWithItsNameAndTheLimit() {
+        String tooLong = "x".repeat(PromptSafety.MAX_HANDOFF_SLOT_CHARS + 1);
+
+        McpToolException e = assertThrows(McpToolException.class,
+                () -> PromptSafety.checkHandoffSlot("ruledOut", tooLong));
+
+        assertTrue(e.getMessage().contains("ruledOut"), e.getMessage());
+        assertTrue(e.getMessage().contains(String.valueOf(PromptSafety.MAX_HANDOFF_SLOT_CHARS)), e.getMessage());
+    }
+
+    @Test
+    void aSlotExactlyAtTheLimitIsAccepted() throws Exception {
+        String exact = "x".repeat(PromptSafety.MAX_HANDOFF_SLOT_CHARS);
+        assertEquals(exact, PromptSafety.checkHandoffSlot("goal", exact));
+    }
+
+    @Test
+    void slotLengthIsCountedInCodePointsNotChars() throws Exception {
+        // Emoji are surrogate pairs: a char-based cap would refuse a brief
+        // half the size the human counted.
+        String emoji = "\uD83D\uDE80".repeat(PromptSafety.MAX_HANDOFF_SLOT_CHARS / 2);
+        assertEquals(emoji, PromptSafety.checkHandoffSlot("goal", emoji));
+    }
+
+    @Test
+    void slotsThatFitAloneCanStillBreachTheWholeRecordCap() {
+        String slot = "x".repeat(PromptSafety.MAX_HANDOFF_SLOT_CHARS);
+
+        McpToolException e = assertThrows(McpToolException.class,
+                () -> PromptSafety.checkHandoffRecordSize(
+                        java.util.List.of(slot, slot, slot, slot, slot, slot)));
+
+        assertTrue(e.getMessage().contains(String.valueOf(PromptSafety.MAX_HANDOFF_RECORD_CHARS)), e.getMessage());
+    }
+
+    @Test
+    void aRecordWithinTheWholeCapIsAccepted() throws Exception {
+        PromptSafety.checkHandoffRecordSize(java.util.List.of("a".repeat(100), "b".repeat(100)));
+    }
+
+    @Test
+    void theRecordCapIsAlsoCountedInCodePoints() throws Exception {
+        // 4000 emoji = 4000 code points, well inside 8000, but 8000 chars --
+        // a char-based total would refuse this.
+        String emoji = "\uD83D\uDE80".repeat(2000);
+        PromptSafety.checkHandoffRecordSize(java.util.List.of(emoji, emoji));
+    }
 }

@@ -1,0 +1,337 @@
+# Work outlives the harness that started it
+
+A drydock session is pinned to the CLI that launched it. `ManagedAgentSession`
+carries an `AgentKind`, the provider builds a command line, and from then on
+the work and the harness are the same object. When the harness is the thing
+that has failed — rate limited, wedged, looping — the work dies with it, and
+the only recovery is to start over in another tab and re-explain everything
+from memory.
+
+That is one of four reasons to want a different agent on the same work. The
+others are wanting a second opinion on accumulated context, wanting to plan in
+one tool and implement in another, and simply not wanting any one vendor's CLI
+to be the sole custodian of a conversation.
+
+This design gives a session a successor. It does **not** move a conversation
+between harnesses: no transcript is translated, no rollout format is parsed,
+no request passes through drydock. The successor is *briefed*, not resumed —
+it knows it inherited the work and says so.
+
+## What actually has to cross
+
+Most of the state that matters is not in the transcript. It is the working
+tree, the diff, the branch and the commits — and drydock already owns all of
+those. What the transcript holds that nothing else does is the *reasoning*:
+why this approach, what was tried and abandoned, what the human corrected.
+
+So the crossing is a document, not a migration. Drydock never learns Claude's
+`.jsonl` layout or Codex's rollout format; `ClaudeConversationSource`,
+`CodexRolloutStore` and `PiSessionStore` keep doing exactly what they do
+today, which is answer catalogue questions (title, message count, mtime) and
+nothing more.
+
+This is deliberately the cheapest thing that serves all four motives, and it
+was chosen over two more expensive shapes. See "What was cut" at the end.
+
+## The brief
+
+A `HandoffBrief` is a small record with fixed slots:
+
+| slot | what it holds |
+|---|---|
+| `goal` | what this session is trying to achieve |
+| `approach` | the shape of the current solution |
+| `decisions` | choices made and why |
+| `ruledOut` | what was tried or considered and rejected, with the reason |
+| `corrections` | what the human pushed back on |
+| `nextStep` | what the successor should do first |
+| `writtenAt` | when it was last written |
+| `writtenAtCommit` | the `HEAD` it was written against |
+
+It is stored beside session metadata through `ApplicationStateCodec`, keyed by
+`ManagedSessionId` — **not** as a field on `ManagedAgentSession`. That record
+is already sixteen fields with a `with*` accessor apiece, and a brief is a
+document with its own write cadence, not part of session identity. A session
+that has never written one simply has no entry.
+
+`ruledOut` earns its slot separately from `decisions` because it is the part a
+successor cannot reconstruct from the tree. A decision leaves evidence in the
+code; a dead end leaves nothing, and without it the second harness cheerfully
+re-walks the path the first one abandoned.
+
+### Why a living document rather than a log
+
+The brief is maintained *during* the session and replaced wholesale on each
+update. There are no merge semantics and no partial writes.
+
+The alternative — the agent appending `decision` / `ruled-out` / `correction`
+events that drydock composes into a brief at fork time — is cheaper per call
+and yields a real timeline, but forty entries is a log, not a briefing, and
+turning one into the other means owning a summariser and keeping it good.
+Wholesale replacement keeps the brief permanently coherent: it reads as a
+briefing because it was written as one.
+
+The cost objection to a living brief is that the agent restates everything at
+every checkpoint. With fixed slots that is roughly fifteen lines — less than
+one file read — and it buys the property that matters most: **the brief exists
+before it is needed.** A brief assembled at switch time is unavailable in
+exactly the case that motivated the feature, because a rate-limited or wedged
+session cannot be asked for anything.
+
+### Why not a file in the worktree
+
+`.drydock/handoff.md` needs no new tool and works with harnesses that have no
+MCP at all. It was rejected because it lands in the worktree: it pollutes
+every diff and the review rail, drydock cannot tell an agent update from a
+human edit or a stale checkout, and it dies with the worktree. It also gives
+the agent no reason to write it — a file nobody asks about does not get
+written.
+
+## `session_handoff`
+
+```
+session_handoff(goal, nextStep, approach?, decisions?, ruledOut?, corrections?)
+```
+
+`goal` and `nextStep` are required; the rest are optional and absent slots are
+stored absent rather than as empty strings, so the seed can omit a heading
+instead of printing an empty one. Every call replaces the whole record — an
+omitted optional slot clears it, it does not preserve the previous value.
+That is the wholesale-replacement rule stated at argument level, and it is the
+one place an implementer would otherwise reasonably guess "merge".
+
+One new MCP tool, following `session_rename` in every respect that already has
+a precedent:
+
+- **It is a write.** It joins `AGENT_WRITE_TOOLS` in `McpServer` — the
+  explicit set that exists precisely so tools added later are classified on
+  purpose rather than by how they were named.
+- **It is charged.** A per-session budget with charge-on-attempt and
+  refund-only-on-outright-failure, matching `chargeRename`/`refundRename`.
+  Refused *outcomes* are charged: each still costs an FX hop and a turn under
+  the state lock.
+- **It validates before charging.** A malformed brief is the agent's mistake
+  to fix, not a spend.
+- **It refuses rather than truncates.** Each slot is capped at 2,000
+  characters and the record at 8,000; an oversize brief comes back with a
+  message naming the slot and the limit. A silently clipped `nextStep` is a
+  brief that lies. The numbers are a starting point chosen so a full brief
+  costs a fraction of a file read — adjust them on evidence, but keep refusal
+  as the behaviour.
+- **It explains its refusals**, so an agent can correct without guessing.
+
+Every slot goes through `PromptSafety.checkInboundText`, which permits `\n`,
+`\r` and `\t` — brief slots are bodies, not titles, so `checkSessionTitle`'s
+one-line rule is wrong for them.
+
+### The injection surface is real and is the reason for that validation
+
+The brief is authored by an agent that reads untrusted diffs, and it becomes
+the **seed prompt of a different agent**. That is a wider sink than a finding
+body: text that survives into the seed is read by a fresh model with no
+history to contradict it, at the moment it is deciding what to do first.
+
+Two mitigations, both structural rather than filtering:
+
+1. The seed marks the brief as *reported by the previous session* and
+   distinguishes it from the facts drydock derived itself. The successor is
+   told which half is testimony.
+2. Fork is a **UI gesture only** and deliberately not an MCP tool, so
+   `session_start`'s "started sessions may not start further sessions"
+   restriction stays intact. No agent can fork itself, and therefore no
+   injected brief can either.
+
+### It has to be advertised
+
+`McpServer.INSTRUCTIONS` is injected into the hosted agent's system prompt and
+is, per its own comment, "the only thing that makes a tool get called without
+the agent already hunting for one — a tool description is read at selection
+time, not at the moment the agent learns what its work is."
+
+So `INSTRUCTIONS` gains a sentence: this session may be handed to a different
+agent at any time, so keep `session_handoff` current — you are writing for
+your successor, not for the human.
+
+## Staleness is measured, and the measurement has verbs
+
+`SessionActivityWatcher` knows when the session last acted; the brief knows
+when it was last written and against which commit. The gap is a fact drydock
+can state, and it states it in work rather than in clock time: *"brief written
+9 commits and 40 changed files ago"* is actionable in a way that *"brief is
+two hours old"* is not.
+
+The banner appears when there is no brief at all, or when the session has
+committed or changed files since `writtenAtCommit`. Time alone never raises
+it: a session idle for a day has a brief that is still perfectly accurate.
+Nothing is enforced and nothing is blocked. The banner carries three verbs:
+
+**Refresh** asks the outgoing session to call `session_handoff` now, by
+writing a prompt into its terminal through the same path any seeded prompt
+takes. It is a request, not a command: the agent may ignore it, and the banner
+clears only when a brief actually lands. This is
+the human pulling the trigger, not drydock silently degrading, which is why it
+does not contradict the living-brief design. It is enabled **only when the
+outgoing session is alive and idle**; otherwise it is disabled with the reason
+on the control. A Refresh button that appears to work against a dead session
+is worse than no button, because the failure is invisible at exactly the
+moment the human is deciding whether to trust the brief.
+
+**Edit** opens the brief in a dialog with one field per slot, for the human to
+write directly — the same caps apply, but a human edit is never charged
+against the session's budget. This is expected to
+carry most of the load in practice: the human usually knows precisely what the
+successor needs — *"the parser rewrite is a dead end, don't retry it"* — and
+can type it faster than any agent round-trip. A human edit stamps `writtenAt`
+and `writtenAtCommit` fresh, which clears the warning honestly, because the
+brief now is current.
+
+**Fork anyway** proceeds, and is safe by construction. See the next section.
+
+## The fork
+
+Every switch is a fork to a sibling. Nothing is ever switched in place, no
+live tab is operated on, and the outgoing session, its branch and its worktree
+are never written to. The whole operation is additive, so a fork that fails
+cannot cost work.
+
+The seed handed to the new session is always **the brief plus facts drydock
+derives fresh at fork time**: branch, base commit, commit subjects, changed
+files and open review intents. That floor needs no cooperation from a dead
+session and costs nothing, so a stale brief is always bounded by current
+mechanical truth — and when there is no brief at all, the successor is *told*
+that rather than quietly starting uninformed.
+
+The operation:
+
+1. Create a branch at the outgoing session's `HEAD` (suffixing on collision).
+2. Mint a worktree for it, via the machinery behind `worktree_create`.
+3. Initialise submodules in the new worktree — locally, from the shared
+   `.git/modules`, no network. A fresh worktree's `third_party/` is empty, and
+   a successor that inherits a repo which will not build has been handed a
+   different problem than the one it was briefed on.
+4. Transplant the outgoing worktree's dirty state — tracked edits, deletions
+   and untracked files, excluding ignored ones — and leave it **uncommitted**,
+   so the review rail sees a real diff.
+5. Write the composed seed to a file in drydock's state directory, and start a
+   session there with the chosen `AgentKind`, with `forkedFrom` set, whose
+   prompt is a **single line pointing at that file**.
+
+### Why the seed is a file and the prompt is a pointer
+
+A prompt reaches a session as real keystrokes, and an embedded newline submits
+the line before it -- which is why `MainWorkspace.sendTaskWhenReady` collapses
+whitespace before typing. Run the composed seed through that and its headings,
+blank lines and bullets become one run-on line, which destroys the separation
+of testimony from derived facts that the section above calls a mitigation
+rather than formatting.
+
+So the structure lives in a file and the prompt is one line pointing at it.
+The file is written **outside** the worktree, in drydock's own state
+directory: a file in the tree would appear in the fork's first diff and in the
+review rail, which is exactly why a worktree file was rejected as the brief's
+*home*. This is a delivery artifact for one launch, not the store -- a
+distinction worth keeping, because the two look alike and only one of them
+belongs in git's view.
+
+It is owner-only, since a brief can quote anything the previous session was
+working on. The successor is asked to delete it once read; because that is a
+request to an agent rather than a guarantee, drydock also sweeps seeds older
+than seven days.
+
+The chosen `AgentKind` may be the same one the outgoing session is running.
+Forking to the same harness is a legitimate rescue — the harness is fine, that
+particular process is wedged — and a legitimate second opinion, so nothing
+excludes it.
+
+The new session starts with **no brief of its own**. The inherited brief is
+in its seed, as testimony; its own `HandoffBrief` entry is created the first
+time it calls `session_handoff`. Copying the parent's brief forward would make
+a successor that never writes one look current forever, which is the exact
+failure the staleness banner exists to catch.
+
+Step 4 is what makes the fork safe for the rescue case: forking into a clean
+worktree would strand the uncommitted work that is precisely what the rescue
+is trying to save.
+
+### Lineage
+
+`ManagedAgentSession` gains one field, `forkedFrom: Optional<ManagedSessionId>`.
+That is the entire lineage model. Nothing mutates on a switch — the outgoing
+session is untouched and the incoming one records its parent — and chain
+depth ("this is the third harness on this work") is derived by walking links
+rather than stored.
+
+### Where it appears
+
+A "Fork to…" gesture on the session tab and its sidebar row, listing
+`AgentRegistry.agents()`. Unavailable agents are shown disabled with
+`describeSearched()`, exactly as the existing picker does.
+
+## Failure modes
+
+The transplant is the risky part and is **all-or-nothing**. Binary files,
+deletions, symlinks, permission bits and a partially applied patch all fail
+the same way: the new worktree and branch are removed and the fork reports
+why. A half-populated worktree that looks like a successful fork is worse than
+a visible failure, because the human would start working in it.
+
+Everything else resolves to a plain refusal or a stated fallback:
+
+| case | behaviour |
+|---|---|
+| outgoing session has no commits yet | fork from the base commit, and say so in the seed |
+| target agent unavailable | never offered; disabled with `describeSearched()` |
+| branch name collides | suffix and continue |
+| brief absent | fork proceeds; the seed states that no brief was recorded |
+| brief oversize | `session_handoff` refuses with the limit; nothing is stored |
+| outgoing session dead, Refresh pressed | not reachable — the control is disabled with the reason |
+
+## Verification
+
+JUnit, for everything that is logic:
+
+- `HandoffBrief` codec round-trip, **including state files written before this
+  feature exists** — old state must still decode.
+- Staleness arithmetic against `writtenAtCommit`.
+- Seed composition in all three cases (brief present, stale, absent),
+  asserting the seed labels which parts drydock derived and which are the
+  previous session's testimony.
+- `PromptSafety` folding of every slot, and the supplementary-plane tag-block
+  case that a `char` loop would miss.
+- `session_handoff` argument validation, caps, and charge/refund behaviour.
+
+Real-git tests for the transplant matrix — tracked edits, untracked files,
+deletions, binary content, submodule present — plus the rollback case,
+asserting that neither worktree nor branch survives a failure.
+
+The staleness banner and the disabled-Refresh-with-reason are visual state
+with no headless-FX harness behind them. Per `docs/architecture.md`, those are
+checked with a diag script and its `shot:` scene snapshot, and the
+implementation report says so plainly rather than claiming "tested".
+
+## What was cut
+
+**Seamless resumption** — replaying the outgoing transcript as the incoming
+harness's own turn history, so `/rewind`, compaction and "as I said earlier"
+all still work. This is the only bar that forces drydock to understand vendor
+transcript formats, and it would put drydock permanently on the hook for an
+N×N matrix of undocumented, independently versioned on-disk layouts, where the
+hard part is not messages but tool calls, thinking blocks, compaction
+boundaries and system prompts that have no counterpart across harnesses.
+
+**The API proxy / uber-harness** — drydock in the request path, owning the
+agent loop or at least the wire, so history is natively its own and switching
+becomes routing. Once the fidelity bar is "briefed", the proxy buys nothing
+for *this* feature: no request needs to sit in drydock's path and no wire
+format needs translating.
+
+It is cut but not foreclosed. If it returns it will be for its own reasons —
+unified cost accounting, a canonical archive, models no CLI exposes — and it
+will get its own spec. This design leaves the door open cheaply: the brief is
+a record behind one MCP tool, and a proxy could fill the same record from
+richer sources, or supply full transcripts alongside it, without any consumer
+of `HandoffBrief` changing.
+
+**Switching in place.** Rejected because every in-place variant is destructive
+in some failure mode, and because "always fork" needs no special case for the
+dead-session path — there is no live tab to operate on.

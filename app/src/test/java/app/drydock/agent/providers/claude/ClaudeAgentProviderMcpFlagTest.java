@@ -2,6 +2,7 @@ package app.drydock.agent.providers.claude;
 
 import app.drydock.agent.api.AgentContext;
 import app.drydock.agent.api.CreateContext;
+import app.drydock.agent.api.McpAccess;
 import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.providers.claude.internal.ClaudeExecutableLocator;
 import app.drydock.domain.SshRemote;
@@ -31,8 +32,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class ClaudeAgentProviderMcpFlagTest {
 
-    private static final Optional<Path> NO_MCP = Optional.empty();
-    private static final Optional<Path> SOME_MCP = Optional.of(Path.of("/base/mcp/abc.json"));
+    private static final Optional<McpAccess> NO_MCP = Optional.empty();
+    private static final Optional<McpAccess> SOME_MCP = Optional.of(new McpAccess(
+            "http://127.0.0.1:51234/mcp", "tok-abc", Optional.of(Path.of("/base/mcp/abc.json"))));
 
     /**
      * A stub whose {@code --help} advertises {@code --mcp-config} exactly when
@@ -64,13 +66,13 @@ class ClaudeAgentProviderMcpFlagTest {
         return provider;
     }
 
-    private static CreateContext create(Optional<Path> mcpConfig) {
-        return new CreateContext("my session", "sid-1", Path.of("/tmp"), Optional.empty(), mcpConfig);
+    private static CreateContext create(Optional<McpAccess> mcp) {
+        return new CreateContext("my session", "sid-1", Path.of("/tmp"), Optional.empty(), mcp);
     }
 
     /** Neither id nor name, so the resume builder takes its bare {@code --resume} branch. */
-    private static ResumeContext resume(Optional<Path> mcpConfig) {
-        return new ResumeContext(Optional.empty(), Optional.empty(), Path.of("/tmp"), Optional.empty(), mcpConfig);
+    private static ResumeContext resume(Optional<McpAccess> mcp) {
+        return new ResumeContext(Optional.empty(), Optional.empty(), Path.of("/tmp"), Optional.empty(), mcp);
     }
 
     @Test
@@ -116,7 +118,8 @@ class ClaudeAgentProviderMcpFlagTest {
     @Test
     void aPathWithSpacesIsQuoted(@TempDir Path dir) throws IOException {
         Path spaced = Path.of("/Users/me/Application Support/drydock/mcp/abc.json");
-        String command = provider(dir, true).buildCreateCommand(create(Optional.of(spaced))).command();
+        String command = provider(dir, true).buildCreateCommand(create(Optional.of(
+                new McpAccess("http://127.0.0.1:51234/mcp", "tok-abc", Optional.of(spaced))))).command();
 
         assertTrue(command.contains("'/Users/me/Application Support/drydock/mcp/abc.json'"), command);
     }

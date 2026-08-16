@@ -1,5 +1,8 @@
 package app.drydock.app;
 
+import app.drydock.domain.SessionWorkspace;
+import app.drydock.domain.PrLink;
+import app.drydock.domain.AgentBinding;
 import app.drydock.agent.api.AgentContext;
 import app.drydock.agent.api.AgentKind;
 import app.drydock.agent.api.AgentRegistry;
@@ -108,22 +111,11 @@ class SessionManagerTest {
                                               Optional<String> agentSessionName) {
         Instant now = Instant.now();
         return new ManagedAgentSession(
-                ManagedSessionId.newId(),
-                RepositoryId.newId(),
-                AgentKind.CLAUDE,
-                "example session",
-                agentSessionId,
-                agentSessionName,
-                workingDirectory,
-                Optional.empty(),
-                SessionStatus.INACTIVE,
-                now,
-                now,
-                Optional.empty(),
-                PrState.NONE,
-                Optional.empty(),
-                true,
-                false);
+                ManagedSessionId.newId(), RepositoryId.newId(), "example session",
+                new AgentBinding(AgentKind.CLAUDE, agentSessionId, agentSessionName),
+                new SessionWorkspace(workingDirectory, Optional.empty(), true),
+                SessionStatus.INACTIVE, now, now, Optional.empty(),
+                PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty());
     }
 
     private Repository someRepository() {
@@ -285,22 +277,11 @@ class SessionManagerTest {
     private static ManagedAgentSession sessionIn(Repository repository, String displayName) {
         Instant now = Instant.now();
         return new ManagedAgentSession(
-                ManagedSessionId.newId(),
-                repository.id(),
-                AgentKind.CLAUDE,
-                displayName,
-                Optional.empty(),
-                Optional.empty(),
-                repository.root(),
-                Optional.empty(),
-                SessionStatus.INACTIVE,
-                now,
-                now,
-                Optional.empty(),
-                PrState.NONE,
-                Optional.empty(),
-                true,
-                false);
+                ManagedSessionId.newId(), repository.id(), displayName,
+                new AgentBinding(AgentKind.CLAUDE, Optional.empty(), Optional.empty()),
+                new SessionWorkspace(repository.root(), Optional.empty(), true),
+                SessionStatus.INACTIVE, now, now, Optional.empty(),
+                PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty());
     }
 
     /** {@link SessionManager#sessions()} is public where {@code findSession} is not; use it to read state back. */

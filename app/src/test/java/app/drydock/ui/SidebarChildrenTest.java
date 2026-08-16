@@ -1,5 +1,8 @@
 package app.drydock.ui;
 
+import app.drydock.domain.SessionWorkspace;
+import app.drydock.domain.PrLink;
+import app.drydock.domain.AgentBinding;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -36,12 +39,12 @@ class SidebarChildrenTest {
 
     private static ManagedAgentSession session(String name, Path worktreeRoot,
             SessionStatus status, Instant lastOpened) {
-        return new ManagedAgentSession(ManagedSessionId.newId(), REPO, AgentKind.CLAUDE, name,
-                Optional.empty(), Optional.empty(),
-                worktreeRoot == null ? ROOT : worktreeRoot,
-                Optional.ofNullable(worktreeRoot),
+        return new ManagedAgentSession(
+                ManagedSessionId.newId(), REPO, name,
+                new AgentBinding(AgentKind.CLAUDE, Optional.empty(), Optional.empty()),
+                new SessionWorkspace(worktreeRoot == null ? ROOT : worktreeRoot, Optional.ofNullable(worktreeRoot), false),
                 status, Instant.EPOCH, lastOpened, Optional.empty(),
-                PrState.NONE, Optional.empty(), false, false);
+                PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty());
     }
 
     private static Function<ManagedSessionId, SessionActivity> noActivity() {

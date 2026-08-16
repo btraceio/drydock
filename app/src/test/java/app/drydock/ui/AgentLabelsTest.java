@@ -1,5 +1,8 @@
 package app.drydock.ui;
 
+import app.drydock.domain.SessionWorkspace;
+import app.drydock.domain.PrLink;
+import app.drydock.domain.AgentBinding;
 import app.drydock.agent.api.AgentCapabilities;
 import app.drydock.agent.api.AgentContext;
 import app.drydock.agent.api.AgentKind;
@@ -8,6 +11,7 @@ import app.drydock.agent.api.ActivityReporter;
 import app.drydock.agent.api.ConversationSource;
 import app.drydock.agent.api.CreateContext;
 import app.drydock.agent.api.LaunchPlan;
+import app.drydock.agent.api.McpDelivery;
 import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdDiscovery;
 import app.drydock.agent.api.SessionIdStrategy;
@@ -37,7 +41,7 @@ class AgentLabelsTest {
         @Override public String describeSearched() { return "PATH"; }
         @Override public AgentCapabilities probeCapabilities() { return new AgentCapabilities(true, true, "1"); }
         @Override public boolean supportsRemote() { return true; }
-        @Override public boolean supportsMcpConfig() { return false; }
+        @Override public McpDelivery mcpDelivery() { return McpDelivery.NONE; }
         @Override public LaunchPlan buildCreateCommand(CreateContext c) { return LaunchPlan.of("x", false); }
         @Override public LaunchPlan buildResumeCommand(ResumeContext r) { return LaunchPlan.of("x", false); }
         @Override public SessionIdStrategy idStrategy() { return SessionIdStrategy.PRESET; }
@@ -86,8 +90,11 @@ class AgentLabelsTest {
     }
 
     private static ManagedAgentSession session(AgentKind kind, SessionStatus status) {
-        return new ManagedAgentSession(ManagedSessionId.newId(), RepositoryId.newId(), kind, "work",
-                Optional.empty(), Optional.empty(), Path.of("/tmp"), Optional.empty(), status,
-                Instant.EPOCH, Instant.EPOCH, Optional.empty(), PrState.NONE, Optional.empty(), false, false);
+        return new ManagedAgentSession(
+                ManagedSessionId.newId(), RepositoryId.newId(), "work",
+                new AgentBinding(kind, Optional.empty(), Optional.empty()),
+                new SessionWorkspace(Path.of("/tmp"), Optional.empty(), false),
+                status, Instant.EPOCH, Instant.EPOCH, Optional.empty(),
+                PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty());
     }
 }

@@ -37,10 +37,17 @@ import java.util.logging.Logger;
  * {@code claude} process on the same machine, not a network service.
  *
  * <p>The {@code X-Drydock-Session-Token} header identifies which managed
- * session is calling, so tools resolve to the right repository. As {@link
+ * session is calling, so tools resolve to the right repository. The same token
+ * is also accepted as {@code Authorization: Bearer}, for clients that can only
+ * be pointed at a bearer token. No drydock provider needs that form today --
+ * Codex, the one that prompted it, turned out to support custom headers after
+ * all ({@code env_http_headers}) and uses {@code X-Drydock-Session-Token} like
+ * Claude -- but the form stays because it costs one branch and is what a
+ * bearer-only client would send. As {@link
  * McpSessionRegistry}'s Javadoc explains, the token is attribution, not a
  * secret between sessions: any process running as this user's uid can already
- * read a sibling session's config file. {@code Origin}/{@code Host} checks
+ * read a sibling session's config file -- which is also why accepting a second
+ * header form widens nothing. {@code Origin}/{@code Host} checks
  * below are defense in depth against a browser tab rebinding to this port --
  * they add nothing against a local process, which is why an absent {@code
  * Origin} (as CLI clients send) is accepted rather than rejected.</p>
@@ -50,6 +57,15 @@ public final class McpServer implements AutoCloseable {
     private static final Logger LOG = Logger.getLogger(McpServer.class.getName());
 
     private static final String TOKEN_HEADER = "X-Drydock-Session-Token";
+
+    /**
+     * The other accepted credential form, for a client that can only be told
+     * to send {@code Authorization: Bearer}. Nothing drydock launches needs it
+     * today (see this class's Javadoc), so it is a compatibility affordance,
+     * not a route any provider depends on.
+     */
+    private static final String BEARER_SCHEME = "Bearer";
+
     private static final String PATH = "/mcp";
 
     /** Bounded drain for in-flight handlers on close; matches SessionManager's own close budget. */
@@ -212,6 +228,52 @@ public final class McpServer implements AutoCloseable {
             }
         }
 
+        /**
+         * The calling session, identified by either accepted credential.
+         *
+         * <p>{@link #TOKEN_HEADER} is tried first because it is drydock's own
+         * and unambiguous; {@code Authorization: Bearer} is the fallback for
+         * clients that cannot set an arbitrary header.</p>
+         *
+         * <p>Falling back when the drydock header is present but does not
+         * resolve is deliberate. The token is attribution, not a secret
+         * between sessions (see {@link McpSessionRegistry}), so a client that
+         * sets both and gets one wrong is a client to be forgiving of, not a
+         * privilege boundary to defend.</p>
+         */
+        private Optional<ManagedSessionId> resolveCaller(HttpExchange exchange) {
+            Optional<ManagedSessionId> byDrydockHeader =
+                    registry.resolve(exchange.getRequestHeaders().getFirst(TOKEN_HEADER));
+            if (byDrydockHeader.isPresent()) {
+                return byDrydockHeader;
+            }
+            return bearerCredential(exchange.getRequestHeaders().getFirst("Authorization"))
+                    .flatMap(registry::resolve);
+        }
+
+        /**
+         * The credential out of an {@code Authorization: Bearer <token>}
+         * header, or empty for any other scheme, a missing header, or a
+         * scheme with no credential after it.
+         *
+         * <p>The scheme is matched case-insensitively (RFC 7235 makes
+         * auth-scheme case-insensitive), and a separator is required after it
+         * so {@code Bearerabc} is not read as the token {@code abc}.</p>
+         */
+        private static Optional<String> bearerCredential(String authorization) {
+            if (authorization == null) {
+                return Optional.empty();
+            }
+            String header = authorization.strip();
+            if (header.length() <= BEARER_SCHEME.length()
+                    || !header.regionMatches(true, 0, BEARER_SCHEME, 0, BEARER_SCHEME.length())
+                    || !Character.isWhitespace(header.charAt(BEARER_SCHEME.length()))) {
+                return Optional.empty();
+            }
+            String credential = header.substring(BEARER_SCHEME.length()).strip();
+            return credential.isEmpty() ? Optional.empty() : Optional.of(credential);
+        }
+
         private void handleSafely(HttpExchange exchange) throws IOException {
             if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
                 sendEmpty(exchange, 405);
@@ -227,8 +289,7 @@ public final class McpServer implements AutoCloseable {
                 return;
             }
 
-            String presentedToken = exchange.getRequestHeaders().getFirst(TOKEN_HEADER);
-            Optional<ManagedSessionId> caller = registry.resolve(presentedToken);
+            Optional<ManagedSessionId> caller = resolveCaller(exchange);
             if (caller.isEmpty()) {
                 sendEmpty(exchange, 401);
                 return;
@@ -332,7 +393,12 @@ public final class McpServer implements AutoCloseable {
                 the work actually is, call session_rename with a short title naming the work -- not \
                 the branch. Re-title it if the work turns out to be something else. Two refusals are \
                 normal and both explain themselves: if the human has named the session, leave it \
-                alone; if another session here already has that title, pick one that tells them apart.\
+                alone; if another session here already has that title, pick one that tells them apart.
+
+                Keep session_handoff current as you work. This session may be handed to a different \
+                agent at any moment, and that brief is all your successor gets -- write it for them, \
+                not for the human, and especially record what you RULED OUT and why, which they \
+                cannot recover from the code.\
                 """;
 
         private JsonValue initializeResult(JsonValue params) {
@@ -433,7 +499,8 @@ public final class McpServer implements AutoCloseable {
      * purpose rather than by how it was named.</p>
      */
     private static final Set<String> AGENT_WRITE_TOOLS = Set.of(
-            "review_reply", "review_intents", "review_finding", "review_answer", "session_rename");
+            "review_reply", "review_intents", "review_finding", "review_answer", "session_rename",
+            "session_handoff");
 
     static McpActivityLog.Direction directionOf(String tool) {
         return AGENT_WRITE_TOOLS.contains(tool)

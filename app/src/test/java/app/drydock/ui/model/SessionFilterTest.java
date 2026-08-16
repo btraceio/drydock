@@ -5,6 +5,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import app.drydock.agent.api.AgentKind;
+import app.drydock.domain.AgentBinding;
+import app.drydock.domain.SessionWorkspace;
+import app.drydock.domain.PrLink;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.PrState;
@@ -24,10 +27,11 @@ class SessionFilterTest {
     private static final RepositoryId REPO = RepositoryId.newId();
 
     private static ManagedAgentSession session(AgentKind kind, SessionStatus status) {
-        return new ManagedAgentSession(ManagedSessionId.newId(), REPO, kind, "s",
-                Optional.empty(), Optional.empty(), Path.of("/repo"), Optional.empty(),
+        return new ManagedAgentSession(ManagedSessionId.newId(), REPO, "s",
+                new AgentBinding(kind, Optional.empty(), Optional.empty()),
+                new SessionWorkspace(Path.of("/repo"), Optional.empty(), false),
                 status, Instant.EPOCH, Instant.EPOCH, Optional.empty(),
-                PrState.NONE, Optional.empty(), false, false);
+                PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty());
     }
 
     @Test

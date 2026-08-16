@@ -1,5 +1,6 @@
 package app.drydock.mcp;
 
+import app.drydock.domain.HandoffBrief;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.git.DiffScope;
 import app.drydock.mcp.AnnotationLines.LineRef;
@@ -22,6 +23,7 @@ import java.io.IOException;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.logging.Level;
@@ -156,6 +158,21 @@ public final class McpToolRouter {
                                 .put("title", schemaString("Short title naming the work; at most 60 "
                                         + "characters, one line.")),
                         "title"),
+                descriptor("session_handoff",
+                        "Records what this session would tell a successor, so the human can hand the work "
+                                + "to a different agent at any moment. Keep it current as you work -- you "
+                                + "are writing for whoever picks this up, not for the human. Every call "
+                                + "REPLACES the whole brief: an omitted optional slot is cleared, not kept.",
+                        JsonObject.empty()
+                                .put("goal", schemaString("What this session is trying to achieve."))
+                                .put("nextStep", schemaString("What the successor should do first."))
+                                .put("approach", schemaString("The shape of the current solution."))
+                                .put("decisions", schemaString("Choices made, and why."))
+                                .put("ruledOut", schemaString("What was tried or considered and rejected, "
+                                        + "with the reason -- the part a successor cannot reconstruct "
+                                        + "from the code."))
+                                .put("corrections", schemaString("What the human pushed back on.")),
+                        "goal", "nextStep"),
                 descriptor("repos_list",
                         "Lists every repository registered in Drydock, with git state for local repositories.",
                         JsonObject.empty()),
@@ -177,6 +194,7 @@ public final class McpToolRouter {
             case "worktree_create" -> worktreeCreate(caller, arguments);
             case "session_start" -> sessionStart(caller, arguments);
             case "session_rename" -> sessionRename(caller, arguments);
+            case "session_handoff" -> sessionHandoff(caller, arguments);
             case "repos_list" -> reposList(caller);
             case "sessions_list" -> sessionsList(caller);
             default -> throw new McpToolException("Unknown tool: " + tool);
@@ -614,6 +632,79 @@ public final class McpToolRouter {
         } catch (IOException e) {
             return path;
         }
+    }
+
+    // ---- session_handoff ----------------------------------------------------
+
+    private JsonValue sessionHandoff(ManagedSessionId caller, JsonValue arguments) throws McpToolException {
+        requireLiveSession(caller);
+        JsonObject args = asObject(arguments);
+
+        // Validate before charging: a malformed brief is the agent's mistake
+        // to fix, not a spend (same rule as session_rename).
+        String goal = PromptSafety.checkHandoffSlot("goal", requiredStringArg(args, "goal"));
+        String nextStep = PromptSafety.checkHandoffSlot("nextStep", requiredStringArg(args, "nextStep"));
+        if (goal.isBlank() || nextStep.isBlank()) {
+            throw new McpToolException("goal and nextStep must not be blank: a brief with no goal or no "
+                    + "next step tells a successor nothing.");
+        }
+        Optional<String> approach = optionalSlot(args, "approach");
+        Optional<String> decisions = optionalSlot(args, "decisions");
+        Optional<String> ruledOut = optionalSlot(args, "ruledOut");
+        Optional<String> corrections = optionalSlot(args, "corrections");
+
+        List<String> present = new ArrayList<>(List.of(goal, nextStep));
+        approach.ifPresent(present::add);
+        decisions.ifPresent(present::add);
+        ruledOut.ifPresent(present::add);
+        corrections.ifPresent(present::add);
+        PromptSafety.checkHandoffRecordSize(present);
+
+        try {
+            registry.chargeHandoff(caller);
+        } catch (McpBudgetExhaustedException e) {
+            throw new McpToolException(e.getMessage());
+        }
+
+        HandoffBrief written;
+        try {
+            written = context.writeHandoff(caller, new McpSessionContext.HandoffDraft(
+                    goal, nextStep, approach, decisions, ruledOut, corrections));
+        } catch (McpToolException | RuntimeException e) {
+            // Only an outright failure is refunded -- but "outright" includes
+            // an unchecked one. The context reaches git and the FX thread, and
+            // a charge kept for a write that never happened would let a
+            // repeatable infrastructure failure burn the whole budget.
+            registry.refundHandoff(caller);
+            throw e;
+        }
+
+        return JsonObject.empty()
+                .put("outcome", new JsonString("written"))
+                .put("writtenAt", new JsonString(written.writtenAt().toString()));
+    }
+
+    /**
+     * An optional slot. Absent OR blank means "clear this slot", never "keep
+     * what was there": the tool replaces the whole brief, so a blank string
+     * and a missing key have to mean the same thing.
+     */
+    private static Optional<String> optionalSlot(JsonObject args, String key) throws McpToolException {
+        JsonValue value = args.get(key);
+        if (value == null || value instanceof JsonNull) {
+            return Optional.empty();
+        }
+        // A present non-string is refused rather than read as "clear this
+        // slot": the tool replaces the whole brief, so silently dropping a
+        // ruledOut sent as an array would answer "written" for a brief that
+        // lost it.
+        if (!(value instanceof JsonString text)) {
+            throw new McpToolException(key + " must be a string.");
+        }
+        if (text.value().isBlank()) {
+            return Optional.empty();
+        }
+        return Optional.of(PromptSafety.checkHandoffSlot(key, text.value()));
     }
 
     // ---- session_rename -----------------------------------------------------

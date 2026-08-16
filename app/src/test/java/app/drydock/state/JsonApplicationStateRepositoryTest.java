@@ -1,5 +1,8 @@
 package app.drydock.state;
 
+import app.drydock.domain.SessionWorkspace;
+import app.drydock.domain.PrLink;
+import app.drydock.domain.AgentBinding;
 import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.ApplicationState;
 import app.drydock.domain.ManagedAgentSession;
@@ -61,7 +64,7 @@ class JsonApplicationStateRepositoryTest {
         WorkspaceUiState ui = new WorkspaceUiState(
                 Optional.of(repo.id()), 321.0, Set.of(repo.id()), app.drydock.domain.UiTheme.LIGHT,
                 WorkspaceUiState.DEFAULT_UI_FONT_SIZE, WorkspaceUiState.DEFAULT_TERMINAL_FONT_SIZE);
-        ApplicationState state = new ApplicationState(List.of(repo), List.of(), ui);
+        ApplicationState state = new ApplicationState(List.of(repo), List.of(), ui, List.of());
 
         JsonApplicationStateRepository repository = new JsonApplicationStateRepository(stateFile());
         repository.save(state);
@@ -127,23 +130,12 @@ class JsonApplicationStateRepositoryTest {
         Path workingDirectory = Files.createDirectory(tempDir.resolve("session-working-dir"));
         Path worktreeRoot = Files.createDirectory(tempDir.resolve("session-worktree"));
         ManagedAgentSession session = new ManagedAgentSession(
-                ManagedSessionId.newId(),
-                repo.id(),
-                AgentKind.CLAUDE,
-                "my session",
-                Optional.of("claude-session-id-abc"),
-                Optional.of("claude-session-name"),
-                workingDirectory,
-                Optional.of(worktreeRoot),
-                SessionStatus.EXITED,
-                Instant.parse("2026-01-03T00:00:00Z"),
-                Instant.parse("2026-01-04T00:00:00Z"),
-                Optional.of(1),
-                PrState.OPEN,
-                Optional.of(128),
-                true,
-                false);
-        ApplicationState state = new ApplicationState(List.of(repo), List.of(session), WorkspaceUiState.empty());
+                ManagedSessionId.newId(), repo.id(), "my session",
+                new AgentBinding(AgentKind.CLAUDE, Optional.of("claude-session-id-abc"), Optional.of("claude-session-name")),
+                new SessionWorkspace(workingDirectory, Optional.of(worktreeRoot), true),
+                SessionStatus.EXITED, Instant.parse("2026-01-03T00:00:00Z"), Instant.parse("2026-01-04T00:00:00Z"), Optional.of(1),
+                PrLink.of(PrState.OPEN, Optional.of(128)), false, Optional.empty());
+        ApplicationState state = new ApplicationState(List.of(repo), List.of(session), WorkspaceUiState.empty(), List.of());
 
         JsonApplicationStateRepository repository = new JsonApplicationStateRepository(stateFile());
         repository.save(state);
@@ -159,23 +151,12 @@ class JsonApplicationStateRepositoryTest {
         Repository repo = sampleRepository(repoRoot);
         Path workingDirectory = Files.createDirectory(tempDir.resolve("session-working-dir"));
         ManagedAgentSession session = new ManagedAgentSession(
-                ManagedSessionId.newId(),
-                repo.id(),
-                AgentKind.CLAUDE,
-                "bare session",
-                Optional.empty(),
-                Optional.empty(),
-                workingDirectory,
-                Optional.empty(),
-                SessionStatus.INACTIVE,
-                Instant.parse("2026-01-03T00:00:00Z"),
-                Instant.parse("2026-01-04T00:00:00Z"),
-                Optional.empty(),
-                PrState.NONE,
-                Optional.empty(),
-                true,
-                false);
-        ApplicationState state = new ApplicationState(List.of(repo), List.of(session), WorkspaceUiState.empty());
+                ManagedSessionId.newId(), repo.id(), "bare session",
+                new AgentBinding(AgentKind.CLAUDE, Optional.empty(), Optional.empty()),
+                new SessionWorkspace(workingDirectory, Optional.empty(), true),
+                SessionStatus.INACTIVE, Instant.parse("2026-01-03T00:00:00Z"), Instant.parse("2026-01-04T00:00:00Z"), Optional.empty(),
+                PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty());
+        ApplicationState state = new ApplicationState(List.of(repo), List.of(session), WorkspaceUiState.empty(), List.of());
 
         JsonApplicationStateRepository repository = new JsonApplicationStateRepository(stateFile());
         repository.save(state);
@@ -279,7 +260,7 @@ class JsonApplicationStateRepositoryTest {
         repository.save(ApplicationState.empty());
 
         Path repoRoot = Files.createDirectory(tempDir.resolve("second-root"));
-        ApplicationState secondState = new ApplicationState(List.of(sampleRepository(repoRoot)), List.of(), WorkspaceUiState.empty());
+        ApplicationState secondState = new ApplicationState(List.of(sampleRepository(repoRoot)), List.of(), WorkspaceUiState.empty(), List.of());
         repository.save(secondState);
 
         Path backup = stateFile().resolveSibling("state.json.bak");

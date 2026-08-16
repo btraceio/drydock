@@ -703,6 +703,36 @@ public final class GitStatusService implements AutoCloseable {
         }
     }
 
+    /**
+     * The commit {@code HEAD} names in {@code workingDirectory}, or empty when
+     * there is none -- an unborn branch with no commits yet, or a directory
+     * that is not a repository.
+     *
+     * <p>Empty rather than throwing, because every caller so far is stamping
+     * or comparing metadata (a handoff brief's {@code writtenAtCommit}, and
+     * the staleness that reads it). A session on a branch with no commits is
+     * an ordinary state, not a failure, and must not cost the caller its
+     * operation. Blocking; never call on the FX thread.</p>
+     */
+    public Optional<String> headCommitBlocking(Path workingDirectory) {
+        Optional<Path> git = locator.locate();
+        if (git.isEmpty()) {
+            return Optional.empty();
+        }
+        ProcessResult result = run(List.of(
+                git.get().toString(), "-C", workingDirectory.toString(), "rev-parse", "--verify", "HEAD"));
+        if (result.exitCode() != 0) {
+            return Optional.empty();
+        }
+        String sha = result.stdout().strip();
+        return sha.isEmpty() ? Optional.empty() : Optional.of(sha);
+    }
+
+    /** Async form of {@link #headCommitBlocking}, on this service's background executor. */
+    public CompletableFuture<Optional<String>> headCommit(Path workingDirectory) {
+        return CompletableFuture.supplyAsync(() -> headCommitBlocking(workingDirectory), executor);
+    }
+
     // ---- process execution (shared ProcessRunner, git-flavored failure translation) ----
 
     private static ProcessResult run(List<String> command) {

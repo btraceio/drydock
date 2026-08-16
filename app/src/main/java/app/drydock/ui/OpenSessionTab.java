@@ -39,6 +39,7 @@ import javafx.util.Duration;
 
 import java.lang.System.Logger;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Optional;
 import java.util.function.BiConsumer;
 import java.util.function.Function;
@@ -114,6 +115,7 @@ final class OpenSessionTab {
     private final StackPane shellPlaceholder = new StackPane();
     private final Label statusLabel = new Label("Starting session...");
     private final BorderPane content = new BorderPane();
+    private final HandoffBanner handoffBanner = new HandoffBanner();
 
     // -- Bottom Agent/Terminal/Explorer sub-tab bar (handoff "Session Explorer") --
     /** Text set in the constructor: it names THIS session's agent (Claude, Codex, …). */
@@ -265,7 +267,10 @@ final class OpenSessionTab {
         tab.setClosable(false); // the graphic carries its own close button (17px ×, handoff 4)
         tab.setGraphic(buildTabGraphic(repository));
 
-        content.setTop(buildSessionHeader(repository));
+        // The banner sits under the header rather than inside it: it is absent
+        // most of the time (managed follows visible), and the header's own
+        // layout must not have to reserve space for something usually gone.
+        content.setTop(new VBox(buildSessionHeader(repository), handoffBanner));
         content.setCenter(placeholder);
         content.setBottom(buildSubTabBar());
         tab.setContent(content);
@@ -674,7 +679,6 @@ final class OpenSessionTab {
         headerTitle.setTextOverrun(OverrunStyle.ELLIPSIS);
         headerMeta.getStyleClass().add("session-meta-line");
         headerTitles.getChildren().setAll(headerTitle, headerMeta);
-        HBox.setHgrow(headerTitles, Priority.ALWAYS);
 
         statusPill.getStyleClass().add("status-pill");
         statusPill.setAlignment(Pos.CENTER);
@@ -682,6 +686,13 @@ final class OpenSessionTab {
 
         // Worktree-only elements; hidden until configureWorktree runs.
         worktreeContextLine.getStyleClass().add("worktree-context-line");
+        // Carries an absolute path, so it is the widest thing in the header
+        // and must be free to collapse (see the header's min-width pinning).
+        worktreeContextLine.setMinWidth(0);
+        worktreeContextLine.setMaxWidth(Double.MAX_VALUE);
+        // Trailing, not centred: branch and base lead the line and matter more
+        // than the tail of the path.
+        worktreeContextLine.setTextOverrun(OverrunStyle.ELLIPSIS);
         aheadChip.getStyleClass().add("chip-ahead");
         dirtyPill.getStyleClass().add("chip-dirty");
         headerPrChip.getStyleClass().add("pr-chip");
@@ -713,8 +724,39 @@ final class OpenSessionTab {
         rename.setFocusTraversable(false);
         rename.setOnAction(e -> startInlineRename());
 
-        HBox header = new HBox(12, back, headerTitles, worktreeChips, finishBox, statusPill, rename);
+        return layOutSessionHeader(back, headerTitles, worktreeChips, finishBox, statusPill, rename);
+    }
+
+    /**
+     * Assembles the session header row and settles who gives when it is too
+     * narrow: the title block absorbs the whole deficit, and every child
+     * carrying a word keeps its preferred width.
+     *
+     * <p>{@code HGROW} does not decide this. It distributes <em>spare</em>
+     * room; a <em>deficit</em> is spread across every child that will shrink,
+     * which by default is all of them. A forked worktree session fills this
+     * row -- context line, chips, {@code Finish}, status -- and a screenshot
+     * of one at 1100px showed what that costs: {@code uncom...},
+     * {@code Fi...}, {@code ru...}. A button reading "Fi..." tells the human
+     * nothing, whereas an elided path still reads as a path.</p>
+     *
+     * <p>Package-private and taking its children as parameters so the layout
+     * policy can be tested: a real {@link OpenSessionTab} needs a native
+     * terminal and cannot be built headlessly, and this row is exactly the
+     * part worth pinning down.</p>
+     */
+    static HBox layOutSessionHeader(Region back, Region titleBlock, Region chips,
+                                    Region finishBox, Region statusPill, Region rename) {
+        HBox header = new HBox(12, back, titleBlock, chips, finishBox, statusPill, rename);
         header.getStyleClass().add("session-header");
+        HBox.setHgrow(titleBlock, Priority.ALWAYS);
+        for (Region pinned : List.of(back, chips, finishBox, statusPill, rename)) {
+            pinned.setMinWidth(Region.USE_PREF_SIZE);
+        }
+        // The pinning only works if the title block will actually shrink; it
+        // derives its own minimum from its children, and the worktree context
+        // line is long enough to hold the row open by itself.
+        titleBlock.setMinWidth(0);
         return header;
     }
 
@@ -1152,4 +1194,10 @@ final class OpenSessionTab {
             }
         }
     }
+
+    /** The staleness banner for this session's handoff brief; the workspace drives it. */
+    HandoffBanner handoffBanner() {
+        return handoffBanner;
+    }
+
 }

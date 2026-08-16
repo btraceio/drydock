@@ -1,5 +1,8 @@
 package app.drydock.ui.model;
 
+import app.drydock.domain.SessionWorkspace;
+import app.drydock.domain.PrLink;
+import app.drydock.domain.AgentBinding;
 import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
@@ -74,9 +77,12 @@ class WorkspaceViewModelTest {
 
     private ManagedAgentSession session(ManagedSessionId id, RepositoryId repositoryId, String name) {
         Instant t = Instant.parse("2026-01-01T00:00:00Z");
-        return new ManagedAgentSession(id, repositoryId, AgentKind.CLAUDE, name, Optional.empty(), Optional.empty(),
-                Path.of("/tmp/repo").toAbsolutePath(), Optional.empty(), SessionStatus.INACTIVE,
-                t, t, Optional.empty(), PrState.NONE, Optional.empty(), true, false);
+        return new ManagedAgentSession(
+                id, repositoryId, name,
+                new AgentBinding(AgentKind.CLAUDE, Optional.empty(), Optional.empty()),
+                new SessionWorkspace(Path.of("/tmp/repo").toAbsolutePath(), Optional.empty(), true),
+                SessionStatus.INACTIVE, t, t, Optional.empty(),
+                PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty());
     }
 
     private static GitStatus status(String branch, boolean dirty) {
