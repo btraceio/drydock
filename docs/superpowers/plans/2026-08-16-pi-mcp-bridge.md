@@ -18,7 +18,7 @@ Every task's requirements implicitly include these. They are copied verbatim fro
 - **The token never enters argv.** Only paths do. Every literal value in a command goes through `AgentCommands.shellQuote`.
 - **Owner-only on disk:** files `rw-------`, directories `rwx------`.
 - **The extension's factory must never throw or reject.** A failed extension load exits pi 1 on every load path, so the whole factory body sits inside a `try`, and it returns instead of throwing.
-- **No floating promises anywhere in the extension.** pi installs no `unhandledRejection` listener and its `uncaughtException` handler calls `process.exit(1)`.
+- **No floating promises anywhere in the extension.** pi installs no `unhandledRejection` listener and its `uncaughtException` handler calls `process.exit(1)`. The spec asks for a single `safe()` wrapper as the only way async work is started; this plan has none because nothing in phase 1 starts detached async work — every call site is awaited. Anything added later that does start fire-and-forget work must bring the wrapper with it.
 - **Every `pi.on` handler is registered synchronously, before the first `await`** in the factory.
 - **Never read `err.cause`** — in tool errors, notifications, or logs. `err.cause` carries `127.0.0.1:<port>`; `err.message` is `"fetch failed"` and is the only safe string. This covers *every* string the extension produces.
 - **The extension has no npm dependencies.** `import type { ExtensionAPI }` is type-only and erased by `jiti`, and tool schemas are raw JSON Schema objects, so `typebox` is not needed either. The one runtime module load is `require("node:fs")` in `readWire()`, which is verified to work inside a `-e` extension on 0.84.1 — do not "clean it up" into a static import without re-running the smoke script.
@@ -604,7 +604,7 @@ git commit -m "PiExtensionInstaller: atomic, owner-only, safe for concurrent lau
 - Produces: launch commands of the form
   `env -u PI_CODING_AGENT DRYDOCK_MCP_CONFIG='<path>' pi -e '<path>' [--session '<id>' | --resume]`.
 
-**A correction to the spec's testing note.** The spec predicted the three existing `endsWith` assertions would break. They do not: the test fixture uses a nonexistent locator, so the probe returns `"unknown"`, so no flag is added. Leave them as `endsWith` — they now assert something *stronger* (that a sub-floor pi is untouched). The bridge form needs a capability override, added below.
+**A correction to the spec's testing note.** The spec predicted the three existing `endsWith` assertions would break. They do not, and the reason is simpler than the version gate: all three pass `Optional.empty()` as the `McpAccess`, and `piCommand` returns before it consults the gate or starts either future. Leave them exactly as they are — they assert "no `McpAccess`, no flags", which is still true. Everything about a sub-floor pi is covered separately by `subFloorPiGetsNoFlagsEvenWithMcpAccess`, which the bridge form's capability override makes possible.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -690,8 +690,11 @@ Add to `PiAgentProviderTest`, and add these imports: `app.drydock.agent.api.McpA
     /**
      * The property the memoised future exists for: a failed write must not be
      * latched, or one transient IOException costs every Pi tab its tools for
-     * the rest of the app run. The version probe is memoised through the same
-     * helper, so this covers both.
+     * the rest of the app run. This exercises the shared {@code memoised}
+     * helper -- NOT the probe's own {@code worthKeeping} predicate, which every
+     * bridge test bypasses via the injected capabilities. "A failed probe
+     * followed by a good one yields the good version" stays on the manual
+     * checklist until that injection becomes a supplier.
      */
     @Test
     void aFailedWriteIsNotLatchedAndTheNextLaunchRetries(@TempDir Path parent) throws Exception {
@@ -700,18 +703,27 @@ Add to `PiAgentProviderTest`, and add these imports: `app.drydock.agent.api.McpA
         PiAgentProvider p = bridgeProvider(state);
         Path config = state.resolve("mcp").resolve("s1.json");
 
-        String firstAttempt = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
-                Optional.empty(), Optional.of(access(config)))).command();
-        assertTrue(firstAttempt.endsWith("pi"), "a failed install must degrade, not fail the launch");
-
-        Files.setPosixFilePermissions(state, PosixFilePermissions.fromString("rwxr-xr-x"));
+        try {
+            String firstAttempt = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
+                    Optional.empty(), Optional.of(access(config)))).command();
+            assertTrue(firstAttempt.endsWith("pi"), "a failed install must degrade, not fail the launch");
+        } finally {
+            // Restore in a finally, or a failed assertion also fails @TempDir
+            // cleanup and buries the real error.
+            Files.setPosixFilePermissions(state, PosixFilePermissions.fromString("rwxr-xr-x"));
+        }
 
         String secondAttempt = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
                 Optional.empty(), Optional.of(access(config)))).command();
         assertTrue(secondAttempt.contains(" -e '"), "the next launch must retry: " + secondAttempt);
     }
 
-    /** Two tabs opened together must produce one write, not two, and both must get the path. */
+    /**
+     * Two tabs opened together must both receive the path rather than one
+     * racing the other into a degraded launch. Note this does NOT count writes
+     * — `memoised` guarantees one, but proving that needs a counting installer,
+     * and the property that matters at this seam is that no caller degrades.
+     */
     @Test
     void concurrentLaunchesShareOneInstall(@TempDir Path state) throws Exception {
         PiAgentProvider p = bridgeProvider(state);
@@ -729,6 +741,8 @@ Add to `PiAgentProviderTest`, and add these imports: `app.drydock.agent.api.McpA
         }
     }
 ```
+
+Neither covers the probe's own memo path: `bridgeProvider` injects capabilities, so `capabilitiesFuture()` short-circuits before the memo. That gap is deliberate for now and is recorded on the manual checklist rather than pretended away.
 
 These two need `java.nio.file.attribute.PosixFilePermissions`, `java.util.List`, and `java.util.concurrent.{Callable,ExecutorService,Executors,Future}` imported in the test.
 
@@ -1015,7 +1029,7 @@ git commit -m "Pi launches with drydock's MCP config and bridge extension"
 - Consumes: `DRYDOCK_MCP_CONFIG` naming a JSON file shaped `{"mcpServers":{"drydock":{"url":…,"headers":{"X-Drydock-Session-Token":…}}}}` — this is what `McpConfigWriter.writeFor` already produces.
 - Produces: the extension registers one pi tool per advertised MCP tool, and appends the server's `instructions` to the system prompt. Tasks 6–8 extend the same file.
 
-**Prerequisite:** `pi` on PATH at ≥ 0.80.3, and a local model configured (the smoke script runs `--offline`, which uses whatever provider pi's settings resolve to). Verify with `pi --version`.
+**Prerequisite:** `pi` on PATH at ≥ 0.80.3 (`pi --version`), and a working model — any provider. `--offline` only disables pi's *startup* network operations; inference still goes to whatever provider pi's settings resolve to, which is why the script preflights it and exits 2 SKIP rather than reporting a bridge failure.
 
 - [ ] **Step 1: Write the smoke script (this is the test)**
 
@@ -1081,24 +1095,33 @@ createServer((req, res) => {
       }
     } else { reply({}); }
   });
-}).listen(PORT, "127.0.0.1", () => console.log("mock listening"));
+}).on("error", (e) => { console.error("mock failed to bind: " + e.message); process.exit(1); })
+  .listen(PORT, "127.0.0.1", () => require("node:fs").writeFileSync(process.argv[3], "ready"));
 MOCK
 
 command -v node > /dev/null 2>&1 || { echo "SKIP: node is not on PATH; the mock server needs it"; exit 2; }
 
 # Preflight: everything below depends on the model actually calling a tool, so
 # a missing/unconfigured provider must not look like "the bridge is broken".
-if ! env -u PI_CODING_AGENT pi --offline -p "Say OK." < /dev/null 2>&1 | grep -qi "ok"; then
+# --session-dir keeps the preflight out of the user's real pi history, and the
+# sentinel is specific enough that "tokens" cannot satisfy it.
+mkdir -p "$WORK/preflight"
+if ! env -u PI_CODING_AGENT pi --session-dir "$WORK/preflight" --offline \
+       -p "Reply with exactly: PREFLIGHT-OK" < /dev/null 2>&1 | grep -q "PREFLIGHT-OK"; then
   echo "SKIP: pi has no working model here, so this script cannot judge the bridge"
   exit 2
 fi
 
-node "$WORK/mock.mjs" "$PORT" &
+node "$WORK/mock.mjs" "$PORT" "$WORK/mock.ready" &
 MOCK_PID=$!
-# Wait for the listener rather than guessing.
+# Wait for OUR mock, not for whatever else might hold the port: the mock writes
+# a sentinel once it is listening, and refuses to start if the port is taken.
 i=0
-while ! node -e "require('node:net').connect($PORT,'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))" 2>/dev/null; do
-  i=$((i+1)); [ "$i" -lt 30 ] || { echo "FAIL: mock server never bound to port $PORT"; exit 1; }
+while [ ! -f "$WORK/mock.ready" ]; do
+  i=$((i+1)); [ "$i" -lt 50 ] || {
+    echo "FAIL: the mock never came up on port $PORT (is something else using it?)"
+    exit 1
+  }
   sleep 0.2
 done
 
@@ -1185,8 +1208,13 @@ Then run the smoke script against it:
 scripts/pi-bridge-smoke.sh "$(scripts/pi-extract-extension.sh)"
 ```
 
-Expected: `FAIL: the tool call never reached the mock` — the Task 3 stub
-registers nothing, so the model has no `session_rename` to call.
+Expected: **exit 3, `INCONCLUSIVE: the model emitted no tool call at all`.**
+With nothing registered the model has no tool to call, so it answers in prose —
+verified twice against the Task 3 stub. That *is* this task's red state; do not
+follow the "re-run once" advice the message prints, which exists for the case
+where the tools *are* registered and the model ignores them. Seeing
+`FAIL: the model never called session_rename (was it registered?)` instead is an
+equally valid red.
 
 - [ ] **Step 3: Replace `PiExtensionSource.SOURCE` with the handshake and registration**
 
@@ -1349,8 +1377,28 @@ scripts/pi-bridge-smoke.sh "$(scripts/pi-extract-extension.sh)"
 
 Expected: `PASS: handshake, registration and tools/call all reached the mock`.
 
-That run also proves the collision guard, because the mock advertises a `read`
-tool: no drydock `read` call may appear, and pi's built-in `read` must survive.
+The mock advertises a colliding `read` so the guard has something to fire on —
+but the happy-path run cannot judge it. `grep '"name":"read"'` only fails if the
+model *calls* `read`, which this prompt never asks it to, and `ctx.ui.notify` is
+a no-op under `-p`, so the refusal is invisible either way. Replace that
+assertion with one that discriminates. Put a canary in the working directory and
+ask the model to read it:
+
+```sh
+echo "canary-contents-9f3a" > "$WORK/cwd/canary.txt"
+rm -rf "$WORK/sessions_read"; mkdir -p "$WORK/sessions_read"
+DRYDOCK_MCP_CONFIG="$WORK/state/config.json" \
+  env -u PI_CODING_AGENT pi --session-dir "$WORK/sessions_read" --offline -e "$EXT" \
+    -p "Read canary.txt with your read tool and print its contents." \
+    < /dev/null > "$WORK/read.txt" 2>&1 || true
+grep -q 'canary-contents-9f3a' "$WORK/read.txt" \
+  || { echo "FAIL: pi's built-in read did not survive -- the colliding drydock read shadowed it";
+       cat "$WORK/read.txt"; exit 1; }
+```
+
+If the guard worked, the file's contents come back. If drydock's proxy shadowed
+the built-in, the mock answers the read with `{"outcome":"renamed","title":""}`
+and the contents never appear. One assertion, both halves.
 `pi.getAllTools()` returns objects with a `.name` — verified against 0.84.1,
 which reports nine built-ins in `session_start` (`read`, `bash`, `edit`,
 `write`, `grep`, `find`, `ls`, plus this machine's `web_search` and
@@ -1616,7 +1664,7 @@ git commit -m "An accepted rename also names the pi session, so /resume agrees w
 
 **Interfaces:**
 - Consumes: the `registered` flag, the `session_start` handler and the `before_agent_start` handler from Task 5; `execute` inside `registerProxy` as Tasks 6 and 7 left it, where the local `const deadline = AbortSignal.timeout(CALL_MS)` is built.
-- Produces: a reversible gate armed on `session_before_switch`/`session_before_fork`, and a committed stand-down on a `session_start` that carries a `previousSessionFile`.
+- Produces: a reversible gate armed on `session_before_switch`/`session_before_fork` and checked at the top of `execute`. (The committed stand-down on a `session_start` carrying a `previousSessionFile` is Task 5's; this task does not touch it.)
 
 **Why both seams.** Reacting only to the next `session_start` leaves a window: `teardownCurrent` calls `session.abort()` first, deliberately, and an abort cancels nothing server-side, so a call in flight when the human types `/new` commits against the conversation being abandoned. But doing the stand-down *in* the pre-hook is worse: pi throws non-fatally between the pre-hook and the teardown on three of four paths (an unsaved session being forked, a missing cwd on resume), so an irreversible disarm would strand a live tab with no `session_start` to re-arm it.
 
@@ -1659,21 +1707,10 @@ Check it at the top of `execute`, before the deadline is built:
                   }
 ```
 
-And commit the stand-down in `session_start` — Task 5 already returns early on `previousSessionFile`; make the instructions stop too by replacing that branch with:
-
-```java
-                if (event?.previousSessionFile) {
-                  // An in-session switch (/new, /resume, /fork) reloaded us into a
-                  // conversation drydock did not claim. Standing down HERE means
-                  // returning before registering -- nothing of ours is in the
-                  // active set yet, so there is nothing to remove. Dropping the
-                  // instructions matters too, or the model keeps being told to
-                  // call session_rename for the rest of the session.
-                  instructions = "";
-                  registered = true;
-                  return;
-                }
-```
+The committed stand-down needs no change here: Task 5's `session_start` handler
+already returns before registering on a `previousSessionFile` and already clears
+`instructions`. Read that branch to confirm it is present, and change nothing —
+this task adds only the reversible gate in front of it.
 
 - [ ] **Step 2: Verify the gate does not break the happy path**
 
@@ -1682,10 +1719,14 @@ Expected: `PASS` — no switch occurs in a `-p` run, so the gate stays clear and
 
 - [ ] **Step 3: Add the interactive checks to the manual checklist**
 
-Append a section to `docs/manual-terminal-checklist.md`:
+Append a section to `docs/manual-terminal-checklist.md`, matching the heading
+level that file already uses for its other sections. **Note the fenced block
+below deliberately uses `###`, not `##`:** a column-0 `##` inside a fenced block
+truncates this task's brief at extraction, and the implementer would lose the
+checklist body and the commit step with it.
 
 ```markdown
-## Pi MCP bridge
+### Pi MCP bridge
 
 None of these can be reached from a non-interactive `pi -p` run: `project_trust`
 is only live in the TUI, every `session_start` reason above `startup` comes from
@@ -1707,7 +1748,15 @@ by `scripts/pi-bridge-smoke.sh`.
       conversation, and the old tab's title is not touched by it.
 - [ ] `/fork` before the first assistant response (pi refuses it): the bridge
       still works afterwards — this is the case the reversible gate exists for.
+- [ ] `/resume` inside a Pi tab, picking a DIFFERENT conversation: the bridge
+      stands down. This is the case that killed the reason-allow-list guard —
+      in-TUI `/resume` reports `reason: "resume"` while drydock's own
+      `pi --session <id>` reports `startup` — so it is the least skippable of
+      the four.
 - [ ] `/reload` inside a Pi tab: the bridge keeps working.
+- [ ] The timeout arm: with the smoke mock running, `-p "Call session_rename
+      with the title 'SLOW'"`. After 45s the model must be told the call *may
+      have completed* and not to retry — not that it failed.
 ```
 
 - [ ] **Step 4: Commit**
@@ -1772,9 +1821,9 @@ git commit -m "Manual checklist: Pi bridge verified against a running drydock"
 
 **Spec coverage.** Walked each normative section: delivery/`CONFIG_FILE` → Task 4; launch command and `shellQuote` → Tasks 1, 4; extension file location, atomicity, permissions → Task 3; memoised futures and join bound → Task 4; version gate and `"unknown"` → Tasks 2, 4; crash rules (factory catch, synchronous handlers) → Tasks 5, 8; handshake/registration split, collision guard, `registered` flag → Task 5, 8; label and `promptSnippet` → Task 5; instructions injection → Task 5; three response rules and three rejection arms → Task 6; `setSessionName` hook → Task 7; stand-down gate and commit → Task 8; stale comments → Task 4; testing and checklist → Tasks 5–9. Phase 2 is deliberately absent.
 
-**One spec correction folded in.** The spec expected `PiAgentProviderTest`'s three `endsWith` assertions to break. They don't — the fixture's nonexistent locator yields `"unknown"`, which is below the gate — so Task 4 keeps them and notes why they now assert something stronger.
+**One spec correction folded in.** The spec expected `PiAgentProviderTest`'s three `endsWith` assertions to break. They don't — all three pass no `McpAccess`, and `piCommand` returns before the gate is consulted — so Task 4 keeps them unchanged and adds separate coverage for the sub-floor case.
 
-**Two things the spec left implicit, now explicit.** The installer needs a *per-call* temp name (`McpConfigWriter`'s fixed `.tmp` is safe only because it writes one file per session id, whereas this is one shared target). And the extension needs no `typebox` import at all, since schemas are raw JSON Schema — so it has zero runtime imports, which Task 5's source reflects.
+**Two things the spec left implicit, now explicit.** The installer needs a *per-call* temp name (`McpConfigWriter`'s fixed `.tmp` is safe only because it writes one file per session id, whereas this is one shared target). And the extension needs no `typebox` import at all, since schemas are raw JSON Schema — so it carries no npm dependencies, its only runtime module load being `require("node:fs")` in `readWire()`, as Global Constraints record.
 
 **Placeholder scan.** No TBDs; every code step carries the actual content. The one deliberate stub — `PiExtensionSource.SOURCE` in Task 3 — is a complete, valid extension, replaced wholesale in Task 5, and Task 3's test asserts only what is true of it then.
 
