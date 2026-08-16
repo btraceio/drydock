@@ -178,17 +178,33 @@ file the human never edits.
 
 **Two crash rules, first, because everything else assumes the tab is alive.**
 
-*The factory must never throw or reject.* An extension named with `-e` is not
-best-effort: when its factory fails, pi prints `Failed to load extension …` plus
-`Hint: Start without extensions using "pi -ne"` and **exits 1**. Verified — the
-tab does not start. (Auto-discovered extensions are collected as non-fatal
-diagnostics instead; `-e` is the strict path, which is the cost of the scoping
-choice made above.) So the entire factory body — `readFile`, `JSON.parse`, both
-`fetch` calls — sits inside one `try { … } catch { return }`. This is the
-invariant, not a style note: without it, a wedged socket does not degrade the
-bridge, it stops the human's session from opening. In the verified run no
-session `.jsonl` was written before the exit, so drydock's discovery claims
-nothing for a process that died; that was checked non-interactively only.
+*The factory must never throw or reject.* When an extension's factory fails, pi
+prints `Failed to load extension …` plus `Hint: Start without extensions using
+"pi -ne"` and **exits 1**. Verified — the tab does not start. This has nothing
+to do with how the extension was loaded: `-e` and auto-discovered both exit 1,
+byte-identically, because `loadExtensionsInternal` collects every failure into
+one `errors` array with no notion of provenance and any error diagnostic exits.
+So the choice of `-e` above costs nothing here, and choosing auto-discovery
+would have bought nothing.
+
+Two rules follow, and the second is the one that is easy to get wrong:
+
+- The entire factory body — `readFile`, `JSON.parse`, both `fetch` calls — sits
+  inside a `try`, and the factory returns rather than throwing. Without this a
+  wedged socket does not degrade the bridge; it stops the human's session from
+  opening.
+- **Every `pi.on` handler is registered synchronously, before the first
+  `await`.** `on()` only calls `assertActive()`, which cannot throw at load
+  time, so this is always possible. Register them after the awaits — the natural
+  writing order — and a handshake failure jumps to the catch before the
+  `session_start` handler exists, so the deferred report below never fires and
+  the tab is left healthy-looking, tool-less and silent. On an outright throw
+  it is worse: `loadExtension` discards the whole extension object, handlers
+  included.
+
+In the verified run no session `.jsonl` was written before the exit, so
+drydock's discovery claims nothing for a process that died; checked
+non-interactively only.
 
 *No floating promises.* pi installs **no `unhandledRejection` listener**
 anywhere, and its `uncaughtException` handler is `uncaughtCrash` →
@@ -260,9 +276,21 @@ with underscores replaced by spaces and the first letter capitalised
 "Available tools" section entirely.
 
 **Calls.** `execute` posts `tools/call` under a **45-second** timeout, combined
-with the tool's own `AbortSignal` via `AbortSignal.any([signal,
-AbortSignal.timeout(45_000)])` — a separate timer racing the fetch is exactly
-the floating-promise shape the discipline rule bans.
+with the tool's own `AbortSignal` — a separate timer racing the fetch is exactly
+the floating-promise shape the discipline rule bans. The combination must
+tolerate an absent signal:
+
+```js
+const deadline = AbortSignal.timeout(45_000);
+const s = signal ? AbortSignal.any([signal, deadline]) : deadline;
+```
+
+`execute`'s third parameter is typed `AbortSignal | undefined` and pi's own loop
+guards it as `signal?.aborted` throughout, so the bare
+`AbortSignal.any([signal, …])` is not safe: with `undefined` it throws
+`The "signals[0]" argument must be an instance of AbortSignal`, which — nothing
+here being type-checked — surfaces as that string in a tool result on every
+call.
 
 45 rather than 30, because 30 is the *server's* ceiling, not a margin over it:
 `START_SESSION_TIMEOUT_SECONDS` and `HANDOFF_TIMEOUT_SECONDS` are both 30 and
@@ -331,6 +359,12 @@ the cause into the message. pi's own error path drops `cause`
 `Error` is transcript-safe. The rule is therefore mechanical: **never read
 `err.cause`**; error text names the tool and the HTTP status and nothing else.
 
+The rule covers **every string this extension produces**, not just tool errors.
+Notification text is not in the transcript, but it is on the human's screen, in
+scrollback and in any screenshot pasted into a bug report — and the deferred
+load-failure notice is exactly where someone will want to say *why* and reach
+one level deeper into `"fetch failed"`.
+
 **Keeping pi's own name in step.** After a `session_rename` that drydock
 accepts, the extension calls `pi.setSessionName(effectiveTitle)` — the title
 from the *outcome*, since drydock may have refused or altered it. Pi's
@@ -346,16 +380,46 @@ still-valid token, and a *different* pi conversation would then rename drydock's
 tab and write its handoff brief — describing work that `pi --session <old id>`
 will never reopen.
 
-**The discriminator is the session file, not the reason code.** The obvious
-rule — stand down on any `session_start` whose reason is not `startup` or
-`resume` — whitelists the one case it exists to catch. In-TUI `/resume` is
-`reason: "resume"` and switches conversations, while drydock's own resume form,
-`pi --session <id>`, is a fresh process and fires `reason: "startup"`. Verified:
-`pi --session <existing id> -p …` logs `reason=startup, previousSessionFile=
-undefined`. A reason allow-list also tears the bridge down on `/reload`, which
-changes nothing. So the extension records `sessionManager.getSessionFile()` when
-it registers, and on any later `session_start` compares: **same file, carry on;
-different file, stand down.**
+**Stand down before the switch, not after it.** pi emits cancellable pre-hooks —
+`session_before_switch` (`reason: "new" | "resume"`, carrying
+`targetSessionFile`) and `session_before_fork` — ahead of the teardown. Those
+are the primary seam: they fire before the new conversation exists, they name
+the target directly, and they cover `/new`, `/resume` and `/fork` without
+inference.
+
+Reacting only to the *next* `session_start` would leave a window that matters.
+`teardownCurrent` calls `session.abort()` first, deliberately, "so the aborted
+turn (including tool results) is persisted to the outgoing session" — and an
+abort cancels nothing server-side, as the arms above establish. So a human
+typing `/new` while a `session_rename` or `session_handoff` is in flight would
+commit exactly the cross-session write this guard exists to prevent, from a
+conversation being abandoned, with the extension never learning the outcome.
+Dropping the tools in the pre-hook closes that.
+
+**The backstop must be memoryless**, and this is the subtlest constraint in the
+design. A switch reloads extensions, and `loadExtension` calls `factory(api)`
+again even on a cache hit — so anything remembered in the factory closure is
+*fresh* in the new instance. A guard of the form "record the session file at
+registration, compare on the next `session_start`" therefore always concludes
+"first registration" precisely when it is supposed to fire, and registers into
+the new conversation. Module-top-level state survives a little longer but not
+reliably either: the module cache is cleared when the cwd changes, which a
+`/resume` into a differently-rooted session does.
+
+So the backstop reads the event, not a memory: **`session_start` carrying a
+`previousSessionFile` means an in-session switch — stand down.** That field is
+documented, and observed, as present for exactly `new`, `resume` and `fork`, and
+absent for `startup` and `reload`. One condition, no remembered state, and it
+gets `/reload` right (no pre-switch event, and correctly must *not* tear down).
+
+Two rules that look reasonable and are not, recorded so they are not reinvented:
+stand down on any reason that is not `startup` or `resume` — this whitelists the
+one case it exists to catch, since in-TUI `/resume` is `reason: "resume"` while
+drydock's own `pi --session <id>` is a fresh process reporting
+`reason: "startup"` (verified: `previousSessionFile=undefined`); or compare
+`sessionManager.getSessionFile()` against a recorded value — defeated by the
+reload above, and additionally `undefined` for a non-persisted session, where a
+comparison whose "equal" branch is the permissive one fails open.
 
 Standing down means dropping the tools from the active set and stopping the
 `instructions` injection — the latter because `McpServer.INSTRUCTIONS` otherwise
@@ -470,6 +534,10 @@ gate: a failed probe must not consume the installer's future, and a failed write
 must not discard a good version. Both live on the same background path and both
 retry on the next launch.
 
+Both are memoised futures, for the same concurrency reason: two tabs opened
+together run `buildCreateCommand` on different `backgroundExecutor` threads, and
+a bare boolean or a re-entered probe races.
+
 They run **concurrently**, and the builder joins both with a bound — the probe
 carries `PiVersionProbe`'s own 30-second timeout, and the write gets a 5-second
 join, because a hung filesystem must cost a tab its tools rather than its
@@ -477,6 +545,14 @@ launch. That join happens inside the `supplyAsync` stage that gates surface
 creation, so the first Pi launch of an app run is measurably slower than the
 rest; per AGENTS.md the existing "Starting…" state must already be showing
 before it begins.
+
+The cost of not caching failures is bounded where it matters and real where it
+does not: `PiVersionProbe.probe(null)` returns `"unknown"` with **no spawn** when
+no executable was found, so the common case — pi not installed — costs nothing
+per launch. The expensive case needs pi to exist *and* `pi --version` to hang,
+and then every Pi launch pays up to 30 seconds behind that "Starting…" state.
+That is a real regression against today, where Pi launches immediately, and it
+is the price of a probe that recovers by itself.
 
 One implementation tax worth naming: TypeScript in a Java text block means
 every backslash is doubled, as `ClaudeHookInstaller.HOOK_SCRIPT` already does
@@ -566,7 +642,10 @@ tab down — which is a property of the promise discipline above, not a wish.
   binary advertise the flag" question is provider-internal — but raising the
   floor to 0.80.3 widens the affected population, so it is stated rather than
   left to be rediscovered. The file is purged and the token revoked when the
-  session ends, so the window is the session's life.
+  session ends — or, if drydock quits with the tab still open,
+  `releaseMcpConfigAsync` swallows the rejected execution by design and the next
+  startup's `purgeStale()` removes it. So the window is the session's life, or
+  until the next app start.
 - Fan-out: `Spawn.FORBIDDEN` is enforced server-side against the calling token
   in `worktree_create` and `session_start`, so a proxied call is refused by the
   same code that refuses Claude's. The design does **not** claim depth 1 is
@@ -613,15 +692,19 @@ What is **not** automated, stated plainly rather than waved at:
   exercise, not a regression test, and nothing re-runs it.
 
 `docs/manual-terminal-checklist.md` gains entries for: a Pi tab renaming itself
-during real work; a refused rename surfacing to the model; a handshake failure
-reporting rather than hanging; **an extension that throws still letting the tab
-start** (the invariant, and the one whose failure is total); `/new`, `/fork`,
-`/resume` and `/reload` inside a Pi tab standing the bridge down or not, as
-appropriate; and **`-e` loading with no trust prompt in a real interactive tab
-in a freshly created worktree**. The last two exist because nothing in them can
-be reached non-interactively: every appendix run was `--offline -p`, which never
-enters the TUI where `project_trust` is live and where every `session_start`
-reason above `startup` comes from.
+during real work; a refused rename surfacing to the model; **a notification
+actually appearing** for a failed handshake; **an extension that throws still
+letting the tab start** (the invariant, and the one whose failure is total);
+`/new`, `/fork`, `/resume` and `/reload` inside a Pi tab standing the bridge
+down or not, as appropriate; and **`-e` loading with no trust prompt in a real
+interactive tab in a freshly created worktree**.
+
+The last three exist because nothing in them can be reached non-interactively.
+Every appendix run was `--offline -p`, which never enters the TUI where
+`project_trust` is live and where every `session_start` reason above `startup`
+comes from — and where `ctx.ui` is a real UI at all: in `-p` runs it is
+`noOpUIContext`, so the notification mechanism that six silent failure modes
+depend on is **structurally unverifiable by the method the appendix uses**.
 
 ## What was cut
 
@@ -741,8 +824,7 @@ was found: four of the fixes from round 1 were themselves unbuildable.
 
 - **The collision check could not run where round 1 put it.** Every action
   method throws during extension load, so `getAllTools()` in the factory would
-  have failed the load outright — and, because `-e` is the strict path, taken
-  the tab with it. Registration moved to `session_start`, snapshot before
+  have failed the load outright — and a failed load takes the tab with it. Registration moved to `session_start`, snapshot before
   register.
 - **A throwing factory exits pi 1.** Round 1's restated invariant ("never takes
   the tab down") was still false, for a different reason than the one it fixed.
@@ -766,6 +848,30 @@ was found: four of the fixes from round 1 were themselves unbuildable.
   which stderr is safe; `err.cause` leaks the port even when the message does
   not; a 30-second client budget is the server's own ceiling rather than a
   margin over it; a sub-floor Pi still gets a credential written for it.
+
+**Round 3 — the remaining corrections, none blocking:**
+
+- **`-e` is not a stricter loading path.** Round 2 explained the fatal load
+  failure by claiming auto-discovered extensions degrade to diagnostics. Both
+  reviewers and a direct run of all three load paths say otherwise: every one
+  exits 1, identically. The invariant survives; its explanation was wrong, and
+  it had begun to look like a cost of the `-e` choice that `-e` does not carry.
+- **The stand-down guard could not remember anything.** `loadExtension`
+  re-invokes the factory on every load, so the recorded session file is fresh in
+  exactly the instance that needs the old one. The guard became memoryless —
+  `previousSessionFile` presence — and gained a cancellable pre-hook so an
+  in-flight `tools/call` cannot land after the switch.
+- **The deferred notification was unreachable** if `pi.on` ran after the awaits
+  inside the factory's top-level try. Handler registration is now specified as
+  synchronous and first.
+- **`AbortSignal.any([signal, …])` throws on an absent signal**, which pi's own
+  loop guards against and this file cannot type-check.
+- Smaller: the abort/timeout rule contradicted the never-rethrow rule beside it
+  and claimed an outcome pi controls, not us; the version table had lost the
+  0.55.4 row that round 2 made load-bearing; the installer tests still described
+  round 2's boolean; `err.cause` needed scoping to notifications as well as tool
+  results; the body had accumulated enough draft archaeology to read as a
+  changelog.
 
 **Round 1 — findings that changed the design:**
 
