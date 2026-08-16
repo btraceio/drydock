@@ -120,7 +120,7 @@ grep -q '"toolCall"' "$TRANSCRIPT" || {
   cat "$TRANSCRIPT"; exit 3
 }
 
-grep -q '"name": *"session_rename"' "$TRANSCRIPT" || grep -q '"name":"session_rename"' "$TRANSCRIPT" \
+grep -q '"name": *"session_rename"' "$TRANSCRIPT" \
   || fail "the model never called session_rename (was it registered?)"
 # NOT `grep 'Smoke test'`: pi writes the user prompt into the transcript
 # verbatim, so that string matches even when nothing was registered.
@@ -129,15 +129,28 @@ grep -q '"name": *"session_rename"' "$TRANSCRIPT" || grep -q '"name":"session_re
 # quotes -- the transcript byte-for-byte contains \"outcome\":\"renamed\", not
 # the unescaped form (confirmed against real pi 0.84.1 output).
 grep -qF '\"outcome\":\"renamed\"' "$TRANSCRIPT" || fail "the tool call never reached the mock"
-# The instructions injection, checked through behaviour: pi never writes the
-# system prompt to the transcript, so there is nothing to grep there.
-grep -q 'DRYDOCK-BRIDGE-OK' "$WORK/out.txt" || {
+
+# The instructions injection, checked through behaviour in a run of its own:
+# pi never writes the system prompt to the transcript, so there is nothing to
+# grep there, and print mode (dist/modes/print-mode.js) writes only the LAST
+# assistant message's text to stdout. The tool-calling run above emits at
+# least two assistant messages, so "begin every reply with..." lands on the
+# first one, which print mode never shows -- checking it there is a false
+# negative waiting to happen, not a check of the injection. A run with no
+# tool call has exactly one assistant message, so it is the only run this
+# assertion can trust.
+rm -rf "$WORK/sessions_instructions"; mkdir -p "$WORK/sessions_instructions"
+DRYDOCK_MCP_CONFIG="$WORK/state/config.json" \
+  env -u PI_CODING_AGENT pi --session-dir "$WORK/sessions_instructions" --offline -e "$EXT" \
+    -p "Say hello." < /dev/null > "$WORK/out_instructions.txt" 2>&1 || true
+grep -q 'DRYDOCK-BRIDGE-OK' "$WORK/out_instructions.txt" || {
   echo "INCONCLUSIVE: the model did not follow the injected instruction."
   echo "That is either a failed before_agent_start injection or an inattentive model."
   echo "To separate them, re-run with the extension's before_agent_start logging its"
   echo "return value to a file (NOT to stderr -- pi is drawing that terminal)."
-  cat "$WORK/out.txt"; exit 3
+  cat "$WORK/out_instructions.txt"; exit 3
 }
+
 # The collision guard, checked by consequence rather than by registry: ask for
 # a real read and see whether pi's built-in answers it.
 echo "canary-contents-9f3a" > "$WORK/cwd/canary.txt"
@@ -147,6 +160,7 @@ DRYDOCK_MCP_CONFIG="$WORK/state/config.json" \
     -p "Read canary.txt with your read tool and print its contents." \
     < /dev/null > "$WORK/read.txt" 2>&1 || true
 T_READ="$(find "$WORK/sessions_read" -name '*.jsonl' | head -1)"
+[ -n "$T_READ" ] || { echo "FAIL: no session transcript written for the read guard run"; cat "$WORK/read.txt"; exit 1; }
 grep -q '"toolCall"' "$T_READ" || {
   echo "INCONCLUSIVE: the model answered without calling read, so this run cannot judge the guard"
   exit 3
