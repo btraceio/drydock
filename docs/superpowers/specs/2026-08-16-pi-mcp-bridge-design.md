@@ -266,14 +266,20 @@ resolves extension-over-built-in by overwriting, so a post-registration
 `getAllTools()` shows one `read` — ours — and a name comparison finds nothing
 wrong.
 
-**The handler must not register twice.** `session_start` fires again on
-`/reload` (`reason: "reload"`, no `previousSessionFile`), so the backstop below
-passes it and the handler re-runs. If the instance survived — and `-e`
-extensions are documented as not reloadable, so it may — the collision snapshot
-now contains *our own* tools from the first pass, every drydock tool reads as
-"already present", and the guard refuses all of them: the bridge disables itself
-on a command that changed nothing. An instance-local `registered` flag, checked
-first, is the fix, and it is correct whether or not the instance is re-created.
+**The handler must not register twice on one instance.** If a second
+`session_start` reaches a live instance, the collision snapshot contains *our
+own* tools from the first pass, every drydock tool reads as "already present",
+and the guard refuses all of them — the bridge disabling itself over nothing. An
+instance-local `registered` flag, checked first, prevents that.
+
+`/reload` is *not* that case, despite emitting `session_start` with no
+`previousSessionFile`. `AgentSession.reload()` goes through
+`ResourceLoader.reload()`, which calls `clearExtensionCache()`, so the module is
+re-imported and the factory re-invoked: a fresh instance with a fresh flag. It
+must re-register, because `_buildRuntime` has just built a new
+`ExtensionRunner` holding none of the old registrations. The flag is insurance
+against a duplicate event on one instance — a shape observed in RPC, not in the
+TUI — not the thing that makes `/reload` safe.
 
 That flag does not reintroduce the memory the backstop rejects, and the
 distinction is worth being explicit about because the two rules look
@@ -440,8 +446,10 @@ localhost round trip normally and by the server's own joins at worst. What the
 gate buys is every call *after* that one.
 
 **The pre-hook handler must not `await`.** Arming a boolean does not need to,
-and the reasoning above depends on it: `emit` awaits each handler, so a
-synchronous handler yields only a microtask — which Node drains before any I/O
+and the reasoning above depends on it: `emit` awaits each handler in turn, so a
+synchronous handler of ours yields only a microtask (another extension loading
+before us and awaiting real I/O in the same event can still turn the loop, which
+only widens the window already conceded above) — which Node drains before any I/O
 callback, leaving no room for a keypress between the pre-hook and the teardown.
 Add a `ctx.ui.notify` or a log write there and that gap becomes a real
 event-loop turn.
@@ -511,7 +519,8 @@ use.
 **No path removes a registered tool**, which is worth stating because the
 obvious third anti-pattern is to reach for one. A completed switch disposes the
 old instance and the new one never registers; an aborted switch should keep its
-tools; `/reload` is short-circuited by the `registered` flag; a failed handshake
+tools; `/reload` builds a fresh instance that registers from scratch into a
+new runner; a failed handshake
 or a refused collision never registered. So the removal API is never needed —
 which is fortunate, since `ExtensionAPI` has no `unregisterTool` at all, and
 `setActiveTools` takes the whole active list, so using it would mean
@@ -699,7 +708,7 @@ None of that is unsolvable. All of it is a second spec.
 | token revoked (session ended) | 401 → "this drydock session has ended" tool error |
 | `session_before_switch` / `session_before_fork` fires (`/new`, `/resume`, `/fork`) | a reversible gate refuses further `tools/call`s **before** teardown; a call already on the wire still lands and cannot be retracted by anyone; cleared on the next `before_agent_start` if the switch never happens |
 | `session_start` carries a `previousSessionFile` (the switch did happen) | stand-down committed: no registration in the new conversation, instructions injection stops, reported |
-| `session_start` carries none (`/reload`, first launch) | bridge carries on; the `registered` flag stops a second registration pass |
+| `session_start` carries none (`/reload`, first launch) | registers normally — `/reload` discards the old runner and rebuilds, so this is a fresh instance, not a second pass |
 
 The invariant, restated now that it is defensible: **a broken bridge degrades to
 today's Pi**. It says so out loud via `ctx.ui.notify`, and it never takes the
