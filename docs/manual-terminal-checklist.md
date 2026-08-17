@@ -27,7 +27,7 @@ Leave the window open for manual driving instead with:
 ./gradlew gate0dSpike -Papp.drydock.gate0d.interactive
 ```
 
-## Results (last automated run: 2026-07-14, 12/12 checks passing)
+## Results (last automated run: 2026-08-17, 12/12 checks passing; Pi MCP bridge 9/11 — 2 need drydock's own window, 1 is a stated limitation)
 
 | # | Item | Status | Notes |
 |---|------|--------|-------|
@@ -301,7 +301,7 @@ plus a live `Stage`). Walk this with a human at the keyboard:
 
 ## Pi MCP bridge
 
-Seven of these were run on 2026-08-17 by driving pi's TUI under a pty against
+Nine of these were run on 2026-08-17 by driving pi's TUI under a pty against
 the smoke script's mock server (`/new`, `/fork`, `/resume`, `/reload`, the trust
 prompt, the unreachable-server warning). Assertions are file-based — a
 conversation's transcript is checked for a *successful* rename, since pi records
@@ -362,11 +362,15 @@ by `scripts/pi-bridge-smoke.sh`.
       `/resume` reports `reason: "resume"` while drydock's own
       `pi --session <id>` reports `startup` — so it is the least skippable of
       the four.
-- [ ] A **resumed** Pi tab still has drydock's tools. Verified against real
-      pi 0.84.1: `pi -e <ext> --session <id>` (drydock's own resume-with-known-id
-      form). Still needs a human: the `--resume` picker form is TUI-only and
-      remains unverified — pick a conversation from the picker and confirm the
-      tools register the same way.
+- [x] A **resumed** Pi tab still has drydock's tools. Both resume forms
+      verified against real pi 0.84.1: `pi -e <ext> --session <id>` (drydock's
+      resume-with-known-id) and `pi -e <ext> --resume` (the picker form, driven
+      under a pty). Both report `reason: "startup"` with no `previousSessionFile`,
+      so the bridge registers normally and a rename lands. This is the exact
+      counterpart to the `/resume` item above, which reports
+      `reason: "resume"` WITH a `previousSessionFile` and must stand down --
+      the asymmetry the reason-allow-list guard got wrong, now checked from
+      both sides.
 - [x] `/reload` inside a Pi tab: the bridge keeps working.
 - [x] The timeout arm: with the smoke mock running, `-p "Call session_rename
       with the title 'SLOW'"`. After 45s the model must be told the call *may
