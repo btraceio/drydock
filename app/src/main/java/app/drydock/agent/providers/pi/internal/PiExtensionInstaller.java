@@ -49,7 +49,7 @@ public final class PiExtensionInstaller {
     }
 
     /** Where the extension lives, whether or not it has been written yet. */
-    public Path extensionFile() {
+    private Path extensionFile() {
         return stateDirectory.resolve("pi").resolve(FILE_NAME);
     }
 

@@ -330,7 +330,9 @@ by `scripts/pi-bridge-smoke.sh`.
       `<state>/pi/drydock-mcp.ts` and confirm. (This is the invariant; its
       failure is total.)
 - [ ] `/new` inside a Pi tab: the drydock tools stop working in the new
-      conversation, and the old tab's title is not touched by it.
+      conversation, the old tab's title is not touched by it, and a warning
+      notification appears saying this pi conversation was replaced and
+      drydock's tools are not available in it.
 - [ ] `/fork` before the first assistant response (pi refuses it): expect
       drydock tool calls made in that SAME turn to still be refused with
       "being handed over" — the gate stays armed for the rest of the turn,
@@ -338,10 +340,17 @@ by `scripts/pi-bridge-smoke.sh`.
       the bridge works again on the next prompt; this is the case the
       reversible gate exists for.
 - [ ] `/resume` inside a Pi tab, picking a DIFFERENT conversation: the bridge
-      stands down. This is the case that killed the reason-allow-list guard —
-      in-TUI `/resume` reports `reason: "resume"` while drydock's own
+      stands down, and the same warning notification appears (this pi
+      conversation was replaced and drydock's tools are not available in it).
+      This is the case that killed the reason-allow-list guard — in-TUI
+      `/resume` reports `reason: "resume"` while drydock's own
       `pi --session <id>` reports `startup` — so it is the least skippable of
       the four.
+- [ ] A **resumed** Pi tab still has drydock's tools. Verified against real
+      pi 0.84.1: `pi -e <ext> --session <id>` (drydock's own resume-with-known-id
+      form). Still needs a human: the `--resume` picker form is TUI-only and
+      remains unverified — pick a conversation from the picker and confirm the
+      tools register the same way.
 - [ ] `/reload` inside a Pi tab: the bridge keeps working.
 - [ ] The timeout arm: with the smoke mock running, `-p "Call session_rename
       with the title 'SLOW'"`. After 45s the model must be told the call *may

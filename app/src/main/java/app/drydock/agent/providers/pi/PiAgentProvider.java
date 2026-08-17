@@ -25,6 +25,7 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
@@ -33,7 +34,6 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
@@ -190,6 +190,17 @@ public final class PiAgentProvider implements AgentProvider {
         // launch will read.
         PiCapabilities probed = join(caps, PROBE_JOIN, PiCapabilities.of("unknown"));
         Path bridgeExtension = join(extension, INSTALL_JOIN, null);
+        if (bridgeExtension != null && !Files.isReadable(bridgeExtension)) {
+            // The install succeeded earlier in this app run and was memoised,
+            // but the file is gone now -- removed, or the state directory was
+            // wiped. `pi -e <missing>` exits 1 and takes the whole tab down
+            // with it, which is exactly the invariant this bridge must not
+            // violate. Degrade this one launch, and un-latch the memo so the
+            // next launch reinstalls instead of repeating this same false
+            // success forever.
+            extensionFile.compareAndSet(extension, null);
+            bridgeExtension = null;
+        }
         if (!probed.supportsBridge() || bridgeExtension == null) {
             return AgentCommands.envPrefix(ENV_SCRUB) + "pi";
         }
@@ -204,6 +215,13 @@ public final class PiAgentProvider implements AgentProvider {
         return memoised(capabilities, work, probed -> !"unknown".equals(probed.version()));
     }
 
+    /**
+     * Installs the bridge extension once per app run and memoises the result.
+     * {@code piCommand} re-validates the memoised path with
+     * {@code Files.isReadable} on every launch, but only for existence: it
+     * does not check content, so a truncated or hand-edited file would still
+     * pass this check and still fail to load in pi.
+     */
     private CompletableFuture<Path> extensionFuture() {
         return memoised(extensionFile, () -> {
             try {
@@ -253,8 +271,12 @@ public final class PiAgentProvider implements AgentProvider {
                         created.completeExceptionally(e);
                     }
                 });
-            } catch (RejectedExecutionException e) {
-                // Shutdown drained the executor; the launch proceeds without tools.
+            } catch (RuntimeException | Error e) {
+                // RejectedExecutionException means shutdown drained the executor;
+                // anything else here is unexpected. Either way this must not leave
+                // an uncompleted future latched in the slot forever -- that would
+                // make every later launch pay the full join and degrade, for the
+                // rest of the app run, over a submission that never even started.
                 slot.compareAndSet(created, null);
                 created.completeExceptionally(e);
             }

@@ -41,6 +41,12 @@ public final class PiExtensionSource {
               let loadError: string | null = null;
               let registered = false;
               let handingOver = false;
+              // Set only when a proxy is actually registered. before_agent_start
+              // gates on this rather than on `instructions` alone: a half-failed
+              // handshake (initialize answered, tools/list did not) leaves
+              // `instructions` populated by itself, and gating on it would keep
+              // telling the model to call tools that were never registered.
+              let anyRegistered = false;
 
               // Handlers first, synchronously, before any await: pi.on() only
               // asserts the runtime is active and cannot throw during load,
@@ -56,6 +62,10 @@ public final class PiExtensionSource {
                   // session_rename for the rest of the session.
                   instructions = "";
                   registered = true;
+                  ctx?.ui?.notify?.(
+                    "drydock: this pi conversation was replaced and drydock's tools are not available in it",
+                    "warning",
+                  );
                   return;
                 }
                 if (registered) {
@@ -82,7 +92,17 @@ public final class PiExtensionSource {
                     );
                     continue;
                   }
-                  registerProxy(tool);
+                  // One malformed tool descriptor must cost only itself, not
+                  // every tool after it in the list.
+                  try {
+                    registerProxy(tool);
+                    anyRegistered = true;
+                  } catch (e: any) {
+                    ctx?.ui?.notify?.(
+                      `drydock: ${tool.name} could not be registered and was skipped`,
+                      "warning",
+                    );
+                  }
                 }
               });
 
@@ -94,7 +114,12 @@ public final class PiExtensionSource {
 
               pi.on("before_agent_start", async (event: any) => {
                 handingOver = false;
-                if (!instructions) return undefined;
+                // Gate on a proxy having actually registered, not merely on
+                // `instructions` being non-empty: initialize and tools/list
+                // share one budget, and "initialize answered, tools/list did
+                // not" is the ordinary shape of a slow server -- it must not
+                // leave the model being told to call tools that do not exist.
+                if (!anyRegistered || !instructions) return undefined;
                 return { systemPrompt: `${event.systemPrompt}\\n\\n${instructions}` };
               });
 
@@ -116,6 +141,11 @@ public final class PiExtensionSource {
                 tools = Array.isArray(listed?.tools) ? listed.tools : [];
               } catch (e: any) {
                 wire = null;
+                // A half-failed handshake (initialize answered, tools/list did
+                // not, both sharing the one HANDSHAKE_MS budget) must not leave
+                // `instructions` populated with nothing registered to back it.
+                tools = [];
+                instructions = "";
                 loadError = "drydock: could not reach this session's tools";
               }
 
