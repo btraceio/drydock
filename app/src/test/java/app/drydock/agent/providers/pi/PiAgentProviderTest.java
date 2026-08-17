@@ -302,4 +302,45 @@ class PiAgentProviderTest {
             pool.shutdownNow();
         }
     }
+
+    /**
+     * The guard that keeps a vanished extension file from stopping a Pi tab
+     * starting at all.
+     *
+     * <p>{@code pi -e <missing>} exits 1 -- the tab never opens -- so a memo
+     * that outlived its file would take down every later launch in the app
+     * run. That is the one failure the whole bridge is built to avoid, and
+     * until this test it rested on code-level reasoning alone.</p>
+     *
+     * <p>Two properties, and the second is the one an implementation can pass
+     * the first half of while still being wrong: the affected launch degrades
+     * rather than emitting {@code -e} at a path that is not there, AND the memo
+     * un-latches, so the launch after it reinstalls instead of repeating the
+     * same false success forever.</p>
+     */
+    @Test
+    void aVanishedExtensionDegradesThenReinstallsOnTheNextLaunch(@TempDir Path state) throws Exception {
+        PiAgentProvider p = bridgeProvider(state);
+        Path config = state.resolve("mcp").resolve("s1.json");
+        Path installed = state.resolve("pi").resolve("drydock-mcp.ts");
+
+        String first = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
+                Optional.empty(), Optional.of(access(config)))).command();
+        assertTrue(first.contains(" -e '"), "the first launch should ship the bridge: " + first);
+        assertTrue(Files.exists(installed), "the installer should have written " + installed);
+
+        Files.delete(installed);
+
+        String afterDeletion = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
+                Optional.empty(), Optional.of(access(config)))).command();
+        assertTrue(afterDeletion.endsWith("pi"),
+                "a vanished extension must degrade, never point -e at a missing path: " + afterDeletion);
+        assertFalse(afterDeletion.contains(" -e '"), afterDeletion);
+
+        String next = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
+                Optional.empty(), Optional.of(access(config)))).command();
+        assertTrue(next.contains(" -e '"),
+                "the memo must un-latch so the next launch reinstalls: " + next);
+        assertTrue(Files.exists(installed), "the extension should be back on disk");
+    }
 }
