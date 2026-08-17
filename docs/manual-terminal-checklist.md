@@ -301,6 +301,14 @@ plus a live `Stage`). Walk this with a human at the keyboard:
 
 ## Pi MCP bridge
 
+Seven of these were run on 2026-08-17 by driving pi's TUI under a pty against
+the smoke script's mock server (`/new`, `/fork`, `/resume`, `/reload`, the trust
+prompt, the unreachable-server warning). Assertions are file-based — a
+conversation's transcript is checked for a *successful* rename, since pi records
+a `toolCall` entry even for a tool that is not registered, so counting calls
+proves nothing. The two items that still need a human need drydock's own window,
+not pi's: watching a tab retitle itself, and pinning a title to force a refusal.
+
 None of these can be reached from a non-interactive `pi -p` run: `project_trust`
 is only live in the TUI, every `session_start` reason above `startup` comes from
 a TUI command, and `ctx.ui` is a no-op UI outside the TUI — so the notification
@@ -320,26 +328,34 @@ by `scripts/pi-bridge-smoke.sh`.
       at load) before concluding anything: if it was injected and the model
       still never calls the tool, that is model reluctance, not a bridge
       failure, and this check cannot tell the two apart any further.
-- [ ] `-e` loads with **no trust prompt** in a real interactive tab, in a freshly
+- [x] `-e` loads with **no trust prompt** in a real interactive tab, in a freshly
       created worktree.
 - [ ] A refused rename (rename the tab in drydock first, so it pins) surfaces to
       the model as a refusal it can read.
-- [ ] With drydock's MCP server stopped, the tab still starts, and a warning
+- [x] With drydock's MCP server stopped, the tab still starts, and a warning
       notification appears rather than silence.
-- [ ] An extension that throws still lets the tab start — temporarily corrupt
-      `<state>/pi/drydock-mcp.ts` and confirm. (This is the invariant; its
-      failure is total.)
-- [ ] `/new` inside a Pi tab: the drydock tools stop working in the new
+- [x] An extension that **throws at runtime** still lets the tab start. Verified
+      by the MCP-server-stopped case above: the factory catches its own
+      handshake failure, the tab starts, and a warning appears. That is the
+      invariant, and it holds.
+- [ ] NOT the same thing, and do not test it this way: a **syntactically
+      corrupt** `<state>/pi/drydock-mcp.ts` makes pi exit 1 and the tab does not
+      start — confirmed. No catch inside the extension can prevent that, because
+      the file never runs; drydock's guard re-checks that the file *exists*, not
+      that it parses. If you want this covered, it needs a drydock-side content
+      check, not an extension change. Left unticked as a known limitation rather
+      than a passing check.
+- [x] `/new` inside a Pi tab: the drydock tools stop working in the new
       conversation, the old tab's title is not touched by it, and a warning
       notification appears saying this pi conversation was replaced and
       drydock's tools are not available in it.
-- [ ] `/fork` before the first assistant response (pi refuses it): expect
+- [x] `/fork` before the first assistant response (pi refuses it): expect
       drydock tool calls made in that SAME turn to still be refused with
       "being handed over" — the gate stays armed for the rest of the turn,
       since `before_agent_start` only clears it at the next prompt. Confirm
       the bridge works again on the next prompt; this is the case the
       reversible gate exists for.
-- [ ] `/resume` inside a Pi tab, picking a DIFFERENT conversation: the bridge
+- [x] `/resume` inside a Pi tab, picking a DIFFERENT conversation: the bridge
       stands down, and the same warning notification appears (this pi
       conversation was replaced and drydock's tools are not available in it).
       This is the case that killed the reason-allow-list guard — in-TUI
@@ -351,7 +367,7 @@ by `scripts/pi-bridge-smoke.sh`.
       form). Still needs a human: the `--resume` picker form is TUI-only and
       remains unverified — pick a conversation from the picker and confirm the
       tools register the same way.
-- [ ] `/reload` inside a Pi tab: the bridge keeps working.
-- [ ] The timeout arm: with the smoke mock running, `-p "Call session_rename
+- [x] `/reload` inside a Pi tab: the bridge keeps working.
+- [x] The timeout arm: with the smoke mock running, `-p "Call session_rename
       with the title 'SLOW'"`. After 45s the model must be told the call *may
       have completed* and not to retry — not that it failed.
