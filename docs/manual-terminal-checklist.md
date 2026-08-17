@@ -27,7 +27,7 @@ Leave the window open for manual driving instead with:
 ./gradlew gate0dSpike -Papp.drydock.gate0d.interactive
 ```
 
-## Results (last automated run: 2026-08-17, 12/12 checks passing; Pi MCP bridge 9/11 — 2 need drydock's own window, 1 is a stated limitation)
+## Results (last automated run: 2026-08-17, 12/12 checks passing; Pi MCP bridge 11/11 checks pass; 1 entry is a recorded limitation, not a check)
 
 | # | Item | Status | Notes |
 |---|------|--------|-------|
@@ -306,8 +306,9 @@ the smoke script's mock server (`/new`, `/fork`, `/resume`, `/reload`, the trust
 prompt, the unreachable-server warning). Assertions are file-based — a
 conversation's transcript is checked for a *successful* rename, since pi records
 a `toolCall` entry even for a tool that is not registered, so counting calls
-proves nothing. The two items that still need a human need drydock's own window,
-not pi's: watching a tab retitle itself, and pinning a title to force a refusal.
+proves nothing. The two items needing drydock's own window — watching a tab retitle itself,
+and pinning a title to force a refusal — were run by hand on 2026-08-17 against
+a live drydock and confirmed from state and transcripts as well as on screen.
 
 None of these can be reached from a non-interactive `pi -p` run: `project_trust`
 is only live in the TUI, every `session_start` reason above `startup` comes from
@@ -315,23 +316,21 @@ a TUI command, and `ctx.ui` is a no-op UI outside the TUI — so the notificatio
 mechanism that six silent failure modes depend on is structurally unverifiable
 by `scripts/pi-bridge-smoke.sh`.
 
-- [ ] A Pi tab renames itself during real work, without being asked. Trigger:
-      start a session in a freshly created worktree and give it a few turns of
-      real work (e.g. "read this repo and summarize its structure"), without
-      ever mentioning renaming. Observable: within the first 3-5 turns, the
-      tab title and sidebar row change away from the placeholder to something
-      describing the work. This item cannot fail honestly on its own — a
-      model that simply declines to call `session_rename` looks identical to
-      a broken bridge. If no rename has happened by turn 5, check whether
-      `before_agent_start` actually injected the `instructions` text into the
-      system prompt (dump the prompt, or confirm `instructions` was non-empty
-      at load) before concluding anything: if it was injected and the model
-      still never calls the tool, that is model reluctance, not a bridge
-      failure, and this check cannot tell the two apart any further.
+- [x] A Pi tab renames itself during real work, without being asked. Run
+      2026-08-17 against a live drydock: a Pi session was given repo-reading
+      work with no mention of renaming, and retitled itself "Repo structure
+      summary". Confirmed from data as well as on screen — pi's own transcript
+      carries that `session_info` name, which only the post-call hook writes,
+      and only after a rename drydock ACCEPTED. The same run also confirmed the
+      lazy installer firing outside a test: `<state>/pi/drydock-mcp.ts` appeared
+      owner-only (`-rw-------`) on the first Pi launch, and an MCP config was
+      minted for the session.
 - [x] `-e` loads with **no trust prompt** in a real interactive tab, in a freshly
       created worktree.
-- [ ] A refused rename (rename the tab in drydock first, so it pins) surfaces to
-      the model as a refusal it can read.
+- [x] A refused rename surfaces to the model as a refusal it can read. Run
+      2026-08-17: the tab was renamed in drydock first (which pins it), the
+      agent was then asked to rename it, and the refusal text reached the model
+      in the transcript rather than being swallowed or read as success.
 - [x] With drydock's MCP server stopped, the tab still starts, and a warning
       notification appears rather than silence.
 - [x] An extension that **throws at runtime** still lets the tab start. Verified
