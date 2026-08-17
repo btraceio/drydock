@@ -202,6 +202,8 @@ public final class PiAgentProvider implements AgentProvider {
             bridgeExtension = null;
         }
         if (!probed.supportsBridge() || bridgeExtension == null) {
+            LOG.log(Level.INFO, "Pi bridge declined for this launch (drydock tools unavailable): "
+                    + declineReason(probed, bridgeExtension));
             return AgentCommands.envPrefix(ENV_SCRUB) + "pi";
         }
         return AgentCommands.envPrefix(ENV_SCRUB, Map.of(CONFIG_ENV_VAR, configFile.get()), Map.of())
@@ -212,7 +214,29 @@ public final class PiAgentProvider implements AgentProvider {
         Supplier<PiCapabilities> work = probe != null
                 ? probe
                 : () -> PiCapabilities.of(PiVersionProbe.probe(locator.locate().orElse(null)));
-        return memoised(capabilities, work, probed -> !"unknown".equals(probed.version()));
+        // A version that parsed and is simply below the floor is worth
+        // keeping -- re-probing cannot change it. A version that did not
+        // parse (including the probe's own "unknown") is not: it might be a
+        // transient probe hiccup, so the next launch should try again rather
+        // than repeat a false read for the rest of the app run.
+        return memoised(capabilities, work, PiCapabilities::versionParsed);
+    }
+
+    /** Names which of {@code piCommand}'s two gate conditions declined, for the F1 diagnostic log. */
+    private static String declineReason(PiCapabilities probed, Path bridgeExtension) {
+        StringBuilder reason = new StringBuilder();
+        if (!probed.supportsBridge()) {
+            reason.append(probed.versionParsed()
+                    ? "pi " + probed.version() + " is below the 0.80.3 floor"
+                    : "pi's version could not be read (probed as \"" + probed.version() + "\")");
+        }
+        if (bridgeExtension == null) {
+            if (reason.length() > 0) {
+                reason.append("; ");
+            }
+            reason.append("the bridge extension could not be installed");
+        }
+        return reason.toString();
     }
 
     /**

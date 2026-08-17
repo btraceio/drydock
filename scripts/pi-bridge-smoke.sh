@@ -123,7 +123,7 @@ fail() { echo "FAIL: $1"; echo "--- pi output ---"; cat "$WORK/out.txt"; echo "-
 # the error paths are exactly where a leak would surface, so a check that only
 # looked at the all-success run would never see it.
 no_leak() {
-  [ -n "$1" ] || return 0
+  [ -n "$1" ] || { echo "FAIL: no transcript path given for $2 (empty find result?)"; exit 1; }
   grep -q '127.0.0.1' "$1" && { echo "FAIL: the endpoint URL leaked into $2"; cat "$1"; exit 1; }
   # Narrowed to the endpoint form: a bare port number can coincidentally
   # appear inside a millisecond timestamp pi writes into the transcript
@@ -209,7 +209,7 @@ if ! DRYDOCK_MCP_CONFIG="$WORK/state/dead.json" \
        -p "Say OK." < /dev/null > "$WORK/out_dead.txt" 2>&1; then
   echo "FAIL: a dead endpoint took the tab down"; cat "$WORK/out_dead.txt"; exit 1
 fi
-grep -q '59999' "$WORK/out_dead.txt" && { echo "FAIL: the port leaked into pi's output"; exit 1; }
+grep -q '127.0.0.1:59999' "$WORK/out_dead.txt" && { echo "FAIL: the port leaked into pi's output"; exit 1; }
 no_leak "$(find "$WORK/sessions_dead" -name '*.jsonl' | head -1)" "the dead-endpoint transcript"
 
 # A refused rename must reach the model as an error, carrying the server's words.

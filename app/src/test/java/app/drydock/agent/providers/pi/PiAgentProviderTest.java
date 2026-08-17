@@ -227,6 +227,57 @@ class PiAgentProviderTest {
     }
 
     /**
+     * F2: a version that parses but sits below the 0.80.3 floor is worth
+     * memoising -- re-probing cannot change it. Unlike {@link
+     * #aFailedProbeIsNotLatchedAndTheNextLaunchRetries}, the second call must
+     * see the SAME degraded result even though the injected probe would
+     * happily report a modern version on a later call.
+     */
+    @Test
+    void aParsedSubFloorVersionIsMemoisedAndNotReprobed(@TempDir Path state) {
+        AtomicInteger calls = new AtomicInteger();
+        PiAgentProvider p = new PiAgentProvider(new PiExecutableLocator(Path.of("/nonexistent/pi")),
+                () -> PiCapabilities.of(calls.incrementAndGet() == 1 ? "0.79.10" : "0.84.1"));
+        p.init(new AgentContext(state, state.resolve("activity"), ForkJoinPool.commonPool()));
+        Path config = state.resolve("mcp").resolve("s1.json");
+
+        String firstAttempt = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
+                Optional.empty(), Optional.of(access(config)))).command();
+        assertTrue(firstAttempt.endsWith("pi"), "0.79.10 is below the floor: " + firstAttempt);
+
+        String secondAttempt = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
+                Optional.empty(), Optional.of(access(config)))).command();
+        assertTrue(secondAttempt.endsWith("pi"),
+                "a parsed sub-floor read must stay memoised, not re-probed: " + secondAttempt);
+        assertEquals(1, calls.get(), "the probe must run exactly once");
+    }
+
+    /**
+     * F2: a version that does NOT parse -- here a stray "v" prefix surviving
+     * {@code PiVersionProbe}'s whitespace-token parse -- must not be latched
+     * any more than the probe's own {@code "unknown"} is. Complements {@link
+     * #aFailedProbeIsNotLatchedAndTheNextLaunchRetries}, which covers the
+     * literal {@code "unknown"} case.
+     */
+    @Test
+    void anUnparseableVersionIsNotLatchedAndTheNextLaunchRetries(@TempDir Path state) {
+        AtomicInteger calls = new AtomicInteger();
+        PiAgentProvider p = new PiAgentProvider(new PiExecutableLocator(Path.of("/nonexistent/pi")),
+                () -> PiCapabilities.of(calls.incrementAndGet() == 1 ? "v0.84.1" : "0.84.1"));
+        p.init(new AgentContext(state, state.resolve("activity"), ForkJoinPool.commonPool()));
+        Path config = state.resolve("mcp").resolve("s1.json");
+
+        String firstAttempt = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
+                Optional.empty(), Optional.of(access(config)))).command();
+        assertTrue(firstAttempt.endsWith("pi"), "an unparseable version must not carry the bridge flags: " + firstAttempt);
+
+        String secondAttempt = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
+                Optional.empty(), Optional.of(access(config)))).command();
+        assertTrue(secondAttempt.contains(" -e '"),
+                "an unparseable read must be retried, not latched: " + secondAttempt);
+    }
+
+    /**
      * Two tabs opened together must both receive the path rather than one
      * racing the other into a degraded launch. This does NOT prove
      * {@code memoised} de-duplicated the install to a single write --

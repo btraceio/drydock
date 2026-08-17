@@ -44,4 +44,21 @@ class PiCapabilitiesTest {
         assertEquals("0.84.1", PiCapabilities.of("0.84.1").version());
         assertEquals("unknown", PiCapabilities.of(null).version());
     }
+
+    @Test
+    void aParsedVersionIsMarkedParsedEvenBelowTheFloor() {
+        assertTrue(PiCapabilities.of("0.84.1").versionParsed());
+        assertTrue(PiCapabilities.of("0.79.10").versionParsed());   // below floor, but still a read version
+        assertTrue(PiCapabilities.of("0.80.2-rc1").versionParsed());
+    }
+
+    @Test
+    void anUnparseableVersionIsMarkedUnparsed() {
+        assertFalse(PiCapabilities.of("unknown").versionParsed());
+        assertFalse(PiCapabilities.of(null).versionParsed());
+        assertFalse(PiCapabilities.of("").versionParsed());
+        assertFalse(PiCapabilities.of("not.a.version").versionParsed());
+        assertFalse(PiCapabilities.of("0.80").versionParsed());       // too few components to judge
+        assertFalse(PiCapabilities.of("v0.84.1").versionParsed());    // stray prefix survives whitespace-token parsing
+    }
 }

@@ -16,6 +16,17 @@ package app.drydock.agent.providers.pi.internal;
  * exercises would claim a compatibility drydock cannot back. Anything
  * unparseable, including {@code PiVersionProbe}'s literal {@code "unknown"},
  * is below the floor: a version we could not read is not one we can trust.</p>
+ *
+ * <p>{@link #versionParsed()} exists so a caller can tell "read the version,
+ * and it is genuinely too old" (worth remembering: re-probing cannot change
+ * it) apart from "could not make sense of what the probe returned" (not
+ * worth remembering: the next probe might do better). Both cases still leave
+ * {@link #supportsBridge()} false -- an unparseable version is never trusted
+ * enough to unlock the bridge. It is a derived question, not a stored field:
+ * {@code version} is already carried verbatim, so re-parsing it on demand
+ * keeps the record's public shape at the two fields callers actually
+ * construct rather than adding a third that only restates what
+ * {@code version} already says.</p>
  */
 public record PiCapabilities(String version, boolean supportsBridge) {
 
@@ -23,25 +34,37 @@ public record PiCapabilities(String version, boolean supportsBridge) {
 
     public static PiCapabilities of(String version) {
         String reported = version == null || version.isBlank() ? "unknown" : version.strip();
-        return new PiCapabilities(reported, meetsMinimum(reported));
+        int[] components = parseComponents(reported);
+        return new PiCapabilities(reported, components != null && meetsMinimum(components));
     }
 
-    private static boolean meetsMinimum(String version) {
-        // Drop any pre-release/build suffix: "0.84.1-beta.2" compares as 0.84.1.
+    /** Whether {@link #version()} was itself readable as a dotted version, independent of the floor. */
+    public boolean versionParsed() {
+        return parseComponents(version) != null;
+    }
+
+    /** Drop any pre-release/build suffix ("0.84.1-beta.2" compares as 0.84.1), then parse each dotted component. */
+    private static int[] parseComponents(String version) {
         String core = version.split("[-+]", 2)[0];
         String[] parts = core.split("\\.");
         if (parts.length < MINIMUM.length) {
-            return false;
+            return null;
         }
+        int[] components = new int[MINIMUM.length];
         for (int i = 0; i < MINIMUM.length; i++) {
-            int component;
             try {
-                component = Integer.parseInt(parts[i]);
+                components[i] = Integer.parseInt(parts[i]);
             } catch (NumberFormatException e) {
-                return false;
+                return null;
             }
-            if (component != MINIMUM[i]) {
-                return component > MINIMUM[i];
+        }
+        return components;
+    }
+
+    private static boolean meetsMinimum(int[] components) {
+        for (int i = 0; i < MINIMUM.length; i++) {
+            if (components[i] != MINIMUM[i]) {
+                return components[i] > MINIMUM[i];
             }
         }
         return true;
