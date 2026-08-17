@@ -27,7 +27,7 @@ Leave the window open for manual driving instead with:
 ./gradlew gate0dSpike -Papp.drydock.gate0d.interactive
 ```
 
-## Results (last automated run: 2026-07-14, 12/12 checks passing)
+## Results (last automated run: 2026-08-17, 12/12 checks passing; Pi MCP bridge 11/11 checks pass; 1 entry is a recorded limitation, not a check)
 
 | # | Item | Status | Notes |
 |---|------|--------|-------|
@@ -298,3 +298,79 @@ plus a live `Stage`). Walk this with a human at the keyboard:
    `namePinned=true`, agent rename refused with "This session was named by
    the human ('Human named this')".)* Blur must never pin because an agent's
    `session_start` opens and selects a tab, which blurs any open editor.
+
+## Pi MCP bridge
+
+Nine of these were run on 2026-08-17 by driving pi's TUI under a pty against
+the smoke script's mock server (`/new`, `/fork`, `/resume`, `/reload`, the trust
+prompt, the unreachable-server warning). Assertions are file-based — a
+conversation's transcript is checked for a *successful* rename, since pi records
+a `toolCall` entry even for a tool that is not registered, so counting calls
+proves nothing. The two items needing drydock's own window — watching a tab retitle itself,
+and pinning a title to force a refusal — were run by hand on 2026-08-17 against
+a live drydock and confirmed from state and transcripts as well as on screen.
+
+None of these can be reached from a non-interactive `pi -p` run: `project_trust`
+is only live in the TUI, every `session_start` reason above `startup` comes from
+a TUI command, and `ctx.ui` is a no-op UI outside the TUI — so the notification
+mechanism that six silent failure modes depend on is structurally unverifiable
+by `scripts/pi-bridge-smoke.sh`.
+
+- [x] A Pi tab renames itself during real work, without being asked. Run
+      2026-08-17 against a live drydock: a Pi session was given repo-reading
+      work with no mention of renaming, and retitled itself "Repo structure
+      summary". Confirmed from data as well as on screen — pi's own transcript
+      carries that `session_info` name, which only the post-call hook writes,
+      and only after a rename drydock ACCEPTED. The same run also confirmed the
+      lazy installer firing outside a test: `<state>/pi/drydock-mcp.ts` appeared
+      owner-only (`-rw-------`) on the first Pi launch, and an MCP config was
+      minted for the session.
+- [x] `-e` loads with **no trust prompt** in a real interactive tab, in a freshly
+      created worktree.
+- [x] A refused rename surfaces to the model as a refusal it can read. Run
+      2026-08-17: the tab was renamed in drydock first (which pins it), the
+      agent was then asked to rename it, and the refusal text reached the model
+      in the transcript rather than being swallowed or read as success.
+- [x] With drydock's MCP server stopped, the tab still starts, and a warning
+      notification appears rather than silence.
+- [x] An extension that **throws at runtime** still lets the tab start. Verified
+      by the MCP-server-stopped case above: the factory catches its own
+      handshake failure, the tab starts, and a warning appears. That is the
+      invariant, and it holds.
+- [ ] NOT the same thing, and do not test it this way: a **syntactically
+      corrupt** `<state>/pi/drydock-mcp.ts` makes pi exit 1 and the tab does not
+      start — confirmed. No catch inside the extension can prevent that, because
+      the file never runs; drydock's guard re-checks that the file *exists*, not
+      that it parses. If you want this covered, it needs a drydock-side content
+      check, not an extension change. Left unticked as a known limitation rather
+      than a passing check.
+- [x] `/new` inside a Pi tab: the drydock tools stop working in the new
+      conversation, the old tab's title is not touched by it, and a warning
+      notification appears saying this pi conversation was replaced and
+      drydock's tools are not available in it.
+- [x] `/fork` before the first assistant response (pi refuses it): expect
+      drydock tool calls made in that SAME turn to still be refused with
+      "being handed over" — the gate stays armed for the rest of the turn,
+      since `before_agent_start` only clears it at the next prompt. Confirm
+      the bridge works again on the next prompt; this is the case the
+      reversible gate exists for.
+- [x] `/resume` inside a Pi tab, picking a DIFFERENT conversation: the bridge
+      stands down, and the same warning notification appears (this pi
+      conversation was replaced and drydock's tools are not available in it).
+      This is the case that killed the reason-allow-list guard — in-TUI
+      `/resume` reports `reason: "resume"` while drydock's own
+      `pi --session <id>` reports `startup` — so it is the least skippable of
+      the four.
+- [x] A **resumed** Pi tab still has drydock's tools. Both resume forms
+      verified against real pi 0.84.1: `pi -e <ext> --session <id>` (drydock's
+      resume-with-known-id) and `pi -e <ext> --resume` (the picker form, driven
+      under a pty). Both report `reason: "startup"` with no `previousSessionFile`,
+      so the bridge registers normally and a rename lands. This is the exact
+      counterpart to the `/resume` item above, which reports
+      `reason: "resume"` WITH a `previousSessionFile` and must stand down --
+      the asymmetry the reason-allow-list guard got wrong, now checked from
+      both sides.
+- [x] `/reload` inside a Pi tab: the bridge keeps working.
+- [x] The timeout arm: with the smoke mock running, `-p "Call session_rename
+      with the title 'SLOW'"`. After 45s the model must be told the call *may
+      have completed* and not to retry — not that it failed.
