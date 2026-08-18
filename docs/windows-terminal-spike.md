@@ -77,6 +77,19 @@ macOS native toolchain (including the Windows box it is meant for).
 - **Integration with `OpenSessionTab` / `TerminalBridge`** — the spike is a
   standalone window, not wired into the app (see "Integration plan" below).
 
+### Windows verification in CI
+
+The `jediterm-spike` job in `.github/workflows/tests.yml` runs
+`./gradlew :app:jeditermSpike` on `windows-latest`, which is the only way to
+exercise the ConPTY (`cmd.exe`) path from this macOS-only dev loop. The spike
+is the one piece of the project that CAN run on Windows today (pure Java +
+pty4j's own native libs, no Zig/Xcode/libghostty), so the job needs no native
+toolchain and no submodule. It opens a real JavaFX window and auto-exits once
+the shell does; `windows-latest` hosts the desktop session that needs. (If a
+future runner image cannot, add the Monocle headless path the `:app:test` job
+uses — `glass.platform=Monocle` + monocle on the spike runtime classpath —
+rather than dropping the job.)
+
 ## Dependency notes (gotchas the spike uncovered)
 
 - `org.openjfx` is **excluded** from `jeditermfx-ui`: the project already

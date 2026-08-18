@@ -57,3 +57,40 @@ jobs:
             app/build/reports/tests/test
             app/build/test-results/test
           retention-days: 7
+
+  jediterm-spike:
+    name: jeditermSpike (Windows)
+    # The JediTermFX + pty4j spike is pure Java + pty4j's own native PTY
+    # libs -- no Zig, no Xcode, no libghostty -- so it is the one piece of
+    # the project that CAN run on Windows today, and running it there is the
+    # only way to exercise the ConPTY (cmd.exe) path this macOS dev host
+    # cannot. The full app stays macOS-only; this job verifies only the
+    # candidate Windows terminal backend (see docs/windows-terminal-spike.md).
+    #
+    # It opens a real JavaFX window and auto-exits once the shell does, so it
+    # needs a desktop session. windows-latest hosts one; if a future runner
+    # image cannot, add the Monocle headless path the :app:test job uses
+    # (glass.platform=Monocle + monocle on the spike runtime classpath) rather
+    # than dropping the job -- the whole point is to run the real Windows
+    # ConPTY + JavaFX render path.
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # The spike needs no submodule: third_party/ghostty is read only by
+          # buildGhosttyNative, which jeditermSpike does not depend on
+          # (requireNativeBuild=false in buildSrc/.../drydock.spikes.gradle.kts).
+          submodules: false
+
+      - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: 26
+          cache: gradle
+
+      # shell: bash so ./gradlew (the POSIX wrapper) runs identically to the
+      # macOS job; Git Bash on windows-latest handles it.
+      - name: JediTermFX + pty4j spike
+        shell: bash
+        run: ./gradlew --no-daemon :app:jeditermSpike
