@@ -38,11 +38,20 @@ val spike: SourceSet = sourceSets.create("spike") {
  * docs/native-integration.md.
  */
 fun registerGateTask(name: String, desc: String, main: String,
+                     requireNativeBuild: Boolean = true,
                      configure: JavaExec.() -> Unit = {}) =
     tasks.register<JavaExec>(name) {
         group = "verification"
         description = desc
-        dependsOn(":buildGhosttyNative")
+        // Most gate tasks embed the libghostty Metal surface and so need the
+        // macOS-only native toolchain built first. requireNativeBuild=false
+        // is for spikes that do not touch libghostty (e.g. the pure-JavaFX
+        // JediTermFX spike): forcing a Zig/Xcode build just to run a Java
+        // terminal would make the spike unrunnable on a machine without
+        // that toolchain -- including the Windows box it is meant for.
+        if (requireNativeBuild) {
+            dependsOn(":buildGhosttyNative")
+        }
         classpath = spike.runtimeClasspath
         mainClass.set(main)
         javaLauncher.set(javaToolchains.launcherFor(java.toolchain))
@@ -50,6 +59,23 @@ fun registerGateTask(name: String, desc: String, main: String,
         workingDir = rootProject.projectDir
         configure()
     }
+
+// Cross-platform terminal spike (see docs/windows-terminal-spike.md):
+// JediTermFX + pty4j as the candidate Windows terminal backend. Pure Java
+// + pty4j's own native PTY libs -- no Zig, no Xcode, no libghostty -- so it
+// does NOT depend on the macOS native build tasks and runs on Windows too.
+// Scripted (auto-exit) by default; -Papp.drydock.jediterm.interactive leaves
+// a live shell open for a human to drive.
+registerGateTask(
+    "jeditermSpike",
+    "JediTermFX + pty4j cross-platform terminal spike (candidate Windows backend).",
+    "app.drydock.terminal.JediTermFxSpikeLauncher",
+    requireNativeBuild = false,
+) {
+    if (!providers.gradleProperty("app.drydock.jediterm.interactive").isPresent) {
+        systemProperty("app.drydock.jediterm.autoExit", "true")
+    }
+}
 
 // Gate 0B (plan section 7 / 28 "Task 4"): FFM smoke test. Loads libghostty
 // via app.drydock.terminal.ghostty (the narrow native boundary package),

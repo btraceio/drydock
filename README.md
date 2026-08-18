@@ -37,6 +37,20 @@ activity, Git status, and your changes without leaving the app.
 Drydock is macOS-only and runs natively on both **Apple Silicon (`arm64`)** and
 **Intel (`x86_64`)**.
 
+### Windows
+
+Windows is not supported yet. The macOS terminal embeds the full `libghostty`
+(Metal renderer + terminal surface) as a native AppKit view — neither Metal nor
+AppKit exists on Windows, and upstream Ghostty's Windows support has no firm
+timeline. A cross-platform backend based on [JediTermFX](https://github.com/techsenger/jeditermfx)
++ [pty4j](https://github.com/JetBrains/pty4j) (a pure-JavaFX terminal widget
+over a ConPTY-backed PTY) has been **spiked and verified on macOS**; the full
+integration into the app plus the `runtimeImageWindows` packaging task and
+these instructions are the follow-up. See
+[`docs/windows-terminal-spike.md`](docs/windows-terminal-spike.md) for the
+findings, the constraint, the integration plan, and how to run the spike
+(`./gradlew jeditermSpike`).
+
 ## Requirements
 
 Run `./scripts/verify-environment.sh` to check most prerequisites automatically.
