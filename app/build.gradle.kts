@@ -40,6 +40,17 @@ javafx {
     modules = listOf("javafx.base", "javafx.controls", "javafx.graphics")
 }
 
+// The source is UTF-8 (smart quotes, arrows, and box-drawing symbols in
+// comments and UI strings) but JavaCompile defaults to the platform encoding,
+// which is windows-1252 on Windows. Without this pin :app:compileJava fails
+// on a Windows runner with dozens of "unmappable character for encoding
+// windows-1252" errors -- a latent bug the Windows jeditermSpike CI job
+// surfaced (macOS only passed by accident: its default encoding is UTF-8).
+// Covers every source set (main, test, spike) in this module.
+tasks.withType<JavaCompile>().configureEach {
+    options.encoding = "UTF-8"
+}
+
 application {
     mainClass.set("app.drydock.Main")
 
