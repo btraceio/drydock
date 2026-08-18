@@ -101,6 +101,26 @@ dependencies {
     // for the first rendered paragraph threw IncompatibleClassChangeError.
     implementation("org.fxmisc.richtext:richtextfx:0.11.7")
 
+    // Cross-platform terminal backend (JediTermFX + pty4j) used on Windows,
+    // where the macOS libghostty Metal surface / AppKit host shim cannot run
+    // (see docs/windows-terminal-spike.md). Compiled into the app jar on
+    // every platform -- the JediTermFX impls are main code selected by
+    // TerminalFactory at runtime -- so the deps are on main's classpath, not
+    // spike-only. jeditermfx-ui transitively pulls jeditermfx-core + pty4j
+    // (the PTY; ConPTY on Windows, forkpty on macOS/Linux) + JNA + kotlin-stdlib.
+    // org.openjfx excluded: the project already provides JavaFX 26 via the
+    // javafx-gradle-plugin; jeditermfx-ui's POM otherwise resolves an older
+    // Linux-default-classifier JavaFX that clashes. pty4j forced to 0.13.10:
+    // jeditermfx-ui 1.1.0 pulls 0.12.25 whose purejavacomm:0.0.11.1 transitive
+    // is not on Maven Central, and 0.13.10 dropped it; the public PTY API is
+    // stable and jeditermfx-ui does not call pty4j directly. slf4j-jdk14 routes
+    // JediTermFX's slf4j logs through java.util.logging (the app's logger).
+    implementation("com.techsenger.jeditermfx:jeditermfx-ui:1.1.0") {
+        exclude("org.openjfx")
+    }
+    implementation("org.jetbrains.pty4j:pty4j:0.13.10")
+    runtimeOnly("org.slf4j:slf4j-jdk14:2.0.13")
+
     testImplementation(platform("org.junit:junit-bom:5.11.4"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
@@ -115,35 +135,6 @@ dependencies {
     testImplementation("org.testfx:testfx-core:4.0.18")
     testImplementation("org.testfx:testfx-junit5:4.0.18")
     testRuntimeOnly("org.testfx:openjfx-monocle:21.0.2")
-
-    // ---- spike: JediTermFX cross-platform terminal candidate ----------------
-    // See docs/windows-terminal-spike.md and app/src/spike/java/.../JediTermFxSpike.
-    // Scoped to the spike source set only (never ships in the app jar or the
-    // jlink image). jeditermfx-ui transitively pulls jeditermfx-core + pty4j
-    // (the PTY, incl. Windows ConPTY) + JNA + kotlin-stdlib. org.openjfx is
-    // excluded because the project already provides JavaFX 26 via the
-    // javafx-gradle-plugin; jeditermfx-ui's POM otherwise resolves a different
-    // (older, Linux-default-classifier) JavaFX that would clash on the
-    // classpath.
-    //
-    // purejavacomm: jeditermfx-ui 1.1.0 transitively pulls pty4j 0.12.25,
-    // which depends on org.jetbrains.pty4j:purejavacomm:0.0.11.1 -- and that
-    // artifact is not published to Maven Central as a POM, so the runtime
-    // classpath would not resolve. pty4j 0.13.10 dropped the purejavacomm
-    // dependency entirely (its only deps are kotlin-stdlib, jna, slf4j-api),
-    // so it is forced here. pty4j's public PTY API
-    // (PtyProcessBuilder/PtyProcess/WinSize) is stable across those versions,
-    // and jeditermfx-ui 1.1.0 does not call pty4j classes directly (only the
-    // optional jeditermfx-app module does, which this spike avoids), so the
-    // override is safe.
-    //
-    // slf4j-jdk14 routes JediTermFX's slf4j logs through java.util.logging,
-    // the logger the rest of the app already uses.
-    "spikeImplementation"("com.techsenger.jeditermfx:jeditermfx-ui:1.1.0") {
-        exclude("org.openjfx")
-    }
-    "spikeImplementation"("org.jetbrains.pty4j:pty4j:0.13.10")
-    "spikeRuntimeOnly"("org.slf4j:slf4j-jdk14:2.0.13")
 }
 
 tasks.test {

@@ -1,5 +1,7 @@
 package app.drydock.terminal.api;
 
+import java.util.Optional;
+
 /**
  * A native view embedded as an overlay in the host window, into which a
  * {@link TerminalSurface} renders. The only implementation is the macOS
@@ -29,6 +31,20 @@ public interface TerminalHostView extends AutoCloseable {
 
     /** Registers the mouse-button listener (at most once per view). */
     void setMouseButtonEventListener(MouseButtonEventListener listener);
+
+    /**
+     * The JavaFX node this host renders into, if any.
+     *
+     * <p>The macOS AppKit host returns {@link Optional#empty()} (it overlays a
+     * native view on the window, never entering the JavaFX scene graph). A
+     * pure-JavaFX backend (JediTermFX, the Windows path) returns its widget’s
+     * pane so the owning tab can add it to its layout. Returning empty is the
+     * native-overlay path; returning a node is the embedded-node path. Defaulting
+     * to empty keeps every native host unchanged.
+     */
+    default Optional<javafx.scene.Node> embeddedNode() {
+        return Optional.empty();
+    }
 
     @Override
     void close();

@@ -77,6 +77,24 @@ registerGateTask(
     }
 }
 
+// Integration spike: drives the real TerminalFactory + the JediTermFX
+// terminal.api impls (selected via app.drydock.terminal.backend=jediterm)
+// through openSurface/processExited/closeGracefully -- the integration layer
+// the jeditermSpike (raw widget) does not cover. Same no-native-build property,
+// so it runs on the Windows CI runner. Auto-exit by default;
+// -Papp.drydock.nodeterm.interactive leaves the window open.
+registerGateTask(
+    "nodeTerminalSpike",
+    "Integration spike: TerminalFactory + JediTermFX backend (openSurface/exit/close).",
+    "app.drydock.terminal.NodeTerminalSpikeLauncher",
+    requireNativeBuild = false,
+) {
+    systemProperty("app.drydock.terminal.backend", "jediterm")
+    if (!providers.gradleProperty("app.drydock.nodeterm.interactive").isPresent) {
+        systemProperty("app.drydock.nodeterm.autoExit", "true")
+    }
+}
+
 // Gate 0B (plan section 7 / 28 "Task 4"): FFM smoke test. Loads libghostty
 // via app.drydock.terminal.ghostty (the narrow native boundary package),
 // initializes it, reads back its version info, exercises config new/free,

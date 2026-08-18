@@ -583,6 +583,7 @@ final class OpenSessionTab {
                     .orElseGet(() -> TerminalSpec.loginShell(shellWorkingDirectory));
             shellSurface = shell.runtime().openSurface(shell.host(), stage.getOutputScaleX(), spec);
             shellBridge.adoptSurface(shellSurface);
+            shell.host().embeddedNode().ifPresent(shellPlaceholder.getChildren()::add);
             shellBridge.wireInputListeners();
             return true;
         } catch (RuntimeException e) {
@@ -1097,6 +1098,7 @@ final class OpenSessionTab {
     void attachSurface(TerminalSurface surface) {
         bridge.adoptSurface(surface);
         placeholder.getChildren().remove(statusLabel);
+        bridge.host().embeddedNode().ifPresent(placeholder.getChildren()::add);
         bridge.wireInputListeners();
     }
 
@@ -1178,6 +1180,7 @@ final class OpenSessionTab {
      * {@link TerminalBridge#disposeNativeResources}.
      */
     void disposeNativeResources() {
+        bridge.host().embeddedNode().ifPresent(placeholder.getChildren()::remove);
         bridge.disposeNativeResources();
         if (shellBridge != null) {
             // The ephemeral shell has no SessionManager-managed lifecycle,
@@ -1193,6 +1196,7 @@ final class OpenSessionTab {
             shellBridge = null;
             shellSurface = null;
             closingShellBridge.markSurfaceClosing();
+            closingShellBridge.host().embeddedNode().ifPresent(shellPlaceholder.getChildren()::remove);
             if (closingShellSurface != null) {
                 closingShellSurface.closeGracefully(SHELL_CLOSE_GRACE_MILLIS, SHELL_CLOSE_POLL_MILLIS,
                         closingShellBridge::disposeNativeResources);
