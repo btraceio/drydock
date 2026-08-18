@@ -89,6 +89,17 @@ jobs:
           java-version: 26
           cache: gradle
 
+      # Gradle's own daemon runs on JDK 17 (gradle/gradle-daemon-jvm.properties
+      # toolchainVersion=17). macos-14 has a preinstalled 17 that toolchain
+      # detection finds; windows-latest does not, and no toolchain download
+      # URL is configured, so without this the build dies before the spike
+      # even runs with "No defined toolchain download url for WINDOWS". The
+      # app itself still compiles and runs on the JDK 26 toolchain above.
+      - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: 17
+
       # shell: bash so ./gradlew (the POSIX wrapper) runs identically to the
       # macOS job; Git Bash on windows-latest handles it.
       - name: JediTermFX + pty4j spike
