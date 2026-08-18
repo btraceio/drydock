@@ -20,6 +20,7 @@ import javafx.scene.control.Button;
 import javafx.scene.control.ButtonBase;
 import javafx.scene.control.ContentDisplay;
 import javafx.scene.control.Label;
+import javafx.scene.control.MenuButton;
 import javafx.scene.control.OverrunStyle;
 import javafx.scene.control.ProgressIndicator;
 import javafx.scene.control.Tab;
@@ -180,6 +181,7 @@ final class OpenSessionTab {
     private final Label headerPrChip = new Label();
     private final HBox worktreeChips = new HBox(6);
     private final Button finishButton = new Button("Finish ▸");
+    private final MenuButton forkButton = new MenuButton("Fork to…");
     private final Label handoffLabel = new Label();
     private final ProgressIndicator handoffSpinner = new ProgressIndicator();
     private final HBox handoffPill = new HBox(6);
@@ -705,6 +707,10 @@ final class OpenSessionTab {
         headerPrChip.setVisible(false);
         headerPrChip.setManaged(false);
 
+        forkButton.getStyleClass().add("header-fork-button");
+        forkButton.setFocusTraversable(false);
+        forkButton.setTooltip(new Tooltip("Fork this session into a sibling worktree, "
+                + "seeded from its handoff brief."));
         finishButton.getStyleClass().add("finish-button");
         finishButton.setFocusTraversable(false);
         handoffSpinner.setPrefSize(12, 12);
@@ -724,7 +730,8 @@ final class OpenSessionTab {
         rename.setFocusTraversable(false);
         rename.setOnAction(e -> startInlineRename());
 
-        return layOutSessionHeader(back, headerTitles, worktreeChips, finishBox, statusPill, rename);
+        return layOutSessionHeader(back, headerTitles, worktreeChips, forkButton,
+                finishBox, statusPill, rename);
     }
 
     /**
@@ -746,11 +753,11 @@ final class OpenSessionTab {
      * part worth pinning down.</p>
      */
     static HBox layOutSessionHeader(Region back, Region titleBlock, Region chips,
-                                    Region finishBox, Region statusPill, Region rename) {
-        HBox header = new HBox(12, back, titleBlock, chips, finishBox, statusPill, rename);
+                                    Region fork, Region finishBox, Region statusPill, Region rename) {
+        HBox header = new HBox(12, back, titleBlock, chips, fork, finishBox, statusPill, rename);
         header.getStyleClass().add("session-header");
         HBox.setHgrow(titleBlock, Priority.ALWAYS);
-        for (Region pinned : List.of(back, chips, finishBox, statusPill, rename)) {
+        for (Region pinned : List.of(back, chips, fork, finishBox, statusPill, rename)) {
             pinned.setMinWidth(Region.USE_PREF_SIZE);
         }
         // The pinning only works if the title block will actually shrink; it
@@ -1198,6 +1205,16 @@ final class OpenSessionTab {
     /** The staleness banner for this session's handoff brief; the workspace drives it. */
     HandoffBanner handoffBanner() {
         return handoffBanner;
+    }
+
+    /**
+     * The persistent <code>Fork to…</code> control in the session header. Always
+     * visible, unlike the banner's verbs: forking is the primary handoff action
+     * and must stay reachable whether the brief is current or stale. The
+     * workspace populates its items on first showing.
+     */
+    MenuButton forkButton() {
+        return forkButton;
     }
 
 }

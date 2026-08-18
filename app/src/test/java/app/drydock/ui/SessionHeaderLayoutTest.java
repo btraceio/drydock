@@ -3,6 +3,7 @@ package app.drydock.ui;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
+import javafx.scene.control.MenuButton;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Region;
 import javafx.scene.layout.StackPane;
@@ -35,6 +36,7 @@ class SessionHeaderLayoutTest extends ApplicationTest {
     private VBox titleBlock;
     private Label contextLine;
     private HBox chips;
+    private MenuButton fork;
     private StackPane finishBox;
     private HBox statusPill;
     private Region rename;
@@ -53,11 +55,13 @@ class SessionHeaderLayoutTest extends ApplicationTest {
         contextLine.setMaxWidth(Double.MAX_VALUE);
         titleBlock = new VBox(1, title, contextLine);
         chips = new HBox(6, new Label("uncommitted"));
+        fork = new MenuButton("Fork to…");
         finishBox = new StackPane(new Button("Finish ▸"));
         statusPill = new HBox(6, new Label("running"));
         rename = new Button("✎");
 
-        header = OpenSessionTab.layOutSessionHeader(back, titleBlock, chips, finishBox, statusPill, rename);
+        header = OpenSessionTab.layOutSessionHeader(back, titleBlock, chips, fork,
+                finishBox, statusPill, rename);
         // A StackPane, not a Pane: Pane lays children out at their PREFERRED
         // width, so the header was never short of space and the whole test
         // measured an unstressed row.
@@ -89,7 +93,7 @@ class SessionHeaderLayoutTest extends ApplicationTest {
         for (double width : new double[]{1100, 900, 700, 560}) {
             squeezeTo(width);
 
-            for (Region pinned : List.of(back, chips, finishBox, statusPill, rename)) {
+            for (Region pinned : List.of(back, chips, fork, finishBox, statusPill, rename)) {
                 assertTrue(pinned.getWidth() >= pinned.prefWidth(-1) - 0.5,
                         "at " + width + "px a header control squeezed to " + pinned.getWidth()
                                 + ", below its preferred " + pinned.prefWidth(-1));

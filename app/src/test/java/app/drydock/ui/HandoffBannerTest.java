@@ -130,21 +130,19 @@ class HandoffBannerTest extends ApplicationTest {
     }
 
     @Test
-    void editAndForkStayOfferedWhenTheAgentIsTheThingThatDied() {
+    void editStaysOfferedWhenTheAgentIsTheThingThatDied() {
         interact(() -> banner.update(HandoffStaleness.of(brief(), 1, 1), false));
 
         assertFalse(banner.editButton().isDisabled(), "editing is what a human does for a dead session");
-        assertFalse(banner.forkButton().isDisabled(), "forking is the whole point of the rescue case");
     }
 
     @Test
-    void aSessionThatNeverWroteABriefStillGetsAllThreeVerbs() {
+    void aSessionThatNeverWroteABriefStillGetsBothVerbs() {
         interact(() -> banner.update(HandoffStaleness.of(Optional.empty(), 0, 0), false));
 
         assertTrue(banner.isVisible());
         assertTrue(banner.messageText().contains("No handoff brief"), banner.messageText());
         assertFalse(banner.editButton().isDisabled());
-        assertFalse(banner.forkButton().isDisabled());
     }
 
     @Test
@@ -158,15 +156,18 @@ class HandoffBannerTest extends ApplicationTest {
     }
 
     /**
-     * Regression, found by screenshot: at ~435px of content the three buttons
-     * collapsed to "R..", "..." and "Fo..." -- HBox shrinks children by
-     * default, and "..." as a label for Edit tells the human nothing.
+     * Regression, found by screenshot: at ~435px of content the buttons
+     * collapsed to "R.." and "..." -- HBox shrinks children by default, and
+     * "..." as a label for Edit tells the human nothing.
      *
      * <p>The squeeze only reproduces when the PARENT is resized, not the
      * banner itself: resizing the banner directly leaves the layout pass with
      * nothing to redistribute, which is why a first attempt at this test
      * passed against the bug. Measured thresholds, unfixed: intact at 500px,
      * truncating at 435px, Edit at zero width by 300px.</p>
+     *
+     * <p>Fork no longer lives on the banner (it graduated to the session
+     * header), so only Refresh and Edit are pinned here.</p>
      */
     @Test
     void theButtonsKeepTheirLabelsWhenTheBannerIsSqueezed() {
@@ -181,7 +182,7 @@ class HandoffBannerTest extends ApplicationTest {
                 banner.getParent().layout();
             });
 
-            for (Control control : List.of(banner.refreshButton(), banner.editButton(), banner.forkButton())) {
+            for (Control control : List.of(banner.refreshButton(), banner.editButton())) {
                 assertTrue(control.getWidth() >= control.prefWidth(-1) - 0.5,
                         "at " + width + "px a button squeezed to " + control.getWidth()
                                 + ", below its preferred " + control.prefWidth(-1));

@@ -2430,18 +2430,21 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         return written;
     }
 
-    // ---- handoff: driving the banner and its three verbs ---------------------
+    // ---- handoff: driving the banner verbs and the header fork control -------
 
     /**
-     * Connects one tab's banner to the three verbs and gives it its first
-     * reading. Done once per tab, when the tab is registered: the buttons
-     * outlive every republish, so re-binding them on each would be churn.
+     * Connects one tab's banner verbs (Refresh, Edit) and the session header's
+     * persistent Fork control, and gives the banner its first reading. Done
+     * once per tab, when the tab is registered: the controls outlive every
+     * republish, so re-binding them on each would be churn. Fork lives on the
+     * header rather than the banner so it stays reachable once the brief is
+     * current and the warning bar hides.
      */
     private void wireHandoffBanner(ManagedSessionId sessionId, OpenSessionTab tab) {
         HandoffBanner banner = tab.handoffBanner();
         banner.refreshButton().setOnAction(event -> requestHandoffRefresh(sessionId));
         banner.editButton().setOnAction(event -> editHandoffBrief(sessionId));
-        banner.forkButton().setOnShowing(event -> populateForkMenu(banner.forkButton(), sessionId));
+        tab.forkButton().setOnShowing(event -> populateForkMenu(tab.forkButton(), sessionId));
         refreshHandoffBanner(sessionId);
     }
 
@@ -2727,7 +2730,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         if (active == null) {
             return "no open or pending tab";
         }
-        MenuButton fork = active.getValue().handoffBanner().forkButton();
+        MenuButton fork = active.getValue().forkButton();
         // Fully qualified: GitHubReviewRequest.Event is imported here too.
         EventHandler<javafx.event.Event> onShowing = fork.getOnShowing();
         if (onShowing == null) {

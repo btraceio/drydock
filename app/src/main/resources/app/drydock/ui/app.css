@@ -1615,6 +1615,29 @@
     -fx-font-size: 10px;
     -fx-padding: 1 7 1 7;
 }
+/* The persistent Fork control in the session header. Bordered and quiet so
+   it reads as a header action, not a call to arms; forking is always
+   available, so it must not share the banner's warning-only visibility. */
+.header-fork-button {
+    -fx-background-color: transparent;
+    -fx-background-radius: 9px;
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 9px;
+    -fx-border-width: 1px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 12px;
+    -fx-padding: 4 10 4 10;
+    -fx-cursor: hand;
+}
+.header-fork-button:hover {
+    -fx-background-color: -drydock-hover;
+    -fx-text-fill: -drydock-text;
+}
+.header-fork-button.showing {
+    -fx-background-color: -drydock-hover;
+    -fx-text-fill: -drydock-text;
+}
+
 .finish-button {
     -fx-background-color: -drydock-accent;
     -fx-background-radius: 7px;

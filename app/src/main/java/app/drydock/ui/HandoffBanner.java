@@ -6,7 +6,6 @@ import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
-import javafx.scene.control.MenuButton;
 import javafx.scene.control.Tooltip;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
@@ -16,26 +15,27 @@ import java.util.List;
 
 /**
  * Tells the human how far a session's work has moved since its handoff brief
- * was written, and gives them something to do about it.
+ * was written, and gives them a corrective verb for it.
  *
- * <p>A warning with no verb is just anxiety, so the banner carries three:
- * <em>Refresh</em> asks the session's own agent to rewrite the brief,
- * <em>Edit</em> lets the human write it themselves, and <em>Fork</em> proceeds
- * anyway. Only <em>Refresh</em> can ever be disabled -- it is the one that
- * needs a live agent, and a Refresh that silently does nothing against a dead
- * session is worse than no button at all, because the failure is invisible at
- * exactly the moment the human is deciding whether to trust the brief.</p>
+ * <p>A warning with no verb is just anxiety, so the banner carries two:
+ * <em>Refresh</em> asks the session's own agent to rewrite the brief and
+ * <em>Edit</em> lets the human write it themselves. Only <em>Refresh</em> can
+ * ever be disabled -- it is the one that needs a live agent, and a Refresh
+ * that silently does nothing against a dead session is worse than no button
+ * at all, because the failure is invisible at exactly the moment the human is
+ * deciding whether to trust the brief.</p>
  *
- * <p>Deliberately knows nothing about {@code AgentRegistry}: the fork control
- * is an empty {@link MenuButton} whose items the workspace fills in, so this
- * class stays testable without a repository or a provider probe.</p>
+ * <p>Forking is not a corrective verb -- it proceeds whether the brief is
+ * stale or current -- so it lives in the session header as a persistent
+ * control, not here. This banner warns; it does not host the primary action,
+ * because hosting it meant the action vanished the moment the warning cleared
+ * (see the {@code Fork to…} control on {@code OpenSessionTab}).</p>
  */
 public final class HandoffBanner extends HBox {
 
     private final Label message = new Label();
     private final Button refresh = new Button("Refresh");
     private final Button edit = new Button("Edit");
-    private final MenuButton fork = new MenuButton("Fork to…");
 
     public HandoffBanner() {
         getStyleClass().add("handoff-banner");
@@ -50,19 +50,18 @@ public final class HandoffBanner extends HBox {
 
         refresh.getStyleClass().add("handoff-banner-button");
         edit.getStyleClass().add("handoff-banner-button");
-        fork.getStyleClass().add("handoff-banner-button");
 
         // The buttons must never be the thing that gives. Found by screenshot
         // at a narrow tab width: HBox shrinks children by default, so at ~435px
-        // of content these collapsed to "R..", "..." and "Fo..." -- and "..."
-        // as a label for Edit tells the human nothing at all. The message is
-        // the only element that should absorb a squeeze, which it does by
+        // of content these collapsed to "R.." and "..." -- and "..." as a
+        // label for Edit tells the human nothing at all. The message is the
+        // only element that should absorb a squeeze, which it does by
         // wrapping, so pin the buttons to their preferred width.
-        for (javafx.scene.control.Control control : List.of(refresh, edit, fork)) {
+        for (javafx.scene.control.Control control : List.of(refresh, edit)) {
             control.setMinWidth(Region.USE_PREF_SIZE);
         }
 
-        getChildren().addAll(message, spacer(), refresh, edit, fork);
+        getChildren().addAll(message, spacer(), refresh, edit);
 
         // Managed follows visible so a current brief costs no vertical space.
         managedProperty().bind(visibleProperty());
@@ -83,10 +82,9 @@ public final class HandoffBanner extends HBox {
                 : "This session is not running, so its agent cannot be asked for a brief. "
                         + "Edit the brief yourself, or fork anyway."));
 
-        // Edit and Fork stay enabled whatever the session is doing: they are
-        // exactly what the human needs when the agent is the thing that died.
+        // Edit stays enabled whatever the session is doing: it is exactly
+        // what the human needs when the agent is the thing that died.
         edit.setDisable(false);
-        fork.setDisable(false);
     }
 
     public Button refreshButton() {
@@ -95,10 +93,6 @@ public final class HandoffBanner extends HBox {
 
     public Button editButton() {
         return edit;
-    }
-
-    public MenuButton forkButton() {
-        return fork;
     }
 
     /** For tests and for the workspace: what the banner is currently telling the human. */
