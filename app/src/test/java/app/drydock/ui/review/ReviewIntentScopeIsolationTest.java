@@ -142,6 +142,17 @@ class ReviewIntentScopeIsolationTest extends ApplicationTest {
      * "selecting an item in a second repository never shows the first
      * repository's files." Two distinct repos, two distinctly-named files,
      * selecting the second must show only its own titles.
+     *
+     * <p>The name is inherited from the deleted queue, where two arbitrary
+     * repositories really could sit side by side. {@link SessionReviewScopes}
+     * always mints both of a board's scopes against ONE checkout, so a
+     * genuine second repository is not reachable here any more -- the two
+     * scopes below are minted from different repos only because the switcher
+     * takes any two {@link ReviewScope}s and this is the cheapest way to get
+     * two that are diffably distinct. What still holds, and is what this
+     * pins, is per-scope isolation of the rail across a chip switch -- the
+     * same guarantee, exercised through the switcher's two slots rather than
+     * a queue's rows.</p>
      */
     @Test
     void aSecondRepositoryNeverShowsTheFirstRepositorysFiles() throws Exception {
@@ -187,6 +198,10 @@ class ReviewIntentScopeIsolationTest extends ApplicationTest {
         interact(() -> view.showScopes(new SessionReviewScopes.Scopes(local, Optional.of(pr)),
                 SessionReviewScopes.Choice.LOCAL));
         view.diagSelectChoice(SessionReviewScopes.Choice.PULL_REQUEST);
+
+        assertEquals(List.of("pr only"), view.diagMarginFindingTitles(),
+                "the PR chip must show only the PR's own finding, not the local scope's carried over");
+
         view.diagSelectChoice(SessionReviewScopes.Choice.LOCAL);
 
         assertEquals(List.of("local only"), view.diagMarginFindingTitles());

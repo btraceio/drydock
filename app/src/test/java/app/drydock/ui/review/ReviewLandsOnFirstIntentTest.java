@@ -22,6 +22,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -36,14 +37,19 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * its own. The deleted queue's {@code setItems} re-selecting the
  * previously-selected scope on every reassembly was exactly this path.
  *
- * <p>{@link SessionReviewView#showScopes} has no such no-op branch --
- * {@link SessionReviewView#renderSelectedScope} always resets the cursor and
- * re-renders, cached diff or not (see {@code bodyFor}'s cache, which this
- * test now goes through instead: the second {@code showScopes} restores the
- * diff via {@code showDiff} rather than re-running git). What this pins is
- * the guarantee that trap broke: handing the board the SAME scopes again
- * must still land back on the first intent, not leave the column wherever
- * the last read happened to stop.</p>
+ * <p>{@code setScope}'s same-id no-op still exists, but {@link
+ * SessionReviewView#showScopes} never reaches it on a repeat call: {@link
+ * SessionReviewView#renderSelectedScope} always resets the cursor, and for a
+ * cached {@code Loaded} outcome {@code bodyFor} renders via {@code showDiff}
+ * instead of {@code setScope} -- and {@code showDiff} nulls the column's live
+ * scope, so even a LATER {@code setScope} call could not take the early
+ * return either. The guard is bypassed, not removed: this test exercises the
+ * exact branch ({@code bodyFor}'s cache path) that now does the bypassing.
+ * What this pins is the guarantee the old trap broke: handing the board the
+ * SAME scopes again must still land back on the first intent -- both the
+ * cursor AND the column's rendered hunks, not merely "scrolled near the
+ * top" (see the second assertion below) -- not leave the column wherever the
+ * last read happened to stop.</p>
  */
 class ReviewLandsOnFirstIntentTest extends ApplicationTest {
 
@@ -101,8 +107,30 @@ class ReviewLandsOnFirstIntentTest extends ApplicationTest {
         interact(() -> view.showScopes(scopes, SessionReviewScopes.Choice.LOCAL));
         awaitCardCount(2);
 
-        assertTrue(renderedHunkFiles().stream().anyMatch(p -> p.endsWith("Alpha.java")),
-                "showing the same scopes again lands on the first intent; rendered " + renderedHunkFiles());
+        List<String> rendered = renderedHunkFiles();
+        assertTrue(rendered.stream().anyMatch(p -> p.endsWith("Alpha.java")),
+                "showing the same scopes again lands on the first intent; rendered " + rendered);
+        // Pins the intent-1 FILTER at the MODEL level, not merely "Alpha.java
+        // happened to be materialized on screen". renderedHunkFiles() reads
+        // the ListView's virtualized cells: a rebuild that scrolls an
+        // UNFILTERED diff to the top (ReviewDiffColumn#rebuild's scrollTo(0),
+        // which runs on every showDiff regardless of whether setIntent ever
+        // narrowed anything) would already put Alpha.java on screen and leave
+        // Zulu.java simply un-materialized -- indistinguishable, at the
+        // rendered-label level, from a genuine narrow. diagRows() reads the
+        // column's row model directly, so a HunkHeader naming Zulu.java shows
+        // up here even when its cell was never realized on screen. Confirmed
+        // by mutation (see task-6-report.md): deleting ONLY
+        // renderSelectedScope's revealCurrentIntent() call does not fail this
+        // assertion, because SessionReviewView's setOnDiffResolved handler
+        // (registered in the constructor) also calls revealCurrentIntent()
+        // and fires synchronously off this same showDiff -- deleting BOTH
+        // call sites does fail it, with rows named
+        // [alpha/Alpha.java, zulu/Zulu.java].
+        List<String> modelFiles = narrowedFiles();
+        assertFalse(modelFiles.stream().anyMatch(p -> p.endsWith("Zulu.java")),
+                "showing the same scopes again must narrow the column back to intent 1's hunks, not merely "
+                        + "scroll an unfiltered diff to the top; rows named " + modelFiles);
     }
 
     private List<String> renderedHunkFiles() {
@@ -110,6 +138,24 @@ class ReviewLandsOnFirstIntentTest extends ApplicationTest {
         interact(() -> lookup(".review-hunk-file").queryAll()
                 .forEach(node -> files.add(((Label) node).getText())));
         return files;
+    }
+
+    /**
+     * The files named by the diff column's row MODEL -- unlike {@link
+     * #renderedHunkFiles()}, unaffected by which cells the virtualized {@code
+     * ListView} happens to have materialized. This is what tells "narrowed to
+     * one intent" apart from "showing the whole diff, scrolled so only the
+     * first file's cells are realized" -- see the caller.
+     */
+    private List<String> narrowedFiles() {
+        ReviewDiffColumn[] found = new ReviewDiffColumn[1];
+        interact(() -> found[0] = (ReviewDiffColumn) lookup(".review-diff-column").query());
+        return found[0].diagRows().stream()
+                .filter(ReviewDiffRow.HunkHeader.class::isInstance)
+                .map(ReviewDiffRow.HunkHeader.class::cast)
+                .map(ReviewDiffRow.HunkHeader::file)
+                .distinct()
+                .toList();
     }
 
     private void awaitCardCount(int expected) {

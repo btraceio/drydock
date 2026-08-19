@@ -27,7 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * and a worktree with nothing changed is not "not checked out".
  *
  * <p>{@link #everyEmptyReasonHasItsOwnSentence()} only pins the enum's own
- * string table down; it never exercises {@code ReviewDestinationView
+ * string table down; it never exercises {@code SessionReviewView
  * .emptyReason()}, the actual {@code DiffOutcome} → {@code Empty} mapping.
  * The tests below drive that mapping for real, through the
  * {@code diagPublishOutcome} seam, for the two cases the isolation and
@@ -134,7 +134,7 @@ class ReviewIntentRailEmptyStateTest extends ApplicationTest {
      * Waits for the scope's REAL diff to land before a test seeds the outcome
      * it actually wants to assert on.
      *
-     * <p>{@code setItems} selects the scope, which starts a genuine {@code git
+     * <p>{@code showScopes} selects the scope, which starts a genuine {@code git
      * diff} on a clean fixture repository. That publishes {@code Loaded} with
      * no files a moment later, and whichever outcome lands last wins -- so a
      * seeded {@code Failed} could be silently overwritten by the real one and
