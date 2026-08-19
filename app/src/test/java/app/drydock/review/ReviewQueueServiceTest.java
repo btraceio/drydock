@@ -57,7 +57,8 @@ class ReviewQueueServiceTest {
         int number = 1;
         for (java.util.Map.Entry<String, String> entry : bases.entrySet()) {
             prs.put(entry.getKey(),
-                    new GhCliService.OpenPullRequest(number++, entry.getKey(), entry.getValue()));
+                    new GhCliService.OpenPullRequest(number++, "", entry.getKey(), entry.getValue(),
+                            false, java.util.Optional.empty(), java.util.Optional.empty()));
         }
         return new ReviewQueueService(worktreeService, gitStatusService, NO_REQUESTS,
                 root -> CompletableFuture.completedFuture(java.util.Map.copyOf(prs)), registry);
@@ -506,7 +507,8 @@ class ReviewQueueServiceTest {
     // ---- fixtures -----------------------------------------------------------
 
     private static GhCliService.OpenPullRequest openPr(int number, String head, String base) {
-        return new GhCliService.OpenPullRequest(number, head, base);
+        return new GhCliService.OpenPullRequest(number, "", head, base,
+                false, java.util.Optional.empty(), java.util.Optional.empty());
     }
 
     private static ReviewQueueService.RepositoryTarget target(Path repo) {

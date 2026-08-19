@@ -7,6 +7,7 @@ import app.drydock.state.json.JsonParseException;
 import app.drydock.state.json.JsonParser;
 import app.drydock.state.json.JsonValue;
 import app.drydock.state.json.JsonValue.JsonArray;
+import app.drydock.state.json.JsonValue.JsonBoolean;
 import app.drydock.state.json.JsonValue.JsonNumber;
 import app.drydock.state.json.JsonValue.JsonObject;
 import app.drydock.state.json.JsonValue.JsonString;
@@ -86,10 +87,40 @@ public final class GhCliService implements AutoCloseable {
      * still a pull request, and a row reading {@code pr-40} tells nobody
      * which.</p>
      */
-    public record OpenPullRequest(int number, String headRefName, String baseRefName) {
+    public record OpenPullRequest(int number, String title, String headRefName, String baseRefName,
+                                  boolean draft, Optional<String> author, Optional<String> url) {
         public OpenPullRequest {
+            Objects.requireNonNull(title, "title");
             Objects.requireNonNull(headRefName, "headRefName");
             Objects.requireNonNull(baseRefName, "baseRefName");
+            Objects.requireNonNull(author, "author");
+            Objects.requireNonNull(url, "url");
+        }
+    }
+
+    /**
+     * The outcome of asking {@code gh} for a repository's open pull
+     * requests. Three cases, not two: a sidebar that renders "no pull
+     * requests" when gh is broken tells the reader something false, and a
+     * sidebar that renders an error when gh simply is not installed nags
+     * about a tool they never asked for.
+     */
+    public sealed interface PullRequestListing {
+        /** gh ran and answered. The list may legitimately be empty. */
+        record Listed(List<OpenPullRequest> pullRequests) implements PullRequestListing {
+            public Listed {
+                pullRequests = List.copyOf(pullRequests);
+            }
+        }
+
+        /** No gh on PATH or in the known fallbacks: show nothing at all. */
+        record Unsupported() implements PullRequestListing { }
+
+        /** gh is here and did not answer: say so, with something actionable. */
+        record Failed(String message) implements PullRequestListing {
+            public Failed {
+                Objects.requireNonNull(message, "message");
+            }
         }
     }
 
@@ -308,7 +339,8 @@ public final class GhCliService implements AutoCloseable {
                         && obj.get("baseRefName") instanceof JsonString base
                         && !head.value().isBlank() && !base.value().isBlank()) {
                     OpenPullRequest pr =
-                            new OpenPullRequest(number.asInt(), head.value(), base.value());
+                            new OpenPullRequest(number.asInt(), "", head.value(), base.value(),
+                                    false, Optional.empty(), Optional.empty());
                     // First wins: two open PRs from one branch is unusual, and
                     // the newer one is not obviously the one being reviewed.
                     bases.putIfAbsent(head.value(), pr);
@@ -321,6 +353,64 @@ public final class GhCliService implements AutoCloseable {
         } catch (JsonParseException | NumberFormatException e) {
             LOG.log(Level.DEBUG, "Unparseable gh pr list output", e);
             return Map.of();
+        }
+    }
+
+    /** Every open pull request in {@code root}, drafts included (see {@link PullRequestListing}). */
+    public CompletableFuture<PullRequestListing> openPullRequests(Path root) {
+        return CompletableFuture.supplyAsync(() -> openPullRequestsBlocking(root), executor);
+    }
+
+    PullRequestListing openPullRequestsBlocking(Path root) {
+        Path gh = locate().orElse(null);
+        if (gh == null) {
+            return new PullRequestListing.Unsupported();
+        }
+        ProcessResult result = runIn(root, List.of(gh.toString(), "pr", "list",
+                "--state", "open",
+                "--limit", String.valueOf(PR_BASE_LIMIT),
+                "--json", "number,title,headRefName,baseRefName,isDraft,author,url"));
+        if (result == null) {
+            return new PullRequestListing.Failed("gh did not run to completion");
+        }
+        if (result.exitCode() != 0) {
+            String excerpt = ProcessRunner.excerpt(result.stderr());
+            LOG.log(Level.WARNING, "gh pr list in " + root + " exited " + result.exitCode()
+                    + (excerpt.isBlank() ? "" : ": " + excerpt));
+            return new PullRequestListing.Failed(excerpt.isBlank()
+                    ? "gh pr list exited " + result.exitCode() : excerpt);
+        }
+        return parsePullRequestListing(result.stdout());
+    }
+
+    /** The pure half: {@code gh pr list --json} output to a listing. */
+    static PullRequestListing parsePullRequestListing(String stdout) {
+        try {
+            if (!(JsonParser.parse(stdout) instanceof JsonArray array)) {
+                return new PullRequestListing.Failed("gh pr list did not return a JSON array");
+            }
+            List<OpenPullRequest> pullRequests = new ArrayList<>();
+            for (JsonValue element : array.elements()) {
+                if (element instanceof JsonObject obj
+                        && obj.get("number") instanceof JsonNumber number
+                        && obj.get("title") instanceof JsonString title
+                        && obj.get("headRefName") instanceof JsonString head
+                        && obj.get("baseRefName") instanceof JsonString base
+                        && !head.value().isBlank() && !base.value().isBlank()) {
+                    boolean draft = obj.get("isDraft") instanceof JsonBoolean d && d.value();
+                    Optional<String> author = obj.get("author") instanceof JsonObject a
+                            && a.get("login") instanceof JsonString login
+                            ? Optional.of(login.value()) : Optional.empty();
+                    Optional<String> url = obj.get("url") instanceof JsonString u
+                            ? Optional.of(u.value()) : Optional.empty();
+                    pullRequests.add(new OpenPullRequest(number.asInt(), title.value(),
+                            head.value(), base.value(), draft, author, url));
+                }
+            }
+            return new PullRequestListing.Listed(pullRequests);
+        } catch (JsonParseException | NumberFormatException e) {
+            LOG.log(Level.DEBUG, "Unparseable gh pr list output", e);
+            return new PullRequestListing.Failed("gh pr list returned output that could not be parsed");
         }
     }
 
