@@ -1320,14 +1320,11 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     }
 
     /**
-     * The open pull request {@code branch} carries, if any -- matched on the
-     * PR's own head branch, or on the {@code pr-<n>} name a drydock checkout
-     * gives it.
-     *
-     * <p>Drafts are NOT filtered out here. A draft still decides the local
-     * scope's {@code PullRequestRef}, and therefore its identity; {@link
-     * SessionReviewScopes} is where the draft gate lives, and it gates the
-     * second chip only. See that class's note.</p>
+     * The open pull request {@code branch} carries, if any. The matching rule
+     * -- and, critically, the fact that a DRAFT must be returned rather than
+     * filtered out, because it decides the local scope's identity -- lives in
+     * {@link SessionReviewScopes#pullRequestCarriedBy}, which is pure and
+     * pinned by tests. Nothing here may narrow its answer.
      *
      * <p>Asked of {@code gh} rather than read from {@link
      * WorkspaceViewModel#pullRequests}: that cache holds the PULL REQUESTS
@@ -1338,20 +1335,20 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      *
      * <p>Every failure degrades to "no pull request", leaving the local scope
      * standing: gh missing, unauthenticated, no GitHub remote and genuinely no
-     * PR are not reasons to show this session's review nothing at all.</p>
+     * PR are not reasons to show this session's review nothing at all. On a
+     * {@code pr-<n>} checkout that degrade also costs the local scope its ref,
+     * so it must stay as brief as a failure actually is -- see {@link
+     * #openPullRequests}, which never memoizes one.</p>
      */
     private CompletableFuture<Optional<GhCliService.OpenPullRequest>> openPullRequestOn(
             Path repositoryRoot, Optional<String> branch) {
         if (branch.isEmpty()) {
+            // Short-circuit only: pullRequestCarriedBy answers the same for an
+            // absent branch. Skipped here so a detached checkout costs no gh.
             return CompletableFuture.completedFuture(Optional.empty());
         }
-        String head = branch.get();
-        Optional<Integer> alias = PrCheckoutService.pullRequestNumberOf(head);
         return openPullRequests(repositoryRoot)
-                .thenApply(open -> open.stream()
-                        .filter(pullRequest -> pullRequest.headRefName().equals(head)
-                                || alias.filter(number -> number == pullRequest.number()).isPresent())
-                        .findFirst());
+                .thenApply(open -> SessionReviewScopes.pullRequestCarriedBy(open, branch));
     }
 
     /**
@@ -1359,32 +1356,44 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * #PULL_REQUEST_MEMO_NANOS}. A listing that did not actually come back
      * from {@code gh} is evicted rather than remembered, so a gh that was
      * missing, unauthenticated or timing out is retried on the next gesture
-     * instead of reading as "no pull requests" for the next half minute.
+     * instead of reading as "no pull requests" for the next half minute --
+     * which on a {@code pr-<n>} checkout would drop the local scope's ref and
+     * mint the wrong identity for as long as the memo stood.
+     *
+     * <p>The entry is installed BEFORE the gh call's completion handler is
+     * attached, which is why this owns its own future rather than memoizing a
+     * derived one. Handed the gh future's own {@code handle}, the {@code
+     * Unsupported} case -- {@code locate()} is cached, so the executor task is
+     * near-instant -- can complete before the {@code put}, leaving the
+     * eviction to run against an absent key and the failed listing stored for
+     * the full window.</p>
+     *
+     * <p>Eviction is value-aware ({@code remove(key, value)}): a slow failing
+     * listing must not evict a newer entry somebody else already installed.</p>
      */
     private CompletableFuture<List<GhCliService.OpenPullRequest>> openPullRequests(Path repositoryRoot) {
         PullRequestMemo memo = pullRequestMemos.get(repositoryRoot);
         if (memo != null && memo.isFresh()) {
             return memo.listing();
         }
-        CompletableFuture<List<GhCliService.OpenPullRequest>> listing =
-                ghCliService.openPullRequests(repositoryRoot).handle((result, failure) -> {
-                    if (failure != null) {
-                        LOG.log(Level.WARNING, "Could not list pull requests in " + repositoryRoot, failure);
-                        pullRequestMemos.remove(repositoryRoot);
-                        return List.<GhCliService.OpenPullRequest>of();
-                    }
-                    if (result instanceof GhCliService.PullRequestListing.Listed listed) {
-                        return listed.pullRequests();
-                    }
-                    if (result instanceof GhCliService.PullRequestListing.Failed failed) {
-                        LOG.log(Level.WARNING, "gh could not list pull requests in " + repositoryRoot
-                                + ": " + failed.message());
-                    }
-                    pullRequestMemos.remove(repositoryRoot);
-                    return List.<GhCliService.OpenPullRequest>of();
-                });
-        pullRequestMemos.put(repositoryRoot,
-                new PullRequestMemo(System.nanoTime() + PULL_REQUEST_MEMO_NANOS, listing));
+        CompletableFuture<List<GhCliService.OpenPullRequest>> listing = new CompletableFuture<>();
+        PullRequestMemo installed =
+                new PullRequestMemo(System.nanoTime() + PULL_REQUEST_MEMO_NANOS, listing);
+        pullRequestMemos.put(repositoryRoot, installed);
+        ghCliService.openPullRequests(repositoryRoot).whenComplete((result, failure) -> {
+            if (failure != null) {
+                LOG.log(Level.WARNING, "Could not list pull requests in " + repositoryRoot, failure);
+            } else if (result instanceof GhCliService.PullRequestListing.Listed listed) {
+                // The only outcome worth remembering: gh actually answered.
+                listing.complete(listed.pullRequests());
+                return;
+            } else if (result instanceof GhCliService.PullRequestListing.Failed failed) {
+                LOG.log(Level.WARNING, "gh could not list pull requests in " + repositoryRoot
+                        + ": " + failed.message());
+            }
+            pullRequestMemos.remove(repositoryRoot, installed);
+            listing.complete(List.of());
+        });
         return listing;
     }
 

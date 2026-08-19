@@ -7,6 +7,7 @@ import app.drydock.git.PrCheckoutService;
 import app.drydock.git.ReviewBase;
 
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -65,6 +66,39 @@ public final class SessionReviewScopes {
             }
             return LOCAL;
         }
+    }
+
+    /**
+     * The open pull request a checkout on {@code branch} carries, if any --
+     * matched on the PR's own head branch, or on the {@code pr-<n>} name
+     * {@link PrCheckoutService} checks a PR out under.
+     *
+     * <p><strong>Drafts are returned, not dropped</strong>, and that is the
+     * whole reason this is a named, tested function rather than three lines
+     * inside its caller. Filtering drafts out on the way in is silently
+     * destructive: the result feeds {@link #forCheckout}'s {@code
+     * PullRequestRef}, which is part of the local scope's identity, so
+     * dropping a draft mints {@code (WORKTREE, repo, worktree, ∅)} for a
+     * {@code pr-<n>} checkout that {@code ReviewQueueService} already minted
+     * as {@code (WORKTREE, repo, worktree, <n>)} -- and every finding,
+     * verdict and thread recorded from one surface becomes invisible from the
+     * other. Reachable, not theoretical: a review-requested PR can be a
+     * draft, and drydock checks those out as {@code pr-<n>}.</p>
+     *
+     * <p>The draft gate lives in {@link #forCheckout}, and withholds the
+     * second chip only.</p>
+     */
+    public static Optional<GhCliService.OpenPullRequest> pullRequestCarriedBy(
+            List<GhCliService.OpenPullRequest> openPullRequests, Optional<String> branch) {
+        if (branch.isEmpty()) {
+            return Optional.empty();
+        }
+        String head = branch.get();
+        Optional<Integer> alias = PrCheckoutService.pullRequestNumberOf(head);
+        return openPullRequests.stream()
+                .filter(pullRequest -> pullRequest.headRefName().equals(head)
+                        || alias.filter(number -> number == pullRequest.number()).isPresent())
+                .findFirst();
     }
 
     private static final String NO_BRANCH = "(no branch)";

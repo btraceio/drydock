@@ -54,6 +54,64 @@ class SessionReviewScopesTest {
                 Optional.empty(), Optional.empty());
     }
 
+    // ---- which PR a checkout carries (pure; no git, no gh) ------------------
+
+    /**
+     * The regression the Critical was actually about, pinned at the seam it
+     * lived in.
+     *
+     * <p>The earlier fix moved the draft gate into {@code forCheckout}, and a
+     * test there proves the callee is right. It does NOT stop a caller from
+     * re-adding {@code .filter(pr -> !pr.draft())} on the way in and
+     * recreating the whole data-corruption bug with every other test green --
+     * which is exactly what the original defect was. This pins the caller's
+     * side of it: the answer to "which open PR does this branch carry" must
+     * include drafts, because that answer becomes the local scope's identity.</p>
+     */
+    @Test
+    void theCheckoutCarriesItsPullRequestEvenWhenItIsADraft() {
+        List<GhCliService.OpenPullRequest> listing = List.of(draftPullRequest(42, "someones-branch"));
+
+        assertEquals(42, SessionReviewScopes
+                        .pullRequestCarriedBy(listing, Optional.of("pr-42")).orElseThrow().number(),
+                "a draft is still the PR this pr-42 worktree holds; dropping it mints "
+                        + "(WORKTREE, repo, worktree, no-PR) and orphans every finding on it");
+    }
+
+    /** The two ways a checkout is recognised as holding a PR, and the one way it is not. */
+    @Test
+    void aCheckoutCarriesThePullRequestOnItsHeadBranchOrItsPrAlias() {
+        List<GhCliService.OpenPullRequest> listing = List.of(pullRequest(42, "someones-branch"));
+
+        assertEquals(42, SessionReviewScopes
+                        .pullRequestCarriedBy(listing, Optional.of("pr-42")).orElseThrow().number(),
+                "the pr-<n> alias PrCheckoutService checks a PR out under");
+        assertEquals(42, SessionReviewScopes
+                        .pullRequestCarriedBy(listing, Optional.of("someones-branch")).orElseThrow().number(),
+                "the PR's own head branch, for a checkout made outside drydock");
+        assertTrue(SessionReviewScopes
+                        .pullRequestCarriedBy(listing, Optional.of("feat/unrelated")).isEmpty(),
+                "an unrelated branch carries nothing");
+        assertTrue(SessionReviewScopes.pullRequestCarriedBy(listing, Optional.empty()).isEmpty(),
+                "a detached checkout has no branch to match on");
+        assertTrue(SessionReviewScopes.pullRequestCarriedBy(List.of(), Optional.of("pr-42")).isEmpty(),
+                "an empty listing (gh missing, unauthenticated, failed) carries nothing");
+    }
+
+    /**
+     * The alias wins on its number, not on a coincidence of names: {@code
+     * pr-42} must not match PR #7 merely because #7 happens to be listed
+     * first.
+     */
+    @Test
+    void thePrAliasMatchesTheNumberItNames() {
+        List<GhCliService.OpenPullRequest> listing = List.of(
+                pullRequest(7, "other-branch"), pullRequest(42, "someones-branch"));
+
+        assertEquals(42, SessionReviewScopes
+                .pullRequestCarriedBy(listing, Optional.of("pr-42")).orElseThrow().number());
+    }
+
     @Test
     void aMainCheckoutMintsAWorkingTreeScopeAndNoPullRequest(@TempDir Path dir)
             throws ExecutionException, InterruptedException, IOException {
