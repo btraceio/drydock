@@ -22,6 +22,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Stream;
@@ -64,7 +65,7 @@ class JsonApplicationStateRepositoryTest {
         WorkspaceUiState ui = new WorkspaceUiState(
                 Optional.of(repo.id()), 321.0, Set.of(repo.id()), app.drydock.domain.UiTheme.LIGHT,
                 WorkspaceUiState.DEFAULT_UI_FONT_SIZE, WorkspaceUiState.DEFAULT_TERMINAL_FONT_SIZE,
-                List.of(), Optional.empty());
+                List.of(), Optional.empty(), Map.of());
         ApplicationState state = new ApplicationState(List.of(repo), List.of(), ui, List.of());
 
         JsonApplicationStateRepository repository = new JsonApplicationStateRepository(stateFile());

@@ -16,6 +16,7 @@ import app.drydock.domain.SessionWorkspace;
 import app.drydock.domain.SshRemote;
 import app.drydock.domain.UiTheme;
 import app.drydock.domain.WorkspaceUiState;
+import app.drydock.review.SessionReviewScopes;
 import app.drydock.state.json.JsonValue;
 import app.drydock.state.json.JsonValue.JsonArray;
 import app.drydock.state.json.JsonValue.JsonBoolean;
@@ -27,8 +28,10 @@ import java.nio.file.Path;
 import java.time.DateTimeException;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
@@ -95,7 +98,8 @@ import java.util.Set;
  *     "uiFontSize": 13.0,
  *     "terminalFontSize": 13.0,
  *     "openSessionIds": ["<uuid>", ...],
- *     "selectedSessionId": "<uuid>" | null
+ *     "selectedSessionId": "<uuid>" | null,
+ *     "reviewScopeChoices": {"<uuid>": "LOCAL" | "PULL_REQUEST", ...}
  *   }
  * }
  * }</pre>
@@ -156,6 +160,14 @@ import java.util.Set;
  * (session tab restoration) were likewise added leniently within version 2:
  * absent or malformed values decode to an empty list and no selection, so
  * no version bump was needed and older builds simply reopen with no tabs.
+ * The {@code reviewScopeChoices} member (per-session Review sub-tab scope,
+ * see {@code SessionReviewScopes.Choice}) was likewise added leniently
+ * within version 2: an entry whose key is not a parseable {@code
+ * ManagedSessionId} names no session and is dropped, while an entry whose
+ * value is unrecognized still names a real session and decodes through
+ * {@code Choice.fromPersisted} (which maps it to {@code LOCAL}) rather than
+ * being dropped. An absent member decodes to an empty map, so no version
+ * bump was needed and older builds simply ignore it.
  * No version bump was needed and downgrades stay non-destructive.</p>
  */
 public final class ApplicationStateCodec {
@@ -291,6 +303,12 @@ public final class ApplicationStateCodec {
                 .<JsonValue>map(id -> new JsonString(id.value().toString()))
                 .orElse(JsonValue.JsonNull.INSTANCE);
         obj.put("selectedSessionId", selectedSession);
+
+        JsonObject reviewScopeChoices = JsonObject.empty();
+        for (Map.Entry<ManagedSessionId, SessionReviewScopes.Choice> entry : ui.reviewScopeChoices().entrySet()) {
+            reviewScopeChoices.put(entry.getKey().value().toString(), new JsonString(entry.getValue().name()));
+        }
+        obj.put("reviewScopeChoices", reviewScopeChoices);
         return obj;
     }
 
@@ -570,8 +588,25 @@ public final class ApplicationStateCodec {
             selectedSessionId = parseSessionId(s.value());
         }
 
+        // Cosmetic, like openSessionIds above. An entry whose KEY is not a
+        // parseable ManagedSessionId names nothing and is dropped entirely;
+        // an entry whose VALUE is unrecognized still names a real session,
+        // so it is kept and decoded through Choice.fromPersisted (which
+        // maps it to LOCAL) rather than being dropped.
+        Map<ManagedSessionId, SessionReviewScopes.Choice> reviewScopeChoices = new LinkedHashMap<>();
+        if (obj.get("reviewScopeChoices") instanceof JsonObject choices) {
+            for (Map.Entry<String, JsonValue> entry : choices.members().entrySet()) {
+                Optional<ManagedSessionId> sessionId = parseSessionId(entry.getKey());
+                if (sessionId.isEmpty()) {
+                    continue;
+                }
+                String rawChoice = entry.getValue() instanceof JsonString cs ? cs.value() : null;
+                reviewScopeChoices.put(sessionId.get(), SessionReviewScopes.Choice.fromPersisted(rawChoice));
+            }
+        }
+
         return new WorkspaceUiState(selected, sidebarWidth, expanded, theme, uiFontSize, terminalFontSize,
-                openSessionIds, selectedSessionId);
+                openSessionIds, selectedSessionId, reviewScopeChoices);
     }
 
     private static int readSchemaVersion(JsonObject root) {
