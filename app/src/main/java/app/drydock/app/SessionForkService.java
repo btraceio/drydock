@@ -38,6 +38,7 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
+import java.util.function.BiFunction;
 import java.util.function.Function;
 
 /**
@@ -95,8 +96,8 @@ public final class SessionForkService {
          * joins, and a second join inside the launcher would be a second
          * timeout to reason about.</p>
          */
-        CompletableFuture<ManagedSessionId> start(Path worktree, AgentKind kind, String seedPrompt,
-                                                  ManagedSessionId forkedFrom);
+        CompletableFuture<ManagedSessionId> start(Path repositoryRoot, Path worktree, AgentKind kind,
+                                                  String seedPrompt, ManagedSessionId forkedFrom);
     }
 
     /**
@@ -115,7 +116,7 @@ public final class SessionForkService {
     private final Launcher launcher;
     private final Function<ManagedSessionId, Optional<HandoffBrief>> briefLookup;
     private final Function<ManagedAgentSession, Path> repositoryRootLookup;
-    private final Function<String, Path> worktreeDirectory;
+    private final BiFunction<ManagedAgentSession, String, Path> worktreeDirectory;
     private final Function<ManagedSessionId, List<String>> openIntentLookup;
     private final Path seedDirectory;
     private final Executor backgroundExecutor;
@@ -126,7 +127,7 @@ public final class SessionForkService {
                               Launcher launcher,
                               Function<ManagedSessionId, Optional<HandoffBrief>> briefLookup,
                               Function<ManagedAgentSession, Path> repositoryRootLookup,
-                              Function<String, Path> worktreeDirectory,
+                              BiFunction<ManagedAgentSession, String, Path> worktreeDirectory,
                               Function<ManagedSessionId, List<String>> openIntentLookup,
                               Path seedDirectory,
                               Executor backgroundExecutor) {
@@ -164,14 +165,15 @@ public final class SessionForkService {
         // from the repository's current HEAD instead and the seed says so.
         Optional<String> head = gitStatusService.headCommitBlocking(sourceWorktree);
         Path created = join(gitStatusService.createWorktree(
-                repositoryRoot, worktreeDirectory.apply(branch), branch, head));
+                repositoryRoot, worktreeDirectory.apply(outgoing, branch), branch, head));
 
         try {
             initSubmodules(created);
             transplant.transplant(sourceWorktree, created);
             String seed = HandoffSeed.compose(briefLookup.apply(outgoing.id()),
                     factsFor(outgoing, sourceWorktree, branch, baseBranch, head));
-            return join(launcher.start(created, target, seedPointer(seed, branch), outgoing.id()));
+            return join(launcher.start(repositoryRoot, created, target, seedPointer(seed, branch),
+                    outgoing.id()));
         } catch (RuntimeException e) {
             rollback(repositoryRoot, created, branch);
             throw e;

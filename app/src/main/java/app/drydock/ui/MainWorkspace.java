@@ -2463,8 +2463,8 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                             .map(Repository::root)
                             .findFirst()
                             .orElseGet(() -> session.worktreeRoot().orElse(session.workingDirectory())),
-                    branch -> WorktreeNaming.defaultDirectory(Path.of(System.getProperty("user.home")),
-                            UserConfig.load().worktreesDirectory(), forkedWorktreeOwner(), branch),
+                    (session, branch) -> WorktreeNaming.defaultDirectory(Path.of(System.getProperty("user.home")),
+                            UserConfig.load().worktreesDirectory(), forkedWorktreeOwner(session), branch),
                     this::openIntentTitles,
                     stateDirectory.resolve("handoff-seeds"),
                     HANDOFF_EXECUTOR);
@@ -2474,10 +2474,11 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     }
 
     /** Repository folder name used for the fork's worktree directory. */
-    private String forkedWorktreeOwner() {
+    private String forkedWorktreeOwner(ManagedAgentSession outgoing) {
         return repositoryManager.repositories().stream()
-                .findFirst()
+                .filter(repository -> repository.id().equals(outgoing.repositoryId()))
                 .map(Repository::displayName)
+                .findFirst()
                 .orElse("drydock");
     }
 
@@ -2524,15 +2525,14 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     }
 
     /** Opens the forked session's tab. Hops to FX; the fork service waits on the future. */
-    private CompletableFuture<ManagedSessionId> launchForkedSession(Path worktree, AgentKind kind,
-                                                                    String seedPrompt,
+    private CompletableFuture<ManagedSessionId> launchForkedSession(Path repositoryRoot, Path worktree,
+                                                                    AgentKind kind, String seedPrompt,
                                                                     ManagedSessionId forkedFrom) {
         CompletableFuture<ManagedSessionId> opened = new CompletableFuture<>();
         Platform.runLater(() -> {
             try {
                 Optional<Repository> owner = repositoryManager.repositories().stream()
-                        .filter(repository -> worktree.startsWith(repository.root())
-                                || worktree.getFileName() != null)
+                        .filter(repository -> repository.root().equals(repositoryRoot))
                         .findFirst();
                 if (owner.isEmpty()) {
                     opened.completeExceptionally(new IllegalStateException(

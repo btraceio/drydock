@@ -64,11 +64,13 @@ class SessionForkServiceTest {
         AgentKind lastKind;
         ManagedSessionId lastParent;
         Path lastWorktree;
+        Path lastRepositoryRoot;
 
         @Override
-        public CompletableFuture<ManagedSessionId> start(Path worktree, AgentKind kind, String seedPrompt,
-                                                         ManagedSessionId forkedFrom) {
+        public CompletableFuture<ManagedSessionId> start(Path repositoryRoot, Path worktree, AgentKind kind,
+                                                         String seedPrompt, ManagedSessionId forkedFrom) {
             startCount++;
+            lastRepositoryRoot = repositoryRoot;
             lastWorktree = worktree;
             lastKind = kind;
             lastPrompt = seedPrompt;
@@ -115,7 +117,7 @@ class SessionForkServiceTest {
                 launcher,
                 id -> Optional.ofNullable(briefs.get(id)),
                 ignored -> repositoryRoot,
-                branch -> worktreeParent.resolve(branch.replace('/', '-')),
+                (ignored, branch) -> worktreeParent.resolve(branch.replace('/', '-')),
                 id -> List.of("Rework the rail"),
                 seedDirectory,
                 ForkJoinPool.commonPool());
@@ -283,6 +285,13 @@ class SessionForkServiceTest {
 
         assertTrue(seedFileContents().contains("Rework the rail"), seedFileContents());
         assertTrue(seedFileContents().contains("Open review intents"), seedFileContents());
+    }
+
+    @Test
+    void passesTheRepositoryRootToTheLauncherSoItCanIdentifyTheOwner() {
+        service.forkBlocking(outgoing, AgentKind.CODEX);
+
+        assertEquals(repositoryRoot, launcher.lastRepositoryRoot);
     }
 
     @Test
