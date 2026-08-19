@@ -19,7 +19,9 @@ import java.util.List;
 import java.util.Optional;
 
 /**
- * A {@link ReviewDestinationView.Host} backed by a real {@link AnnotationStore}
+ * A {@link ReviewDestinationView.Host} -- and, since the session board's
+ * {@link SessionReviewView.Host} is the same interface minus the queue's
+ * hand-offs, one of those too -- backed by a real {@link AnnotationStore}
  * and {@link IntentGrouping}, so the view tests exercise the same store the
  * app does rather than a bag of stubs -- the (scopeId, id) keying is the
  * thing under test, and a stub would key however the test felt like.
@@ -28,7 +30,7 @@ import java.util.Optional;
  * terminal) are recorded rather than performed; those have no counterpart in
  * a test JVM.</p>
  */
-final class FakeReviewHost implements ReviewDestinationView.Host {
+final class FakeReviewHost implements ReviewDestinationView.Host, SessionReviewView.Host {
 
     final AnnotationStore store;
     final IntentGrouping intents = new IntentGrouping();
