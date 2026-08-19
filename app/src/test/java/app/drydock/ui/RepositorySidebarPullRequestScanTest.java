@@ -64,12 +64,22 @@ class RepositorySidebarPullRequestScanTest {
     }
 
     @Test
-    void aRequestWhileAScanIsInFlightIsQueuedRatherThanDropped() {
-        assertTrue(RepositorySidebar.shouldQueuePullRequestRescan(true));
+    void aRequestIsQueuedWhenTheListMovedUnderTheInFlightScan() {
+        List<Worktree> captured = List.of(worktree("/wt/a"));
+        List<Worktree> current = List.of(worktree("/wt/a"), worktree("/wt/b"));
+        assertTrue(RepositorySidebar.shouldQueuePullRequestRescan(captured, current));
     }
 
     @Test
-    void aRequestWithNothingInFlightNeedsNoQueueing() {
-        assertFalse(RepositorySidebar.shouldQueuePullRequestRescan(false));
+    void aDuplicateRequestAgainstTheUnchangedListIsNotQueued() {
+        List<Worktree> same = List.of(worktree("/wt/a"));
+        assertFalse(RepositorySidebar.shouldQueuePullRequestRescan(same, List.of(worktree("/wt/a"))));
+    }
+
+    @Test
+    void aRequestWithNothingCapturedYetIsQueued() {
+        // No scan should ever be in flight with a null captured list, but a
+        // request arriving in that window is not silently swallowed.
+        assertTrue(RepositorySidebar.shouldQueuePullRequestRescan(null, List.of(worktree("/wt/a"))));
     }
 }

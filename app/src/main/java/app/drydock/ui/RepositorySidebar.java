@@ -75,6 +75,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -193,6 +194,10 @@ public final class RepositorySidebar extends VBox {
     private final Set<RepositoryId> scanningPullRequests = ConcurrentHashMap.newKeySet();
     /** Repos with a PR-scan request that arrived mid-scan; re-run once the in-flight one lands (see refreshPullRequests). */
     private final Set<RepositoryId> pendingPullRequestRescan = ConcurrentHashMap.newKeySet();
+    /** The worktree list the in-flight PR scan for a repo started with (see refreshPullRequests / shouldQueuePullRequestRescan). */
+    private final Map<RepositoryId, List<WorktreeService.Worktree>> pullRequestScanWorktrees = new ConcurrentHashMap<>();
+    /** Repos whose worktree list changed while collapsed, so their PR outcome is known stale; rescanned on next expand. */
+    private final Set<RepositoryId> pullRequestsStale = ConcurrentHashMap.newKeySet();
     /** Worktree paths discovered by the latest rescan, highlighted one-shot until the timer clears them. */
     private final Set<Path> recentlyDiscovered = new HashSet<>();
     /** Transient per-repo meta note ("Already up to date — no new worktrees") shown briefly after a rescan. */
@@ -667,7 +672,14 @@ public final class RepositorySidebar extends VBox {
      * changes, so a worktree appearing/disappearing later keeps the group
      * correct too). {@code pullRequestsScanned} then keeps a repo that
      * already has an outcome -- of any kind, {@code Absent} included --
-     * from being rescanned on every rebuild.
+     * from being rescanned on every rebuild. NOT the whole story where
+     * staleness is concerned, though: a repo can hold a correct-when-taken
+     * outcome that a LATER worktree change invalidated while the repo was
+     * collapsed (deliberately not auto-rescanned then -- see {@code
+     * refreshWorktrees}'s completion); every caller of this method also
+     * consults {@link #pullRequestsStale} alongside it, since {@code
+     * pullRequestsScanned} alone cannot tell "scanned" from "scanned, but
+     * no longer accurate" apart.
      *
      * <p>Consequence worth naming: a repository whose worktree discovery
      * fails and keeps failing never satisfies {@code worktreesDiscovered}
@@ -697,17 +709,23 @@ public final class RepositorySidebar extends VBox {
 
     /**
      * Whether a PR-scan request arriving while one is already in flight
-     * should be remembered and re-run once that scan lands, rather than
-     * silently dropped (the old behaviour). True whenever a scan is
-     * already in flight: it captured whatever worktree list existed when
-     * IT started, and a request arriving while it runs -- e.g. the ⟳
-     * click, which fires this at the same moment it starts a worktree
-     * rescan whose OWN completion calls back in here once the list is
-     * known to have changed -- means that captured list may already be
-     * stale by the time the in-flight scan's result lands.
+     * should be remembered and re-run once that scan lands (true), or
+     * dropped as a genuine duplicate of the one already running (false).
+     * Compares the worktree list the in-flight scan captured against the
+     * current one, NOT just "is something in flight": a scan already
+     * captures whatever list existed when it started, so if that list has
+     * not moved since, the in-flight scan's result will already be
+     * correct once it lands, and queuing a second run would just repeat
+     * the identical {@code gh pr list} call the first one is already
+     * making. It IS queued when the list has moved -- the ⟳ race this
+     * exists for: the worktree rescan that same click starts lands its own
+     * re-run request here (via {@code refreshWorktrees}'s completion)
+     * while the PR scan the SAME click fired moments earlier is still in
+     * flight, captured against the pre-rescan list.
      */
-    static boolean shouldQueuePullRequestRescan(boolean scanInFlight) {
-        return scanInFlight;
+    static boolean shouldQueuePullRequestRescan(List<WorktreeService.Worktree> capturedWorktrees,
+                                                List<WorktreeService.Worktree> currentWorktrees) {
+        return !Objects.equals(capturedWorktrees, currentWorktrees);
     }
 
     /**
@@ -936,14 +954,10 @@ public final class RepositorySidebar extends VBox {
                     matchCount++;
                 }
             }
-            // Same condition the top-level children filter above uses: a
-            // group survives by content match, not because the repo itself
-            // matched, only narrows its own PR rows in the former case.
-            String narrowQuery = !query.isEmpty() && !repoMatchedByName ? query : "";
             TreeItem<SidebarNode> repoItem = new TreeItem<>(new SidebarNode.RepoNode(repository));
             for (SidebarNode child : children) {
                 repoItem.getChildren().add(
-                        pullRequestGroupItem(child, repository, narrowQuery).orElseGet(() -> new TreeItem<>(child)));
+                        pullRequestGroupItem(child, repository).orElseGet(() -> new TreeItem<>(child)));
             }
             repoItem.setExpanded(!collapsed.contains(repository.id()));
             repoItem.expandedProperty().addListener((obs, was, is) -> {
@@ -952,14 +966,12 @@ public final class RepositorySidebar extends VBox {
                     // A repo row expanding is one of refreshPullRequests's
                     // four triggers (see its javadoc) -- and the one that
                     // actually fires the FIRST scan for a repo that starts
-                    // collapsed: refreshWorktrees's completion deliberately
-                    // does not scan a collapsed repo (see the comment
-                    // there), so its PR outcome stays unset until this
-                    // fires on expand. A repo already scanned (any outcome,
-                    // including Absent) is left alone; needsPullRequestScan
-                    // also waits on worktree discovery having landed.
-                    if (needsPullRequestScan(viewModel.worktrees(repository.id()).isPresent(),
-                            viewModel.pullRequests(repository.id()).isPresent())) {
+                    // collapsed, or recovers one whose outcome went stale
+                    // while collapsed: refreshWorktrees's completion
+                    // deliberately does not scan a collapsed repo (see the
+                    // comment there), marking it stale instead, and
+                    // pullRequestScanDue is what notices that mark here.
+                    if (pullRequestScanDue(repository)) {
                         refreshPullRequests(repository);
                     }
                 } else {
@@ -970,8 +982,7 @@ public final class RepositorySidebar extends VBox {
                 // the row's own mouse handler.
                 updateRepoRow(repository.id());
             });
-            if (repoItem.isExpanded() && needsPullRequestScan(viewModel.worktrees(repository.id()).isPresent(),
-                    viewModel.pullRequests(repository.id()).isPresent())) {
+            if (repoItem.isExpanded() && pullRequestScanDue(repository)) {
                 refreshPullRequests(repository);
             }
             repoItems.add(repoItem);
@@ -1001,32 +1012,30 @@ public final class RepositorySidebar extends VBox {
      * survives rebuilds in {@link #pullRequestsExpanded}, the same way a
      * repository row's does in {@link #collapsed}. Empty for every other
      * {@code SidebarNode}, so the caller falls back to a plain leaf item.
-     *
-     * <p>{@code narrowQuery} -- empty when the group survived by matching
-     * the repo's own name/branch rather than its content, same as the
-     * top-level filter in {@code rebuildTree} -- narrows which PRs get a
-     * child row, so a group kept by one matching PR does not also show
-     * every PR that failed the query.</p>
      */
-    private Optional<TreeItem<SidebarNode>> pullRequestGroupItem(SidebarNode child, Repository repository,
-                                                                  String narrowQuery) {
+    /**
+     * Whether {@code repository} is due for a PR scan right now, at either
+     * of the two places {@code rebuildTree} asks: on repository add (a
+     * newly built, expanded {@code TreeItem}) and on repo-row expand. True
+     * for either half of {@link #needsPullRequestScan}'s reason (discovery
+     * has landed, nothing scanned yet) OR {@link #pullRequestsStale} (an
+     * outcome exists, but a worktree change invalidated it while the repo
+     * was collapsed) -- {@code needsPullRequestScan} alone cannot tell
+     * "scanned" from "scanned, but no longer accurate" apart.
+     */
+    private boolean pullRequestScanDue(Repository repository) {
+        return needsPullRequestScan(viewModel.worktrees(repository.id()).isPresent(),
+                viewModel.pullRequests(repository.id()).isPresent())
+                || pullRequestsStale.contains(repository.id());
+    }
+
+    private Optional<TreeItem<SidebarNode>> pullRequestGroupItem(SidebarNode child, Repository repository) {
         if (!(child instanceof SidebarNode.PullRequestGroupNode groupNode)) {
             return Optional.empty();
         }
         TreeItem<SidebarNode> groupItem = new TreeItem<>(groupNode);
-        if (groupNode.outcome() instanceof RepositoryPullRequests.Outcome.Rows rows) {
-            for (GhCliService.OpenPullRequest pullRequest : rows.pullRequests()) {
-                SidebarNode prNode = new SidebarNode.PullRequestNode(pullRequest, repository);
-                // Routed through matchesNode's own PullRequestNode case
-                // (rather than calling matchesPullRequest directly) so that
-                // case is the one place this decision is made, not a second
-                // copy of it.
-                if (!narrowQuery.isEmpty() && !matchesNode(prNode, narrowQuery)) {
-                    continue;
-                }
-                groupItem.getChildren().add(new TreeItem<>(prNode));
-            }
-        }
+        groupItem.getChildren().setAll(
+                pullRequestChildItems(groupNode.outcome(), repository, pullRequestNarrowQuery(repository)));
         groupItem.setExpanded(pullRequestsExpanded.contains(repository.id()));
         groupItem.expandedProperty().addListener((obs, was, is) -> {
             if (is) {
@@ -1044,6 +1053,53 @@ public final class RepositorySidebar extends VBox {
     }
 
     /**
+     * The query {@link #pullRequestGroupItem} and {@link
+     * #updatePullRequestGroupRow} narrow a group's PR rows by -- empty
+     * unless a text filter is active AND the repo did not already match by
+     * its own name/branch, mirroring {@code rebuildTree}'s own top-level
+     * children filter exactly (a repo matched by name shows everything
+     * under it, unnarrowed).
+     */
+    private String pullRequestNarrowQuery(Repository repository) {
+        String query = currentQuery();
+        if (query.isEmpty() || matchesRepo(repository, query)) {
+            return "";
+        }
+        return query;
+    }
+
+    /**
+     * The {@code PullRequestNode} child items a group's TreeItem should
+     * hold for {@code outcome}, narrowed to those matching {@code
+     * narrowQuery} (empty means unnarrowed -- every PR in a landed {@code
+     * Rows}, none for {@code Unavailable}). Shared by {@link
+     * #pullRequestGroupItem} (a fresh TreeItem) and {@link
+     * #updatePullRequestGroupRow} (an in-place repaint of an existing one)
+     * so both ALWAYS agree on which children a group holds -- the in-place
+     * repaint used to only swap the node's value and leave stale children
+     * in place, which could show a wrong "n of m" for one frame with no
+     * filter active at all.
+     */
+    private List<TreeItem<SidebarNode>> pullRequestChildItems(RepositoryPullRequests.Outcome outcome,
+                                                               Repository repository, String narrowQuery) {
+        List<TreeItem<SidebarNode>> items = new ArrayList<>();
+        if (!(outcome instanceof RepositoryPullRequests.Outcome.Rows rows)) {
+            return items;
+        }
+        for (GhCliService.OpenPullRequest pullRequest : rows.pullRequests()) {
+            SidebarNode prNode = new SidebarNode.PullRequestNode(pullRequest, repository);
+            // Routed through matchesNode's own PullRequestNode case
+            // (rather than a private duplicate of the same check) so that
+            // case is the one place this decision is made.
+            if (!narrowQuery.isEmpty() && !matchesNode(prNode, narrowQuery)) {
+                continue;
+            }
+            items.add(new TreeItem<>(prNode));
+        }
+        return items;
+    }
+
+    /**
      * Force-repaints {@code repositoryId}'s PULL REQUESTS group row in
      * place, without depending on a model change to get there. {@link
      * WorkspaceViewModel#setPullRequests} only notifies (and so only
@@ -1054,6 +1110,13 @@ public final class RepositorySidebar extends VBox {
      * Label} (see {@code buildPullRequestGroupRow}) would be stranded
      * forever, and the group's expand caret (this method's other caller,
      * {@link #pullRequestGroupItem}) would never repaint after a toggle.
+     *
+     * <p>Rebuilds the group's CHILDREN (via {@link #pullRequestChildItems},
+     * the same helper a fresh {@link #pullRequestGroupItem} uses) before
+     * touching its value: the row's label counts the live child list, not
+     * just the outcome, so replacing only the value here -- leaving
+     * whatever children happened to be attached before -- could show a
+     * stale "n of m" even with no filter active.</p>
      *
      * <p>A freshly constructed {@code PullRequestGroupNode} always repaints
      * its cell here regardless: {@code TreeItem}'s value property
@@ -1072,7 +1135,14 @@ public final class RepositorySidebar extends VBox {
             }
             for (TreeItem<SidebarNode> child : repoItem.getChildren()) {
                 if (child.getValue() instanceof SidebarNode.PullRequestGroupNode groupNode) {
-                    pullRequestGroupNodeFor(groupNode.repository()).ifPresent(child::setValue);
+                    Repository repository = groupNode.repository();
+                    pullRequestGroupNodeFor(repository).ifPresent(fresh -> {
+                        if (fresh instanceof SidebarNode.PullRequestGroupNode freshGroup) {
+                            child.getChildren().setAll(pullRequestChildItems(
+                                    freshGroup.outcome(), repository, pullRequestNarrowQuery(repository)));
+                        }
+                        child.setValue(fresh);
+                    });
                     return;
                 }
             }
@@ -1244,6 +1314,14 @@ public final class RepositorySidebar extends VBox {
         staleBucketExpanded.retainAll(repoIds);
         lockedBucketExpanded.retainAll(repoIds);
         pullRequestsExpanded.retainAll(repoIds);
+        // Without this, a repository removed while a PR-scan request was
+        // queued for it (pendingPullRequestRescan) spawns one more gh
+        // process on the in-flight scan's completion, for a repo that no
+        // longer exists; pullRequestsStale and pullRequestScanWorktrees
+        // have the identical leak shape.
+        pendingPullRequestRescan.retainAll(repoIds);
+        pullRequestsStale.retainAll(repoIds);
+        pullRequestScanWorktrees.keySet().retainAll(repoIds);
     }
 
     /** Supplies a worktree checkout's open-finding count for its {@code ◨n} badge. */
@@ -1581,15 +1659,21 @@ public final class RepositorySidebar extends VBox {
                     // the very first landing corrects any earlier scan that
                     // had to run before discovery had anything to dedup
                     // against (worktreeListChanged's `previous == null`
-                    // case). Gated on the repo being expanded: a collapsed
-                    // repo's worktree discovery still runs as it always
-                    // has, but must not cascade into a `gh pr list` spawn
-                    // for a row nobody is looking at -- that repo's PR
-                    // outcome stays unset until it is actually expanded,
-                    // at which point rebuildTree's own needsPullRequestScan
-                    // check (still live, not dead code) picks it up.
-                    if (worktreeListChanged(previous, worktrees) && !collapsed.contains(repository.id())) {
-                        refreshPullRequests(repository);
+                    // case). A collapsed repo's worktree discovery still
+                    // runs as it always has, but must not cascade into a
+                    // `gh pr list` spawn for a row nobody is looking at --
+                    // marked stale instead of rescanned, so ANY outcome it
+                    // already holds is known to need a fresh scan without
+                    // actually running one, and pullRequestScanDue (via
+                    // pullRequestsStale) picks it up the moment the repo is
+                    // next expanded. A repo NOT collapsed rescans right
+                    // away, same as before.
+                    if (worktreeListChanged(previous, worktrees)) {
+                        if (collapsed.contains(repository.id())) {
+                            pullRequestsStale.add(repository.id());
+                        } else {
+                            refreshPullRequests(repository);
+                        }
                     }
                     // An unchanged list emits no model event; the rescan
                     // note / spinner stop still need the header re-rendered.
@@ -1609,22 +1693,29 @@ public final class RepositorySidebar extends VBox {
      * rendered. Always a no-op for a remote repository, which has no local
      * checkout to ask {@code gh} about. Four call sites: repository add and
      * repo-row expansion (both via {@link #rebuildTree()}, gated by {@link
-     * #needsPullRequestScan}), the ⟳ rescan, and {@link #refreshWorktrees}'s
+     * #pullRequestScanDue}), the ⟳ rescan, and {@link #refreshWorktrees}'s
      * completion re-running this whenever the worktree list actually
-     * changes (gated by {@link #worktreeListChanged} and the repo being
-     * expanded -- see that method).
+     * changes AND the repo is expanded (a collapsed repo is marked {@link
+     * #pullRequestsStale} instead -- see that method).
      *
      * <p>A request arriving while a scan is already in flight is NOT
-     * dropped ({@link #shouldQueuePullRequestRescan}): it is remembered in
-     * {@link #pendingPullRequestRescan} and re-run once the in-flight scan
-     * lands. This matters most on the ⟳ path, which calls this at the same
-     * moment it starts a worktree rescan: that worktree rescan's own
-     * completion calls back in here (see above) once it knows the list
-     * changed, but by then the PR scan the SAME click fired moments earlier
-     * is very likely still in flight (a local {@code git worktree list}
-     * finishes in milliseconds; {@code gh pr list} is a network call) --
-     * dropping that second request left the in-flight scan land dedup'ed
-     * against the pre-rescan list, so the group never healed.</p>
+     * simply dropped: {@link #shouldQueuePullRequestRescan} compares the
+     * worktree list the in-flight scan captured ({@link
+     * #pullRequestScanWorktrees}) against the current one, and only if
+     * they differ is the request remembered in {@link
+     * #pendingPullRequestRescan} for a re-run once the in-flight scan
+     * lands -- an identical list means the in-flight scan's result will
+     * already be correct, and queuing anyway would spawn a redundant,
+     * identical {@code gh pr list}. This matters most on the ⟳ path, which
+     * calls this at the same moment it starts a worktree rescan: that
+     * worktree rescan's own completion calls back in here (see above) once
+     * it knows the list changed, but by then the PR scan the SAME click
+     * fired moments earlier is very likely still in flight (a local {@code
+     * git worktree list} finishes in milliseconds; {@code gh pr list} is a
+     * network call) -- dropping that second request unconditionally left
+     * the in-flight scan land dedup'ed against the pre-rescan list, so the
+     * group never healed; queuing it unconditionally instead double-spawned
+     * an identical scan on every startup rebuild.</p>
      *
      * <p>{@link RepositoryPullRequests#scan} already converts every failure
      * it knows about into {@code Outcome.Unavailable}, so the future here
@@ -1638,19 +1729,27 @@ public final class RepositorySidebar extends VBox {
         if (repository.isRemote()) {
             return;
         }
+        List<WorktreeService.Worktree> worktrees = viewModel.worktrees(repository.id()).orElse(List.of());
         if (!scanningPullRequests.add(repository.id())) {
-            if (shouldQueuePullRequestRescan(true)) {
+            if (shouldQueuePullRequestRescan(pullRequestScanWorktrees.get(repository.id()), worktrees)) {
                 pendingPullRequestRescan.add(repository.id());
             }
             return;
         }
+        // A scan is launching against the CURRENT list right now, so
+        // whatever made the outcome stale (if anything) is being
+        // addressed; leaving the mark would only cause a redundant queued
+        // re-run once this one lands (shouldQueuePullRequestRescan would
+        // still say no, since the lists match -- harmless, but pointless).
+        pullRequestsStale.remove(repository.id());
+        pullRequestScanWorktrees.put(repository.id(), worktrees);
         updateRepoRow(repository.id()); // progress must show immediately (AGENTS.md)
-        List<WorktreeService.Worktree> worktrees = viewModel.worktrees(repository.id()).orElse(List.of());
         repositoryPullRequests.scan(repository.root(), worktrees)
                 .whenComplete((outcome, failure) -> Platform.runLater(() -> {
                     // Every completion path -- success, failure, and (via the
                     // guards above) early return -- clears the progress state.
                     scanningPullRequests.remove(repository.id());
+                    pullRequestScanWorktrees.remove(repository.id());
                     if (failure != null) {
                         LOG.log(Level.DEBUG, "Pull-request scan failed for " + repository.root(), failure);
                         Throwable cause = UiErrors.unwrap(failure);
@@ -1667,8 +1766,9 @@ public final class RepositorySidebar extends VBox {
                     // directly so a retry's "checking…" text (see
                     // buildPullRequestGroupRow) never gets stranded.
                     updatePullRequestGroupRow(repository.id());
-                    // A request that arrived while this scan was running
-                    // (see this method's javadoc) gets its re-run now.
+                    // A request that arrived while this scan was running,
+                    // against a list that has since moved on (see this
+                    // method's javadoc), gets its re-run now.
                     if (pendingPullRequestRescan.remove(repository.id())) {
                         refreshPullRequests(repository);
                     }
