@@ -6,6 +6,7 @@ import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionActivity;
 import app.drydock.git.GitStatus;
 import app.drydock.git.WorktreeService;
+import app.drydock.review.RepositoryPullRequests;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -68,6 +69,7 @@ public final class WorkspaceViewModel {
     private final Map<RepositoryId, Throwable> repoStatusFailures = new HashMap<>();
     private final Map<Path, GitStatus> worktreeStatuses = new HashMap<>();
     private final Map<RepositoryId, List<WorktreeService.Worktree>> worktrees = new HashMap<>();
+    private final Map<RepositoryId, RepositoryPullRequests.Outcome> pullRequests = new HashMap<>();
     private Optional<ManagedSessionId> activeSession = Optional.empty();
     private Map<ManagedSessionId, SessionActivity> activities = Map.of();
 
@@ -223,7 +225,22 @@ public final class WorkspaceViewModel {
         boolean changed = repoStatuses.remove(repositoryId) != null;
         changed |= repoStatusFailures.remove(repositoryId) != null;
         changed |= worktrees.remove(repositoryId) != null;
+        changed |= pullRequests.remove(repositoryId) != null;
         if (changed) {
+            notify(Listener::structureChanged);
+        }
+    }
+
+    // ---- Pull requests ---------------------------------------------------
+
+    /** The latest pull-request scan result for a repository; empty until its first scan lands. */
+    public Optional<RepositoryPullRequests.Outcome> pullRequests(RepositoryId repositoryId) {
+        return Optional.ofNullable(pullRequests.get(repositoryId));
+    }
+
+    /** Stores a scan result; PR rows appear/disappear, so a change emits {@code structureChanged}. */
+    public void setPullRequests(RepositoryId repositoryId, RepositoryPullRequests.Outcome outcome) {
+        if (!outcome.equals(pullRequests.put(repositoryId, outcome))) {
             notify(Listener::structureChanged);
         }
     }
