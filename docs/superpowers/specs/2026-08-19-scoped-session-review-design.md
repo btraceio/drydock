@@ -71,6 +71,14 @@ worktree mints `WORKTREE`, a local scope on the main checkout mints
 `WORKING_TREE`, and a PR scope mints `PR` carrying its worktree — the same
 three the queue and `openCheckedOutPr` mint today, for the same places.
 
+One easily-missed part of that: scope identity includes the PR number, and
+the queue mints a PR-holding worktree as `WORKTREE` **carrying its
+`PullRequestRef`**. So a local scope on a checkout whose branch has an open
+PR carries that ref too. Minting it with an empty ref would be a different
+identity, a different handle, and every finding already recorded there would
+silently vanish — the exact failure the registry's Javadoc was written
+about.
+
 That a checked-out PR therefore has *two* handles — `WORKTREE` for the
 checkout and `PR` for the pull request — is today an accident of two code
 paths minting the same place differently. Here it is the point: they are the
