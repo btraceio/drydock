@@ -33,6 +33,7 @@ import app.drydock.git.PrCheckoutService;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.git.WorktreeNaming;
 import app.drydock.git.GitBranchState;
+import app.drydock.git.GitStatus;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.GitTarget;
 import app.drydock.git.WorktreeService;
@@ -59,6 +60,7 @@ import app.drydock.review.ReviewQueueService;
 import app.drydock.review.ReviewInstructions;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
+import app.drydock.review.SessionReviewScopes;
 import app.drydock.review.SubmitPlan;
 import app.drydock.search.SessionSearchService;
 import app.drydock.ui.explorer.DiffOverlay;
@@ -124,7 +126,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.LinkedHashMap;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.Set;
@@ -135,6 +136,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.DoubleSupplier;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
@@ -288,6 +290,8 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     private Tab reviewOriginTab;
     private final PrCheckoutService prCheckoutService = new PrCheckoutService();
     private final ReviewScopeRegistry reviewScopeRegistry;
+    /** Resolves one checkout's scopes for its session's Review sub-tab (spec §3.2). */
+    private final SessionReviewScopes sessionReviewScopes;
     private final ReviewQueueService reviewQueueService;
     private final IntentGrouping intentGrouping = new IntentGrouping();
 
@@ -449,6 +453,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         this.annotationStore = annotationStore;
         this.explorerTrailStore = explorerTrailStore;
         this.reviewScopeRegistry = reviewScopeRegistry;
+        this.sessionReviewScopes = new SessionReviewScopes(gitStatusService, reviewScopeRegistry);
         this.reviewQueueService = new ReviewQueueService(worktreeService, gitStatusService,
                 ghCliService::listReviewRequests, ghCliService::listOpenPullRequests,
                 reviewScopeRegistry);
@@ -1070,25 +1075,14 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     }
 
     /**
-     * {@code ⌘4}, a toggle (nav §4): from a session it opens Review scoped to
-     * that session's checkout and remembers the tab; from Review it returns
-     * to exactly that tab. A navigation command, not a view switch -- Review
-     * spans repositories, so it cannot live inside one session's tab.
+     * {@code ⌘4}: switches the selected session tab to its Review sub-tab --
+     * the same shape as {@code ⌘1}/{@code ⌘2}/{@code ⌘3}, because review is
+     * something a session HAS now, not a place the app navigates to. Names no
+     * scope: {@code ⌘4} says where to go, and the chip the session was last
+     * left on (persisted per session) says which scope.
      */
-    public void showReviewForCurrentSession() {
-        if (isReviewShowing()) {
-            hideReview();
-            return;
-        }
-        Optional<Path> checkout = currentlySelected()
-                .map(OpenSessionTab::sessionId)
-                .flatMap(id -> sessionManager.sessions().stream()
-                        .filter(session -> session.id().equals(id))
-                        .findFirst())
-                .map(session -> session.worktreeRoot().orElseGet(() ->
-                        repositoryFor(session).map(Repository::root).orElse(null)));
-        checkout.filter(Objects::nonNull).ifPresentOrElse(this::showReviewForCheckout,
-                this::showReview);
+    public void showReviewSubTab() {
+        currentlySelected().ifPresent(open -> open.showSubTab(OpenSessionTab.SubTab.REVIEW));
     }
 
     // ---- Review destination (Review handoff sections 1 & 2) -----------------
@@ -1100,24 +1094,285 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * above the whole JavaFX scene -- go hidden because none of their tabs is
      * the selected one any more (see {@link #updateTerminalVisibility}).
      */
-    @Override
     public void showReview() {
         enterReview();
     }
 
+    // ---- The one review destination (spec: four gestures, one destination) --
+
     /**
-     * {@code ⌘4} and the sidebar's {@code ◨n} badge: shows Review with the
-     * item for {@code checkoutRoot} selected. The queue is reassembled
-     * asynchronously, so the selection is applied both now (for a scope that
-     * is already minted) and again when the refresh lands.
+     * Opens or focuses {@code sessionId}'s tab, selects its Review sub-tab and
+     * shows {@code choice}'s scope. The single destination every gesture on an
+     * existing session lands on: the row's context menu, its {@code PR #n}
+     * chip, its {@code ◨n} findings badge, and (with no explicit choice)
+     * {@code ⌘4}.
      */
     @Override
-    public void showReviewForCheckout(Path checkoutRoot) {
-        // Recorded before the refresh is kicked off, so the completion
-        // handler cannot land on a null request.
-        pendingReviewSelection = checkoutRoot;
-        enterReview();
-        selectReviewScopeFor(checkoutRoot);
+    public void showReviewForSession(ManagedSessionId sessionId, SessionReviewScopes.Choice choice) {
+        OpenSessionTab open = openTabs.containsKey(sessionId)
+                ? openTabs.get(sessionId) : pendingTabs.get(sessionId);
+        if (open != null) {
+            tabPane.getSelectionModel().select(open.tab);
+            open.showReviewSubTab(choice);
+            return;
+        }
+        Optional<ManagedAgentSession> session = sessionManager.sessions().stream()
+                .filter(candidate -> candidate.id().equals(sessionId))
+                .findFirst();
+        if (session.isEmpty()) {
+            LOG.log(Level.WARNING, "Asked to review session " + sessionId + ", which no longer exists");
+            return;
+        }
+        resumeSession(session.get());
+        showReviewWhenTabAppears(sessionId, choice);
+    }
+
+    /**
+     * Reviews a discovered worktree with no session yet: the Start-session
+     * modal, then the new session's Review sub-tab. Polled rather than
+     * chained, for the same reason {@link #runReviewWhenSessionReady} is --
+     * the modal hands its confirmation to {@code openNewWorktreeSession},
+     * which reports a session id long before a tab exists for it. Sessions
+     * that already existed when the gesture was made are excluded, so a
+     * cancelled modal cannot land on somebody else's tab; the poll simply
+     * expires.
+     */
+    @Override
+    public void startReviewForWorktree(Repository repository, WorktreeService.Worktree worktree,
+                                       SessionReviewScopes.Choice choice) {
+        Set<ManagedSessionId> before = new HashSet<>(openTabs.keySet());
+        promptStartWorktreeSession(repository, worktree);
+        pollForTab(id -> !before.contains(id) && startedOn(id, repository, worktree),
+                "a session on " + worktree.path(),
+                open -> open.showReviewSubTab(choice));
+    }
+
+    /**
+     * Reviews an open pull request that has nothing local behind it. The
+     * checkout, the session and the landing are Task 12's; what exists here is
+     * the Start-session modal, on the worktree path the repository's naming
+     * policy gives {@code pr-<n>}.
+     */
+    @Override
+    public void startReviewForPullRequest(Repository repository, GhCliService.OpenPullRequest pullRequest) {
+        if (modalLayer == null) {
+            return;
+        }
+        Optional<AgentKind> defaultKind =
+                agentRegistry.resolveDefault(repository.settings().lastUsedAgent(), repository.isRemote());
+        if (defaultKind.isEmpty()) {
+            showNoAgentAvailable();
+            return;
+        }
+        String branch = PrCheckoutService.localBranchFor(pullRequest.number());
+        Path worktree = WorktreeNaming.defaultDirectory(Path.of(System.getProperty("user.home")),
+                UserConfig.load().worktreesDirectory(), repository.displayName(), branch);
+        modalLayer.show(new StartSessionModal(branch, worktree, agentRegistry, defaultKind.get(),
+                repository.isRemote(), remoteOf(repository), modalLayer::close,
+                (task, agent, eval) -> modalLayer.close()));
+    }
+
+    /**
+     * Resolves the scopes of the checkout behind {@code tab} and pushes them
+     * into its board. Called every time the Review sub-tab is shown, by every
+     * route -- without it the board says "Resolving this session's review
+     * scopes…" forever, because nothing else ever calls {@code showScopes}.
+     *
+     * <p>{@code requested} is the choice the gesture named; empty means the
+     * gesture named where, not which, so the persisted per-session chip
+     * applies. A named choice is also what gets persisted -- the same write
+     * the switcher's own chip makes.</p>
+     *
+     * <p>Everything after {@code showResolving()} is asynchronous (a git base
+     * measurement and a {@code gh} listing), and EVERY exit -- success,
+     * failure, and each early return -- replaces that placeholder.</p>
+     */
+    private void resolveReviewScopes(OpenSessionTab tab, Optional<SessionReviewScopes.Choice> requested) {
+        SessionReviewView view = tab.reviewView().orElse(null);
+        if (view == null) {
+            return;     // the sub-tab was never built: nothing to resolve into
+        }
+        ManagedSessionId sessionId = tab.sessionId();
+        SessionReviewScopes.Choice choice = requested.orElseGet(() -> persistedReviewChoice(sessionId));
+        requested.ifPresent(picked -> repositoryManager.updateReviewScopeChoice(sessionId, picked));
+        view.showResolving();
+
+        Optional<ManagedAgentSession> session = sessionManager.sessions().stream()
+                .filter(candidate -> candidate.id().equals(sessionId))
+                .findFirst();
+        if (session.isEmpty()) {
+            view.showUnavailable("This session is no longer registered, so there is nothing to diff.");
+            return;
+        }
+        Optional<Repository> repository = repositoryFor(session.get());
+        if (repository.isEmpty()) {
+            view.showUnavailable("The repository this session belongs to is no longer registered.");
+            return;
+        }
+        if (repository.get().isRemote()) {
+            view.showUnavailable("This session runs on a remote repository. Review reads a checkout on this "
+                    + "machine, and there is none.");
+            return;
+        }
+        Path repositoryRoot = repository.get().root();
+        // The path the session RECORDED, used exactly as recorded. Scope
+        // identity is (kind, repoRoot, worktree, PR number), and every finding
+        // ever written is keyed by the id it produces -- so re-resolving,
+        // canonicalising or toRealPath()-ing it here would silently mint a
+        // second scope and detach the findings already recorded against the
+        // first. `git worktree list` is what wrote it; nothing between here
+        // and ReviewScopeRegistry.Identity does more than
+        // toAbsolutePath().normalize().
+        Path checkoutRoot = session.get().worktreeRoot().orElse(repositoryRoot);
+        Optional<String> branch = branchOfCheckout(repository.get(), session.get(), checkoutRoot);
+
+        openPullRequestOn(repositoryRoot, branch)
+                .thenCompose(pullRequest -> sessionReviewScopes.forCheckout(repositoryRoot, checkoutRoot,
+                        branch, Optional.of(sessionId), pullRequest))
+                .whenComplete((scopes, failure) -> Platform.runLater(() -> {
+                    if (tab.reviewView().orElse(null) != view) {
+                        return;     // tab closed (or its board rebuilt) while git ran
+                    }
+                    if (failure != null) {
+                        LOG.log(Level.WARNING, "Could not resolve review scopes for " + checkoutRoot, failure);
+                        view.showUnavailable(UiErrors.message(failure));
+                        return;
+                    }
+                    view.showScopes(scopes, choice);
+                    tab.setReviewBadge(openFindingsFor(scopes.forChoice(view.selectedChoice())));
+                }));
+    }
+
+    /**
+     * The open, non-draft pull request {@code branch} carries, if any --
+     * matched on the PR's own head branch, or on the {@code pr-<n>} name a
+     * drydock checkout gives it.
+     *
+     * <p>Asked of {@code gh} rather than read from {@link
+     * WorkspaceViewModel#pullRequests}: that cache holds the PULL REQUESTS
+     * group's rows, and {@code RepositoryPullRequests.selectable} has already
+     * deduped those AGAINST the local worktrees -- so a checkout's own pull
+     * request is precisely the one it never contains. Same listing call the
+     * sidebar's own scan makes, on the gh service's executor.</p>
+     *
+     * <p>Every failure degrades to "no pull request", leaving the local scope
+     * standing: gh missing, unauthenticated, no GitHub remote and genuinely no
+     * PR are not reasons to show this session's review nothing at all.</p>
+     */
+    private CompletableFuture<Optional<GhCliService.OpenPullRequest>> openPullRequestOn(
+            Path repositoryRoot, Optional<String> branch) {
+        if (branch.isEmpty()) {
+            return CompletableFuture.completedFuture(Optional.empty());
+        }
+        String head = branch.get();
+        Optional<Integer> alias = PrCheckoutService.pullRequestNumberOf(head);
+        return ghCliService.openPullRequests(repositoryRoot)
+                .handle((listing, failure) -> {
+                    if (failure != null) {
+                        LOG.log(Level.WARNING, "Could not list pull requests in " + repositoryRoot, failure);
+                        return List.<GhCliService.OpenPullRequest>of();
+                    }
+                    if (listing instanceof GhCliService.PullRequestListing.Failed failed) {
+                        LOG.log(Level.WARNING, "gh could not list pull requests in " + repositoryRoot
+                                + ": " + failed.message());
+                        return List.<GhCliService.OpenPullRequest>of();
+                    }
+                    return listing instanceof GhCliService.PullRequestListing.Listed listed
+                            ? listed.pullRequests() : List.<GhCliService.OpenPullRequest>of();
+                })
+                .thenApply(open -> open.stream()
+                        // Draft excluded deliberately (spec §3.2): a draft is
+                        // not yet something anyone is being asked to review,
+                        // and a PR scope for one would mint an identity whose
+                        // findings have nowhere to be posted.
+                        .filter(pullRequest -> !pullRequest.draft())
+                        .filter(pullRequest -> pullRequest.headRefName().equals(head)
+                                || alias.filter(number -> number == pullRequest.number()).isPresent())
+                        .findFirst());
+    }
+
+    /**
+     * The branch {@code checkoutRoot} is on, from the status the sidebar
+     * already fetched, falling back to what {@code git worktree list} reported
+     * for it. Read from cache rather than re-run: this decides which pull
+     * request the checkout carries, not the scope's identity (see {@link
+     * ReviewScopeRegistry}), so a miss costs the PR chip, never a finding.
+     */
+    private Optional<String> branchOfCheckout(Repository repository, ManagedAgentSession session,
+                                              Path checkoutRoot) {
+        Optional<GitStatus> status = session.worktreeRoot().isPresent()
+                ? viewModel.worktreeStatus(checkoutRoot)
+                : viewModel.repoStatus(repository.id());
+        return status.map(GitStatus::branch)
+                .flatMap(state -> state instanceof GitBranchState.OnBranch onBranch
+                        ? Optional.of(onBranch.name()) : Optional.empty())
+                .or(() -> viewModel.worktrees(repository.id()).orElse(List.of()).stream()
+                        .filter(worktree -> worktree.path().equals(checkoutRoot))
+                        .findFirst()
+                        .flatMap(WorktreeService.Worktree::branch));
+    }
+
+    /** Which scope chip this session was last left on; {@code LOCAL} for one that has never chosen. */
+    private SessionReviewScopes.Choice persistedReviewChoice(ManagedSessionId sessionId) {
+        return repositoryManager.state().ui().reviewScopeChoices()
+                .getOrDefault(sessionId, SessionReviewScopes.Choice.LOCAL);
+    }
+
+    /**
+     * Whether {@code sessionId} is a session on {@code worktree}.
+     *
+     * <p>The main checkout is matched by "this repository, no worktree of its
+     * own" rather than by comparing paths: a main-checkout session records no
+     * worktree root, and the path {@code git worktree list} reports for the
+     * main checkout is not always the one the repository was registered under
+     * (macOS resolves {@code /var} to {@code /private/var}). Comparing those
+     * two would simply never match, and the poll would expire on every main
+     * checkout.</p>
+     */
+    private boolean startedOn(ManagedSessionId sessionId, Repository repository,
+                              WorktreeService.Worktree worktree) {
+        return sessionManager.sessions().stream()
+                .filter(session -> session.id().equals(sessionId))
+                .anyMatch(session -> worktree.mainCheckout()
+                        ? session.repositoryId().equals(repository.id()) && session.worktreeRoot().isEmpty()
+                        : session.worktreeRoot().filter(worktree.path()::equals).isPresent());
+    }
+
+    /** Lands on {@code sessionId}'s Review sub-tab as soon as its resume has produced a tab. */
+    private void showReviewWhenTabAppears(ManagedSessionId sessionId, SessionReviewScopes.Choice choice) {
+        pollForTab(sessionId::equals, "session " + sessionId, open -> open.showReviewSubTab(choice));
+    }
+
+    /**
+     * Runs {@code action} on the first open tab whose session {@code matches},
+     * polling on the FX thread until one appears. Polled for the reason {@link
+     * #runReviewWhenSessionReady} documents: a tab does not enter {@link
+     * #openTabs} until its surface attaches, and a poll needs nothing
+     * unregistered if the user closes it (or cancels the modal) first -- the
+     * tab simply never appears and the poll expires.
+     */
+    private void pollForTab(Predicate<ManagedSessionId> matches, String what,
+                            Consumer<OpenSessionTab> action) {
+        Timeline poll = new Timeline();
+        int[] attemptsLeft = {REVIEW_LAUNCH_WAIT_SECONDS * 2};
+        poll.getKeyFrames().add(new KeyFrame(Duration.millis(500), e -> {
+            Optional<Map.Entry<ManagedSessionId, OpenSessionTab>> found = openTabs.entrySet().stream()
+                    .filter(entry -> matches.test(entry.getKey()))
+                    .findFirst();
+            if (found.isPresent()) {
+                poll.stop();
+                OpenSessionTab open = found.get().getValue();
+                tabPane.getSelectionModel().select(open.tab);
+                action.accept(open);
+                return;
+            }
+            if (--attemptsLeft[0] <= 0) {
+                poll.stop();
+                LOG.log(Level.DEBUG, "Gave up waiting for " + what + " before opening its review");
+            }
+        }));
+        poll.setCycleCount(Animation.INDEFINITE);
+        poll.play();
     }
 
     /** Whether Review currently owns the centre (the Esc unwind order asks). */
@@ -1226,7 +1481,17 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * should move on and leave Review altogether.
      */
     public boolean unwindReviewOverlay() {
-        return isReviewShowing() && reviewDestination.unwindOne();
+        if (isReviewShowing()) {
+            return reviewDestination.unwindOne();
+        }
+        // The session's OWN Review sub-tab, which is where review lives now:
+        // Esc has to mean "close what the board has open" before it means
+        // "leave this tab", or the symbol lens takes the whole tab with it.
+        return currentlySelected()
+                .filter(open -> open.activeSubTab() == OpenSessionTab.SubTab.REVIEW)
+                .flatMap(OpenSessionTab::reviewView)
+                .map(SessionReviewView::unwindOne)
+                .orElse(false);
     }
 
     /**
@@ -3842,7 +4107,22 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         // resolution does, and that is Task 11's. Not wired to real scopes
         // here: the board shows its own "no scope yet" placeholder until
         // something calls showScopes.
-        openTab.setReviewViewFactory(() -> new SessionReviewView(reviewHost, diffService, activityLog));
+        openTab.setReviewViewFactory(() -> {
+            SessionReviewView view = new SessionReviewView(reviewHost, diffService, activityLog);
+            // The chip the human picks is persisted per session -- through
+            // the state store's single writer, never a load-then-save here.
+            // Read back by resolveReviewScopes when a later gesture names no
+            // choice of its own (⌘4, the sub-tab button).
+            view.setOnChoiceChanged(choice -> {
+                repositoryManager.updateReviewScopeChoice(openTab.sessionId(), choice);
+                view.selectedScope().ifPresent(scope -> openTab.setReviewBadge(openFindingsFor(scope)));
+            });
+            return view;
+        });
+        // Every route into the Review sub-tab -- ⌘4, the sub-tab button, and
+        // showReviewSubTab from the sidebar's gestures -- arrives here, which
+        // is what actually resolves the scopes the board renders.
+        openTab.setOnReviewShown(requested -> resolveReviewScopes(openTab, requested));
 
         if (repository.map(Repository::isRemote).orElse(false)) {
             // The Explorer's file search has no local checkout to operate on

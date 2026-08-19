@@ -11,6 +11,7 @@ import app.drydock.git.GhCliService;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.WorktreeService;
 import app.drydock.review.RepositoryPullRequests;
+import app.drydock.review.SessionReviewScopes;
 import app.drydock.state.ApplicationStateRepository;
 import app.drydock.ui.model.WorkspaceViewModel;
 import javafx.scene.Node;
@@ -479,10 +480,14 @@ class RepositorySidebarPullRequestDedupFxTest extends ApplicationTest {
         }
 
         @Override
-        public void showReview() { }
+        public void showReviewForSession(ManagedSessionId sessionId, SessionReviewScopes.Choice choice) { }
 
         @Override
-        public void showReviewForCheckout(Path checkoutRoot) { }
+        public void startReviewForWorktree(Repository repository, WorktreeService.Worktree worktree,
+                                           SessionReviewScopes.Choice choice) { }
+
+        @Override
+        public void startReviewForPullRequest(Repository repository, GhCliService.OpenPullRequest pullRequest) { }
     }
 
     private static final class InMemoryStateRepository implements ApplicationStateRepository {

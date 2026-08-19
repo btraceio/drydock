@@ -45,6 +45,7 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
 import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -134,6 +135,14 @@ final class OpenSessionTab {
     /** Built on first switch to Review, via {@link #setReviewViewFactory}. */
     private SessionReviewView reviewView;
     private Supplier<SessionReviewView> reviewViewFactory;
+    /**
+     * The scope choice the gesture that is opening Review asked for, held
+     * only until {@link #notifyReviewShown} hands it to the host. Null means
+     * "no choice named" -- the sub-tab button and {@code ⌘4} say WHERE to go,
+     * not WHICH chip, so the host falls back to the persisted one.
+     */
+    private SessionReviewScopes.Choice pendingReviewChoice;
+    private Consumer<Optional<SessionReviewScopes.Choice>> onReviewShown = requested -> { };
 
     // -- Ephemeral shell Terminal sub-tab (never persisted; created on first switch) --
     /** Supplies a fresh shell runtime+host whose wakeup drives the argument (the shell bridge's tickAndDraw). */
@@ -390,16 +399,54 @@ final class OpenSessionTab {
     }
 
     /**
-     * Selects the Review sub-tab, on the way to landing on {@code choice}'s
-     * scope. This task builds, hosts, disposes and badges the view only --
-     * asking the host to actually resolve {@code choice} into {@link
-     * SessionReviewScopes} and push them into {@link #reviewView()} via
-     * {@link SessionReviewView#showScopes} is Task 11's, which is free to
-     * shape that hand-off however it needs (a callback here, a scope pushed
-     * in some other way) once it exists to call this.
+     * Selects the Review sub-tab and lands on {@code choice}'s scope: the
+     * one destination every gesture that names a scope arrives at (the
+     * sidebar's context menu, its {@code PR #n} chip, its {@code ◨n}
+     * findings badge). The scopes themselves are resolved by the host,
+     * through {@link #setOnReviewShown}, and pushed into {@link
+     * #reviewView()} via {@link SessionReviewView#showScopes}.
      */
     void showReviewSubTab(SessionReviewScopes.Choice choice) {
+        if (activeSubTab == SubTab.REVIEW) {
+            // Already here. Reclaim focus either way (see showSubTab's
+            // early return), but ask for scopes again only when the gesture
+            // names a chip the board is not already showing -- re-resolving
+            // spawns git AND a gh network call, and "the PR chip while the
+            // PR chip is up" is a refocus, not a re-measure.
+            showSubTab(SubTab.REVIEW);
+            boolean alreadyShowingIt = reviewView()
+                    .filter(view -> view.selectedScope().isPresent() && view.selectedChoice() == choice)
+                    .isPresent();
+            if (!alreadyShowingIt) {
+                pendingReviewChoice = choice;
+                notifyReviewShown();
+            }
+            return;
+        }
+        pendingReviewChoice = choice;
         showSubTab(SubTab.REVIEW);
+    }
+
+    /**
+     * Wires who resolves this session's review scopes (MainWorkspace). Called
+     * every time the Review sub-tab becomes the shown one, by ANY route --
+     * the sub-tab button and {@code ⌘4} reach {@link #showSubTab} directly and
+     * never pass through {@link #showReviewSubTab}, so hanging resolution off
+     * the latter alone is what leaves the board saying "Resolving this
+     * session's review scopes…" forever.
+     *
+     * <p>The argument is the choice the gesture named, or empty when it named
+     * none.</p>
+     */
+    void setOnReviewShown(Consumer<Optional<SessionReviewScopes.Choice>> handler) {
+        this.onReviewShown = handler == null ? requested -> { } : handler;
+    }
+
+    /** Hands the host the choice this entry asked for (once), and clears it. */
+    private void notifyReviewShown() {
+        Optional<SessionReviewScopes.Choice> requested = Optional.ofNullable(pendingReviewChoice);
+        pendingReviewChoice = null;
+        onReviewShown.accept(requested);
     }
 
     /**
@@ -493,12 +540,11 @@ final class OpenSessionTab {
     void showSubTab(SubTab subTab) {
         selectSubTabButton(subTab);
         if (subTab == activeSubTab) {
-            // Already showing -- but still reclaim key routing for a native
-            // sub-tab: the user may have clicked into the sidebar (moving
-            // the AppKit first responder to the Glass view), and "switch to
-            // Claude/Terminal" must mean "let me type there again", not a
-            // silent no-op.
-            focusActiveNativeSubTab();
+            // Already showing -- but still reclaim key routing: the user may
+            // have clicked into the sidebar (moving the AppKit first
+            // responder to the Glass view), and "switch to this sub-tab"
+            // must mean "let me type there again", not a silent no-op.
+            refocusActiveSubTab();
             return;
         }
         if (subTab == SubTab.EXPLORER) {
@@ -519,7 +565,10 @@ final class OpenSessionTab {
         if (subTab == SubTab.REVIEW) {
             SessionReviewView view = reviewViewOrBuild();
             if (view == null) {
-                // Factory never wired (or not yet): undo the selection, stay put.
+                // Factory never wired (or not yet): undo the selection, stay
+                // put -- and drop the choice this attempt asked for, so it
+                // cannot leak into whichever gesture opens Review next.
+                pendingReviewChoice = null;
                 selectSubTabButton(activeSubTab);
                 return;
             }
@@ -535,6 +584,7 @@ final class OpenSessionTab {
             // is dead until something is focused inside it, and the button
             // that got us here is deliberately not focus-traversable.
             view.onShown();
+            notifyReviewShown();
             return;
         }
         // CLAUDE or TERMINAL: show the corresponding native surface, hide the other.
@@ -584,8 +634,28 @@ final class OpenSessionTab {
         button.setGraphicTextGap(8);
     }
 
-    /** Refocuses whichever native terminal (Claude or shell) the active sub-tab shows, if any. */
-    void focusActiveNativeSubTab() {
+    /**
+     * Reclaims key routing for whichever sub-tab is showing. The Review board
+     * needs this as much as a terminal does and for the same reason: its whole
+     * single-letter key table is an {@code addEventFilter} on the view itself,
+     * so a board that is showing but not focused is a board whose keyboard is
+     * dead -- and {@link #focusActiveNativeSubTab} alone matches only
+     * {@code CLAUDE}/{@code TERMINAL}.
+     */
+    void refocusActiveSubTab() {
+        focusActiveNativeSubTab();
+        if (activeSubTab == SubTab.REVIEW) {
+            reviewView().ifPresent(SessionReviewView::onShown);
+        }
+    }
+
+    /**
+     * Refocuses whichever native terminal (Claude or shell) the active sub-tab
+     * shows, if any. Private on purpose: it is half of what "reclaim the
+     * keyboard" means now, and a caller reaching for it directly is the hole
+     * {@link #refocusActiveSubTab} exists to close.
+     */
+    private void focusActiveNativeSubTab() {
         if (activeSubTab == SubTab.CLAUDE) {
             bridge.focus();
         } else if (activeSubTab == SubTab.TERMINAL && shellBridge != null) {
@@ -1217,8 +1287,13 @@ final class OpenSessionTab {
         bridge.sendPrompt(instruction);
     }
 
+    /**
+     * Re-picking this tab (window refocus, the sidebar's own row) means "let
+     * me work here again", which for a showing Review board means its
+     * keyboard, not a terminal's.
+     */
     void focus() {
-        focusActiveNativeSubTab();
+        refocusActiveSubTab();
     }
 
     /**

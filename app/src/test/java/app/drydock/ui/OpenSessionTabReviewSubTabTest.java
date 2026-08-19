@@ -7,6 +7,8 @@ import app.drydock.git.UnifiedDiff;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
+import app.drydock.review.ReviewScopeRegistry;
+import app.drydock.review.SessionReviewScopes;
 import app.drydock.review.ReviewVerdict;
 import app.drydock.review.Severity;
 import app.drydock.review.SubmitPlan;
@@ -17,6 +19,7 @@ import app.drydock.terminal.api.TerminalSpec;
 import app.drydock.terminal.api.TerminalSurface;
 import app.drydock.ui.review.SessionReviewView;
 import javafx.scene.Scene;
+import javafx.scene.control.Button;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.Region;
 import javafx.scene.layout.StackPane;
@@ -24,8 +27,10 @@ import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.testfx.framework.junit5.ApplicationTest;
+import org.testfx.util.WaitForAsyncUtils;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -62,6 +67,31 @@ class OpenSessionTabReviewSubTabTest extends ApplicationTest {
 
     /** The Claude native surface's host for the tab most recently built by {@link #newTab}. */
     private RecordingHost lastHost;
+
+    /**
+     * A focusable node beside the tab, standing in for the sidebar: the
+     * refocus tests need somewhere real for focus to go, since a
+     * {@code requestFocus} on nothing leaves it where it was. Built on the FX
+     * thread, never in a field initializer -- constructing any {@code Control}
+     * on the JUnit worker before the toolkit is up poisons that class's static
+     * initializer for every later test in the same JVM.
+     */
+    private Button elsewhere;
+
+    /**
+     * Puts {@code tab}'s content in the showing scene. Focus is a scene-level
+     * property, so a board that was never attached can never be focused --
+     * without this the refocus assertions would be vacuously false.
+     */
+    private void showInScene(OpenSessionTab tab) {
+        elsewhere = new Button("elsewhere");
+        StackPane root = (StackPane) stage.getScene().getRoot();
+        root.getChildren().setAll(tab.tab.getContent(), elsewhere);
+    }
+
+    private static void waitForFxEvents() {
+        WaitForAsyncUtils.waitForFxEvents();
+    }
 
     private OpenSessionTab newTab() {
         OpenSessionTab[] holder = new OpenSessionTab[1];
@@ -125,6 +155,121 @@ class OpenSessionTabReviewSubTabTest extends ApplicationTest {
         interact(() -> tab.setReviewBadge(Optional.of(3)));
 
         assertEquals("Review ◨3", tab.diagReviewButtonText());
+    }
+
+    /**
+     * Task 11: the sub-tab button and {@code ⌘4} reach {@code showSubTab}
+     * directly, never {@code showReviewSubTab}. Hanging scope resolution off
+     * the latter alone is exactly what left the board saying "Resolving this
+     * session's review scopes…" forever, so every route has to ask. A route
+     * that names no chip asks with an empty choice -- the host falls back to
+     * the persisted one.
+     */
+    @Test
+    void everyRouteIntoTheSubTabAsksForScopes() {
+        List<Optional<SessionReviewScopes.Choice>> asked = new ArrayList<>();
+        OpenSessionTab tab = newTab();
+        interact(() -> {
+            tab.setReviewViewFactory(this::newReviewView);
+            tab.setOnReviewShown(asked::add);
+        });
+
+        interact(() -> tab.showSubTab(OpenSessionTab.SubTab.REVIEW));
+        assertEquals(List.of(Optional.empty()), asked,
+                "the sub-tab button and ⌘4 say where, not which chip");
+
+        interact(() -> {
+            tab.showSubTab(OpenSessionTab.SubTab.CLAUDE);
+            tab.showReviewSubTab(SessionReviewScopes.Choice.PULL_REQUEST);
+        });
+        assertEquals(List.of(Optional.empty(), Optional.of(SessionReviewScopes.Choice.PULL_REQUEST)), asked,
+                "a gesture that names a chip must ask for that chip -- exactly once");
+    }
+
+    /**
+     * Re-resolving spawns git AND a gh network call, so the two "already
+     * here" cases are told apart: asking for a chip the board is not showing
+     * re-resolves, while a plain refocus of the chip it IS showing does not.
+     */
+    @Test
+    void askingForTheChipTheBoardAlreadyShowsDoesNotReResolveIt() {
+        List<Optional<SessionReviewScopes.Choice>> asked = new ArrayList<>();
+        OpenSessionTab tab = newTab();
+        interact(() -> {
+            tab.setReviewViewFactory(this::newReviewView);
+            tab.setOnReviewShown(asked::add);
+            tab.showSubTab(OpenSessionTab.SubTab.REVIEW);
+        });
+        SessionReviewView board = tab.reviewView().orElseThrow();
+        ReviewScopeRegistry registry = new ReviewScopeRegistry();
+        ReviewScope local = registry.mint(ReviewScopeRegistry.spec(
+                ReviewScope.Kind.WORKTREE, Path.of("/repo"), Optional.of(Path.of("/wt/feature")),
+                "main", "feature/x", Optional.empty(), Optional.empty()));
+        ReviewScope pr = registry.mint(ReviewScopeRegistry.spec(
+                ReviewScope.Kind.PR, Path.of("/repo"), Optional.of(Path.of("/wt/feature")),
+                "main", "feature/x", Optional.of(new ReviewScope.PullRequestRef(42, Optional.empty())),
+                Optional.empty()));
+        interact(() -> board.showScopes(new SessionReviewScopes.Scopes(local, Optional.of(pr)),
+                SessionReviewScopes.Choice.PULL_REQUEST));
+        asked.clear();
+
+        interact(() -> tab.showReviewSubTab(SessionReviewScopes.Choice.PULL_REQUEST));
+        assertEquals(List.of(), asked, "it is already showing that chip: this gesture is a refocus");
+
+        interact(() -> tab.showReviewSubTab(SessionReviewScopes.Choice.LOCAL));
+        assertEquals(List.of(Optional.of(SessionReviewScopes.Choice.LOCAL)), asked,
+                "the other chip is a real request, even from the sub-tab that is already showing");
+    }
+
+    /**
+     * Task 11, deferred from Task 8: {@code showSubTab} early-returns when the
+     * asked-for sub-tab is already active, and the refocus it does on the way
+     * out used to handle only the two native sub-tabs. So "I clicked the
+     * sidebar, now let me work in the board again" -- {@code ⌘4} or the Review
+     * button while REVIEW is already showing -- left the board unfocused, and
+     * its entire single-letter key table dead, because those shortcuts are an
+     * event filter on the view itself.
+     */
+    @Test
+    void showingReviewWhileItIsAlreadyShowingRefocusesTheBoard() {
+        OpenSessionTab tab = newTab();
+        interact(() -> tab.setReviewViewFactory(this::newReviewView));
+        interact(() -> showInScene(tab));
+
+        interact(() -> tab.showSubTab(OpenSessionTab.SubTab.REVIEW));
+        waitForFxEvents();
+        SessionReviewView board = tab.reviewView().orElseThrow();
+        assertTrue(board.isFocused(), "the first visit focuses the board (Task 8)");
+
+        // Focus wanders off the board the way a sidebar click moves it.
+        interact(() -> elsewhere.requestFocus());
+        waitForFxEvents();
+        assertFalse(board.isFocused(), "the test's own precondition: focus really did leave the board");
+
+        interact(() -> tab.showSubTab(OpenSessionTab.SubTab.REVIEW));
+        waitForFxEvents();
+
+        assertTrue(board.isFocused(), "asking for the sub-tab that is already showing must reclaim its keyboard");
+    }
+
+    /** The same hole in {@link OpenSessionTab#focus()}, which window refocus and re-picking a session reach. */
+    @Test
+    void refocusingTheTabRefocusesTheBoardItIsShowing() {
+        OpenSessionTab tab = newTab();
+        interact(() -> tab.setReviewViewFactory(this::newReviewView));
+        interact(() -> showInScene(tab));
+
+        interact(() -> tab.showSubTab(OpenSessionTab.SubTab.REVIEW));
+        waitForFxEvents();
+        SessionReviewView board = tab.reviewView().orElseThrow();
+        interact(() -> elsewhere.requestFocus());
+        waitForFxEvents();
+        assertFalse(board.isFocused());
+
+        interact(tab::focus);
+        waitForFxEvents();
+
+        assertTrue(board.isFocused());
     }
 
     /**

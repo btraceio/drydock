@@ -1165,7 +1165,7 @@ public final class DrydockApplication extends Application {
                 mainWorkspace.showExplorerSubTab();
                 event.consume();
             } else if (cmd && event.getCode() == KeyCode.DIGIT4) {
-                mainWorkspace.showReviewForCurrentSession();
+                mainWorkspace.showReviewSubTab();
                 event.consume();
             } else if (cmd && event.getCode() == KeyCode.R) {
                 mainWorkspace.activeSessionId().flatMap(id -> sessionManager.sessions().stream()

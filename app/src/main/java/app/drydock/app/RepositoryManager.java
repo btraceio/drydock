@@ -8,13 +8,17 @@ import app.drydock.domain.RepositoryCatalog;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.RepositorySettings;
 import app.drydock.domain.SshRemote;
+import app.drydock.domain.WorkspaceUiState;
 import app.drydock.git.GitStatusService;
+import app.drydock.review.SessionReviewScopes;
 import app.drydock.state.ApplicationStateRepository;
 
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -171,6 +175,26 @@ public final class RepositoryManager {
     /** Persists the order of open session tabs (tab-strip order, including drag-reorder). */
     public void updateOpenSessions(List<ManagedSessionId> openSessionIds) {
         stateStore.update(state -> state.withUi(state.ui().withOpenSessionIds(openSessionIds)));
+    }
+
+    /**
+     * Persists which scope chip one session's Review sub-tab is showing.
+     * Read-modify-write of the map happens INSIDE the state store's own
+     * update function, which is the single authoritative owner: a
+     * load-then-save here would be the second writer that cost this
+     * application a documented data-loss bug.
+     */
+    public void updateReviewScopeChoice(ManagedSessionId sessionId, SessionReviewScopes.Choice choice) {
+        stateStore.update(state -> {
+            WorkspaceUiState ui = state.ui();
+            if (choice == ui.reviewScopeChoices().get(sessionId)) {
+                return state;
+            }
+            Map<ManagedSessionId, SessionReviewScopes.Choice> choices =
+                    new LinkedHashMap<>(ui.reviewScopeChoices());
+            choices.put(sessionId, choice);
+            return state.withUi(ui.withReviewScopeChoices(choices));
+        });
     }
 
     /** Persists which session tab was active when the app shut down. */

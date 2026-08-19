@@ -3,8 +3,9 @@ package app.drydock.ui;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.Repository;
+import app.drydock.git.GhCliService;
 import app.drydock.git.WorktreeService;
-import java.nio.file.Path;
+import app.drydock.review.SessionReviewScopes;
 
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -46,15 +47,28 @@ public interface WorkspaceNavigator {
     Optional<ManagedSessionId> activeSessionId();
 
     /**
-     * Shows the Review destination (Review handoff §2: a sidebar
-     * destination pinned above the repository tree), keeping the queue's
-     * current selection.
+     * Lands on {@code sessionId}'s own Review sub-tab, showing {@code
+     * choice}'s scope: opens or focuses the session's tab, selects Review,
+     * selects the scope. Every gesture that invokes review on an existing
+     * session -- the row's context menu, its {@code PR #n} chip, its {@code
+     * ◨n} findings badge, {@code ⌘4} -- comes through here, so there is
+     * exactly one destination to get right.
      */
-    void showReview();
+    void showReviewForSession(ManagedSessionId sessionId, SessionReviewScopes.Choice choice);
 
     /**
-     * Shows Review with the item for {@code checkoutRoot} selected -- {@code
-     * ⌘4} from a session, and the sidebar's per-worktree {@code ◨n} badge.
+     * Reviews a discovered worktree that has no session yet: the Start-session
+     * modal first, then that new session's Review sub-tab on {@code choice}'s
+     * scope. A separate call from {@link #showReviewForSession} because there
+     * is no session to name -- review is something a session HAS, so one has
+     * to exist before there is anywhere to land.
      */
-    void showReviewForCheckout(Path checkoutRoot);
+    void startReviewForWorktree(Repository repository, WorktreeService.Worktree worktree,
+                                SessionReviewScopes.Choice choice);
+
+    /**
+     * Reviews an open pull request with nothing local behind it: check it out,
+     * start a session on it, land on its Review sub-tab.
+     */
+    void startReviewForPullRequest(Repository repository, GhCliService.OpenPullRequest pullRequest);
 }

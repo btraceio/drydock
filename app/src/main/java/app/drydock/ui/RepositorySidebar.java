@@ -21,6 +21,7 @@ import app.drydock.git.WorktreeLockedException;
 import app.drydock.git.WorktreeNotCleanException;
 import app.drydock.git.WorktreeService;
 import app.drydock.review.RepositoryPullRequests;
+import app.drydock.review.SessionReviewScopes;
 import app.drydock.ui.model.SessionFilter;
 import app.drydock.ui.model.WorkspaceViewModel;
 import java.io.File;
@@ -53,6 +54,7 @@ import javafx.scene.control.TreeItem;
 import javafx.scene.control.TreeView;
 import javafx.scene.input.KeyCode;
 import javafx.scene.input.MouseButton;
+import javafx.scene.input.MouseEvent;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
@@ -60,6 +62,7 @@ import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
 import javafx.stage.DirectoryChooser;
 import javafx.stage.Window;
+import javafx.stage.WindowEvent;
 import javafx.util.Duration;
 
 import java.io.IOException;
@@ -240,6 +243,8 @@ public final class RepositorySidebar extends VBox {
     private final Map<ManagedSessionId, Tooltip> sessionTooltips = new HashMap<>();
     private final AgentRegistry agentRegistry;
     private final Map<RepositoryId, ContextMenu> repoMenus = new HashMap<>();
+    /** One cached menu per discovered-worktree row, keyed and pruned by checkout path. */
+    private final Map<Path, ContextMenu> unopenedMenus = new HashMap<>();
     private final Map<RepositoryId, ContextMenu> newSessionMenus = new HashMap<>();
     private final Map<Path, Tooltip> unopenedTooltips = new HashMap<>();
 
@@ -493,7 +498,8 @@ public final class RepositorySidebar extends VBox {
                 }
             }
             // Left unbound deliberately: materializing a pull request into a
-            // worktree/session is Task 11/12's seam, not this one's to invent.
+            // worktree/session is Task 12's -- WorkspaceNavigator carries the
+            // startReviewForPullRequest seam it will fill in.
             case SidebarNode.PullRequestNode pullRequestNode -> { }
         }
     }
@@ -565,6 +571,48 @@ public final class RepositorySidebar extends VBox {
      */
     public Optional<ManagedSessionId> diagActiveSession() {
         return viewModel.activeSession();
+    }
+
+    /**
+     * Diagnostic-only: fires the {@code PR #n} chip's own click handler on
+     * {@code row}. Not a robot click: synthetic pointer input in a headless
+     * run reports success without reaching the app, so this delivers the
+     * event straight to the node the handler is installed on. Returns whether
+     * the row had a chip at all -- a silent no-op would let a test that
+     * proves nothing look green.
+     */
+    static boolean diagClickPrChip(Node row) {
+        return diagClickRowBadge(row, ".pr-chip");
+    }
+
+    /** Diagnostic-only: fires the {@code ◨n} findings badge's click handler; see {@link #diagClickPrChip}. */
+    static boolean diagClickFindingsBadge(Node row) {
+        return diagClickRowBadge(row, ".worktree-findings-badge");
+    }
+
+    private static boolean diagClickRowBadge(Node row, String selector) {
+        Node badge = row.lookup(selector);
+        if (badge == null) {
+            return false;
+        }
+        badge.fireEvent(new MouseEvent(MouseEvent.MOUSE_CLICKED, 0, 0, 0, 0, MouseButton.PRIMARY, 1,
+                false, false, false, false, true, false, false, true, false, false, null));
+        return true;
+    }
+
+    /**
+     * Diagnostic-only: the {@code Review ▸} entries of {@code sessionId}'s
+     * cached context menu, read the way a right-click reads them -- through
+     * the menu's real {@code onShowing}, which is what re-reads the live
+     * session's pull request.
+     */
+    List<MenuItem> diagReviewMenuItems(ManagedSessionId sessionId) {
+        ContextMenu menu = sessionMenu(sessionId);
+        menu.fireEvent(new WindowEvent(menu, WindowEvent.WINDOW_SHOWING));
+        return menu.getItems().stream()
+                .filter(MenuItem::isVisible)
+                .filter(item -> item.getText() != null && item.getText().startsWith("Review ▸"))
+                .toList();
     }
 
     /**
@@ -1324,6 +1372,7 @@ public final class RepositorySidebar extends VBox {
         repoMenus.keySet().retainAll(repoIds);
         newSessionMenus.keySet().retainAll(repoIds);
         unopenedTooltips.keySet().retainAll(worktreePaths);
+        unopenedMenus.keySet().retainAll(worktreePaths);
         collapsed.retainAll(repoIds);
         if (collapsedBeforeFilter != null) {
             collapsedBeforeFilter.retainAll(repoIds);
@@ -2158,7 +2207,7 @@ public final class RepositorySidebar extends VBox {
                 }
                 case SidebarNode.UnopenedWorktreeNode worktreeNode -> {
                     setGraphic(buildUnopenedRow(worktreeNode.worktree(), worktreeNode.repository()));
-                    setContextMenu(null);
+                    setContextMenu(unopenedWorktreeMenu(worktreeNode.repository(), worktreeNode.worktree()));
                 }
                 case SidebarNode.StaleWorktreesNode staleNode -> {
                     setGraphic(buildStaleRow(staleNode.worktrees(), staleNode.repository()));
@@ -2325,12 +2374,18 @@ public final class RepositorySidebar extends VBox {
         }
 
         /**
-         * The {@code ◨n} badge (Review handoff section 2): that worktree's
-         * open findings, and a jump into Review filtered to it. Absent
-         * rather than zero when no reviewer has run -- a confident zero would
-         * read as "reviewed, nothing found".
+         * The {@code ◨n} badge (spec §2): that checkout's open findings, and
+         * a click that opens review on its LOCAL scope -- findings are
+         * recorded against the checkout, so the local changes are what the
+         * count is counting. Absent rather than zero when no reviewer has
+         * run -- a confident zero would read as "reviewed, nothing found".
+         *
+         * <p>{@code onReview} rather than a fixed call because the same
+         * badge sits on two row kinds with two different destinations: a
+         * session row has a Review sub-tab to land on, an unopened worktree
+         * row has to start a session first.</p>
          */
-        private Optional<Label> findingsBadge(Path checkoutRoot) {
+        private Optional<Label> findingsBadge(Path checkoutRoot, Runnable onReview) {
             return openFindingsAt.apply(checkoutRoot).map(count -> {
                 Label badge = new Label("◨" + count);
                 badge.getStyleClass().add("worktree-findings-badge");
@@ -2338,7 +2393,7 @@ public final class RepositorySidebar extends VBox {
                         + " — click to review this worktree"));
                 badge.setOnMouseClicked(event -> {
                     if (event.getButton() == MouseButton.PRIMARY) {
-                        navigator.showReviewForCheckout(checkoutRoot);
+                        onReview.run();
                         event.consume();
                     }
                 });
@@ -2404,6 +2459,19 @@ public final class RepositorySidebar extends VBox {
                 prChip.getStyleClass().add(session.prState() == PrState.MERGED
                         ? "pr-chip-merged" : "pr-chip");
             }
+            if (prChip != null && session.prState() == PrState.OPEN) {
+                // Only while the PR is OPEN: a merged PR has no pull-request
+                // scope to show, and a chip that lands on the local one
+                // instead would be a lie about what it reviews.
+                Tooltip.install(prChip, new Tooltip("Review this pull request"));
+                prChip.setOnMouseClicked(event -> {
+                    if (event.getButton() == MouseButton.PRIMARY) {
+                        navigator.showReviewForSession(session.id(),
+                                SessionReviewScopes.Choice.PULL_REQUEST);
+                        event.consume();
+                    }
+                });
+            }
 
             Button open = quickAction("↗", "Open", false, () -> navigator.resumeSession(session));
             Button stop = quickAction("■", "Stop process", true, () -> navigator.closeSession(session.id()));
@@ -2422,7 +2490,9 @@ public final class RepositorySidebar extends VBox {
                 row.getChildren().add(prChip);
             }
             session.worktreeRoot().ifPresent(root ->
-                    findingsBadge(root).ifPresent(badge -> row.getChildren().add(badge)));
+                    findingsBadge(root, () -> navigator.showReviewForSession(session.id(),
+                            SessionReviewScopes.Choice.LOCAL))
+                            .ifPresent(badge -> row.getChildren().add(badge)));
             // A session whose Claude is blocked on a human gets a badge: it
             // is the one state that makes no further progress until the user
             // comes back to it. Cleared by switching to the session.
@@ -2525,7 +2595,8 @@ public final class RepositorySidebar extends VBox {
             });
 
             HBox row = new HBox(8, statusCol, name, startPill);
-            findingsBadge(worktree.path())
+            findingsBadge(worktree.path(), () -> navigator.startReviewForWorktree(repository, worktree,
+                    SessionReviewScopes.Choice.LOCAL))
                     .ifPresent(badge -> row.getChildren().add(row.getChildren().indexOf(startPill), badge));
             if (!worktree.mainCheckout()) {
                 Button delete = quickAction("🗑", "Delete worktree & branch", true,
@@ -2711,7 +2782,8 @@ public final class RepositorySidebar extends VBox {
          * its number/title/author, and a {@code Review ▸} pill -- styled
          * from the same {@code worktree-unopened-row} rules as an unopened
          * worktree row, so the two "not yet opened" row kinds read as
-         * siblings. The pill's action is Task 11/12's to wire; this task
+         * siblings. The pill's action is Task 12's to wire (through
+         * {@code WorkspaceNavigator.startReviewForPullRequest}); this task
          * only renders the row and lets the tree select it.
          */
         private HBox buildPullRequestRow(SidebarNode.PullRequestNode node) {
@@ -2758,6 +2830,27 @@ public final class RepositorySidebar extends VBox {
         viewModel.sessionById(sessionId).ifPresent(action);
     }
 
+    /**
+     * What the {@code Review ▸} block of a row's context menu offers: the
+     * local changes always, the pull request only when the checkout carries
+     * one. Pure and static so the offer can be pinned without a pointer --
+     * synthetic pointer input in this project's headless runs reports success
+     * without reaching the app, so a robot click here would assert nothing.
+     */
+    static List<String> reviewMenuLabels(Optional<Integer> prNumber) {
+        List<String> labels = new ArrayList<>();
+        labels.add("Review ▸ Local changes");
+        prNumber.ifPresent(number -> labels.add("Review ▸ PR #" + number));
+        return List.copyOf(labels);
+    }
+
+    /** The open PR of the LIVE session, if it has one -- never a captured snapshot's. */
+    private Optional<Integer> openPullRequestOf(ManagedSessionId sessionId) {
+        return viewModel.sessionById(sessionId)
+                .filter(session -> session.prState() == PrState.OPEN)
+                .flatMap(ManagedAgentSession::prNumber);
+    }
+
     /** One cached menu per session row; handlers re-resolve the session so the cache never acts stale. */
     private ContextMenu sessionMenu(ManagedSessionId sessionId) {
         return sessionMenus.computeIfAbsent(sessionId, id -> {
@@ -2778,9 +2871,46 @@ public final class RepositorySidebar extends VBox {
                     launchExternally("Could not reveal working directory",
                             () -> FinderLauncher.reveal(session.workingDirectory()))));
 
+            MenuItem reviewLocal = new MenuItem();
+            reviewLocal.setOnAction(e -> navigator.showReviewForSession(id, SessionReviewScopes.Choice.LOCAL));
+            MenuItem reviewPullRequest = new MenuItem();
+            reviewPullRequest.setOnAction(e ->
+                    navigator.showReviewForSession(id, SessionReviewScopes.Choice.PULL_REQUEST));
+
             ContextMenu menu = new ContextMenu();
-            menu.getItems().addAll(resume, rename, stop, delete, new SeparatorMenuItem(), reveal);
+            menu.getItems().addAll(resume, rename, stop, delete,
+                    new SeparatorMenuItem(), reviewLocal, reviewPullRequest,
+                    new SeparatorMenuItem(), reveal);
+            // Relabelled on every showing, not once at build: this menu is
+            // cached for the life of the row, and whether the checkout
+            // carries an open pull request changes underneath it.
+            menu.setOnShowing(e -> applyReviewMenuLabels(reviewLocal, reviewPullRequest, id));
+            applyReviewMenuLabels(reviewLocal, reviewPullRequest, id);
             return menu;
+        });
+    }
+
+    /** Re-reads {@link #reviewMenuLabels} for the live session and hides the PR entry when there is none. */
+    private void applyReviewMenuLabels(MenuItem local, MenuItem pullRequest, ManagedSessionId sessionId) {
+        List<String> labels = reviewMenuLabels(openPullRequestOf(sessionId));
+        local.setText(labels.get(0));
+        boolean hasPullRequest = labels.size() > 1;
+        pullRequest.setText(hasPullRequest ? labels.get(1) : "");
+        pullRequest.setVisible(hasPullRequest);
+    }
+
+    /**
+     * The context menu of a discovered worktree that has no session yet. Only
+     * the local scope: a checkout with no session has no pull-request scope
+     * resolved for it either, and the entry starts a session before there is
+     * anywhere to land.
+     */
+    private ContextMenu unopenedWorktreeMenu(Repository repository, WorktreeService.Worktree worktree) {
+        return unopenedMenus.computeIfAbsent(worktree.path(), path -> {
+            MenuItem review = new MenuItem(reviewMenuLabels(Optional.empty()).get(0));
+            review.setOnAction(e -> navigator.startReviewForWorktree(repository, worktree,
+                    SessionReviewScopes.Choice.LOCAL));
+            return new ContextMenu(review);
         });
     }
 
