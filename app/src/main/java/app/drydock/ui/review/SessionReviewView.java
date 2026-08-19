@@ -177,8 +177,14 @@ public final class SessionReviewView extends BorderPane {
      * absent from this map has no diff -- which is a state, not a reason to
      * reach for someone else's.
      *
-     * <p>Retained across a chip switch on purpose: flipping between local and
-     * the PR and back must not re-run git for a diff already resolved.</p>
+     * <p>This is also the chip switch's cache: {@link #bodyFor} renders a
+     * {@link DiffOutcome.Loaded} entry straight into the column rather than
+     * re-scoping it, so flipping between local and the PR and back does not
+     * run git again. That is not merely an optimisation -- re-scoping
+     * publishes {@link DiffOutcome.Diffing} over the entry the moment it is
+     * asked for, so the cache would destroy itself on the first switch and
+     * empty the rail, the verdict bar and the file count on every one after
+     * it.</p>
      */
     private final Map<String, DiffOutcome> outcomeByScope = new HashMap<>();
 
@@ -491,7 +497,6 @@ public final class SessionReviewView extends BorderPane {
         headerIcon.setText(headerGlyphFor(scope));
         headerTitle.setText(headerTitleFor(scope));
         headerContext.setText(headerContextFor(scope));
-        body.getChildren().setAll(bodyFor(scope));
         intentIndex = 0;
         // Fallback intent ids are NOT scope-namespaced ("auto:change:src" is
         // just (kind, directory)), so two different scopes with a similar
@@ -499,6 +504,12 @@ public final class SessionReviewView extends BorderPane {
         // scope switch could make u undo, and jump into, a same-named
         // intent in the WRONG scope.
         lastSettledIntentId = Optional.empty();
+        // The cursor is reset BEFORE the body is built, which the destination
+        // did the other way round: a cached diff publishes Loaded
+        // synchronously from inside bodyFor, and the diff-resolved handler
+        // that fires off it would otherwise render the incoming scope at the
+        // OUTGOING scope's intent index.
+        body.getChildren().setAll(bodyFor(scope));
         refreshReviewState();
         applyResponsiveLayout(getWidth());
         // The diff usually has not arrived yet, in which case there is nothing
@@ -513,6 +524,18 @@ public final class SessionReviewView extends BorderPane {
      * of it -- that override is the seam the findings margin and intent rail
      * arrive through.
      *
+     * <p>A diff this view has already seen resolve is re-rendered from {@link
+     * #outcomeByScope} through {@link ReviewDiffColumn#showDiff}, never by
+     * re-scoping the column: {@code setScope} early-returns only on an
+     * unchanged scope id, and a chip switch always changes it, so it would
+     * publish {@code Diffing} over the cached outcome and run git again on
+     * every toggle of a two-chip control people flip back and forth on.
+     * {@code showDiff} bumps the column's request token, so an in-flight git
+     * completion for the outgoing scope is dropped rather than overwriting
+     * this one, and it publishes under the scope it was read FOR -- which is
+     * what keeps {@code displayedScopeId} equal to the selected scope, and so
+     * keeps {@link #submitReview} from refusing.</p>
+     *
      * <p>A scope with no checkout cannot be diffed at all ({@link
      * ReviewDiffColumn#setScope} rejects one, because the only diff obtainable
      * would be of the wrong tree). {@link SessionReviewScopes} always mints
@@ -525,12 +548,18 @@ public final class SessionReviewView extends BorderPane {
         if (supplied.isPresent()) {
             return supplied.get();
         }
+        VBox.setVgrow(diffColumn, Priority.ALWAYS);
+        // Checked before diffability: a diff already in hand is renderable
+        // whether or not git could be run for it again.
+        if (outcomeByScope.get(scope.id()) instanceof DiffOutcome.Loaded loaded) {
+            diffColumn.showDiff(scope, loaded.diff());
+            return diffColumn;
+        }
         if (!scope.diffable()) {
             return placeholder("No checkout to diff",
                     "This scope has no working copy, so there is nothing to read here.", "");
         }
         diffColumn.setScope(scope);
-        VBox.setVgrow(diffColumn, Priority.ALWAYS);
         return diffColumn;
     }
 
@@ -672,6 +701,11 @@ public final class SessionReviewView extends BorderPane {
         return selectedScope().map(scope -> outcomeByScope.get(scope.id()));
     }
 
+    /**
+     * The selected scope's intents. A scope whose diff has not loaded -- or
+     * never will, because it has no checkout -- has none, and says so
+     * through {@link #emptyReason()} rather than borrowing another's.
+     */
     private List<ReviewIntent> intents() {
         Optional<ReviewScope> scope = selectedScope();
         if (scope.isEmpty()) {
@@ -1342,6 +1376,11 @@ public final class SessionReviewView extends BorderPane {
         return ReviewDiagFxThread.call(switcher::diagChipTexts);
     }
 
+    /** Diagnostic-only: the text of the chip that is actually selected, if any. */
+    Optional<String> diagSelectedChipText() {
+        return ReviewDiagFxThread.call(switcher::diagSelectedChipText);
+    }
+
     /**
      * Diagnostic-only: presses the chip for {@code choice}, through the same
      * selection path a click takes -- including the guard that makes pressing
@@ -1352,5 +1391,27 @@ public final class SessionReviewView extends BorderPane {
             switcher.diagSelectChoice(choice);
             return null;
         });
+    }
+
+    /**
+     * Test-only: records an outcome for a scope without running git. The
+     * view derives everything from these outcomes now, so a test with a
+     * synthetic diff and no real checkout has no other way in.
+     */
+    void diagPublishOutcome(String scopeId, DiffOutcome outcome) {
+        outcomeByScope.put(scopeId, outcome);
+        refreshReviewState();
+    }
+
+    /**
+     * Test-only: renders {@code diff} in the column as though it had been
+     * read for {@code scope}, with no git behind it.
+     *
+     * <p>Safe after the body has already asked for a real diff: {@code
+     * showDiff} bumps the column's request token, so the in-flight git
+     * completion is dropped rather than overwriting this one.</p>
+     */
+    void diagShowDiff(ReviewScope forScope, UnifiedDiff diff) {
+        diffColumn.showDiff(forScope, diff);
     }
 }
