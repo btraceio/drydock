@@ -3,6 +3,7 @@ package app.drydock.review;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.git.GhCliService;
 import app.drydock.git.GitStatusService;
+import app.drydock.git.PrCheckoutService;
 import app.drydock.git.ReviewBase;
 
 import java.nio.file.Path;
@@ -67,7 +68,12 @@ public final class SessionReviewScopes {
 
     /**
      * Resolves {@code checkoutRoot}'s scopes. Never blocks the caller: the
-     * base measurement runs on the git service's own executor.
+     * base measurement runs on the git service's own executor, and a git
+     * failure (no executable, unreadable checkout) degrades to {@link
+     * ReviewBase.Origin#DEFAULT_UNMEASURED} rather than failing the future
+     * -- the same degrade {@code ReviewQueueService} applies, because a
+     * missing base measurement is no reason to show the Review sub-tab
+     * nothing at all.
      *
      * @param pullRequest the open non-draft PR this checkout's branch carries,
      *                    if any -- resolved by the caller, which already holds
@@ -84,18 +90,41 @@ public final class SessionReviewScopes {
                 .equals(repositoryRoot.toAbsolutePath().normalize());
         ReviewScope.Kind localKind = mainCheckout
                 ? ReviewScope.Kind.WORKING_TREE : ReviewScope.Kind.WORKTREE;
+        // The local scope carries the PR ref only when the checkout's own
+        // branch IS the pr-<n> alias PrCheckoutService checks a PR out
+        // under -- never for an ordinary branch, and never for the main
+        // checkout. The wider rule flips this scope's identity the moment a
+        // PR is opened or merged on an ordinary branch, silently detaching
+        // every finding already recorded against the worktree from events
+        // that have nothing to do with it. The PR scope itself is
+        // unaffected: it always carries its ref.
+        Optional<ReviewScope.PullRequestRef> localRef = !mainCheckout
+                && PrCheckoutService.pullRequestNumberOf(head).isPresent()
+                ? ref : Optional.empty();
 
         return gitStatusService.defaultBranch(repositoryRoot)
-                .thenCompose(defaultBranch -> gitStatusService.reviewBase(checkoutRoot,
-                        pullRequest.map(GhCliService.OpenPullRequest::baseRefName),
-                        defaultBranch.orElse("main")))
+                .handle((defaultBranch, failure) -> failure == null ? defaultBranch : Optional.<String>empty())
+                .thenCompose(defaultBranch -> {
+                    String fallback = defaultBranch.orElse("main");
+                    return gitStatusService.reviewBase(checkoutRoot,
+                                    pullRequest.map(GhCliService.OpenPullRequest::baseRefName), fallback)
+                            .handle((base, failure) -> failure == null ? base
+                                    : new ReviewBase(fallback, ReviewBase.Origin.DEFAULT_UNMEASURED));
+                })
                 .thenApply(base -> {
                     ReviewScope local = registry.mint(ReviewScopeRegistry.spec(
                             localKind, repositoryRoot, Optional.of(checkoutRoot),
-                            base.ref(), head, ref, session, Optional.of(base.origin())));
+                            base.ref(), head, localRef, session, Optional.of(base.origin())));
+                    // The PR scope diffs against the SAME resolved base as the
+                    // local scope -- reviewBase already privileges the PR's
+                    // declared base when one is supplied, and that resolution
+                    // (falling back to origin/<name> when there is no local
+                    // ref) is what makes the base a revision git can actually
+                    // name. Using the raw, unresolved baseRefName here would
+                    // let the PR chip's diff fail while the local chip's works.
                     Optional<ReviewScope> pr = pullRequest.map(open -> registry.mint(
                             ReviewScopeRegistry.spec(ReviewScope.Kind.PR, repositoryRoot,
-                                    Optional.of(checkoutRoot), open.baseRefName(), head, ref,
+                                    Optional.of(checkoutRoot), base.ref(), head, ref,
                                     session, Optional.of(ReviewBase.Origin.PULL_REQUEST))));
                     return new Scopes(local, pr);
                 });

@@ -2,7 +2,9 @@ package app.drydock.review;
 
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.git.GhCliService;
+import app.drydock.git.GitExecutableLocator;
 import app.drydock.git.GitStatusService;
+import app.drydock.git.ReviewBase;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -10,6 +12,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ExecutionException;
@@ -55,7 +58,6 @@ class SessionReviewScopesTest {
                 repo, repo, Optional.of("main"), Optional.empty(), Optional.empty()).get();
 
         assertEquals(ReviewScope.Kind.WORKING_TREE, resolved.local().kind());
-        assertEquals(Optional.of(repo), resolved.local().worktree());
         assertTrue(resolved.pullRequest().isEmpty());
     }
 
@@ -69,12 +71,22 @@ class SessionReviewScopesTest {
                 repo, worktree, Optional.of("feature/x"), Optional.empty(), Optional.empty()).get();
 
         assertEquals(ReviewScope.Kind.WORKTREE, resolved.local().kind());
-        assertEquals(Optional.of(worktree), resolved.local().worktree());
         assertEquals("feature/x", resolved.local().head());
+        // Pins that the base is the MEASURED one, not the unmeasured
+        // fallback -- with a bare @TempDir (no real branches to measure
+        // between) this would read DEFAULT_UNMEASURED regardless of what
+        // forCheckout actually does, which is exactly what the real-repo
+        // fixtures are here to rule out.
+        assertEquals(ReviewBase.Origin.FORKED_FROM, resolved.local().baseOrigin().orElseThrow());
     }
 
+    /**
+     * The narrow case: the checkout's branch IS the {@code pr-<n>} alias
+     * {@code PrCheckoutService} checks a PR out under, so the local scope
+     * and the PR scope name the very same worktree under review.
+     */
     @Test
-    void theLocalScopeCarriesThePullRequestRefBecauseIdentityIncludesIt(
+    void theLocalScopeCarriesThePullRequestRefWhenTheCheckoutIsThePrAlias(
             @TempDir Path dir, @TempDir Path worktreeParent)
             throws ExecutionException, InterruptedException, IOException {
         Path repo = initCommittedRepo(dir);
@@ -84,11 +96,51 @@ class SessionReviewScopesTest {
                 repo, worktree, Optional.of("pr-42"), Optional.empty(),
                 Optional.of(pullRequest(42, "someones-branch"))).get();
 
-        // The queue minted PR-holding worktrees exactly this way; minting it
-        // with an empty ref would be a different handle and would orphan
-        // every finding already recorded against this worktree.
         assertEquals(ReviewScope.Kind.WORKTREE, resolved.local().kind());
         assertEquals(42, resolved.local().pr().orElseThrow().number());
+    }
+
+    /**
+     * The rule this task got wrong the first time: a worktree on an
+     * ordinary branch that happens to have an open PR does NOT carry the
+     * ref locally. {@code ReviewQueueService.build} only ever attaches a
+     * {@code PullRequestRef} to a worktree via {@code
+     * PrCheckoutService.pullRequestNumberOf(head)}, which requires the
+     * literal {@code pr-<n>} alias -- an ordinary branch like this one is
+     * never recognised as "holding" a PR that way. Attaching the ref
+     * whenever one was merely supplied would flip this scope's identity the
+     * moment somebody opens (or merges) a PR on the branch, silently
+     * detaching every finding already recorded against the worktree.
+     */
+    @Test
+    void aWorktreeOnAnOrdinaryBranchDoesNotCarryAnOpenPullRequestsRefLocally(
+            @TempDir Path dir, @TempDir Path worktreeParent)
+            throws ExecutionException, InterruptedException, IOException {
+        Path repo = initCommittedRepo(dir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/x").get();
+
+        SessionReviewScopes.Scopes resolved = scopes.forCheckout(
+                repo, worktree, Optional.of("feat/x"), Optional.empty(),
+                Optional.of(pullRequest(42, "feat/x"))).get();
+
+        assertTrue(resolved.local().pr().isEmpty(),
+                "an ordinary branch's local scope must not carry the PR ref");
+        assertEquals(42, resolved.pullRequest().orElseThrow().pr().orElseThrow().number(),
+                "the PR scope itself is unaffected and always carries its ref");
+    }
+
+    /** As above, for the main checkout: never a {@code pr-<n>} alias, so never a ref. */
+    @Test
+    void aMainCheckoutDoesNotCarryAnOpenPullRequestsRefLocally(@TempDir Path dir)
+            throws ExecutionException, InterruptedException, IOException {
+        Path repo = initCommittedRepo(dir);
+
+        SessionReviewScopes.Scopes resolved = scopes.forCheckout(
+                repo, repo, Optional.of("main"), Optional.empty(),
+                Optional.of(pullRequest(42, "main"))).get();
+
+        assertEquals(ReviewScope.Kind.WORKING_TREE, resolved.local().kind());
+        assertTrue(resolved.local().pr().isEmpty());
     }
 
     @Test
@@ -104,9 +156,8 @@ class SessionReviewScopesTest {
 
         ReviewScope pr = resolved.pullRequest().orElseThrow();
         assertEquals(ReviewScope.Kind.PR, pr.kind());
-        assertEquals(Optional.of(worktree), pr.worktree());
         assertEquals(42, pr.pr().orElseThrow().number());
-        assertTrue(pr.diffable());
+        assertTrue(pr.diffable(), "diffable() is true exactly when a worktree is present");
     }
 
     @Test
@@ -150,6 +201,50 @@ class SessionReviewScopesTest {
         assertEquals("(no branch)", resolved.local().head());
     }
 
+    /**
+     * {@code defaultBranch} and {@code reviewBase} both throw {@code
+     * GitExecutableNotFoundException} from inside their suppliers when no
+     * git executable can be found; without a {@code handle}/{@code
+     * exceptionally} step the future would complete exceptionally and the
+     * Review sub-tab would get nothing. A service that cannot measure
+     * something must degrade to a documented fallback instead -- the same
+     * one {@code ReviewQueueService} uses.
+     */
+    @Test
+    void aFailingGitServiceStillYieldsALocalScope(@TempDir Path dir)
+            throws ExecutionException, InterruptedException, IOException {
+        Path repo = initCommittedRepo(dir);
+        GitExecutableLocator missingLocator = new GitExecutableLocator(Path.of("/nonexistent/git-does-not-exist"));
+        try (GitStatusService brokenGitStatusService = new GitStatusService(missingLocator)) {
+            SessionReviewScopes brokenScopes = new SessionReviewScopes(brokenGitStatusService, registry);
+
+            SessionReviewScopes.Scopes resolved = brokenScopes.forCheckout(
+                    repo, repo, Optional.of("main"), Optional.empty(), Optional.empty()).get();
+
+            assertEquals(ReviewScope.Kind.WORKING_TREE, resolved.local().kind());
+            assertEquals(ReviewBase.Origin.DEFAULT_UNMEASURED, resolved.local().baseOrigin().orElseThrow());
+        }
+    }
+
+    @Test
+    void forChoiceFallsBackToLocalWhenThePullRequestIsAbsent() {
+        ReviewScope local = ReviewScopeRegistry.spec(ReviewScope.Kind.WORKING_TREE, Path.of("/repo"),
+                Optional.of(Path.of("/repo")), "main", "main", Optional.empty(), Optional.empty());
+        SessionReviewScopes.Scopes noPullRequest = new SessionReviewScopes.Scopes(local, Optional.empty());
+
+        assertEquals(local, noPullRequest.forChoice(SessionReviewScopes.Choice.PULL_REQUEST));
+    }
+
+    @Test
+    void choiceFromPersistedIsLenient() {
+        assertEquals(SessionReviewScopes.Choice.LOCAL, SessionReviewScopes.Choice.fromPersisted(null));
+        assertEquals(SessionReviewScopes.Choice.LOCAL, SessionReviewScopes.Choice.fromPersisted("not-a-choice"));
+        assertEquals(SessionReviewScopes.Choice.PULL_REQUEST,
+                SessionReviewScopes.Choice.fromPersisted("pull_request"));
+        assertEquals(SessionReviewScopes.Choice.PULL_REQUEST,
+                SessionReviewScopes.Choice.fromPersisted("Pull_Request"));
+    }
+
     // ---- fixtures, in the style of ReviewQueueServiceTest -------------------
 
     private static Path initCommittedRepo(Path parent) throws IOException, InterruptedException {
@@ -164,7 +259,7 @@ class SessionReviewScopesTest {
     }
 
     private static void runGit(Path repo, String... args) throws IOException, InterruptedException {
-        List<String> command = new java.util.ArrayList<>(List.of("git"));
+        List<String> command = new ArrayList<>(List.of("git"));
         command.addAll(List.of(args));
         Process process = new ProcessBuilder(command)
                 .directory(repo.toFile())
