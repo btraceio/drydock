@@ -73,11 +73,23 @@ three the queue and `openCheckedOutPr` mint today, for the same places.
 
 One easily-missed part of that: scope identity includes the PR number, and
 the queue mints a PR-holding worktree as `WORKTREE` **carrying its
-`PullRequestRef`**. So a local scope on a checkout whose branch has an open
-PR carries that ref too. Minting it with an empty ref would be a different
-identity, a different handle, and every finding already recorded there would
-silently vanish — the exact failure the registry's Javadoc was written
-about.
+`PullRequestRef`** — but only when the checkout's branch is the `pr-<n>`
+alias drydock's own checkout creates (`PrCheckoutService.pullRequestNumberOf`
+requires a literal `pr-` plus digits). A worktree on `feat/x` that happens to
+have an open pull request is minted with an **empty** ref; only its *base* is
+taken from the PR.
+
+The local scope reproduces that rule exactly: it carries the ref when the
+branch is the `pr-<n>` alias, and not otherwise. The wider rule — carry the
+ref whenever a PR exists — was considered and is wrong in a way worth
+recording, because it looks safer: identity would then flip the moment
+someone *opened* a pull request on a branch, and flip back when they merged
+it, so a session's findings would vanish and reappear on events that have
+nothing to do with the worktree. A `WORKING_TREE` scope on the main checkout
+never carries a ref at all, matching the queue.
+
+This is the failure the registry's Javadoc was written about, and the narrow
+rule is the one that avoids it.
 
 That a checked-out PR therefore has *two* handles — `WORKTREE` for the
 checkout and `PR` for the pull request — is today an accident of two code

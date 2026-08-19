@@ -23,7 +23,7 @@ Copied from `AGENTS.md` and the spec; every task's requirements implicitly inclu
 - **Shared presentation logic lives in `UiFormats` / `UiErrors`**, not per-view copies.
 - **Anything advertised in `ShortcutsOverlay` must actually be bound, and vice versa** (`ShortcutsOverlayParityTest` enforces it).
 - **Test command:** `./gradlew :app:test --tests "<pattern>"`. The full suite takes 14–20 minutes; run targeted `--tests` patterns per task and leave the full run to the end (Task 13).
-- **Scope kinds are fixed by the spec §3.2:** local scope on a worktree → `WORKTREE`; local scope on the repository's main checkout → `WORKING_TREE`; PR scope → `PR` carrying its worktree. A local scope on a checkout whose branch has an open PR **carries that `PullRequestRef`** — the ref is part of identity.
+- **Scope kinds are fixed by the spec §3.2:** local scope on a worktree → `WORKTREE`; local scope on the repository's main checkout → `WORKING_TREE`; PR scope → `PR` carrying its worktree. A local scope carries a `PullRequestRef` **only when the checkout's branch is the `pr-<n>` alias** (`PrCheckoutService.pullRequestNumberOf(branch)` is non-empty) — reproducing `ReviewQueueService.build` exactly. A worktree on an ordinary branch that happens to have an open PR, and the main checkout in every case, mint with an empty ref: the ref is part of identity, and attaching it on PR-open would make findings vanish and reappear as the PR's state changes. The PR *scope* is unaffected — it always carries its ref.
 
 ---
 
