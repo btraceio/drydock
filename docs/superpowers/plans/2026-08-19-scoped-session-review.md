@@ -926,16 +926,7 @@ public final class ReviewInstructions {
 }
 ```
 
-Widen `AgentCapabilities`:
-
-```java
-public record AgentCapabilities(boolean supportsRemote, boolean supportsResume,
-                                boolean supportsSubagents, String version) {
-    public AgentCapabilities {
-        Objects.requireNonNull(version, "version");
-    }
-}
-```
+`AgentCapabilities` is **not** touched — see the load-bearing paragraph above. An earlier draft of this task widened that record; it is the wrong home for this flag, because the record is produced by `probeCapabilities()`, which may spawn a process.
 
 Replace `MainWorkspace.reviewInstruction(ReviewScope)` (around :1943) with a call to `ReviewInstructions.forScope(scope.id(), agentRegistry.supportsSubagents(kind))`, where `kind` is the bound session's `agentKind()` — falling back to `false` when the scope has no bound session. This is what makes "Run review" on a session's own local changes use the subagent form, not only the pull-request flow in Task 12.
 
@@ -1750,7 +1741,7 @@ git commit -m "Review is invoked from the row you are looking at"
 - Test: `app/src/test/java/app/drydock/ui/PullRequestMaterializationTest.java`
 
 **Interfaces:**
-- Consumes: `PrCheckoutService` (`checkout(...)` — read its actual signature before writing the call), `StartSessionModal(String branch, Path worktreePath, AgentRegistry registry, AgentKind preselected, Runnable onClose, StartHandler onStart)` where `StartHandler.start(Optional<String> task, AgentKind agent, boolean eval)`, `SessionReviewScopes` (Task 3), `ReviewInstructions.forScope` (Task 4), `AgentCapabilities.supportsSubagents` (Task 4).
+- Consumes: `PrCheckoutService` (`checkout(...)` — read its actual signature before writing the call), `StartSessionModal(String branch, Path worktreePath, AgentRegistry registry, AgentKind preselected, Runnable onClose, StartHandler onStart)` where `StartHandler.start(Optional<String> task, AgentKind agent, boolean eval)`, `SessionReviewScopes` (Task 3), `ReviewInstructions.forScope` (Task 4), `AgentRegistry.supportsSubagents(AgentKind)` (Task 4).
 - Produces:
   - `sealed interface PullRequestMaterialization.Step` — `record Checkout(int prNumber)`, `record StartSession(Path worktree)`, `record OpenReview(Path worktree)`
   - `sealed interface PullRequestMaterialization.Failure` — `record CheckoutFailed(String message)` (nothing left behind), `record SessionFailed(Path worktree, String message)` (the worktree stays)
