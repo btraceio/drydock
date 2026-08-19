@@ -7,8 +7,9 @@ import app.drydock.review.ReviewScopeRegistry;
 import app.drydock.review.SessionReviewScopes;
 
 import javafx.scene.Scene;
+import javafx.scene.control.Button;
 import javafx.scene.control.Label;
-import javafx.scene.layout.BorderPane;
+import javafx.scene.layout.Pane;
 import javafx.scene.layout.Region;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
@@ -26,6 +27,7 @@ import java.util.Optional;
 import java.util.OptionalInt;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -46,30 +48,31 @@ class SessionReviewViewTest extends ApplicationTest {
     private final ReviewScopeRegistry registry = new ReviewScopeRegistry();
 
     private FakeReviewHost host;
-    private Stage stage;
 
     /**
-     * The Stage's size as this class found it. TestFX hands every class in the
-     * JVM the same primary Stage, so a class that resizes it -- and the layout
-     * test below must -- leaves every later class measuring ITS window. {@code
-     * ReviewDiffColumnWidthTest} sizes only its Scene and so inherits whatever
-     * width it is given; put back what was here rather than making it someone
-     * else's problem.
+     * The view under test is laid out inside this, at a width this class sets
+     * directly, rather than by resizing the window.
+     *
+     * <p>TestFX hands every class in the JVM the same primary Stage, so a
+     * class that resizes it leaves every later class measuring ITS window --
+     * {@code ReviewDiffColumnWidthTest} sizes only its Scene and inherits
+     * whatever width it is handed, and resizing the Stage here broke it. A
+     * bare {@link Pane} lays its children out at their preferred size, so
+     * setting the view's preferred width is a complete, local substitute for
+     * a window resize: the width property changes for real, the responsive
+     * listener runs for real, and nothing outside this class can observe
+     * that it happened.</p>
      */
-    private double incomingStageWidth = Double.NaN;
-    private double incomingStageHeight = Double.NaN;
+    private final Pane viewport = new Pane();
+
+    /** The view {@link #newView()} last built, for the width helpers. */
+    private SessionReviewView view;
     private Scene scene;
     private ReviewScope localScope;
     private ReviewScope prScope;
 
     @AfterEach
     void tearDown() {
-        if (stage != null && Double.isFinite(incomingStageWidth) && incomingStageWidth > 0) {
-            interact(() -> {
-                stage.setWidth(incomingStageWidth);
-                stage.setHeight(incomingStageHeight);
-            });
-        }
         diffService.close();
         host.store.close();
     }
@@ -90,20 +93,11 @@ class SessionReviewViewTest extends ApplicationTest {
                 "master", "feature/x",
                 Optional.of(new ReviewScope.PullRequestRef(42, Optional.empty())),
                 Optional.empty()));
-        scene = new Scene(new BorderPane(), SCENE_WIDTH, 900);
+        scene = new Scene(viewport, SCENE_WIDTH, 900);
         scene.getStylesheets().addAll(
                 getClass().getResource("/app/drydock/ui/app.css").toExternalForm(),
                 getClass().getResource("/app/drydock/ui/theme-dark.css").toExternalForm());
-        this.stage = stage;
         stage.setScene(scene);
-        incomingStageWidth = stage.getWidth();
-        incomingStageHeight = stage.getHeight();
-        // Explicit, because the harness reuses one Stage across the class: a
-        // stage a previous test left narrow keeps that width when this scene
-        // is installed, and every width assertion below would then be
-        // measuring the previous test's window.
-        stage.setWidth(SCENE_WIDTH);
-        stage.setHeight(900);
         stage.show();
     }
 
@@ -235,6 +229,68 @@ class SessionReviewViewTest extends ApplicationTest {
     }
 
     /**
+     * A restored diff must not still be filtered by the scope it replaced.
+     *
+     * <p>Fallback intent ids are keyed by (kind, directory) and nothing else,
+     * so the two scopes of one branch collide on them: both diffs here group
+     * into {@code auto:change:src}. {@code setIntent} early-returns on an
+     * equal id, so nothing downstream would repair a filter left pointing at
+     * the outgoing scope -- and because the hunk sets differ (which is the
+     * whole reason a local scope exists beside its PR), the column would
+     * render the incoming diff down to nothing, with no indication that it
+     * was hiding anything.</p>
+     */
+    @Test
+    void aRestoredScopeIsNotStillFilteredByTheScopeItReplaced() {
+        SessionReviewView view = newView();
+        interact(() -> {
+            view.diagPublishOutcome(localScope.id(),
+                    new DiffOutcome.Loaded(diffOf("src/A.java", "src/B.java")));
+            view.diagPublishOutcome(prScope.id(), new DiffOutcome.Loaded(diffOf("src/C.java")));
+        });
+        showScopes(view, new SessionReviewScopes.Scopes(localScope, Optional.of(prScope)),
+                SessionReviewScopes.Choice.LOCAL);
+        assertEquals(2, renderedHunkHeaders(), "the local scope's two files");
+
+        view.diagSelectChoice(SessionReviewScopes.Choice.PULL_REQUEST);
+
+        assertEquals(1, renderedHunkHeaders(),
+                "the PR's own file must be on screen, not filtered away by the local scope's intent");
+    }
+
+    /**
+     * The {@code ⤢} jump must keep working on a restored scope. It answers
+     * from the scope the rendered rows belong to, and a diff handed to the
+     * column rather than read by it leaves the column's LIVE scope null -- so
+     * a jump keyed on that one silently does nothing, which is precisely what
+     * the button's own design forbids ("says so on the button rather than
+     * doing nothing when clicked").
+     */
+    @Test
+    void theExplorerJumpStillWorksOnARestoredScope() {
+        SessionReviewView view = newView();
+        host.explorerAvailable = true;
+        interact(() -> {
+            view.diagPublishOutcome(localScope.id(), new DiffOutcome.Loaded(diffOf("src/A.java")));
+            view.diagPublishOutcome(prScope.id(), new DiffOutcome.Loaded(diffOf("src/C.java")));
+        });
+        showScopes(view, new SessionReviewScopes.Scopes(localScope, Optional.of(prScope)),
+                SessionReviewScopes.Choice.LOCAL);
+        view.diagSelectChoice(SessionReviewScopes.Choice.PULL_REQUEST);
+        view.diagSelectChoice(SessionReviewScopes.Choice.LOCAL);
+
+        // fire() rather than clickOn(): the button lives inside a virtualized
+        // ListView cell, so the robot's hit test depends on where the list
+        // happens to be scrolled (see ReviewDiffColumnTest).
+        Button explorer = (Button) lookup(".review-hunk-explorer").queryAll().iterator().next();
+        interact(explorer::fire);
+        WaitForAsyncUtils.waitForFxEvents();
+
+        assertEquals(List.of(Path.of("src/A.java")), host.explorerJumps);
+        assertFalse(explorer.isDisabled(), "the jump reached a session, so nothing should disable it");
+    }
+
+    /**
      * The one member the brief specified as rewritten rather than moved.
      * With the queue gone there are three columns, and the trade order is the
      * solver's: narrow both rails, then collapse the margin, then the intent
@@ -276,14 +332,21 @@ class SessionReviewViewTest extends ApplicationTest {
 
     // ---- fixtures -----------------------------------------------------------
 
-    /** A fresh view, built and installed on the FX thread as the app builds it. */
+    /**
+     * A fresh view, built and installed on the FX thread as the app builds it.
+     *
+     * <p>Its preferred width is pinned rather than left computed: the view's
+     * computed preference is the sum of the rails' widths, and collapsing a
+     * rail would shrink it, which would collapse another rail -- a layout
+     * loop that has nothing to do with what any of these tests measure.</p>
+     */
     private SessionReviewView newView() {
-        SessionReviewView[] created = new SessionReviewView[1];
         interact(() -> {
-            created[0] = new SessionReviewView(host, diffService, null);
-            scene.setRoot(created[0]);
+            view = new SessionReviewView(host, diffService, null);
+            view.setPrefSize(SCENE_WIDTH, 900);
+            viewport.getChildren().setAll(view);
         });
-        return created[0];
+        return view;
     }
 
     private void showScopes(SessionReviewView view, SessionReviewScopes.Scopes scopes,
@@ -308,8 +371,9 @@ class SessionReviewViewTest extends ApplicationTest {
         return text[0];
     }
 
+    /** Gives the view {@code width} to lay out in; see {@link #viewport}. */
     private void resizeTo(double width) {
-        interact(() -> stage.setWidth(width));
+        interact(() -> view.setPrefWidth(width));
         settledWidth(".review-findings-margin");
     }
 
@@ -325,6 +389,13 @@ class SessionReviewViewTest extends ApplicationTest {
             previous = current;
         }
         return previous;
+    }
+
+    /** How many hunk cards the column is actually rendering. */
+    private int renderedHunkHeaders() {
+        int[] count = new int[1];
+        interact(() -> count[0] = lookup(".review-hunk-header").queryAll().size());
+        return count[0];
     }
 
     private double railWidth(String selector) {

@@ -534,7 +534,9 @@ public final class SessionReviewView extends BorderPane {
      * completion for the outgoing scope is dropped rather than overwriting
      * this one, and it publishes under the scope it was read FOR -- which is
      * what keeps {@code displayedScopeId} equal to the selected scope, and so
-     * keeps {@link #submitReview} from refusing.</p>
+     * keeps {@link #submitReview} from refusing. What it does NOT do for
+     * itself is clear the outgoing scope's intent filter; this does, below,
+     * before handing it the diff.</p>
      *
      * <p>A scope with no checkout cannot be diffed at all ({@link
      * ReviewDiffColumn#setScope} rejects one, because the only diff obtainable
@@ -552,6 +554,17 @@ public final class SessionReviewView extends BorderPane {
         // Checked before diffability: a diff already in hand is renderable
         // whether or not git could be run for it again.
         if (outcomeByScope.get(scope.id()) instanceof DiffOutcome.Loaded loaded) {
+            // The outgoing scope's intent must not filter the incoming
+            // scope's diff -- the rule setScope enforces for itself, which
+            // showDiff does not, because it was written for a caller that
+            // never navigates. Left alone, the filter survives: fallback
+            // intent ids are not scope-namespaced ("auto:change:src" is just
+            // (kind, directory)), so the two scopes of one branch collide on
+            // them essentially always, and setIntent early-returns on an
+            // equal id -- leaving the restored column filtered by the OTHER
+            // scope's hunk ids, with its own files missing and nothing on
+            // screen to say so.
+            diffColumn.setIntent(null);
             diffColumn.showDiff(scope, loaded.diff());
             return diffColumn;
         }
