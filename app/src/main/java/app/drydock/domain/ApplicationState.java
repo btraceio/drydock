@@ -16,11 +16,8 @@ import java.util.Objects;
  * written one simply has no entry.</p>
  *
  * <p>{@code sessions} holds only the persisted {@link ManagedAgentSession}
- * metadata (plan section 10.2). It deliberately does not yet include any
- * open-tab/UI-open-state tracking -- that belongs to {@link WorkspaceUiState}
- * in a later milestone step, once the terminal-tab UI itself exists (plan
- * rule 27.2: do not scaffold later milestones before the current one
- * works).</p>
+ * metadata (plan section 10.2). Open-tab order and the active tab are kept
+ * in {@link WorkspaceUiState} and restored at startup.</p>
  */
 public record ApplicationState(
         List<Repository> repositories,

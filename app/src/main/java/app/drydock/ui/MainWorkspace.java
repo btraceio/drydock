@@ -81,6 +81,7 @@ import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.Node;
 import javafx.scene.control.Alert;
+import javafx.scene.control.Alert.AlertType;
 import javafx.scene.control.Button;
 import javafx.scene.control.ButtonType;
 import javafx.scene.control.Label;
@@ -89,6 +90,7 @@ import javafx.scene.control.MenuItem;
 import javafx.scene.control.ProgressIndicator;
 import javafx.scene.control.Tab;
 import javafx.scene.control.TabPane;
+import javafx.scene.control.TextArea;
 import javafx.scene.control.TextInputControl;
 import javafx.scene.control.TextInputDialog;
 import javafx.scene.control.Tooltip;
@@ -109,9 +111,11 @@ import java.io.File;
 import java.io.IOException;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.HashSet;
 import java.util.HashMap;
 import java.util.List;
@@ -300,6 +304,20 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     private final Map<ManagedSessionId, OpenSessionTab> openTabs = new LinkedHashMap<>();
 
     /**
+     * Session ids that are being restored from the previous launch. Tabs
+     * added/removed while this set is non-empty are tracked so the
+     * persisted open-session list converges as each async resume completes,
+     * without recording the transient pending placeholders.
+     */
+    private final Set<ManagedSessionId> restoringSessionIds = new LinkedHashSet<>();
+
+    /**
+     * The session that should be selected once it finishes restoring; the
+     * first attach/remove that matches this id clears it.
+     */
+    private Optional<ManagedSessionId> pendingRestoreSelection = Optional.empty();
+
+    /**
      * Placeholder tabs for sessions whose open/resume is still in flight
      * (registered in {@link #openTabs} only once the surface attaches). A
      * second resume request arriving in that window must focus the pending
@@ -483,6 +501,9 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             // Tab selection only moves the active-row highlight; the model
             // turns this into activeSessionChanged, never a tree rebuild.
             viewModel.setActiveSession(activeSessionId());
+            if (restoringSessionIds.isEmpty()) {
+                repositoryManager.updateSelectedSession(activeSessionId());
+            }
             // Every selection path funnels through here, so this is the one
             // place a "needs you" badge has to be cleared.
             acknowledgeActivity(activeSessionId());
@@ -490,6 +511,9 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         tabPane.getTabs().addListener((ListChangeListener<Tab>) change -> {
             pinReviewTabLeftmost();
             updatePickerVisibility();
+            if (restoringSessionIds.isEmpty()) {
+                persistOpenSessionIds();
+            }
         });
         stage.focusedProperty().addListener((obs, wasFocused, isFocused) -> {
             if (isFocused) {
@@ -923,9 +947,95 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         return currentlySelected().map(OpenSessionTab::sessionId);
     }
 
+    /**
+     * Persists the current tab-strip order of open session tabs (Review is
+     * filtered out). Called from tab open/close/reorder and from the restore
+     * completion path.
+     */
+    private void persistOpenSessionIds() {
+        List<ManagedSessionId> ids = tabPane.getTabs().stream()
+                .filter(tab -> tab != reviewTab)
+                .map(this::sessionIdForTab)
+                .flatMap(Optional::stream)
+                .toList();
+        repositoryManager.updateOpenSessions(ids);
+    }
+
+    private Optional<ManagedSessionId> sessionIdForTab(Tab tab) {
+        return openTabs.entrySet().stream()
+                .filter(e -> e.getValue().tab == tab)
+                .map(Map.Entry::getKey)
+                .findFirst();
+    }
+
     /** Back / Esc from a session: deselect the tab, revealing the resume picker (handoff section 6). */
     public void showPicker() {
         tabPane.getSelectionModel().clearSelection();
+    }
+
+    /**
+     * Restores the open session tabs from the persisted workspace UI state.
+     * Sessions whose working directory no longer exist are skipped and reported
+     * in one consolidated warning dialog. The previously-selected tab is
+     * re-selected once its resume completes.
+     */
+    public void restoreOpenSessions() {
+        WorkspaceUiState ui = repositoryManager.state().ui();
+        List<ManagedSessionId> ids = ui.openSessionIds();
+        Optional<ManagedSessionId> selected = ui.selectedSessionId();
+        if (ids.isEmpty() && selected.isEmpty()) {
+            return;
+        }
+
+        List<String> skipped = new ArrayList<>();
+        restoringSessionIds.clear();
+        pendingRestoreSelection = selected.filter(ids::contains);
+        for (ManagedSessionId id : ids) {
+            Optional<ManagedAgentSession> session = sessionManager.sessions().stream()
+                    .filter(s -> s.id().equals(id))
+                    .findFirst();
+            if (session.isEmpty()) {
+                skipped.add("Session " + id + " no longer exists");
+                continue;
+            }
+            ManagedAgentSession s = session.get();
+            if (!Files.exists(s.workingDirectory())) {
+                skipped.add("\"" + s.displayName() + "\" — working directory missing: " + s.workingDirectory());
+                continue;
+            }
+            restoringSessionIds.add(id);
+            resumeSession(s);
+        }
+
+        // A selected session that is itself skipped can never be re-selected,
+        // so drop the pending target rather than leaving it to match an unrelated
+        // future open.
+        pendingRestoreSelection = pendingRestoreSelection.filter(restoringSessionIds::contains);
+
+        if (!skipped.isEmpty()) {
+            showRestoreWarning(skipped);
+        }
+    }
+
+    private void showRestoreWarning(List<String> skipped) {
+        Alert alert = new Alert(AlertType.WARNING);
+        if (getScene() != null && getScene().getWindow() != null) {
+            alert.initOwner(getScene().getWindow());
+        }
+        alert.setTitle("Could not restore some sessions");
+        alert.setHeaderText(skipped.size() + " session" + (skipped.size() == 1 ? "" : "s") + " were not restored");
+
+        StringBuilder body = new StringBuilder();
+        body.append("The following sessions were open when Drydock last closed, but their working directories are missing or the sessions no longer exist:\n\n");
+        for (String reason : skipped) {
+            body.append("• ").append(reason).append("\n");
+        }
+        TextArea details = new TextArea(body.toString());
+        details.setEditable(false);
+        details.setWrapText(true);
+        details.setPrefRowCount(Math.min(12, skipped.size() + 3));
+        alert.getDialogPane().setContent(details);
+        alert.showAndWait();
     }
 
     /** ⌘1: switches the selected session tab to its Claude sub-tab. */
@@ -2968,10 +3078,11 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             case SessionOpenResult.AlreadyOpen alreadyOpen -> {
                 // The placeholder's app/host were never handed a surface (SessionManager's
                 // checkResumeBlocked short-circuits before creating one); discard them.
-                removeTab(placeholderTab);
                 OpenSessionTab existing = openTabs.get(alreadyOpen.activeSessionId());
+                removeTab(placeholderTab);
                 if (existing != null) {
                     tabPane.getSelectionModel().select(existing.tab);
+                    noteRestoredSession(alreadyOpen.activeSessionId(), existing.tab);
                 } else {
                     LOG.log(Level.WARNING, "AlreadyOpen reported active session {0} but no tab is tracking it",
                             alreadyOpen.activeSessionId());
@@ -3071,7 +3182,22 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 && tabPane.getSelectionModel().getSelectedItem() == placeholderTab.tab);
         opened.session().worktreeRoot().ifPresent(root ->
                 worktreeLifecycle.setupWorktreeHeader(placeholderTab, opened.session().id(), root));
+        if (restoringSessionIds.remove(opened.session().id())) {
+            persistOpenSessionIds();
+        }
+        noteRestoredSession(opened.session().id(), placeholderTab.tab);
         publishSessions();
+    }
+
+    /**
+     * If the just-restored session is the one we intended to activate,
+     * select its tab now and clear the pending target.
+     */
+    private void noteRestoredSession(ManagedSessionId sessionId, Tab tab) {
+        if (pendingRestoreSelection.isPresent() && pendingRestoreSelection.get().equals(sessionId)) {
+            tabPane.getSelectionModel().select(tab);
+            pendingRestoreSelection = Optional.empty();
+        }
     }
 
     // ---- Worktree lifecycle (handoff section B) -----------------------------
@@ -3539,6 +3665,9 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         openTabs.remove(openTab.sessionId(), openTab);
         pendingTabs.remove(openTab.sessionId(), openTab);
         exitRecorded.remove(openTab.sessionId());
+        if (restoringSessionIds.remove(openTab.sessionId())) {
+            persistOpenSessionIds();
+        }
         openTab.disposeNativeResources();
     }
 

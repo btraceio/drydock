@@ -1,6 +1,11 @@
 package app.drydock.domain;
 
+import app.drydock.domain.ManagedSessionId;
 import org.junit.jupiter.api.Test;
+
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -19,6 +24,14 @@ class WorkspaceUiStateTest {
     }
 
     @Test
+    void emptyHasNoOpenSessionsOrSelectedSession() {
+        WorkspaceUiState empty = WorkspaceUiState.empty();
+
+        assertEquals(List.of(), empty.openSessionIds());
+        assertEquals(Optional.empty(), empty.selectedSessionId());
+    }
+
+    @Test
     void withUiFontSizeLeavesEveryOtherFieldAlone() {
         WorkspaceUiState updated = WorkspaceUiState.empty()
                 .withSidebarWidth(300)
@@ -29,6 +42,7 @@ class WorkspaceUiStateTest {
         assertEquals(300, updated.sidebarWidth());
         assertEquals(UiTheme.LIGHT, updated.theme());
         assertEquals(13.0, updated.terminalFontSize());
+        assertEquals(List.of(), updated.openSessionIds());
     }
 
     @Test
@@ -39,5 +53,28 @@ class WorkspaceUiStateTest {
 
         assertEquals(16, updated.uiFontSize());
         assertEquals(11, updated.terminalFontSize());
+    }
+
+    @Test
+    void withOpenSessionIdsReplacesTheListAndLeavesSelectionAlone() {
+        ManagedSessionId first = ManagedSessionId.newId();
+        ManagedSessionId second = ManagedSessionId.newId();
+        WorkspaceUiState updated = WorkspaceUiState.empty()
+                .withSelectedSessionId(Optional.of(first))
+                .withOpenSessionIds(List.of(first, second));
+
+        assertEquals(List.of(first, second), updated.openSessionIds());
+        assertEquals(Optional.of(first), updated.selectedSessionId());
+    }
+
+    @Test
+    void withSelectedSessionIdLeavesOpenSessionsAlone() {
+        ManagedSessionId id = ManagedSessionId.newId();
+        WorkspaceUiState updated = WorkspaceUiState.empty()
+                .withOpenSessionIds(List.of(id))
+                .withSelectedSessionId(Optional.of(id));
+
+        assertEquals(List.of(id), updated.openSessionIds());
+        assertEquals(Optional.of(id), updated.selectedSessionId());
     }
 }

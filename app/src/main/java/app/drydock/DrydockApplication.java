@@ -471,6 +471,11 @@ public final class DrydockApplication extends Application {
 
         primaryStage.show();
 
+        // Restore the open session tabs from the previous launch after the
+        // main window is visible, so the user sees the initial UI before
+        // tabs start re-opening one by one.
+        mainWorkspace.restoreOpenSessions();
+
         // Diagnostic hook for automated visual verification (screenshot
         // tests): registers app.drydock.diag.repo and immediately opens a new
         // Claude session in it, so a headless driver can exercise the real

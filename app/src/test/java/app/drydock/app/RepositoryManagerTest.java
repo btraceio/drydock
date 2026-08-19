@@ -1,10 +1,12 @@
 package app.drydock.app;
 
 import app.drydock.domain.ApplicationState;
+import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SshRemote;
 import app.drydock.domain.UiTheme;
+import app.drydock.domain.WorkspaceUiState;
 import app.drydock.git.GitExecutableLocator;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.NotAGitRepositoryException;
@@ -20,6 +22,7 @@ import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
 
@@ -183,6 +186,46 @@ class RepositoryManagerTest {
 
         assertEquals(11.0, manager.state().ui().terminalFontSize());
         assertEquals(15.0, manager.state().ui().uiFontSize());
+    }
+
+    @Test
+    void updateOpenSessionsAndSelectedSessionPersist() {
+        ManagedSessionId first = ManagedSessionId.newId();
+        ManagedSessionId second = ManagedSessionId.newId();
+
+        manager.updateOpenSessions(List.of(first, second));
+        manager.updateSelectedSession(Optional.of(first));
+        flushState();
+
+        assertEquals(List.of(first, second), stateRepository.savedState().ui().openSessionIds());
+        assertEquals(Optional.of(first), stateRepository.savedState().ui().selectedSessionId());
+    }
+
+    @Test
+    void updateOpenSessionsLeavesOtherUiFieldsAlone() {
+        manager.updateTheme(UiTheme.LIGHT);
+        manager.updateSidebarWidth(400.0);
+        ManagedSessionId id = ManagedSessionId.newId();
+
+        manager.updateOpenSessions(List.of(id));
+        flushState();
+
+        WorkspaceUiState ui = stateRepository.savedState().ui();
+        assertEquals(UiTheme.LIGHT, ui.theme());
+        assertEquals(400.0, ui.sidebarWidth());
+        assertEquals(List.of(id), ui.openSessionIds());
+    }
+
+    @Test
+    void updateSelectedSessionLeavesOtherUiFieldsAlone() {
+        manager.updateTheme(UiTheme.LIGHT);
+        ManagedSessionId id = ManagedSessionId.newId();
+
+        manager.updateSelectedSession(Optional.of(id));
+        flushState();
+
+        assertEquals(UiTheme.LIGHT, stateRepository.savedState().ui().theme());
+        assertEquals(Optional.of(id), stateRepository.savedState().ui().selectedSessionId());
     }
 
     private static final class InMemoryStateRepository implements ApplicationStateRepository {

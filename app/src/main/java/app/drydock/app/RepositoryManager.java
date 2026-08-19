@@ -2,6 +2,7 @@ package app.drydock.app;
 
 import app.drydock.domain.ApplicationState;
 import app.drydock.domain.UiTheme;
+import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryCatalog;
 import app.drydock.domain.RepositoryId;
@@ -14,6 +15,7 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 
@@ -164,6 +166,16 @@ public final class RepositoryManager {
         if (removed[0]) {
             notifyChanged();
         }
+    }
+
+    /** Persists the order of open session tabs (tab-strip order, including drag-reorder). */
+    public void updateOpenSessions(List<ManagedSessionId> openSessionIds) {
+        stateStore.update(state -> state.withUi(state.ui().withOpenSessionIds(openSessionIds)));
+    }
+
+    /** Persists which session tab was active when the app shut down. */
+    public void updateSelectedSession(Optional<ManagedSessionId> selectedSessionId) {
+        stateStore.update(state -> state.withUi(state.ui().withSelectedSessionId(selectedSessionId)));
     }
 
     /**

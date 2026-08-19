@@ -92,7 +92,9 @@ import java.util.Set;
  *     "expandedRepositoryIds": ["<uuid>", ...],
  *     "theme": "DARK" | "LIGHT",
  *     "uiFontSize": 13.0,
- *     "terminalFontSize": 13.0
+ *     "terminalFontSize": 13.0,
+ *     "openSessionIds": ["<uuid>", ...],
+ *     "selectedSessionId": "<uuid>" | null
  *   }
  * }
  * }</pre>
@@ -145,6 +147,10 @@ import java.util.Set;
  * <em>brief</em> entry is dropped rather than throwing -- unlike a malformed
  * session, which still fails the decode: a session is the user's work, a brief
  * is only a note about it, so one bad note must not cost the whole state file.
+ * The {@code openSessionIds} and {@code selectedSessionId} members
+ * (session tab restoration) were likewise added leniently within version 2:
+ * absent or malformed values decode to an empty list and no selection, so
+ * no version bump was needed and older builds simply reopen with no tabs.
  * No version bump was needed and downgrades stay non-destructive.</p>
  */
 public final class ApplicationStateCodec {
@@ -254,10 +260,10 @@ public final class ApplicationStateCodec {
 
     private static JsonValue uiToJson(WorkspaceUiState ui) {
         JsonObject obj = JsonObject.empty();
-        JsonValue selected = ui.selectedRepositoryId()
+        JsonValue selectedRepo = ui.selectedRepositoryId()
                 .<JsonValue>map(id -> new JsonString(id.value().toString()))
                 .orElse(JsonValue.JsonNull.INSTANCE);
-        obj.put("selectedRepositoryId", selected);
+        obj.put("selectedRepositoryId", selectedRepo);
         obj.put("sidebarWidth", JsonNumber.of(ui.sidebarWidth()));
 
         List<JsonValue> expanded = new ArrayList<>();
@@ -268,6 +274,17 @@ public final class ApplicationStateCodec {
         obj.put("theme", new JsonString(ui.theme().name()));
         obj.put("uiFontSize", JsonNumber.of(ui.uiFontSize()));
         obj.put("terminalFontSize", JsonNumber.of(ui.terminalFontSize()));
+
+        List<JsonValue> openSessions = new ArrayList<>();
+        for (ManagedSessionId id : ui.openSessionIds()) {
+            openSessions.add(new JsonString(id.value().toString()));
+        }
+        obj.put("openSessionIds", new JsonArray(openSessions));
+
+        JsonValue selectedSession = ui.selectedSessionId()
+                .<JsonValue>map(id -> new JsonString(id.value().toString()))
+                .orElse(JsonValue.JsonNull.INSTANCE);
+        obj.put("selectedSessionId", selectedSession);
         return obj;
     }
 
@@ -526,7 +543,25 @@ public final class ApplicationStateCodec {
                 ? n.asDouble()
                 : WorkspaceUiState.DEFAULT_TERMINAL_FONT_SIZE;
 
-        return new WorkspaceUiState(selected, sidebarWidth, expanded, theme, uiFontSize, terminalFontSize);
+        // Cosmetic: absent in documents written before session-tab
+        // restoration existed; malformed ids are skipped rather than failing
+        // the whole state decode.
+        List<ManagedSessionId> openSessionIds = new ArrayList<>();
+        if (obj.get("openSessionIds") instanceof JsonArray arr) {
+            for (JsonValue element : arr.elements()) {
+                if (element instanceof JsonString s) {
+                    parseSessionId(s.value()).ifPresent(openSessionIds::add);
+                }
+            }
+        }
+
+        Optional<ManagedSessionId> selectedSessionId = Optional.empty();
+        if (obj.get("selectedSessionId") instanceof JsonString s) {
+            selectedSessionId = parseSessionId(s.value());
+        }
+
+        return new WorkspaceUiState(selected, sidebarWidth, expanded, theme, uiFontSize, terminalFontSize,
+                openSessionIds, selectedSessionId);
     }
 
     private static int readSchemaVersion(JsonObject root) {
