@@ -7,7 +7,6 @@ import app.drydock.domain.ApplicationState;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.Repository;
-import app.drydock.domain.RepositoryId;
 import app.drydock.git.GhCliService;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.WorktreeService;
@@ -41,6 +40,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -160,11 +160,25 @@ class RepositorySidebarPullRequestDedupFxTest extends ApplicationTest {
         clickRescan();
 
         awaitCallCount(2, "the rescan's own PR scan, fired directly by the ⟳ click");
-        // This is the ⟳ race itself: the worktree rescan the SAME click
-        // started is a real, fast `git worktree list` and may already have
-        // landed. Either way, the view model's worktree list at the moment
-        // of THIS call must still be whatever it was before the click --
-        // the click-triggered scan does not itself wait for discovery.
+        assertFalse(hasPr7(worktreeListAt(1)),
+                "the ⟳ click's own PR scan runs in the click handler, before its worktree "
+                        + "rescan can possibly have landed: it must have been launched against "
+                        + "the stale, pre-rescan worktree list");
+
+        // Force the overlap this whole mechanism exists for, instead of
+        // hoping for it: hold the ⟳'s PR scan open (call #2 is still
+        // uncompleted) until the worktree rescan the SAME click started has
+        // actually landed its new list. That is precisely the window in
+        // which refreshPullRequests is re-entered with a scan in flight --
+        // the only window pendingPullRequestRescan is ever exercised in.
+        // Without this wait, a fast `git worktree list` losing a race
+        // against a few FX pulses would land the worktree list AFTER call
+        // #2 completed, the re-scan would come from the ordinary
+        // (non-pending) path, and reverting the pending mechanism would
+        // still pass.
+        awaitCondition(this::viewModelSeesPr7Worktree,
+                "the ⟳'s worktree rescan landing while its PR scan is still in flight");
+
         source.complete(1, listing(pr(7, "Fix login", "pr-7")));
         WaitForAsyncUtils.waitForFxEvents();
 
@@ -173,10 +187,10 @@ class RepositorySidebarPullRequestDedupFxTest extends ApplicationTest {
         // drops): a third call, made only once the view model's worktree
         // list has actually caught up.
         awaitCallCount(3, "the re-scan the worktree rescan's completion queues once the list changed");
-        assertTrue(worktreeListAt(2).stream().anyMatch(worktree -> worktree.branch().equals(Optional.of("pr-7"))),
-                "the third scan must be launched only once the view model's own worktree list "
-                        + "already includes the pr-7 checkout -- capturing the argument indirectly, "
-                        + "since RepositoryPullRequests.Source does not carry the worktree list itself");
+        assertTrue(hasPr7(worktreeListAt(2)),
+                "the third scan must be launched with the worktree list that already includes "
+                        + "the pr-7 checkout -- captured inside the Source at the moment that "
+                        + "call was made, not re-read now");
         source.complete(2, listing(pr(7, "Fix login", "pr-7")));
         WaitForAsyncUtils.waitForFxEvents();
 
@@ -213,9 +227,15 @@ class RepositorySidebarPullRequestDedupFxTest extends ApplicationTest {
 
         // N2: the worktree rescan's completion notices the list changed
         // but must NOT spawn a third scan while the repo stays collapsed.
-        // Give the real (fast, local) `git worktree list` ample time to
-        // land, then assert nothing more was asked.
-        Thread.sleep(1500);
+        // Wait on the observable rather than on the clock: once the view
+        // model holds the new list, the runLater that wrote it -- and
+        // therefore the collapsed-vs-rescan decision it makes right
+        // afterwards, in the same FX task -- has already run to completion
+        // (viewModelSeesPr7Worktree drains the FX queue). A fixed sleep
+        // instead passes vacuously on any machine where `git worktree list`
+        // outlasts it.
+        awaitCondition(this::viewModelSeesPr7Worktree,
+                "the collapsed repo's worktree rescan landing its new list");
         assertEquals(2, source.callCount(),
                 "a collapsed repo's worktree change must not spawn an automatic PR scan on its own (N2)");
 
@@ -225,7 +245,7 @@ class RepositorySidebarPullRequestDedupFxTest extends ApplicationTest {
         // collapsed skip above) and rescan -- otherwise PR #7 keeps a row
         // despite now having a local worktree, forever.
         awaitCallCount(3, "the rescan B1 fires on expand for a repo marked stale while collapsed");
-        assertTrue(worktreeListAt(2).stream().anyMatch(worktree -> worktree.branch().equals(Optional.of("pr-7"))),
+        assertTrue(hasPr7(worktreeListAt(2)),
                 "the expand-triggered rescan must use the worktree list that already includes pr-7");
         source.complete(2, listing(pr(7, "Fix login", "pr-7")));
         WaitForAsyncUtils.waitForFxEvents();
@@ -319,7 +339,24 @@ class RepositorySidebarPullRequestDedupFxTest extends ApplicationTest {
     }
 
     private List<WorktreeService.Worktree> worktreeListAt(int callIndex) {
-        return source.worktreeSnapshotAt(callIndex, viewModel, repository.id());
+        return source.worktreeSnapshotAt(callIndex);
+    }
+
+    /**
+     * The view model's own worktree list, read on the FX thread (it is a
+     * plain HashMap the FX thread writes; {@code interact} also drains the
+     * FX queue first, so a true answer here means the runLater that landed
+     * the new list has already finished -- including whatever it decided to
+     * do about the PR scan).
+     */
+    private boolean viewModelSeesPr7Worktree() {
+        AtomicBoolean seen = new AtomicBoolean();
+        interact(() -> seen.set(hasPr7(viewModel.worktrees(repository.id()).orElse(List.of()))));
+        return seen.get();
+    }
+
+    private static boolean hasPr7(List<WorktreeService.Worktree> worktrees) {
+        return worktrees.stream().anyMatch(worktree -> worktree.branch().equals(Optional.of("pr-7")));
     }
 
     // ---- fixtures -----------------------------------------------------------
@@ -352,16 +389,32 @@ class RepositorySidebarPullRequestDedupFxTest extends ApplicationTest {
      * {@link #complete}, so the test controls exactly when each scan
      * "returns from gh" relative to the real async worktree discovery
      * happening concurrently underneath it.
+     *
+     * <p>Non-static on purpose: {@link #forRepository} records the worktree
+     * list each scan was launched with, per call, which needs the outer
+     * test's view model.</p>
      */
-    private static final class ControlledSource implements RepositoryPullRequests.Source {
+    private final class ControlledSource implements RepositoryPullRequests.Source {
         private final List<CompletableFuture<GhCliService.PullRequestListing>> futures = new CopyOnWriteArrayList<>();
         private final List<Path> roots = new CopyOnWriteArrayList<>();
+        private final List<List<WorktreeService.Worktree>> worktreeSnapshots = new CopyOnWriteArrayList<>();
         private final AtomicInteger calls = new AtomicInteger();
 
         @Override
         public CompletableFuture<GhCliService.PullRequestListing> forRepository(Path repositoryRoot) {
-            calls.incrementAndGet();
+            // RepositoryPullRequests.scan calls this synchronously, on the
+            // FX thread, in the very same call in which
+            // refreshPullRequests read viewModel.worktrees(id) and passed
+            // it in -- so what the view model holds RIGHT NOW is exactly
+            // the list this scan will dedup against. (The Source interface
+            // itself does not carry that argument: scan applies the
+            // worktree list after the listing comes back, not before asking
+            // for it. Recording it here is what makes the assertion below a
+            // real capture of THIS call's argument rather than a re-read at
+            // assertion time, which any implementation would pass.)
+            worktreeSnapshots.add(worktreesFor(repositoryRoot));
             roots.add(repositoryRoot);
+            calls.incrementAndGet();
             CompletableFuture<GhCliService.PullRequestListing> future = new CompletableFuture<>();
             futures.add(future);
             return future;
@@ -379,22 +432,20 @@ class RepositorySidebarPullRequestDedupFxTest extends ApplicationTest {
             futures.get(index).complete(listing);
         }
 
-        /**
-         * The view model's worktree list at the moment this test asks --
-         * not literally "at the time of the call" (the {@code Source}
-         * interface does not carry that argument at all, since {@code
-         * RepositoryPullRequests.scan} applies the worktree list AFTER the
-         * listing comes back, not before asking for it), but the closest
-         * available proxy: by the time call {@code index} exists, {@code
-         * refreshPullRequests} has already read {@code
-         * viewModel.worktrees(id)} synchronously to make that very call, so
-         * this is what it read.
-         */
-        List<WorktreeService.Worktree> worktreeSnapshotAt(int index, WorkspaceViewModel viewModel,
-                                                           RepositoryId repositoryId) {
+        /** The worktree list scan {@code index} was actually launched with, captured when it was made. */
+        List<WorktreeService.Worktree> worktreeSnapshotAt(int index) {
             assertTrue(index < callCount(), "no such call yet");
-            return viewModel.worktrees(repositoryId).orElse(List.of());
+            return worktreeSnapshots.get(index);
         }
+    }
+
+    /** The view model's worktree list for the repository rooted at {@code root} -- FX-thread only. */
+    private List<WorktreeService.Worktree> worktreesFor(Path root) {
+        return repositoryManager.repositories().stream()
+                .filter(candidate -> candidate.root().equals(root))
+                .findFirst()
+                .flatMap(candidate -> viewModel.worktrees(candidate.id()))
+                .orElse(List.of());
     }
 
     /** Every method a no-op: this test drives the tree, never the navigator. */

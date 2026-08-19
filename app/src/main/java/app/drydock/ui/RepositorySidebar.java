@@ -1004,16 +1004,6 @@ public final class RepositorySidebar extends VBox {
     }
 
     /**
-     * A {@code PullRequestGroupNode}'s TreeItem, unlike every other child
-     * row, holds real {@code PullRequestNode} children -- one per pull
-     * request in a landed {@code Rows} outcome, none for {@code
-     * Unavailable} -- rather than being a leaf, so the TreeView's own
-     * expand/collapse drives it. Starts collapsed; its expand state
-     * survives rebuilds in {@link #pullRequestsExpanded}, the same way a
-     * repository row's does in {@link #collapsed}. Empty for every other
-     * {@code SidebarNode}, so the caller falls back to a plain leaf item.
-     */
-    /**
      * Whether {@code repository} is due for a PR scan right now, at either
      * of the two places {@code rebuildTree} asks: on repository add (a
      * newly built, expanded {@code TreeItem}) and on repo-row expand. True
@@ -1029,6 +1019,16 @@ public final class RepositorySidebar extends VBox {
                 || pullRequestsStale.contains(repository.id());
     }
 
+    /**
+     * A {@code PullRequestGroupNode}'s TreeItem, unlike every other child
+     * row, holds real {@code PullRequestNode} children -- one per pull
+     * request in a landed {@code Rows} outcome, none for {@code
+     * Unavailable} -- rather than being a leaf, so the TreeView's own
+     * expand/collapse drives it. Starts collapsed; its expand state
+     * survives rebuilds in {@link #pullRequestsExpanded}, the same way a
+     * repository row's does in {@link #collapsed}. Empty for every other
+     * {@code SidebarNode}, so the caller falls back to a plain leaf item.
+     */
     private Optional<TreeItem<SidebarNode>> pullRequestGroupItem(SidebarNode child, Repository repository) {
         if (!(child instanceof SidebarNode.PullRequestGroupNode groupNode)) {
             return Optional.empty();
@@ -1138,8 +1138,20 @@ public final class RepositorySidebar extends VBox {
                     Repository repository = groupNode.repository();
                     pullRequestGroupNodeFor(repository).ifPresent(fresh -> {
                         if (fresh instanceof SidebarNode.PullRequestGroupNode freshGroup) {
-                            child.getChildren().setAll(pullRequestChildItems(
-                                    freshGroup.outcome(), repository, pullRequestNarrowQuery(repository)));
+                            List<TreeItem<SidebarNode>> freshChildren = pullRequestChildItems(
+                                    freshGroup.outcome(), repository, pullRequestNarrowQuery(repository));
+                            // Most calls here repaint content that did not
+                            // change at all -- a completion whose outcome
+                            // matched what was stored, and the group's own
+                            // expand/collapse listener (which only needs the
+                            // caret redrawn). A setAll on those replaces every
+                            // child TreeItem with an equal-but-new instance,
+                            // which drops TreeView selection/focus off a PR row
+                            // every time the user toggles the group. TreeItem
+                            // has identity equals, so compare the VALUES.
+                            if (!nodeValuesOf(child.getChildren()).equals(nodeValuesOf(freshChildren))) {
+                                child.getChildren().setAll(freshChildren);
+                            }
                         }
                         child.setValue(fresh);
                     });
@@ -1148,6 +1160,11 @@ public final class RepositorySidebar extends VBox {
             }
             return;
         }
+    }
+
+    /** The {@code SidebarNode} values of {@code items}, in order -- records, so this compares by content. */
+    private static List<SidebarNode> nodeValuesOf(List<TreeItem<SidebarNode>> items) {
+        return items.stream().map(TreeItem::getValue).toList();
     }
 
     /**
