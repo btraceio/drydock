@@ -45,7 +45,6 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
 import java.util.function.BiConsumer;
-import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -192,14 +191,6 @@ final class OpenSessionTab {
     private Runnable onPreviousSessionTab = () -> { };
     private Runnable onNextSessionTab = () -> { };
     private Runnable onToggleSidebar = () -> { };
-    /**
-     * Told when {@link #showReviewSubTab} is asked to land on a particular
-     * scope choice, so the workspace (the "host" {@link #showReviewSubTab}'s
-     * Javadoc refers to) can resolve this session's {@link
-     * SessionReviewScopes} and push them into {@link #reviewView()}. Not
-     * wired to real scopes in this task -- see {@code showReviewSubTab}.
-     */
-    private Consumer<SessionReviewScopes.Choice> onReviewScopeRequested = choice -> { };
 
     private String displayName;
 
@@ -399,23 +390,16 @@ final class OpenSessionTab {
     }
 
     /**
-     * Selects the Review sub-tab and asks the host to resolve {@code
-     * choice}'s scopes for this session, via whichever handler {@link
-     * #setOnReviewScopeRequested} was given.
-     *
-     * <p>This task builds, hosts, disposes and badges the view only --
-     * scope resolution is Task 11's, so the handler defaults to a no-op and
-     * the view shows nothing until something wires it and calls {@link
-     * SessionReviewView#showScopes}.</p>
+     * Selects the Review sub-tab, on the way to landing on {@code choice}'s
+     * scope. This task builds, hosts, disposes and badges the view only --
+     * asking the host to actually resolve {@code choice} into {@link
+     * SessionReviewScopes} and push them into {@link #reviewView()} via
+     * {@link SessionReviewView#showScopes} is Task 11's, which is free to
+     * shape that hand-off however it needs (a callback here, a scope pushed
+     * in some other way) once it exists to call this.
      */
     void showReviewSubTab(SessionReviewScopes.Choice choice) {
         showSubTab(SubTab.REVIEW);
-        onReviewScopeRequested.accept(choice);
-    }
-
-    /** Wires the handler {@link #showReviewSubTab} asks to resolve a session's review scopes. */
-    void setOnReviewScopeRequested(Consumer<SessionReviewScopes.Choice> handler) {
-        this.onReviewScopeRequested = handler == null ? choice -> { } : handler;
     }
 
     /**
@@ -545,6 +529,12 @@ final class OpenSessionTab {
             if (shellBridge != null) {
                 shellBridge.setTerminalSubTabActive(false);
             }
+            // Mirrors MainWorkspace's own onShown() call for the global
+            // destination: the board's whole single-letter keyboard table
+            // (a/r/u/[/]/n/m/i/f/d/\/?) is an addEventFilter on itself, so it
+            // is dead until something is focused inside it, and the button
+            // that got us here is deliberately not focus-traversable.
+            view.onShown();
             return;
         }
         // CLAUDE or TERMINAL: show the corresponding native surface, hide the other.
@@ -1258,12 +1248,17 @@ final class OpenSessionTab {
     void disposeNativeResources() {
         bridge.host().embeddedNode().ifPresent(placeholder.getChildren()::remove);
         bridge.disposeNativeResources();
-        // The Review view owns no native or background resource of its own
-        // yet (Task 11 wires scope resolution in) -- dropping the reference
-        // here, alongside the rest of this tab's own teardown, is the whole
-        // of disposing it, and mirrors where MainWorkspace.removeTab
-        // releases the Explorer's.
-        reviewView = null;
+        // The Review view's own close() detaches its MCP activity panel's
+        // live-log subscription BEFORE the reference is dropped -- that
+        // subscription is on McpActivityLog, which is app-lifetime, so
+        // skipping this would leave every closed session's panel (if it was
+        // ever opened) running a pointless refresh() on every MCP call for
+        // the rest of the process's life. Mirrors where MainWorkspace.removeTab
+        // releases the Explorer's own resources via its dispose().
+        if (reviewView != null) {
+            reviewView.close();
+            reviewView = null;
+        }
         if (shellBridge != null) {
             // The ephemeral shell has no SessionManager-managed lifecycle,
             // so it is reaped here -- but NEVER via a direct close(): a

@@ -17,6 +17,7 @@ import app.drydock.terminal.api.TerminalSpec;
 import app.drydock.terminal.api.TerminalSurface;
 import app.drydock.ui.review.SessionReviewView;
 import javafx.scene.Scene;
+import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.Region;
 import javafx.scene.layout.StackPane;
 import javafx.stage.Stage;
@@ -30,6 +31,8 @@ import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Task 8: the session tab's fourth sub-tab. {@link OpenSessionTab} needs a
@@ -57,10 +60,16 @@ class OpenSessionTabReviewSubTabTest extends ApplicationTest {
         diffService.close();
     }
 
+    /** The Claude native surface's host for the tab most recently built by {@link #newTab}. */
+    private RecordingHost lastHost;
+
     private OpenSessionTab newTab() {
         OpenSessionTab[] holder = new OpenSessionTab[1];
-        interact(() -> holder[0] = new OpenSessionTab(ManagedSessionId.newId(), "test-session", "Claude",
-                AgentKind.CLAUDE, false, Optional.empty(), stage, fakeRuntime(), fakeHost()));
+        interact(() -> {
+            lastHost = new RecordingHost();
+            holder[0] = new OpenSessionTab(ManagedSessionId.newId(), "test-session", "Claude",
+                    AgentKind.CLAUDE, false, Optional.empty(), stage, fakeRuntime(), lastHost);
+        });
         return holder[0];
     }
 
@@ -118,6 +127,67 @@ class OpenSessionTabReviewSubTabTest extends ApplicationTest {
         assertEquals("Review ◨3", tab.diagReviewButtonText());
     }
 
+    /**
+     * The board must actually replace what is on screen, not merely become
+     * the tab's {@link OpenSessionTab#reviewView()} -- deleting {@code
+     * content.setCenter(view)} from the {@code REVIEW} branch of {@code
+     * showSubTab} leaves every one of the other tests in this class passing,
+     * which is exactly why it needs its own pin.
+     */
+    @Test
+    void showingReviewPutsTheBoardInTheTabsContentCenter() {
+        OpenSessionTab tab = newTab();
+        interact(() -> tab.setReviewViewFactory(this::newReviewView));
+
+        interact(() -> tab.showSubTab(OpenSessionTab.SubTab.REVIEW));
+
+        SessionReviewView view = tab.reviewView().orElseThrow();
+        assertEquals(view, ((BorderPane) tab.tab.getContent()).getCenter(),
+                "the built review view must be the tab content's center node, not just a built-and-forgotten view");
+    }
+
+    /**
+     * The native Claude surface overlays the JavaFX scene (see {@code
+     * TerminalBridge}), so showing Review must also tell it to hide -- else
+     * it keeps painting over the board underneath it, a visible defect no
+     * assertion on {@code content}'s center alone would catch. Deleting
+     * {@code bridge.setTerminalSubTabActive(false)} from the {@code REVIEW}
+     * branch leaves this the only test in the class that fails.
+     */
+    @Test
+    void showingReviewHidesTheClaudeNativeSurface() {
+        OpenSessionTab tab = newTab();
+        interact(() -> tab.setReviewViewFactory(this::newReviewView));
+        // Establishes workspaceWantsVisible=true first: TerminalBridge starts
+        // with it false, so the native host's computed visibility would be
+        // false regardless of the REVIEW branch under test, and the
+        // assertion below would pass even with the fix deleted.
+        interact(() -> tab.setVisible(true));
+        assertTrue(lastHost.lastVisible, "setup: the Claude surface must be visible before switching away from it");
+
+        interact(() -> tab.showSubTab(OpenSessionTab.SubTab.REVIEW));
+
+        assertFalse(lastHost.lastVisible,
+                "the Claude native surface must be told to hide, or it paints over the Review board");
+    }
+
+    /** A produced member with no coverage otherwise: empty, present, then empty again after teardown. */
+    @Test
+    void theReviewViewIsEmptyBeforeVisitPresentAfterAndEmptyAfterDisposal() {
+        OpenSessionTab tab = newTab();
+        interact(() -> tab.setReviewViewFactory(this::newReviewView));
+
+        assertEquals(Optional.empty(), tab.reviewView());
+
+        interact(() -> tab.showSubTab(OpenSessionTab.SubTab.REVIEW));
+
+        assertTrue(tab.reviewView().isPresent());
+
+        interact(tab::disposeNativeResources);
+
+        assertEquals(Optional.empty(), tab.reviewView());
+    }
+
     private static TerminalRuntime fakeRuntime() {
         return new TerminalRuntime() {
             @Override
@@ -143,40 +213,42 @@ class OpenSessionTabReviewSubTabTest extends ApplicationTest {
         };
     }
 
-    private static TerminalHostView fakeHost() {
-        return new TerminalHostView() {
-            @Override
-            public void setFrame(double x, double y, double width, double height) {
-            }
+    /** A no-op {@link TerminalHostView} that records the last {@link #setVisible} call it saw. */
+    private static final class RecordingHost implements TerminalHostView {
+        boolean lastVisible;
 
-            @Override
-            public void setVisible(boolean visible) {
-            }
+        @Override
+        public void setFrame(double x, double y, double width, double height) {
+        }
 
-            @Override
-            public void setFocused(boolean focused) {
-            }
+        @Override
+        public void setVisible(boolean visible) {
+            this.lastVisible = visible;
+        }
 
-            @Override
-            public void setKeyEventListener(KeyEventListener listener) {
-            }
+        @Override
+        public void setFocused(boolean focused) {
+        }
 
-            @Override
-            public void setScrollEventListener(ScrollEventListener listener) {
-            }
+        @Override
+        public void setKeyEventListener(KeyEventListener listener) {
+        }
 
-            @Override
-            public void setMousePosEventListener(MousePosEventListener listener) {
-            }
+        @Override
+        public void setScrollEventListener(ScrollEventListener listener) {
+        }
 
-            @Override
-            public void setMouseButtonEventListener(MouseButtonEventListener listener) {
-            }
+        @Override
+        public void setMousePosEventListener(MousePosEventListener listener) {
+        }
 
-            @Override
-            public void close() {
-            }
-        };
+        @Override
+        public void setMouseButtonEventListener(MouseButtonEventListener listener) {
+        }
+
+        @Override
+        public void close() {
+        }
     }
 
     /**

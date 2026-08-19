@@ -67,6 +67,7 @@ import app.drydock.ui.explorer.ExplorerTrailStore;
 import app.drydock.ui.explorer.SessionExplorerView;
 import app.drydock.ui.review.ReviewDestinationView;
 import app.drydock.ui.review.ReviewSubmitSheet;
+import app.drydock.ui.review.SessionReviewView;
 import app.drydock.ui.model.WorkspaceViewModel;
 import app.drydock.terminal.TerminalFactory;
 import app.drydock.terminal.api.TerminalHostView;
@@ -232,6 +233,8 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     private final GhCliService ghCliService;
     private final GitHubReviewService gitHubReviewService;
     private final DiffService diffService;
+    /** The MCP traffic log a session's Review sub-tab's {@code \} panel renders; null when no server is running. */
+    private final McpActivityLog activityLog;
     private final ChangedLineService changedLineService;
     private final AnnotationStore annotationStore;
     private final WorkspaceViewModel viewModel;
@@ -255,6 +258,17 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * queue selection and the remembered rail-collapse state.
      */
     private final ReviewDestinationView reviewDestination;
+
+    /**
+     * The one {@link ReviewHost}, shared by {@link #reviewDestination} and
+     * every session tab's Review sub-tab (see {@code createOpenSessionTab}):
+     * {@link SessionReviewView.Host} is the same interface {@link
+     * ReviewDestinationView.Host} already is, minus the queue's hand-offs
+     * (see {@code FakeReviewHost}'s Javadoc for the same observation on the
+     * test side), so one instance answers both without a second
+     * implementation to keep in sync with the first.
+     */
+    private final ReviewHost reviewHost = new ReviewHost();
 
     /**
      * Review's own tab: pinned leftmost, never closable (nav §2). A tab
@@ -430,6 +444,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         this.ghCliService = ghCliService;
         this.gitHubReviewService = gitHubReviewService;
         this.diffService = diffService;
+        this.activityLog = activityLog;
         this.changedLineService = changedLineService;
         this.annotationStore = annotationStore;
         this.explorerTrailStore = explorerTrailStore;
@@ -466,7 +481,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             }
         });
 
-        reviewDestination = new ReviewDestinationView(new ReviewHost(), diffService, activityLog);
+        reviewDestination = new ReviewDestinationView(reviewHost, diffService, activityLog);
         reviewDestination.setBackTarget(Optional.empty(), null);
         buildReviewTab();
 
@@ -1402,8 +1417,13 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 .filter(count -> count > 0);
     }
 
-    /** The Review view's window onto the workspace (see {@link ReviewDestinationView.Host}). */
-    private final class ReviewHost implements ReviewDestinationView.Host {
+    /**
+     * The Review view's window onto the workspace (see {@link
+     * ReviewDestinationView.Host}) -- and, since {@link SessionReviewView.Host}
+     * is the same interface minus the queue's hand-offs, a session's Review
+     * sub-tab's window too. One implementation answers both.
+     */
+    private final class ReviewHost implements ReviewDestinationView.Host, SessionReviewView.Host {
 
         /**
          * Scope ids with a {@code gh} availability check in flight for
@@ -3537,6 +3557,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         OpenSessionTab.SubTab subTab = switch (name.strip().toLowerCase(Locale.ROOT)) {
             case "terminal" -> OpenSessionTab.SubTab.TERMINAL;
             case "explorer" -> OpenSessionTab.SubTab.EXPLORER;
+            case "review" -> OpenSessionTab.SubTab.REVIEW;
             default -> OpenSessionTab.SubTab.CLAUDE;
         };
         currentlySelected().ifPresent(open -> open.diagShowSubTab(subTab));
@@ -3815,6 +3836,13 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         openTab.setOnPreviousSessionTab(this::selectPreviousSessionTab);
         openTab.setOnNextSessionTab(this::selectNextSessionTab);
         openTab.setOnToggleSidebar(() -> onToggleSidebar.run());
+        // Built lazily on the first REVIEW visit (see OpenSessionTab.setReviewViewFactory);
+        // unlike the Explorer's factory this is wired for a remote tab too --
+        // nothing about the board itself needs a local checkout, only scope
+        // resolution does, and that is Task 11's. Not wired to real scopes
+        // here: the board shows its own "no scope yet" placeholder until
+        // something calls showScopes.
+        openTab.setReviewViewFactory(() -> new SessionReviewView(reviewHost, diffService, activityLog));
 
         if (repository.map(Repository::isRemote).orElse(false)) {
             // The Explorer's file search has no local checkout to operate on

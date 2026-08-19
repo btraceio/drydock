@@ -195,7 +195,12 @@ final class ReviewIntentRail extends VBox {
         setMaxWidth(target);
     }
 
-    private void stopWidthAnimation() {
+    /**
+     * Package-private (not just called internally): {@link SessionReviewView#close}
+     * calls this too, so a rail torn down mid-collapse/expand does not leave
+     * an in-flight {@link Timeline} running against a detached node.
+     */
+    void stopWidthAnimation() {
         if (widthAnimation != null) {
             widthAnimation.stop();
             widthAnimation = null;

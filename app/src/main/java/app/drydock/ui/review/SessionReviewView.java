@@ -1376,6 +1376,34 @@ public final class SessionReviewView extends BorderPane {
         Platform.runLater(this::requestFocus);
     }
 
+    /**
+     * Releases what this view holds that would otherwise outlive it.
+     *
+     * <p>The MCP activity panel's live-log subscription is the one that
+     * matters: {@link ReviewMcpActivityPanel#attach} registers a listener on
+     * {@link McpActivityLog}, which is app-lifetime and keeps
+     * its listeners in a {@code CopyOnWriteArrayList} -- so an un-detached
+     * panel keeps this whole view (diff column included) reachable, and
+     * running a pointless FX-thread {@code refresh()} on every MCP call for
+     * every closed session's board that was ever opened with the panel
+     * showing, for the rest of the process's life. {@code detach()} is a
+     * no-op if the panel was never attached (never opened, or already
+     * hidden), so this is always safe to call.</p>
+     *
+     * <p>The intent rail's collapse/expand {@code Timeline} is finite (it
+     * self-stops at the end of its keyframe), not {@code INDEFINITE}, so it
+     * is not the leak the panel is -- but stopping it too
+     * means a view closed mid-animation never runs a timeline against a
+     * detached node.</p>
+     *
+     * <p>Call before dropping the last reference to this view -- see {@code
+     * OpenSessionTab.disposeNativeResources}.</p>
+     */
+    public void close() {
+        mcpPanel.ifPresent(ReviewMcpActivityPanel::detach);
+        intentRail.stopWidthAnimation();
+    }
+
     // ---- diagnostics --------------------------------------------------------
 
     /**
