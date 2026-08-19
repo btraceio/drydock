@@ -30,6 +30,7 @@ import app.drydock.review.AnnotationStatus;
 import app.drydock.review.AnnotationStore;
 import app.drydock.ui.explorer.ExplorerTrailStore;
 import app.drydock.review.Confidence;
+import app.drydock.review.RepositoryPullRequests;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewItem;
 import app.drydock.review.ReviewScope;
@@ -231,6 +232,7 @@ public final class DrydockApplication extends Application {
         diffService = new DiffService();
         searchService = new SessionSearchService();
         ghCliService = new GhCliService();
+        RepositoryPullRequests repositoryPullRequests = new RepositoryPullRequests(ghCliService::openPullRequests);
         gitHubReviewService = new GitHubReviewService();
         Path stateDir = stateRepository.stateFile().getParent();
         Path activityDir = stateDir.resolve("activity");
@@ -270,8 +272,8 @@ public final class DrydockApplication extends Application {
                 annotationStore, reviewScopeRegistry, mcpActivityLog, explorerTrailStore, viewModel, primaryStage,
                 stateDir);
         RepositorySidebar sidebar =
-                new RepositorySidebar(repositoryManager, gitStatusService, worktreeService, sessionManager,
-                        agentRegistry, mainWorkspace, viewModel);
+                new RepositorySidebar(repositoryManager, gitStatusService, worktreeService, repositoryPullRequests,
+                        sessionManager, agentRegistry, mainWorkspace, viewModel);
         sidebar.setOpenFindingsAt(mainWorkspace::openFindingsAt);
         mainWorkspace.setOnReviewQueueChanged(sidebar::refreshReviewBadges);
 

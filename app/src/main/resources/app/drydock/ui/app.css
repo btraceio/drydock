@@ -1830,6 +1830,16 @@
 .stale-clean-button { -fx-font-size: 10.5px; }
 .stale-path { -fx-text-fill: -drydock-text-faint; -fx-font-family: "JetBrains Mono", "Menlo"; -fx-font-size: 10px; }
 
+/* ---- Collapsed pull-request bucket (open PRs with no local worktree) ----- */
+
+.pull-request-group-row {
+    -fx-background-radius: 6px;
+    -fx-cursor: hand;
+}
+.pull-request-group-row:hover {
+    -fx-background-color: -drydock-hover;
+}
+
 /* ---- Diff Review tab (design handoff section C) -------------------------- */
 
 .review-root {

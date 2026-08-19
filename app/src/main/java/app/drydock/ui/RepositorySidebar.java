@@ -12,6 +12,7 @@ import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionActivity;
 import app.drydock.domain.SessionStatus;
+import app.drydock.git.GhCliService;
 import app.drydock.git.GitStatus;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.GitTarget;
@@ -19,6 +20,7 @@ import app.drydock.git.SshUnreachableException;
 import app.drydock.git.WorktreeLockedException;
 import app.drydock.git.WorktreeNotCleanException;
 import app.drydock.git.WorktreeService;
+import app.drydock.review.RepositoryPullRequests;
 import app.drydock.ui.model.SessionFilter;
 import app.drydock.ui.model.WorkspaceViewModel;
 import java.io.File;
@@ -116,6 +118,7 @@ public final class RepositorySidebar extends VBox {
     private final RepositoryManager repositoryManager;
     private final GitStatusService gitStatusService;
     private final WorktreeService worktreeService;
+    private final RepositoryPullRequests repositoryPullRequests;
     private final SessionManager sessionManager;
     private final WorkspaceNavigator navigator;
     private final WorkspaceViewModel viewModel;
@@ -183,6 +186,11 @@ public final class RepositorySidebar extends VBox {
 
     /** Repositories with a rescan in flight (spins the ⟳ button, prevents double-scans). */
     private final Set<RepositoryId> scanning = ConcurrentHashMap.newKeySet();
+
+    /** Repos whose pull-request group is expanded. Distinct from {@code collapsed} (repo-level). */
+    private final Set<RepositoryId> pullRequestsExpanded = new HashSet<>();
+    /** Repositories with a pull-request scan in flight (also spins the ⟳ button, prevents double-scans). */
+    private final Set<RepositoryId> scanningPullRequests = ConcurrentHashMap.newKeySet();
     /** Worktree paths discovered by the latest rescan, highlighted one-shot until the timer clears them. */
     private final Set<Path> recentlyDiscovered = new HashSet<>();
     /** Transient per-repo meta note ("Already up to date — no new worktrees") shown briefly after a rescan. */
@@ -238,16 +246,23 @@ public final class RepositorySidebar extends VBox {
                 implements SidebarNode { }
         record LockedWorktreesNode(List<WorktreeService.Worktree> worktrees, Repository repository)
                 implements SidebarNode { }
+        /** The collapsed "PULL REQUESTS (n)" bucket: open PRs with no local worktree (Task 10). */
+        record PullRequestGroupNode(RepositoryPullRequests.Outcome outcome, Repository repository)
+                implements SidebarNode { }
+        /** One open pull request with no local worktree -- a virtual, not-yet-checked-out row. */
+        record PullRequestNode(GhCliService.OpenPullRequest pullRequest, Repository repository)
+                implements SidebarNode { }
     }
 
     public RepositorySidebar(RepositoryManager repositoryManager, GitStatusService gitStatusService,
-                              WorktreeService worktreeService, SessionManager sessionManager,
-                              AgentRegistry agentRegistry, WorkspaceNavigator navigator,
-                              WorkspaceViewModel viewModel) {
+                              WorktreeService worktreeService, RepositoryPullRequests repositoryPullRequests,
+                              SessionManager sessionManager, AgentRegistry agentRegistry,
+                              WorkspaceNavigator navigator, WorkspaceViewModel viewModel) {
         this.repositoryManager = repositoryManager;
         this.agentRegistry = agentRegistry;
         this.gitStatusService = gitStatusService;
         this.worktreeService = worktreeService;
+        this.repositoryPullRequests = repositoryPullRequests;
         this.sessionManager = sessionManager;
         this.navigator = navigator;
         this.viewModel = viewModel;
@@ -463,6 +478,16 @@ public final class RepositorySidebar extends VBox {
                 }
                 requestRebuild();
             }
+            case SidebarNode.PullRequestGroupNode groupNode -> {
+                if (groupNode.outcome() instanceof RepositoryPullRequests.Outcome.Unavailable) {
+                    refreshPullRequests(groupNode.repository());
+                } else {
+                    item.setExpanded(!item.isExpanded());
+                }
+            }
+            // Left unbound deliberately: materializing a pull request into a
+            // worktree/session is Task 11/12's seam, not this one's to invent.
+            case SidebarNode.PullRequestNode pullRequestNode -> { }
         }
     }
 
@@ -606,6 +631,27 @@ public final class RepositorySidebar extends VBox {
     /** Tooltip text for a remote-host chip: the full (untruncated) host. */
     static String remoteChipTooltipText(String host) {
         return "Remote host: " + host;
+    }
+
+    /**
+     * Header text for the "PULL REQUESTS" bucket: a count for a landed scan,
+     * or a retry affordance for one that could not run. Never called for
+     * {@link RepositoryPullRequests.Outcome.Absent} -- {@code childNodesFor}
+     * never mints a group for it, so there is nothing sensible to say.
+     */
+    static String pullRequestGroupLabel(RepositoryPullRequests.Outcome outcome) {
+        return switch (outcome) {
+            case RepositoryPullRequests.Outcome.Rows rows -> "PULL REQUESTS (" + rows.pullRequests().size() + ")";
+            case RepositoryPullRequests.Outcome.Unavailable unavailable -> "PULL REQUESTS — unavailable · retry";
+            case RepositoryPullRequests.Outcome.Absent absent ->
+                    throw new IllegalArgumentException("Absent has no group to label");
+        };
+    }
+
+    /** One PR row's text: its number, title, and (if known) who opened it. */
+    static String pullRequestRowText(GhCliService.OpenPullRequest pullRequest) {
+        String author = pullRequest.author().map(name -> " · @" + name).orElse("");
+        return "#" + pullRequest.number() + "  " + pullRequest.title() + author;
     }
 
     /**
@@ -820,12 +866,20 @@ public final class RepositorySidebar extends VBox {
             }
             TreeItem<SidebarNode> repoItem = new TreeItem<>(new SidebarNode.RepoNode(repository));
             for (SidebarNode child : children) {
-                repoItem.getChildren().add(new TreeItem<>(child));
+                repoItem.getChildren().add(pullRequestGroupItem(child, repository).orElseGet(() -> new TreeItem<>(child)));
             }
             repoItem.setExpanded(!collapsed.contains(repository.id()));
             repoItem.expandedProperty().addListener((obs, was, is) -> {
                 if (is) {
                     collapsed.remove(repository.id());
+                    // A repo row expanding is one of the three PR-scan
+                    // triggers (repo added -- new repos start expanded, so
+                    // this fires immediately below too -- repo row
+                    // expanded, and the ⟳ rescan); a repo already scanned
+                    // (any outcome, including Absent) is left alone.
+                    if (viewModel.pullRequests(repository.id()).isEmpty()) {
+                        refreshPullRequests(repository);
+                    }
                 } else {
                     collapsed.add(repository.id());
                 }
@@ -834,6 +888,9 @@ public final class RepositorySidebar extends VBox {
                 // the row's own mouse handler.
                 updateRepoRow(repository.id());
             });
+            if (repoItem.isExpanded() && viewModel.pullRequests(repository.id()).isEmpty()) {
+                refreshPullRequests(repository);
+            }
             repoItems.add(repoItem);
         }
 
@@ -850,6 +907,38 @@ public final class RepositorySidebar extends VBox {
 
         updateFooter();
         syncActiveSelection();
+    }
+
+    /**
+     * A {@code PullRequestGroupNode}'s TreeItem, unlike every other child
+     * row, holds real {@code PullRequestNode} children -- one per pull
+     * request in a landed {@code Rows} outcome, none for {@code
+     * Unavailable} -- rather than being a leaf, so the TreeView's own
+     * expand/collapse drives it. Starts collapsed; its expand state
+     * survives rebuilds in {@link #pullRequestsExpanded}, the same way a
+     * repository row's does in {@link #collapsed}. Empty for every other
+     * {@code SidebarNode}, so the caller falls back to a plain leaf item.
+     */
+    private Optional<TreeItem<SidebarNode>> pullRequestGroupItem(SidebarNode child, Repository repository) {
+        if (!(child instanceof SidebarNode.PullRequestGroupNode groupNode)) {
+            return Optional.empty();
+        }
+        TreeItem<SidebarNode> groupItem = new TreeItem<>(groupNode);
+        if (groupNode.outcome() instanceof RepositoryPullRequests.Outcome.Rows rows) {
+            for (GhCliService.OpenPullRequest pullRequest : rows.pullRequests()) {
+                groupItem.getChildren().add(new TreeItem<>(
+                        new SidebarNode.PullRequestNode(pullRequest, repository)));
+            }
+        }
+        groupItem.setExpanded(pullRequestsExpanded.contains(repository.id()));
+        groupItem.expandedProperty().addListener((obs, was, is) -> {
+            if (is) {
+                pullRequestsExpanded.add(repository.id());
+            } else {
+                pullRequestsExpanded.remove(repository.id());
+            }
+        });
+        return Optional.of(groupItem);
     }
 
     /**
@@ -1015,6 +1104,7 @@ public final class RepositorySidebar extends VBox {
         }
         staleBucketExpanded.retainAll(repoIds);
         lockedBucketExpanded.retainAll(repoIds);
+        pullRequestsExpanded.retainAll(repoIds);
     }
 
     /** Supplies a worktree checkout's open-finding count for its {@code ◨n} badge. */
@@ -1153,9 +1243,11 @@ public final class RepositorySidebar extends VBox {
         if (classified == null) {
             // Discovery hasn't run yet: kick it off and show session-derived rows meanwhile.
             refreshWorktrees(repository, false);
-            return new ArrayList<>(sessionsFor(repository).stream()
+            List<SidebarNode> children = new ArrayList<>(sessionsFor(repository).stream()
                     .map(session -> (SidebarNode) new SidebarNode.SessionNode(session, repository))
                     .toList());
+            pullRequestGroupNodeFor(repository).ifPresent(children::add);
+            return children;
         }
         List<SidebarNode> children = new ArrayList<>();
         for (ManagedAgentSession session : classified.orderedSessions()) {
@@ -1170,7 +1262,23 @@ public final class RepositorySidebar extends VBox {
         if (!classified.staleWorktrees().isEmpty()) {
             children.add(new SidebarNode.StaleWorktreesNode(classified.staleWorktrees(), repository));
         }
+        pullRequestGroupNodeFor(repository).ifPresent(children::add);
         return children;
+    }
+
+    /**
+     * The repo's {@code PULL REQUESTS} group, if its latest scan earns one:
+     * a landed {@code Rows} with at least one entry, or an {@code
+     * Unavailable} the reader can retry. Nothing for a scan that has not
+     * run yet, for {@code Absent} (no {@code gh}), or for an empty {@code
+     * Rows} -- a group that says "(0)" is noise.
+     */
+    private Optional<SidebarNode> pullRequestGroupNodeFor(Repository repository) {
+        return viewModel.pullRequests(repository.id())
+                .filter(outcome -> outcome instanceof RepositoryPullRequests.Outcome.Unavailable
+                        || (outcome instanceof RepositoryPullRequests.Outcome.Rows rows
+                                && !rows.pullRequests().isEmpty()))
+                .map(outcome -> new SidebarNode.PullRequestGroupNode(outcome, repository));
     }
 
     /** Classifies a repo's worktrees + sessions, or {@code null} if discovery hasn't run yet. */
@@ -1218,7 +1326,17 @@ public final class RepositorySidebar extends VBox {
                 String text = worktree.branch().orElse("") + " " + worktree.path();
                 return text.toLowerCase(Locale.ROOT).contains(query);
             });
+            case SidebarNode.PullRequestNode pullRequestNode -> matchesPullRequest(pullRequestNode.pullRequest(), query);
+            case SidebarNode.PullRequestGroupNode groupNode ->
+                    groupNode.outcome() instanceof RepositoryPullRequests.Outcome.Rows rows
+                            && rows.pullRequests().stream().anyMatch(pullRequest -> matchesPullRequest(pullRequest, query));
         };
+    }
+
+    /** A pull request matches on its number, title or head branch -- the same fields the row renders. */
+    private static boolean matchesPullRequest(GhCliService.OpenPullRequest pullRequest, String query) {
+        String text = "#" + pullRequest.number() + " " + pullRequest.title() + " " + pullRequest.headRefName();
+        return text.toLowerCase(Locale.ROOT).contains(query);
     }
 
     /**
@@ -1320,6 +1438,44 @@ public final class RepositorySidebar extends VBox {
                     }
                     // An unchanged list emits no model event; the rescan
                     // note / spinner stop still need the header re-rendered.
+                    updateRepoRow(repository.id());
+                }));
+    }
+
+    /**
+     * Re-runs the open-pull-request scan for {@code repository} and writes
+     * the outcome into the view model. Mirrors {@link #refreshWorktrees}:
+     * the scan itself (a {@code gh} process spawn) never touches the FX
+     * thread, only the {@link Platform#runLater} that follows it does; a
+     * repository removed mid-flight is handled the same way a mid-flight
+     * status/worktree refresh is -- the write lands in the view model under
+     * its (now orphaned) id, but {@code rebuildTree} only ever iterates
+     * {@code repositoryManager.repositories()}, so it is simply never
+     * rendered. Called on repository add and repo-row expansion (both via
+     * {@link #rebuildTree()}) and on the ⟳ rescan; a no-op for a repository
+     * already mid-scan, and always a no-op for a remote repository, which
+     * has no local checkout to ask {@code gh} about.
+     */
+    private void refreshPullRequests(Repository repository) {
+        if (repository.isRemote()) {
+            return;
+        }
+        if (!scanningPullRequests.add(repository.id())) {
+            return;
+        }
+        updateRepoRow(repository.id()); // progress must show immediately (AGENTS.md)
+        List<WorktreeService.Worktree> worktrees = viewModel.worktrees(repository.id()).orElse(List.of());
+        repositoryPullRequests.scan(repository.root(), worktrees)
+                .whenComplete((outcome, failure) -> Platform.runLater(() -> {
+                    // Every completion path -- success, failure, and (via the
+                    // guards above) early return -- clears the progress state.
+                    scanningPullRequests.remove(repository.id());
+                    if (failure != null) {
+                        LOG.log(Level.DEBUG, "Pull-request scan failed for " + repository.root(), failure);
+                        updateRepoRow(repository.id());
+                        return;
+                    }
+                    viewModel.setPullRequests(repository.id(), outcome);
                     updateRepoRow(repository.id());
                 }));
     }
@@ -1700,6 +1856,14 @@ public final class RepositorySidebar extends VBox {
                     setGraphic(buildLockedRow(lockedNode.worktrees(), lockedNode.repository()));
                     setContextMenu(null);
                 }
+                case SidebarNode.PullRequestGroupNode groupNode -> {
+                    setGraphic(buildPullRequestGroupRow(groupNode));
+                    setContextMenu(null);
+                }
+                case SidebarNode.PullRequestNode pullRequestNode -> {
+                    setGraphic(buildPullRequestRow(pullRequestNode));
+                    setContextMenu(null);
+                }
             }
         }
 
@@ -1775,7 +1939,7 @@ public final class RepositorySidebar extends VBox {
             rescan.getStyleClass().add("row-action-button");
             rescan.setTooltip(new Tooltip("Rescan worktrees"));
             rescan.setFocusTraversable(false);
-            if (scanning.contains(repository.id())) {
+            if (scanning.contains(repository.id()) || scanningPullRequests.contains(repository.id())) {
                 RotateTransition spin = new RotateTransition(Duration.seconds(0.8), rescan);
                 spin.setByAngle(360);
                 spin.setCycleCount(RotateTransition.INDEFINITE);
@@ -1793,6 +1957,7 @@ public final class RepositorySidebar extends VBox {
             rescan.setOnAction(e -> {
                 refreshStatus(repository);
                 refreshWorktrees(repository, true);
+                refreshPullRequests(repository);
             });
 
             Button newSession = new Button("+");
@@ -2180,6 +2345,80 @@ public final class RepositorySidebar extends VBox {
             return box;
         }
 
+        /**
+         * The collapsed {@code PULL REQUESTS (n)} bucket header. Unlike the
+         * stale/locked buckets, its expand state lives on the real {@code
+         * TreeItem} (see {@link #pullRequestGroupItem}), so the caret here
+         * just mirrors {@code getTreeItem().isExpanded()} and a click
+         * toggles it -- except for an {@code Unavailable} scan, which has no
+         * children to expand and instead re-runs the scan.
+         */
+        private HBox buildPullRequestGroupRow(SidebarNode.PullRequestGroupNode node) {
+            Repository repository = node.repository();
+            boolean unavailable = node.outcome() instanceof RepositoryPullRequests.Outcome.Unavailable;
+            boolean expanded = !unavailable && getTreeItem() != null && getTreeItem().isExpanded();
+
+            Label caret = new Label(unavailable ? "◧" : expanded ? "▾" : "▸");
+            caret.getStyleClass().add("repo-caret");
+            StackPane statusCol = new StackPane(caret);
+            statusCol.getStyleClass().add("child-row-status");
+
+            Label label = new Label(pullRequestGroupLabel(node.outcome()));
+            label.getStyleClass().add("stale-summary");
+            HBox.setHgrow(label, Priority.ALWAYS);
+
+            HBox row = new HBox(7, statusCol, label);
+            row.getStyleClass().addAll("stale-summary-row", "child-row", "pull-request-group-row");
+            row.setAlignment(Pos.CENTER_LEFT);
+            row.setOnMouseClicked(event -> {
+                if (event.getButton() != MouseButton.PRIMARY) {
+                    return;
+                }
+                if (unavailable) {
+                    // Immediate feedback for this click specifically (AGENTS.md):
+                    // the outcome itself is unchanged until the scan lands, so
+                    // nothing else would repaint this row in the meantime.
+                    label.setText("PULL REQUESTS — checking…");
+                    refreshPullRequests(repository);
+                } else if (getTreeItem() != null) {
+                    getTreeItem().setExpanded(!getTreeItem().isExpanded());
+                }
+                event.consume();
+            });
+            return row;
+        }
+
+        /**
+         * One open pull request with no local worktree: an {@code ◧} icon,
+         * its number/title/author, and a {@code Review ▸} pill -- styled
+         * from the same {@code worktree-unopened-row} rules as an unopened
+         * worktree row, so the two "not yet opened" row kinds read as
+         * siblings. The pill's action is Task 11/12's to wire; this task
+         * only renders the row and lets the tree select it.
+         */
+        private HBox buildPullRequestRow(SidebarNode.PullRequestNode node) {
+            Label icon = new Label("◧");
+            icon.getStyleClass().add("worktree-unopened-icon");
+            StackPane statusCol = new StackPane(icon);
+            statusCol.getStyleClass().add("child-row-status");
+
+            Label text = new Label(pullRequestRowText(node.pullRequest()));
+            text.getStyleClass().add("worktree-unopened-branch");
+            HBox.setHgrow(text, Priority.ALWAYS);
+            text.setMinWidth(0);
+            text.setMaxWidth(Double.MAX_VALUE);
+            text.setTextOverrun(OverrunStyle.ELLIPSIS);
+
+            Label reviewPill = new Label("Review ▸");
+            reviewPill.getStyleClass().add("start-pill");
+            reviewPill.setMinWidth(Region.USE_PREF_SIZE);
+
+            HBox row = new HBox(8, statusCol, text, reviewPill);
+            row.getStyleClass().addAll("worktree-unopened-row", "child-row");
+            row.setAlignment(Pos.CENTER_LEFT);
+            return row;
+        }
+
         private Button quickAction(String glyph, String tooltip, boolean destructive, Runnable action) {
             Button button = new Button(glyph);
             button.getStyleClass().add("row-action-button");
@@ -2238,7 +2477,10 @@ public final class RepositorySidebar extends VBox {
             MenuItem newWorktree = new MenuItem("◫  New worktree…");
             newWorktree.setOnAction(e -> onNewWorktree.accept(repository));
             MenuItem rescan = new MenuItem("⟳  Rescan worktrees");
-            rescan.setOnAction(e -> refreshWorktrees(repository, true));
+            rescan.setOnAction(e -> {
+                refreshWorktrees(repository, true);
+                refreshPullRequests(repository);
+            });
             return new ContextMenu(inCheckout, newWorktree, rescan);
         });
     }
@@ -2252,6 +2494,7 @@ public final class RepositorySidebar extends VBox {
             refresh.setOnAction(e -> {
                 refreshStatus(repository);
                 refreshWorktrees(repository, true);
+                refreshPullRequests(repository);
             });
 
             MenuItem remove = new MenuItem("Remove from manager");
@@ -2264,7 +2507,10 @@ public final class RepositorySidebar extends VBox {
                 newWorktree.setOnAction(e -> onNewWorktree.accept(repository));
 
                 MenuItem rescan = new MenuItem("Rescan worktrees");
-                rescan.setOnAction(e -> refreshWorktrees(repository, true));
+                rescan.setOnAction(e -> {
+                    refreshWorktrees(repository, true);
+                    refreshPullRequests(repository);
+                });
 
                 menu.getItems().addAll(newWorktree, rescan);
             }
