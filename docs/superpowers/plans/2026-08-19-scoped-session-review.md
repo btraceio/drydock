@@ -674,7 +674,9 @@ class SessionReviewScopesTest {
 }
 ```
 
-Check `ManagedSessionId`'s factory name before running — if it is not `newId()`, use whatever the existing tests in `app/src/test/java/app/drydock/review/` use.
+`ManagedSessionId.newId()` is the factory (verified).
+
+**The temp dirs must be real git repositories.** `defaultBranch` and `reviewBase` measure a checkout; against a bare `@TempDir` they only ever exercise the fallback path, so the assertions would prove nothing about the base. Init each one the way `ReviewQueueServiceTest` does — that file's setup is the reference, including its worktree creation for the worktree cases.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -809,19 +811,22 @@ git commit -m "A session's scopes: its local changes, and its pull request"
 ### Task 4: A reviewer that is a subagent where the harness has them
 
 **Files:**
-- Modify: `app/src/main/java/app/drydock/agent/api/AgentCapabilities.java`
+- Modify: `app/src/main/java/app/drydock/agent/spi/AgentProvider.java` (a new default method beside `supportsRemote()`)
+- Modify: `app/src/main/java/app/drydock/agent/api/AgentRegistry.java` (cache it beside `remoteCapability`)
+- Modify: `app/src/main/java/app/drydock/agent/providers/claude/ClaudeAgentProvider.java`
 - Modify: `app/src/main/java/app/drydock/ui/MainWorkspace.java:1943` (`reviewInstruction`)
-- Modify: `app/src/main/java/app/drydock/agent/providers/claude/ClaudeAgentProvider.java` (`probeCapabilities`)
-- Modify: `app/src/main/java/app/drydock/agent/providers/codex/CodexAgentProvider.java` (`probeCapabilities`)
-- Modify: `app/src/main/java/app/drydock/agent/providers/pi/PiAgentProvider.java` (`probeCapabilities`)
 - Create: `app/src/main/java/app/drydock/review/ReviewInstructions.java`
 - Test: `app/src/test/java/app/drydock/review/ReviewInstructionsTest.java`
+- Test: `app/src/test/java/app/drydock/agent/api/AgentRegistrySubagentsTest.java` (create)
 
 **Interfaces:**
 - Consumes: nothing from earlier tasks.
 - Produces:
-  - `AgentCapabilities(boolean supportsRemote, boolean supportsResume, boolean supportsSubagents, String version)`
+  - `default boolean AgentProvider.supportsSubagents() { return false; }`
+  - `boolean AgentRegistry.supportsSubagents(AgentKind kind)`
   - `static String ReviewInstructions.forScope(String scopeId, boolean supportsSubagents)`
+
+**Declared, not probed — this is load-bearing.** `AgentProvider.probeCapabilities()` is documented as possibly spawning a process, and the UI reads subagent support synchronously while building a prompt on the FX thread. So subagent support is declared exactly the way `supportsRemote()` is: a cheap SPI method with a `false` default, cached at `AgentRegistry` construction, read from the cache. Do **not** add a field to `AgentCapabilities`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -932,14 +937,43 @@ public record AgentCapabilities(boolean supportsRemote, boolean supportsResume,
 }
 ```
 
-Replace `MainWorkspace.reviewInstruction(ReviewScope)` (around :1943) with a call to `ReviewInstructions.forScope(scope.id(), supportsSubagents)`, where `supportsSubagents` comes from the bound session's agent: `agentRegistry.byKind(session.agentKind()).probeCapabilities().supportsSubagents()`, defaulting to `false` when the agent cannot be resolved. Check `AgentRegistry`'s actual lookup method name before writing the call. This is what makes "Run review" on a session's own local changes use the subagent form — not only the pull-request flow in Task 12.
+Replace `MainWorkspace.reviewInstruction(ReviewScope)` (around :1943) with a call to `ReviewInstructions.forScope(scope.id(), agentRegistry.supportsSubagents(kind))`, where `kind` is the bound session's `agentKind()` — falling back to `false` when the scope has no bound session. This is what makes "Run review" on a session's own local changes use the subagent form, not only the pull-request flow in Task 12.
 
-Update the three providers' `probeCapabilities()` construction sites:
-- Claude: `new AgentCapabilities(true, caps.supportsResume(), true, caps.version())` — Claude has the Task/subagent tool.
-- Codex: pass `false` in the new third position.
-- Pi: pass `false` in the new third position.
+Add to `AgentProvider`, directly beneath `supportsRemote()` and carrying the same cheapness contract:
 
-Compile after this: `./gradlew :app:compileJava` will name any other construction site (tests included) that needs the extra argument.
+```java
+    /**
+     * Whether this integration can dispatch a subagent -- a nested agent with
+     * its own context. Drydock asks for a review in one when it can, so the
+     * review is read outside the context that wrote the code.
+     *
+     * <p>Like {@link #supportsRemote()}, a static fact about the integration:
+     * implementations MUST make this CHEAP and non-blocking -- no process
+     * spawns, no filesystem or network I/O. Safe to call on the JavaFX
+     * Application Thread.</p>
+     */
+    default boolean supportsSubagents() {
+        return false;
+    }
+```
+
+Override it as `true` in `ClaudeAgentProvider` only. Codex and Pi inherit the default, so they need no edit.
+
+In `AgentRegistry`, cache it beside `remoteCapability` — a `Map<AgentKind, Boolean> subagentCapability` filled in the same construction loop — and expose:
+
+```java
+    /**
+     * Whether {@code kind}'s provider can dispatch a subagent, per
+     * {@link app.drydock.agent.spi.AgentProvider#supportsSubagents()}.
+     * Cached at construction alongside {@link #supportsRemote}, so the UI
+     * reads it on the FX thread without a process spawn.
+     */
+    public boolean supportsSubagents(AgentKind kind) {
+        return subagentCapability.getOrDefault(kind, false);
+    }
+```
+
+Add `app/src/test/java/app/drydock/agent/api/AgentRegistrySubagentsTest.java` asserting that a registry built from a provider declaring `true` answers `true` for that kind and `false` for a kind it does not know. Build it from a stub `AgentProvider` the way the existing tests under `app/src/test/java/app/drydock/agent/` build theirs.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -950,9 +984,12 @@ Expected: PASS.
 
 ```bash
 git add app/src/main/java/app/drydock/review/ReviewInstructions.java \
-        app/src/main/java/app/drydock/agent/api/AgentCapabilities.java \
-        app/src/main/java/app/drydock/agent/providers \
-        app/src/test/java/app/drydock/review/ReviewInstructionsTest.java
+        app/src/main/java/app/drydock/agent/spi/AgentProvider.java \
+        app/src/main/java/app/drydock/agent/api/AgentRegistry.java \
+        app/src/main/java/app/drydock/agent/providers/claude/ClaudeAgentProvider.java \
+        app/src/main/java/app/drydock/ui/MainWorkspace.java \
+        app/src/test/java/app/drydock/review/ReviewInstructionsTest.java \
+        app/src/test/java/app/drydock/agent/api/AgentRegistrySubagentsTest.java
 git commit -m "The reviewer is a subagent where the harness has them"
 ```
 
@@ -1139,7 +1176,8 @@ Create `SessionReviewView` by **moving** the members listed above out of `Review
 2. `refreshCounts()` and `refreshReviewState()` operate on `selectedScope()` exactly as before.
 3. Keep the `outcomeByScope` map: switching chips must not re-run git for a diff already resolved.
 4. Layout: `setLeft(intentRail)`, `setCenter(centre)`, switcher in `setTop`. No queue, no back button, no session row.
-5. `ReviewDestinationView` keeps compiling — leave it untouched apart from removing nothing. Duplication between the two is expected and temporary; Task 13 deletes the older one.
+5. `ReviewDestinationView` keeps compiling — leave it untouched. Duplication between the two is expected and temporary; Task 13 deletes the older one.
+6. **Convert inline fully-qualified names to imports as you move them.** The source file writes `app.drydock.git.UnifiedDiff`, `app.drydock.mcp.McpActivityLog` and `java.util.Map` inline in several places; the Global Constraints forbid that, and a new file has no reason to inherit it.
 
 - [ ] **Step 8: Run it to verify it passes**
 
@@ -1338,6 +1376,7 @@ git commit -m "A session remembers which scope its review was showing"
 
 **Files:**
 - Modify: `app/src/main/java/app/drydock/ui/OpenSessionTab.java`
+- Modify: `app/src/main/java/app/drydock/ui/MainWorkspace.java:3647` — delete the `openTab.setOnShowReview(this::showReviewForCurrentSession)` wiring; removing the setter without its call site does not compile
 - Modify: `app/src/main/java/app/drydock/ui/ShortcutsOverlay.java:36`
 - Modify: `app/src/main/resources/app/drydock/ui/app.css` (a `review-scope-chip` style, and the sub-tab button reusing the existing sub-tab styles)
 - Test: `app/src/test/java/app/drydock/ui/OpenSessionTabReviewSubTabTest.java` (create)
@@ -1810,7 +1849,8 @@ git commit -m "Opening review on a pull request makes the worktree it needs"
 ### Task 13: Delete the destination, tighten the MCP surface, verify
 
 **Files:**
-- Delete: `app/src/main/java/app/drydock/ui/review/ReviewDestinationView.java`, `ReviewQueueRail.java`, `ReviewCheckoutGate.java`, `ReviewEmptyState.java`
+- Delete: `app/src/main/java/app/drydock/ui/review/ReviewDestinationView.java`, `ReviewQueueRail.java`, `ReviewCheckoutGate.java`
+- Delete **only if unreferenced after Tasks 5-6** (the compile step names it either way): `app/src/main/java/app/drydock/ui/review/ReviewEmptyState.java` — `SessionReviewView` may legitimately reuse it for its own empty state
 - Delete: `app/src/main/java/app/drydock/review/ReviewQueueService.java`, `QueueAssembly.java`, `ReviewItem.java`
 - Delete: `app/src/test/java/app/drydock/ui/review/ReviewDestinationViewTest.java`, `ReviewEmptyStateTest.java`, `ReviewEmptyStateScannedTest.java`, `ReviewEmptySurfaceTest.java`, `ReviewNarrowLayoutTest.java`, `ReviewQueueRailMatchTest.java`, `ReviewQueueRailSelectionTest.java`
 - Delete: `app/src/test/java/app/drydock/review/ReviewQueueServiceTest.java`, `ReviewQueueCompletenessTest.java`, `ReviewQueueEndToEndTest.java`
