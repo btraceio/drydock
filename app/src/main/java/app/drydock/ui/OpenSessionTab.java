@@ -5,12 +5,14 @@ import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.PrState;
 import app.drydock.domain.Repository;
 import app.drydock.domain.SessionStatus;
+import app.drydock.review.SessionReviewScopes;
 import app.drydock.terminal.api.Shortcut;
 import app.drydock.terminal.api.TerminalSpec;
 import app.drydock.terminal.api.TerminalHostView;
 import app.drydock.terminal.api.TerminalRuntime;
 import app.drydock.terminal.api.TerminalSurface;
 import app.drydock.ui.explorer.SessionExplorerView;
+import app.drydock.ui.review.SessionReviewView;
 import javafx.animation.PauseTransition;
 import javafx.application.Platform;
 import javafx.css.PseudoClass;
@@ -43,6 +45,7 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
 import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -88,14 +91,13 @@ final class OpenSessionTab {
     private static final long SHELL_CLOSE_POLL_MILLIS = 100;
 
     /**
-     * The three views a session tab can show in its content area (design
-     * handoff "Session Explorer"). Review used to be a fourth: it is now a
-     * global destination (Review handoff §1), because a per-session tab
-     * cannot show a queue that spans repositories, and because it gated
-     * review off for remote repositories -- while reviewing a remote PR is
-     * the primary use case. {@code ⌘4} navigates there instead.
+     * The four views a session tab can show in its content area (design
+     * handoff "Session Explorer"). Claude and Terminal are native surfaces
+     * (their own {@link TerminalBridge}); Explorer and Review are plain
+     * JavaFX views, built lazily on the first visit and hidden -- not
+     * removed -- on every other sub-tab, exactly like Explorer.
      */
-    enum SubTab { CLAUDE, TERMINAL, EXPLORER }
+    enum SubTab { CLAUDE, TERMINAL, EXPLORER, REVIEW }
 
     /** One lazily-created native trio for the shell sub-tab (runtime + host, themed by MainWorkspace). */
     record ShellTerminal(TerminalRuntime runtime, TerminalHostView host) { }
@@ -123,19 +125,16 @@ final class OpenSessionTab {
     private final ToggleButton claudeSubTabButton = new ToggleButton();
     private final ToggleButton terminalSubTabButton = new ToggleButton("❯_  Terminal");
     private final ToggleButton explorerSubTabButton = new ToggleButton("▤  Explorer");
-
-    /**
-     * The ⌘4 affordance. A plain {@link Button}, not a {@link ToggleButton}
-     * beside the three sub-tabs: Review is a destination this session
-     * navigates TO, not a fourth view inside it, and a toggle that never
-     * shows a selected state next to three that do would say otherwise.
-     */
-    private final Button reviewButton = new Button("◨  Review");
+    /** Base text; {@link #setReviewBadge} appends the open-findings badge to this. */
+    private final ToggleButton reviewSubTabButton = new ToggleButton("Review");
     private final Label subTabContext = new Label();
     private SubTab activeSubTab = SubTab.CLAUDE;
     /** Built on first switch to Explorer, via {@link #setExplorerFactory}. */
     private Region explorerView;
     private Supplier<Region> explorerFactory;
+    /** Built on first switch to Review, via {@link #setReviewViewFactory}. */
+    private SessionReviewView reviewView;
+    private Supplier<SessionReviewView> reviewViewFactory;
 
     // -- Ephemeral shell Terminal sub-tab (never persisted; created on first switch) --
     /** Supplies a fresh shell runtime+host whose wakeup drives the argument (the shell bridge's tickAndDraw). */
@@ -193,8 +192,14 @@ final class OpenSessionTab {
     private Runnable onPreviousSessionTab = () -> { };
     private Runnable onNextSessionTab = () -> { };
     private Runnable onToggleSidebar = () -> { };
-    /** ⌘4 intercepted inside the terminal: navigate to Review, scoped to this session. */
-    private Runnable onShowReview = () -> { };
+    /**
+     * Told when {@link #showReviewSubTab} is asked to land on a particular
+     * scope choice, so the workspace (the "host" {@link #showReviewSubTab}'s
+     * Javadoc refers to) can resolve this session's {@link
+     * SessionReviewScopes} and push them into {@link #reviewView()}. Not
+     * wired to real scopes in this task -- see {@code showReviewSubTab}.
+     */
+    private Consumer<SessionReviewScopes.Choice> onReviewScopeRequested = choice -> { };
 
     private String displayName;
 
@@ -351,6 +356,11 @@ final class OpenSessionTab {
             explorerSubTabButton.setTooltip(new Tooltip("Explorer (⌘3)"));
         }
 
+        reviewSubTabButton.getStyleClass().add("session-subtab");
+        reviewSubTabButton.setFocusTraversable(false);
+        reviewSubTabButton.setTooltip(new Tooltip("Review this session's changes (⌘4)"));
+        reviewSubTabButton.setOnAction(e -> showSubTab(SubTab.REVIEW));
+
         // The shortcut is spelled out ON the button, not only in its tooltip:
         // a tooltip is only found by someone who already suspects there is a
         // shortcut. Disabled sub-tabs get none -- their key does nothing.
@@ -359,15 +369,7 @@ final class OpenSessionTab {
         if (!isRemote) {
             showKeyHint(explorerSubTabButton, "⌘3");
         }
-        // ⌘4 gets a button of its own. Review is not a sub-tab, but a key
-        // that is only advertised in the shortcuts overlay is a key nobody
-        // finds: the same argument that put ⌘1--⌘3 on their buttons rather
-        // than in their tooltips applies here.
-        reviewButton.getStyleClass().add("session-subtab");
-        reviewButton.setFocusTraversable(false);
-        reviewButton.setTooltip(new Tooltip("Review this session's changes (⌘4)"));
-        reviewButton.setOnAction(e -> onShowReview.run());
-        showKeyHint(reviewButton, "⌘4");
+        showKeyHint(reviewSubTabButton, "⌘4");
 
         subTabContext.getStyleClass().add("session-subtab-context");
 
@@ -375,7 +377,7 @@ final class OpenSessionTab {
         HBox.setHgrow(spacer, Priority.ALWAYS);
 
         HBox bar = new HBox(4, claudeSubTabButton, terminalSubTabButton, explorerSubTabButton,
-                reviewButton, spacer, subTabContext);
+                reviewSubTabButton, spacer, subTabContext);
         bar.setAlignment(Pos.CENTER_LEFT);
         bar.getStyleClass().add("session-subtab-bar");
         return bar;
@@ -384,6 +386,53 @@ final class OpenSessionTab {
     /** Supplies the Explorer view on first use (MainWorkspace wires this; it knows the session's search root). */
     void setExplorerFactory(Supplier<Region> factory) {
         this.explorerFactory = factory;
+    }
+
+    /**
+     * Supplies the Review view on first use (MainWorkspace wires this).
+     * Called at most once: {@link #reviewViewOrBuild} builds it on the
+     * first {@code REVIEW} visit and every later visit reuses it -- a diff
+     * column per open session, built eagerly, is a cost nobody asked for.
+     */
+    void setReviewViewFactory(Supplier<SessionReviewView> factory) {
+        this.reviewViewFactory = factory;
+    }
+
+    /**
+     * Selects the Review sub-tab and asks the host to resolve {@code
+     * choice}'s scopes for this session, via whichever handler {@link
+     * #setOnReviewScopeRequested} was given.
+     *
+     * <p>This task builds, hosts, disposes and badges the view only --
+     * scope resolution is Task 11's, so the handler defaults to a no-op and
+     * the view shows nothing until something wires it and calls {@link
+     * SessionReviewView#showScopes}.</p>
+     */
+    void showReviewSubTab(SessionReviewScopes.Choice choice) {
+        showSubTab(SubTab.REVIEW);
+        onReviewScopeRequested.accept(choice);
+    }
+
+    /** Wires the handler {@link #showReviewSubTab} asks to resolve a session's review scopes. */
+    void setOnReviewScopeRequested(Consumer<SessionReviewScopes.Choice> handler) {
+        this.onReviewScopeRequested = handler == null ? choice -> { } : handler;
+    }
+
+    /**
+     * The Review sub-tab's view, once built by a first {@code REVIEW}
+     * visit; empty before then and after {@link #disposeNativeResources}.
+     */
+    Optional<SessionReviewView> reviewView() {
+        return Optional.ofNullable(reviewView);
+    }
+
+    /**
+     * Updates the Review sub-tab button's badge. Works whether or not the
+     * view has been built yet -- the badge is a property of the button, not
+     * of the (possibly still unbuilt) view it opens.
+     */
+    void setReviewBadge(Optional<Integer> openFindings) {
+        reviewSubTabButton.setText(openFindings.map(count -> "Review ◨" + count).orElse("Review"));
     }
 
     /** Supplies a fresh shell runtime+host on first switch to the Terminal sub-tab (MainWorkspace wires this). */
@@ -448,13 +497,14 @@ final class OpenSessionTab {
 
     /**
      * Switches between the native-surface sub-tabs (Claude, Terminal) and
-     * the scene-graph one (Explorer). The native views overlay the
-     * scene, so showing the Explorer must both swap the center node AND
+     * the scene-graph ones (Explorer, Review). The native views overlay the
+     * scene, so showing Explorer or Review must both swap the center node AND
      * hide the native hosts (else they keep painting over the view);
      * switching to a native sub-tab restores its placeholder center first
      * and re-runs geometry after the layout pass so the native frame tracks
      * the placeholder's fresh bounds. Only one native view is visible at a
-     * time; the shell terminal is built lazily on first switch.
+     * time; the shell terminal and the review view are each built lazily on
+     * first switch.
      */
     void showSubTab(SubTab subTab) {
         selectSubTabButton(subTab);
@@ -471,6 +521,21 @@ final class OpenSessionTab {
             Region view = explorerViewOrBuild();
             if (view == null) {
                 // Build failed: undo the button selection, stay put.
+                selectSubTabButton(activeSubTab);
+                return;
+            }
+            activeSubTab = subTab;
+            content.setCenter(view);
+            bridge.setTerminalSubTabActive(false);
+            if (shellBridge != null) {
+                shellBridge.setTerminalSubTabActive(false);
+            }
+            return;
+        }
+        if (subTab == SubTab.REVIEW) {
+            SessionReviewView view = reviewViewOrBuild();
+            if (view == null) {
+                // Factory never wired (or not yet): undo the selection, stay put.
                 selectSubTabButton(activeSubTab);
                 return;
             }
@@ -542,6 +607,7 @@ final class OpenSessionTab {
         claudeSubTabButton.setSelected(subTab == SubTab.CLAUDE);
         terminalSubTabButton.setSelected(subTab == SubTab.TERMINAL);
         explorerSubTabButton.setSelected(subTab == SubTab.EXPLORER);
+        reviewSubTabButton.setSelected(subTab == SubTab.REVIEW);
     }
 
     /**
@@ -599,9 +665,7 @@ final class OpenSessionTab {
             case CLAUDE_SUB_TAB -> showSubTab(SubTab.CLAUDE);
             case TERMINAL_SUB_TAB -> showSubTab(SubTab.TERMINAL);
             case EXPLORER_SUB_TAB -> showSubTab(SubTab.EXPLORER);
-            // ⌘4 is a navigation command now, not a view switch: it selects
-            // the global Review destination, scoped to this session.
-            case REVIEW_SUB_TAB -> onShowReview.run();
+            case REVIEW_SUB_TAB -> showSubTab(SubTab.REVIEW);
             case PREVIOUS_SESSION_TAB -> onPreviousSessionTab.run();
             case NEXT_SESSION_TAB -> onNextSessionTab.run();
             case TOGGLE_SIDEBAR -> onToggleSidebar.run();
@@ -613,6 +677,13 @@ final class OpenSessionTab {
             explorerView = explorerFactory.get();
         }
         return explorerView;
+    }
+
+    private SessionReviewView reviewViewOrBuild() {
+        if (reviewView == null && reviewViewFactory != null) {
+            reviewView = reviewViewFactory.get();
+        }
+        return reviewView;
     }
 
 
@@ -958,6 +1029,16 @@ final class OpenSessionTab {
         showSubTab(subTab);
     }
 
+    /** Feeds an intercepted terminal app-shortcut through the exact same path a real one takes. */
+    void diagRunShortcut(Shortcut shortcut) {
+        runShortcut(shortcut);
+    }
+
+    /** The Review sub-tab button's current text, badge included when set. */
+    String diagReviewButtonText() {
+        return reviewSubTabButton.getText();
+    }
+
     /**
      * Releases the terminal's AppKit first-responder status so JavaFX text
      * inputs receive keys.
@@ -1008,11 +1089,6 @@ final class OpenSessionTab {
 
     void setOnToggleSidebar(Runnable handler) {
         this.onToggleSidebar = handler == null ? () -> { } : handler;
-    }
-
-    /** ⌘4 target: the workspace navigates to the Review destination for this session's checkout. */
-    void setOnShowReview(Runnable handler) {
-        this.onShowReview = handler == null ? () -> { } : handler;
     }
 
     /**
@@ -1182,6 +1258,12 @@ final class OpenSessionTab {
     void disposeNativeResources() {
         bridge.host().embeddedNode().ifPresent(placeholder.getChildren()::remove);
         bridge.disposeNativeResources();
+        // The Review view owns no native or background resource of its own
+        // yet (Task 11 wires scope resolution in) -- dropping the reference
+        // here, alongside the rest of this tab's own teardown, is the whole
+        // of disposing it, and mirrors where MainWorkspace.removeTab
+        // releases the Explorer's.
+        reviewView = null;
         if (shellBridge != null) {
             // The ephemeral shell has no SessionManager-managed lifecycle,
             // so it is reaped here -- but NEVER via a direct close(): a

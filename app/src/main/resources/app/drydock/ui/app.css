@@ -1064,6 +1064,13 @@
     -fx-border-radius: 5px;
     -fx-border-width: 1;
 }
+/* The session Review sub-tab's two scope chips (Local changes / PR #n),
+ * layered on .seg-toggle-button: the monospace face matches every other
+ * small chip carrying a count (.chip-ahead, ReviewScopeSwitcher's own
+ * "◨n" suffix), rather than the pill's default sans face. */
+.review-scope-chip {
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
 .explorer-search-row {
     -fx-background-color: -drydock-input-bg;
     -fx-background-radius: 7px;

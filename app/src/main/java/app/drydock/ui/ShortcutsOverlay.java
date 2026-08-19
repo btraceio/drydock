@@ -33,7 +33,7 @@ final class ShortcutsOverlay {
                     {"Agent view", "⌘1"},
                     {"Terminal view", "⌘2"},
                     {"Explorer view", "⌘3"},
-                    {"Review — and back to where you were", "⌘4"},
+                    {"Review this session's changes", "⌘4"},
                     {"Previous / next session tab", "⌘[ / ⌘]"},
                     {"  (in the Explorer: back / forward along the trail)", ""},
                     {"Previous / next live session", "⌘↑ / ⌘↓"},

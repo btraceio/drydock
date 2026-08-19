@@ -3815,7 +3815,6 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         openTab.setOnPreviousSessionTab(this::selectPreviousSessionTab);
         openTab.setOnNextSessionTab(this::selectNextSessionTab);
         openTab.setOnToggleSidebar(() -> onToggleSidebar.run());
-        openTab.setOnShowReview(this::showReviewForCurrentSession);
 
         if (repository.map(Repository::isRemote).orElse(false)) {
             // The Explorer's file search has no local checkout to operate on
