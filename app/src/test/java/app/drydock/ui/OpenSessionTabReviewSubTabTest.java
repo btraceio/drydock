@@ -103,6 +103,15 @@ class OpenSessionTabReviewSubTabTest extends ApplicationTest {
         return holder[0];
     }
 
+    private final ReviewScopeRegistry scopeRegistry = new ReviewScopeRegistry();
+
+    /** Any real scope: these tests care that the board HAS one, never which. */
+    private ReviewScope someLocalScope() {
+        return scopeRegistry.mint(ReviewScopeRegistry.spec(
+                ReviewScope.Kind.WORKTREE, Path.of("/repo"), Optional.of(Path.of("/wt/feature")),
+                "main", "feature/x", Optional.empty(), Optional.empty()));
+    }
+
     private SessionReviewView newReviewView() {
         SessionReviewView[] holder = new SessionReviewView[1];
         interact(() -> holder[0] = new SessionReviewView(new StubHost(), diffService, null));
@@ -201,15 +210,12 @@ class OpenSessionTabReviewSubTabTest extends ApplicationTest {
             tab.showSubTab(OpenSessionTab.SubTab.REVIEW);
         });
         SessionReviewView board = tab.reviewView().orElseThrow();
-        ReviewScopeRegistry registry = new ReviewScopeRegistry();
-        ReviewScope local = registry.mint(ReviewScopeRegistry.spec(
-                ReviewScope.Kind.WORKTREE, Path.of("/repo"), Optional.of(Path.of("/wt/feature")),
-                "main", "feature/x", Optional.empty(), Optional.empty()));
-        ReviewScope pr = registry.mint(ReviewScopeRegistry.spec(
+        ReviewScope pr = scopeRegistry.mint(ReviewScopeRegistry.spec(
                 ReviewScope.Kind.PR, Path.of("/repo"), Optional.of(Path.of("/wt/feature")),
                 "main", "feature/x", Optional.of(new ReviewScope.PullRequestRef(42, Optional.empty())),
                 Optional.empty()));
-        interact(() -> board.showScopes(new SessionReviewScopes.Scopes(local, Optional.of(pr)),
+        interact(() -> board.showScopes(
+                new SessionReviewScopes.Scopes(someLocalScope(), Optional.of(pr)),
                 SessionReviewScopes.Choice.PULL_REQUEST));
         asked.clear();
 
@@ -219,6 +225,56 @@ class OpenSessionTabReviewSubTabTest extends ApplicationTest {
         interact(() -> tab.showReviewSubTab(SessionReviewScopes.Choice.LOCAL));
         assertEquals(List.of(Optional.of(SessionReviewScopes.Choice.LOCAL)), asked,
                 "the other chip is a real request, even from the sub-tab that is already showing");
+    }
+
+    /**
+     * A transient git or {@code gh} failure must not be terminal. The routes
+     * that name no chip (⌘4, the sub-tab button) early-return out of {@code
+     * showSubTab} when REVIEW is already active, so without a retry the board
+     * would keep reading "Review is not available for this session" until the
+     * user switched sub-tabs away and back. The chip-naming gestures always
+     * retried; these have to as well.
+     */
+    @Test
+    void repeatingTheGestureRetriesAfterTheBoardCouldNotResolve() {
+        List<Optional<SessionReviewScopes.Choice>> asked = new ArrayList<>();
+        OpenSessionTab tab = newTab();
+        interact(() -> {
+            tab.setReviewViewFactory(this::newReviewView);
+            tab.setOnReviewShown(asked::add);
+            tab.showSubTab(OpenSessionTab.SubTab.REVIEW);
+        });
+        SessionReviewView board = tab.reviewView().orElseThrow();
+        interact(() -> board.showUnavailable("git exploded"));
+        asked.clear();
+
+        interact(() -> tab.showSubTab(OpenSessionTab.SubTab.REVIEW));
+
+        assertEquals(List.of(Optional.empty()), asked,
+                "⌘4 on a board that could not resolve is a retry, not a refocus of a dead board");
+    }
+
+    /**
+     * The other half of the same rule: once the board HAS a scope, repeating
+     * the no-chip gesture is a refocus and must not spawn git and gh again.
+     */
+    @Test
+    void repeatingTheGestureOnAResolvedBoardDoesNotReResolve() {
+        List<Optional<SessionReviewScopes.Choice>> asked = new ArrayList<>();
+        OpenSessionTab tab = newTab();
+        interact(() -> {
+            tab.setReviewViewFactory(this::newReviewView);
+            tab.setOnReviewShown(asked::add);
+            tab.showSubTab(OpenSessionTab.SubTab.REVIEW);
+        });
+        interact(() -> tab.reviewView().orElseThrow().showScopes(
+                new SessionReviewScopes.Scopes(someLocalScope(), Optional.empty()),
+                SessionReviewScopes.Choice.LOCAL));
+        asked.clear();
+
+        interact(() -> tab.showSubTab(OpenSessionTab.SubTab.REVIEW));
+
+        assertEquals(List.of(), asked);
     }
 
     /**

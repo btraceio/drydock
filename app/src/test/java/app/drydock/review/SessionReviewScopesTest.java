@@ -49,6 +49,11 @@ class SessionReviewScopesTest {
                 Optional.empty(), Optional.empty());
     }
 
+    private static GhCliService.OpenPullRequest draftPullRequest(int number, String head) {
+        return new GhCliService.OpenPullRequest(number, "Title", head, "main", true,
+                Optional.empty(), Optional.empty());
+    }
+
     @Test
     void aMainCheckoutMintsAWorkingTreeScopeAndNoPullRequest(@TempDir Path dir)
             throws ExecutionException, InterruptedException, IOException {
@@ -98,6 +103,54 @@ class SessionReviewScopesTest {
 
         assertEquals(ReviewScope.Kind.WORKTREE, resolved.local().kind());
         assertEquals(42, resolved.local().pr().orElseThrow().number());
+    }
+
+    /**
+     * A DRAFT pull request checked out as {@code pr-<n>} must mint the very
+     * same local identity a non-draft one does.
+     *
+     * <p>{@code ReviewQueueService} mints {@code (WORKTREE, repo, worktree,
+     * <n>)} for such a checkout unconditionally: its PR source, {@code
+     * GhCliService.listOpenPullRequests}, never asks {@code gh} for {@code
+     * isDraft} and hardcodes {@code draft = false}, while {@code gh pr list
+     * --state open} does return drafts. So filtering drafts out before {@code
+     * forCheckout} would mint {@code (WORKTREE, repo, worktree, ∅)} for the
+     * same worktree, and every finding, verdict and thread recorded from one
+     * surface would be invisible from the other. This is reachable: a
+     * review-requested PR can be a draft, and drydock checks those out as
+     * {@code pr-<n>}.</p>
+     *
+     * <p>The chip is a separate question, and IS withheld -- a draft is not
+     * yet something anyone is being asked to review.</p>
+     */
+    @Test
+    void aDraftPullRequestMintsTheSameLocalIdentityAsANonDraftOne(
+            @TempDir Path dir, @TempDir Path worktreeParent)
+            throws ExecutionException, InterruptedException, IOException {
+        Path repo = initCommittedRepo(dir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "pr-42").get();
+
+        SessionReviewScopes.Scopes resolved = scopes.forCheckout(
+                repo, worktree, Optional.of("pr-42"), Optional.empty(),
+                Optional.of(draftPullRequest(42, "someones-branch"))).get();
+
+        assertEquals(42, resolved.local().pr().orElseThrow().number(),
+                "the local scope's ref is identity, and a draft PR is still the PR this worktree holds");
+        assertTrue(resolved.pullRequest().isEmpty(),
+                "a draft gets no second chip: nobody is being asked to review it yet");
+
+        // The cross-check that makes the claim above mean something: mint the
+        // scope the way ReviewQueueService does for this same worktree,
+        // through the SAME registry. A matching handle means matching
+        // Identity -- (kind, repoRoot, worktree, PR number) -- which is what
+        // every finding is keyed by.
+        ReviewScope asTheQueueMintsIt = registry.mint(ReviewScopeRegistry.spec(
+                ReviewScope.Kind.WORKTREE, repo, Optional.of(worktree),
+                resolved.local().base(), "pr-42",
+                Optional.of(new ReviewScope.PullRequestRef(42, Optional.empty())),
+                Optional.empty()));
+        assertEquals(asTheQueueMintsIt.id(), resolved.local().id(),
+                "a draft pr-42 worktree must resolve to the handle ReviewQueueService already minted");
     }
 
     /**

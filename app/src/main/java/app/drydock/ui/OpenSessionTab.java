@@ -407,24 +407,28 @@ final class OpenSessionTab {
      * #reviewView()} via {@link SessionReviewView#showScopes}.
      */
     void showReviewSubTab(SessionReviewScopes.Choice choice) {
-        if (activeSubTab == SubTab.REVIEW) {
-            // Already here. Reclaim focus either way (see showSubTab's
-            // early return), but ask for scopes again only when the gesture
-            // names a chip the board is not already showing -- re-resolving
-            // spawns git AND a gh network call, and "the PR chip while the
-            // PR chip is up" is a refocus, not a re-measure.
-            showSubTab(SubTab.REVIEW);
-            boolean alreadyShowingIt = reviewView()
-                    .filter(view -> view.selectedScope().isPresent() && view.selectedChoice() == choice)
-                    .isPresent();
-            if (!alreadyShowingIt) {
-                pendingReviewChoice = choice;
-                notifyReviewShown();
-            }
+        pendingReviewChoice = choice;
+        if (activeSubTab != SubTab.REVIEW) {
+            showSubTab(SubTab.REVIEW);      // the activation branch asks, carrying this choice
             return;
         }
-        pendingReviewChoice = choice;
-        showSubTab(SubTab.REVIEW);
+        // Already here. Read the board BEFORE the refocus, which is what the
+        // gesture is measured against.
+        boolean alreadyShowingIt = reviewView()
+                .filter(view -> view.selectedScope().isPresent() && view.selectedChoice() == choice)
+                .isPresent();
+        showSubTab(SubTab.REVIEW);          // refocuses; asks too if the board holds no scope
+        if (pendingReviewChoice == null) {
+            return;                         // that retry already asked, and it carried this choice
+        }
+        if (alreadyShowingIt) {
+            // The board is on exactly this chip already: a refocus, not a
+            // re-measure. Re-resolving would spawn git AND a gh call for a
+            // result the user is already looking at.
+            pendingReviewChoice = null;
+            return;
+        }
+        notifyReviewShown();
     }
 
     /**
@@ -545,6 +549,16 @@ final class OpenSessionTab {
             // responder to the Glass view), and "switch to this sub-tab"
             // must mean "let me type there again", not a silent no-op.
             refocusActiveSubTab();
+            if (subTab == SubTab.REVIEW
+                    && reviewView().filter(view -> view.selectedScope().isEmpty()).isPresent()) {
+                // The board is on its "resolving…"/"not available"
+                // placeholder. Without this, a transient git or gh failure is
+                // terminal for the routes that name no chip (⌘4, the sub-tab
+                // button): they would refocus a dead board forever, and only
+                // switching sub-tabs away and back could ever retry. The host
+                // drops the ask if a resolve really is still in flight.
+                notifyReviewShown();
+            }
             return;
         }
         if (subTab == SubTab.EXPLORER) {

@@ -16,6 +16,17 @@ import java.util.concurrent.CompletableFuture;
  * a local scope always, and a pull-request scope when the checkout's branch
  * carries an open non-draft PR.
  *
+ * <p><strong>Draft is a chip rule, not an identity rule.</strong> The caller
+ * hands over any open PR the checkout carries, draft included, because the
+ * local scope's {@code PullRequestRef} -- and therefore its identity -- is
+ * derived from it. Only the second chip is withheld for a draft. Filtering
+ * drafts out in the caller instead would mint {@code (WORKTREE, repo,
+ * worktree, ∅)} for a {@code pr-<n>} checkout that {@code ReviewQueueService}
+ * already minted as {@code (WORKTREE, repo, worktree, <n>)} -- its PR source,
+ * {@code GhCliService.listOpenPullRequests}, never asks {@code gh} for {@code
+ * isDraft} at all -- and every finding recorded from one surface would be
+ * invisible from the other, silently.</p>
+ *
  * <p><strong>The kinds are not a free choice.</strong> They are the ones the
  * deleted queue and {@code openCheckedOutPr} already minted for the same
  * places -- {@code WORKING_TREE} for a main checkout, {@code WORKTREE} for a
@@ -75,9 +86,10 @@ public final class SessionReviewScopes {
      * missing base measurement is no reason to show the Review sub-tab
      * nothing at all.
      *
-     * @param pullRequest the open non-draft PR this checkout's branch carries,
-     *                    if any -- resolved by the caller, which already holds
-     *                    the repository's listing
+     * @param pullRequest the open PR this checkout's branch carries, if any --
+     *                    resolved by the caller, which already holds the
+     *                    repository's listing. Drafts included: see the class
+     *                    note on why the draft gate belongs here and not there
      */
     public CompletableFuture<Scopes> forCheckout(Path repositoryRoot, Path checkoutRoot,
                                                  Optional<String> branch,
@@ -122,8 +134,15 @@ public final class SessionReviewScopes {
                     // ref) is what makes the base a revision git can actually
                     // name. Using the raw, unresolved baseRefName here would
                     // let the PR chip's diff fail while the local chip's works.
-                    Optional<ReviewScope> pr = pullRequest.map(open -> registry.mint(
-                            ReviewScopeRegistry.spec(ReviewScope.Kind.PR, repositoryRoot,
+                    // The draft gate, and the ONLY thing it gates: a draft is
+                    // not yet something anyone is being asked to review, so it
+                    // gets no chip -- while the local scope's ref, its base and
+                    // therefore its identity are all left exactly as a
+                    // non-draft PR would leave them.
+                    Optional<ReviewScope> pr = pullRequest
+                            .filter(open -> !open.draft())
+                            .map(open -> registry.mint(ReviewScopeRegistry.spec(
+                                    ReviewScope.Kind.PR, repositoryRoot,
                                     Optional.of(checkoutRoot), base.ref(), head, ref,
                                     session, Optional.of(ReviewBase.Origin.PULL_REQUEST))));
                     return new Scopes(local, pr);

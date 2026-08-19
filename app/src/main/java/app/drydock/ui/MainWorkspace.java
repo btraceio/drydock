@@ -130,6 +130,7 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -292,6 +293,43 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     private final ReviewScopeRegistry reviewScopeRegistry;
     /** Resolves one checkout's scopes for its session's Review sub-tab (spec §3.2). */
     private final SessionReviewScopes sessionReviewScopes;
+
+    /**
+     * How long a repository's {@code gh pr list} answer is reused. Entering
+     * Review is the most common gesture in the feature and every entry needs
+     * to know whether the checkout carries a PR; without this, every ⌘4, every
+     * sub-tab button press and every chip switch spawns a fresh {@code gh}
+     * subprocess, each of which can sit on the process runner's timeout with
+     * the board parked on "Resolving…". Short enough that a PR opened while
+     * the app is running shows up on the next gesture but one.
+     */
+    private static final long PULL_REQUEST_MEMO_NANOS = 30_000_000_000L;
+
+    /**
+     * The in-flight-or-recent {@code gh pr list} per repository root.
+     * Memoizes the FUTURE, not the result, so gestures that overlap share one
+     * subprocess instead of racing two. Concurrent because the completion that
+     * evicts a failed lookup runs on the gh service's executor, not the FX
+     * thread.
+     */
+    private final Map<Path, PullRequestMemo> pullRequestMemos = new ConcurrentHashMap<>();
+
+    /** One memoized listing and when it goes stale; see {@link #PULL_REQUEST_MEMO_NANOS}. */
+    private record PullRequestMemo(long expiresAt,
+                                   CompletableFuture<List<GhCliService.OpenPullRequest>> listing) {
+        boolean isFresh() {
+            return System.nanoTime() - expiresAt < 0;
+        }
+    }
+
+    /**
+     * The scope resolution in flight per session, by generation. Two jobs:
+     * a repeated gesture that names no chip (⌘4 on a board still resolving) is
+     * dropped rather than spawning a second git+gh pass, and a slower earlier
+     * resolve cannot land its scopes on top of a later one's.
+     */
+    private final Map<ManagedSessionId, Long> reviewResolveInFlight = new HashMap<>();
+    private long reviewResolveSequence;
     private final ReviewQueueService reviewQueueService;
     private final IntentGrouping intentGrouping = new IntentGrouping();
 
@@ -863,6 +901,18 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      */
     @Override
     public void promptStartWorktreeSession(Repository repository, WorktreeService.Worktree worktree) {
+        promptStartWorktreeSession(repository, worktree, () -> { });
+    }
+
+    /**
+     * As above, running {@code onStarted} after the human actually confirms.
+     * The hook exists because "cancelled" and "confirmed" are otherwise
+     * indistinguishable from outside this method, and {@link
+     * #startReviewForWorktree} must not go looking for a session the user
+     * decided not to start.
+     */
+    private void promptStartWorktreeSession(Repository repository, WorktreeService.Worktree worktree,
+                                            Runnable onStarted) {
         if (modalLayer == null) {
             return;
         }
@@ -883,6 +933,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 // removing the worktree must never force-delete it.
                 openNewWorktreeSession(repository, branch, worktree.path(), task, false, agent, eval);
             }
+            onStarted.run();
         });
         modalLayer.show(modal);
     }
@@ -1140,11 +1191,21 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     @Override
     public void startReviewForWorktree(Repository repository, WorktreeService.Worktree worktree,
                                        SessionReviewScopes.Choice choice) {
-        Set<ManagedSessionId> before = new HashSet<>(openTabs.keySet());
-        promptStartWorktreeSession(repository, worktree);
-        pollForTab(id -> !before.contains(id) && startedOn(id, repository, worktree),
-                "a session on " + worktree.path(),
-                open -> open.showReviewSubTab(choice));
+        // Snapshotted BEFORE the modal, and from the sessions rather than the
+        // open tabs: a session that already existed here must never be the one
+        // the poll lands on, whether or not it happens to have a tab yet.
+        Set<ManagedSessionId> before = sessionManager.sessions().stream()
+                .map(ManagedAgentSession::id)
+                .collect(Collectors.toSet());
+        // The poll starts only once the human confirms. Started before the
+        // modal, a cancel would leave it running for a minute, and any
+        // main-checkout tab for this repository opened in that window would be
+        // selected and thrown into Review -- a wrong-target action, not a
+        // no-op.
+        promptStartWorktreeSession(repository, worktree,
+                () -> pollForTab(id -> !before.contains(id) && startedOn(id, repository, worktree),
+                        "a session on " + worktree.path(),
+                        open -> open.showReviewSubTab(choice)));
     }
 
     /**
@@ -1193,6 +1254,12 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             return;     // the sub-tab was never built: nothing to resolve into
         }
         ManagedSessionId sessionId = tab.sessionId();
+        if (requested.isEmpty() && reviewResolveInFlight.containsKey(sessionId)) {
+            // A resolve is already running and this gesture named no chip of
+            // its own (⌘4 or the sub-tab button, repeated while the board is
+            // still on "Resolving…"). Nothing new to ask for.
+            return;
+        }
         SessionReviewScopes.Choice choice = requested.orElseGet(() -> persistedReviewChoice(sessionId));
         requested.ifPresent(picked -> repositoryManager.updateReviewScopeChoice(sessionId, picked));
         view.showResolving();
@@ -1226,10 +1293,19 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         Path checkoutRoot = session.get().worktreeRoot().orElse(repositoryRoot);
         Optional<String> branch = branchOfCheckout(repository.get(), session.get(), checkoutRoot);
 
+        long generation = ++reviewResolveSequence;
+        reviewResolveInFlight.put(sessionId, generation);
         openPullRequestOn(repositoryRoot, branch)
                 .thenCompose(pullRequest -> sessionReviewScopes.forCheckout(repositoryRoot, checkoutRoot,
                         branch, Optional.of(sessionId), pullRequest))
                 .whenComplete((scopes, failure) -> Platform.runLater(() -> {
+                    if (!Long.valueOf(generation).equals(reviewResolveInFlight.get(sessionId))) {
+                        // Superseded by a later gesture (a chip switch while
+                        // this one was still measuring): that one owns the
+                        // entry, and this one's scopes must not land on top.
+                        return;
+                    }
+                    reviewResolveInFlight.remove(sessionId);
                     if (tab.reviewView().orElse(null) != view) {
                         return;     // tab closed (or its board rebuilt) while git ran
                     }
@@ -1244,9 +1320,14 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     }
 
     /**
-     * The open, non-draft pull request {@code branch} carries, if any --
-     * matched on the PR's own head branch, or on the {@code pr-<n>} name a
-     * drydock checkout gives it.
+     * The open pull request {@code branch} carries, if any -- matched on the
+     * PR's own head branch, or on the {@code pr-<n>} name a drydock checkout
+     * gives it.
+     *
+     * <p>Drafts are NOT filtered out here. A draft still decides the local
+     * scope's {@code PullRequestRef}, and therefore its identity; {@link
+     * SessionReviewScopes} is where the draft gate lives, and it gates the
+     * second chip only. See that class's note.</p>
      *
      * <p>Asked of {@code gh} rather than read from {@link
      * WorkspaceViewModel#pullRequests}: that cache holds the PULL REQUESTS
@@ -1266,29 +1347,45 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         }
         String head = branch.get();
         Optional<Integer> alias = PrCheckoutService.pullRequestNumberOf(head);
-        return ghCliService.openPullRequests(repositoryRoot)
-                .handle((listing, failure) -> {
-                    if (failure != null) {
-                        LOG.log(Level.WARNING, "Could not list pull requests in " + repositoryRoot, failure);
-                        return List.<GhCliService.OpenPullRequest>of();
-                    }
-                    if (listing instanceof GhCliService.PullRequestListing.Failed failed) {
-                        LOG.log(Level.WARNING, "gh could not list pull requests in " + repositoryRoot
-                                + ": " + failed.message());
-                        return List.<GhCliService.OpenPullRequest>of();
-                    }
-                    return listing instanceof GhCliService.PullRequestListing.Listed listed
-                            ? listed.pullRequests() : List.<GhCliService.OpenPullRequest>of();
-                })
+        return openPullRequests(repositoryRoot)
                 .thenApply(open -> open.stream()
-                        // Draft excluded deliberately (spec §3.2): a draft is
-                        // not yet something anyone is being asked to review,
-                        // and a PR scope for one would mint an identity whose
-                        // findings have nowhere to be posted.
-                        .filter(pullRequest -> !pullRequest.draft())
                         .filter(pullRequest -> pullRequest.headRefName().equals(head)
                                 || alias.filter(number -> number == pullRequest.number()).isPresent())
                         .findFirst());
+    }
+
+    /**
+     * A repository's open pull requests, memoized for {@link
+     * #PULL_REQUEST_MEMO_NANOS}. A listing that did not actually come back
+     * from {@code gh} is evicted rather than remembered, so a gh that was
+     * missing, unauthenticated or timing out is retried on the next gesture
+     * instead of reading as "no pull requests" for the next half minute.
+     */
+    private CompletableFuture<List<GhCliService.OpenPullRequest>> openPullRequests(Path repositoryRoot) {
+        PullRequestMemo memo = pullRequestMemos.get(repositoryRoot);
+        if (memo != null && memo.isFresh()) {
+            return memo.listing();
+        }
+        CompletableFuture<List<GhCliService.OpenPullRequest>> listing =
+                ghCliService.openPullRequests(repositoryRoot).handle((result, failure) -> {
+                    if (failure != null) {
+                        LOG.log(Level.WARNING, "Could not list pull requests in " + repositoryRoot, failure);
+                        pullRequestMemos.remove(repositoryRoot);
+                        return List.<GhCliService.OpenPullRequest>of();
+                    }
+                    if (result instanceof GhCliService.PullRequestListing.Listed listed) {
+                        return listed.pullRequests();
+                    }
+                    if (result instanceof GhCliService.PullRequestListing.Failed failed) {
+                        LOG.log(Level.WARNING, "gh could not list pull requests in " + repositoryRoot
+                                + ": " + failed.message());
+                    }
+                    pullRequestMemos.remove(repositoryRoot);
+                    return List.<GhCliService.OpenPullRequest>of();
+                });
+        pullRequestMemos.put(repositoryRoot,
+                new PullRequestMemo(System.nanoTime() + PULL_REQUEST_MEMO_NANOS, listing));
+        return listing;
     }
 
     /**
