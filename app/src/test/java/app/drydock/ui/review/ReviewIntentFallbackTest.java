@@ -1,16 +1,18 @@
 package app.drydock.ui.review;
 
 import app.drydock.git.DiffService;
-import app.drydock.review.QueueAssembly;
-import app.drydock.review.ReviewItem;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
+import app.drydock.review.SessionReviewScopes;
+import javafx.scene.Node;
 import javafx.scene.Scene;
+import javafx.scene.control.Button;
 import javafx.scene.control.Label;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.testfx.framework.junit5.ApplicationTest;
+import org.testfx.util.WaitForAsyncUtils;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -40,7 +42,7 @@ class ReviewIntentFallbackTest extends ApplicationTest {
     private final DiffService diffService = new DiffService();
     private final ReviewScopeRegistry registry = new ReviewScopeRegistry();
     private FakeReviewHost host;
-    private ReviewDestinationView view;
+    private SessionReviewView view;
 
     @Override
     public void start(Stage stage) {
@@ -50,7 +52,7 @@ class ReviewIntentFallbackTest extends ApplicationTest {
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
-        view = new ReviewDestinationView(host, diffService);
+        view = new SessionReviewView(host, diffService, null);
         Scene scene = new Scene(view, 1400, 900);
         scene.getStylesheets().addAll(
                 getClass().getResource("/app/drydock/ui/app.css").toExternalForm(),
@@ -72,8 +74,8 @@ class ReviewIntentFallbackTest extends ApplicationTest {
                 ReviewScope.Kind.WORKING_TREE, repo, Optional.of(repo), "main", "main",
                 Optional.empty(), Optional.empty()));
 
-        interact(() -> view.setItems(new QueueAssembly(List.of(new ReviewItem(scope, ReviewItem.Group.MINE,
-                "Working tree", "drydock · uncommitted changes")), true, true), List.of("repo")));
+        interact(() -> view.showScopes(new SessionReviewScopes.Scopes(scope, Optional.empty()),
+                SessionReviewScopes.Choice.LOCAL));
 
         assertEquals("1 · B.java", awaitIntentLabel(),
                 "the verdict bar must re-render when the diff arrives, not stay on 'no intent'");
@@ -91,8 +93,8 @@ class ReviewIntentFallbackTest extends ApplicationTest {
                 ReviewScope.Kind.WORKING_TREE, repo, Optional.of(repo), "main", "main",
                 Optional.empty(), Optional.empty()));
 
-        interact(() -> view.setItems(new QueueAssembly(List.of(new ReviewItem(scope, ReviewItem.Group.MINE,
-                "Working tree", "drydock · uncommitted changes")), true, true), List.of("repo")));
+        interact(() -> view.showScopes(new SessionReviewScopes.Scopes(scope, Optional.empty()),
+                SessionReviewScopes.Choice.LOCAL));
         assertEquals("1 · Alpha.java", awaitIntentLabel());
 
         assertFalse(renderedHunkFiles().stream().anyMatch(p -> p.endsWith("Zulu.java")),
@@ -100,10 +102,10 @@ class ReviewIntentFallbackTest extends ApplicationTest {
 
         // fire() rather than clickOn(): what is under test is the handler, not
         // TestFX's ability to land a pointer on a rail card.
-        List<javafx.scene.Node> cards = new ArrayList<>(lookup(".review-intent-card").queryAll());
+        List<Node> cards = new ArrayList<>(lookup(".review-intent-card").queryAll());
         assertEquals(2, cards.size(), "expected one intent per changed directory");
-        interact(((javafx.scene.control.Button) cards.get(1))::fire);
-        org.testfx.util.WaitForAsyncUtils.waitForFxEvents();
+        interact(((Button) cards.get(1))::fire);
+        WaitForAsyncUtils.waitForFxEvents();
 
         assertTrue(renderedHunkFiles().stream().anyMatch(p -> p.endsWith("Zulu.java")),
                 "selecting the second intent must scroll to its file; rendered " + renderedHunkFiles());

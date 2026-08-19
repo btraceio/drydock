@@ -57,6 +57,17 @@ final class FakeReviewHost implements ReviewDestinationView.Host, SessionReviewV
         this.store = new AnnotationStore(storeFile);
     }
 
+    /**
+     * Test convenience: writes {@code finding} into the store under {@code
+     * scope}, stamping its scope id -- the board tests that seed synthetic
+     * findings (rather than driving a real diff) go through this rather than
+     * poking {@link #store} directly, so the (scopeId, id) keying stays in
+     * one place.
+     */
+    void addFinding(ReviewScope scope, ReviewAnnotation finding) {
+        store.upsert(finding.withScopeId(scope.id()));
+    }
+
     /** How many times the empty state's Retry asked for a rescan. */
     int queueRetries;
 

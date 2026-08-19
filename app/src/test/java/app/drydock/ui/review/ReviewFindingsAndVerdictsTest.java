@@ -4,14 +4,13 @@ import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.Confidence;
-import app.drydock.review.QueueAssembly;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewIntent;
-import app.drydock.review.ReviewItem;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
 import app.drydock.review.ReviewVerdict;
 import app.drydock.review.Severity;
+import app.drydock.review.SessionReviewScopes;
 import app.drydock.review.SubmitPlan;
 import javafx.scene.Node;
 import javafx.scene.Scene;
@@ -50,7 +49,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
     private final DiffService diffService = new DiffService();
     private final ReviewScopeRegistry registry = new ReviewScopeRegistry();
     private FakeReviewHost host;
-    private ReviewDestinationView view;
+    private SessionReviewView view;
     private ReviewScope scope;
 
     @Override
@@ -67,7 +66,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
         // makes Main.java intent 1.
         host.diff = new UnifiedDiff(List.of(
                 file("src/Main.java"), file("web/Other.java")));
-        view = new ReviewDestinationView(host, diffService);
+        view = new SessionReviewView(host, diffService, null);
         Scene scene = new Scene(view, 1400, 900);
         scene.getStylesheets().addAll(
                 getClass().getResource("/app/drydock/ui/app.css").toExternalForm(),
@@ -408,7 +407,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
         return scope;
     }
 
-    /** Seeds the queue with one item and the store with {@code findings}. */
+    /** Shows the board on one scope and seeds the store with {@code findings}. */
     private void seed(ReviewAnnotation... findings) {
         ReviewScope minted = mintScope();
         for (ReviewAnnotation finding : findings) {
@@ -416,14 +415,14 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
         }
         // The view renders the diff column for a worktree scope; the fake's
         // diff is what the by-file intent fallback groups.
-        interact(() -> view.setItems(new QueueAssembly(List.of(new ReviewItem(minted, ReviewItem.Group.AGENTS,
-                "feat", "drydock · vs master")), true, true), List.of("repo")));
+        interact(() -> view.showScopes(new SessionReviewScopes.Scopes(minted, Optional.empty()),
+                SessionReviewScopes.Choice.LOCAL));
         interact(() -> view.diagPublishOutcome(minted.id(),
                 new DiffOutcome.Loaded(host.diff)));
-        // setItems already asked the diff column for a real diff of the
+        // showScopes already asked the diff column for a real diff of the
         // (nonexistent) worktree path, which fails asynchronously and
         // otherwise leaves the column's displayedScopeId unset -- Submit's
-        // stale-diff guard (ReviewDestinationView#submitReview) would then
+        // stale-diff guard (SessionReviewView#submitReview) would then
         // refuse every submit in this file. diagShowDiff publishes the
         // fake's synthetic diff as belonging to this scope, same as a real
         // diff landing would, so that guard sees a match.

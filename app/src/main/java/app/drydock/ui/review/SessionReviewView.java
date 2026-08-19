@@ -1427,4 +1427,20 @@ public final class SessionReviewView extends BorderPane {
     void diagShowDiff(ReviewScope forScope, UnifiedDiff diff) {
         diffColumn.showDiff(forScope, diff);
     }
+
+    /**
+     * Diagnostic-only: the findings margin's cards, read in the order they
+     * are rendered, by the text their body actually shows -- the same text
+     * {@link ReviewFindingsMargin}'s {@code cardBody} renders (the thread's
+     * first message when there is one, the finding's title otherwise).
+     *
+     * <p>Routed through {@link ReviewDiagFxThread} for the same reason every
+     * other {@code diag*} accessor is: the margin rebuilds its card list on
+     * the FX thread on every {@link #refreshReviewState}.</p>
+     */
+    List<String> diagMarginFindingTitles() {
+        return ReviewDiagFxThread.call(() -> lookupAll(".review-finding-body").stream()
+                .map(node -> ((Label) node).getText())
+                .toList());
+    }
 }

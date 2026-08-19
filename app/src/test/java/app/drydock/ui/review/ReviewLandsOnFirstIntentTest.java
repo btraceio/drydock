@@ -1,16 +1,18 @@
 package app.drydock.ui.review;
 
 import app.drydock.git.DiffService;
-import app.drydock.review.QueueAssembly;
-import app.drydock.review.ReviewItem;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
+import app.drydock.review.SessionReviewScopes;
+import javafx.scene.Node;
 import javafx.scene.Scene;
+import javafx.scene.control.Button;
 import javafx.scene.control.Label;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.testfx.framework.junit5.ApplicationTest;
+import org.testfx.util.WaitForAsyncUtils;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -28,22 +30,27 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * the verdict bar back to intent 1 -- so the bar said "intent 1" while the
  * code stayed parked on whatever hunk the previous intent had scrolled to.
  *
- * <p>The trap is {@link ReviewDiffColumn#setScope} taking its same-id no-op
- * branch: re-selecting a scope the column is already showing re-runs no
- * diff, so {@code setOnDiffResolved} never fires and nothing reveals
- * anything on its own. {@code setItems} re-selecting the previously-selected
- * scope on every reassembly is exactly this path, which is why an earlier
- * draft of this test -- which hopped through a second queue item before
- * coming back -- could not fail: hopping through another scope forces a
- * genuine reload, and the reload's own {@code setOnDiffResolved} callback
- * papers over the bug.</p>
+ * <p>The trap was {@link ReviewDiffColumn#setScope} taking its same-id no-op
+ * branch: re-selecting a scope the column is already showing re-ran no diff,
+ * so {@code setOnDiffResolved} never fired and nothing revealed anything on
+ * its own. The deleted queue's {@code setItems} re-selecting the
+ * previously-selected scope on every reassembly was exactly this path.
+ *
+ * <p>{@link SessionReviewView#showScopes} has no such no-op branch --
+ * {@link SessionReviewView#renderSelectedScope} always resets the cursor and
+ * re-renders, cached diff or not (see {@code bodyFor}'s cache, which this
+ * test now goes through instead: the second {@code showScopes} restores the
+ * diff via {@code showDiff} rather than re-running git). What this pins is
+ * the guarantee that trap broke: handing the board the SAME scopes again
+ * must still land back on the first intent, not leave the column wherever
+ * the last read happened to stop.</p>
  */
 class ReviewLandsOnFirstIntentTest extends ApplicationTest {
 
     private final DiffService diffService = new DiffService();
     private final ReviewScopeRegistry registry = new ReviewScopeRegistry();
     private FakeReviewHost host;
-    private ReviewDestinationView view;
+    private SessionReviewView view;
 
     @Override
     public void start(Stage stage) {
@@ -53,7 +60,7 @@ class ReviewLandsOnFirstIntentTest extends ApplicationTest {
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
-        view = new ReviewDestinationView(host, diffService);
+        view = new SessionReviewView(host, diffService, null);
         Scene scene = new Scene(view, 1400, 900);
         scene.getStylesheets().addAll(
                 getClass().getResource("/app/drydock/ui/app.css").toExternalForm(),
@@ -69,34 +76,33 @@ class ReviewLandsOnFirstIntentTest extends ApplicationTest {
     }
 
     @Test
-    void aQueueReassemblyLandsBackOnTheFirstIntent() throws Exception {
+    void showingTheSameScopesAgainLandsBackOnTheFirstIntent() throws Exception {
         Path repo = repoWithTwoFilesFarApart();
         ReviewScope scope = registry.mint(ReviewScopeRegistry.spec(
                 ReviewScope.Kind.WORKING_TREE, repo, Optional.of(repo), "main", "main",
                 Optional.empty(), Optional.empty()));
-        ReviewItem item = new ReviewItem(scope, ReviewItem.Group.MINE, "Working tree",
-                "repo · uncommitted");
+        SessionReviewScopes.Scopes scopes = new SessionReviewScopes.Scopes(scope, Optional.empty());
 
-        interact(() -> view.setItems(new QueueAssembly(List.of(item), true, true), List.of("repo")));
+        interact(() -> view.showScopes(scopes, SessionReviewScopes.Choice.LOCAL));
         awaitCardCount(2);
 
         // Walk to the second intent, which scrolls the column to Zulu.java.
-        List<javafx.scene.Node> cards = new ArrayList<>(lookup(".review-intent-card").queryAll());
-        interact(((javafx.scene.control.Button) cards.get(1))::fire);
-        org.testfx.util.WaitForAsyncUtils.waitForFxEvents();
+        List<Node> cards = new ArrayList<>(lookup(".review-intent-card").queryAll());
+        interact(((Button) cards.get(1))::fire);
+        WaitForAsyncUtils.waitForFxEvents();
         assertTrue(renderedHunkFiles().stream().anyMatch(p -> p.endsWith("Zulu.java")),
                 "precondition: moved off intent 1");
 
-        // A background queue reassembly rebuilds the rows and re-selects the
-        // same scope -- the column is already showing it, so setScope takes
-        // its same-id no-op branch and no diff re-runs. The reassembly must
-        // still land on the first intent, not leave the column where the
-        // last read of it happened to stop.
-        interact(() -> view.setItems(new QueueAssembly(List.of(item), true, true), List.of("repo")));
+        // A session refresh hands the board the SAME scopes again -- the diff
+        // is already cached, so bodyFor restores it via showDiff rather than
+        // re-running git (see SessionReviewView#bodyFor). That must still
+        // land on the first intent, not leave the column where the last read
+        // of it happened to stop.
+        interact(() -> view.showScopes(scopes, SessionReviewScopes.Choice.LOCAL));
         awaitCardCount(2);
 
         assertTrue(renderedHunkFiles().stream().anyMatch(p -> p.endsWith("Alpha.java")),
-                "a reassembly lands on the first intent; rendered " + renderedHunkFiles());
+                "showing the same scopes again lands on the first intent; rendered " + renderedHunkFiles());
     }
 
     private List<String> renderedHunkFiles() {
