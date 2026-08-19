@@ -43,4 +43,27 @@ class RepositorySidebarPullRequestRowTest {
 
         assertEquals("#7  Bump deps", RepositorySidebar.pullRequestRowText(anonymous));
     }
+
+    @Test
+    void theHeaderCountMatchesWhatIsShownWhenNothingIsNarrowed() {
+        RepositoryPullRequests.Outcome outcome =
+                new RepositoryPullRequests.Outcome.Rows(List.of(pr(1, "a", "x"), pr(2, "b", "y")));
+
+        assertEquals("PULL REQUESTS (2)", RepositorySidebar.pullRequestGroupText(outcome, 2));
+    }
+
+    @Test
+    void aTextFilterNarrowingTheRowsAlsoNarrowsTheHeaderCount() {
+        RepositoryPullRequests.Outcome outcome =
+                new RepositoryPullRequests.Outcome.Rows(List.of(pr(1, "a", "x"), pr(2, "b", "y")));
+
+        assertEquals("PULL REQUESTS (1 of 2)", RepositorySidebar.pullRequestGroupText(outcome, 1));
+    }
+
+    @Test
+    void anUnavailableHeaderIgnoresTheShownCountEntirely() {
+        RepositoryPullRequests.Outcome outcome = new RepositoryPullRequests.Outcome.Unavailable("gh: not authenticated");
+
+        assertEquals("PULL REQUESTS — unavailable · retry", RepositorySidebar.pullRequestGroupText(outcome, 0));
+    }
 }
