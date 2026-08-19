@@ -67,6 +67,17 @@ import java.util.Optional;
  * a name the human typed is theirs. Set only by an explicit confirm (Enter in
  * the inline editor, OK in the Rename dialog) -- never by a focus-loss commit,
  * which an agent can provoke by opening a tab.</p>
+ *
+ * <p>{@link #evalMode()} records that this session runs on the "eval" account:
+ * the launched agent CLI is made to send an {@code x-target-account: eval}
+ * request header so plugin/extension testing traffic is not charged against
+ * ordinary usage. Set at creation by the human (a checkbox in the Start-session
+ * modal), persisted, honored on resume, and inherited by a fork. Agent-driven
+ * ({@code session_start}) sessions are never eval. Injection is implemented for Pi
+ * (bridge extension); for Claude it is deferred (see the provider's own docs for
+ * why no non-invasive path exists) and for Codex it is unsupported (built-in
+ * provider cannot carry extra headers), so an eval session of those kinds is
+ * marked and badged but its requests are not rerouted.</p>
  */
 public record ManagedAgentSession(
         ManagedSessionId id,
@@ -80,7 +91,8 @@ public record ManagedAgentSession(
         Optional<Integer> lastExitCode,
         PrLink pr,
         boolean namePinned,
-        Optional<ManagedSessionId> forkedFrom
+        Optional<ManagedSessionId> forkedFrom,
+        boolean evalMode
 ) {
 
     public ManagedAgentSession {
@@ -99,6 +111,18 @@ public record ManagedAgentSession(
         if (displayName.isBlank()) {
             throw new IllegalArgumentException("ManagedAgentSession displayName must not be blank");
         }
+    }
+
+    /**
+     * As the canonical constructor with {@code evalMode = false}; for callers
+     * (and tests) that do not participate in eval mode.
+     */
+    public ManagedAgentSession(ManagedSessionId id, RepositoryId repositoryId, String displayName,
+                               AgentBinding binding, SessionWorkspace workspace, SessionStatus status,
+                               Instant createdAt, Instant lastOpenedAt, Optional<Integer> lastExitCode,
+                               PrLink pr, boolean namePinned, Optional<ManagedSessionId> forkedFrom) {
+        this(id, repositoryId, displayName, binding, workspace, status, createdAt, lastOpenedAt, lastExitCode,
+                pr, namePinned, forkedFrom, false);
     }
 
     // ---- leaf accessors, delegating into the groups --------------------------
@@ -191,6 +215,10 @@ public record ManagedAgentSession(
         return toBuilder().forkedFrom(newForkedFrom).build();
     }
 
+    public ManagedAgentSession withEvalMode(boolean newEvalMode) {
+        return toBuilder().evalMode(newEvalMode).build();
+    }
+
     /**
      * The single construction path. Adding a component touches this class in
      * one place instead of once per {@code with*} method, which is the whole
@@ -210,6 +238,7 @@ public record ManagedAgentSession(
         private PrLink pr;
         private boolean namePinned;
         private Optional<ManagedSessionId> forkedFrom;
+        private boolean evalMode;
 
         private Builder(ManagedAgentSession from) {
             this.id = from.id;
@@ -224,6 +253,7 @@ public record ManagedAgentSession(
             this.pr = from.pr;
             this.namePinned = from.namePinned;
             this.forkedFrom = from.forkedFrom;
+            this.evalMode = from.evalMode;
         }
 
         /**
@@ -246,6 +276,7 @@ public record ManagedAgentSession(
             this.pr = PrLink.none();
             this.namePinned = false;
             this.forkedFrom = Optional.empty();
+            this.evalMode = false;
         }
 
         public Builder id(ManagedSessionId value) {
@@ -308,9 +339,14 @@ public record ManagedAgentSession(
             return this;
         }
 
+        public Builder evalMode(boolean value) {
+            this.evalMode = value;
+            return this;
+        }
+
         public ManagedAgentSession build() {
             return new ManagedAgentSession(id, repositoryId, displayName, binding, workspace, status,
-                    createdAt, lastOpenedAt, lastExitCode, pr, namePinned, forkedFrom);
+                    createdAt, lastOpenedAt, lastExitCode, pr, namePinned, forkedFrom, evalMode);
         }
     }
 }

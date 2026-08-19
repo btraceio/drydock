@@ -1869,6 +1869,15 @@ public final class RepositorySidebar extends VBox {
             });
         }
 
+        /** The eval-mode tooltip line, honest per provider: Pi reroutes, Claude and Codex are marked but not rerouted. */
+        private static String evalTooltipLine(ManagedAgentSession session) {
+            return switch (session.agentKind()) {
+                case PI -> "Eval mode: on (x-target-account: eval)";
+                case CLAUDE -> "Eval mode: on (header injection deferred for Claude; requests are NOT rerouted)";
+                case CODEX -> "Eval mode: on (not supported for Codex; requests are NOT rerouted)";
+            };
+        }
+
         private StackPane buildSessionRow(ManagedAgentSession session, Repository repository) {
             boolean live = SessionStatusStyles.isRunning(session.status());
             Region dot = SessionStatusStyles.createDot(8, session.status(), live);
@@ -1946,6 +1955,11 @@ public final class RepositorySidebar extends VBox {
                 attention.getStyleClass().add("attention-badge");
                 row.getChildren().add(attention);
             }
+            if (session.evalMode()) {
+                Label evalChip = new Label("eval");
+                evalChip.getStyleClass().add("eval-badge");
+                row.getChildren().add(evalChip);
+            }
             row.getChildren().add(branchTag);
             branchTag.maxWidthProperty().bind(
                     row.widthProperty().map(w -> SidebarRowMetrics.branchTagMaxWidth(w.doubleValue())));
@@ -1960,6 +1974,7 @@ public final class RepositorySidebar extends VBox {
                     : session.workingDirectory().toString();
             rowTip.setText("Status: " + session.status()
                     + "\nAgent: " + AgentLabels.displayName(agentRegistry, session)
+                    + (session.evalMode() ? "\n" + evalTooltipLine(session) : "")
                     + (activity == SessionActivity.UNKNOWN ? ""
                             : "\nActivity: "
                                     + activityLabel(activity))

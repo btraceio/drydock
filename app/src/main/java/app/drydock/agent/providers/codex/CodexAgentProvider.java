@@ -110,8 +110,14 @@ public final class CodexAgentProvider implements AgentProvider {
         if (c.remote().isPresent()) {
             return LaunchPlan.unsupported();   // Codex declines remote
         }
-        // DISCOVERED: no id; no --settings
-        return LaunchPlan.of(codexCommand(c.mcp()), false);
+        // Eval mode: the flag is carried on the session and shown in the UI,
+        // but Codex's built-in openai provider cannot be overridden with
+        // extra headers (codex rejects `model_providers.openai.*` as a
+        // reserved built-in), and defining a whole custom provider would
+        // require the user's base_url and auth -- too invasive and fragile.
+        // So an eval Codex session is marked but its requests are NOT routed
+        // to the eval account. See ManagedAgentSession.evalMode.
+        return LaunchPlan.of(codexCommand(c.mcp()), false);   // DISCOVERED: no id; no --settings
     }
 
     @Override

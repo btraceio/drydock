@@ -83,7 +83,7 @@ class NewWorktreeModalTest extends ApplicationTest {
                 Instant.now(), Instant.now(), RepositorySettings.DEFAULT);
         modal = new NewWorktreeModal(repository, gitStatusService, worktreeService,
                 new AgentRegistry(List.of(), null), AgentKind.CLAUDE, false, () -> { },
-                (mode, outcome, branch, base, directory, task, agent) -> {
+                (mode, outcome, branch, base, directory, task, agent, eval) -> {
                     createdMode = mode;
                     createdBranch = branch;
                     createdRef = outcome instanceof app.drydock.git.BranchCheckout.Outcome.Ready ready

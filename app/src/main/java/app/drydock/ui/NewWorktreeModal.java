@@ -15,6 +15,7 @@ import app.drydock.ui.NewWorktreeState.Mode;
 import javafx.application.Platform;
 import javafx.geometry.Pos;
 import javafx.scene.control.Button;
+import javafx.scene.control.CheckBox;
 import javafx.scene.control.ComboBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.ListCell;
@@ -69,7 +70,7 @@ final class NewWorktreeModal extends VBox {
      */
     interface CreateHandler {
         void create(Mode mode, BranchCheckout.Outcome outcome, String branch, String base, Path directory,
-                    Optional<String> task, AgentKind agent);
+                    Optional<String> task, AgentKind agent, boolean eval);
     }
 
     private final ToggleGroup modeGroup = new ToggleGroup();
@@ -94,6 +95,7 @@ final class NewWorktreeModal extends VBox {
     private final TextField directoryField = new TextField();
     private final TextArea taskField = new TextArea();
     private final AgentSelector agentSelector;
+    private final CheckBox evalMode = new CheckBox("Eval mode");
     private final Label commandPreview = new Label();
     private final Label errorLine = new Label();
     private final Button createButton = new Button("Create worktree");
@@ -190,6 +192,8 @@ final class NewWorktreeModal extends VBox {
         taskField.setWrapText(true);
 
         agentSelector = new AgentSelector(agentRegistry, preselected, requireRemoteCapability, kind -> { });
+        evalMode.setTooltip(new Tooltip("Route this session's model traffic to the eval account "
+                + "(x-target-account: eval) so plugin/extension testing is not charged to ordinary usage."));
 
         Path home = Path.of(System.getProperty("user.home"));
         AtomicReference<Optional<Path>> worktreesDirectory = new AtomicReference<>(Optional.empty());
@@ -317,7 +321,8 @@ final class NewWorktreeModal extends VBox {
                     : branchText();
             onCreate.create(mode, lastState.outcome(), branch, baseText(),
                     Path.of(directoryField.getText().strip()).toAbsolutePath().normalize(),
-                    task.isEmpty() ? Optional.empty() : Optional.of(task), agentSelector.selected());
+                    task.isEmpty() ? Optional.empty() : Optional.of(task), agentSelector.selected(),
+                    evalMode.isSelected());
         });
         Region footerSpacer = new Region();
         HBox.setHgrow(footerSpacer, Priority.ALWAYS);
@@ -330,6 +335,7 @@ final class NewWorktreeModal extends VBox {
                 fieldGroup("Worktree directory", directoryField),
                 agentSelector,
                 fieldGroup("Start the agent with a task", taskField),
+                evalMode,
                 commandPreview, hintRow, errorLine, buttons);
 
         // A filter rather than a handler, so it works with the caret in either

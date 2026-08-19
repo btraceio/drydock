@@ -151,7 +151,7 @@ public final class PiAgentProvider implements AgentProvider {
         if (c.remote().isPresent()) {
             return LaunchPlan.unsupported();   // Pi declines remote
         }
-        return LaunchPlan.of(piCommand(c.mcp()), false);   // DISCOVERED: no id
+        return LaunchPlan.of(piCommand(c.mcp(), c.evalMode()), false);   // DISCOVERED: no id
     }
 
     @Override
@@ -159,7 +159,7 @@ public final class PiAgentProvider implements AgentProvider {
         if (r.remote().isPresent()) {
             return LaunchPlan.unsupported();
         }
-        String pi = piCommand(r.mcp());
+        String pi = piCommand(r.mcp(), r.evalMode());
         if (r.agentSessionId().isPresent()) {
             return LaunchPlan.of(pi + " --session " + AgentCommands.shellQuote(r.agentSessionId().get()), false);
         }
@@ -172,11 +172,19 @@ public final class PiAgentProvider implements AgentProvider {
      * {@code -e} pointing at drydock's bridge extension. Both are omitted
      * together — a config path with no extension to read it, or an extension
      * with no config to find, is worse than neither.
+     *
+     * <p>When {@code eval} is set, {@code DRYDOCK_EVAL=1} is added to the
+     * {@code env} prefix: the bridge extension reads it and registers an
+     * Anthropic provider override carrying {@code x-target-account: eval}, so
+     * this session's model traffic is charged to the eval account. The flag
+     * is a non-secret boolean, so it rides the {@code env} argv like the path
+     * literals in {@link AgentCommands#envPrefix} rather than going through
+     * the credential-only {@code fromFiles} channel.</p>
      */
-    private String piCommand(Optional<McpAccess> access) {
+    private String piCommand(Optional<McpAccess> access, boolean eval) {
         Optional<Path> configFile = access.flatMap(McpAccess::credentialFile);
         if (configFile.isEmpty()) {
-            return AgentCommands.envPrefix(ENV_SCRUB) + "pi";
+            return evalEnvPrefix(eval) + "pi";
         }
         // Start BOTH, then join both: the cost is max(probe, write), not the
         // sum. Sequencing them would put up to 35 s in front of the first Pi
@@ -204,10 +212,28 @@ public final class PiAgentProvider implements AgentProvider {
         if (!probed.supportsBridge() || bridgeExtension == null) {
             LOG.log(Level.INFO, "Pi bridge declined for this launch (drydock tools unavailable): "
                     + declineReason(probed, bridgeExtension));
-            return AgentCommands.envPrefix(ENV_SCRUB) + "pi";
+            return evalEnvPrefix(eval) + "pi";
         }
         return AgentCommands.envPrefix(ENV_SCRUB, Map.of(CONFIG_ENV_VAR, configFile.get()), Map.of())
-                + "pi -e " + AgentCommands.shellQuote(bridgeExtension.toString());
+                + evalEnvSuffix(eval) + "pi -e " + AgentCommands.shellQuote(bridgeExtension.toString());
+    }
+
+    /**
+     * The env prefix for a launch with no bridge extension: scrub vars, plus
+     * the eval flag when set.
+     */
+    private String evalEnvPrefix(boolean eval) {
+        return AgentCommands.envPrefix(ENV_SCRUB) + evalEnvSuffix(eval);
+    }
+
+    /**
+     * {@code DRYDOCK_EVAL=1 } to splice into an existing {@code env} prefix,
+     * or empty. {@link AgentCommands#envPrefix} always emits the literal
+     * {@code env} for Pi's non-empty scrub list, so the result is a valid
+     * {@code env VAR=value} assignment rather than a bare shell assignment.
+     */
+    private static String evalEnvSuffix(boolean eval) {
+        return eval ? "DRYDOCK_EVAL=1 " : "";
     }
 
     private CompletableFuture<PiCapabilities> capabilitiesFuture() {

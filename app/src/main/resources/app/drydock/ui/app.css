@@ -1804,6 +1804,14 @@
     -fx-font-weight: bold;
     -fx-padding: 1 8 1 8;
 }
+.eval-badge {
+    -fx-background-color: -drydock-merged-soft;
+    -fx-background-radius: 100px;
+    -fx-text-fill: -drydock-merged;
+    -fx-font-size: 10px;
+    -fx-font-weight: bold;
+    -fx-padding: 1 7 1 7;
+}
 .worktree-delete-button:hover {
     -fx-background-color: -drydock-error-soft;
 }

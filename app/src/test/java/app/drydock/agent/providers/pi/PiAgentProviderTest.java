@@ -61,6 +61,24 @@ class PiAgentProviderTest {
     }
 
     @Test
+    void evalCreateSetsEvalEnvFlag() {
+        LaunchPlan plan = provider().buildCreateCommand(
+                new CreateContext("Session 1", "ignored-uuid", Path.of("/repo"),
+                        Optional.empty(), Optional.empty(), true));
+        String command = plan.command();
+        assertTrue(command.contains("DRYDOCK_EVAL=1 "), command);
+        assertTrue(command.endsWith("pi"));
+    }
+
+    @Test
+    void nonEvalCreateOmitsEvalEnvFlag() {
+        LaunchPlan plan = provider().buildCreateCommand(
+                new CreateContext("Session 1", "ignored-uuid", Path.of("/repo"),
+                        Optional.empty(), Optional.empty(), false));
+        assertFalse(plan.command().contains("DRYDOCK_EVAL"));
+    }
+
+    @Test
     void resumeByIdWhenKnown() {
         LaunchPlan plan = provider().buildResumeCommand(
                 new ResumeContext(Optional.of("019f9072-abc"), Optional.empty(), Path.of("/repo"), Optional.empty(), Optional.empty()));

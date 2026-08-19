@@ -69,7 +69,8 @@ import java.util.Set;
  *       "prNumber": <int> | null,
  *       "branchCreatedHere": <boolean>,
  *       "namePinned": <boolean>,
- *       "forkedFrom": "<uuid>" | null
+ *       "forkedFrom": "<uuid>" | null,
+ *       "evalMode": <boolean>
  *     }
  *   ],
  *   "handoffBriefs": [
@@ -138,7 +139,11 @@ import java.util.Set;
  * always writes the current version. Any {@code schemaVersion} other than 1
  * or 2 is treated as malformed input (throws {@link StateDecodeException}),
  * consistent with how unknown versions were already rejected before this change.
- * The {@code handoffBriefs} array and the session {@code forkedFrom} member
+ * The {@code evalMode} member was likewise added leniently within version 2:
+ * an absent or malformed value decodes to {@code false} -- a session persisted
+ * before eval mode existed was never on the eval account, and an unreadable
+ * value must not silently route a session's traffic to it. No version bump
+ * was needed and downgrades stay non-destructive. The {@code handoffBriefs} array and the session {@code forkedFrom} member
  * were likewise added leniently within version 2: an absent {@code
  * handoffBriefs} decodes to an empty list, an absent or unparseable {@code
  * forkedFrom} to empty (a session persisted before it existed was not a fork),
@@ -236,6 +241,7 @@ public final class ApplicationStateCodec {
         obj.put("forkedFrom", session.forkedFrom()
                 .<JsonValue>map(parent -> new JsonString(parent.value().toString()))
                 .orElse(JsonValue.JsonNull.INSTANCE));
+        obj.put("evalMode", new JsonBoolean(session.evalMode()));
         return obj;
     }
 
@@ -471,13 +477,17 @@ public final class ApplicationStateCodec {
             // the session -- lineage is informational, the session is not.
             Optional<ManagedSessionId> forkedFrom = optionalString(obj, "forkedFrom")
                     .flatMap(ApplicationStateCodec::parseSessionId);
+            // Lenient like namePinned: a session persisted before this member
+            // existed was not an eval session, and a malformed value must not
+            // silently put a session on the eval account.
+            boolean evalMode = obj.get("evalMode") instanceof JsonBoolean em && em.value();
             // The persisted shape stays FLAT: grouping is a Java-side change,
             // and schemaVersion must not move for it.
             return new ManagedAgentSession(id, repositoryId, displayName,
                     new AgentBinding(agentKind, agentSessionId, agentSessionName),
                     new SessionWorkspace(workingDirectory, worktreeRoot, branchCreatedHere),
                     status, createdAt, lastOpenedAt, lastExitCode,
-                    PrLink.fromPersisted(prState, prNumber), namePinned, forkedFrom);
+                    PrLink.fromPersisted(prState, prNumber), namePinned, forkedFrom, evalMode);
         } catch (IllegalArgumentException | DateTimeException e) {
             throw new StateDecodeException("Malformed session entry: " + e.getMessage());
         }

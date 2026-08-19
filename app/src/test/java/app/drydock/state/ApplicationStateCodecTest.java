@@ -285,6 +285,42 @@ class ApplicationStateCodecTest {
     }
 
     @Test
+    void evalModeRoundTrips() {
+        Repository repo = new Repository(RepositoryId.newId(), Path.of("/tmp/repo"), "repo",
+                Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT);
+        ManagedAgentSession eval = new ManagedAgentSession(
+                ManagedSessionId.newId(), repo.id(), "eval session",
+                new AgentBinding(AgentKind.CLAUDE, Optional.empty(), Optional.empty()),
+                new SessionWorkspace(Path.of("/tmp/repo/wd"), Optional.empty(), true),
+                SessionStatus.INACTIVE, Instant.EPOCH, Instant.EPOCH, Optional.empty(),
+                PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty(), true);
+        ApplicationState state = new ApplicationState(List.of(repo), List.of(eval), WorkspaceUiState.empty(), List.of());
+
+        ApplicationState decoded = ApplicationStateCodec.fromJson(ApplicationStateCodec.toJson(state));
+
+        assertTrue(decoded.sessions().getFirst().evalMode());
+    }
+
+    @Test
+    void aSessionWrittenBeforeEvalModeDecodesAsNonEval() {
+        // VALID_SESSION has no "evalMode" member, as every state file
+        // written before this change.
+        ApplicationState decoded = ApplicationStateCodec.fromJson(JsonParser.parse(sessionDocument(VALID_SESSION)));
+
+        assertFalse(decoded.sessions().getFirst().evalMode());
+    }
+
+    @Test
+    void aMalformedEvalModeDecodesAsNonEval() {
+        String session = VALID_SESSION.replace(
+                "\"lastOpenedAt\": \"2026-01-02T00:00:00Z\"",
+                "\"lastOpenedAt\": \"2026-01-02T00:00:00Z\",\n\"evalMode\": \"not-a-boolean\"");
+        ApplicationState decoded = ApplicationStateCodec.fromJson(JsonParser.parse(sessionDocument(session)));
+
+        assertFalse(decoded.sessions().getFirst().evalMode());
+    }
+
+    @Test
     void repositoryLastUsedAgentRoundTrips() {
         Repository repo = new Repository(RepositoryId.newId(), Path.of("/tmp/repo"), "repo",
                 Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT)
@@ -577,5 +613,64 @@ class ApplicationStateCodecTest {
 
         assertEquals(1, decoded.sessions().size(), "the session itself must survive");
         assertEquals(Optional.empty(), decoded.sessions().get(0).forkedFrom());
+    }
+
+    @Test
+    void openSessionIdsAndSelectedSessionRoundTrip() {
+        ManagedSessionId first = ManagedSessionId.newId();
+        ManagedSessionId second = ManagedSessionId.newId();
+        WorkspaceUiState ui = WorkspaceUiState.empty()
+                .withOpenSessionIds(List.of(first, second))
+                .withSelectedSessionId(Optional.of(first));
+        ApplicationState state = ApplicationState.empty().withUi(ui);
+
+        WorkspaceUiState decoded = ApplicationStateCodec.fromJson(ApplicationStateCodec.toJson(state)).ui();
+
+        assertEquals(List.of(first, second), decoded.openSessionIds());
+        assertEquals(Optional.of(first), decoded.selectedSessionId());
+    }
+
+    @Test
+    void absentOpenSessionIdsAndSelectedSessionDecodeToEmpty() {
+        // Documents written before session-tab restoration existed have no
+        // openSessionIds / selectedSessionId members.
+        String legacy = """
+                {"schemaVersion":2,"repositories":[],"sessions":[],
+                 "ui":{"selectedRepositoryId":null,"sidebarWidth":288.0,
+                       "expandedRepositoryIds":[],"theme":"DARK"}}""";
+
+        WorkspaceUiState decoded = ApplicationStateCodec.fromJson(JsonParser.parse(legacy)).ui();
+
+        assertEquals(List.of(), decoded.openSessionIds());
+        assertEquals(Optional.empty(), decoded.selectedSessionId());
+    }
+
+    @Test
+    void malformedOpenSessionIdIsSkippedWithoutFailingTheState() {
+        JsonValue json = JsonParser.parse("""
+                {"schemaVersion":2,"repositories":[],"sessions":[],
+                 "ui":{"selectedRepositoryId":null,"sidebarWidth":288.0,
+                       "expandedRepositoryIds":[],"theme":"DARK",
+                       "openSessionIds":["not-a-uuid","%s"]}}
+                """.formatted(OTHER_ID));
+
+        WorkspaceUiState decoded = ApplicationStateCodec.fromJson(json).ui();
+
+        assertEquals(1, decoded.openSessionIds().size());
+        assertEquals(ManagedSessionId.of(OTHER_ID), decoded.openSessionIds().get(0));
+    }
+
+    @Test
+    void malformedSelectedSessionIdDecodesToEmpty() {
+        JsonValue json = JsonParser.parse("""
+                {"schemaVersion":2,"repositories":[],"sessions":[],
+                 "ui":{"selectedRepositoryId":null,"sidebarWidth":288.0,
+                       "expandedRepositoryIds":[],"theme":"DARK",
+                       "selectedSessionId":"not-a-uuid"}}
+                """);
+
+        WorkspaceUiState decoded = ApplicationStateCodec.fromJson(json).ui();
+
+        assertEquals(Optional.empty(), decoded.selectedSessionId());
     }
 }

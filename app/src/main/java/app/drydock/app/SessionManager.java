@@ -423,7 +423,7 @@ public final class SessionManager implements AutoCloseable {
                 }, backgroundExecutor)
                 .thenCompose(ignored -> buildAndLaunchCreate(provider, displayName, sessionId,
                         initial.workingDirectory(), remote, app, host, scaleFactor, workingDir,
-                        initial.id(), spawn))
+                        initial.id(), spawn, initial.evalMode()))
                 .handleAsync((launch, ex) -> finalizeCreate(initial, sessionId, launch, ex), backgroundExecutor);
 
         if (discovery.isPresent()) {
@@ -473,13 +473,14 @@ public final class SessionManager implements AutoCloseable {
                                                                   Optional<SshRemote> remote, TerminalRuntime app,
                                                                   TerminalHostView host, double scaleFactor,
                                                                   String surfaceWorkingDirectory,
-                                                                  ManagedSessionId managedSessionId, Spawn spawn) {
+                                                                  ManagedSessionId managedSessionId, Spawn spawn,
+                                                                  boolean eval) {
         return CompletableFuture.supplyAsync(() -> {
                     Optional<McpAccess> mcp = remote.isPresent() || hasDiagOverride(provider.kind())
                             ? Optional.empty()
                             : mcpAccessFor(provider, managedSessionId, spawn);
                     CreateContext ctx = new CreateContext(displayName, sessionId, targetWorkingDirectory, remote,
-                            mcp);
+                            mcp, eval);
                     LaunchPlan plan = provider.buildCreateCommand(ctx);
                     if (!plan.supported()) {
                         throw new IllegalStateException(
@@ -584,6 +585,7 @@ public final class SessionManager implements AutoCloseable {
                     // conservative fallback rather than sinking the resume
                     // (see ClaudeAgentProvider.detectCaps).
                     return CompletableFuture.supplyAsync(() -> {
+                                boolean eval = session.evalMode();
                                 // Spawn.ALLOWED: a resume is the human
                                 // reopening a session from the UI. A known
                                 // limitation: depth 1 is a property of the
@@ -594,7 +596,7 @@ public final class SessionManager implements AutoCloseable {
                                         ? Optional.empty()
                                         : mcpAccessFor(provider, session.id(), Spawn.ALLOWED);
                                 ResumeContext ctx = new ResumeContext(session.agentSessionId(),
-                                        session.agentSessionName(), session.workingDirectory(), remote, mcp);
+                                        session.agentSessionName(), session.workingDirectory(), remote, mcp, eval);
                                 return provider.buildResumeCommand(ctx).command();
                             }, backgroundExecutor)
                             .thenCompose(command -> createSurfaceOnFxThread(app, host, scaleFactor, command,
@@ -718,7 +720,7 @@ public final class SessionManager implements AutoCloseable {
                     // fresh start is the human's own action, taken from the UI.
                     return buildAndLaunchCreate(provider, cleared.displayName(), freshSessionId,
                             cleared.workingDirectory(), remote, app, host, scaleFactor, workingDir,
-                            cleared.id(), Spawn.ALLOWED)
+                            cleared.id(), Spawn.ALLOWED, cleared.evalMode())
                             .handleAsync((launch, ex) -> finalizeCreate(cleared, freshSessionId, launch, ex),
                                     backgroundExecutor);
                 });

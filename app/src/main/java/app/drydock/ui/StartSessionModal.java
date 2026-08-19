@@ -8,8 +8,10 @@ import app.drydock.domain.SshRemote;
 import javafx.application.Platform;
 import javafx.geometry.Pos;
 import javafx.scene.control.Button;
+import javafx.scene.control.CheckBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.TextArea;
+import javafx.scene.control.Tooltip;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
@@ -33,7 +35,7 @@ import java.util.function.Consumer;
 final class StartSessionModal extends VBox {
 
     interface StartHandler {
-        void start(Optional<String> task, AgentKind agent);
+        void start(Optional<String> task, AgentKind agent, boolean eval);
     }
 
     private final AgentRegistry registry;
@@ -41,6 +43,7 @@ final class StartSessionModal extends VBox {
     private final Path worktreePath;
     private final Optional<SshRemote> remote;
     private final Label commandPreview = new Label("Preparing…");
+    private final CheckBox evalMode = new CheckBox("Eval mode");
 
     StartSessionModal(String branch, Path worktreePath, AgentRegistry registry, AgentKind preselected,
                        Runnable onClose, StartHandler onStart) {
@@ -106,6 +109,8 @@ final class StartSessionModal extends VBox {
 
         commandPreview.getStyleClass().add("worktree-command-preview");
         commandPreview.setWrapText(true);
+        evalMode.setTooltip(new Tooltip("Route this session's model traffic to the eval account "
+                + "(x-target-account: eval) so plugin/extension testing is not charged to ordinary usage."));
 
         // Title, task label, and prompt all track the selected agent, so the
         // modal never advertises one agent while the picker has another
@@ -129,7 +134,8 @@ final class StartSessionModal extends VBox {
         start.setOnAction(e -> {
             String task = taskField.getText() == null ? "" : taskField.getText().strip();
             onClose.run();
-            onStart.start(task.isEmpty() ? Optional.empty() : Optional.of(task), selector.selected());
+            onStart.start(task.isEmpty() ? Optional.empty() : Optional.of(task), selector.selected(),
+                    evalMode.isSelected());
         });
         Region footerSpacer = new Region();
         HBox.setHgrow(footerSpacer, Priority.ALWAYS);
@@ -140,7 +146,7 @@ final class StartSessionModal extends VBox {
         targetLabel.getStyleClass().add("worktree-field-label");
 
         getChildren().addAll(header, selector, new VBox(4, targetLabel, target), new VBox(4, taskLabel, taskField),
-                commandPreview, buttons);
+                evalMode, commandPreview, buttons);
         Platform.runLater(taskField::requestFocus);
     }
 

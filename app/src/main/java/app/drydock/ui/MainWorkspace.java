@@ -853,14 +853,14 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         }
         String branch = worktree.branch().orElse(worktree.detached() ? "(detached)" : repository.displayName());
         StartSessionModal modal = new StartSessionModal(branch, worktree.path(), agentRegistry, defaultKind.get(),
-                requireRemote, remoteOf(repository), modalLayer::close, (task, agent) -> {
+                requireRemote, remoteOf(repository), modalLayer::close, (task, agent, eval) -> {
             clearUnopenedWorktreeState();
             if (worktree.mainCheckout()) {
-                openNewSession(repository, task, agent);
+                openNewSession(repository, task, agent, eval);
             } else {
                 // Discovered on disk: drydock did not create this branch, so
                 // removing the worktree must never force-delete it.
-                openNewWorktreeSession(repository, branch, worktree.path(), task, false, agent);
+                openNewWorktreeSession(repository, branch, worktree.path(), task, false, agent, eval);
             }
         });
         modalLayer.show(modal);
@@ -2141,7 +2141,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         }
         StartSessionModal modal = new StartSessionModal(repository.displayName(), repository.root(), agentRegistry,
                 defaultKind.get(), requireRemote, remoteOf(repository), modalLayer::close,
-                (task, agent) -> openNewSession(repository, task, agent));
+                (task, agent, eval) -> openNewSession(repository, task, agent, eval));
         modalLayer.show(modal);
     }
 
@@ -2178,11 +2178,20 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
     /** As {@link #openNewSession(Repository)}, with an explicit agent and optionally typing a task into the fresh session's terminal. */
     public void openNewSession(Repository repository, Optional<String> task, AgentKind agent) {
+        openNewSession(repository, task, agent, false);
+    }
+
+    /**
+     * As above, stating whether this session runs on the eval account. The
+     * eval flag is stamped onto the prepared session before launch so it is
+     * persisted with the first state save and honored on resume.
+     */
+    public void openNewSession(Repository repository, Optional<String> task, AgentKind agent, boolean eval) {
         // Prepared (not just a fresh id) so the placeholder is keyed under
         // the REAL session id: the launch persists the session almost
         // immediately, and a sidebar resume racing the launch must find
         // this pending tab instead of starting a second surface.
-        ManagedAgentSession prepared = sessionManager.prepareSession(repository, agent);
+        ManagedAgentSession prepared = sessionManager.prepareSession(repository, agent).withEvalMode(eval);
         OpenSessionTab placeholderTab = showPendingTab(prepared.id(), "Starting...", AgentLabels.displayName(agentRegistry, prepared),
                 prepared.agentKind(), prepared.status() == SessionStatus.UNSUPPORTED_AGENT,
                 Optional.of(repository), repository.root());
@@ -2261,7 +2270,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         openWorktreeModal = null;
         holder[0] = new NewWorktreeModal(repository, gitStatusService, worktreeService, agentRegistry,
                 defaultKind.get(), requireRemote, modalLayer::close,
-                (mode, outcome, branch, base, directory, task, agent) -> {
+                (mode, outcome, branch, base, directory, task, agent, eval) -> {
                     holder[0].showCreating();
                     // The mode alone, never a second lookup: the modal is the
                     // authority on which of the two things the user asked for.
@@ -2282,7 +2291,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                         // but it tracks a remote somebody else owns -- removing
                         // the worktree must not offer to delete it.
                         openNewWorktreeSession(repository, branch, created, task,
-                                mode == NewWorktreeState.Mode.NEW, agent);
+                                mode == NewWorktreeState.Mode.NEW, agent, eval);
                     }));
                 });
         openWorktreeModal = holder[0];
@@ -2341,7 +2350,15 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      */
     public void openNewWorktreeSession(Repository repository, String branch, Path worktreeRoot,
                                        Optional<String> task, boolean branchCreatedHere, AgentKind agent) {
-        openWorktreeSession(repository, branch, worktreeRoot, task, branchCreatedHere, agent, Spawn.ALLOWED);
+        openNewWorktreeSession(repository, branch, worktreeRoot, task, branchCreatedHere, agent, false);
+    }
+
+    /** As above, stating whether this session runs on the eval account. */
+    public void openNewWorktreeSession(Repository repository, String branch, Path worktreeRoot,
+                                       Optional<String> task, boolean branchCreatedHere, AgentKind agent,
+                                       boolean eval) {
+        openWorktreeSession(repository, branch, worktreeRoot, task, branchCreatedHere, agent, Spawn.ALLOWED,
+                Optional.empty(), eval);
     }
 
     /**
@@ -2356,17 +2373,25 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                                                  Optional<String> task, boolean branchCreatedHere, AgentKind agent,
                                                  Spawn spawn) {
         return openWorktreeSession(repository, branch, worktreeRoot, task, branchCreatedHere, agent, spawn,
-                Optional.empty());
+                Optional.empty(), false);
     }
 
     /** As above, recording the session this one was forked from. */
     private ManagedSessionId openWorktreeSession(Repository repository, String branch, Path worktreeRoot,
                                                  Optional<String> task, boolean branchCreatedHere, AgentKind agent,
                                                  Spawn spawn, Optional<ManagedSessionId> forkedFrom) {
+        return openWorktreeSession(repository, branch, worktreeRoot, task, branchCreatedHere, agent, spawn,
+                forkedFrom, false);
+    }
+
+    /** The full form: carries eval mode in addition to spawn/forkedFrom. */
+    private ManagedSessionId openWorktreeSession(Repository repository, String branch, Path worktreeRoot,
+                                                 Optional<String> task, boolean branchCreatedHere, AgentKind agent,
+                                                 Spawn spawn, Optional<ManagedSessionId> forkedFrom, boolean eval) {
         // Keyed under the real session id for the same launch-race reason
         // as openNewSession.
         ManagedAgentSession prepared = sessionManager.prepareWorktreeSession(
-                repository, branch, worktreeRoot, branchCreatedHere, agent, forkedFrom);
+                repository, branch, worktreeRoot, branchCreatedHere, agent, forkedFrom).withEvalMode(eval);
         OpenSessionTab placeholderTab = showPendingTab(prepared.id(), branch, AgentLabels.displayName(agentRegistry, prepared),
                 prepared.agentKind(), prepared.status() == SessionStatus.UNSUPPORTED_AGENT,
                 Optional.of(repository), worktreeRoot);
@@ -2650,8 +2675,15 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                     return;
                 }
                 String branch = worktree.getFileName().toString();
+                // A fork inherits the outgoing session's eval mode: continuing
+                // eval-gated work stays on the eval account.
+                boolean eval = sessionManager.sessions().stream()
+                        .filter(s -> s.id().equals(forkedFrom))
+                        .map(ManagedAgentSession::evalMode)
+                        .findFirst()
+                        .orElse(false);
                 opened.complete(openWorktreeSession(owner.get(), branch, worktree, Optional.of(seedPrompt),
-                        true, kind, Spawn.ALLOWED, Optional.of(forkedFrom)));
+                        true, kind, Spawn.ALLOWED, Optional.of(forkedFrom), eval));
             } catch (RuntimeException e) {
                 opened.completeExceptionally(e);
             }

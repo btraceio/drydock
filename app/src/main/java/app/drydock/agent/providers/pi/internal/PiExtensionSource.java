@@ -26,6 +26,8 @@ public final class PiExtensionSource {
             const TOKEN_HEADER = "X-Drydock-Session-Token";
             const HANDSHAKE_MS = 2000;
             const CALL_MS = 45000;
+            const EVAL_HEADER_NAME = "x-target-account";
+            const EVAL_HEADER_VALUE = "eval";
 
             type Wire = { url: string; token: string };
 
@@ -122,6 +124,29 @@ public final class PiExtensionSource {
                 if (!anyRegistered || !instructions) return undefined;
                 return { systemPrompt: `${event.systemPrompt}\\n\\n${instructions}` };
               });
+
+              // Eval mode: when the harness sets DRYDOCK_EVAL=1 it wants this
+              // session's model traffic charged to the "eval" account, so the
+              // Anthropic provider gets an x-target-account: eval header
+              // override. Only the header is supplied, so pi preserves the
+              // provider's existing models and base URL -- this is an addition,
+              // not a replacement. Registered in the factory body (before any
+              // await) so it is in place before the first model request,
+              // independently of whether the drydock MCP handshake below
+              // succeeds. Wrapped so a registration failure can never sink the
+              // bridge: eval routing is best-effort, not load-critical.
+              try {
+                if (process.env.DRYDOCK_EVAL === "1") {
+                  pi.registerProvider("anthropic", {
+                    headers: { [EVAL_HEADER_NAME]: EVAL_HEADER_VALUE },
+                  } as any);
+                }
+              } catch (e: any) {
+                // No session ctx is in scope at factory load time, so a
+                // user-facing notify is not available; a console warning is
+                // the safe fallback. eval routing is best-effort.
+                console.warn("drydock: could not register eval-account routing;", e?.message ?? e);
+              }
 
               // Network work only, and never allowed to reject: a failed extension
               // load exits pi 1, on every load path.
