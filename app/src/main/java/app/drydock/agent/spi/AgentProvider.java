@@ -49,6 +49,20 @@ public interface AgentProvider {
     boolean supportsRemote();
 
     /**
+     * Whether this integration can dispatch a subagent -- a nested agent with
+     * its own context. Drydock asks for a review in one when it can, so the
+     * review is read outside the context that wrote the code.
+     *
+     * <p>Like {@link #supportsRemote()}, a static fact about the integration:
+     * implementations MUST make this CHEAP and non-blocking -- no process
+     * spawns, no filesystem or network I/O. Safe to call on the JavaFX
+     * Application Thread.</p>
+     */
+    default boolean supportsSubagents() {
+        return false;
+    }
+
+    /**
      * How this integration is handed drydock's own MCP tools -- a file it
      * points at, overrides on its command line, or not at all. A static fact
      * about the integration, like {@link #supportsRemote()}, so implementations

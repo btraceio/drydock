@@ -56,6 +56,7 @@ import app.drydock.review.ReviewVerdict;
 import app.drydock.review.Severity;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.ReviewQueueService;
+import app.drydock.review.ReviewInstructions;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
 import app.drydock.review.SubmitPlan;
@@ -1939,12 +1940,21 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * starts: the Review tab's "Run review", and the checkout gate's "Start
      * session &amp; review", which would otherwise start a session that
      * reviews nothing.
+     *
+     * <p>Dispatches to {@link ReviewInstructions#forScope}, asking for a
+     * subagent form when the scope's bound session's agent declares one
+     * (per {@link AgentRegistry#supportsSubagents}). A scope with no bound
+     * session -- the PR-not-yet-checked-out case -- falls back to the
+     * inline form; there is no session to resolve an agent kind from.</p>
      */
-    private static String reviewInstruction(ReviewScope scope) {
-        return "Review the changes in this worktree with the drydock review tools. "
-                + "Read review_scope for handle " + scope.id()
-                + ", then post review_intents and review_finding against it. "
-                + "Call review_state first so already-settled findings are not re-flagged.";
+    private String reviewInstruction(ReviewScope scope) {
+        boolean supportsSubagents = scope.sessionId()
+                .flatMap(id -> sessionManager.sessions().stream()
+                        .filter(candidate -> candidate.id().equals(id))
+                        .findFirst())
+                .map(session -> agentRegistry.supportsSubagents(session.agentKind()))
+                .orElse(false);
+        return ReviewInstructions.forScope(scope.id(), supportsSubagents);
     }
 
     /**

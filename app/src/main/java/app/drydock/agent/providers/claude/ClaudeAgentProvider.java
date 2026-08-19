@@ -88,6 +88,11 @@ public final class ClaudeAgentProvider implements AgentProvider {
         return true;
     }
 
+    @Override
+    public boolean supportsSubagents() {
+        return true;
+    }
+
     /** Claude reads a config file drydock writes ({@code --mcp-config}). */
     @Override
     public McpDelivery mcpDelivery() {
