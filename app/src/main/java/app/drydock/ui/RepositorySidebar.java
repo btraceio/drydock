@@ -1872,8 +1872,8 @@ public final class RepositorySidebar extends VBox {
         /** The eval-mode tooltip line, honest per provider: Pi reroutes, Claude and Codex are marked but not rerouted. */
         private static String evalTooltipLine(ManagedAgentSession session) {
             return switch (session.agentKind()) {
-                case PI -> "Eval mode: on (x-target-account: eval)";
-                case CLAUDE -> "Eval mode: on (header injection deferred for Claude; requests are NOT rerouted)";
+                case PI -> "Eval mode: on (x-target-account: eval via the Pi bridge extension)";
+                case CLAUDE -> "Eval mode: on (x-target-account: eval via omlx_proxy)";
                 case CODEX -> "Eval mode: on (not supported for Codex; requests are NOT rerouted)";
             };
         }

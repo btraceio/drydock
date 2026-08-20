@@ -271,6 +271,34 @@ public final class SessionManager implements AutoCloseable {
     }
 
     /**
+     * Reverses an eval session's out-of-band marking (e.g. omlx_proxy) on the
+     * background executor. Called from every session-ending path (close, exit,
+     * delete) and from launch/resume failure handlers; the provider's unmark
+     * is idempotent, so the overlap between an exit and a later surface close
+     * is safe. No-op for non-eval sessions and for providers with no marking.
+     */
+    private void unmarkEvalAsync(ManagedAgentSession session) {
+        if (!session.evalMode()) {
+            return;
+        }
+        String key = session.agentSessionId().orElse("");
+        if (key.isBlank()) {
+            return;
+        }
+        AgentProvider provider = registry.provider(session.agentKind()).orElse(null);
+        if (provider == null) {
+            return;
+        }
+        try {
+            backgroundExecutor.execute(() -> provider.unmarkEvalSession(key));
+        } catch (RejectedExecutionException e) {
+            // Shutdown drained the executor; the proxy's mark is in-memory and
+            // dies on the proxy's own restart, so nothing leaks permanently.
+            LOG.log(Level.DEBUG, "Skipping eval unmark for " + session.id() + " during shutdown");
+        }
+    }
+
+    /**
      * Lets a diagnostic override win over a provider-built command, keyed by
      * agent kind first (so multiple agent kinds can be overridden
      * independently) and falling back to the un-keyed property for backward
@@ -476,6 +504,9 @@ public final class SessionManager implements AutoCloseable {
                                                                   ManagedSessionId managedSessionId, Spawn spawn,
                                                                   boolean eval) {
         return CompletableFuture.supplyAsync(() -> {
+                    if (eval) {
+                        provider.markEvalSession(sessionId);
+                    }
                     Optional<McpAccess> mcp = remote.isPresent() || hasDiagOverride(provider.kind())
                             ? Optional.empty()
                             : mcpAccessFor(provider, managedSessionId, spawn);
@@ -512,6 +543,7 @@ public final class SessionManager implements AutoCloseable {
             // app. Already on the background executor (handleAsync), so the
             // file delete needs no further hop.
             releaseMcpConfig(initial.id());
+            unmarkEvalAsync(initial);
             try {
                 persistUpdatedSession(initial.withStatus(SessionStatus.FAILED));
             } catch (RuntimeException persistFailure) {
@@ -586,6 +618,9 @@ public final class SessionManager implements AutoCloseable {
                     // (see ClaudeAgentProvider.detectCaps).
                     return CompletableFuture.supplyAsync(() -> {
                                 boolean eval = session.evalMode();
+                                if (eval) {
+                                    provider.markEvalSession(session.agentSessionId().orElse(""));
+                                }
                                 // Spawn.ALLOWED: a resume is the human
                                 // reopening a session from the UI. A known
                                 // limitation: depth 1 is a property of the
@@ -610,6 +645,7 @@ public final class SessionManager implements AutoCloseable {
         if (ex != null) {
             Throwable cause = unwrap(ex);
             LOG.log(Level.WARNING, () -> "Failed to resume session " + session.id() + ": " + cause.getMessage());
+            unmarkEvalAsync(session);
             persistUpdatedSession(session.withStatus(SessionStatus.FAILED));
             throw wrap(cause);
         }
@@ -905,6 +941,7 @@ public final class SessionManager implements AutoCloseable {
                     // Also covers a session that had no active surface, and so
                     // never went through onSurfaceClosed.
                     releaseMcpConfig(sessionId);
+                    findSession(sessionId).ifPresent(this::unmarkEvalAsync);
                     // The brief goes with the session it describes. Nothing
                     // else ever removes one, so leaving it would grow the state
                     // file by up to a full brief per deleted session, forever.
@@ -986,7 +1023,10 @@ public final class SessionManager implements AutoCloseable {
             return withReplacedSession(state, updated);
         });
         Optional<ManagedAgentSession> exited = Optional.ofNullable(result[0]);
-        exited.ifPresent(session -> releaseMcpConfigAsync(session.id()));
+        exited.ifPresent(session -> {
+            releaseMcpConfigAsync(session.id());
+            unmarkEvalAsync(session);
+        });
         return exited;
     }
 
@@ -994,6 +1034,7 @@ public final class SessionManager implements AutoCloseable {
         activeSurfaces.remove(sessionId, surface);
         releaseMcpConfigAsync(sessionId);
         findSession(sessionId).ifPresent(session -> {
+            unmarkEvalAsync(session);
             session.agentSessionId().ifPresent(activeRegistry::release);
             persistUpdatedSession(session.withStatus(SessionStatus.EXITED));
         });

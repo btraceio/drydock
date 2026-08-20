@@ -203,4 +203,14 @@ public final class CodexAgentProvider implements AgentProvider {
         return Optional.of(idDiscovery);
     }
 
+    /**
+     * Codex's built-in openai provider cannot carry extra headers and there
+     * is no proxy-side injection path, so an eval session would be marked but
+     * not rerouted. Disable the checkbox rather than offer a no-op.
+     */
+    @Override
+    public boolean evalAvailable() {
+        return false;
+    }
+
 }

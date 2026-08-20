@@ -191,9 +191,24 @@ final class NewWorktreeModal extends VBox {
         taskField.setPrefRowCount(3);
         taskField.setWrapText(true);
 
-        agentSelector = new AgentSelector(agentRegistry, preselected, requireRemoteCapability, kind -> { });
-        evalMode.setTooltip(new Tooltip("Route this session's model traffic to the eval account "
-                + "(x-target-account: eval) so plugin/extension testing is not charged to ordinary usage."));
+        agentSelector = new AgentSelector(agentRegistry, preselected, requireRemoteCapability, kind -> {
+            boolean evalOk = agentRegistry.evalAvailable(kind);
+            evalMode.setDisable(!evalOk);
+            if (!evalOk) {
+                evalMode.setSelected(false);
+                evalMode.setTooltip(new Tooltip("Eval routing is not available for " + kind.persistedName()
+                        + " (requires the omlx_proxy for Claude, or is unsupported for this agent)."));
+            } else {
+                evalMode.setTooltip(new Tooltip("Route this session's model traffic to the eval account "
+                        + "(x-target-account: eval) so plugin/extension testing is not charged to ordinary usage."));
+            }
+        });
+        // AgentSelector fires its callback only on click, so set the initial
+        // checkbox state for the preselected agent here too.
+        if (!agentRegistry.evalAvailable(preselected)) {
+            evalMode.setDisable(true);
+            evalMode.setSelected(false);
+        }
 
         Path home = Path.of(System.getProperty("user.home"));
         AtomicReference<Optional<Path>> worktreesDirectory = new AtomicReference<>(Optional.empty());
