@@ -71,4 +71,23 @@ public interface WorkspaceNavigator {
      * start a session on it, land on its Review sub-tab.
      */
     void startReviewForPullRequest(Repository repository, GhCliService.OpenPullRequest pullRequest);
+
+    /**
+     * As above, running {@code onSettled} when the gesture is over however it
+     * ends -- cancelled at the modal, failed at the checkout, failed at the
+     * session, or landed on the review board.
+     *
+     * <p>The caller needs that hook because materializing a pull request is
+     * the one sidebar gesture that takes a whole-branch network fetch to
+     * finish: the row disables itself for the duration so a second click
+     * cannot start a second {@code git worktree add} at the same path, and
+     * only the workspace knows when that duration is over. The default
+     * implementation settles immediately, which is right for any navigator
+     * that does not actually materialize anything.</p>
+     */
+    default void startReviewForPullRequest(Repository repository, GhCliService.OpenPullRequest pullRequest,
+                                           Runnable onSettled) {
+        startReviewForPullRequest(repository, pullRequest);
+        onSettled.run();
+    }
 }

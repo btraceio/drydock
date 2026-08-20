@@ -72,6 +72,7 @@ class RepositorySidebarPullRequestDedupFxTest extends ApplicationTest {
     private ControlledSource source;
     private WorkspaceViewModel viewModel;
     private RepositorySidebar sidebar;
+    private final RecordingNavigator navigator = new RecordingNavigator();
     private Repository repository;
 
     @Override
@@ -94,7 +95,7 @@ class RepositorySidebarPullRequestDedupFxTest extends ApplicationTest {
         viewModel = new WorkspaceViewModel();
 
         sidebar = new RepositorySidebar(repositoryManager, gitStatusService, worktreeService, repositoryPullRequests,
-                sessionManager, agentRegistry, new NoOpNavigator(), viewModel);
+                sessionManager, agentRegistry, navigator, viewModel);
 
         stage.setScene(new Scene(new StackPane(sidebar), 360, 640));
         stage.show();
@@ -275,6 +276,92 @@ class RepositorySidebarPullRequestDedupFxTest extends ApplicationTest {
                 "the header narrowing to \"1 of 2\" once the filter debounce fires");
     }
 
+    /**
+     * Task 12's double-click guard, through the real row: materializing a
+     * pull request takes a whole-branch fetch, so the row must refuse a
+     * second click for as long as the first is running -- a second {@code
+     * git worktree add} at the same path fails with "there is already
+     * something at …", which would show the human a failure for work that is
+     * in fact succeeding.
+     *
+     * <p>The pill's handler is fired directly rather than clicked: a disabled
+     * row would not accept a pointer at all, and "the row is disabled" is
+     * only half the guard. The other half -- the sidebar refusing the second
+     * gesture whatever fired it (⏎ on the selected row comes through {@code
+     * activateNode}, not the pill) -- is what this pins.</p>
+     */
+    @Test
+    void aSecondClickOnAPullRequestRowDoesNotStartASecondMaterialization() throws Exception {
+        awaitCallCount(1, "the first PR scan");
+        source.complete(0, listing(pr(7, "Fix login", "pr-7")));
+        WaitForAsyncUtils.waitForFxEvents();
+        expandPullRequestGroup();
+
+        clickReviewPill();
+        assertEquals(1, navigator.materializations(), "the first click starts one materialization");
+        assertEquals(7, navigator.lastPullRequest().number(), "it must materialize the row's own PR");
+
+        clickReviewPill();
+        assertEquals(1, navigator.materializations(),
+                "a second click while the fetch is still running must not start a second one");
+        assertTrue(reviewPillIsBusy(), "the row must say what it is doing while it does it");
+
+        // Every ending settles -- cancelled, failed or landed. Here that is
+        // the workspace telling the row it is over.
+        interact(navigator::settle);
+        assertFalse(reviewPillIsBusy(), "the row must come back once the materialization ends");
+
+        clickReviewPill();
+        assertEquals(2, navigator.materializations(),
+                "a settled row must be startable again -- a failed checkout is meant to be retried");
+    }
+
+    private void expandPullRequestGroup() throws InterruptedException {
+        AtomicReference<Node> group = new AtomicReference<>();
+        interact(() -> group.set(sidebar.lookup(".pull-request-group-row")));
+        assertTrue(group.get() != null, "no PULL REQUESTS group row to expand");
+        clickOn(group.get());
+        awaitCondition(this::pullRequestRowPresent, "the PR row appearing under the expanded group");
+    }
+
+    private boolean pullRequestRowPresent() {
+        AtomicBoolean found = new AtomicBoolean();
+        interact(() -> found.set(pullRequestRow() != null));
+        return found.get();
+    }
+
+    /** The one PR row: an unopened-style row whose pill is the Review one. */
+    private Node pullRequestRow() {
+        for (Node node : sidebar.lookupAll(".worktree-unopened-row")) {
+            Node pill = node.lookup(".start-pill");
+            if (pill instanceof Label label && !label.getText().startsWith("Start")) {
+                return node;
+            }
+        }
+        return null;
+    }
+
+    private void clickReviewPill() {
+        AtomicBoolean clicked = new AtomicBoolean();
+        interact(() -> {
+            Node row = pullRequestRow();
+            clicked.set(row != null && RepositorySidebar.diagClickReviewPill(row));
+        });
+        WaitForAsyncUtils.waitForFxEvents();
+        assertTrue(clicked.get(), "could not find the Review ▸ pill");
+    }
+
+    private boolean reviewPillIsBusy() {
+        AtomicBoolean busy = new AtomicBoolean();
+        interact(() -> {
+            Node row = pullRequestRow();
+            Node pill = row == null ? null : row.lookup(".start-pill");
+            busy.set(row != null && row.isDisabled() && pill instanceof Label label
+                    && "Opening…".equals(label.getText()));
+        });
+        return busy.get();
+    }
+
     // ---- lookups --------------------------------------------------------
 
     private boolean groupRowPresent() {
@@ -449,8 +536,32 @@ class RepositorySidebarPullRequestDedupFxTest extends ApplicationTest {
                 .orElse(List.of());
     }
 
-    /** Every method a no-op: this test drives the tree, never the navigator. */
-    private static final class NoOpNavigator implements WorkspaceNavigator {
+    /**
+     * A no-op for everything the dedup tests drive through the tree, plus
+     * the one thing the materialization test needs: a count of how many
+     * materializations were actually asked for, and the settle hook the
+     * workspace would run when one ends.
+     */
+    private static final class RecordingNavigator implements WorkspaceNavigator {
+        private final AtomicInteger materializations = new AtomicInteger();
+        private final List<Runnable> settles = new CopyOnWriteArrayList<>();
+        private volatile GhCliService.OpenPullRequest lastPullRequest;
+
+        int materializations() {
+            return materializations.get();
+        }
+
+        GhCliService.OpenPullRequest lastPullRequest() {
+            return lastPullRequest;
+        }
+
+        /** Ends every materialization asked for so far, as the workspace does on its completion paths. */
+        void settle() {
+            List<Runnable> pending = List.copyOf(settles);
+            settles.clear();
+            pending.forEach(Runnable::run);
+        }
+
         @Override
         public void resumeSession(ManagedAgentSession session) { }
 
@@ -487,7 +598,17 @@ class RepositorySidebarPullRequestDedupFxTest extends ApplicationTest {
                                            SessionReviewScopes.Choice choice) { }
 
         @Override
-        public void startReviewForPullRequest(Repository repository, GhCliService.OpenPullRequest pullRequest) { }
+        public void startReviewForPullRequest(Repository repository, GhCliService.OpenPullRequest pullRequest) {
+            startReviewForPullRequest(repository, pullRequest, () -> { });
+        }
+
+        @Override
+        public void startReviewForPullRequest(Repository repository, GhCliService.OpenPullRequest pullRequest,
+                                              Runnable onSettled) {
+            materializations.incrementAndGet();
+            lastPullRequest = pullRequest;
+            settles.add(onSettled);
+        }
     }
 
     private static final class InMemoryStateRepository implements ApplicationStateRepository {

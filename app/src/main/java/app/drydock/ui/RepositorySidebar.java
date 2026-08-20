@@ -205,6 +205,14 @@ public final class RepositorySidebar extends VBox {
     private final Set<Path> recentlyDiscovered = new HashSet<>();
     /** Transient per-repo meta note ("Already up to date — no new worktrees") shown briefly after a rescan. */
     private final Map<RepositoryId, String> rescanNotes = new ConcurrentHashMap<>();
+    /**
+     * Pull requests currently being materialized into a worktree + session,
+     * so their row can say so and refuse a second click. Keyed by (repository,
+     * number) rather than by the row node because rows are rebuilt from the
+     * model constantly and a node identity would not survive that.
+     */
+    private final PullRequestMaterialization.InFlight materializingPullRequests =
+            new PullRequestMaterialization.InFlight();
 
     /** The session last scrolled into view, so status-refresh rebuilds don't keep yanking the scroll position. */
     private ManagedSessionId lastRevealedSession;
@@ -497,11 +505,34 @@ public final class RepositorySidebar extends VBox {
                     item.setExpanded(!item.isExpanded());
                 }
             }
-            // Left unbound deliberately: materializing a pull request into a
-            // worktree/session is Task 12's -- WorkspaceNavigator carries the
-            // startReviewForPullRequest seam it will fill in.
-            case SidebarNode.PullRequestNode pullRequestNode -> { }
+            case SidebarNode.PullRequestNode pullRequestNode -> materializePullRequest(pullRequestNode);
         }
+    }
+
+    /**
+     * Materializes {@code node}'s pull request: the workspace creates the
+     * worktree, checks the PR out into it, starts a session and lands on its
+     * review board.
+     *
+     * <p>The row is claimed first and released by the workspace's settle
+     * hook, which runs on every ending -- cancelled at the Start-session
+     * modal, failed at the checkout, failed at the session, or landed. A
+     * second click while one is running is refused here rather than by the
+     * disabled row alone: the row is disabled a rebuild later, and the
+     * gesture that reaches this method is not always the pill (⏎ on the
+     * selected row comes through {@code activateNode}).</p>
+     */
+    private void materializePullRequest(SidebarNode.PullRequestNode node) {
+        PullRequestMaterialization.Target target = new PullRequestMaterialization.Target(
+                node.repository().root(), node.pullRequest().number());
+        if (!materializingPullRequests.begin(target)) {
+            return;
+        }
+        requestRebuild();
+        navigator.startReviewForPullRequest(node.repository(), node.pullRequest(), () -> {
+            materializingPullRequests.end(target);
+            requestRebuild();
+        });
     }
 
     /** Focuses the filter field (⌘F). */
@@ -588,6 +619,16 @@ public final class RepositorySidebar extends VBox {
     /** Diagnostic-only: fires the {@code ◨n} findings badge's click handler; see {@link #diagClickPrChip}. */
     static boolean diagClickFindingsBadge(Node row) {
         return diagClickRowBadge(row, ".worktree-findings-badge");
+    }
+
+    /**
+     * Diagnostic-only: fires a pull-request row's {@code Review ▸} pill; see
+     * {@link #diagClickPrChip}. Deliberately fires the handler rather than
+     * moving a pointer, so it also reaches a row that has disabled itself --
+     * which is exactly the case a double-click test needs to make.
+     */
+    static boolean diagClickReviewPill(Node row) {
+        return diagClickRowBadge(row, ".start-pill");
     }
 
     private static boolean diagClickRowBadge(Node row, String selector) {
@@ -2782,11 +2823,21 @@ public final class RepositorySidebar extends VBox {
          * its number/title/author, and a {@code Review ▸} pill -- styled
          * from the same {@code worktree-unopened-row} rules as an unopened
          * worktree row, so the two "not yet opened" row kinds read as
-         * siblings. The pill's action is Task 12's to wire (through
-         * {@code WorkspaceNavigator.startReviewForPullRequest}); this task
-         * only renders the row and lets the tree select it.
+         * siblings.
+         *
+         * <p>The pill materializes the pull request: a worktree, {@code gh pr
+         * checkout} into it, a session, and its review board. That takes a
+         * whole-branch fetch, so while one is running the row says
+         * "Opening…" and is disabled -- a second click would otherwise start
+         * a second {@code git worktree add} at the same path, and the human
+         * would be shown a collision failure for work that is succeeding.
+         * The in-flight state is held by the sidebar, not the row, because
+         * the row is rebuilt from the model while the fetch runs.</p>
          */
         private HBox buildPullRequestRow(SidebarNode.PullRequestNode node) {
+            PullRequestMaterialization.Target target = new PullRequestMaterialization.Target(
+                    node.repository().root(), node.pullRequest().number());
+            boolean materializing = materializingPullRequests.isRunning(target);
             Label icon = new Label("◧");
             icon.getStyleClass().add("worktree-unopened-icon");
             StackPane statusCol = new StackPane(icon);
@@ -2799,13 +2850,22 @@ public final class RepositorySidebar extends VBox {
             text.setMaxWidth(Double.MAX_VALUE);
             text.setTextOverrun(OverrunStyle.ELLIPSIS);
 
-            Label reviewPill = new Label("Review ▸");
+            Label reviewPill = new Label(materializing ? "Opening…" : "Review ▸");
             reviewPill.getStyleClass().add("start-pill");
             reviewPill.setMinWidth(Region.USE_PREF_SIZE);
+            reviewPill.setOnMouseClicked(event -> {
+                if (event.getButton() == MouseButton.PRIMARY) {
+                    materializePullRequest(node);
+                    event.consume();
+                }
+            });
 
             HBox row = new HBox(8, statusCol, text, reviewPill);
             row.getStyleClass().addAll("worktree-unopened-row", "child-row");
             row.setAlignment(Pos.CENTER_LEFT);
+            // Disabling the whole row, not just the pill: while the fetch
+            // runs, nothing on this row is a thing to press.
+            row.setDisable(materializing);
             return row;
         }
 
