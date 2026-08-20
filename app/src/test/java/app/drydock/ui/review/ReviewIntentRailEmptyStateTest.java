@@ -2,10 +2,9 @@ package app.drydock.ui.review;
 
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
-import app.drydock.review.QueueAssembly;
-import app.drydock.review.ReviewItem;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
+import app.drydock.review.SessionReviewScopes;
 import javafx.scene.Scene;
 import javafx.scene.control.Label;
 import javafx.stage.Stage;
@@ -28,7 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * and a worktree with nothing changed is not "not checked out".
  *
  * <p>{@link #everyEmptyReasonHasItsOwnSentence()} only pins the enum's own
- * string table down; it never exercises {@code ReviewDestinationView
+ * string table down; it never exercises {@code SessionReviewView
  * .emptyReason()}, the actual {@code DiffOutcome} → {@code Empty} mapping.
  * The tests below drive that mapping for real, through the
  * {@code diagPublishOutcome} seam, for the two cases the isolation and
@@ -40,7 +39,7 @@ class ReviewIntentRailEmptyStateTest extends ApplicationTest {
     private final DiffService diffService = new DiffService();
     private final ReviewScopeRegistry registry = new ReviewScopeRegistry();
     private FakeReviewHost host;
-    private ReviewDestinationView view;
+    private SessionReviewView view;
     private ReviewScope scope;
 
     @Override
@@ -51,7 +50,7 @@ class ReviewIntentRailEmptyStateTest extends ApplicationTest {
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
-        view = new ReviewDestinationView(host, diffService);
+        view = new SessionReviewView(host, diffService, null);
         Scene scene = new Scene(view, 1400, 900);
         scene.getStylesheets().addAll(
                 getClass().getResource("/app/drydock/ui/app.css").toExternalForm(),
@@ -70,9 +69,8 @@ class ReviewIntentRailEmptyStateTest extends ApplicationTest {
         scope = registry.mint(ReviewScopeRegistry.spec(
                 ReviewScope.Kind.WORKING_TREE, repo, Optional.of(repo), "main", "main",
                 Optional.empty(), Optional.empty()));
-        interact(() -> view.setItems(new QueueAssembly(
-                List.of(new ReviewItem(scope, ReviewItem.Group.MINE, "Working tree", "repo · uncommitted")),
-                true, true), List.of("repo")));
+        interact(() -> view.showScopes(new SessionReviewScopes.Scopes(scope, Optional.empty()),
+                SessionReviewScopes.Choice.LOCAL));
     }
 
     @AfterEach
@@ -136,7 +134,7 @@ class ReviewIntentRailEmptyStateTest extends ApplicationTest {
      * Waits for the scope's REAL diff to land before a test seeds the outcome
      * it actually wants to assert on.
      *
-     * <p>{@code setItems} selects the scope, which starts a genuine {@code git
+     * <p>{@code showScopes} selects the scope, which starts a genuine {@code git
      * diff} on a clean fixture repository. That publishes {@code Loaded} with
      * no files a moment later, and whichever outcome lands last wins -- so a
      * seeded {@code Failed} could be silently overwritten by the real one and

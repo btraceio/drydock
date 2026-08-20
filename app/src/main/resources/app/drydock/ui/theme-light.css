@@ -72,7 +72,6 @@
      * against the existing light ramp -- queue and intent rails sit between
      * the main pane (#faf9f6) and the sidebar (#f4f2ee), progressively more
      * "chrome" the further left they are. */
-    -drydock-queue-rail: #f2f0ec;
     -drydock-intent-rail: #efece7;
     -drydock-hunk-header: #ebe8e3;
 

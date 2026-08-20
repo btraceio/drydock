@@ -49,6 +49,27 @@ class ShortcutsOverlayParityTest {
     }
 
     /**
+     * The review board's own single-letter layer, read straight off {@code
+     * SessionReviewView.handleShortcut}'s switch. The section carried rows
+     * for the departed destination's queue keys ({@code j}/{@code k}, {@code
+     * q}, {@code /}, {@code o}) and its narrow drill-in long enough to be
+     * worth pinning: every one of them advertised a key that nothing bound.
+     */
+    @Test
+    void theReviewBoardAdvertisesExactlyTheKeysItBinds() {
+        Set<String> advertised = ShortcutsOverlay.diagKeysFor("IN REVIEW").stream()
+                .flatMap(keycap -> Arrays.stream(keycap.split(" / ")))
+                .collect(Collectors.toSet());
+
+        Set<String> bound = Set.of("d", "c", "m", "i", "\\", "[", "]", "n", "a", "r", "u",
+                "⏎", "⇧F", "f");
+
+        assertEquals(bound, advertised,
+                "the overlay's IN REVIEW rows and what SessionReviewView.handleShortcut "
+                        + "binds must be the same set");
+    }
+
+    /**
      * The modal binds one chord, in a KEY_PRESSED filter rather than the
      * global chain -- {@code NewWorktreeModalTest} pins that ⌘E actually
      * flips the mode; this pins that the overlay says so and says nothing

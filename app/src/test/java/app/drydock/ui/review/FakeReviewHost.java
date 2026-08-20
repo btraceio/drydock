@@ -1,6 +1,5 @@
 package app.drydock.ui.review;
 
-import app.drydock.domain.ManagedSessionId;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.AnnotationStore;
@@ -19,21 +18,20 @@ import java.util.List;
 import java.util.Optional;
 
 /**
- * A {@link ReviewDestinationView.Host} backed by a real {@link AnnotationStore}
+ * A {@link SessionReviewView.Host} backed by a real {@link AnnotationStore}
  * and {@link IntentGrouping}, so the view tests exercise the same store the
  * app does rather than a bag of stubs -- the (scopeId, id) keying is the
  * thing under test, and a stub would key however the test felt like.
  *
- * <p>Only the outward hand-offs (opening a session, sending a prompt to a
- * terminal) are recorded rather than performed; those have no counterpart in
- * a test JVM.</p>
+ * <p>Only the outward hand-offs (jumping to the Explorer, sending a prompt to
+ * a terminal) are recorded rather than performed; those have no counterpart
+ * in a test JVM.</p>
  */
-final class FakeReviewHost implements ReviewDestinationView.Host {
+final class FakeReviewHost implements SessionReviewView.Host {
 
     final AnnotationStore store;
     final IntentGrouping intents = new IntentGrouping();
 
-    final List<ManagedSessionId> openedSessions = new ArrayList<>();
     final List<String> handedOffPrompts = new ArrayList<>();
     final List<String> submittedScopes = new ArrayList<>();
     final List<Path> explorerJumps = new ArrayList<>();
@@ -55,21 +53,15 @@ final class FakeReviewHost implements ReviewDestinationView.Host {
         this.store = new AnnotationStore(storeFile);
     }
 
-    /** How many times the empty state's Retry asked for a rescan. */
-    int queueRetries;
-
-    @Override
-    public void refreshQueue() {
-    }
-
-    @Override
-    public void retryQueueScan() {
-        queueRetries++;
-    }
-
-    @Override
-    public void openSession(ManagedSessionId sessionId) {
-        openedSessions.add(sessionId);
+    /**
+     * Test convenience: writes {@code finding} into the store under {@code
+     * scope}, stamping its scope id -- the board tests that seed synthetic
+     * findings (rather than driving a real diff) go through this rather than
+     * poking {@link #store} directly, so the (scopeId, id) keying stays in
+     * one place.
+     */
+    void addFinding(ReviewScope scope, ReviewAnnotation finding) {
+        store.upsert(finding.withScopeId(scope.id()));
     }
 
     @Override
@@ -82,11 +74,6 @@ final class FakeReviewHost implements ReviewDestinationView.Host {
         return store.forScope(scope.id()).isEmpty()
                 ? Optional.empty()
                 : Optional.of((int) store.openCount(scope.id()));
-    }
-
-    @Override
-    public Optional<String> sessionState(ReviewScope scope) {
-        return scope.sessionId().map(id -> "running");
     }
 
     @Override
@@ -195,58 +182,9 @@ final class FakeReviewHost implements ReviewDestinationView.Host {
         store.markSubmitted(scope.id());
     }
 
-    /** What {@link #launchCommandPreview} answers -- a non-Claude agent by default, since that is the case that regressed. */
-    String launchCommand = "codex --cd <worktree>";
-
-    /** Reviewers this fake offers; empty models "no reviewer configured". */
+    /** Whether a reviewer is available at all; empty models "no reviewer configured". */
     final List<String> reviewers = new ArrayList<>();
-    String selectedReviewer;
     final List<String> reviewRuns = new ArrayList<>();
-
-    @Override
-    public List<String> reviewers() {
-        return List.copyOf(reviewers);
-    }
-
-    @Override
-    public Optional<String> selectedReviewer() {
-        return Optional.ofNullable(selectedReviewer);
-    }
-
-    @Override
-    public void selectReviewer(String reviewer) {
-        selectedReviewer = reviewer;
-    }
-
-    final List<String> checkoutRequests = new ArrayList<>();
-    /** When set, the fake checkout reports this failure instead of succeeding. */
-    String checkoutFailure;
-    /** The patch "Read the patch only" returns; empty models gh being unable to read it. */
-    Optional<UnifiedDiff> patch = Optional.empty();
-
-    @Override
-    public void startSessionAndReview(ReviewScope scope, java.util.function.Consumer<String> onFailed) {
-        checkoutRequests.add(scope.id());
-        if (checkoutFailure != null) {
-            onFailed.accept(checkoutFailure);
-        }
-    }
-
-    @Override
-    public void readPatchOnly(ReviewScope scope, java.util.function.Consumer<Optional<UnifiedDiff>> onComplete) {
-        onComplete.accept(patch);
-    }
-
-    /** The launch line the gate previews; tests set {@link #launchCommand} to whichever agent they model. */
-    @Override
-    public void launchCommandPreview(ReviewScope scope, java.util.function.Consumer<String> onReady) {
-        onReady.accept(launchCommand);
-    }
-
-    @Override
-    public String diagDiffSummary(ReviewScope scope) {
-        return "0 files";
-    }
 
     @Override
     public boolean runReview(ReviewScope scope) {

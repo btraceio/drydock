@@ -10,6 +10,7 @@ import app.drydock.domain.WorkspaceUiState;
 import app.drydock.git.GitExecutableLocator;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.NotAGitRepositoryException;
+import app.drydock.review.SessionReviewScopes;
 import app.drydock.state.ApplicationStateRepository;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -226,6 +227,83 @@ class RepositoryManagerTest {
 
         assertEquals(UiTheme.LIGHT, stateRepository.savedState().ui().theme());
         assertEquals(Optional.of(id), stateRepository.savedState().ui().selectedSessionId());
+    }
+
+    // ---- Review scope choices (per session, cosmetic, single-writer) --------
+
+    /**
+     * The per-session Review chip is persisted and read back. Both halves in
+     * one test because they are one contract: what {@code MainWorkspace} reads
+     * when a gesture names no chip (⌘4, the sub-tab button) is exactly what an
+     * earlier gesture, or the switcher itself, wrote here.
+     */
+    @Test
+    void aSessionsReviewScopeChoiceIsPersistedAndReadBack() {
+        ManagedSessionId session = ManagedSessionId.newId();
+
+        assertEquals(SessionReviewScopes.Choice.LOCAL,
+                manager.state().ui().reviewScopeChoices()
+                        .getOrDefault(session, SessionReviewScopes.Choice.LOCAL),
+                "a session that has never chosen reads as LOCAL");
+
+        manager.updateReviewScopeChoice(session, SessionReviewScopes.Choice.PULL_REQUEST);
+
+        assertEquals(SessionReviewScopes.Choice.PULL_REQUEST,
+                manager.state().ui().reviewScopeChoices().get(session));
+        flushState();
+        assertEquals(SessionReviewScopes.Choice.PULL_REQUEST,
+                stateRepository.savedState().ui().reviewScopeChoices().get(session),
+                "the choice reached the state file, not just the in-memory copy");
+    }
+
+    /** One session's chip must not disturb another's -- the map is read-modify-written, not replaced. */
+    @Test
+    void oneSessionsChoiceLeavesTheOthersAlone() {
+        ManagedSessionId first = ManagedSessionId.newId();
+        ManagedSessionId second = ManagedSessionId.newId();
+
+        manager.updateReviewScopeChoice(first, SessionReviewScopes.Choice.PULL_REQUEST);
+        manager.updateReviewScopeChoice(second, SessionReviewScopes.Choice.LOCAL);
+
+        assertEquals(SessionReviewScopes.Choice.PULL_REQUEST,
+                manager.state().ui().reviewScopeChoices().get(first));
+        assertEquals(SessionReviewScopes.Choice.LOCAL,
+                manager.state().ui().reviewScopeChoices().get(second));
+    }
+
+    /**
+     * The rest of the workspace UI state survives a chip write. The map is
+     * rebuilt on every call, so a {@code withReviewScopeChoices} that dropped
+     * a sibling field would show up here rather than as a lost tab strip on
+     * somebody's next launch.
+     */
+    @Test
+    void writingAChoiceKeepsTheRestOfTheUiState() {
+        ManagedSessionId session = ManagedSessionId.newId();
+        manager.updateTheme(UiTheme.LIGHT);
+        manager.updateOpenSessions(List.of(session));
+
+        manager.updateReviewScopeChoice(session, SessionReviewScopes.Choice.PULL_REQUEST);
+
+        flushState();
+        WorkspaceUiState ui = stateRepository.savedState().ui();
+        assertEquals(UiTheme.LIGHT, ui.theme());
+        assertEquals(List.of(session), ui.openSessionIds());
+        assertEquals(SessionReviewScopes.Choice.PULL_REQUEST, ui.reviewScopeChoices().get(session));
+    }
+
+    /** Re-writing the choice a session already has is not a state write at all. */
+    @Test
+    void rewritingTheSameChoiceDoesNotSaveAgain() {
+        ManagedSessionId session = ManagedSessionId.newId();
+        manager.updateReviewScopeChoice(session, SessionReviewScopes.Choice.PULL_REQUEST);
+        flushState();
+        int savesBefore = stateRepository.saveCount();
+
+        manager.updateReviewScopeChoice(session, SessionReviewScopes.Choice.PULL_REQUEST);
+        flushState();
+
+        assertEquals(savesBefore, stateRepository.saveCount());
     }
 
     private static final class InMemoryStateRepository implements ApplicationStateRepository {

@@ -189,6 +189,22 @@ final class ReviewDiffColumn extends BorderPane {
     private String displayedScopeId;
 
     /**
+     * The same thing as {@link #displayedScopeId}, as the scope itself: what
+     * the rendered rows are rows OF.
+     *
+     * <p>Tracks {@link #scope} on the git-run path and {@code forScope} on
+     * the supplied-diff path, so unlike {@code scope} it survives {@link
+     * #showDiff}. Every reader that needs to answer "whose file is this?"
+     * about something already on screen -- {@link #openInExplorer(ReviewDiffRow.HunkHeader, Button)}
+     * is the only one today -- must use this and not {@code scope}: a diff
+     * that arrived through {@code showDiff} has no live scope at all, and a
+     * reader keyed on {@code scope} silently does nothing there. That is
+     * exactly what the Explorer jump did once the session board began
+     * restoring cached diffs through {@code showDiff}.</p>
+     */
+    private ReviewScope displayedScope;
+
+    /**
      * Per-scope untracked-inclusion preference, in-memory for the session
      * only (a {@code Map<String, Boolean>}, not persisted to
      * {@code ApplicationState}). A scope with no entry defaults to
@@ -376,6 +392,7 @@ final class ReviewDiffColumn extends BorderPane {
                     "not diffable (no checkout): " + newScope.id());
         }
         scope = newScope;
+        displayedScope = newScope;
         expandedRuns.clear();
         // The outgoing scope's intent must not filter the incoming scope's
         // diff: its hunk ids name files that are not in it, so the column
@@ -881,6 +898,10 @@ final class ReviewDiffColumn extends BorderPane {
      */
     void showDiff(ReviewScope forScope, UnifiedDiff supplied) {
         scope = null;
+        // Cleared as the column's LIVE scope, kept as the one the rows
+        // describe: see the field javadoc on why the two must not be the
+        // same field.
+        displayedScope = forScope;
         requestToken++;
         expandedRuns.clear();
         applyDiff(supplied, forScope.id());
@@ -1223,10 +1244,11 @@ final class ReviewDiffColumn extends BorderPane {
      * on the button rather than doing nothing when clicked.
      */
     private void openInExplorer(ReviewDiffRow.HunkHeader header, Button button) {
-        if (scope == null) {
+        ReviewScope owner = displayedScope;
+        if (owner == null) {
             return;
         }
-        if (!explorerBridge.openFileAtLine(scope, Path.of(header.file()), header.startLine())) {
+        if (!explorerBridge.openFileAtLine(owner, Path.of(header.file()), header.startLine())) {
             button.setTooltip(new Tooltip("Open this scope's session first — the Explorer lives in it"));
             button.setDisable(true);
         }
@@ -1588,7 +1610,7 @@ final class ReviewDiffColumn extends BorderPane {
      * long run of unchanged lines folds into a single {@code CollapsedRun}
      * row and a large diff can be truncated outright, so a caller that needs
      * to know whether a given line is genuinely in the diff (Submit's {@code
-     * DiffIndex}, built in {@code ReviewDestinationView}) must read this, not
+     * DiffIndex}, built in {@code SessionReviewView}) must read this, not
      * the rows.
      */
     UnifiedDiff displayedDiff() {
@@ -1603,7 +1625,7 @@ final class ReviewDiffColumn extends BorderPane {
      * that follows a fresh selection would otherwise get the OUTGOING
      * scope's diff under the INCOMING scope's name. Submit must compare this
      * against the scope it thinks it is posting for before trusting the
-     * diff at all -- see {@code ReviewDestinationView#submitReview()}.
+     * diff at all -- see {@code SessionReviewView#submitReview()}.
      */
     Optional<String> displayedScopeId() {
         return Optional.ofNullable(displayedScopeId);

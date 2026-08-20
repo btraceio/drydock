@@ -1,20 +1,23 @@
 package app.drydock.ui.review;
 
 import app.drydock.git.DiffService;
-import app.drydock.review.QueueAssembly;
-import app.drydock.review.ReviewItem;
+import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
+import app.drydock.review.SessionReviewScopes;
 import javafx.scene.Scene;
 import javafx.scene.control.Label;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.testfx.framework.junit5.ApplicationTest;
+import org.testfx.util.WaitForAsyncUtils;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -34,7 +37,7 @@ class ReviewIntentScopeIsolationTest extends ApplicationTest {
     private final DiffService diffService = new DiffService();
     private final ReviewScopeRegistry registry = new ReviewScopeRegistry();
     private FakeReviewHost host;
-    private ReviewDestinationView view;
+    private SessionReviewView view;
 
     @Override
     public void start(Stage stage) {
@@ -42,9 +45,9 @@ class ReviewIntentScopeIsolationTest extends ApplicationTest {
             host = new FakeReviewHost(Files.createTempDirectory("drydock-isolation")
                     .resolve("annotations.json"));
         } catch (IOException e) {
-            throw new java.io.UncheckedIOException(e);
+            throw new UncheckedIOException(e);
         }
-        view = new ReviewDestinationView(host, diffService);
+        view = new SessionReviewView(host, diffService, null);
         Scene scene = new Scene(view, 1400, 900);
         scene.getStylesheets().addAll(
                 getClass().getResource("/app/drydock/ui/app.css").toExternalForm(),
@@ -70,15 +73,13 @@ class ReviewIntentScopeIsolationTest extends ApplicationTest {
                 Optional.of(new ReviewScope.PullRequestRef(7, Optional.empty())),
                 Optional.empty()));
 
-        interact(() -> view.setItems(new QueueAssembly(List.of(
-                new ReviewItem(worktree, ReviewItem.Group.MINE, "Working tree", "repo · uncommitted"),
-                new ReviewItem(gate, ReviewItem.Group.REQUESTED, "PR #7 feature", "repo · not checked out")),
-                true, true), List.of("repo")));
+        interact(() -> view.showScopes(new SessionReviewScopes.Scopes(worktree, Optional.of(gate)),
+                SessionReviewScopes.Choice.LOCAL));
 
         awaitCardCount(2);
 
-        interact(() -> view.selectScope(gate.id()));
-        org.testfx.util.WaitForAsyncUtils.waitForFxEvents();
+        view.diagSelectChoice(SessionReviewScopes.Choice.PULL_REQUEST);
+        WaitForAsyncUtils.waitForFxEvents();
 
         assertEquals(0, cardCount(),
                 "a scope with no diff of its own must show no intents, not the previous scope's");
@@ -96,15 +97,13 @@ class ReviewIntentScopeIsolationTest extends ApplicationTest {
                 Optional.of(new ReviewScope.PullRequestRef(7, Optional.empty())),
                 Optional.empty()));
 
-        interact(() -> view.setItems(new QueueAssembly(List.of(
-                new ReviewItem(worktree, ReviewItem.Group.MINE, "Working tree", "repo · uncommitted"),
-                new ReviewItem(gate, ReviewItem.Group.REQUESTED, "PR #7 feature", "repo · not checked out")),
-                true, true), List.of("repo")));
+        interact(() -> view.showScopes(new SessionReviewScopes.Scopes(worktree, Optional.of(gate)),
+                SessionReviewScopes.Choice.LOCAL));
         awaitCardCount(2);
 
-        interact(() -> view.selectScope(gate.id()));
-        org.testfx.util.WaitForAsyncUtils.waitForFxEvents();
-        interact(() -> view.selectScope(worktree.id()));
+        view.diagSelectChoice(SessionReviewScopes.Choice.PULL_REQUEST);
+        WaitForAsyncUtils.waitForFxEvents();
+        view.diagSelectChoice(SessionReviewScopes.Choice.LOCAL);
 
         awaitCardCount(2);
     }
@@ -114,26 +113,28 @@ class ReviewIntentScopeIsolationTest extends ApplicationTest {
      * scope selected" cleared the margin and the verdict bar but never the
      * rail, so a rescan that emptied the queue left the previous scope's
      * cards on screen -- a dead click describing an item no longer queued.
+     *
+     * <p>The queue that used to empty is gone with the Review destination;
+     * the board now loses its scope the same way the two placeholder states
+     * do -- {@link SessionReviewView#showResolving()} -- which runs through
+     * the exact same {@code refreshReviewState} early return this guards.</p>
      */
     @Test
-    void theRailClearsWhenTheQueueEmpties() throws Exception {
+    void theRailClearsWhenTheScopeIsLost() throws Exception {
         Path repo = repoWithTwoChangedFiles();
         ReviewScope worktree = registry.mint(ReviewScopeRegistry.spec(
                 ReviewScope.Kind.WORKING_TREE, repo, Optional.of(repo), "main", "main",
                 Optional.empty(), Optional.empty()));
 
-        interact(() -> view.setItems(new QueueAssembly(List.of(
-                new ReviewItem(worktree, ReviewItem.Group.MINE, "Working tree", "repo · uncommitted")),
-                true, true), List.of("repo")));
+        interact(() -> view.showScopes(new SessionReviewScopes.Scopes(worktree, Optional.empty()),
+                SessionReviewScopes.Choice.LOCAL));
         awaitCardCount(2);
 
-        // A rescan that finds nothing (worktree pruned, or gh down): the
-        // SCAN_INCOMPLETE empty state, exactly as QueueAssembly.complete()
-        // computes it for localComplete=true, requestsComplete=false.
-        interact(() -> view.setItems(new QueueAssembly(List.of(), true, false), List.of("repo")));
-        org.testfx.util.WaitForAsyncUtils.waitForFxEvents();
+        interact(view::showResolving);
+        WaitForAsyncUtils.waitForFxEvents();
 
-        assertEquals(0, cardCount(), "an empty queue must clear the rail, not keep the departed scope's cards");
+        assertEquals(0, cardCount(),
+                "losing the scope must clear the rail, not keep the departed scope's cards");
     }
 
     /**
@@ -141,6 +142,17 @@ class ReviewIntentScopeIsolationTest extends ApplicationTest {
      * "selecting an item in a second repository never shows the first
      * repository's files." Two distinct repos, two distinctly-named files,
      * selecting the second must show only its own titles.
+     *
+     * <p>The name is inherited from the deleted queue, where two arbitrary
+     * repositories really could sit side by side. {@link SessionReviewScopes}
+     * always mints both of a board's scopes against ONE checkout, so a
+     * genuine second repository is not reachable here any more -- the two
+     * scopes below are minted from different repos only because the switcher
+     * takes any two {@link ReviewScope}s and this is the cheapest way to get
+     * two that are diffably distinct. What still holds, and is what this
+     * pins, is per-scope isolation of the rail across a chip switch -- the
+     * same guarantee, exercised through the switcher's two slots rather than
+     * a queue's rows.</p>
      */
     @Test
     void aSecondRepositoryNeverShowsTheFirstRepositorysFiles() throws Exception {
@@ -153,20 +165,51 @@ class ReviewIntentScopeIsolationTest extends ApplicationTest {
                 ReviewScope.Kind.WORKING_TREE, repoTwo, Optional.of(repoTwo), "main", "main",
                 Optional.empty(), Optional.empty()));
 
-        interact(() -> view.setItems(new QueueAssembly(List.of(
-                new ReviewItem(scopeOne, ReviewItem.Group.MINE, "repo-one", "repo-one · uncommitted"),
-                new ReviewItem(scopeTwo, ReviewItem.Group.MINE, "repo-two", "repo-two · uncommitted")),
-                true, true), List.of("repo", "other")));
-
-        interact(() -> view.selectScope(scopeOne.id()));
+        interact(() -> view.showScopes(new SessionReviewScopes.Scopes(scopeOne, Optional.of(scopeTwo)),
+                SessionReviewScopes.Choice.LOCAL));
         awaitCardCount(1);
         assertEquals(List.of("Alpha.java"), cardTitles());
 
-        interact(() -> view.selectScope(scopeTwo.id()));
+        view.diagSelectChoice(SessionReviewScopes.Choice.PULL_REQUEST);
         awaitCardCount(1);
         List<String> titles = cardTitles();
         assertEquals(List.of("Zulu.java"), titles);
         assertFalse(titles.contains("Alpha.java"), "the second repository must not carry the first's files");
+    }
+
+    /**
+     * Step 7.3's addition: the switcher must not carry a finding minted
+     * against one scope into the margin of the other. Synthetic findings
+     * rather than a real diff -- what is under test is the margin's own
+     * scoping, which does not depend on any diff having resolved at all.
+     */
+    @Test
+    void switchingChipsDoesNotCarryFindingsAcrossScopes() {
+        ReviewScope local = registry.mint(ReviewScopeRegistry.spec(
+                ReviewScope.Kind.WORKTREE, Path.of("/repo"), Optional.of(Path.of("/wt/feature")),
+                "main", "feature", Optional.empty(), Optional.empty()));
+        ReviewScope pr = registry.mint(ReviewScopeRegistry.spec(
+                ReviewScope.Kind.PR, Path.of("/repo"), Optional.of(Path.of("/wt/feature")),
+                "main", "feature", Optional.of(new ReviewScope.PullRequestRef(9, Optional.empty())),
+                Optional.empty()));
+        host.addFinding(local, finding("A.java", 10, "local only"));
+        host.addFinding(pr, finding("B.java", 20, "pr only"));
+
+        interact(() -> view.showScopes(new SessionReviewScopes.Scopes(local, Optional.of(pr)),
+                SessionReviewScopes.Choice.LOCAL));
+        view.diagSelectChoice(SessionReviewScopes.Choice.PULL_REQUEST);
+
+        assertEquals(List.of("pr only"), view.diagMarginFindingTitles(),
+                "the PR chip must show only the PR's own finding, not the local scope's carried over");
+
+        view.diagSelectChoice(SessionReviewScopes.Choice.LOCAL);
+
+        assertEquals(List.of("local only"), view.diagMarginFindingTitles());
+    }
+
+    private ReviewAnnotation finding(String file, int line, String text) {
+        return ReviewAnnotation.human("placeholder", file, "n" + line, "n" + line,
+                new ReviewAnnotation.Message("Claude", Instant.EPOCH, text));
     }
 
     private List<String> cardTitles() {

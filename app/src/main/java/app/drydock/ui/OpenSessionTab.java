@@ -5,12 +5,14 @@ import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.PrState;
 import app.drydock.domain.Repository;
 import app.drydock.domain.SessionStatus;
+import app.drydock.review.SessionReviewScopes;
 import app.drydock.terminal.api.Shortcut;
 import app.drydock.terminal.api.TerminalSpec;
 import app.drydock.terminal.api.TerminalHostView;
 import app.drydock.terminal.api.TerminalRuntime;
 import app.drydock.terminal.api.TerminalSurface;
 import app.drydock.ui.explorer.SessionExplorerView;
+import app.drydock.ui.review.SessionReviewView;
 import javafx.animation.PauseTransition;
 import javafx.application.Platform;
 import javafx.css.PseudoClass;
@@ -43,6 +45,7 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
 import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -88,14 +91,13 @@ final class OpenSessionTab {
     private static final long SHELL_CLOSE_POLL_MILLIS = 100;
 
     /**
-     * The three views a session tab can show in its content area (design
-     * handoff "Session Explorer"). Review used to be a fourth: it is now a
-     * global destination (Review handoff §1), because a per-session tab
-     * cannot show a queue that spans repositories, and because it gated
-     * review off for remote repositories -- while reviewing a remote PR is
-     * the primary use case. {@code ⌘4} navigates there instead.
+     * The four views a session tab can show in its content area (design
+     * handoff "Session Explorer"). Claude and Terminal are native surfaces
+     * (their own {@link TerminalBridge}); Explorer and Review are plain
+     * JavaFX views, built lazily on the first visit and hidden -- not
+     * removed -- on every other sub-tab, exactly like Explorer.
      */
-    enum SubTab { CLAUDE, TERMINAL, EXPLORER }
+    enum SubTab { CLAUDE, TERMINAL, EXPLORER, REVIEW }
 
     /** One lazily-created native trio for the shell sub-tab (runtime + host, themed by MainWorkspace). */
     record ShellTerminal(TerminalRuntime runtime, TerminalHostView host) { }
@@ -123,19 +125,24 @@ final class OpenSessionTab {
     private final ToggleButton claudeSubTabButton = new ToggleButton();
     private final ToggleButton terminalSubTabButton = new ToggleButton("❯_  Terminal");
     private final ToggleButton explorerSubTabButton = new ToggleButton("▤  Explorer");
-
-    /**
-     * The ⌘4 affordance. A plain {@link Button}, not a {@link ToggleButton}
-     * beside the three sub-tabs: Review is a destination this session
-     * navigates TO, not a fourth view inside it, and a toggle that never
-     * shows a selected state next to three that do would say otherwise.
-     */
-    private final Button reviewButton = new Button("◨  Review");
+    /** Base text; {@link #setReviewBadge} appends the open-findings badge to this. */
+    private final ToggleButton reviewSubTabButton = new ToggleButton("Review");
     private final Label subTabContext = new Label();
     private SubTab activeSubTab = SubTab.CLAUDE;
     /** Built on first switch to Explorer, via {@link #setExplorerFactory}. */
     private Region explorerView;
     private Supplier<Region> explorerFactory;
+    /** Built on first switch to Review, via {@link #setReviewViewFactory}. */
+    private SessionReviewView reviewView;
+    private Supplier<SessionReviewView> reviewViewFactory;
+    /**
+     * The scope choice the gesture that is opening Review asked for, held
+     * only until {@link #notifyReviewShown} hands it to the host. Null means
+     * "no choice named" -- the sub-tab button and {@code ⌘4} say WHERE to go,
+     * not WHICH chip, so the host falls back to the persisted one.
+     */
+    private SessionReviewScopes.Choice pendingReviewChoice;
+    private Consumer<Optional<SessionReviewScopes.Choice>> onReviewShown = requested -> { };
 
     // -- Ephemeral shell Terminal sub-tab (never persisted; created on first switch) --
     /** Supplies a fresh shell runtime+host whose wakeup drives the argument (the shell bridge's tickAndDraw). */
@@ -193,8 +200,6 @@ final class OpenSessionTab {
     private Runnable onPreviousSessionTab = () -> { };
     private Runnable onNextSessionTab = () -> { };
     private Runnable onToggleSidebar = () -> { };
-    /** ⌘4 intercepted inside the terminal: navigate to Review, scoped to this session. */
-    private Runnable onShowReview = () -> { };
 
     private String displayName;
 
@@ -351,6 +356,11 @@ final class OpenSessionTab {
             explorerSubTabButton.setTooltip(new Tooltip("Explorer (⌘3)"));
         }
 
+        reviewSubTabButton.getStyleClass().add("session-subtab");
+        reviewSubTabButton.setFocusTraversable(false);
+        reviewSubTabButton.setTooltip(new Tooltip("Review this session's changes (⌘4)"));
+        reviewSubTabButton.setOnAction(e -> showSubTab(SubTab.REVIEW));
+
         // The shortcut is spelled out ON the button, not only in its tooltip:
         // a tooltip is only found by someone who already suspects there is a
         // shortcut. Disabled sub-tabs get none -- their key does nothing.
@@ -359,15 +369,7 @@ final class OpenSessionTab {
         if (!isRemote) {
             showKeyHint(explorerSubTabButton, "⌘3");
         }
-        // ⌘4 gets a button of its own. Review is not a sub-tab, but a key
-        // that is only advertised in the shortcuts overlay is a key nobody
-        // finds: the same argument that put ⌘1--⌘3 on their buttons rather
-        // than in their tooltips applies here.
-        reviewButton.getStyleClass().add("session-subtab");
-        reviewButton.setFocusTraversable(false);
-        reviewButton.setTooltip(new Tooltip("Review this session's changes (⌘4)"));
-        reviewButton.setOnAction(e -> onShowReview.run());
-        showKeyHint(reviewButton, "⌘4");
+        showKeyHint(reviewSubTabButton, "⌘4");
 
         subTabContext.getStyleClass().add("session-subtab-context");
 
@@ -375,7 +377,7 @@ final class OpenSessionTab {
         HBox.setHgrow(spacer, Priority.ALWAYS);
 
         HBox bar = new HBox(4, claudeSubTabButton, terminalSubTabButton, explorerSubTabButton,
-                reviewButton, spacer, subTabContext);
+                reviewSubTabButton, spacer, subTabContext);
         bar.setAlignment(Pos.CENTER_LEFT);
         bar.getStyleClass().add("session-subtab-bar");
         return bar;
@@ -384,6 +386,88 @@ final class OpenSessionTab {
     /** Supplies the Explorer view on first use (MainWorkspace wires this; it knows the session's search root). */
     void setExplorerFactory(Supplier<Region> factory) {
         this.explorerFactory = factory;
+    }
+
+    /**
+     * Supplies the Review view on first use (MainWorkspace wires this).
+     * Called at most once: {@link #reviewViewOrBuild} builds it on the
+     * first {@code REVIEW} visit and every later visit reuses it -- a diff
+     * column per open session, built eagerly, is a cost nobody asked for.
+     */
+    void setReviewViewFactory(Supplier<SessionReviewView> factory) {
+        this.reviewViewFactory = factory;
+    }
+
+    /**
+     * Selects the Review sub-tab and lands on {@code choice}'s scope: the
+     * one destination every gesture that names a scope arrives at (the
+     * sidebar's context menu, its {@code PR #n} chip, its {@code ◨n}
+     * findings badge). The scopes themselves are resolved by the host,
+     * through {@link #setOnReviewShown}, and pushed into {@link
+     * #reviewView()} via {@link SessionReviewView#showScopes}.
+     */
+    void showReviewSubTab(SessionReviewScopes.Choice choice) {
+        pendingReviewChoice = choice;
+        if (activeSubTab != SubTab.REVIEW) {
+            showSubTab(SubTab.REVIEW);      // the activation branch asks, carrying this choice
+            return;
+        }
+        // Already here. Read the board BEFORE the refocus, which is what the
+        // gesture is measured against.
+        boolean alreadyShowingIt = reviewView()
+                .filter(view -> view.selectedScope().isPresent() && view.selectedChoice() == choice)
+                .isPresent();
+        showSubTab(SubTab.REVIEW);          // refocuses; asks too if the board holds no scope
+        if (pendingReviewChoice == null) {
+            return;                         // that retry already asked, and it carried this choice
+        }
+        if (alreadyShowingIt) {
+            // The board is on exactly this chip already: a refocus, not a
+            // re-measure. Re-resolving would spawn git AND a gh call for a
+            // result the user is already looking at.
+            pendingReviewChoice = null;
+            return;
+        }
+        notifyReviewShown();
+    }
+
+    /**
+     * Wires who resolves this session's review scopes (MainWorkspace). Called
+     * every time the Review sub-tab becomes the shown one, by ANY route --
+     * the sub-tab button and {@code ⌘4} reach {@link #showSubTab} directly and
+     * never pass through {@link #showReviewSubTab}, so hanging resolution off
+     * the latter alone is what leaves the board saying "Resolving this
+     * session's review scopes…" forever.
+     *
+     * <p>The argument is the choice the gesture named, or empty when it named
+     * none.</p>
+     */
+    void setOnReviewShown(Consumer<Optional<SessionReviewScopes.Choice>> handler) {
+        this.onReviewShown = handler == null ? requested -> { } : handler;
+    }
+
+    /** Hands the host the choice this entry asked for (once), and clears it. */
+    private void notifyReviewShown() {
+        Optional<SessionReviewScopes.Choice> requested = Optional.ofNullable(pendingReviewChoice);
+        pendingReviewChoice = null;
+        onReviewShown.accept(requested);
+    }
+
+    /**
+     * The Review sub-tab's view, once built by a first {@code REVIEW}
+     * visit; empty before then and after {@link #disposeNativeResources}.
+     */
+    Optional<SessionReviewView> reviewView() {
+        return Optional.ofNullable(reviewView);
+    }
+
+    /**
+     * Updates the Review sub-tab button's badge. Works whether or not the
+     * view has been built yet -- the badge is a property of the button, not
+     * of the (possibly still unbuilt) view it opens.
+     */
+    void setReviewBadge(Optional<Integer> openFindings) {
+        reviewSubTabButton.setText(openFindings.map(count -> "Review ◨" + count).orElse("Review"));
     }
 
     /** Supplies a fresh shell runtime+host on first switch to the Terminal sub-tab (MainWorkspace wires this). */
@@ -448,23 +532,33 @@ final class OpenSessionTab {
 
     /**
      * Switches between the native-surface sub-tabs (Claude, Terminal) and
-     * the scene-graph one (Explorer). The native views overlay the
-     * scene, so showing the Explorer must both swap the center node AND
+     * the scene-graph ones (Explorer, Review). The native views overlay the
+     * scene, so showing Explorer or Review must both swap the center node AND
      * hide the native hosts (else they keep painting over the view);
      * switching to a native sub-tab restores its placeholder center first
      * and re-runs geometry after the layout pass so the native frame tracks
      * the placeholder's fresh bounds. Only one native view is visible at a
-     * time; the shell terminal is built lazily on first switch.
+     * time; the shell terminal and the review view are each built lazily on
+     * first switch.
      */
     void showSubTab(SubTab subTab) {
         selectSubTabButton(subTab);
         if (subTab == activeSubTab) {
-            // Already showing -- but still reclaim key routing for a native
-            // sub-tab: the user may have clicked into the sidebar (moving
-            // the AppKit first responder to the Glass view), and "switch to
-            // Claude/Terminal" must mean "let me type there again", not a
-            // silent no-op.
-            focusActiveNativeSubTab();
+            // Already showing -- but still reclaim key routing: the user may
+            // have clicked into the sidebar (moving the AppKit first
+            // responder to the Glass view), and "switch to this sub-tab"
+            // must mean "let me type there again", not a silent no-op.
+            refocusActiveSubTab();
+            if (subTab == SubTab.REVIEW
+                    && reviewView().filter(view -> view.selectedScope().isEmpty()).isPresent()) {
+                // The board is on its "resolving…"/"not available"
+                // placeholder. Without this, a transient git or gh failure is
+                // terminal for the routes that name no chip (⌘4, the sub-tab
+                // button): they would refocus a dead board forever, and only
+                // switching sub-tabs away and back could ever retry. The host
+                // drops the ask if a resolve really is still in flight.
+                notifyReviewShown();
+            }
             return;
         }
         if (subTab == SubTab.EXPLORER) {
@@ -480,6 +574,31 @@ final class OpenSessionTab {
             if (shellBridge != null) {
                 shellBridge.setTerminalSubTabActive(false);
             }
+            return;
+        }
+        if (subTab == SubTab.REVIEW) {
+            SessionReviewView view = reviewViewOrBuild();
+            if (view == null) {
+                // Factory never wired (or not yet): undo the selection, stay
+                // put -- and drop the choice this attempt asked for, so it
+                // cannot leak into whichever gesture opens Review next.
+                pendingReviewChoice = null;
+                selectSubTabButton(activeSubTab);
+                return;
+            }
+            activeSubTab = subTab;
+            content.setCenter(view);
+            bridge.setTerminalSubTabActive(false);
+            if (shellBridge != null) {
+                shellBridge.setTerminalSubTabActive(false);
+            }
+            // Mirrors MainWorkspace's own onShown() call for the global
+            // destination: the board's whole single-letter keyboard table
+            // (a/r/u/[/]/n/m/i/f/d/\/?) is an addEventFilter on itself, so it
+            // is dead until something is focused inside it, and the button
+            // that got us here is deliberately not focus-traversable.
+            view.onShown();
+            notifyReviewShown();
             return;
         }
         // CLAUDE or TERMINAL: show the corresponding native surface, hide the other.
@@ -529,8 +648,28 @@ final class OpenSessionTab {
         button.setGraphicTextGap(8);
     }
 
-    /** Refocuses whichever native terminal (Claude or shell) the active sub-tab shows, if any. */
-    void focusActiveNativeSubTab() {
+    /**
+     * Reclaims key routing for whichever sub-tab is showing. The Review board
+     * needs this as much as a terminal does and for the same reason: its whole
+     * single-letter key table is an {@code addEventFilter} on the view itself,
+     * so a board that is showing but not focused is a board whose keyboard is
+     * dead -- and {@link #focusActiveNativeSubTab} alone matches only
+     * {@code CLAUDE}/{@code TERMINAL}.
+     */
+    void refocusActiveSubTab() {
+        focusActiveNativeSubTab();
+        if (activeSubTab == SubTab.REVIEW) {
+            reviewView().ifPresent(SessionReviewView::onShown);
+        }
+    }
+
+    /**
+     * Refocuses whichever native terminal (Claude or shell) the active sub-tab
+     * shows, if any. Private on purpose: it is half of what "reclaim the
+     * keyboard" means now, and a caller reaching for it directly is the hole
+     * {@link #refocusActiveSubTab} exists to close.
+     */
+    private void focusActiveNativeSubTab() {
         if (activeSubTab == SubTab.CLAUDE) {
             bridge.focus();
         } else if (activeSubTab == SubTab.TERMINAL && shellBridge != null) {
@@ -542,6 +681,7 @@ final class OpenSessionTab {
         claudeSubTabButton.setSelected(subTab == SubTab.CLAUDE);
         terminalSubTabButton.setSelected(subTab == SubTab.TERMINAL);
         explorerSubTabButton.setSelected(subTab == SubTab.EXPLORER);
+        reviewSubTabButton.setSelected(subTab == SubTab.REVIEW);
     }
 
     /**
@@ -599,9 +739,7 @@ final class OpenSessionTab {
             case CLAUDE_SUB_TAB -> showSubTab(SubTab.CLAUDE);
             case TERMINAL_SUB_TAB -> showSubTab(SubTab.TERMINAL);
             case EXPLORER_SUB_TAB -> showSubTab(SubTab.EXPLORER);
-            // ⌘4 is a navigation command now, not a view switch: it selects
-            // the global Review destination, scoped to this session.
-            case REVIEW_SUB_TAB -> onShowReview.run();
+            case REVIEW_SUB_TAB -> showSubTab(SubTab.REVIEW);
             case PREVIOUS_SESSION_TAB -> onPreviousSessionTab.run();
             case NEXT_SESSION_TAB -> onNextSessionTab.run();
             case TOGGLE_SIDEBAR -> onToggleSidebar.run();
@@ -613,6 +751,13 @@ final class OpenSessionTab {
             explorerView = explorerFactory.get();
         }
         return explorerView;
+    }
+
+    private SessionReviewView reviewViewOrBuild() {
+        if (reviewView == null && reviewViewFactory != null) {
+            reviewView = reviewViewFactory.get();
+        }
+        return reviewView;
     }
 
 
@@ -958,6 +1103,16 @@ final class OpenSessionTab {
         showSubTab(subTab);
     }
 
+    /** Feeds an intercepted terminal app-shortcut through the exact same path a real one takes. */
+    void diagRunShortcut(Shortcut shortcut) {
+        runShortcut(shortcut);
+    }
+
+    /** The Review sub-tab button's current text, badge included when set. */
+    String diagReviewButtonText() {
+        return reviewSubTabButton.getText();
+    }
+
     /**
      * Releases the terminal's AppKit first-responder status so JavaFX text
      * inputs receive keys.
@@ -1008,11 +1163,6 @@ final class OpenSessionTab {
 
     void setOnToggleSidebar(Runnable handler) {
         this.onToggleSidebar = handler == null ? () -> { } : handler;
-    }
-
-    /** ⌘4 target: the workspace navigates to the Review destination for this session's checkout. */
-    void setOnShowReview(Runnable handler) {
-        this.onShowReview = handler == null ? () -> { } : handler;
     }
 
     /**
@@ -1151,8 +1301,13 @@ final class OpenSessionTab {
         bridge.sendPrompt(instruction);
     }
 
+    /**
+     * Re-picking this tab (window refocus, the sidebar's own row) means "let
+     * me work here again", which for a showing Review board means its
+     * keyboard, not a terminal's.
+     */
     void focus() {
-        focusActiveNativeSubTab();
+        refocusActiveSubTab();
     }
 
     /**
@@ -1182,6 +1337,17 @@ final class OpenSessionTab {
     void disposeNativeResources() {
         bridge.host().embeddedNode().ifPresent(placeholder.getChildren()::remove);
         bridge.disposeNativeResources();
+        // The Review view's own close() detaches its MCP activity panel's
+        // live-log subscription BEFORE the reference is dropped -- that
+        // subscription is on McpActivityLog, which is app-lifetime, so
+        // skipping this would leave every closed session's panel (if it was
+        // ever opened) running a pointless refresh() on every MCP call for
+        // the rest of the process's life. Mirrors where MainWorkspace.removeTab
+        // releases the Explorer's own resources via its dispose().
+        if (reviewView != null) {
+            reviewView.close();
+            reviewView = null;
+        }
         if (shellBridge != null) {
             // The ephemeral shell has no SessionManager-managed lifecycle,
             // so it is reaped here -- but NEVER via a direct close(): a

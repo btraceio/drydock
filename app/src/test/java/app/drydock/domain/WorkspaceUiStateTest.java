@@ -1,13 +1,17 @@
 package app.drydock.domain;
 
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.review.SessionReviewScopes;
 import org.junit.jupiter.api.Test;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * The font-size fields default to the design's 13px base and copy
@@ -76,5 +80,22 @@ class WorkspaceUiStateTest {
 
         assertEquals(List.of(id), updated.openSessionIds());
         assertEquals(Optional.of(id), updated.selectedSessionId());
+    }
+
+    @Test
+    void reviewScopeChoicesDefaultToEmpty() {
+        assertTrue(WorkspaceUiState.empty().reviewScopeChoices().isEmpty());
+    }
+
+    @Test
+    void reviewScopeChoicesAreCopiedNotAliased() {
+        Map<ManagedSessionId, SessionReviewScopes.Choice> mutable = new HashMap<>();
+        ManagedSessionId session = ManagedSessionId.newId();
+        mutable.put(session, SessionReviewScopes.Choice.PULL_REQUEST);
+
+        WorkspaceUiState state = WorkspaceUiState.empty().withReviewScopeChoices(mutable);
+        mutable.clear();
+
+        assertEquals(SessionReviewScopes.Choice.PULL_REQUEST, state.reviewScopeChoices().get(session));
     }
 }

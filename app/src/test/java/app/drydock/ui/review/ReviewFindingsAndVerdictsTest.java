@@ -4,14 +4,13 @@ import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.Confidence;
-import app.drydock.review.QueueAssembly;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewIntent;
-import app.drydock.review.ReviewItem;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
 import app.drydock.review.ReviewVerdict;
 import app.drydock.review.Severity;
+import app.drydock.review.SessionReviewScopes;
 import app.drydock.review.SubmitPlan;
 import javafx.scene.Node;
 import javafx.scene.Scene;
@@ -19,6 +18,7 @@ import javafx.scene.control.Button;
 import javafx.scene.control.Label;
 import javafx.scene.control.TextArea;
 import javafx.scene.input.KeyCode;
+import javafx.scene.layout.Region;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -30,7 +30,9 @@ import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
@@ -50,7 +52,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
     private final DiffService diffService = new DiffService();
     private final ReviewScopeRegistry registry = new ReviewScopeRegistry();
     private FakeReviewHost host;
-    private ReviewDestinationView view;
+    private SessionReviewView view;
     private ReviewScope scope;
 
     @Override
@@ -67,7 +69,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
         // makes Main.java intent 1.
         host.diff = new UnifiedDiff(List.of(
                 file("src/Main.java"), file("web/Other.java")));
-        view = new ReviewDestinationView(host, diffService);
+        view = new SessionReviewView(host, diffService, null);
         Scene scene = new Scene(view, 1400, 900);
         scene.getStylesheets().addAll(
                 getClass().getResource("/app/drydock/ui/app.css").toExternalForm(),
@@ -216,6 +218,15 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
         assertEquals("1", count.getText(), "the count survives the collapse");
         assertTrue(count.getStyleClass().contains("severity-blocking"),
                 "the strip is coloured by the worst severity: " + count.getStyleClass());
+
+        // m is a toggle, not a one-way collapse: the return trip is the half
+        // a reader is stuck without, and it has its own guard (the manual
+        // collapse is remembered, so the responsive solver must not re-apply
+        // it on the way back).
+        type(KeyCode.M);
+        WaitForAsyncUtils.waitForFxEvents();
+        assertTrue(lookup(".review-findings-scroll").query().isVisible(),
+                "pressing m again must bring the cards back");
     }
 
     /**
@@ -335,7 +346,12 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
         assertEquals("2 · Other.java", intentLabel());
     }
 
-    /** Submitting early jumps to the first unsettled intent rather than posting a partial review. */
+    /**
+     * Submitting early jumps to the first unsettled intent rather than
+     * posting a partial review -- and says so. The jump alone was the
+     * original defect's other half: Submit silently moved the reader and did
+     * nothing else, with no explanation, so the button read as broken.
+     */
     @Test
     void submitJumpsToTheFirstUnsettledIntentWhenIncomplete() {
         seed();
@@ -346,6 +362,95 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
 
         assertTrue(host.submittedScopes.isEmpty(), "an incomplete review must not be posted");
         assertEquals("1 · Main.java", intentLabel());
+        assertTrue(submitRefusal().toLowerCase(Locale.ROOT).contains("verdict"),
+                "the message must say what is blocking: " + submitRefusal());
+    }
+
+    /**
+     * A PR scope whose diff FAILED has nothing to anchor a comment to, so
+     * Submit must keep refusing -- but visibly. The bug this pins is the
+     * guard doing nothing at all, silently and for the rest of the session,
+     * because {@code ReviewDiffColumn.reload} clears {@code
+     * displayedScopeId} on a failure and nothing here ever retries it (see
+     * {@link SessionReviewView#submitReview}).
+     */
+    @Test
+    void submitOnAFailedDiffShowsAVisibleRefusalInsteadOfDoingNothing() {
+        ReviewScope pr = seedWithNoDiffInTheColumn(mintPrScope(),
+                new DiffOutcome.Failed("Could not diff /wt/feat"));
+
+        type(KeyCode.ENTER);
+
+        assertTrue(submitRefusal().toLowerCase(Locale.ROOT).contains("failed"),
+                "the message must say why: " + submitRefusal());
+        assertTrue(host.submittedScopes.isEmpty(),
+                "a PR scope with no diff to anchor comments to must not reach host.submit");
+        assertFalse(pr.pr().isEmpty(), "this fixture is only meaningful for a PR scope");
+    }
+
+    /**
+     * The sibling of the failed case, and the reason the guard cannot simply
+     * key on "no displayed diff": the window between selecting a scope and
+     * its diff landing is temporary, so the refusal has to invite a retry
+     * rather than declare the diff broken.
+     */
+    @Test
+    void submitWhileTheDiffIsStillLoadingRefusesWithARetryableMessage() {
+        seedWithNoDiffInTheColumn(mintPrScope(), new DiffOutcome.Diffing());
+
+        type(KeyCode.ENTER);
+
+        assertTrue(submitRefusal().toLowerCase(Locale.ROOT).contains("still loading"),
+                "a diff still in flight must not read as a broken one: " + submitRefusal());
+        assertTrue(host.submittedScopes.isEmpty());
+    }
+
+    /**
+     * The fall-through the other two guard: a non-PR scope posts no comments
+     * either way ({@code Host#submit} takes it straight to the Finish
+     * hand-off), so a FAILED diff must not leave IT stuck refusing for the
+     * rest of the session the way a PR scope correctly is.
+     */
+    @Test
+    void submitOnAFailedDiffStillReachesTheHostForANonPrScope() {
+        ReviewScope local = seedWithNoDiffInTheColumn(mintScope(),
+                new DiffOutcome.Failed("Could not diff /wt/feat"));
+        assertTrue(local.pr().isEmpty(), "this scope must not be a PR");
+
+        type(KeyCode.ENTER);
+
+        assertEquals(List.of(local.id()), host.submittedScopes,
+                "a failed diff must not strand the merge-and-finish path");
+    }
+
+    /**
+     * The whole reason {@code submitReview()} builds the {@code DiffIndex}
+     * from {@code ReviewDiffColumn.displayedDiff()} rather than from the
+     * rendered rows: a run of unchanged lines longer than {@code
+     * ReviewDiffRows.COLLAPSE_THRESHOLD} folds into a single collapsed-run
+     * row and disappears from the rows entirely, but every one of those
+     * lines is still a perfectly valid GitHub anchor.
+     */
+    @Test
+    void submitBuildsTheDiffIndexFromTheRealDiffNotTheCollapsedRows() {
+        host.diff = fileWithALongUnchangedRun();
+        seed();
+
+        // n3 sits inside the collapsed run above the change at n20 -- rendered
+        // as a folded "N unchanged" row, never as its own Line row.
+        assertTrue(lookup(".review-collapsed-run").tryQuery().isPresent(),
+                "the fixture must actually produce a collapsed run, or this test proves nothing");
+
+        type(KeyCode.A);
+        type(KeyCode.ENTER);
+
+        assertEquals(List.of(scope.id()), host.submittedScopes);
+        SubmitPlan.DiffIndex index = host.submittedIndexes.get(scope.id());
+        assertTrue(index.positionOfKey().containsKey("src/Big.java n3"),
+                "a line hidden behind a collapsed run must still be in the index built from the diff");
+        assertTrue(index.hunkOfKey().containsKey("src/Big.java n3"));
+        assertTrue(index.positionOfKey().containsKey("src/Big.java n20"),
+                "the changed line itself must be indexed too");
     }
 
     @Test
@@ -372,6 +477,27 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
         assertTrue(lookup(".review-verdict-action").queryAll().stream().anyMatch(Node::isVisible),
                 "the verdict bar must stay reachable with every rail collapsed");
         assertEquals("1 · Main.java", intentLabel());
+    }
+
+    /**
+     * Focus mode is a toggle, not a one-way collapse -- {@code f} twice must
+     * return the rails. Its condition is {@code !(intentsCollapsedByUser &amp;&amp;
+     * marginCollapsedByUser)}, so it is the one shortcut whose second press
+     * takes a different branch than its first.
+     */
+    @Test
+    void fTogglesFocusModeRatherThanOnlyCollapsing() {
+        seed(finding("f1", Severity.QUESTION));
+        assertTrue(lookup(".review-findings-scroll").query().isVisible());
+
+        type(KeyCode.F);
+        WaitForAsyncUtils.waitForFxEvents();
+        assertFalse(lookup(".review-findings-scroll").query().isVisible(), "the margin collapses");
+
+        type(KeyCode.F);
+        WaitForAsyncUtils.waitForFxEvents();
+        assertTrue(lookup(".review-findings-scroll").query().isVisible(),
+                "pressing f again must give the rails back");
     }
 
     @Test
@@ -408,7 +534,62 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
         return scope;
     }
 
-    /** Seeds the queue with one item and the store with {@code findings}. */
+    /** The same checkout as {@link #mintScope}, as the pull request it carries. */
+    private ReviewScope mintPrScope() {
+        scope = registry.mint(ReviewScopeRegistry.spec(ReviewScope.Kind.PR,
+                Path.of("/repo"), Optional.of(Path.of("/wt/feat")), "master", "feat",
+                Optional.of(new ReviewScope.PullRequestRef(42, Optional.empty())), Optional.empty()));
+        return scope;
+    }
+
+    /**
+     * Shows {@code minted} with {@code outcome} recorded and <em>nothing</em>
+     * in the diff column -- the state Submit's stale-diff guard exists for.
+     *
+     * <p>The host supplies its own body, which is what makes this
+     * deterministic: {@code bodyFor} returns early and never asks the column
+     * to diff anything, so {@code displayedScopeId} stays empty rather than
+     * being decided by whether an async git call against a path that does
+     * not exist happened to fail before the keystroke.</p>
+     */
+    private ReviewScope seedWithNoDiffInTheColumn(ReviewScope minted, DiffOutcome outcome) {
+        host.body = Optional.of(new Region());
+        interact(() -> view.showScopes(new SessionReviewScopes.Scopes(minted, Optional.empty()),
+                SessionReviewScopes.Choice.LOCAL));
+        interact(() -> view.diagPublishOutcome(minted.id(), outcome));
+        WaitForAsyncUtils.waitForFxEvents();
+        return minted;
+    }
+
+    /** The text of the verdict bar's submit-refusal label; blank when it is not showing. */
+    private String submitRefusal() {
+        return lookup(".review-verdict-submit-refusal").queryAll().stream()
+                .filter(Node::isVisible)
+                .map(node -> ((Label) node).getText())
+                .findFirst()
+                .orElse("");
+    }
+
+    /**
+     * One file whose change at line 20 is surrounded by unchanged context
+     * long enough to fold: {@code ReviewDiffRows.COLLAPSE_THRESHOLD} is 4, so
+     * the nineteen context lines ahead of it become a single collapsed-run
+     * row and n3 is not rendered at all.
+     */
+    private static UnifiedDiff fileWithALongUnchangedRun() {
+        List<UnifiedDiff.Line> lines = new ArrayList<>();
+        for (int i = 1; i <= 40; i++) {
+            UnifiedDiff.Line.Kind kind = i == 20
+                    ? UnifiedDiff.Line.Kind.ADD
+                    : UnifiedDiff.Line.Kind.CONTEXT;
+            lines.add(new UnifiedDiff.Line(kind, OptionalInt.of(i), OptionalInt.of(i),
+                    "int field" + i + " = " + i + ";"));
+        }
+        return new UnifiedDiff(List.of(new UnifiedDiff.FileDiff("src/Big.java", "M", 1, 0, false,
+                false, List.of(new UnifiedDiff.Hunk("@@ -1,40 +1,40 @@", lines)))));
+    }
+
+    /** Shows the board on one scope and seeds the store with {@code findings}. */
     private void seed(ReviewAnnotation... findings) {
         ReviewScope minted = mintScope();
         for (ReviewAnnotation finding : findings) {
@@ -416,14 +597,14 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
         }
         // The view renders the diff column for a worktree scope; the fake's
         // diff is what the by-file intent fallback groups.
-        interact(() -> view.setItems(new QueueAssembly(List.of(new ReviewItem(minted, ReviewItem.Group.AGENTS,
-                "feat", "drydock · vs master")), true, true), List.of("repo")));
+        interact(() -> view.showScopes(new SessionReviewScopes.Scopes(minted, Optional.empty()),
+                SessionReviewScopes.Choice.LOCAL));
         interact(() -> view.diagPublishOutcome(minted.id(),
                 new DiffOutcome.Loaded(host.diff)));
-        // setItems already asked the diff column for a real diff of the
+        // showScopes already asked the diff column for a real diff of the
         // (nonexistent) worktree path, which fails asynchronously and
         // otherwise leaves the column's displayedScopeId unset -- Submit's
-        // stale-diff guard (ReviewDestinationView#submitReview) would then
+        // stale-diff guard (SessionReviewView#submitReview) would then
         // refuse every submit in this file. diagShowDiff publishes the
         // fake's synthetic diff as belonging to this scope, same as a real
         // diff landing would, so that guard sees a match.

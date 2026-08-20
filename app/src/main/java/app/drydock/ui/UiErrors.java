@@ -33,6 +33,19 @@ public final class UiErrors {
     }
 
     /**
+     * The one-line reason a view renders inline (a placeholder, a status
+     * label) instead of in a dialog. Never blank: a failure carrying no
+     * message reports its type, for the same reason {@link #show}'s fallback
+     * branch does -- "Something went wrong" is not a diagnosis. Lives here so
+     * the inline callers and the dialog agree on what a failure reads as.
+     */
+    public static String message(Throwable failure) {
+        Throwable cause = unwrap(failure);
+        String text = cause.getMessage();
+        return text == null || text.isBlank() ? cause.getClass().getSimpleName() : text;
+    }
+
+    /**
      * The no-diagnosis form, for a failure nothing anticipated: the uncaught
      * FX-thread handler. {@link #show(String, Throwable)} names a known
      * failure mode; here there is none, so the value is the stack trace,

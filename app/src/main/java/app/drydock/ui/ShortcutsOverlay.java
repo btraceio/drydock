@@ -17,7 +17,7 @@ import java.util.List;
  * into sections. Lists only shortcuts the app actually binds (see {@code
  * DrydockApplication.installGlobalShortcuts}, the terminal-side intercepts
  * in {@code OpenSessionTab.onKeyEvent}, and {@code
- * ReviewDestinationView.onKeyPressed}) -- the design prototype's
+ * SessionReviewView.handleShortcut}) -- the design prototype's
  * resume-picker shortcuts are parked with the picker itself, and the
  * Review keys that belong to features not yet built are added with those
  * features, never ahead of them.
@@ -33,7 +33,7 @@ final class ShortcutsOverlay {
                     {"Agent view", "⌘1"},
                     {"Terminal view", "⌘2"},
                     {"Explorer view", "⌘3"},
-                    {"Review — and back to where you were", "⌘4"},
+                    {"Review this session's changes", "⌘4"},
                     {"Previous / next session tab", "⌘[ / ⌘]"},
                     {"  (in the Explorer: back / forward along the trail)", ""},
                     {"Previous / next live session", "⌘↑ / ⌘↓"},
@@ -44,11 +44,7 @@ final class ShortcutsOverlay {
                     {"Cancel / close", "Esc"},
             }),
             new Section("IN REVIEW", new String[][] {
-                    {"Previous / next review item", "j / k"},
-                    {"Collapse the queue", "q"},
-                    {"Filter the queue", "/"},
                     {"Focus mode — collapse every rail", "f"},
-                    {"Open the bound session", "o"},
                     {"Cycle density: cozy · compact · dense", "d"},
                     {"Show or hide unchanged lines", "c"},
                     {"Previous / next intent", "[ / ]"},
@@ -61,7 +57,6 @@ final class ShortcutsOverlay {
                     {"Collapse the findings margin", "m"},
                     {"Findings from the whole review", "⇧F"},
                     {"MCP activity log", "\\"},
-                    {"Narrow: open the diff / back to the queue", "⏎ esc"},
             }),
             new Section("IN THE NEW-WORKTREE MODAL", new String[][] {
                     {"Switch new / existing branch", "⌘E"},

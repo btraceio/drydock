@@ -13,7 +13,7 @@ import java.util.concurrent.TimeoutException;
  * thread called it".
  *
  * <p>The {@code diag*} methods on {@link ReviewDiffColumn} and {@link
- * ReviewDestinationView} exist for two callers that are never the FX thread
+ * SessionReviewView} exist for two callers that are never the FX thread
  * themselves: a JUnit/TestFX test thread polling for an async diff to land,
  * and the diagnostic script driver in {@code DrydockApplication}. Both read
  * or mutate plain fields the FX Application Thread owns -- {@code

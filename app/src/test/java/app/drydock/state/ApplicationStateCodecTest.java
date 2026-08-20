@@ -15,6 +15,7 @@ import app.drydock.domain.RepositorySettings;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SshRemote;
 import app.drydock.domain.WorkspaceUiState;
+import app.drydock.review.SessionReviewScopes;
 import app.drydock.state.json.JsonParser;
 import app.drydock.state.json.JsonValue;
 import app.drydock.state.json.JsonWriter;
@@ -26,6 +27,7 @@ import org.junit.jupiter.api.Test;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -672,5 +674,54 @@ class ApplicationStateCodecTest {
         WorkspaceUiState decoded = ApplicationStateCodec.fromJson(json).ui();
 
         assertEquals(Optional.empty(), decoded.selectedSessionId());
+    }
+
+    @Test
+    void aReviewScopeChoiceRoundTrips() {
+        ManagedSessionId session = ManagedSessionId.newId();
+        ApplicationState state = ApplicationState.empty().withUi(WorkspaceUiState.empty().withReviewScopeChoices(
+                Map.of(session, SessionReviewScopes.Choice.PULL_REQUEST)));
+
+        ApplicationState decoded = ApplicationStateCodec.fromJson(ApplicationStateCodec.toJson(state));
+
+        assertEquals(SessionReviewScopes.Choice.PULL_REQUEST,
+                decoded.ui().reviewScopeChoices().get(session));
+    }
+
+    @Test
+    void anUnknownReviewScopeChoiceIsSkippedRatherThanFailingTheLoad() {
+        // Cosmetic UI state decodes leniently: a malformed entry is dropped,
+        // never a reason to declare the state file corrupt. Here the KEY
+        // itself is not a parseable session id, so it names nothing and the
+        // whole entry is skipped.
+        JsonValue json = JsonParser.parse("""
+                {"schemaVersion":2,"repositories":[],"sessions":[],
+                 "ui":{"selectedRepositoryId":null,"sidebarWidth":288.0,
+                       "expandedRepositoryIds":[],"theme":"DARK",
+                       "reviewScopeChoices":{"not-a-session":"SIDEWAYS"}}}
+                """);
+
+        ApplicationState decoded = ApplicationStateCodec.fromJson(json);
+
+        assertTrue(decoded.ui().reviewScopeChoices().isEmpty());
+    }
+
+    @Test
+    void anUnrecognizedReviewScopeChoiceValueDecodesAsLocal() {
+        // Unlike a malformed KEY, a malformed VALUE still names a real
+        // session: Choice.fromPersisted's own lenient default (LOCAL)
+        // applies, and the entry is kept rather than dropped.
+        JsonValue json = JsonParser.parse("""
+                {"schemaVersion":2,"repositories":[],"sessions":[],
+                 "ui":{"selectedRepositoryId":null,"sidebarWidth":288.0,
+                       "expandedRepositoryIds":[],"theme":"DARK",
+                       "reviewScopeChoices":{"%s":"SIDEWAYS"}}}
+                """.formatted(OTHER_ID));
+
+        WorkspaceUiState decoded = ApplicationStateCodec.fromJson(json).ui();
+
+        assertEquals(1, decoded.reviewScopeChoices().size());
+        assertEquals(SessionReviewScopes.Choice.LOCAL,
+                decoded.reviewScopeChoices().get(ManagedSessionId.of(OTHER_ID)));
     }
 }

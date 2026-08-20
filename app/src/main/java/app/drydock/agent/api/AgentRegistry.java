@@ -13,15 +13,17 @@ import java.util.ServiceLoader;
 
 /**
  * Discovers {@link AgentProvider}s (via {@link ServiceLoader}), inits each with
- * the shared {@link AgentContext}, caches availability and remote-capability
- * once, and resolves the default agent for a new session. Availability is
- * computed off the FX thread by the caller of {@link #create} (construction
- * probes {@code locateExecutable}, which may block on filesystem I/O);
- * remote-capability comes from {@link AgentProvider#supportsRemote()}, which
- * is cheap and non-blocking by contract, so it imposes no such requirement.
- * Every other reader (e.g. the UI building a picker) only ever reads the
- * cached maps, so it never needs to probe -- and never blocks the FX
- * thread -- to know whether an agent is available or remote-capable.
+ * the shared {@link AgentContext}, caches availability, remote-capability, and
+ * subagent-capability once, and resolves the default agent for a new session.
+ * Availability is computed off the FX thread by the caller of {@link #create}
+ * (construction probes {@code locateExecutable}, which may block on
+ * filesystem I/O); remote-capability and subagent-capability come from
+ * {@link AgentProvider#supportsRemote()} and
+ * {@link AgentProvider#supportsSubagents()}, which are cheap and non-blocking
+ * by contract, so they impose no such requirement. Every other reader (e.g.
+ * the UI building a picker or a prompt) only ever reads the cached maps, so
+ * it never needs to probe -- and never blocks the FX thread -- to know
+ * whether an agent is available, remote-capable, or subagent-capable.
  */
 public final class AgentRegistry {
 
@@ -30,6 +32,7 @@ public final class AgentRegistry {
     private final Map<AgentKind, AgentProvider> providers = new EnumMap<>(AgentKind.class);
     private final Map<AgentKind, Boolean> availability = new EnumMap<>(AgentKind.class);
     private final Map<AgentKind, Boolean> remoteCapability = new EnumMap<>(AgentKind.class);
+    private final Map<AgentKind, Boolean> subagentCapability = new EnumMap<>(AgentKind.class);
 
     /** Discovers providers via ServiceLoader. Call off the FX thread (probes executables). */
     public static AgentRegistry create(AgentContext ctx) {
@@ -65,6 +68,14 @@ public final class AgentRegistry {
                 remote = false;
             }
             remoteCapability.put(provider.kind(), remote);
+            boolean subagents;
+            try {
+                subagents = provider.supportsSubagents();
+            } catch (RuntimeException e) {
+                LOG.log(Level.WARNING, () -> "Subagent-capability check failed for " + provider.kind() + ": " + e);
+                subagents = false;
+            }
+            subagentCapability.put(provider.kind(), subagents);
         }
     }
 
@@ -139,6 +150,16 @@ public final class AgentRegistry {
      */
     public boolean supportsRemote(AgentKind kind) {
         return remoteCapability.getOrDefault(kind, false);
+    }
+
+    /**
+     * Whether {@code kind}'s provider can dispatch a subagent, per
+     * {@link app.drydock.agent.spi.AgentProvider#supportsSubagents()}.
+     * Cached at construction alongside {@link #supportsRemote}, so the UI
+     * reads it on the FX thread without a process spawn.
+     */
+    public boolean supportsSubagents(AgentKind kind) {
+        return subagentCapability.getOrDefault(kind, false);
     }
 
     /**
