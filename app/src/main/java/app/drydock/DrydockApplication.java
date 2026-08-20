@@ -276,6 +276,10 @@ public final class DrydockApplication extends Application {
                         sessionManager, agentRegistry, mainWorkspace, viewModel);
         sidebar.setOpenFindingsAt(mainWorkspace::openFindingsAt);
         mainWorkspace.setOnReviewQueueChanged(sidebar::refreshReviewBadges);
+        // The sidebar owns worktree discovery; the workspace is what creates
+        // worktrees (materializing a pull request), so it asks rather than
+        // keeping a second, thinner copy of the scan.
+        mainWorkspace.setOnWorktreesChanged(sidebar::refreshWorktreesFor);
 
         installSessionActivityHooks(activityDir);
         startMcpServer(stateDir);

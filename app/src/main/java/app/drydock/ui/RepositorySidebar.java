@@ -529,10 +529,34 @@ public final class RepositorySidebar extends VBox {
             return;
         }
         requestRebuild();
-        navigator.startReviewForPullRequest(node.repository(), node.pullRequest(), () -> {
+        try {
+            navigator.startReviewForPullRequest(node.repository(), node.pullRequest(), () -> {
+                materializingPullRequests.end(target);
+                requestRebuild();
+            });
+        } catch (RuntimeException e) {
+            // A synchronous throw before the flow ever reaches a settle path
+            // (its worktree-path resolution touches the filesystem) would
+            // otherwise leak the claim and disable this row permanently.
             materializingPullRequests.end(target);
             requestRebuild();
-        });
+            throw e;
+        }
+    }
+
+    /**
+     * Re-runs worktree discovery for {@code repository} on somebody else's
+     * behalf -- the workspace, after it changed what is on disk (a pull
+     * request materialized into a new worktree, say).
+     *
+     * <p>Deliberately the same call the sidebar's own gestures make, so the
+     * caller gets the whole job and not a subset of it: the new list, each
+     * new worktree's git status, and -- when the list actually changed -- the
+     * {@code gh} rescan that dedups a now-checked-out PR's row away, or the
+     * stale mark that defers it while the repo is collapsed.</p>
+     */
+    public void refreshWorktreesFor(Repository repository) {
+        refreshWorktrees(repository, false);
     }
 
     /** Focuses the filter field (⌘F). */

@@ -336,6 +336,13 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     /** Fires when the Review queue changes, so the sidebar can restyle its badge. */
     private Runnable onReviewQueueChanged = () -> { };
 
+    /**
+     * Who re-runs worktree discovery when this workspace changed what is on
+     * disk (see {@link #requestWorktreeRefresh}). Wired to the sidebar, which
+     * owns discovery; a no-op until then.
+     */
+    private Consumer<Repository> onWorktreesChanged = repository -> { };
+
     /** Shows the shared shortcuts overlay (wired by DrydockApplication, which owns the modal layer). */
     private Runnable onShowShortcuts = () -> { };
 
@@ -1247,20 +1254,24 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 UserConfig.load().worktreesDirectory(), repository.displayName(), branch);
         // Cancelled and confirmed are indistinguishable from the modal's
         // onClose alone: StartSessionModal runs onClose BEFORE onStart, so
-        // pressing Start also runs the close hook. The settle is therefore
-        // deferred by one FX pulse and skipped if `confirmed` was flipped in
-        // between -- by which time onStart has run, synchronously, in the
-        // same event.
-        boolean[] confirmed = {false};
+        // pressing Start also runs the close hook. The decision -- deferred
+        // one FX pulse, answered once -- lives in StartModalSettle, which is
+        // pure and tested: getting it wrong either disables this row forever
+        // or lets a second click start a second checkout.
+        PullRequestMaterialization.StartModalSettle settle =
+                new PullRequestMaterialization.StartModalSettle();
+        // Runs when the modal is cancelled, Esc'd, backdrop-clicked, OR
+        // replaced by another flow's modal -- ModalLayer.show runs the
+        // outgoing hook precisely so that last case is not a stranded row.
         Runnable settleUnlessConfirmed = () -> Platform.runLater(() -> {
-            if (!confirmed[0]) {
+            if (settle.settleNow()) {
                 onSettled.run();
             }
         });
         modalLayer.show(new StartSessionModal(branch, worktree, agentRegistry, defaultKind.get(),
                 repository.isRemote(), remoteOf(repository), modalLayer::close,
                 (task, agent, eval) -> {
-                    confirmed[0] = true;
+                    settle.confirmed();
                     materializePullRequest(repository, pullRequest, worktree, task, agent, eval, onSettled);
                 }),
                 settleUnlessConfirmed);
@@ -1280,17 +1291,17 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                                         boolean eval, Runnable onSettled) {
         int number = pullRequest.number();
         // Esc closes the busy modal without cancelling the fetch behind it,
-        // so "was it dismissed" is captured HERE, against this flow's own
+        // so "was it dismissed" is tracked HERE, against this flow's own
         // modals -- asking modalLayer later would ask about whatever the human
         // opened in the meantime (same reasoning as showSubmitSheet).
-        boolean[] dismissed = {false};
-        showMaterializationProgress(dismissed, new PullRequestMaterialization.Step.Checkout(number));
+        MaterializationProgress progress = new MaterializationProgress();
+        progress.show(new PullRequestMaterialization.Step.Checkout(number));
         prCheckoutService.checkout(repository.root(), worktreeDirectory, number)
                 .whenComplete((created, failure) -> Platform.runLater(() -> {
                     if (failure != null) {
                         LOG.log(Level.WARNING, "Could not check out PR #" + number
                                 + " of " + repository.root(), failure);
-                        endMaterialization(dismissed, onSettled);
+                        endMaterialization(progress, onSettled);
                         UiErrors.show("Could not open review", "PR #" + number + " was not checked out",
                                 PullRequestMaterialization.failureMessage(
                                         new PullRequestMaterialization.Failure.CheckoutFailed(
@@ -1301,11 +1312,11 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                         // then shows the stranded worktree rather than
                         // nothing, which is what the next attempt will
                         // collide with.
-                        refreshWorktreesOf(repository);
+                        requestWorktreeRefresh(repository);
                         return;
                     }
                     startSessionOnCheckedOutPr(repository, pullRequest, created, task, agent, eval,
-                            dismissed, onSettled);
+                            progress, onSettled);
                 }));
     }
 
@@ -1327,28 +1338,34 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      */
     private void startSessionOnCheckedOutPr(Repository repository, GhCliService.OpenPullRequest pullRequest,
                                             Path worktree, Optional<String> task, AgentKind agent,
-                                            boolean eval, boolean[] dismissed, Runnable onSettled) {
+                                            boolean eval, MaterializationProgress progress,
+                                            Runnable onSettled) {
         int number = pullRequest.number();
-        showMaterializationProgress(dismissed, new PullRequestMaterialization.Step.StartSession(worktree));
+        progress.show(new PullRequestMaterialization.Step.StartSession(worktree));
         ManagedSessionId session;
         try {
             // branchCreatedHere=false: gh minted pr-<n>, and it tracks a
             // branch somebody else owns -- removing the worktree must never
             // offer to delete it.
+            //
+            // The task is deliberately NOT handed to the session start: it
+            // would be typed as its own submission ~0-500 ms before the
+            // review instruction's, interrupting the agent mid-turn. Both go
+            // out as one line below (PullRequestMaterialization.prompt).
             session = openWorktreeSession(repository, PrCheckoutService.localBranchFor(number), worktree,
-                    task, false, agent, Spawn.FORBIDDEN, Optional.empty(), eval);
+                    Optional.empty(), false, agent, Spawn.FORBIDDEN, Optional.empty(), eval);
         } catch (RuntimeException e) {
             LOG.log(Level.WARNING, "Could not start a session on the checked-out PR #" + number, e);
-            endMaterialization(dismissed, onSettled);
+            endMaterialization(progress, onSettled);
             UiErrors.show("Could not open review", "PR #" + number + " is checked out, but has no session",
                     PullRequestMaterialization.failureMessage(
                             new PullRequestMaterialization.Failure.SessionFailed(
                                     worktree, UiErrors.message(e))));
             // The worktree survives, so the sidebar must show it.
-            refreshWorktreesOf(repository);
+            requestWorktreeRefresh(repository);
             return;
         }
-        showMaterializationProgress(dismissed, new PullRequestMaterialization.Step.OpenReview(worktree));
+        progress.show(new PullRequestMaterialization.Step.OpenReview(worktree));
         // The PR is handed over whole, draft included: SessionReviewScopes
         // owns both rules -- the local scope of a pr-<n> checkout carries the
         // ref either way, and only the second chip is withheld for a draft.
@@ -1356,16 +1373,25 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                         Optional.of(PrCheckoutService.localBranchFor(number)),
                         Optional.of(session), Optional.of(pullRequest))
                 .whenComplete((scopes, failure) -> Platform.runLater(() -> {
-                    endMaterialization(dismissed, onSettled);
-                    // The worktree exists either way now; the row it replaces
-                    // is deduped away by the same scan.
-                    refreshWorktreesOf(repository);
+                    endMaterialization(progress, onSettled);
+                    // The worktree exists now, so discovery has to re-run --
+                    // and with it the gh scan, which is the ONLY thing that
+                    // dedups this PR's own "Review ▸" row away. Left showing,
+                    // that row would report "No worktree was created" for the
+                    // healthy checkout this flow just made.
+                    requestWorktreeRefresh(repository);
                     if (failure != null) {
                         // The session is up and the checkout is real -- only
                         // the scope resolution failed, so land on the board
                         // anyway and let it say what it could not resolve.
+                        // The typed task still goes out: there is no review
+                        // instruction to carry it any more, and silently
+                        // dropping what the human wrote is worse than
+                        // sending it alone.
                         LOG.log(Level.WARNING, "Could not resolve review scopes for " + worktree, failure);
                         showReviewForSession(session, SessionReviewScopes.Choice.PULL_REQUEST);
+                        task.ifPresent(typed -> sendWhenSessionReady(session, () -> typed,
+                                "the start task", Optional.of(typed)));
                         return;
                     }
                     // A draft has no PR chip, and its local scope is the one
@@ -1378,23 +1404,58 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                     showReviewForSession(session, SessionReviewScopes.Choice.PULL_REQUEST);
                     // Sent once the terminal is live, and only then: the
                     // instruction names the scope handle, which did not exist
-                    // when the session was started.
-                    runReviewWhenSessionReady(session, scope);
+                    // when the session was started. The human's task rides
+                    // along on that same line.
+                    runReviewWhenSessionReady(session, scope, task);
                 }));
     }
 
     /**
-     * Replaces the busy modal's caption with {@code step}'s -- unless the
-     * human already dismissed it with Esc, in which case the work carries on
-     * (a fetch in flight cannot be recalled) but nothing pops back over
-     * whatever they opened instead.
+     * One materialization's busy modal: re-captioned by us from step to step,
+     * and "dismissed" the moment anybody else ends it -- Esc, a backdrop
+     * click, or another flow showing a modal over it.
+     *
+     * <p>The distinction matters in both directions. A dismissed modal must
+     * not be re-shown (a fetch in flight cannot be recalled, but nothing may
+     * pop back over whatever the human opened instead), and it must not be
+     * {@code close()}d on completion either, because by then the layer holds
+     * somebody else's modal. Telling "I replaced it" from "somebody else
+     * ended it" is the whole reason this is a small object rather than a
+     * boolean: {@link ModalLayer#show} now runs the outgoing hook, which is
+     * ours on every step transition.</p>
      */
-    private void showMaterializationProgress(boolean[] dismissed, PullRequestMaterialization.Step step) {
-        if (dismissed[0] || modalLayer == null) {
-            return;
+    private final class MaterializationProgress {
+
+        private boolean dismissed;
+        private boolean replacing;
+
+        /** Shows (or re-captions) the busy modal for {@code step}. */
+        void show(PullRequestMaterialization.Step step) {
+            if (dismissed || modalLayer == null) {
+                return;
+            }
+            replacing = true;
+            try {
+                modalLayer.show(busyModal(PullRequestMaterialization.progressLabel(step)), this::ended);
+            } finally {
+                replacing = false;
+            }
         }
-        modalLayer.show(busyModal(PullRequestMaterialization.progressLabel(step)),
-                () -> dismissed[0] = true);
+
+        /** The modal layer's own hook: ours ends it only when somebody else did. */
+        private void ended() {
+            if (!replacing) {
+                dismissed = true;
+            }
+        }
+
+        /** Clears the progress state. Idempotent, and never closes a modal that is no longer ours. */
+        void clear() {
+            if (!dismissed && modalLayer != null) {
+                modalLayer.close();
+            }
+            dismissed = true;
+        }
     }
 
     /**
@@ -1403,34 +1464,30 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * session failure -- before anything else happens, so no path can leave
      * a spinner stranded (AGENTS.md).
      */
-    private void endMaterialization(boolean[] dismissed, Runnable onSettled) {
-        if (!dismissed[0] && modalLayer != null) {
-            // Only ours: a dismissed modal means the human has moved on, and
-            // close() would then shut whatever they opened next.
-            modalLayer.close();
-        }
-        dismissed[0] = true;
+    private static void endMaterialization(MaterializationProgress progress, Runnable onSettled) {
+        progress.clear();
         onSettled.run();
     }
 
     /**
-     * Re-runs {@code git worktree list} for {@code repository} and publishes
-     * it, so a worktree this flow created (or left behind) appears as an
-     * unopened row without waiting for the next sidebar gesture.
+     * Asks whoever owns worktree discovery to re-run it for {@code
+     * repository} -- the sidebar, which does the whole job: the new list, the
+     * per-worktree git status, and the pull-request rescan that dedups a
+     * now-checked-out PR's row away (or marks it stale when the repo is
+     * collapsed).
+     *
+     * <p>A seam rather than a second copy of that logic here. Publishing a
+     * fresh list straight into the view model looks equivalent and is not: it
+     * rebuilds the tree without re-running the {@code gh} scan, so the
+     * materialized PR keeps its {@code Review ▸} row next to the session it
+     * just created -- and pressing it again reports "No worktree was created"
+     * for a path that now holds a healthy checkout.</p>
      */
-    private void refreshWorktreesOf(Repository repository) {
+    private void requestWorktreeRefresh(Repository repository) {
         if (repository.isRemote()) {
             return;
         }
-        worktreeService.list(repository.root())
-                .whenComplete((worktrees, failure) -> Platform.runLater(() -> {
-                    if (failure != null) {
-                        // Cosmetic: the sidebar rescans on its own gestures too.
-                        LOG.log(Level.WARNING, "Could not refresh worktrees of " + repository.root(), failure);
-                        return;
-                    }
-                    viewModel.setWorktrees(repository.id(), worktrees);
-                }));
+        onWorktreesChanged.accept(repository);
     }
 
     /**
@@ -1970,6 +2027,15 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     }
 
     /** Notified after every queue reassembly, so the sidebar can re-render its badge. */
+    /**
+     * Wires worktree rediscovery (see {@link #requestWorktreeRefresh}). Same
+     * shape as {@link #setOnReviewQueueChanged}: the workspace changes the
+     * repository, the sidebar re-scans it.
+     */
+    public void setOnWorktreesChanged(Consumer<Repository> handler) {
+        this.onWorktreesChanged = handler == null ? repository -> { } : handler;
+    }
+
     public void setOnReviewQueueChanged(Runnable handler) {
         this.onReviewQueueChanged = handler == null ? () -> { } : handler;
     }
@@ -2801,6 +2867,34 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * the poll expires.</p>
      */
     private void runReviewWhenSessionReady(ManagedSessionId session, ReviewScope scope) {
+        runReviewWhenSessionReady(session, scope, Optional.empty());
+    }
+
+    /**
+     * As above, with the human's own task prepended onto the SAME submitted
+     * line (see {@link PullRequestMaterialization#prompt}) rather than typed
+     * as a second one.
+     */
+    private void runReviewWhenSessionReady(ManagedSessionId session, ReviewScope scope, Optional<String> task) {
+        sendWhenSessionReady(session, () -> PullRequestMaterialization.prompt(task, reviewInstruction(scope)),
+                "the review for scope " + scope.id(), task);
+    }
+
+    /**
+     * Sends {@code prompt} to {@code session}'s terminal once it has one.
+     *
+     * <p>{@code prompt} is built at send time, not at call time: a review
+     * instruction resolves the session's agent capabilities, which is not
+     * something to freeze seconds before the session exists.</p>
+     *
+     * <p>{@code fallbackTask}, when present, is what the human typed. If the
+     * poll expires the session never entered {@link #openTabs}, but its
+     * placeholder tab may still be in {@link #pendingTabs} -- the task is
+     * offered to that, because a typed task silently dropped is worse than
+     * one sent to a terminal that may not read it.</p>
+     */
+    private void sendWhenSessionReady(ManagedSessionId session, Supplier<String> prompt, String what,
+                                      Optional<String> fallbackTask) {
         Timeline poll = new Timeline();
         int[] attemptsLeft = {REVIEW_LAUNCH_WAIT_SECONDS * 2};
         poll.getKeyFrames().add(new KeyFrame(Duration.millis(500), e -> {
@@ -2810,13 +2904,17 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 // The surface exists, but the agent behind it has only just
                 // been exec'd; the same grace period every other start-task
                 // gets (see sendTaskWhenReady).
-                sendTaskWhenReady(open, reviewInstruction(scope));
+                sendTaskWhenReady(open, prompt.get());
                 return;
             }
             if (--attemptsLeft[0] <= 0) {
                 poll.stop();
                 LOG.log(Level.WARNING, "Gave up waiting for session " + session
-                        + " to start before running the review for scope " + scope.id());
+                        + " to start before sending " + what);
+                OpenSessionTab pending = pendingTabs.get(session);
+                if (pending != null && fallbackTask.isPresent()) {
+                    sendTaskWhenReady(pending, fallbackTask.get());
+                }
             }
         }));
         poll.setCycleCount(Animation.INDEFINITE);

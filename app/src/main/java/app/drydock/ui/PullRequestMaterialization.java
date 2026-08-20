@@ -3,6 +3,7 @@ package app.drydock.ui;
 import java.nio.file.Path;
 import java.util.HashSet;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -99,6 +100,68 @@ public final class PullRequestMaterialization {
                             + "branch: it is in the sidebar as an unopened worktree, one Start ▸ away "
                             + "from a session.";
         };
+    }
+
+    /**
+     * One line for the session's terminal: the human's own task, then the
+     * review instruction.
+     *
+     * <p>ONE submission, not two. {@code TerminalBridge.sendPrompt} is a
+     * single submitted line, and two of them 0-500 ms apart interrupt the
+     * agent mid-turn -- the second arrives while the first is still being
+     * worked on. Passing the task to the session start instead of combining
+     * it here is exactly what produced that pair.</p>
+     *
+     * <p>A blank or absent task leaves the instruction alone; whitespace is
+     * collapsed by the sender (an embedded newline would submit early), so
+     * this only has to get the ordering and the separator right.</p>
+     */
+    public static String prompt(Optional<String> task, String reviewInstruction) {
+        Objects.requireNonNull(reviewInstruction, "reviewInstruction");
+        return task.map(String::strip)
+                .filter(typed -> !typed.isEmpty())
+                .map(typed -> typed + " " + reviewInstruction)
+                .orElse(reviewInstruction);
+    }
+
+    /**
+     * The confirm-or-cancel decision behind a Start-session modal's settle
+     * hook, which decides whether the row that opened it is released.
+     *
+     * <p>Its own object because it is the one piece of this flow whose
+     * failure is permanent: settle on a confirm and a second click can start
+     * a second checkout of the same PR; fail to settle on a cancel and that
+     * PR's row is disabled for the rest of the process.</p>
+     *
+     * <p>It is needed at all because {@code StartSessionModal} runs its
+     * {@code onClose} hook BEFORE {@code onStart}, so at close time "did the
+     * human confirm" is not yet knowable -- the caller asks {@link
+     * #settleNow()} one FX pulse later, by which time {@code onStart} has run
+     * (synchronously, in the same event) and called {@link #confirmed()}.
+     * {@link #settleNow()} also answers true at most once, because a modal
+     * can be ended twice -- its own Cancel calling {@code close()}, or a
+     * replacement running the hook and the human then pressing Esc.</p>
+     *
+     * <p>FX thread only.</p>
+     */
+    public static final class StartModalSettle {
+
+        private boolean confirmed;
+        private boolean settled;
+
+        /** The human pressed Start: from here on the materialization owns the settle. */
+        public void confirmed() {
+            confirmed = true;
+        }
+
+        /** Whether this close should release the row -- true at most once, and never after a confirm. */
+        public boolean settleNow() {
+            if (confirmed || settled) {
+                return false;
+            }
+            settled = true;
+            return true;
+        }
     }
 
     /**

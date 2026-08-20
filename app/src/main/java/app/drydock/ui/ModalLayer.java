@@ -61,8 +61,29 @@ public final class ModalLayer extends StackPane {
         this.onShowingChanged = listener == null ? showing -> { } : listener;
     }
 
-    /** Shows {@code modal} centered; replaces any modal already showing. */
+    /**
+     * Shows {@code modal} centered; replaces any modal already showing.
+     *
+     * <p><strong>Replacing a modal ends it, so the outgoing modal's {@code
+     * onClosed} runs first</strong> -- exactly as if {@link #close} had been
+     * called on it. Without that, a flow whose only completion signal is that
+     * hook is stranded silently the moment anything else opens a modal over
+     * it: {@code ⌘N}'s new-session modal over an open Start-session modal
+     * left a pull-request row disabled and reading "Opening…" for the rest of
+     * the process, with no way to review that PR again. The same hole ran the
+     * other way for the busy modals, whose owners use the hook to learn that
+     * the human moved on -- a replaced one never told them, and they then
+     * closed a modal somebody else had opened.</p>
+     *
+     * <p>The outgoing hook is cleared before it runs, so a handler that
+     * itself calls {@link #close} cannot re-enter it.</p>
+     */
     public void show(Region modal, Runnable onClosed) {
+        if (isVisible()) {
+            Runnable outgoing = this.onClosed;
+            this.onClosed = () -> { };
+            outgoing.run();
+        }
         this.onClosed = onClosed == null ? () -> { } : onClosed;
         getChildren().setAll(modal);
         setVisible(true);

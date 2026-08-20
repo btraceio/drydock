@@ -3,6 +3,7 @@ package app.drydock.ui;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -47,6 +48,58 @@ class PullRequestMaterializationTest {
         assertTrue(message.contains("/tmp/wt-42"));
         assertTrue(message.contains("Start ▸"),
                 "the worktree survives as an unopened row -- say how to use it");
+    }
+
+    // ---- One line, not two --------------------------------------------------
+
+    @Test
+    void theTypedTaskRidesOnTheSameLineAsTheReviewInstruction() {
+        assertEquals("Look at the migration first. review scope-7",
+                PullRequestMaterialization.prompt(Optional.of("Look at the migration first."),
+                        "review scope-7"),
+                "two submissions 0-500ms apart interrupt the agent mid-turn: one line, task first");
+    }
+
+    @Test
+    void aTaskThatIsAbsentOrBlankLeavesTheInstructionAlone() {
+        assertEquals("review scope-7",
+                PullRequestMaterialization.prompt(Optional.empty(), "review scope-7"));
+        assertEquals("review scope-7",
+                PullRequestMaterialization.prompt(Optional.of("   "), "review scope-7"));
+    }
+
+    // ---- The confirm-vs-cancel settle ---------------------------------------
+
+    @Test
+    void cancellingTheStartModalSettlesTheRow() {
+        PullRequestMaterialization.StartModalSettle settle =
+                new PullRequestMaterialization.StartModalSettle();
+
+        assertTrue(settle.settleNow(), "a cancelled modal must release the row it disabled");
+    }
+
+    @Test
+    void confirmingTheStartModalLeavesTheSettleToTheMaterialization() {
+        PullRequestMaterialization.StartModalSettle settle =
+                new PullRequestMaterialization.StartModalSettle();
+
+        // StartSessionModal runs onClose BEFORE onStart, so the close hook
+        // fires on confirm too -- and the answer is asked for one FX pulse
+        // later, after confirmed() has run.
+        settle.confirmed();
+
+        assertFalse(settle.settleNow(),
+                "settling here would re-enable the row while the checkout is still running");
+    }
+
+    @Test
+    void aModalEndedTwiceSettlesOnce() {
+        PullRequestMaterialization.StartModalSettle settle =
+                new PullRequestMaterialization.StartModalSettle();
+
+        assertTrue(settle.settleNow());
+        assertFalse(settle.settleNow(),
+                "a modal can be ended twice -- replaced, then Esc -- and must not settle twice");
     }
 
     // ---- The in-flight guard behind the row's disabled state ----------------

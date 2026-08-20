@@ -18,6 +18,8 @@ import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
+import javafx.scene.input.MouseButton;
+import javafx.scene.input.MouseEvent;
 import javafx.scene.layout.StackPane;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
@@ -316,11 +318,60 @@ class RepositorySidebarPullRequestDedupFxTest extends ApplicationTest {
                 "a settled row must be startable again -- a failed checkout is meant to be retried");
     }
 
+    /**
+     * Task 12's I2: after a successful materialization the PR row must be
+     * GONE, not re-enabled. The dedup is computed inside the {@code gh pr
+     * list} scan and cached in its outcome, so publishing a fresh worktree
+     * list into the view model rebuilds the tree without re-running it -- the
+     * row survived, and pressing it again reported "No worktree was created"
+     * for a path that by then held a healthy checkout.
+     *
+     * <p>Driven through the exact seam the workspace calls ({@link
+     * RepositorySidebar#refreshWorktreesFor}) with the worktree a
+     * materialization would have left on disk.</p>
+     */
+    @Test
+    void theSeamTheWorkspaceCallsRemovesTheRowOfAMaterializedPr() throws Exception {
+        awaitCallCount(1, "the first PR scan");
+        source.complete(0, listing(pr(7, "Fix login", "pr-7")));
+        WaitForAsyncUtils.waitForFxEvents();
+        expandPullRequestGroup();
+        assertTrue(pullRequestRowPresent(), "PR #7 has no worktree yet: its row must be present");
+
+        // What a successful materialization leaves behind: a worktree with
+        // the PR checked out as pr-<n>.
+        git(repoRoot, "branch", "pr-7");
+        Path worktreePath = newWorktreePath("pr-7-materialized");
+        git(repoRoot, "worktree", "add", worktreePath.toString(), "pr-7");
+
+        interact(() -> sidebar.refreshWorktreesFor(repository));
+
+        awaitCallCount(2, "the PR rescan the workspace's refresh seam must trigger");
+        assertTrue(hasPr7(worktreeListAt(1)),
+                "the rescan must run against the list that already holds the new worktree");
+        source.complete(1, listing(pr(7, "Fix login", "pr-7")));
+        WaitForAsyncUtils.waitForFxEvents();
+
+        awaitCondition(() -> !pullRequestRowPresent(),
+                "the materialized PR's row disappearing -- pressing it again would report that "
+                        + "no worktree was created for a path that now holds a healthy checkout");
+        awaitCondition(() -> !groupRowPresent(), "the now-empty PULL REQUESTS group going away");
+    }
+
+    /**
+     * Expands the PULL REQUESTS group by firing its row's own click handler
+     * rather than moving a pointer: a real {@code clickOn} depends on the
+     * window being focused and positioned, which does not hold when the whole
+     * {@code app.drydock.ui} package shares one JVM -- it passed alone and
+     * timed out in the suite.
+     */
     private void expandPullRequestGroup() throws InterruptedException {
         AtomicReference<Node> group = new AtomicReference<>();
         interact(() -> group.set(sidebar.lookup(".pull-request-group-row")));
         assertTrue(group.get() != null, "no PULL REQUESTS group row to expand");
-        clickOn(group.get());
+        interact(() -> group.get().fireEvent(new MouseEvent(MouseEvent.MOUSE_CLICKED, 0, 0, 0, 0,
+                MouseButton.PRIMARY, 1, false, false, false, false, true, false, false, true, false,
+                false, null)));
         awaitCondition(this::pullRequestRowPresent, "the PR row appearing under the expanded group");
     }
 
