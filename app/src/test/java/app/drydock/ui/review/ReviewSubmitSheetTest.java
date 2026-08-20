@@ -183,7 +183,7 @@ class ReviewSubmitSheetTest extends ApplicationTest {
         assertTrue(submit.isDisabled(),
                 "showError must not force-enable Submit; the live disabled rule still applies");
         assertFalse(progressRow().isVisible(), "showError must hide the progress row -- no path may strand it");
-        Label error = (Label) lookup(".review-gate-failure").queryAll().stream()
+        Label error = (Label) lookup(".review-error-callout").queryAll().stream()
                 .filter(node -> node.isVisible())
                 .findFirst()
                 .orElseThrow(() -> new AssertionError("no visible error label after showError"));

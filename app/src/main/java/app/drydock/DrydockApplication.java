@@ -265,7 +265,7 @@ public final class DrydockApplication extends Application {
                 new RepositorySidebar(repositoryManager, gitStatusService, worktreeService, repositoryPullRequests,
                         sessionManager, agentRegistry, mainWorkspace, viewModel);
         sidebar.setOpenFindingsAt(mainWorkspace::openFindingsAt);
-        mainWorkspace.setOnReviewQueueChanged(sidebar::refreshReviewBadges);
+        mainWorkspace.setOnReviewFindingsChanged(sidebar::refreshReviewBadges);
         // The sidebar owns worktree discovery; the workspace is what creates
         // worktrees (materializing a pull request), so it asks rather than
         // keeping a second, thinner copy of the scan.

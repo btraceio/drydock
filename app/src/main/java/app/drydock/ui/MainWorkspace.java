@@ -293,7 +293,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     private final IntentGrouping intentGrouping = new IntentGrouping();
 
     /** Fires when a session's findings change, so the sidebar can restyle its badges. */
-    private Runnable onReviewQueueChanged = () -> { };
+    private Runnable onReviewFindingsChanged = () -> { };
 
     /**
      * Who re-runs worktree discovery when this workspace changed what is on
@@ -566,7 +566,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 view.refreshReviewState();
             });
         }
-        onReviewQueueChanged.run();
+        onReviewFindingsChanged.run();
     }
 
     /** Pushes the manager's current session snapshot into the view model (FX thread; no-op if unchanged). */
@@ -1714,7 +1714,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
     /**
      * Wires worktree rediscovery (see {@link #requestWorktreeRefresh}). Same
-     * shape as {@link #setOnReviewQueueChanged}: the workspace changes the
+     * shape as {@link #setOnReviewFindingsChanged}: the workspace changes the
      * repository, the sidebar re-scans it.
      */
     public void setOnWorktreesChanged(Consumer<Repository> handler) {
@@ -1722,8 +1722,8 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     }
 
     /** Notified after every findings change, so the sidebar can re-render its badges. */
-    public void setOnReviewQueueChanged(Runnable handler) {
-        this.onReviewQueueChanged = handler == null ? () -> { } : handler;
+    public void setOnReviewFindingsChanged(Runnable handler) {
+        this.onReviewFindingsChanged = handler == null ? () -> { } : handler;
     }
 
     /** Shows the shared shortcuts overlay (the board's {@code ?} button); the app shell owns the modal layer. */

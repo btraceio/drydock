@@ -88,11 +88,11 @@ public final class ReviewSubmitSheet extends VBox {
         progressRow.getStyleClass().add("review-submit-progress");
         setProgressVisible(false);
 
-        errorLabel.getStyleClass().add("review-gate-failure");
+        errorLabel.getStyleClass().add("review-error-callout");
         errorLabel.setWrapText(true);
         hide(errorLabel);
 
-        unavailableLabel.getStyleClass().add("review-gate-failure");
+        unavailableLabel.getStyleClass().add("review-error-callout");
         unavailableLabel.setWrapText(true);
         hide(unavailableLabel);
 

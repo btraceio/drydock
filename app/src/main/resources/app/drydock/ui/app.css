@@ -3200,6 +3200,21 @@
 .review-intent-dot.decision-auto-approved { -fx-background-color: -drydock-resolved; }
 .review-intent-dot.decision-changes { -fx-background-color: -drydock-question; }
 
+/* The error callout of the submit sheet: a failed post, and the refusal to
+ * open at all when gh cannot reach GitHub. Named for what it is rather than
+ * where it started -- it was the checkout gate's failure line first, and the
+ * gate is gone, but these two labels carry no other class and go unstyled
+ * without it. (A TestFX lookup matches the node whether or not a rule
+ * exists, so no test catches losing this; the visual pass is the only guard.)
+ */
+.review-error-callout {
+    -fx-text-fill: -drydock-blocking;
+    -fx-font-size: 11.5px;
+    -fx-background-color: -drydock-blocking-soft;
+    -fx-background-radius: 6px;
+    -fx-padding: 8 10 8 10;
+}
+
 /* ---- Submit sheet (Task 9): the last stop before a review posts --------- */
 
 .review-submit-sheet {

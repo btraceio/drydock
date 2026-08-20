@@ -1,6 +1,8 @@
 package app.drydock.review;
 
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.git.DiffScope;
+import app.drydock.git.DiffService;
 import app.drydock.git.GhCliService;
 import app.drydock.git.GitExecutableLocator;
 import app.drydock.git.GitStatusService;
@@ -351,6 +353,124 @@ class SessionReviewScopesTest {
                 SessionReviewScopes.Choice.fromPersisted("pull_request"));
         assertEquals(SessionReviewScopes.Choice.PULL_REQUEST,
                 SessionReviewScopes.Choice.fromPersisted("Pull_Request"));
+    }
+
+    // ---- the base has to RESOLVE, not merely be named ----------------------
+
+    /**
+     * The end-to-end regression test for the orphaned-findings bug, carried
+     * over from the deleted queue's own suite because nothing else guards it.
+     *
+     * <p>The base used to be the main checkout's CURRENT branch and part of
+     * scope identity, so switching branches in the main checkout re-derived
+     * every worktree's handle and silently detached its findings and
+     * verdicts. Identity drift of exactly this shape has recurred several
+     * times, and it is invisible without a real {@code git switch} behind
+     * it: every unit-level assertion stays green while the data goes
+     * missing.</p>
+     */
+    @Test
+    void switchingTheMainCheckoutsBranchKeepsEveryHandleAndBase(
+            @TempDir Path dir, @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(dir);
+        Path worktree = gitStatusService
+                .createWorktree(repo, worktreeParent.resolve("wt"), "feat/stable").get();
+
+        ReviewScope before = scopes.forCheckout(repo, worktree, Optional.of("feat/stable"),
+                Optional.empty(), Optional.empty()).get().local();
+
+        // Exactly what a reviewer does in another terminal, mid-review.
+        runGit(repo, "switch", "-c", "some-other-thing");
+        ReviewScope after = scopes.forCheckout(repo, worktree, Optional.of("feat/stable"),
+                Optional.empty(), Optional.empty()).get().local();
+
+        assertEquals(before.id(), after.id(),
+                "a branch switch in the main checkout must not orphan a worktree's findings");
+        assertEquals("main", after.base(),
+                "the base is the repository's default branch, not whatever is checked out");
+        assertDiffsResolve(after);
+    }
+
+    /**
+     * The base is only useful if git can resolve it. This runs the real diff
+     * for every scope a session can be shown -- a dirty main checkout and two
+     * worktrees -- which is what the diff column does. A base naming a branch
+     * with no local ref fails with "unknown revision", and the board shows an
+     * error where the diff should be.
+     */
+    @Test
+    void everyResolvedBaseActuallyDiffs(@TempDir Path dir, @TempDir Path worktreeParent)
+            throws Exception {
+        Path repo = initCommittedRepo(dir);
+        Path a = gitStatusService.createWorktree(repo, worktreeParent.resolve("a"), "feat/a").get();
+        Path b = gitStatusService.createWorktree(repo, worktreeParent.resolve("b"), "feat/b").get();
+        Files.writeString(repo.resolve("README.md"), "edited\n");
+
+        assertDiffsResolve(
+                scopes.forCheckout(repo, repo, Optional.of("main"),
+                        Optional.empty(), Optional.empty()).get().local(),
+                scopes.forCheckout(repo, a, Optional.of("feat/a"),
+                        Optional.empty(), Optional.empty()).get().local(),
+                scopes.forCheckout(repo, b, Optional.of("feat/b"),
+                        Optional.empty(), Optional.empty()).get().local());
+    }
+
+    /**
+     * The regression this guards: {@code origin/HEAD} names a REMOTE default,
+     * and {@code git clone -b feat/x} -- or deleting a local main after a
+     * merge -- leaves no local branch of that name. Handing the bare name to
+     * the diff would fail every worktree scope with "unknown revision".
+     *
+     * <p>{@code GitStatusServiceTest} covers the PR-hinted {@code
+     * origin/develop} case; this is the unhinted one, where nothing but the
+     * repository's own remote-tracking refs can supply the answer.</p>
+     */
+    @Test
+    void aDefaultBranchWithNoLocalRefStillDiffs(@TempDir Path parent, @TempDir Path worktreeParent)
+            throws Exception {
+        Path upstream = initCommittedRepo(parent);
+        Path clone = parent.resolve("work");
+        runGit(parent, "clone", "--quiet", upstream.toString(), clone.toString());
+        runGit(clone, "config", "user.name", "Test");
+        runGit(clone, "config", "user.email", "test@example.com");
+        runGit(clone, "switch", "--quiet", "-c", "feat/x");
+        Files.writeString(clone.resolve("README.md"), "changed\n");
+        runGit(clone, "commit", "-qam", "change");
+        runGit(clone, "branch", "-D", "main");
+        Path worktree = gitStatusService
+                .createWorktree(clone, worktreeParent.resolve("wt"), "feat/y").get();
+
+        ReviewScope local = scopes.forCheckout(clone, worktree, Optional.of("feat/y"),
+                Optional.empty(), Optional.empty()).get().local();
+
+        assertEquals("origin/main", local.base(),
+                "with no local main, the base must be the remote-tracking ref that does resolve");
+        assertDiffsResolve(local);
+    }
+
+    /**
+     * Runs the real diff for each scope and fails on the first that cannot
+     * resolve its base.
+     *
+     * <p>Asserting the base's <em>name</em> is the wrong altitude on its own:
+     * a base is only useful if git can resolve it, and a name-only assertion
+     * passed happily while {@code origin/HEAD} handed the diff a branch with
+     * no local ref. Every test above that asserts a base string ends here.</p>
+     */
+    private void assertDiffsResolve(ReviewScope... resolved) throws Exception {
+        try (DiffService diffService = new DiffService()) {
+            for (ReviewScope scope : resolved) {
+                DiffScope diffScope = scope.kind() == ReviewScope.Kind.WORKING_TREE
+                        ? DiffScope.WORKING_TREE
+                        : DiffScope.BASE;
+                try {
+                    diffService.diff(scope.diffRoot(), diffScope, scope.base()).get();
+                } catch (Exception e) {
+                    throw new AssertionError("a " + scope.kind() + " scope could not diff against base '"
+                            + scope.base() + "': " + e.getCause(), e);
+                }
+            }
+        }
     }
 
     // ---- fixtures -----------------------------------------------------------

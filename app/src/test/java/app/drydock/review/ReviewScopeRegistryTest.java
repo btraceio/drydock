@@ -132,7 +132,6 @@ class ReviewScopeRegistryTest {
         assertEquals(Optional.of(session), registry.byId(bound.id()).orElseThrow().sessionId());
     }
 
-
     @Test
     void aSessionCannotAddressAnotherSessionsScope() {
         // Review is hosted by the session that owns the checkout, so a handle
