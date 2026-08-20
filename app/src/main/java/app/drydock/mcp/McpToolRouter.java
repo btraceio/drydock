@@ -245,8 +245,8 @@ public final class McpToolRouter {
         return context.reviewScope(scopeId, caller)
                 .orElseThrow(() -> new McpToolException(
                         "No review scope '" + scopeId + "' is addressable by this session. A scope is "
-                                + "addressable when it is bound to this session, or when the human granted "
-                                + "it with \"Run review\"."));
+                                + "addressable only when it is bound to this session -- review is hosted "
+                                + "by the session that owns the checkout."));
     }
 
     private JsonValue reviewScope(ManagedSessionId caller, JsonValue arguments) throws McpToolException {

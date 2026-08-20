@@ -88,7 +88,6 @@
      * needs already exists above and is reused under its own semantic name,
      * because the meanings genuinely differ (a MED-risk intent is not a
      * dirty worktree, even though both are amber). */
-    -drydock-queue-rail: #1a1918;
     -drydock-intent-rail: #181716;
     -drydock-hunk-header: #1c1b1a;
 

@@ -22,14 +22,12 @@ import java.util.concurrent.CompletableFuture;
  * local scope's {@code PullRequestRef} -- and therefore its identity -- is
  * derived from it. Only the second chip is withheld for a draft. Filtering
  * drafts out in the caller instead would mint {@code (WORKTREE, repo,
- * worktree, ∅)} for a {@code pr-<n>} checkout that {@code ReviewQueueService}
- * already minted as {@code (WORKTREE, repo, worktree, <n>)} -- its PR source,
- * {@code GhCliService.listOpenPullRequests}, never asks {@code gh} for {@code
- * isDraft} at all -- and every finding recorded from one surface would be
- * invisible from the other, silently.</p>
+ * worktree, ∅)} for a {@code pr-<n>} checkout that another surface may
+ * already have minted as {@code (WORKTREE, repo, worktree, <n>)}, and every
+ * finding recorded from one would be invisible from the other, silently.</p>
  *
  * <p><strong>The kinds are not a free choice.</strong> They are the ones the
- * deleted queue and {@code openCheckedOutPr} already minted for the same
+ * now-deleted cross-repo queue already minted for the same
  * places -- {@code WORKING_TREE} for a main checkout, {@code WORKTREE} for a
  * worktree (carrying its PR ref when it has one), {@code PR} for the pull
  * request -- because scope identity is what every finding is keyed by.</p>
@@ -79,8 +77,8 @@ public final class SessionReviewScopes {
      * destructive: the result feeds {@link #forCheckout}'s {@code
      * PullRequestRef}, which is part of the local scope's identity, so
      * dropping a draft mints {@code (WORKTREE, repo, worktree, ∅)} for a
-     * {@code pr-<n>} checkout that {@code ReviewQueueService} already minted
-     * as {@code (WORKTREE, repo, worktree, <n>)} -- and every finding,
+     * {@code pr-<n>} checkout that is elsewhere minted as {@code (WORKTREE,
+     * repo, worktree, <n>)} -- and every finding,
      * verdict and thread recorded from one surface becomes invisible from the
      * other. Reachable, not theoretical: a review-requested PR can be a
      * draft, and drydock checks those out as {@code pr-<n>}.</p>
@@ -115,9 +113,8 @@ public final class SessionReviewScopes {
      * Resolves {@code checkoutRoot}'s scopes. Never blocks the caller: the
      * base measurement runs on the git service's own executor, and a git
      * failure (no executable, unreadable checkout) degrades to {@link
-     * ReviewBase.Origin#DEFAULT_UNMEASURED} rather than failing the future
-     * -- the same degrade {@code ReviewQueueService} applies, because a
-     * missing base measurement is no reason to show the Review sub-tab
+     * ReviewBase.Origin#DEFAULT_UNMEASURED} rather than failing the future:
+     * a missing base measurement is no reason to show the Review sub-tab
      * nothing at all.
      *
      * @param pullRequest the open PR this checkout's branch carries, if any --

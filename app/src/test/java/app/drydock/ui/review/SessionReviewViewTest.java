@@ -31,13 +31,13 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * The session Review board driven through the same headless JavaFX harness
- * {@link ReviewDestinationViewTest} uses (Monocle + TestFX; see the Monocle
- * block in {@code app/build.gradle.kts}) and against the same {@link
- * FakeReviewHost}, so the two views are held to the same store.
+ * The session Review board driven through the headless JavaFX harness
+ * (Monocle + TestFX; see the Monocle block in {@code app/build.gradle.kts})
+ * against a {@link FakeReviewHost} backed by a real annotation store.
  *
- * <p>What is under test here is the part the destination never had: exactly
- * one scope on screen, chosen by a two-chip switcher.</p>
+ * <p>What is under test here is the part the departed Review destination
+ * never had: exactly one scope on screen, chosen by a two-chip
+ * switcher.</p>
  */
 class SessionReviewViewTest extends ApplicationTest {
 

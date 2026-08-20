@@ -437,29 +437,6 @@
     -fx-padding: 0;
 }
 
-/* The pinned Review tab (nav 2): a landmark, so it reads as a destination
- * rather than as one more session -- accent glyph, no repo line, no close. */
-.review-tab-glyph {
-    -fx-text-fill: -drydock-accent;
-    -fx-font-size: 12px;
-}
-.review-tab-label {
-    -fx-font-size: 12.5px;
-    -fx-font-weight: 600;
-    -fx-text-fill: -drydock-text-dim;
-}
-.tab:selected .review-tab-label {
-    -fx-text-fill: -drydock-text;
-}
-.review-tab-badge {
-    -fx-background-color: -drydock-accent-soft;
-    -fx-background-radius: 12px;
-    -fx-text-fill: -drydock-accent;
-    -fx-font-size: 10px;
-    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
-    -fx-padding: 1 7 1 7;
-}
-
 .tab-repo-label {
     -fx-font-family: "JetBrains Mono", "Menlo", monospace;
     -fx-font-size: 9.5px;
@@ -2356,15 +2333,6 @@
     -fx-max-height: 36px;
     -fx-padding: 0 12 0 12;
 }
-.review-title-glyph {
-    -fx-text-fill: -drydock-accent;
-    -fx-font-size: 12px;
-}
-.review-title {
-    -fx-text-fill: -drydock-text;
-    -fx-font-size: 13px;
-    -fx-font-weight: 600;
-}
 .review-title-counts {
     -fx-text-fill: -drydock-text-faint;
     -fx-font-size: 11px;
@@ -2372,26 +2340,6 @@
 }
 
 /* The pill-shaped chip buttons of the title bar and the session row. */
-/* The ‹ affordance back to the tab Review was entered from (nav 3). */
-.review-back-button {
-    -fx-background-color: transparent;
-    -fx-background-radius: 6px;
-    -fx-border-color: transparent;
-    -fx-border-radius: 6px;
-    -fx-text-fill: -drydock-text-dim;
-    -fx-font-size: 11px;
-    -fx-padding: 3 8 3 6;
-    -fx-cursor: hand;
-}
-.review-back-button:hover {
-    -fx-background-color: -drydock-hover;
-    -fx-text-fill: -drydock-text;
-}
-.review-back-button:focused {
-    -fx-border-color: -drydock-accent;
-    -fx-text-fill: -drydock-text;
-}
-
 .review-chip-button {
     -fx-background-color: transparent;
     -fx-background-radius: 12px;
@@ -2411,12 +2359,6 @@
     -fx-text-fill: -drydock-text;
 }
 
-/* Queue rail (spec 4.1) -- 236px / 206px narrow / 44px collapsed. */
-.review-queue-rail {
-    -fx-background-color: -drydock-queue-rail;
-    -fx-border-color: transparent -drydock-border transparent transparent;
-    -fx-border-width: 0 1 0 0;
-}
 .panel-header {
     -fx-background-color: transparent;
     -fx-background-radius: 0;
@@ -2445,125 +2387,6 @@
     -fx-font-size: 10px;
     -fx-font-family: "JetBrains Mono", "Menlo", monospace;
 }
-.review-rail-footer {
-    -fx-text-fill: -drydock-text-faint;
-    -fx-font-size: 10px;
-    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
-    -fx-border-color: -drydock-border transparent transparent transparent;
-    -fx-border-width: 1 0 0 0;
-    -fx-padding: 6 10 6 10;
-}
-.review-queue-scroll, .review-queue-scroll .viewport {
-    -fx-background-color: transparent;
-}
-.review-queue-items {
-    -fx-padding: 0 6 8 6;
-    -fx-spacing: 3;
-}
-.review-queue-group {
-    -fx-text-fill: -drydock-text-faint;
-    -fx-font-size: 9px;
-    -fx-font-weight: 700;
-    -fx-padding: 8 0 2 4;
-}
-/* The queue's quick-search field: the sidebar's filter, sized for a 236px
- * rail. Hidden and unmanaged while the rail is collapsed. */
-.review-queue-filter {
-    -fx-min-height: 26px; -fx-max-height: 26px;
-    -fx-font-size: 11px;
-    -fx-padding: 0 8 0 8;
-}
-.review-queue-no-match {
-    -fx-text-fill: -drydock-text-faint;
-    -fx-font-size: 11px;
-    -fx-padding: 10 4 0 4;
-}
-.review-queue-item {
-    -fx-background-color: transparent;
-    -fx-background-radius: 6px;
-    -fx-border-color: -drydock-border;
-    -fx-border-radius: 6px;
-    -fx-padding: 7 8 7 8;
-    -fx-alignment: center-left;
-    -fx-cursor: hand;
-}
-.review-queue-item.collapsed {
-    -fx-padding: 7 0 7 0;
-    -fx-alignment: center;
-}
-.review-queue-item:hover {
-    -fx-border-color: -drydock-border-strong;
-}
-.review-queue-item:selected {
-    -fx-background-color: -drydock-accent-soft;
-    -fx-border-color: -drydock-accent;
-}
-/* The focus ring is a real ring, not merely the selection tint: keyboard
-   focus and mouse selection are different states and must look different. */
-.review-queue-item:focused {
-    -fx-border-color: -drydock-accent;
-    -fx-effect: dropshadow(gaussian, -drydock-accent-soft, 6, 0.6, 0, 0);
-}
-.review-queue-icon-column {
-    -fx-min-width: 22px;
-    -fx-max-width: 22px;
-}
-.review-queue-icon {
-    -fx-text-fill: -drydock-text-faint;
-    -fx-font-size: 11px;
-}
-.review-queue-item:selected .review-queue-icon {
-    -fx-text-fill: -drydock-accent;
-}
-.review-queue-count {
-    -fx-font-size: 9px;
-    -fx-font-weight: 700;
-    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
-}
-.review-queue-count.count-open {
-    -fx-text-fill: -drydock-question;
-}
-.review-queue-count.count-blocking {
-    -fx-text-fill: -drydock-blocking;
-}
-.review-queue-dot {
-    -fx-min-width: 5px;  -fx-max-width: 5px;
-    -fx-min-height: 5px; -fx-max-height: 5px;
-    -fx-background-radius: 100px;
-    -fx-background-color: transparent;
-}
-.review-queue-dot.dot-running, .review-session-dot.dot-running {
-    -fx-background-color: -drydock-running;
-}
-.review-queue-dot.dot-idle, .review-session-dot.dot-idle {
-    -fx-background-color: -drydock-text-faint;
-}
-.review-queue-dot.dot-none, .review-session-dot.dot-none {
-    -fx-background-color: transparent;
-}
-.review-queue-title {
-    -fx-text-fill: -drydock-text-dim;
-    -fx-font-size: 11.5px;
-    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
-}
-.review-queue-item:selected .review-queue-title {
-    -fx-text-fill: -drydock-text;
-}
-.review-queue-subtitle {
-    -fx-text-fill: -drydock-text-faint;
-    -fx-font-size: 10.5px;
-}
-/* Shown only where opening the item is a step of its own (the narrow Browse
- * page): the row leads somewhere, and nothing else on that page said so. */
-.review-queue-chevron {
-    -fx-text-fill: -drydock-text-faint;
-    -fx-font-size: 13px;
-    -fx-padding: 0 2 0 0;
-}
-.review-queue-item:selected .review-queue-chevron {
-    -fx-text-fill: -drydock-accent;
-}
-
 /* Item header -- two rows: what is being reviewed, and its session binding. */
 .review-centre {
     -fx-background-color: -drydock-main;
@@ -2589,22 +2412,6 @@
     -fx-text-fill: -drydock-text-faint;
     -fx-font-size: 11px;
 }
-.review-session-dot {
-    -fx-min-width: 6px;  -fx-max-width: 6px;
-    -fx-min-height: 6px; -fx-max-height: 6px;
-    -fx-background-radius: 100px;
-    -fx-background-color: transparent;
-}
-.review-session-line {
-    -fx-text-fill: -drydock-text-dim;
-    -fx-font-size: 11px;
-    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
-}
-.review-session-hint {
-    -fx-text-fill: -drydock-text-faint;
-    -fx-font-size: 10.5px;
-}
-
 /* Centre body + its placeholder states (spec section 6). */
 .review-body {
     -fx-background-color: -drydock-main;
@@ -2628,17 +2435,6 @@
 .review-placeholder-scope {
     -fx-text-fill: -drydock-text-faint;
     -fx-font-size: 11.5px;
-}
-
-.review-placeholder-mono {
-    -fx-text-fill: -drydock-code-type;
-    -fx-font-size: 11.5px;
-    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
-    -fx-background-color: -drydock-code-bg;
-    -fx-background-radius: 6px;
-    -fx-border-color: -drydock-border;
-    -fx-border-radius: 6px;
-    -fx-padding: 8 10 8 10;
 }
 
 /* The per-worktree open-findings badge (Review handoff 2). */
@@ -3403,29 +3199,6 @@
 .review-intent-dot.decision-approved,
 .review-intent-dot.decision-auto-approved { -fx-background-color: -drydock-resolved; }
 .review-intent-dot.decision-changes { -fx-background-color: -drydock-question; }
-
-/* ---- Review checkout gate (handoff section 6) ---------------------------- */
-
-.review-gate {
-    -fx-padding: 32;
-}
-.review-gate-failure {
-    -fx-text-fill: -drydock-blocking;
-    -fx-font-size: 11.5px;
-    -fx-background-color: -drydock-blocking-soft;
-    -fx-background-radius: 6px;
-    -fx-padding: 8 10 8 10;
-}
-.review-readonly-banner-row {
-    -fx-background-color: -drydock-question-soft;
-    -fx-border-color: transparent transparent -drydock-border transparent;
-    -fx-border-width: 0 0 1 0;
-    -fx-padding: 7 12 7 12;
-}
-.review-readonly-banner {
-    -fx-text-fill: -drydock-question;
-    -fx-font-size: 11px;
-}
 
 /* ---- Submit sheet (Task 9): the last stop before a review posts --------- */
 

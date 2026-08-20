@@ -27,8 +27,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * number); every finding is keyed by the id that identity produces, so a
  * kind or a PR ref that drifts here makes existing reviews vanish silently.
  *
- * <p>The checkouts below are real git repositories, in the style of {@code
- * ReviewQueueServiceTest}: {@code defaultBranch} and {@code reviewBase}
+ * <p>The checkouts below are real git repositories: {@code defaultBranch}
+ * and {@code reviewBase}
  * measure an actual checkout, and against a bare {@code @TempDir} they would
  * only ever exercise the unmeasured fallback, proving nothing about the base
  * these scopes are minted with.</p>
@@ -167,11 +167,10 @@ class SessionReviewScopesTest {
      * A DRAFT pull request checked out as {@code pr-<n>} must mint the very
      * same local identity a non-draft one does.
      *
-     * <p>{@code ReviewQueueService} mints {@code (WORKTREE, repo, worktree,
-     * <n>)} for such a checkout unconditionally: its PR source, {@code
-     * GhCliService.listOpenPullRequests}, never asks {@code gh} for {@code
-     * isDraft} and hardcodes {@code draft = false}, while {@code gh pr list
-     * --state open} does return drafts. So filtering drafts out before {@code
+     * <p>The identity for such a checkout is {@code (WORKTREE, repo,
+     * worktree, <n>)} unconditionally -- {@code gh pr list --state open}
+     * returns drafts, so a checkout of one is still a checkout of that PR.
+     * Filtering drafts out before {@code
      * forCheckout} would mint {@code (WORKTREE, repo, worktree, ∅)} for the
      * same worktree, and every finding, verdict and thread recorded from one
      * surface would be invisible from the other. This is reachable: a
@@ -198,24 +197,23 @@ class SessionReviewScopesTest {
                 "a draft gets no second chip: nobody is being asked to review it yet");
 
         // The cross-check that makes the claim above mean something: mint the
-        // scope the way ReviewQueueService does for this same worktree,
-        // through the SAME registry. A matching handle means matching
-        // Identity -- (kind, repoRoot, worktree, PR number) -- which is what
-        // every finding is keyed by.
+        // scope directly, with the PR ref, through the SAME registry. A
+        // matching handle means matching Identity -- (kind, repoRoot,
+        // worktree, PR number) -- which is what every finding is keyed by.
         ReviewScope asTheQueueMintsIt = registry.mint(ReviewScopeRegistry.spec(
                 ReviewScope.Kind.WORKTREE, repo, Optional.of(worktree),
                 resolved.local().base(), "pr-42",
                 Optional.of(new ReviewScope.PullRequestRef(42, Optional.empty())),
                 Optional.empty()));
         assertEquals(asTheQueueMintsIt.id(), resolved.local().id(),
-                "a draft pr-42 worktree must resolve to the handle ReviewQueueService already minted");
+                "a draft pr-42 worktree must resolve to the handle its PR ref already produces");
     }
 
     /**
      * The rule this task got wrong the first time: a worktree on an
      * ordinary branch that happens to have an open PR does NOT carry the
-     * ref locally. {@code ReviewQueueService.build} only ever attaches a
-     * {@code PullRequestRef} to a worktree via {@code
+     * ref locally. A {@code PullRequestRef} is attached to a worktree only
+     * via {@code
      * PrCheckoutService.pullRequestNumberOf(head)}, which requires the
      * literal {@code pr-<n>} alias -- an ordinary branch like this one is
      * never recognised as "holding" a PR that way. Attaching the ref
@@ -318,8 +316,7 @@ class SessionReviewScopesTest {
      * git executable can be found; without a {@code handle}/{@code
      * exceptionally} step the future would complete exceptionally and the
      * Review sub-tab would get nothing. A service that cannot measure
-     * something must degrade to a documented fallback instead -- the same
-     * one {@code ReviewQueueService} uses.
+     * something must degrade to a documented fallback instead.
      */
     @Test
     void aFailingGitServiceStillYieldsALocalScope(@TempDir Path dir)
@@ -356,7 +353,7 @@ class SessionReviewScopesTest {
                 SessionReviewScopes.Choice.fromPersisted("Pull_Request"));
     }
 
-    // ---- fixtures, in the style of ReviewQueueServiceTest -------------------
+    // ---- fixtures -----------------------------------------------------------
 
     private static Path initCommittedRepo(Path parent) throws IOException, InterruptedException {
         Path repo = Files.createDirectories(parent.resolve("repo"));

@@ -40,8 +40,8 @@ import java.util.function.Consumer;
  * exactly ONE scope -- this checkout's local changes, or the pull request its
  * branch carries -- chosen by the two chips of a {@link ReviewScopeSwitcher}.
  *
- * <p>The board itself is the one {@code ReviewDestinationView} rendered; what
- * is gone is everything the cross-repo queue needed around it. There is no
+ * <p>The board itself is the one the departed Review destination rendered;
+ * what is gone is everything the cross-repo queue needed around it. There is no
  * queue rail, no title bar with a back affordance, no session row and no
  * checkout gate here, because a session's Review sub-tab already knows whose
  * checkout it is looking at: the session's. The two scopes are measured for
@@ -1084,11 +1084,7 @@ public final class SessionReviewView extends BorderPane {
      * <p>Three columns rather than the destination's four, which is what
      * removes the two-page drill-in the destination needed below 980px: with
      * the queue rail gone {@link RailLayout} has enough to trade at every
-     * width the window can actually be. It is still asked for a four-column
-     * answer with the queue forced collapsed, and handed the collapsed
-     * queue's width back on top, so its arithmetic sees exactly the three
-     * rails this view has -- the alternative was a second copy of the solver
-     * that could drift from the one the destination still uses.</p>
+     * width the window can actually be.</p>
      */
     private void applyResponsiveLayout(double width) {
         if (noScope) {
@@ -1098,8 +1094,8 @@ public final class SessionReviewView extends BorderPane {
         showEveryRegion();
         intentRail.setVisible(true);
         intentRail.setManaged(true);
-        RailLayout.Layout layout = RailLayout.solve(width + ReviewQueueRail.COLLAPSED_WIDTH,
-                true, intentsCollapsedByUser, marginCollapsedByUser);
+        RailLayout.Layout layout =
+                RailLayout.solve(width, intentsCollapsedByUser, marginCollapsedByUser);
         intentRail.setNarrow(layout.narrow());
         intentRail.setCollapsed(layout.intentsCollapsed());
         margin.setNarrow(layout.narrow());

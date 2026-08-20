@@ -52,7 +52,7 @@ public record SubmitPlan(Event preselected, List<Comment> comments, List<ReviewA
      * Which review event to preselect from the human's verdicts on this
      * scope's counted intents. Any {@code CHANGES} outweighs everything else;
      * an empty list of decisions (a scope with no counted intents) preselects
-     * a plain comment, since {@code ReviewDestinationView.submitReview()}
+     * a plain comment, since {@code SessionReviewView.submitReview()}
      * only reaches {@code host.submit} once every counted intent has a
      * verdict, so this is reachable only when there are none to have one.
      * Switches over {@code Decision} exhaustively with no {@code default} --

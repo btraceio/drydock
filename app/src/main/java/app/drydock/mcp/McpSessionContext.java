@@ -49,8 +49,8 @@ public interface McpSessionContext {
     Optional<String> baseBranch(ManagedSessionId caller);
 
     /**
-     * Every finding of every review scope the caller may address: the scopes
-     * bound to its session, plus any the human granted it. Unfiltered.
+     * Every finding of every review scope the caller may address -- the
+     * scopes bound to its session, and only those. Unfiltered.
      */
     List<ReviewAnnotation> annotations(ManagedSessionId caller);
 
@@ -73,7 +73,7 @@ public interface McpSessionContext {
 
     /**
      * The review scope {@code scopeId} names, if the caller may address it:
-     * its own session's scopes plus any the human granted with "Run review".
+     * its own session's scopes, and no others.
      * Empty for an unknown scope <em>and</em> for one the caller may not
      * touch -- the two are deliberately indistinguishable, so probing scope
      * ids tells an agent nothing.

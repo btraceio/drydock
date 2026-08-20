@@ -27,7 +27,7 @@ import java.util.function.BiConsumer;
  * The submit sheet: the last thing a human sees before a review posts to a
  * public, hard-to-undo pull request. Shown by {@code MainWorkspace} inside
  * {@code ModalLayer}, so it must be {@code public} unlike its package-private
- * siblings here, which only {@link ReviewDestinationView} ever builds.
+ * siblings here, which only {@link SessionReviewView} ever builds.
  *
  * <p>Everything the sheet renders comes from a {@link SubmitPlan} handed in
  * at construction -- comments already resolved, refusals already explained.

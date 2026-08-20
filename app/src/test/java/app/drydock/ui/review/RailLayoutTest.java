@@ -10,15 +10,20 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * on screen. The rails used to collapse on independent width triggers while
  * the code column had no claim on space at all, so at ~1200px the rails were
  * the only thing left and the intent card was the only thing to click.
+ *
+ * <p>Two rails now, not three: the cross-repo queue rail went with the Review
+ * destination. Its collapsed width was a constant on both sides of the
+ * arithmetic -- the board asked for a three-rail answer with the queue forced
+ * collapsed and handed the collapsed queue's 44px back on top -- so dropping
+ * it changes no breakpoint, only the terms.</p>
  */
 class RailLayoutTest {
 
     @Test
     void aWideWindowCollapsesNothingAndStaysFullWidth() {
-        // Expanded rails are 236 + 232 + 336 = 804; 1800 leaves 996 for code.
-        RailLayout.Layout layout = RailLayout.solve(1800, false, false, false);
+        // Expanded rails are 232 + 336 = 568; 1800 leaves 1232 for code.
+        RailLayout.Layout layout = RailLayout.solve(1800, false, false);
 
-        assertFalse(layout.queueCollapsed());
         assertFalse(layout.intentsCollapsed());
         assertFalse(layout.marginCollapsed());
         assertFalse(layout.narrow());
@@ -26,9 +31,9 @@ class RailLayoutTest {
 
     @Test
     void narrowingTheRailsIsTriedBeforeCollapsingAnything() {
-        // Expanded would leave 1300 - 804 = 496, under the floor. Narrow rails
-        // are 206 + 196 + 286 = 688, leaving 612 -- so nothing has to go.
-        RailLayout.Layout layout = RailLayout.solve(1300, false, false, false);
+        // Expanded would leave 1100 - 568 = 532, under the floor. Narrow rails
+        // are 196 + 286 = 482, leaving 618 -- so nothing has to go.
+        RailLayout.Layout layout = RailLayout.solve(1100, false, false);
 
         assertTrue(layout.narrow());
         assertFalse(layout.marginCollapsed(), "narrowing bought enough width on its own");
@@ -36,32 +41,28 @@ class RailLayoutTest {
 
     @Test
     void theMarginIsTheFirstToGo() {
-        // Narrow rails 688 leave 1200 - 688 = 512, under the floor. Collapsing
-        // the margin gives 206 + 196 + 30 = 432, leaving 768.
-        RailLayout.Layout layout = RailLayout.solve(1200, false, false, false);
+        // Narrow rails 482 leave 900 - 482 = 418, under the floor. Collapsing
+        // the margin gives 196 + 30 = 226, leaving 674.
+        RailLayout.Layout layout = RailLayout.solve(900, false, false);
 
         assertTrue(layout.marginCollapsed(), "the margin collapses first");
-        assertFalse(layout.intentsCollapsed());
-        assertFalse(layout.queueCollapsed());
+        assertFalse(layout.intentsCollapsed(), "the intent rail must still be readable");
     }
 
     @Test
-    void thenTheIntentsAndOnlyThenTheQueue() {
-        // 950 - 432 = 518, under the floor; collapsing intents gives 276.
-        RailLayout.Layout intents = RailLayout.solve(950, false, false, false);
-        assertTrue(intents.marginCollapsed());
-        assertTrue(intents.intentsCollapsed());
-        assertFalse(intents.queueCollapsed(), "the queue still has room here");
+    void andOnlyThenTheIntents() {
+        // 700 - 226 = 474, under the floor; collapsing the intents gives 70,
+        // leaving 630. The intent rail is the last to give up its width.
+        RailLayout.Layout layout = RailLayout.solve(700, false, false);
 
-        // 800 - 276 = 524, under the floor; the queue is the last to go.
-        RailLayout.Layout all = RailLayout.solve(800, false, false, false);
-        assertTrue(all.queueCollapsed(), "the queue is the last to give up its width");
+        assertTrue(layout.marginCollapsed());
+        assertTrue(layout.intentsCollapsed());
     }
 
     @Test
     void theCodeColumnClearsItsFloorWheneverArithmeticAllows() {
         for (double width = 700; width <= 2000; width += 10) {
-            RailLayout.Layout layout = RailLayout.solve(width, false, false, false);
+            RailLayout.Layout layout = RailLayout.solve(width, false, false);
             double used = RailLayout.railsWidth(layout);
             assertTrue(width - used >= RailLayout.CODE_MIN_WIDTH || allCollapsed(layout),
                     "at " + width + "px the code column got " + (width - used));
@@ -70,10 +71,10 @@ class RailLayoutTest {
 
     @Test
     void aManualCollapseIsHonouredEvenWhenThereIsRoom() {
-        RailLayout.Layout layout = RailLayout.solve(1800, true, false, false);
+        RailLayout.Layout layout = RailLayout.solve(1800, true, false);
 
-        assertTrue(layout.queueCollapsed(), "the user's own collapse survives a wide window");
-        assertFalse(layout.intentsCollapsed());
+        assertTrue(layout.intentsCollapsed(), "the user's own collapse survives a wide window");
+        assertFalse(layout.marginCollapsed());
     }
 
     @Test
@@ -81,9 +82,9 @@ class RailLayoutTest {
         // A wider window may never be more collapsed than a narrower one.
         // The rule this pins down: narrowing is tried before collapsing, so
         // there is no width at which widening the window loses you a rail.
-        RailLayout.Layout previous = RailLayout.solve(600, false, false, false);
+        RailLayout.Layout previous = RailLayout.solve(600, false, false);
         for (double width = 610; width <= 2000; width += 10) {
-            RailLayout.Layout layout = RailLayout.solve(width, false, false, false);
+            RailLayout.Layout layout = RailLayout.solve(width, false, false);
             assertTrue(collapsedCount(layout) <= collapsedCount(previous),
                     "widening to " + width + "px collapsed something that was open");
             previous = layout;
@@ -99,15 +100,15 @@ class RailLayoutTest {
      * window is wider by the sidebar.)
      *
      * <p>The code column's own width is deliberately <em>not</em> asserted to
-     * grow with the window. Widening from 1210 to 1270 takes it from 778 to
-     * 582, because 1270 is where the margin can re-open and it takes its
-     * 286px back. That is the design -- rails return in the reverse of the
-     * order they went -- and the floor is what must hold across it.</p>
+     * grow with the window. Widening from 1110 to 1150 takes it from 628 to
+     * 582, because 1150 is where the rails can re-expand and they take their
+     * full width back. That is the design -- rails return in the reverse of
+     * the order they went -- and the floor is what must hold across it.</p>
      */
     @Test
     void theWidthsThatWereMeasuredWrongAreRight() {
         for (double width : new double[] {1050, 1110, 1150, 1181, 1210, 1270, 1330}) {
-            RailLayout.Layout layout = RailLayout.solve(width, false, false, false);
+            RailLayout.Layout layout = RailLayout.solve(width, false, false);
             double code = width - RailLayout.railsWidth(layout);
             assertTrue(code >= RailLayout.CODE_MIN_WIDTH,
                     "at " + width + "px the code column got " + code);
@@ -115,11 +116,10 @@ class RailLayoutTest {
     }
 
     private static int collapsedCount(RailLayout.Layout layout) {
-        return (layout.queueCollapsed() ? 1 : 0) + (layout.intentsCollapsed() ? 1 : 0)
-                + (layout.marginCollapsed() ? 1 : 0);
+        return (layout.intentsCollapsed() ? 1 : 0) + (layout.marginCollapsed() ? 1 : 0);
     }
 
     private static boolean allCollapsed(RailLayout.Layout layout) {
-        return layout.queueCollapsed() && layout.intentsCollapsed() && layout.marginCollapsed();
+        return layout.intentsCollapsed() && layout.marginCollapsed();
     }
 }

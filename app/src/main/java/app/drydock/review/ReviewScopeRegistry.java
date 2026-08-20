@@ -14,7 +14,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Consumer;
@@ -23,23 +22,24 @@ import java.util.function.Consumer;
  * Mints, resolves and revokes {@link ReviewScope} handles, and records which
  * sessions may address which scopes (Review MCP schema §0).
  *
- * <p>{@code McpSessionRegistry} binds an MCP caller to one session; the
- * Review destination spans repositories. This registry is the bridge: an
- * agent may touch the scope its own session is bound to, <em>plus</em> any
- * scope a human explicitly granted it by pressing "Run review". That grant
- * is what lets a session's agent review a worktree that is not its own.</p>
+ * <p>{@code McpSessionRegistry} binds an MCP caller to one session, and that
+ * binding is the whole of the answer here: an agent may touch the scopes of
+ * its own session's checkout, and nothing else. There used to be a second
+ * route -- a human-issued grant that let one session's agent address another
+ * checkout's scope -- because the Review destination spanned repositories and
+ * "Run review" could be pressed on somebody else's worktree. Review is hosted
+ * by the session that owns the checkout now, so a handle to another session's
+ * checkout is no longer something an agent can be given.</p>
  *
  * <p>Minting is <strong>idempotent on identity</strong> -- kind, repository
- * root, worktree, base, head and PR number. The queue is reassembled every
- * time repositories or worktrees change, and a fresh id per assembly would
- * break everything keyed by {@code (scopeId, id)}: findings, threads,
- * drafts and verdicts would all be orphaned by a background rescan. The id
- * a scope was first minted with therefore survives until it is explicitly
- * revoked (the item left the queue).</p>
+ * root, worktree, base, head and PR number. Scopes are re-derived every time
+ * repositories or worktrees change, and a fresh id per pass would break
+ * everything keyed by {@code (scopeId, id)}: findings, threads, drafts and
+ * verdicts would all be orphaned by a background rescan. The id a scope was
+ * first minted with therefore survives until it is explicitly revoked.</p>
  *
- * <p>Thread-safe: the queue service assembles off the FX thread, the MCP
- * router resolves on its own executor, and the UI reads on the FX
- * thread.</p>
+ * <p>Thread-safe: scopes are resolved off the FX thread, the MCP router
+ * resolves on its own executor, and the UI reads on the FX thread.</p>
  */
 public final class ReviewScopeRegistry {
 
@@ -83,7 +83,6 @@ public final class ReviewScopeRegistry {
     private final byte[] scopeIdSecret;
     private final Map<String, ReviewScope> byId = new ConcurrentHashMap<>();
     private final Map<Identity, String> idByIdentity = new ConcurrentHashMap<>();
-    private final Map<String, Set<ManagedSessionId>> grants = new ConcurrentHashMap<>();
     private final List<Consumer<String>> listeners = new CopyOnWriteArrayList<>();
 
     /** Creates a registry with a fresh secret for callers that do not persist review data. */
@@ -165,68 +164,41 @@ public final class ReviewScopeRegistry {
     }
 
     /**
-     * Drops the handle and every grant against it -- the item left the
-     * queue. Findings keyed by this id are not touched here: the store owns
-     * their lifetime, and revoking a handle for an item that later comes
-     * back remains addressable under its stable identity-derived id. The
-     * store owns the lifetime of its review data, while this registry owns
-     * whether an agent may currently address it.
+     * Drops the handle -- the scope is gone. Findings keyed by this id are
+     * not touched here: the store owns their lifetime, and a scope that
+     * later comes back remains addressable under its stable
+     * identity-derived id. The store owns the lifetime of its review data,
+     * while this registry owns whether an agent may currently address it.
      */
     public void revoke(String id) {
         if (id == null) {
             return;
         }
         ReviewScope removed = byId.remove(id);
-        grants.remove(id);
         idByIdentity.values().removeIf(id::equals);
         if (removed != null) {
             notifyChanged(id);
         }
     }
 
-    /** Lets {@code sessionId}'s agent address {@code scopeId} ("Run review" on someone else's worktree). */
-    public void grant(String scopeId, ManagedSessionId sessionId) {
-        Objects.requireNonNull(sessionId, "sessionId");
-        if (!byId.containsKey(scopeId)) {
-            throw new IllegalArgumentException("No such review scope: " + scopeId);
-        }
-        grants.computeIfAbsent(scopeId, key -> ConcurrentHashMap.newKeySet()).add(sessionId);
-        notifyChanged(scopeId);
-    }
-
-    /** Withdraws a grant made by {@link #grant}; the scope's own bound session is unaffected. */
-    public void revokeGrant(String scopeId, ManagedSessionId sessionId) {
-        Set<ManagedSessionId> granted = grants.get(scopeId);
-        if (granted != null && granted.remove(sessionId)) {
-            notifyChanged(scopeId);
-        }
-    }
-
     /**
-     * Whether {@code sessionId} may address {@code scopeId}: either the
-     * scope is bound to that session, or a human granted it. An unknown
-     * scope is never addressable -- the MCP router turns that into a tool
-     * error rather than a silent empty result.
+     * Whether {@code sessionId} may address {@code scopeId}: only when the
+     * scope is bound to that session. An unknown scope is never addressable
+     * -- the MCP router turns that into a tool error rather than a silent
+     * empty result, and answers the same way for a scope that exists but
+     * belongs to somebody else, so ids cannot be probed for.
      */
     public boolean isAddressableBy(String scopeId, ManagedSessionId sessionId) {
         ReviewScope scope = byId.get(scopeId);
         if (scope == null || sessionId == null) {
             return false;
         }
-        if (scope.sessionId().filter(sessionId::equals).isPresent()) {
-            return true;
-        }
-        return grants.getOrDefault(scopeId, Set.of()).contains(sessionId);
-    }
-
-    /** Sessions explicitly granted {@code scopeId} (excluding its own bound session). */
-    public Set<ManagedSessionId> grantsFor(String scopeId) {
-        return Set.copyOf(grants.getOrDefault(scopeId, Set.of()));
+        return scope.sessionId().filter(sessionId::equals).isPresent();
     }
 
     /**
-     * Subscribes to mint/update/revoke/grant notifications; the returned
-     * runnable unsubscribes. Listeners may be called from any thread.
+     * Subscribes to mint/update/revoke notifications; the returned runnable
+     * unsubscribes. Listeners may be called from any thread.
      */
     public Runnable addChangeListener(Consumer<String> listener) {
         Objects.requireNonNull(listener, "listener");

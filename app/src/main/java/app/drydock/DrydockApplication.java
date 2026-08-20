@@ -26,15 +26,9 @@ import app.drydock.mcp.McpServer;
 import app.drydock.mcp.McpSessionRegistry;
 import app.drydock.mcp.McpToolRouter;
 import app.drydock.mcp.WorkspaceMcpSessionContext;
-import app.drydock.review.AnnotationStatus;
 import app.drydock.review.AnnotationStore;
 import app.drydock.ui.explorer.ExplorerTrailStore;
-import app.drydock.review.Confidence;
 import app.drydock.review.RepositoryPullRequests;
-import app.drydock.review.ReviewAnnotation;
-import app.drydock.review.ReviewItem;
-import app.drydock.review.ReviewScope;
-import app.drydock.review.Severity;
 import app.drydock.review.ReviewScopeRegistry;
 import app.drydock.search.SessionSearchService;
 import app.drydock.state.JsonApplicationStateRepository;
@@ -43,7 +37,6 @@ import app.drydock.ui.GitHubCloneModal;
 import app.drydock.ui.MainWorkspace;
 import app.drydock.ui.RemoteRepositoryModal;
 import app.drydock.ui.RepositorySidebar;
-import app.drydock.ui.review.ReviewDestinationView;
 import app.drydock.ui.SettingsModal;
 import app.drydock.ui.SizeSetting;
 import app.drydock.ui.UiErrors;
@@ -166,14 +159,11 @@ public final class DrydockApplication extends Application {
     private GitHubService gitHubService;
     private AnnotationStore annotationStore;
     private ExplorerTrailStore explorerTrailStore;
-    /** Cross-repo review scope handles, shared by the Review destination and the MCP tool router. */
+    /** Review scope handles, shared by the session boards and the MCP tool router. */
     private ReviewScopeRegistry reviewScopeRegistry;
     /** Shared by the MCP server (writer) and the Review activity panel (reader). */
     private McpActivityLog mcpActivityLog;
     private McpServer mcpServer;
-    /** Diagnostic-only: the Review view {@code app.drydock.diag.reviewScript} is driving, if any. */
-    private ReviewDestinationView diagReviewView;
-
     private boolean shutdownConfirmed;
 
     @Override
@@ -667,10 +657,6 @@ public final class DrydockApplication extends Application {
                                 });
                                 System.out.println("[diag] resized to " + arg);
                             }
-                            case "reviewkey" -> System.out.println("[diag] reviewkey " + arg + " -> "
-                                    + mainWorkspace.diagReviewKey(arg));
-                            case "comment" -> System.out.println("[diag] comment -> "
-                                    + mainWorkspace.diagOpenReviewComposer());
                             case "peek" -> {
                                 mainWorkspace.diagExplorerPeek(arg);
                                 System.out.println("[diag] explorer peeking " + arg);
@@ -699,68 +685,13 @@ public final class DrydockApplication extends Application {
                             }
                             case "unwind" -> System.out.println("[diag] explorer unwind -> "
                                     + mainWorkspace.unwindExplorerOverlay());
-                            default -> System.out.println("[diag] mark " + arg + " · review "
-                                    + mainWorkspace.diagReviewLayout());
+                            default -> System.out.println("[diag] mark " + arg);
                         }
                     });
                 }
             });
             driver.setDaemon(true);
             driver.start();
-        }
-
-        // Diagnostic hook for the Review destination's visual pass: shows
-        // Review and lets its queue assemble, after <delaySeconds>. Inert
-        // unless -Dapp.drydock.diag.openReview is set.
-        String openReview = System.getProperty("app.drydock.diag.openReview");
-        if (openReview != null) {
-            long reviewDelayMillis = (long) (Double.parseDouble(openReview.strip()) * 1000);
-            Thread reviewOpener = new Thread(() -> {
-                try {
-                    Thread.sleep(reviewDelayMillis);
-                    ReviewDestinationView review = onFx(mainWorkspace::diagShowReview);
-                    // The queue assembles off-thread (git + gh per repo).
-                    Thread.sleep(3_000);
-                    System.out.println("[diag] review opened with "
-                            + onFx(() -> review.diagItems().size()) + " queue items");
-                    // The diff of the selected item lands a moment later.
-                    Thread.sleep(3_000);
-                    System.out.println("[diag] diff column: " + onFx(review::diagDiffSummary));
-                    for (String line : onFx(review::diagAllItemDiffs)) {
-                        System.out.println("[diag] item: " + line);
-                    }
-                    // Renders the scene graph to a PNG from inside the
-                    // process. Unlike a screen capture this needs no OS
-                    // screen-recording permission and cannot pick up another
-                    // window, so it is the only visual evidence that is both
-                    // available headlessly and guaranteed to be OUR UI.
-                    String item = System.getProperty("app.drydock.diag.reviewItem");
-                    if (item != null) {
-                        int index = Integer.parseInt(item.strip());
-                        onFx(() -> {
-                            review.diagSelectItem(index);
-                            return null;
-                        });
-                        // The selected item's diff is a git process.
-                        Thread.sleep(3_000);
-                        System.out.println("[diag] selected item " + index);
-                    }
-                    if (Boolean.getBoolean("app.drydock.diag.seedFindings")) {
-                        System.out.println("[diag] seeded: " + onFx(() -> seedFindings(review)));
-                        Thread.sleep(1_500);
-                    }
-                    String shot = System.getProperty("app.drydock.diag.screenshot");
-                    if (shot != null) {
-                        System.out.println("[diag] screenshot: " + onFx(() -> snapshotScene(shot)));
-                    }
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                } catch (RuntimeException e) {
-                    System.out.println("[diag] openReview failed: " + e);
-                }
-            });
-            reviewOpener.setDaemon(true);
-            reviewOpener.start();
         }
 
         // Diagnostic hook for the Settings modal's visual and behavioural
@@ -895,98 +826,6 @@ public final class DrydockApplication extends Application {
             driver.start();
         }
 
-        // Diagnostic hook for the three Review surfaces no test can reach:
-        // the gutter's drag, the composer and the submit sheet are all
-        // FX-only (there is no headless toolkit harness here), so this is
-        // their visual pass, not an unverified claim.
-        //
-        // Needs a registered repository with something to diff -- pair with
-        // -Dapp.drydock.diag.repo=<path> (plus autoCreateSession, or the
-        // queue stays empty) -- and a window wide enough that Review does
-        // not drill into its narrow single-page layout, which has no room
-        // for the diff column at all: -Dapp.drydock.diag.windowSize=1800x1000
-        // (see sceneWidth()/sceneHeight() below; Review's own drill-in
-        // threshold is ReviewDestinationView.DRILL_IN_WIDTH, measured
-        // against ITS width, which is the window width minus the app
-        // sidebar -- the default 1100px window leaves it well under that).
-        //
-        // Value is a comma-separated "<atSeconds>:<verb>[:<arg>]" script,
-        // same shape as diag.settingsScript. Verbs:
-        //   review               open Review, selecting a PR-kind scope if
-        //                        the queue has one, else a BRANCH-kind scope
-        //                        (a real diff against its base), else
-        //                        whatever the queue selected by default --
-        //                        every queue item is logged either way
-        //   select:<file>:<startKey>:<endKey>
-        //                        drive the gutter's real selection path and
-        //                        open the composer on it (a startKey/endKey
-        //                        spanning a deletion into its replacement is
-        //                        the most interesting case -- see
-        //                        ReviewDiffColumn.diagSelectRange)
-        //   compose:<text>       append text to the open composer's body
-        //   enter                fire a real KeyCode.ENTER at the focused
-        //                        text input -- NOT a literal \n in the arg,
-        //                        which this parser passes through verbatim
-        //                        (see diag.settingsScript's own split above)
-        //   commit               fire the composer's real commit shortcut
-        //                        (Cmd/Ctrl+Enter) at the focused text input
-        //   approveall           settle every counted intent so a real
-        //                        multi-file diff can reach Submit without
-        //                        the visual pass clicking each one by hand
-        //                        (submitReview refuses to post while
-        //                        anything is unsettled). Guarded exactly
-        //                        like sheet below -- refuses on a scope with
-        //                        no PR.
-        //   sheet                submit, exactly as the verdict bar's Submit
-        //                        action does -- but ONLY when the selected
-        //                        scope has a GitHub PR. A non-PR scope's
-        //                        submit() does not stop at posting: it hides
-        //                        Review and opens the Finish panel (merge /
-        //                        open a PR / delete the worktree), which a
-        //                        diagnostic driver must never be able to
-        //                        reach even by accident. See
-        //                        ReviewDestinationView.diagSubmit.
-        //   shot:<path>          snapshot the scene -- give it a session- or
-        //                        run-unique path (e.g. under this worktree's
-        //                        scratchpad) when more than one Drydock
-        //                        worktree might be capturing at once, or two
-        //                        runs racing the same /tmp path will
-        //                        overwrite each other's PNG
-        //   mark:label           print a marker to synchronise on
-        // Inert unless app.drydock.diag.reviewScript is set. Pass it as a
-        // GRADLE PROJECT property -- -Papp.drydock.diag.reviewScript=... --
-        // not -D: the run task forwards -P properties into the forked app
-        // JVM as system properties, while the Gradle client's own -D flags
-        // never reach it (see tasks.named<JavaExec>("run") in
-        // app/build.gradle.kts). A -D invocation is a silent no-op: the app
-        // opens, the driver never starts, and no PNG is written. (The
-        // comment blocks on the neighbouring settingsScript/tabScript/
-        // explorerScript hooks above say -D; that is misleading holdover --
-        // -P is what actually reaches this process for all of them.)
-        String reviewScript = System.getProperty("app.drydock.diag.reviewScript");
-        if (reviewScript != null) {
-            Thread driver = new Thread(() -> {
-                long start = System.nanoTime();
-                for (String step : reviewScript.split(",")) {
-                    String[] parts = step.split(":", 3);
-                    long atMillis = (long) (Double.parseDouble(parts[0].strip()) * 1000);
-                    long elapsed = (System.nanoTime() - start) / 1_000_000;
-                    if (elapsed < atMillis) {
-                        try {
-                            Thread.sleep(atMillis - elapsed);
-                        } catch (InterruptedException e) {
-                            return;
-                        }
-                    }
-                    String verb = parts[1].strip();
-                    String arg = parts.length > 2 ? parts[2] : "";
-                    Platform.runLater(() -> diagReviewStep(primaryStage, verb, arg));
-                }
-            });
-            driver.setDaemon(true);
-            driver.start();
-        }
-
         // Diagnostic hook: sends 10 synthetic scroll-up events through the
         // selected tab's scroll path (verifies the Java ->
         // ghostty_surface_mouse_scroll pipeline without real NSEvents).
@@ -1078,8 +917,9 @@ public final class DrydockApplication extends Application {
             boolean cmd = event.isShortcutDown();
 
             if (event.getCode() == KeyCode.ESCAPE) {
-                // Topmost-first (Review spec section 5): the modal, then the
-                // Review destination, then the tab selection.
+                // Topmost-first (Review spec section 5): the modal, then
+                // whatever the Explorer or the review board has open, then
+                // the tab selection.
                 if (appShell.modalLayer().isShowingModal()) {
                     appShell.modalLayer().close();
                     event.consume();
@@ -1088,11 +928,8 @@ public final class DrydockApplication extends Application {
                     // the reader stays exactly where they were reading.
                     event.consume();
                 } else if (!inTextInput && mainWorkspace.unwindReviewOverlay()) {
-                    // Review had something open (the symbol lens, the MCP
-                    // panel); that closes first and Review stays.
-                    event.consume();
-                } else if (!inTextInput && mainWorkspace.isReviewShowing()) {
-                    mainWorkspace.hideReview();
+                    // The review board had something open (the symbol lens,
+                    // the MCP panel); that closes first and the board stays.
                     event.consume();
                 } else if (!inTextInput) {
                     mainWorkspace.showPicker();
@@ -1101,10 +938,11 @@ public final class DrydockApplication extends Application {
                 return;
             }
             // Review's keyboard backstop (see MainWorkspace#reviewKeyboardBackstop):
-            // catches Review's own shortcuts (j/k/[/]/a/r/... ) when focus has
-            // drifted off Review's subtree while it is still the showing tab,
-            // which the node-level filter installed on ReviewDestinationView
-            // itself cannot see happen. Gated on no modal showing -- a modal's
+            // catches the board's own shortcuts ([/]/a/r/... ) when focus has
+            // drifted off its subtree while the Review sub-tab is still
+            // showing, which the node-level filter installed on
+            // SessionReviewView itself cannot see happen. Gated on no modal
+            // showing -- a modal's
             // own controls (a checkbox, a radio button) are not text inputs
             // either, and must not be shadowed by Review's letters while they
             // have focus.
@@ -1147,14 +985,7 @@ public final class DrydockApplication extends Application {
                 appShell.toggleSidebar();
                 event.consume();
             } else if (cmd && event.getCode() == KeyCode.F) {
-                // Review's queue owns ⌘F while it is showing and its rail is
-                // expanded; otherwise the key keeps its sidebar meaning
-                // rather than becoming a dead key.
-                if (mainWorkspace.isReviewQueueFilterable()) {
-                    mainWorkspace.focusReviewQueueFilter();
-                } else {
-                    sidebar.focusFilter();
-                }
+                sidebar.focusFilter();
                 event.consume();
             } else if (cmd && event.getCode() == KeyCode.N) {
                 activeOrFirstRepository().ifPresent(mainWorkspace::openNewSession);
@@ -1225,106 +1056,6 @@ public final class DrydockApplication extends Application {
                     Double.parseDouble(parts[0].strip()), Double.parseDouble(parts[1].strip()) });
         } catch (NumberFormatException e) {
             return Optional.empty();
-        }
-    }
-
-    /**
-     * Seeds representative findings against the selected scope, anchored to
-     * lines that are actually in the diff. Diagnostic-only: the findings
-     * margin renders severity pills, pins, patches and ASK chips, and none of
-     * that can be seen -- or shown to a reviewer -- without findings to
-     * render.
-     */
-    private String seedFindings(ReviewDestinationView review) {
-        Optional<String> scopeId = review.diagSelectedScopeId();
-        if (scopeId.isEmpty()) {
-            return "no scope selected";
-        }
-        List<String[]> anchors = review.diagAnchors(4);
-        if (anchors.isEmpty()) {
-            return "no changed lines to anchor to";
-        }
-        java.time.Instant now = java.time.Instant.now();
-        String[] a0 = anchors.get(0);
-        String[] a1 = anchors.get(Math.min(1, anchors.size() - 1));
-        String[] a2 = anchors.get(Math.min(2, anchors.size() - 1));
-        String[] a3 = anchors.get(Math.min(3, anchors.size() - 1));
-
-        annotationStore.upsert(new ReviewAnnotation(scopeId.get(), "f_leak_1", Optional.empty(),
-                a0[0], a0[1], a0[1], Severity.BLOCKING, Confidence.HIGH,
-                Optional.of("Event filter never detached"), "Claude", now,
-                List.of(), Optional.of(new ReviewAnnotation.Patch(
-                        "-        scene.addEventFilter(MOUSE_DRAGGED, tracker);\n"
-                                + "+        scene.removeEventFilter(MOUSE_DRAGGED, tracker);",
-                        "one line in onRelease")),
-                Optional.empty(),
-                List.of(new ReviewAnnotation.Ask("Why is it a leak?", "Explain why this leaks."),
-                        new ReviewAnnotation.Ask("What breaks?", "What breaks in practice?")),
-                List.of(new ReviewAnnotation.Message("Claude", now,
-                        "The filter is added on every press and never removed on release -- one "
-                                + "leaked listener per drag. After a few minutes of resizing, every "
-                                + "mouse move runs dozens of stale trackers.")),
-                Optional.empty(), AnnotationStatus.OPEN, Optional.empty(), false));
-
-        annotationStore.upsert(new ReviewAnnotation(scopeId.get(), "f_clamp_2", Optional.empty(),
-                a1[0], a1[1], a1[1], Severity.QUESTION, Confidence.MEDIUM,
-                Optional.of("Width is committed unclamped"), "Claude", now,
-                List.of(), Optional.empty(), Optional.empty(), List.of(),
-                List.of(new ReviewAnnotation.Message("Claude", now,
-                                "This commits the raw width before the clamp runs. Deliberate?"),
-                        new ReviewAnnotation.Message("You", now, "No -- good catch, I will fix it.")),
-                Optional.empty(), AnnotationStatus.OPEN, Optional.empty(), false));
-
-        annotationStore.upsert(new ReviewAnnotation(scopeId.get(), "f_dev_3", Optional.empty(),
-                a2[0], a2[1], a2[1], Severity.DEVIATION, Confidence.HIGH,
-                Optional.of("Minimum width is 220, you asked for 240"), "Claude", now,
-                List.of(), Optional.empty(),
-                Optional.of(new ReviewAnnotation.DeviatesFrom("min width 240", Optional.of(9))),
-                List.of(),
-                List.of(new ReviewAnnotation.Message("Claude", now,
-                        "Step 5 set the clamp to 240; step 7 reverted it to 220.")),
-                Optional.empty(), AnnotationStatus.OPEN, Optional.empty(), false));
-
-        annotationStore.upsert(new ReviewAnnotation(scopeId.get(), "f_nit_4", Optional.empty(),
-                a3[0], a3[1], a3[1], Severity.NIT, Confidence.UNSURE,
-                Optional.of("Spelling in a comment"), "Claude", now,
-                List.of(), Optional.empty(), Optional.empty(), List.of(),
-                List.of(new ReviewAnnotation.Message("Claude", now, "\"recieve\" -> \"receive\".")),
-                Optional.empty(), AnnotationStatus.RESOLVED, Optional.empty(), false));
-
-        return "4 findings against " + scopeId.get();
-    }
-
-    /**
-     * Writes the current scene to {@code path} as a PNG, on the FX thread.
-     * Diagnostic-only: the visual pass has no other way to see the real UI,
-     * because the FX layer has no headless harness inside the running app
-     * (docs/architecture.md).
-     */
-    private String snapshotScene(String path) {
-        try {
-            javafx.scene.image.WritableImage image = appShell.scene().snapshot(null);
-            int width = (int) image.getWidth();
-            int height = (int) image.getHeight();
-            // Pixels are copied by hand rather than through SwingFXUtils: that
-            // lives in javafx.swing, which the runtime image does not carry.
-            // java.desktop (BufferedImage/ImageIO) is already on the module
-            // list, so this adds no module to the packaged app.
-            int[] argb = new int[width * height];
-            image.getPixelReader().getPixels(0, 0, width, height,
-                    javafx.scene.image.PixelFormat.getIntArgbInstance(), argb, 0, width);
-            java.awt.image.BufferedImage out = new java.awt.image.BufferedImage(
-                    width, height, java.awt.image.BufferedImage.TYPE_INT_ARGB);
-            out.setRGB(0, 0, width, height, argb, 0, width);
-            java.io.File file = new java.io.File(path);
-            java.io.File parent = file.getParentFile();
-            if (parent != null) {
-                parent.mkdirs();
-            }
-            javax.imageio.ImageIO.write(out, "png", file);
-            return path + " (" + width + "x" + height + ")";
-        } catch (Exception e) {
-            return "FAILED: " + e;
         }
     }
 
@@ -1749,204 +1480,6 @@ public final class DrydockApplication extends Application {
     private String describeFocusOwner() {
         Node owner = appShell.scene().getFocusOwner();
         return owner == null ? "none" : owner.getClass().getSimpleName();
-    }
-
-    /**
-     * Diagnostic-only: one step of {@code app.drydock.diag.reviewScript}.
-     * Drives the gutter, the composer and the submit sheet through the same
-     * entry points the UI uses -- {@code select} fires the real {@code
-     * onComposeRequested} callback a gutter release makes ({@link
-     * app.drydock.ui.review.ReviewDiffColumn#diagSelectRange} via {@link
-     * ReviewDestinationView#diagSelectRange}), {@code enter}/{@code commit}
-     * fire real {@link KeyEvent}s at whatever the scene's focus owner
-     * actually is, and {@code sheet} goes through the same {@code
-     * submitReview()} the verdict bar's Submit button calls -- so what this
-     * exercises is the real path, not a test-only shortcut past it.
-     */
-    private void diagReviewStep(Stage stage, String verb, String arg) {
-        try {
-            switch (verb) {
-                case "review" -> {
-                    diagReviewView = mainWorkspace.diagShowReview();
-                    List<ReviewItem> items = diagReviewView.diagItems();
-                    for (int i = 0; i < items.size(); i++) {
-                        ReviewScope scope = items.get(i).scope();
-                        System.out.println("[diag] queue item " + i + ": " + scope.kind()
-                                + " " + items.get(i).title() + " base=" + scope.base()
-                                + " head=" + scope.head());
-                    }
-                    // Prefer a real PR scope; a repository with no open PR
-                    // still has a BRANCH scope for whatever is checked out
-                    // against its base, which is the next best real diff to
-                    // drive the gutter/composer/sheet against.
-                    int index = indexOfKind(items, ReviewScope.Kind.PR);
-                    if (index < 0) {
-                        index = indexOfKind(items, ReviewScope.Kind.BRANCH);
-                    }
-                    if (index >= 0) {
-                        diagReviewView.diagSelectItem(index);
-                        System.out.println("[diag] review opened, selected item " + index
-                                + " (" + items.get(index).scope().kind() + ") of " + items.size());
-                    } else {
-                        System.out.println("[diag] review opened, no PR or BRANCH scope in queue ("
-                                + items.size() + " items) -- leaving the queue's own default selection");
-                    }
-                }
-                case "select" -> {
-                    String[] range = arg.split(":", 3);
-                    boolean found = diagReviewView != null
-                            && diagReviewView.diagSelectRange(range[0], range[1], range[2]);
-                    System.out.println("[diag] select " + arg + " -> " + found);
-                }
-                // Selects a specific queue item by index, unlike the "review"
-                // verb's own PR/BRANCH auto-select -- needed to land on a
-                // WORKTREE item with a real multi-file diff (several intents)
-                // for the issue-3 keyboard-routing evidence.
-                case "item" -> {
-                    if (diagReviewView == null) {
-                        System.out.println("[diag] item: no review view open");
-                    } else {
-                        diagReviewView.diagSelectItem(Integer.parseInt(arg.strip()));
-                        System.out.println("[diag] item " + arg + " selected");
-                    }
-                }
-                // Prints "index/count" for the intent [/]/n currently sit on
-                // -- the issue-3 evidence of whether a keystroke actually
-                // moved the reader.
-                case "intentidx" -> System.out.println("[diag] intentidx "
-                        + (diagReviewView == null ? "no review view open" : diagReviewView.diagIntentIndex()));
-                // Steals focus onto the sidebar's "+ Add repository" button --
-                // a real, focus-traversable control OUTSIDE ReviewDestinationView's
-                // subtree -- to reproduce hypothesis (a) from issue 3: focus
-                // landing somewhere Review's own node-level key filter cannot see.
-                case "stealfocus" -> {
-                    Node target = appShell.scene().lookup(".add-repo-button");
-                    if (target == null) {
-                        System.out.println("[diag] stealfocus: sidebar add-repo button not found");
-                    } else {
-                        target.requestFocus();
-                        Node owner = appShell.scene().getFocusOwner();
-                        System.out.println("[diag] stealfocus -> focus owner now "
-                                + (owner == null ? "null" : owner.getClass().getName()));
-                    }
-                }
-                // Same idea as "stealfocus" but a TEXT INPUT outside Review --
-                // the sidebar's own repo filter -- to prove the backstop
-                // yields to it rather than hijacking a letter typed there.
-                case "stealfocustext" -> {
-                    Node target = appShell.scene().lookup(".filter-field");
-                    if (target == null) {
-                        System.out.println("[diag] stealfocustext: sidebar filter field not found");
-                    } else {
-                        target.requestFocus();
-                        Node owner = appShell.scene().getFocusOwner();
-                        System.out.println("[diag] stealfocustext -> focus owner now "
-                                + (owner == null ? "null" : owner.getClass().getName()));
-                    }
-                }
-                case "compose" -> {
-                    Node owner = appShell.scene().getFocusOwner();
-                    if (owner instanceof TextInputControl field) {
-                        field.appendText(arg);
-                        System.out.println("[diag] composed: " + arg);
-                    } else {
-                        System.out.println("[diag] compose: no focused text input (is the composer open?)");
-                    }
-                }
-                case "enter" -> diagFireKeyAtFocusOwner(KeyCode.ENTER, false);
-                case "commit" -> diagFireKeyAtFocusOwner(KeyCode.ENTER, true);
-                case "approveall" -> {
-                    if (diagReviewView == null) {
-                        System.out.println("[diag] approveall: no review view open");
-                    } else if (!diagReviewView.diagApproveAllIntents()) {
-                        System.out.println("[diag] approveall: selected scope has no PR; "
-                                + "refusing to stamp real verdicts on it");
-                    } else {
-                        System.out.println("[diag] approved every counted intent");
-                    }
-                }
-                case "sheet" -> {
-                    if (diagReviewView == null) {
-                        System.out.println("[diag] sheet: no review view open");
-                    } else if (!diagReviewView.diagSubmit()) {
-                        System.out.println("[diag] sheet: selected scope has no PR; "
-                                + "refusing to take the merge-and-finish path");
-                    } else {
-                        System.out.println("[diag] submit requested");
-                    }
-                }
-                case "shot" -> diagSnapshot(stage, Path.of(arg));
-                case "focus" -> {
-                    Node owner = appShell.scene().getFocusOwner();
-                    boolean underReview = owner != null && diagReviewView != null
-                            && diagReviewView.diagOwnsNode(owner);
-                    System.out.println("[diag] focus owner: "
-                            + (owner == null ? "null" : owner.getClass().getName())
-                            + " underReview=" + underReview);
-                }
-                // Fires a real key press+release at whatever the scene's
-                // focus owner actually is -- unlike diagFireKeyAtFocusOwner,
-                // which only fires into a focused TextInputControl (composer,
-                // filter field). This is the verb issue 3's diagnosis needed:
-                // it proves whether a Review shortcut fires the way a human's
-                // keystroke would, through the real focus owner, rather than
-                // by calling the handler method directly (which would "pass"
-                // even with the routing dead).
-                case "key" -> {
-                    Node owner = appShell.scene().getFocusOwner();
-                    if (owner == null) {
-                        System.out.println("[diag] key " + arg + ": no focus owner");
-                    } else {
-                        KeyCode code = KeyCode.valueOf(arg);
-                        owner.fireEvent(new KeyEvent(KeyEvent.KEY_PRESSED, "", "", code,
-                                false, false, false, false));
-                        owner.fireEvent(new KeyEvent(KeyEvent.KEY_RELEASED, "", "", code,
-                                false, false, false, false));
-                        System.out.println("[diag] key " + arg + " fired at "
-                                + owner.getClass().getName());
-                    }
-                }
-                default -> System.out.println("[diag] mark " + arg);
-            }
-        } catch (RuntimeException e) {
-            System.out.println("[diag] review step '" + verb + "' failed: " + e);
-        }
-    }
-
-    /** The index of the first queue item of {@code kind}, or -1 when none matches. */
-    private static int indexOfKind(List<ReviewItem> items, ReviewScope.Kind kind) {
-        for (int i = 0; i < items.size(); i++) {
-            if (items.get(i).scope().kind() == kind) {
-                return i;
-            }
-        }
-        return -1;
-    }
-
-    /**
-     * Fires a real {@code code} press+release at the scene's focus owner --
-     * {@code shortcut} sets both {@code controlDown} and {@code metaDown} so
-     * the event reads as a shortcut on either platform ({@link
-     * KeyEvent#isShortcutDown()} reads {@code metaDown} on macOS and {@code
-     * controlDown} everywhere else). A plain Enter (no modifiers) is left to
-     * the composer's own default {@code TextArea} handling, which is what
-     * inserts the newline -- this method never writes {@code \n} itself,
-     * which is why the {@code enter} verb exists at all (see the
-     * reviewScript comment block in {@link #startOnFxThread}: the script
-     * argument is never unescaped, so a literal {@code \n} in the property
-     * value stays a literal backslash-n).
-     */
-    private void diagFireKeyAtFocusOwner(KeyCode code, boolean shortcut) {
-        Node owner = appShell.scene().getFocusOwner();
-        if (!(owner instanceof TextInputControl field)) {
-            System.out.println("[diag] key " + code + ": no focused text input");
-            return;
-        }
-        field.fireEvent(new KeyEvent(KeyEvent.KEY_PRESSED, "\n", "\n", code,
-                false, shortcut, false, shortcut));
-        field.fireEvent(new KeyEvent(KeyEvent.KEY_RELEASED, "\n", "\n", code,
-                false, shortcut, false, shortcut));
-        System.out.println("[diag] key " + code + (shortcut ? " (shortcut)" : "") + " fired");
     }
 
     private void diagSettingsStep(Stage stage, String verb, String arg) {

@@ -1610,7 +1610,7 @@ final class ReviewDiffColumn extends BorderPane {
      * long run of unchanged lines folds into a single {@code CollapsedRun}
      * row and a large diff can be truncated outright, so a caller that needs
      * to know whether a given line is genuinely in the diff (Submit's {@code
-     * DiffIndex}, built in {@code ReviewDestinationView}) must read this, not
+     * DiffIndex}, built in {@code SessionReviewView}) must read this, not
      * the rows.
      */
     UnifiedDiff displayedDiff() {
@@ -1625,7 +1625,7 @@ final class ReviewDiffColumn extends BorderPane {
      * that follows a fresh selection would otherwise get the OUTGOING
      * scope's diff under the INCOMING scope's name. Submit must compare this
      * against the scope it thinks it is posting for before trusting the
-     * diff at all -- see {@code ReviewDestinationView#submitReview()}.
+     * diff at all -- see {@code SessionReviewView#submitReview()}.
      */
     Optional<String> displayedScopeId() {
         return Optional.ofNullable(displayedScopeId);

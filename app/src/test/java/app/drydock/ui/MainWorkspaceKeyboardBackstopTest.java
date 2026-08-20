@@ -14,10 +14,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Direct, non-TestFX coverage of {@link MainWorkspace}'s static {@code
  * reviewKeyboardBackstop(boolean, Node, KeyEvent, java.util.function.Predicate)}
  * -- the routing DECISION behind the scene-level backstop that replays a
- * Review shortcut when focus has drifted off {@code ReviewDestinationView}'s
+ * Review shortcut when focus has drifted off {@code SessionReviewView}'s
  * subtree (see that method's Javadoc). The production wiring (the real
  * scene filter in {@code DrydockApplication}, a real {@code
- * ReviewDestinationView}) needs a live app to exercise -- the diag-driver
+ * SessionReviewView}) needs a live app to exercise -- the diag-driver
  * transcript in the fix report is the evidence for that -- but the decision
  * itself is pure once the review root and the replay function are taken as
  * parameters, so it does not need one.
@@ -70,7 +70,7 @@ class MainWorkspaceKeyboardBackstopTest {
 
     /**
      * The regression this fix's undo semantics depend on: {@code u} has to
-     * reach {@code ReviewDestinationView.handleShortcut} off-subtree too,
+     * reach {@code SessionReviewView.handleShortcut} off-subtree too,
      * or undoing a verdict recorded while focus had drifted away would be
      * silently dead the same way every other shortcut used to be.
      */
@@ -106,7 +106,7 @@ class MainWorkspaceKeyboardBackstopTest {
      * {@code Shift+/} ("?") IS allow-listed under the plain {@code SLASH}
      * key code (modifiers are not part of the allow-list check), so this
      * pins that the backstop still returns exactly what the replay decides
-     * for it -- which is where {@code ReviewDestinationView.handleShortcut}'s
+     * for it -- which is where {@code SessionReviewView.handleShortcut}'s
      * own {@code isShiftDown()} check (added alongside this fix) actually
      * does the excluding, by yielding false. The stub below mirrors that
      * real behaviour rather than re-implementing the production check, so

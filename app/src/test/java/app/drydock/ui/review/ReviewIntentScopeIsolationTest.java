@@ -114,7 +114,7 @@ class ReviewIntentScopeIsolationTest extends ApplicationTest {
      * rail, so a rescan that emptied the queue left the previous scope's
      * cards on screen -- a dead click describing an item no longer queued.
      *
-     * <p>The queue that used to empty is gone with {@code ReviewDestinationView};
+     * <p>The queue that used to empty is gone with the Review destination;
      * the board now loses its scope the same way the two placeholder states
      * do -- {@link SessionReviewView#showResolving()} -- which runs through
      * the exact same {@code refreshReviewState} early return this guards.</p>

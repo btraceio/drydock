@@ -11,19 +11,19 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Minting identity, grants and revocation (Review MCP schema §0). The
- * idempotence tests are the load-bearing ones: the queue is reassembled on
- * every worktree/repository change, and a fresh handle per assembly would
- * orphan every finding, thread, draft and verdict keyed by {@code
- * (scopeId, …)}.
+ * Minting identity, addressability and revocation (Review MCP schema §0).
+ * The idempotence tests are the load-bearing ones: scopes are re-derived on
+ * every worktree/repository change, and a fresh handle per pass would orphan
+ * every finding, thread, draft and verdict keyed by {@code (scopeId, …)}.
  */
 class ReviewScopeRegistryTest {
 
     private final ReviewScopeRegistry registry = new ReviewScopeRegistry();
+    private final ManagedSessionId owner = ManagedSessionId.newId();
+    private final ManagedSessionId stranger = ManagedSessionId.newId();
 
     private static ReviewScope worktreeSpec(String head, Optional<ManagedSessionId> session) {
         return ReviewScopeRegistry.spec(ReviewScope.Kind.WORKTREE, Path.of("/repo"),
@@ -132,56 +132,35 @@ class ReviewScopeRegistryTest {
         assertEquals(Optional.of(session), registry.byId(bound.id()).orElseThrow().sessionId());
     }
 
-    @Test
-    void aBoundSessionMayAddressItsOwnScope() {
-        ManagedSessionId session = ManagedSessionId.newId();
-        ReviewScope scope = registry.mint(worktreeSpec("feat/a", Optional.of(session)));
 
-        assertTrue(registry.isAddressableBy(scope.id(), session));
-        assertFalse(registry.isAddressableBy(scope.id(), ManagedSessionId.newId()));
+    @Test
+    void aSessionCannotAddressAnotherSessionsScope() {
+        // Review is hosted by the session that owns the checkout, so a handle
+        // to someone else's checkout is no longer something an agent can hold.
+        ReviewScope scope = registry.mint(ReviewScopeRegistry.spec(
+                ReviewScope.Kind.WORKTREE, Path.of("/repo"), Optional.of(Path.of("/wt")),
+                "main", "feature/x", Optional.empty(), Optional.of(owner)));
+
+        assertFalse(registry.isAddressableBy(scope.id(), stranger));
     }
 
     @Test
-    void aGrantLetsAnotherSessionReviewAWorktreeThatIsNotItsOwn() {
-        ReviewScope scope = registry.mint(worktreeSpec("feat/a", Optional.empty()));
-        ManagedSessionId reviewer = ManagedSessionId.newId();
+    void aSessionCanAddressItsOwnScope() {
+        ReviewScope scope = registry.mint(ReviewScopeRegistry.spec(
+                ReviewScope.Kind.WORKTREE, Path.of("/repo"), Optional.of(Path.of("/wt")),
+                "main", "feature/x", Optional.empty(), Optional.of(owner)));
 
-        assertFalse(registry.isAddressableBy(scope.id(), reviewer));
-        registry.grant(scope.id(), reviewer);
-
-        assertTrue(registry.isAddressableBy(scope.id(), reviewer));
-        assertEquals(java.util.Set.of(reviewer), registry.grantsFor(scope.id()));
-    }
-
-    @Test
-    void revokingAGrantLeavesTheBoundSessionAlone() {
-        ManagedSessionId owner = ManagedSessionId.newId();
-        ManagedSessionId reviewer = ManagedSessionId.newId();
-        ReviewScope scope = registry.mint(worktreeSpec("feat/a", Optional.of(owner)));
-        registry.grant(scope.id(), reviewer);
-
-        registry.revokeGrant(scope.id(), reviewer);
-
-        assertFalse(registry.isAddressableBy(scope.id(), reviewer));
         assertTrue(registry.isAddressableBy(scope.id(), owner));
     }
 
     @Test
-    void grantingAgainstAnUnknownScopeIsRefused() {
-        assertThrows(IllegalArgumentException.class,
-                () -> registry.grant("rs_nope", ManagedSessionId.newId()));
-    }
-
-    @Test
-    void revokingDropsTheHandleAndEveryGrantAgainstIt() {
-        ManagedSessionId reviewer = ManagedSessionId.newId();
-        ReviewScope scope = registry.mint(worktreeSpec("feat/a", Optional.empty()));
-        registry.grant(scope.id(), reviewer);
+    void revokingDropsTheHandleAndWithItEveryWayToAddressIt() {
+        ReviewScope scope = registry.mint(worktreeSpec("feat/a", Optional.of(owner)));
 
         registry.revoke(scope.id());
 
         assertEquals(Optional.empty(), registry.byId(scope.id()));
-        assertFalse(registry.isAddressableBy(scope.id(), reviewer));
+        assertFalse(registry.isAddressableBy(scope.id(), owner));
         assertTrue(registry.scopes().isEmpty());
     }
 
@@ -206,18 +185,17 @@ class ReviewScopeRegistryTest {
     }
 
     @Test
-    void listenersSeeMintUpdateGrantAndRevoke() {
+    void listenersSeeMintUpdateAndRevoke() {
         List<String> seen = new ArrayList<>();
         Runnable unsubscribe = registry.addChangeListener(seen::add);
 
         ReviewScope scope = registry.mint(worktreeSpec("feat/a", Optional.empty()));
-        registry.mint(worktreeSpec("feat/a", Optional.of(ManagedSessionId.newId())));
-        registry.grant(scope.id(), ManagedSessionId.newId());
+        registry.mint(worktreeSpec("feat/a", Optional.of(owner)));
         registry.revoke(scope.id());
         unsubscribe.run();
         registry.mint(worktreeSpec("feat/b", Optional.empty()));
 
-        assertEquals(List.of(scope.id(), scope.id(), scope.id(), scope.id()), seen);
+        assertEquals(List.of(scope.id(), scope.id(), scope.id()), seen);
     }
 
     @Test

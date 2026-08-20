@@ -162,7 +162,8 @@ final class ReviewIntentRail extends VBox {
      * The narrow drill-in's Browse page (spec §4.9) sizes the rails as
      * fractions of the window rather than letting them keep their own fixed
      * width. {@code 0} hands sizing back to {@link #targetWidth()}. Never
-     * animated -- see {@code ReviewQueueRail.setSpanWidth}.
+     * animated: a width that is a fraction of the window has to track a
+     * resize frame for frame, and an animation would lag every drag.
      */
     void setSpanWidth(double width) {
         if (spanWidth == width) {

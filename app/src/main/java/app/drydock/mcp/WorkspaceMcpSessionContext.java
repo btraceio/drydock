@@ -239,9 +239,10 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
 
     /**
      * Findings are keyed by scope handle, not by session, so this resolves
-     * the caller's addressable scopes first (its own, plus any granted) and
-     * collects their findings. A caller with no scope sees nothing rather
-     * than everything -- the registry is the authorization boundary.
+     * the caller's addressable scopes first -- its own checkout's, and only
+     * those -- and collects their findings. A caller with no scope sees
+     * nothing rather than everything: the registry is the authorization
+     * boundary.
      */
     @Override
     public List<ReviewAnnotation> annotations(ManagedSessionId caller) {
