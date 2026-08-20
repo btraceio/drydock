@@ -618,6 +618,30 @@ public final class RepositorySidebar extends VBox {
     }
 
     /**
+     * Diagnostic-only: sets a repository row's expansion to {@code expanded}
+     * through the same {@code TreeItem.setExpanded} call the repo row's own
+     * mouse-click handler uses (see {@code buildRepoRow}), so the
+     * {@code expandedProperty} listener installed in {@link #rebuildTree}
+     * fires the real expand path -- including the B1 rescan a repo whose PR
+     * outcome went stale while collapsed self-heals on. Exists so a headless
+     * test can drive the expand trigger without a TestFX robot click, which
+     * intermittently fails to toggle a TreeView row under monocle/load (the
+     * click reports success without the {@code expandedProperty} listener
+     * ever firing, leaving the rescan the test exists to prove never
+     * started). No-op (no listener fire) when the row is already in that
+     * state, matching {@code setExpanded}'s own contract. Not reachable
+     * outside tests.
+     */
+    public void diagSetRepoExpanded(RepositoryId repoId, boolean expanded) {
+        for (TreeItem<SidebarNode> item : treeRoot.getChildren()) {
+            if (item.getValue() instanceof SidebarNode.RepoNode repo && repo.repository().id().equals(repoId)) {
+                item.setExpanded(expanded);
+                return;
+            }
+        }
+    }
+
+    /**
      * Diagnostic-only ({@code app.drydock.diag.tabScript} "clickedge" verb):
      * the session the workspace currently considers active, so the driver can
      * capture it before a synthetic click and compare after -- the same

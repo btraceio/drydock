@@ -218,7 +218,7 @@ class RepositorySidebarPullRequestDedupFxTest extends ApplicationTest {
         WaitForAsyncUtils.waitForFxEvents();
         assertTrue(groupRowPresent(), "PR #7 has no worktree yet: its group row must be present");
 
-        toggleRepoExpansion(); // collapse
+        interact(() -> sidebar.diagSetRepoExpanded(repository.id(), false)); // collapse
 
         git(repoRoot, "branch", "pr-7");
         Path worktreePath = newWorktreePath("pr-7-collapsed-worktree");
@@ -243,7 +243,7 @@ class RepositorySidebarPullRequestDedupFxTest extends ApplicationTest {
         assertEquals(2, source.callCount(),
                 "a collapsed repo's worktree change must not spawn an automatic PR scan on its own (N2)");
 
-        toggleRepoExpansion(); // expand
+        interact(() -> sidebar.diagSetRepoExpanded(repository.id(), true)); // expand
 
         // B1: expanding must notice the outcome is stale (marked so by the
         // collapsed skip above) and rescan -- otherwise PR #7 keeps a row
@@ -449,14 +449,6 @@ class RepositorySidebarPullRequestDedupFxTest extends ApplicationTest {
             }
         });
         assertTrue(clicked.get(), "could not find the ⟳ rescan button");
-    }
-
-    /** The repo header row's own click handler toggles unconditionally, so this flips whatever state it is in. */
-    private void toggleRepoExpansion() {
-        AtomicReference<Node> row = new AtomicReference<>();
-        interact(() -> row.set(sidebar.lookup(".repo-row")));
-        assertTrue(row.get() != null, "could not find the repo header row");
-        clickOn(row.get());
     }
 
     // ---- waiting ----------------------------------------------------------
