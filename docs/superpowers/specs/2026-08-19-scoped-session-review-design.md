@@ -287,10 +287,16 @@ findings back — unchanged, and unchanged in being stated rather than hidden.
 
 The `review_*` tool schema does not change. What changes is who may address
 what: **a session may address the scopes of its own checkout**.
-`reviewScopeRegistry.grant` remains — the materialize flow grants a fresh
-session its PR scope — but nothing grants across sessions any more, so
 `McpSessionContext.reviewScope(scopeId, caller)` loses its "plus any scope a
 human granted with Run review" branch.
+
+The grant mechanism goes entirely — `grant`, `revokeGrant`, `grantsFor` and
+the registry's `grants` map. An earlier draft of this section kept it for the
+materialize flow, on the theory that a freshly checked-out PR needed its
+session granted the new scope. That was wrong: `SessionReviewScopes.forCheckout`
+mints both scopes with the session id already bound, so the grant was handing a
+session a scope it was bound to anyway. `isAddressableBy` reduces to
+`scope.sessionId().equals(caller)`.
 
 This is a tightening: an agent could previously be handed a handle to a
 checkout it does not live in.
@@ -308,10 +314,18 @@ re-materializing that PR mints the same handle, which brings them back.
 ## 10. Deletions and additions
 
 **Deleted**: `ReviewDestinationView`, `ReviewQueueRail`, `ReviewCheckoutGate`,
-`ReviewQueueService`, `QueueAssembly`, `ReviewItem`, the pinned review tab
-with its badge and back-target machinery, `WorkspaceNavigator.showReview()`
-and `showReviewForCheckout(Path)`, and the cross-session grant branch in
-`McpSessionContext`.
+`ReviewEmptyState`, `ReviewQueueService`, `QueueAssembly`, `ReviewItem`, the
+pinned review tab with its badge and back-target machinery,
+`WorkspaceNavigator.showReview()` and `showReviewForCheckout(Path)`, the whole
+grant mechanism in `ReviewScopeRegistry`, and — with their last callers —
+`GhCliService.listReviewRequests`, `prDiff` and `listOpenPullRequests`.
+
+**A capability this removes, stated plainly:** "pull requests where a review
+was requested of *me*, aggregated across every repository" was sourced from
+`listReviewRequests` and has no replacement. The sidebar lists all open
+non-draft pull requests per repository — a superset within one repository, but
+the requested-of-me signal and the cross-repo roll-up are gone. Reaching an
+un-added repository's pull requests means adding that repository first.
 
 **Added**: `SessionReviewView`, `SessionReviewScopes`,
 `RepositoryPullRequests`, `SidebarNode.PullRequestNode`, `SubTab.REVIEW`,
