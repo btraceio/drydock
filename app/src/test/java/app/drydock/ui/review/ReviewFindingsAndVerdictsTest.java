@@ -17,8 +17,8 @@ import javafx.scene.Scene;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
 import javafx.scene.control.TextArea;
-import javafx.scene.layout.Region;
 import javafx.scene.input.KeyCode;
+import javafx.scene.layout.Region;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -30,6 +30,7 @@ import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -380,7 +381,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
 
         type(KeyCode.ENTER);
 
-        assertTrue(submitRefusal().toLowerCase(Locale.ROOT).contains("diff"),
+        assertTrue(submitRefusal().toLowerCase(Locale.ROOT).contains("failed"),
                 "the message must say why: " + submitRefusal());
         assertTrue(host.submittedScopes.isEmpty(),
                 "a PR scope with no diff to anchor comments to must not reach host.submit");
@@ -576,7 +577,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
      * row and n3 is not rendered at all.
      */
     private static UnifiedDiff fileWithALongUnchangedRun() {
-        List<UnifiedDiff.Line> lines = new java.util.ArrayList<>();
+        List<UnifiedDiff.Line> lines = new ArrayList<>();
         for (int i = 1; i <= 40; i++) {
             UnifiedDiff.Line.Kind kind = i == 20
                     ? UnifiedDiff.Line.Kind.ADD
