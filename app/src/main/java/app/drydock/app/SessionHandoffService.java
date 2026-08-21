@@ -269,18 +269,26 @@ public final class SessionHandoffService {
      * SessionDeleter#delete}, whose completion depends on a native callback
      * that is not guaranteed to run (see {@link #DELETE_TIMEOUT}). A timeout
      * here is translated into a message naming exactly what is known to have
-     * happened (the terminal was closed) and what could not be confirmed (the
-     * session's removal), because the alternative -- letting the handoff
-     * thread park forever -- shows the human neither a successor nor an
-     * error.
+     * happened (drydock asked the terminal to close) and what could not be
+     * confirmed (that it did, and that the session was removed), because the
+     * alternative -- letting the handoff thread park forever -- shows the
+     * human neither a successor nor an error.
+     *
+     * <p>It deliberately does not say the agent process was stopped. The
+     * surface this waits on ({@code GhosttySurface}) never kills the child
+     * from Java -- the kill is a side effect of the native free completing --
+     * and the documented way this future never completes is that free did
+     * <em>not</em> complete, which correlates with the process still being
+     * alive. Claiming the kill happened here would be wrong in the exact case
+     * this method exists to report.</p>
      */
     private static void joinDelete(CompletableFuture<Void> deleted, Duration timeout) {
         try {
             deleted.get(timeout.toMillis(), TimeUnit.MILLISECONDS);
         } catch (TimeoutException e) {
-            throw new IllegalStateException("This session's terminal was closed, but drydock could not "
-                    + "confirm within " + timeout.toSeconds() + "s that the session was removed, so no "
-                    + "successor was started.");
+            throw new IllegalStateException("Drydock asked this session's terminal to close, but got no "
+                    + "confirmation within " + describeTimeout(timeout) + " that it did, so the session was "
+                    + "not removed and no successor was started. The agent process may still be running.");
         } catch (ExecutionException e) {
             if (e.getCause() instanceof RuntimeException runtime) {
                 throw runtime;
@@ -290,6 +298,17 @@ public final class SessionHandoffService {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("Interrupted while waiting for the outgoing session to be removed.", e);
         }
+    }
+
+    /**
+     * Renders {@code timeout} for the message in {@link #joinDelete}.
+     * {@link Duration#toSeconds()} truncates, so a sub-second bound would
+     * read as "within 0s" -- harmless while only {@link #DELETE_TIMEOUT}
+     * (30s) reaches production, but the sub-second bounds tests pass render
+     * the same user-facing string, and "0s" tells a human nothing.
+     */
+    private static String describeTimeout(Duration timeout) {
+        return timeout.toSeconds() == 0 ? timeout.toMillis() + "ms" : timeout.toSeconds() + "s";
     }
 
     private HandoffFacts factsFor(ManagedAgentSession outgoing, Path worktree, String branch,

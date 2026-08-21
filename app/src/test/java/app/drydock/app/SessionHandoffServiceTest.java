@@ -36,6 +36,7 @@ import java.util.concurrent.ForkJoinPool;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -226,15 +227,34 @@ class SessionHandoffServiceTest {
         // human neither a successor nor an error. A short bound here keeps
         // the test itself fast rather than actually waiting out the real
         // production timeout.
+        //
+        // The whole assertion is wrapped in assertTimeoutPreemptively rather
+        // than just timed with System.nanoTime: if joinDelete's bound ever
+        // regressed back to an unbounded join, assertThrows below would
+        // block the test thread forever and the elapsed-time check below it
+        // would never run -- exactly the regression this test exists to
+        // catch. assertTimeoutPreemptively runs the body on a second thread
+        // and fails the test instead of hanging the suite when the outer
+        // bound is exceeded.
         deleter.neverCompletes = true;
 
         long start = System.nanoTime();
-        assertThrows(IllegalStateException.class,
-                () -> service.handOffBlocking(outgoing, AgentKind.CODEX, Duration.ofMillis(200)));
+        IllegalStateException failure = assertTimeoutPreemptively(Duration.ofSeconds(5), () ->
+                assertThrows(IllegalStateException.class,
+                        () -> service.handOffBlocking(outgoing, AgentKind.CODEX, Duration.ofMillis(200))));
         long elapsedMillis = Duration.ofNanos(System.nanoTime() - start).toMillis();
 
         assertTrue(elapsedMillis < 5000, "handOffBlocking should fail within its bound, took " + elapsedMillis + "ms");
         assertEquals(0, launcher.startCount, "no successor may be started when the delete cannot be confirmed");
+        // Not just that it threw, but that a human reading the message would
+        // learn something true: the bound is named (in ms, since 200ms
+        // truncates to "0s"), and the agent's fate is left open rather than
+        // asserted, because the surface never confirmed its close.
+        assertTrue(failure.getMessage().contains("200ms"),
+                "message should name the bound that elapsed without confirmation: " + failure.getMessage());
+        assertTrue(failure.getMessage().contains("may still be running"),
+                "message should not claim the agent was stopped when the close was never confirmed: "
+                        + failure.getMessage());
     }
 
     @Test

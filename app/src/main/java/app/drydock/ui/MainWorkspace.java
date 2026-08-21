@@ -2998,21 +2998,26 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                         Alert alert = new Alert(Alert.AlertType.WARNING);
                         alert.setTitle("Could not hand off this session");
                         alert.setHeaderText("Could not hand off this session");
-                        // deleteSession closes the surface before it writes
-                        // metadata, so whichever branch put us here, this
-                        // session's agent process is already stopped -- that
-                        // has to be said explicitly, not left implied,
-                        // because a delete failure otherwise leaves a session
-                        // sitting in the sidebar with a dead terminal and no
-                        // warning that it is dead.
+                        // Deliberately silent on whether the agent process or
+                        // the terminal is still alive: this handler cannot
+                        // tell a delete that timed out waiting for
+                        // confirmation (agent status unknown -- the surface
+                        // never kills the child from Java, so an unconfirmed
+                        // close means an unconfirmed kill) from a delete
+                        // whose surface really did close (agent genuinely
+                        // stopped), and sessionGone below is the only
+                        // distinction it CAN make. The specific claim, where
+                        // one is knowable, is already in the exception
+                        // message rendered above; duplicating a guess here
+                        // would only contradict it in the branch that
+                        // guessed wrong.
                         alert.setContentText(UiErrors.unwrap(failure).getMessage()
-                                + "\n\nThe worktree, the branch and every uncommitted change are "
-                                + "untouched, and this session's agent process has already been stopped. "
+                                + "\n\nThe worktree, the branch and every uncommitted change are untouched. "
                                 + (sessionGone
-                                        ? "This session's tab is gone; its work is still on disk and you "
-                                                + "can open a new session on the same worktree."
-                                        : "This session is still listed, with a dead terminal, and can be "
-                                                + "resumed."));
+                                        ? "This session's tab is gone, and no successor was started; its "
+                                                + "work is still on disk and you can open a new session on "
+                                                + "the same worktree."
+                                        : "This session is still listed."));
                         alert.showAndWait();
                     }
                 }));
