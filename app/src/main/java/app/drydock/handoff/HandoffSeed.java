@@ -6,7 +6,7 @@ import java.util.List;
 import java.util.Optional;
 
 /**
- * Builds the prompt a forked session starts with: the outgoing session's
+ * Builds the prompt a successor session starts with: the outgoing session's
  * brief, plus the facts drydock derived itself, with the two kept visibly
  * apart.
  *
@@ -22,14 +22,14 @@ public final class HandoffSeed {
     private HandoffSeed() {
     }
 
-    public static String compose(Optional<HandoffBrief> brief, ForkFacts facts) {
+    public static String compose(Optional<HandoffBrief> brief, HandoffFacts facts) {
         StringBuilder seed = new StringBuilder();
         seed.append("You are continuing work another agent started. The working tree, branch and ")
                 .append("commits are real and already in place; only the conversation did not carry over.\n\n");
 
         brief.ifPresentOrElse(
                 b -> appendBrief(seed, b),
-                () -> seed.append("## Handoff\n\nNo handoff brief was recorded before this fork, so nothing ")
+                () -> seed.append("## Handoff\n\nNo handoff brief was recorded before this handoff, so nothing ")
                         .append("is known about why the work was done this way. Read the diff before ")
                         .append("changing direction.\n\n"));
 
@@ -57,16 +57,19 @@ public final class HandoffSeed {
         value.ifPresent(v -> seed.append("**").append(heading).append(":** ").append(v).append("\n\n"));
     }
 
-    private static void appendFacts(StringBuilder seed, ForkFacts facts) {
+    private static void appendFacts(StringBuilder seed, HandoffFacts facts) {
         seed.append("## State (derived by drydock, checkable)\n\n");
         seed.append("**Branch:** ").append(facts.branch())
-                .append(" (forked from ").append(facts.baseBranch()).append(")\n\n");
+                .append(facts.headCommit()
+                        .map(commit -> " at " + commit)
+                        .orElse(" -- no commits yet, so all of the work is uncommitted"))
+                .append("\n\n");
         // "Recent commits", not "Commits": the caller lists the last N commits
         // reachable from HEAD, which on a branch cut from a long-lived base is
         // mostly that base's history. Calling it "Commits" directly under
-        // "Branch: X (forked from Y)" reads as "this is the work", and a
-        // successor would attribute a dozen unrelated mainline subjects to the
-        // session it is taking over.
+        // "Branch: X" reads as "this is the work", and a successor would
+        // attribute a dozen unrelated mainline subjects to the session it is
+        // taking over.
         appendList(seed, "Recent commits (newest first, including base history)", facts.commitSubjects());
         appendList(seed, "Uncommitted changes", facts.changedFiles());
         appendList(seed, "Open review intents", facts.openIntents());

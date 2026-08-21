@@ -13,8 +13,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class HandoffSeedTest {
 
-    private static ForkFacts facts() {
-        return new ForkFacts("feat/fork-codex", "main",
+    private static HandoffFacts facts() {
+        return new HandoffFacts("feat/fork-codex", Optional.of("main"),
                 List.of("Add the banner"),
                 List.of("MainWorkspace.java"),
                 List.of("Rework the rail"));
@@ -92,7 +92,7 @@ class HandoffSeedTest {
 
     @Test
     void emptyFactSectionsAreOmittedRatherThanPrintedEmpty() {
-        ForkFacts bare = new ForkFacts("feat/fork", "main", List.of(), List.of(), List.of());
+        HandoffFacts bare = new HandoffFacts("feat/fork", Optional.of("main"), List.of(), List.of(), List.of());
 
         String seed = HandoffSeed.compose(Optional.empty(), bare);
 
@@ -107,5 +107,31 @@ class HandoffSeedTest {
         String seed = HandoffSeed.compose(Optional.of(brief(HandoffBrief.Author.AGENT)), facts());
 
         assertTrue(seed.contains("continuing work another agent started"), seed);
+    }
+
+    @Test
+    void theBranchLineNamesOneBranchBecauseThereIsOnlyOne() {
+        String seed = HandoffSeed.compose(Optional.empty(), new HandoffFacts(
+                "feat/work", Optional.of("a1b2c3d"), List.of("add a.txt"), List.of(), List.of()));
+
+        assertTrue(seed.contains("**Branch:** feat/work"), seed);
+        assertFalse(seed.contains("forked from"), seed);
+    }
+
+    @Test
+    void theSeedCarriesTheHeadCommitSoTheSuccessorCanCheckIt() {
+        String seed = HandoffSeed.compose(Optional.empty(), new HandoffFacts(
+                "feat/work", Optional.of("a1b2c3d"), List.of("add a.txt"), List.of(), List.of()));
+
+        assertTrue(seed.contains("a1b2c3d"), seed);
+    }
+
+    @Test
+    void anUnbornBranchSaysSoRatherThanOmittingTheCommitSection() {
+        // Silence would read as "no commits worth mentioning", not "none".
+        String seed = HandoffSeed.compose(Optional.empty(), new HandoffFacts(
+                "feat/work", Optional.empty(), List.of(), List.of("?? wip.txt"), List.of()));
+
+        assertTrue(seed.contains("no commits yet"), seed);
     }
 }

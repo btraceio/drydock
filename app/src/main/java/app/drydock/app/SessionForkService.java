@@ -12,7 +12,7 @@ import app.drydock.git.GitExecutableNotFoundException;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.WorktreeNaming;
 import app.drydock.git.WorktreeTransplant;
-import app.drydock.handoff.ForkFacts;
+import app.drydock.handoff.HandoffFacts;
 import app.drydock.handoff.HandoffSeed;
 import app.drydock.handoff.HandoffStaleness;
 import app.drydock.process.ProcessResult;
@@ -171,7 +171,7 @@ public final class SessionForkService {
             initSubmodules(created);
             transplant.transplant(sourceWorktree, created);
             String seed = HandoffSeed.compose(briefLookup.apply(outgoing.id()),
-                    factsFor(outgoing, sourceWorktree, branch, baseBranch, head));
+                    factsFor(outgoing, sourceWorktree, branch, head));
             return join(launcher.start(repositoryRoot, created, target, seedPointer(seed, branch),
                     outgoing.id()));
         } catch (RuntimeException e) {
@@ -224,8 +224,8 @@ public final class SessionForkService {
         }
     }
 
-    private ForkFacts factsFor(ManagedAgentSession outgoing, Path sourceWorktree, String branch,
-                               String baseBranch, Optional<String> head) {
+    private HandoffFacts factsFor(ManagedAgentSession outgoing, Path sourceWorktree, String branch,
+                                  Optional<String> head) {
         List<String> subjects = head.isEmpty()
                 ? List.of()
                 : lines(gitOut(sourceWorktree, "log", "--format=%s",
@@ -235,7 +235,7 @@ public final class SessionForkService {
         // The intents the human has not settled are the most concrete
         // statement of what is still open; a successor that re-litigates a
         // resolved one is doing the work twice.
-        return new ForkFacts(branch, baseBranch, subjects, changed,
+        return new HandoffFacts(branch, head, subjects, changed,
                 capped(openIntentLookup.apply(outgoing.id()), MAX_CHANGED_FILES));
     }
 
