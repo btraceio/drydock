@@ -310,7 +310,7 @@ public final class RepositorySidebar extends VBox {
 
         filterBar = new SessionFilterBar(agentRegistry, () -> onFilterChipsChanged());
 
-        VBox header = new VBox(addButton, filterField, filterBar);
+        VBox header = new VBox(addButton, new ClearableTextField(filterField), filterBar);
         header.getStyleClass().add("sidebar-header");
 
         // The same collapse control the Review rails wear, in the same place.

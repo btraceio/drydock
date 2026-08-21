@@ -337,8 +337,8 @@ final class SearchRail extends VBox {
         // here and d/s/z fire instead of being typed. Pinned by
         // enterHandsTheKeyboardBackOutOfTheQueryField.
         searchField.setOnAction(e -> resultsBox.requestFocus());
-        HBox.setHgrow(searchField, Priority.ALWAYS);
-        HBox fieldRow = new HBox(6, magnifier, searchField);
+        HBox fieldRow = new HBox(6, magnifier, new app.drydock.ui.ClearableTextField(searchField));
+        HBox.setHgrow(fieldRow.getChildren().get(1), Priority.ALWAYS);
         fieldRow.setAlignment(Pos.CENTER_LEFT);
         fieldRow.getStyleClass().add("explorer-search-row");
 
