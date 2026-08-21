@@ -2608,7 +2608,8 @@ public final class RepositorySidebar extends VBox {
             String workingDirectoryText = session.worktreeRoot().isEmpty() && repository.isRemote()
                     ? repository.remote().host() + ":" + repository.remote().remotePath()
                     : session.workingDirectory().toString();
-            rowTip.setText("Status: " + session.status()
+            rowTip.setText(session.displayName()
+                    + "\nStatus: " + session.status()
                     + "\nAgent: " + AgentLabels.displayName(agentRegistry, session)
                     + (session.evalMode() ? "\n" + evalTooltipLine(session) : "")
                     + (activity == SessionActivity.UNKNOWN ? ""

@@ -766,6 +766,8 @@ final class OpenSessionTab {
         tabRepoLabel.setMaxWidth(160);
         tabTitleLabel.getStyleClass().add("tab-title-label");
         tabTitleLabel.setMaxWidth(160);
+        tabTitleLabel.setTextOverrun(OverrunStyle.ELLIPSIS);
+        tabTitleLabel.setTooltip(new Tooltip());
 
         renameField.getStyleClass().add("tab-rename-field");
         renameField.setPrefWidth(140);
@@ -825,6 +827,7 @@ final class OpenSessionTab {
         headerTitle.setMinWidth(0);
         headerTitle.setMaxWidth(Double.MAX_VALUE);
         headerTitle.setTextOverrun(OverrunStyle.ELLIPSIS);
+        headerTitle.setTooltip(new Tooltip());
         headerMeta.getStyleClass().add("session-meta-line");
         headerTitles.getChildren().setAll(headerTitle, headerMeta);
 
@@ -1179,6 +1182,14 @@ final class OpenSessionTab {
         this.displayName = displayName;
         tabTitleLabel.setText(displayName);
         headerTitle.setText(displayName);
+        // The title is clamped (maxWidth 160 / ELLIPSIS), so a hover tooltip
+        // carries the full name a truncated tab strip cannot show.
+        if (tabTitleLabel.getTooltip() != null) {
+            tabTitleLabel.getTooltip().setText(displayName);
+        }
+        if (headerTitle.getTooltip() != null) {
+            headerTitle.getTooltip().setText(displayName);
+        }
     }
 
     /** Display name of the agent this session runs; names it in this tab's own copy. */
