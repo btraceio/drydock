@@ -286,7 +286,7 @@ successor is told it inherited the work by its seed regardless.
 
 ### Where it appears
 
-A "Hand off to…" gesture on the session tab and its sidebar row, listing
+A "Hand off to…" gesture on the session tab, listing
 `AgentRegistry.agents()`. Unavailable agents are shown disabled with
 `describeSearched()`, exactly as the existing picker does.
 
@@ -318,9 +318,17 @@ processes editing one tree. The design has no defence against that beyond
 never creating it, which is why the outgoing session is gone before the
 successor starts, and why the two steps are ordered rather than concurrent.
 
-Closing the outgoing surface cannot itself fail: `closeGracefully` waits out
-its grace period and then calls `destroyForcibly`, and it always invokes its
-completion callback. The step that can fail is the metadata write inside
+Closing the outgoing surface is not supposed to fail: `closeGracefully` waits
+out its grace period and then kills the process. That is true of the JediTerm
+surface, which finishes by invoking its completion callback whatever happened.
+It is not quite true of the ghostty one, which runs the callback only after
+`close()`, and `close()` can throw if freeing the native surface fails — in
+which case the callback never runs and the delete never completes. So the
+handoff bounds its wait rather than trusting the callback, and a close that
+never reports back becomes a stated failure instead of a session that hangs
+with no successor and no error.
+
+The step that is expected to fail is the metadata write inside
 `deleteSession`. It degrades safely — the surface is closed but the session is
 still listed, which is the resumable state this design rejected but not a
 damaged one — and the handoff stops there rather than launching the successor,
@@ -346,6 +354,8 @@ Everything else resolves to a plain refusal or a stated fallback:
 | outgoing session already dead | proceeds; closing a dead surface is a no-op |
 | outgoing session has no commits yet | proceeds; the seed says the branch is unborn |
 | metadata write fails during delete | handoff stops; no successor is started |
+| surface close never reports back | the wait is bounded; handoff stops and says the removal could not be confirmed |
+| a second handoff is started while one is in flight | refused; the first one owns that session until it settles |
 | owning repository no longer registered | refused before anything is deleted |
 | launch fails after a successful delete | the session is gone and no successor arrived; the tree, branch and commits are untouched, and the failure says so |
 | target agent unavailable | never offered; disabled with `describeSearched()` |
