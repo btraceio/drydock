@@ -1196,6 +1196,23 @@ Replace `forkSessionTo` and `populateForkMenu`:
         if (session.isEmpty()) {
             return;
         }
+        // Pre-flight, and the reason it is here rather than inside the
+        // service: the delete is committed before the launch runs, so
+        // anything the launch needs that can be checked in advance MUST be
+        // checked before the session is destroyed. An unregistered repository
+        // is the one predictable way that launch fails, and finding out
+        // afterwards would cost the session with no successor to show for it.
+        if (repositoryManager.repositories().stream()
+                .noneMatch(repository -> repository.id().equals(session.get().repositoryId()))) {
+            Alert missing = new Alert(Alert.AlertType.WARNING);
+            missing.setTitle("Could not hand off this session");
+            missing.setHeaderText("No registered repository owns this session");
+            missing.setContentText("Drydock no longer has a repository registered for "
+                    + session.get().workingDirectory()
+                    + ", so it cannot start a successor there. Nothing has been changed.");
+            missing.showAndWait();
+            return;
+        }
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
         confirm.setTitle("Hand off this session");
         confirm.setHeaderText("Hand \"" + session.get().displayName() + "\" to "
@@ -1210,13 +1227,20 @@ Replace `forkSessionTo` and `populateForkMenu`:
         handoffService().handOff(session.get(), target)
                 .whenComplete((successor, failure) -> Platform.runLater(() -> {
                     if (failure != null) {
-                        // A failed handoff starts nothing, but it must be
-                        // visible: the outgoing session's terminal may already
-                        // be closed even though its entry survives.
+                        // Deliberately vague about what survives, because it
+                        // depends on how far the handoff got: a failure before
+                        // the delete leaves the session intact, and one after
+                        // it leaves no session at all. What is true either way
+                        // -- and the thing the human is about to worry about
+                        // -- is that the tree, the branch and every
+                        // uncommitted change are untouched.
                         Alert alert = new Alert(Alert.AlertType.WARNING);
                         alert.setTitle("Could not hand off this session");
                         alert.setHeaderText("Could not hand off this session");
-                        alert.setContentText(String.valueOf(UiErrors.unwrap(failure).getMessage()));
+                        alert.setContentText(UiErrors.unwrap(failure).getMessage()
+                                + "\n\nThe worktree, the branch and every uncommitted change are "
+                                + "untouched. If this session's tab is gone, its work is still on disk "
+                                + "and you can open a new session on the same worktree.");
                         alert.showAndWait();
                         return;
                     }
@@ -1287,18 +1311,28 @@ so a diag run of `handoff:` will block on a modal. Say so in the verb's
 javadoc: a screenshot driver must dismiss it, and that is the point — the
 confirmation is part of the gesture being exercised.
 
-- [ ] **Step 5: Build and run the affected tests**
+- [ ] **Step 5: Check the pre-flight by reading, not by testing**
+
+`handOffSessionTo` is FX-thread code with no headless harness, so the
+pre-flight has no unit test. Read it once against this question: is there any
+path where `deleteSession` runs before the repository lookup? If there is, the
+pre-flight is decoration. Say in your report which lines you checked.
+
+- [ ] **Step 6: Build and run the affected tests**
 
 Run: `./gradlew :app:test --tests "app.drydock.app.*" --tests "app.drydock.ui.*" --tests "app.drydock.handoff.*" --tests "app.drydock.review.*"`
 Expected: PASS. Fix any remaining references the compiler finds.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add app/src/main/java/app/drydock/ui/MainWorkspace.java \
         app/src/main/java/app/drydock/DrydockApplication.java
 git commit -m "Handing off is a confirmed gesture on the session it replaces"
 ```
+
+Run `git status --short` first and stage anything else you changed — a commit
+that does not build is worse than a noisy one.
 
 ---
 
@@ -1404,11 +1438,16 @@ to match.
 
 - [ ] **Step 5: Sweep the remaining copy**
 
-Run `grep -rn -i "fork" app/src/main/java/app/drydock/handoff app/src/main/java/app/drydock/domain/HandoffBrief.java app/src/main/java/app/drydock/ui/HandoffEditDialog.java`
-and fix the three known stragglers, which are comments rather than behaviour:
+Run `grep -rn -i "fork" app/src/main/java/app/drydock/handoff app/src/main/java/app/drydock/app/SessionHandoffService.java app/src/main/java/app/drydock/domain/HandoffBrief.java app/src/main/java/app/drydock/ui/HandoffEditDialog.java`
+and fix the known stragglers, which are comments rather than behaviour:
 
 - `HandoffStaleness.java:18` — "(see {@code SessionForkService})" becomes
   "(see {@code SessionHandoffService})".
+- `SessionHandoffService.java`, the `seedPointer` javadoc — "would show up in
+  the fork's very first diff" becomes "the successor's very first diff".
+- `SessionHandoffService.java`, `undeliverableSeed`'s comment — "The fork
+  itself is still worth having" becomes "The handoff itself is still worth
+  having".
 - `HandoffBrief.java:29` — "the seed a fork is launched with labels" becomes
   "the seed a successor is launched with labels".
 - `HandoffEditDialog.java:109` — "is later flattened into the fork seed"

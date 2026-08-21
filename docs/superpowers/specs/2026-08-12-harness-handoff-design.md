@@ -327,6 +327,18 @@ damaged one — and the handoff stops there rather than launching the successor,
 so one worktree never ends up with two sessions on it. The human sees why and
 can try again.
 
+The order buys that safety at the cost of a second window, and it is worth
+naming rather than discovering. Once the delete succeeds, a failing launch
+leaves no session at all: the outgoing entry and its brief are gone, and no
+successor arrived to take their place. The tree, the branch and the commits
+are untouched — the work is all still there — but the conversation's metadata
+is not. Reversing the two steps would trade that for two agents editing one
+worktree, which is the one hazard this design cannot survive, so the order
+stays and the window is narrowed instead: everything the launch needs that
+can be checked in advance — that a registered repository still owns the
+session's checkout, above all — is resolved **before** the delete, so what
+remains after it is only the genuinely unpredictable.
+
 Everything else resolves to a plain refusal or a stated fallback:
 
 | case | behaviour |
@@ -334,6 +346,8 @@ Everything else resolves to a plain refusal or a stated fallback:
 | outgoing session already dead | proceeds; closing a dead surface is a no-op |
 | outgoing session has no commits yet | proceeds; the seed says the branch is unborn |
 | metadata write fails during delete | handoff stops; no successor is started |
+| owning repository no longer registered | refused before anything is deleted |
+| launch fails after a successful delete | the session is gone and no successor arrived; the tree, branch and commits are untouched, and the failure says so |
 | target agent unavailable | never offered; disabled with `describeSearched()` |
 | brief absent | proceeds; the seed states that no brief was recorded |
 | brief oversize | `session_handoff` refuses with the limit; nothing is stored |
@@ -359,9 +373,11 @@ repository: the successor is launched on the outgoing session's own worktree
 and branch; the outgoing session is deleted before the successor starts; a
 delete that fails leaves no successor; an already-dead session is handed off
 without special-casing; the title, `namePinned`, `branchCreatedHere` and eval
-mode reach the successor; `forkedFrom` is not written; and the outgoing
-session's review scopes end up addressable by the successor and by nobody
-else.
+mode reach the successor; `forkedFrom` is not written; a launch that fails
+after the delete leaves the session gone rather than half-restored, which is
+pinned by a test so the trade-off cannot be silently reversed; and the
+outgoing session's review scopes end up addressable by the successor and by
+nobody else.
 
 The staleness banner, the disabled-Refresh-with-reason and the handoff's
 confirmation are visual state with no headless-FX harness behind them. Per `docs/architecture.md`, those are
