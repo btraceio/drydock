@@ -2697,6 +2697,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             try {
                 HandoffBrief brief = sessionManager.applyAgentHandoff(id, draft, stamp);
                 publishSessions();
+                refreshHandoffBanner(id);
                 written.complete(brief);
             } catch (RuntimeException e) {
                 // As for a rename: the session can vanish between the router's
