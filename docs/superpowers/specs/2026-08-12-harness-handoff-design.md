@@ -290,10 +290,15 @@ A "Hand off to…" gesture on the session tab, listing
 `AgentRegistry.agents()`. Unavailable agents are shown disabled with
 `describeSearched()`, exactly as the existing picker does.
 
-It asks for confirmation first, naming what goes: this session's tab and its
-conversation are removed and the chosen agent takes over the worktree. The
-gesture removes a session rather than adding one, which puts it among
-drydock's destructive sequences, and those are confirmed.
+It asks for confirmation first, naming what goes — and naming it exactly.
+The session and its tab are removed *from drydock*; the agent's own transcript
+is not touched, and stays on disk wherever that CLI keeps it, resumable with
+that CLI directly. The branch, the working tree and every uncommitted change
+are untouched. Saying "the conversation is removed" would be the easy phrasing
+and it would be false, on the one screen where the human is deciding, about
+the one thing this design deliberately preserved. The gesture removes a
+session rather than adding one, which puts it among drydock's destructive
+sequences, and those are confirmed.
 
 ### Review scopes move with the work
 
@@ -318,12 +323,16 @@ processes editing one tree. The design has no defence against that beyond
 never creating it, which is why the outgoing session is gone before the
 successor starts, and why the two steps are ordered rather than concurrent.
 
-Closing the outgoing surface is not supposed to fail: `closeGracefully` waits
-out its grace period and then kills the process. That is true of the JediTerm
-surface, which finishes by invoking its completion callback whatever happened.
-It is not quite true of the ghostty one, which runs the callback only after
-`close()`, and `close()` can throw if freeing the native surface fails — in
-which case the callback never runs and the delete never completes. So the
+Closing the outgoing surface is not supposed to fail, and the two surfaces
+fail differently. The JediTerm one destroys the child, waits out the grace
+period, forcibly destroys it, and invokes its completion callback whatever
+happened. The ghostty one — the surface the app actually runs — never kills
+the child from Java at all: it sends Ctrl+D, polls, and then calls `close()`
+whether or not the child exited, with the kill arriving as a side effect of
+freeing the native surface. So its callback runs only after `close()`, and
+`close()` can throw if that free fails — in which case the callback never
+runs, the delete never completes, and the child is quite possibly still
+alive. So the
 handoff bounds its wait rather than trusting the callback, and a close that
 never reports back becomes a stated failure instead of a session that hangs
 with no successor and no error.
@@ -354,7 +363,7 @@ Everything else resolves to a plain refusal or a stated fallback:
 | outgoing session already dead | proceeds; closing a dead surface is a no-op |
 | outgoing session has no commits yet | proceeds; the seed says the branch is unborn |
 | metadata write fails during delete | handoff stops; no successor is started |
-| surface close never reports back | the wait is bounded; handoff stops and says the removal could not be confirmed |
+| surface close never reports back | the wait is bounded; handoff stops, says the removal could not be confirmed, and does not claim the agent was stopped -- in this branch it most likely was not |
 | a second handoff is started while one is in flight | refused; the first one owns that session until it settles |
 | owning repository no longer registered | refused before anything is deleted |
 | launch fails after a successful delete | the session is gone and no successor arrived; the tree, branch and commits are untouched, and the failure says so |
