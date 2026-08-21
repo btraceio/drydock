@@ -2685,6 +2685,15 @@ public final class RepositorySidebar extends VBox {
             });
 
             HBox row = new HBox(8, statusCol, name, startPill);
+            // A dirty dot when this checkout has uncommitted changes, matching
+            // the session row's -- the worktree's state is independent of
+            // whether a session is running in it.
+            GitStatus unopenedStatus = viewModel.worktreeStatus(worktree.path()).orElse(null);
+            if (unopenedStatus != null && unopenedStatus.dirty()) {
+                Region dirtyDot = new Region();
+                dirtyDot.getStyleClass().add("dirty-dot");
+                row.getChildren().add(row.getChildren().indexOf(startPill), dirtyDot);
+            }
             findingsBadge(worktree.path(), () -> navigator.startReviewForWorktree(repository, worktree,
                     SessionReviewScopes.Choice.LOCAL))
                     .ifPresent(badge -> row.getChildren().add(row.getChildren().indexOf(startPill), badge));
