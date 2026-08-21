@@ -45,6 +45,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -352,6 +353,33 @@ public final class SessionManager implements AutoCloseable {
                                                         Optional<ManagedSessionId> forkedFrom) {
         return newSessionMetadata(repository, displayName, agentKind, Optional.of(worktreeRoot), branchCreatedHere)
                 .withForkedFrom(forkedFrom);
+    }
+
+    /**
+     * Metadata for the session that takes {@code outgoing}'s place under a
+     * different agent.
+     *
+     * <p>The successor runs in the same checkout on the same branch over the
+     * same working tree, so it inherits what made that session what it was:
+     * its title, whether a human pinned that title, which checkout it lives
+     * in, whether drydock created the branch there, and its eval mode. Only
+     * the agent changes.</p>
+     *
+     * <p>{@code branchCreatedHere} is COPIED rather than asserted. The
+     * successor did not create the branch; claiming it did would let a later
+     * delete offer to remove a branch drydock does not own.</p>
+     *
+     * <p>No lineage is recorded. {@code outgoing} is deleted as part of the
+     * same handoff, so a {@code forkedFrom} pointing at it would resolve to
+     * nothing.</p>
+     */
+    public ManagedAgentSession prepareSuccessorSession(Repository repository, ManagedAgentSession outgoing,
+                                                       AgentKind agentKind) {
+        Objects.requireNonNull(outgoing, "outgoing");
+        return newSessionMetadata(repository, outgoing.displayName(), agentKind,
+                        outgoing.worktreeRoot(), outgoing.branchCreatedHere())
+                .withNamePinned(outgoing.namePinned())
+                .withEvalMode(outgoing.evalMode());
     }
 
     /**

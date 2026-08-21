@@ -36,6 +36,7 @@ import java.util.concurrent.Executors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -419,6 +420,84 @@ class SessionManagerTest {
         flushState(stateRepository);
         assertEquals(PrState.OPEN, stateRepository.savedState().sessions().get(0).prState());
         assertEquals(129, stateRepository.savedState().sessions().get(0).prNumber().orElseThrow());
+    }
+
+    @Test
+    void aSuccessorInheritsTheOutgoingSessionsIdentityAndCheckout() {
+        SessionManager manager = newManager(new InMemoryStateRepository(List.of()));
+        Repository repository = someRepository();
+        ManagedAgentSession outgoing = manager
+                .prepareWorktreeSession(repository, "Rework the rail", Path.of("/repo/wt"), true,
+                        AgentKind.CLAUDE)
+                .withNamePinned(true);
+
+        ManagedAgentSession successor =
+                manager.prepareSuccessorSession(repository, outgoing, AgentKind.CODEX);
+
+        assertEquals("Rework the rail", successor.displayName());
+        assertTrue(successor.namePinned());
+        assertEquals(Optional.of(Path.of("/repo/wt")), successor.worktreeRoot());
+        assertEquals(Path.of("/repo/wt"), successor.workingDirectory());
+        assertEquals(AgentKind.CODEX, successor.agentKind());
+    }
+
+    @Test
+    void aSuccessorNeverClaimsToHaveCreatedTheBranch() {
+        // It did not: the branch is the outgoing session's, and a successor
+        // that claims otherwise would offer to delete a branch drydock does
+        // not own.
+        SessionManager manager = newManager(new InMemoryStateRepository(List.of()));
+        Repository repository = someRepository();
+        ManagedAgentSession outgoing = manager.prepareWorktreeSession(
+                repository, "Rework the rail", Path.of("/repo/wt"), false, AgentKind.CLAUDE);
+
+        ManagedAgentSession successor =
+                manager.prepareSuccessorSession(repository, outgoing, AgentKind.CODEX);
+
+        assertFalse(successor.branchCreatedHere());
+    }
+
+    @Test
+    void aSuccessorOfAMainCheckoutSessionStaysOnTheMainCheckout() {
+        SessionManager manager = newManager(new InMemoryStateRepository(List.of()));
+        Repository repository = someRepository();
+        ManagedAgentSession outgoing = manager.prepareSession(repository, AgentKind.CLAUDE);
+
+        ManagedAgentSession successor =
+                manager.prepareSuccessorSession(repository, outgoing, AgentKind.CODEX);
+
+        assertEquals(Optional.empty(), successor.worktreeRoot());
+        assertEquals(repository.root(), successor.workingDirectory());
+    }
+
+    @Test
+    void aSuccessorInheritsEvalModeSoGatedWorkStaysOnTheEvalAccount() {
+        SessionManager manager = newManager(new InMemoryStateRepository(List.of()));
+        Repository repository = someRepository();
+        ManagedAgentSession outgoing = manager
+                .prepareSession(repository, AgentKind.CLAUDE).withEvalMode(true);
+
+        assertTrue(manager.prepareSuccessorSession(repository, outgoing, AgentKind.CODEX).evalMode());
+    }
+
+    @Test
+    void aSuccessorRecordsNoLineageBecauseItsParentIsAboutToBeDeleted() {
+        SessionManager manager = newManager(new InMemoryStateRepository(List.of()));
+        Repository repository = someRepository();
+        ManagedAgentSession outgoing = manager.prepareSession(repository, AgentKind.CLAUDE);
+
+        assertEquals(Optional.empty(),
+                manager.prepareSuccessorSession(repository, outgoing, AgentKind.CODEX).forkedFrom());
+    }
+
+    @Test
+    void aSuccessorGetsItsOwnId() {
+        SessionManager manager = newManager(new InMemoryStateRepository(List.of()));
+        Repository repository = someRepository();
+        ManagedAgentSession outgoing = manager.prepareSession(repository, AgentKind.CLAUDE);
+
+        assertNotEquals(outgoing.id(),
+                manager.prepareSuccessorSession(repository, outgoing, AgentKind.CODEX).id());
     }
 
     private static final class InMemoryStateRepository implements ApplicationStateRepository {
