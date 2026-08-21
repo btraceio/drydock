@@ -207,4 +207,53 @@ class ReviewScopeRegistryTest {
 
         assertEquals(List.of(scope.id()), seen);
     }
+
+    @Test
+    void rebindMovesAScopeToTheSuccessorSession() {
+        ReviewScope scope = registry.mint(worktreeSpec("feat/a", Optional.of(owner)));
+        ManagedSessionId successor = ManagedSessionId.newId();
+
+        registry.rebind(owner, successor);
+
+        assertTrue(registry.isAddressableBy(scope.id(), successor));
+        assertFalse(registry.isAddressableBy(scope.id(), owner));
+    }
+
+    @Test
+    void rebindKeepsTheScopeIdSoFindingsAreNotOrphaned() {
+        // Findings are keyed by (scopeId, ...). A new id would hide every one
+        // of them while leaving it sitting in the store under the old handle.
+        ReviewScope scope = registry.mint(worktreeSpec("feat/a", Optional.of(owner)));
+
+        registry.rebind(owner, ManagedSessionId.newId());
+
+        assertEquals(Optional.of(scope.id()), registry.byId(scope.id()).map(ReviewScope::id));
+        assertEquals(1, registry.scopes().size());
+    }
+
+    @Test
+    void rebindLeavesScopesBoundToOtherSessionsAlone() {
+        ReviewScope other = registry.mint(worktreeSpec("feat/b", Optional.of(stranger)));
+
+        registry.rebind(owner, ManagedSessionId.newId());
+
+        assertTrue(registry.isAddressableBy(other.id(), stranger));
+    }
+
+    @Test
+    void rebindNotifiesListenersSoTheBoardRedraws() {
+        ReviewScope scope = registry.mint(worktreeSpec("feat/a", Optional.of(owner)));
+        List<String> changed = new ArrayList<>();
+        registry.addChangeListener(changed::add);
+
+        registry.rebind(owner, ManagedSessionId.newId());
+
+        assertEquals(List.of(scope.id()), changed);
+    }
+
+    @Test
+    void rebindIgnoresNullsRatherThanThrowingIntoAHandoff() {
+        registry.rebind(null, ManagedSessionId.newId());
+        registry.rebind(owner, null);
+    }
 }

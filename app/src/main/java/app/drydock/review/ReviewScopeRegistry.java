@@ -182,6 +182,34 @@ public final class ReviewScopeRegistry {
     }
 
     /**
+     * Moves every scope bound to {@code from} onto {@code to}, keeping each
+     * scope's id.
+     *
+     * <p>A handoff deletes the outgoing session and starts a successor on the
+     * same worktree. The diff those scopes describe is untouched by that, so
+     * the review is exactly as valid as it was a moment earlier -- but the
+     * session that could address it no longer exists. Revoking instead would
+     * strand the findings already recorded against these ids and make the
+     * human review the same diff twice.</p>
+     *
+     * <p>Ids are preserved because scope identity is {@code (kind, repoRoot,
+     * worktree, pr)} and excludes the session: nothing about a rebind changes
+     * what a scope IS, so nothing may change what findings are keyed by.</p>
+     */
+    public void rebind(ManagedSessionId from, ManagedSessionId to) {
+        if (from == null || to == null) {
+            return;
+        }
+        for (Map.Entry<String, ReviewScope> entry : byId.entrySet()) {
+            if (entry.getValue().sessionId().filter(from::equals).isEmpty()) {
+                continue;
+            }
+            byId.put(entry.getKey(), entry.getValue().withSession(to));
+            notifyChanged(entry.getKey());
+        }
+    }
+
+    /**
      * Whether {@code sessionId} may address {@code scopeId}: only when the
      * scope is bound to that session. An unknown scope is never addressable
      * -- the MCP router turns that into a tool error rather than a silent
