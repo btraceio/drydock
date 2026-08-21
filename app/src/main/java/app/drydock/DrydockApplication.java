@@ -599,25 +599,28 @@ public final class DrydockApplication extends Application {
                             // over an hour.
                             case "quit" -> diagQuit(primaryStage);
                             case "shot" -> diagSnapshot(primaryStage, Path.of(arg));
-                            // handoff:<commits>/<files>, or handoff:none for a
-                            // session that never wrote a brief, or
-                            // handoff:<c>/<f>/dead for one whose agent has
-                            // exited (the disabled-Refresh case). Drives the
-                            // active tab's banner without needing a real stale
-                            // brief, which would otherwise mean a live agent
-                            // and a git history to go stale against.
-                            case "handoff" -> System.out.println("[diag] handoff banner -> "
+                            // forcebanner:<commits>/<files>, or
+                            // forcebanner:none for a session that never wrote
+                            // a brief, or forcebanner:<c>/<f>/dead for one
+                            // whose agent has exited (the disabled-Refresh
+                            // case). Drives the active tab's banner without
+                            // needing a real stale brief, which would
+                            // otherwise mean a live agent and a git history to
+                            // go stale against. Renamed from "handoff" here so
+                            // that verb is free for the handoff gesture below
+                            // -- this one only forces the banner's display.
+                            case "forcebanner" -> System.out.println("[diag] handoff banner -> "
                                     + mainWorkspace.diagHandoffBanner(arg));
                             // staleness recomputes the banner from the real git
-                            // history instead of forcing a number, and fork:<agent>
-                            // performs the fork gesture through the button's own
-                            // handlers. Together they drive a live end-to-end fork,
+                            // history instead of forcing a number, and handoff:<agent>
+                            // performs the handoff gesture through the button's own
+                            // handlers. Together they drive a live end-to-end handoff,
                             // which Robot input cannot: synthetic mouse events never
                             // reach the app in a diag run.
                             case "staleness" -> System.out.println("[diag] staleness -> "
                                     + mainWorkspace.diagRecomputeStaleness());
-                            case "fork" -> System.out.println("[diag] fork -> "
-                                    + mainWorkspace.diagFork(arg));
+                            case "handoff" -> System.out.println("[diag] handoff -> "
+                                    + mainWorkspace.diagHandoff(arg));
                             // newworktree:<repo path> -- registers the repository
                             // if it is not already known, then opens the
                             // create-worktree modal on it. Deliberately does not

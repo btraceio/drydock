@@ -2691,7 +2691,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
     /**
      * Connects one tab's banner verbs (Refresh, Edit) and the session header's
-     * persistent Fork control, and gives the banner its first reading. Done
+     * persistent Hand off control, and gives the banner its first reading. Done
      * once per tab, when the tab is registered: the controls outlive every
      * republish, so re-binding them on each would be churn. Fork lives on the
      * header rather than the banner so it stays reachable once the brief is
@@ -2701,7 +2701,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         HandoffBanner banner = tab.handoffBanner();
         banner.refreshButton().setOnAction(event -> requestHandoffRefresh(sessionId));
         banner.editButton().setOnAction(event -> editHandoffBrief(sessionId));
-        tab.forkButton().setOnShowing(event -> populateForkMenu(tab.forkButton(), sessionId));
+        tab.forkButton().setOnShowing(event -> populateHandoffMenu(tab.forkButton(), sessionId));
         refreshHandoffBanner(sessionId);
     }
 
@@ -2890,38 +2890,85 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         });
     }
 
-    /** <em>Fork</em>: mint a sibling worktree running {@code target}, seeded from the brief. */
-    public void forkSessionTo(ManagedSessionId sessionId, AgentKind target) {
-        sessionManager.sessions().stream()
+    /**
+     * <em>Hand off</em>: replace this session with one running {@code target}
+     * in the same worktree, seeded from the brief.
+     *
+     * <p>Confirmed first, because it removes a session. The worktree, the
+     * branch and every uncommitted change are untouched -- the confirmation
+     * says so, so the human is deciding about the conversation and nothing
+     * else.</p>
+     */
+    public void handOffSessionTo(ManagedSessionId sessionId, AgentKind target) {
+        Optional<ManagedAgentSession> session = sessionManager.sessions().stream()
                 .filter(candidate -> candidate.id().equals(sessionId))
-                .findFirst()
-                .ifPresent(session -> handoffService().handOff(session, target)
-                        .whenComplete((forked, failure) -> Platform.runLater(() -> {
-                            if (failure != null) {
-                                // A failed fork is additive-only, so nothing was
-                                // lost -- but it must be visible, not silent.
-                                Alert alert = new Alert(Alert.AlertType.WARNING);
-                                alert.setTitle("Could not fork this session");
-                                alert.setHeaderText("Could not fork this session");
-                                alert.setContentText(String.valueOf(UiErrors.unwrap(failure).getMessage()));
-                                alert.showAndWait();
-                                return;
-                            }
-                            publishSessions();
-                        })));
+                .findFirst();
+        if (session.isEmpty()) {
+            return;
+        }
+        // Pre-flight, and the reason it is here rather than inside the
+        // service: the delete is committed before the launch runs, so
+        // anything the launch needs that can be checked in advance MUST be
+        // checked before the session is destroyed. An unregistered repository
+        // is the one predictable way that launch fails, and finding out
+        // afterwards would cost the session with no successor to show for it.
+        if (repositoryManager.repositories().stream()
+                .noneMatch(repository -> repository.id().equals(session.get().repositoryId()))) {
+            Alert missing = new Alert(Alert.AlertType.WARNING);
+            missing.setTitle("Could not hand off this session");
+            missing.setHeaderText("No registered repository owns this session");
+            missing.setContentText("Drydock no longer has a repository registered for "
+                    + session.get().workingDirectory()
+                    + ", so it cannot start a successor there. Nothing has been changed.");
+            missing.showAndWait();
+            return;
+        }
+        Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
+        confirm.setTitle("Hand off this session");
+        confirm.setHeaderText("Hand \"" + session.get().displayName() + "\" to "
+                + AgentLabels.displayName(agentRegistry, target) + "?");
+        confirm.setContentText("This session's tab and its conversation are removed, and "
+                + AgentLabels.displayName(agentRegistry, target)
+                + " takes over the same worktree with a brief of what happened here. "
+                + "The branch, the working tree and every uncommitted change stay exactly as they are.");
+        if (confirm.showAndWait().filter(button -> button == ButtonType.OK).isEmpty()) {
+            return;
+        }
+        handoffService().handOff(session.get(), target)
+                .whenComplete((successor, failure) -> Platform.runLater(() -> {
+                    if (failure != null) {
+                        // Deliberately vague about what survives, because it
+                        // depends on how far the handoff got: a failure before
+                        // the delete leaves the session intact, and one after
+                        // it leaves no session at all. What is true either way
+                        // -- and the thing the human is about to worry about
+                        // -- is that the tree, the branch and every
+                        // uncommitted change are untouched.
+                        Alert alert = new Alert(Alert.AlertType.WARNING);
+                        alert.setTitle("Could not hand off this session");
+                        alert.setHeaderText("Could not hand off this session");
+                        alert.setContentText(UiErrors.unwrap(failure).getMessage()
+                                + "\n\nThe worktree, the branch and every uncommitted change are "
+                                + "untouched. If this session's tab is gone, its work is still on disk "
+                                + "and you can open a new session on the same worktree.");
+                        alert.showAndWait();
+                        return;
+                    }
+                    publishSessions();
+                }));
     }
 
     /**
-     * Fills a fork control with the installed agents. An unavailable one is
+     * Fills a handoff control with the installed agents. An unavailable one is
      * shown DISABLED with where drydock looked, rather than hidden: "Codex is
      * not installed" is a fact the human can act on; an absent row is not.
      */
-    public void populateForkMenu(MenuButton control, ManagedSessionId sessionId) {
+    public void populateHandoffMenu(MenuButton control, ManagedSessionId sessionId) {
         control.getItems().clear();
         for (Agent agent : agentRegistry.agents()) {
             MenuItem item = new MenuItem(agent.displayName());
             if (agent.isAvailable()) {
-                item.setOnAction(event -> forkSessionTo(sessionId, agent.kind()));
+                item.setOnAction(event -> handOffSessionTo(sessionId, agent.kind()));
             } else {
                 item.setText(agent.displayName() + " (not installed)");
                 item.setDisable(true);
@@ -2980,40 +3027,45 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     }
 
     /**
-     * Diagnostic hook: performs the fork gesture on the active tab for the
+     * Diagnostic hook: performs the handoff gesture on the active tab for the
      * agent whose display name starts with {@code agentName}.
      *
-     * <p>Drives the <em>wiring</em>, not the service: it fires the fork
+     * <p>Drives the <em>wiring</em>, not the service: it fires the handoff
      * button's real {@code onShowing} handler to populate the menu and then
-     * the chosen item's real action. Calling {@link #forkSessionTo} here
+     * the chosen item's real action. Calling {@link #handOffSessionTo} here
      * instead would let the verb pass with the menu unwired, which is exactly
      * the failure a live run exists to catch. Robot input cannot reach the app
      * in a diag run, so this is the only way to press this button without a
      * human.</p>
+     *
+     * <p>Firing the chosen item now opens the handoff confirmation dialog and
+     * blocks there -- a screenshot driver must dismiss it before the run can
+     * continue. That is the point, not a defect: the confirmation is part of
+     * the gesture being exercised.</p>
      */
-    public String diagFork(String agentName) {
+    public String diagHandoff(String agentName) {
         Map.Entry<ManagedSessionId, OpenSessionTab> active = activeDiagTab();
         if (active == null) {
             return "no open or pending tab";
         }
-        MenuButton fork = active.getValue().forkButton();
+        MenuButton handoff = active.getValue().forkButton();   // renamed in Task 6
         // Fully qualified: GitHubReviewRequest.Event is imported here too.
-        EventHandler<javafx.event.Event> onShowing = fork.getOnShowing();
+        EventHandler<javafx.event.Event> onShowing = handoff.getOnShowing();
         if (onShowing == null) {
-            return "the fork button has no onShowing handler, so its menu never populates";
+            return "the handoff button has no onShowing handler, so its menu never populates";
         }
         onShowing.handle(new javafx.event.Event(MenuButton.ON_SHOWING));
 
         String wanted = agentName.strip().toLowerCase(Locale.ROOT);
-        Optional<MenuItem> chosen = fork.getItems().stream()
+        Optional<MenuItem> chosen = handoff.getItems().stream()
                 .filter(item -> item.getText().toLowerCase(Locale.ROOT).startsWith(wanted))
                 .findFirst();
         if (chosen.isEmpty()) {
             return "no agent matching " + quoted(agentName) + " among "
-                    + fork.getItems().stream().map(MenuItem::getText).toList();
+                    + handoff.getItems().stream().map(MenuItem::getText).toList();
         }
         if (chosen.get().isDisable()) {
-            return quoted(chosen.get().getText()) + " cannot be forked to";
+            return quoted(chosen.get().getText()) + " cannot be handed off to";
         }
         chosen.get().fire();
         return "fired " + quoted(chosen.get().getText()) + " for session " + active.getKey();
