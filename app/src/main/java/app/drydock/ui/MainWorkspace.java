@@ -220,6 +220,29 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * executable, and workspace construction is on the FX thread.
      */
     private SessionHandoffService handoffService;
+
+    /**
+     * Sessions with a handoff currently running, from the moment the human
+     * confirms to the moment {@link #handOffSessionTo}'s completion handler
+     * runs. This is the guard against a second handoff launching a second
+     * successor onto the same worktree -- checking that the session still
+     * exists in {@link SessionManager#sessions()} is NOT enough, because it
+     * stays in state for the whole window {@code deleteSession}'s surface
+     * close spends polling a dying child (up to {@code
+     * DEFAULT_GRACE_PERIOD_MILLIS}, three seconds). Through that window the
+     * outgoing tab is still in the strip with its live "Hand off to..."
+     * control, nothing on screen has changed, and a second click would find
+     * the session, pass the pre-flight check, and start a second successor
+     * while the first is still in flight -- two agent processes editing one
+     * worktree, which is the one hazard {@link SessionHandoffService}'s own
+     * Javadoc names as the thing this design cannot survive.
+     *
+     * <p>Added only once the human confirms, not before: a cancelled
+     * confirmation must leave no trace here. Removed unconditionally in the
+     * completion handler, success or failure, so a failed handoff does not
+     * lock the session out of ever being retried.</p>
+     */
+    private final Set<ManagedSessionId> handoffsInFlight = new HashSet<>();
     private final AgentRegistry agentRegistry;
     private final RepositoryManager repositoryManager;
     private final GitStatusService gitStatusService;
@@ -1150,7 +1173,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             // review instruction's, interrupting the agent mid-turn. Both go
             // out as one line below (PullRequestMaterialization.prompt).
             session = openWorktreeSession(repository, PrCheckoutService.localBranchFor(number), worktree,
-                    Optional.empty(), false, agent, Spawn.FORBIDDEN, Optional.empty(), eval);
+                    Optional.empty(), false, agent, Spawn.FORBIDDEN, eval);
         } catch (RuntimeException e) {
             LOG.log(Level.WARNING, "Could not start a session on the checked-out PR #" + number, e);
             endMaterialization(progress, onSettled);
@@ -2491,8 +2514,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     public void openNewWorktreeSession(Repository repository, String branch, Path worktreeRoot,
                                        Optional<String> task, boolean branchCreatedHere, AgentKind agent,
                                        boolean eval) {
-        openWorktreeSession(repository, branch, worktreeRoot, task, branchCreatedHere, agent, Spawn.ALLOWED,
-                Optional.empty(), eval);
+        openWorktreeSession(repository, branch, worktreeRoot, task, branchCreatedHere, agent, Spawn.ALLOWED, eval);
     }
 
     /**
@@ -2506,26 +2528,17 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     private ManagedSessionId openWorktreeSession(Repository repository, String branch, Path worktreeRoot,
                                                  Optional<String> task, boolean branchCreatedHere, AgentKind agent,
                                                  Spawn spawn) {
-        return openWorktreeSession(repository, branch, worktreeRoot, task, branchCreatedHere, agent, spawn,
-                Optional.empty(), false);
+        return openWorktreeSession(repository, branch, worktreeRoot, task, branchCreatedHere, agent, spawn, false);
     }
 
-    /** As above, recording the session this one was forked from. */
+    /** The full form: carries eval mode in addition to spawn. */
     private ManagedSessionId openWorktreeSession(Repository repository, String branch, Path worktreeRoot,
                                                  Optional<String> task, boolean branchCreatedHere, AgentKind agent,
-                                                 Spawn spawn, Optional<ManagedSessionId> forkedFrom) {
-        return openWorktreeSession(repository, branch, worktreeRoot, task, branchCreatedHere, agent, spawn,
-                forkedFrom, false);
-    }
-
-    /** The full form: carries eval mode in addition to spawn/forkedFrom. */
-    private ManagedSessionId openWorktreeSession(Repository repository, String branch, Path worktreeRoot,
-                                                 Optional<String> task, boolean branchCreatedHere, AgentKind agent,
-                                                 Spawn spawn, Optional<ManagedSessionId> forkedFrom, boolean eval) {
+                                                 Spawn spawn, boolean eval) {
         // Keyed under the real session id for the same launch-race reason
         // as openNewSession.
         ManagedAgentSession prepared = sessionManager.prepareWorktreeSession(
-                repository, branch, worktreeRoot, branchCreatedHere, agent, forkedFrom).withEvalMode(eval);
+                repository, branch, worktreeRoot, branchCreatedHere, agent).withEvalMode(eval);
         return openPreparedSession(prepared, branch, task, spawn, repository);
     }
 
@@ -2711,7 +2724,17 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                     gitStatusService,
                     new GitExecutableLocator(),
                     this::launchSuccessorSession,
-                    sessionManager::deleteSession,
+                    // Drops the outgoing tab the moment the delete commits,
+                    // rather than waiting for handOffSessionTo's completion
+                    // handler to run once the WHOLE handoff (including the
+                    // successor's launch) finishes. Without this, the tab for
+                    // a session already gone from state -- its surface freed,
+                    // its metadata removed -- sits in the strip as a ghost for
+                    // however long the successor takes to launch. The
+                    // completion handler's own sessionGone check makes this
+                    // harmless to call twice.
+                    id -> sessionManager.deleteSession(id)
+                            .thenRun(() -> Platform.runLater(() -> dropHandedOffSessionTab(id))),
                     reviewScopeRegistry::rebind,
                     id -> sessionManager.handoffBriefs().stream()
                             .filter(brief -> brief.sessionId().equals(id))
@@ -2731,7 +2754,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      *
      * <p>Reads the grouping the reviewer already recorded, which needs the
      * scope's diff, so this runs git. Best-effort throughout: review state is a
-     * nicety in the seed and never a reason to fail a fork, so anything
+     * nicety in the seed and never a reason to fail a handoff, so anything
      * unavailable degrades to no intents rather than an exception.</p>
      */
     private List<String> openIntentTitles(ManagedSessionId sessionId) {
@@ -2900,6 +2923,15 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * else.</p>
      */
     public void handOffSessionTo(ManagedSessionId sessionId, AgentKind target) {
+        if (handoffsInFlight.contains(sessionId)) {
+            // A handoff for this session is already running. The session
+            // still being in sessionManager.sessions() is not a safe signal
+            // by itself -- see handoffsInFlight's Javadoc -- so this is the
+            // actual guard against starting a second successor on the same
+            // worktree while the first handoff is still closing the
+            // outgoing surface.
+            return;
+        }
         Optional<ManagedAgentSession> session = sessionManager.sessions().stream()
                 .filter(candidate -> candidate.id().equals(sessionId))
                 .findFirst();
@@ -2927,15 +2959,24 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         confirm.setTitle("Hand off this session");
         confirm.setHeaderText("Hand \"" + session.get().displayName() + "\" to "
                 + AgentLabels.displayName(agentRegistry, target) + "?");
-        confirm.setContentText("This session's tab and its conversation are removed, and "
+        confirm.setContentText("This session and its tab are removed from drydock, and "
                 + AgentLabels.displayName(agentRegistry, target)
                 + " takes over the same worktree with a brief of what happened here. "
+                + "The agent's own transcript is not touched -- it stays on disk wherever that CLI keeps "
+                + "it, and can still be resumed with it directly, outside drydock. "
                 + "The branch, the working tree and every uncommitted change stay exactly as they are.");
         if (confirm.showAndWait().filter(button -> button == ButtonType.OK).isEmpty()) {
             return;
         }
+        // Registered only now that the human has actually confirmed -- a
+        // cancelled confirmation (the two returns above) must leave no
+        // trace in handoffsInFlight.
+        handoffsInFlight.add(sessionId);
         handoffService().handOff(session.get(), target)
                 .whenComplete((successor, failure) -> Platform.runLater(() -> {
+                    // Unconditional: a failed handoff must not lock this
+                    // session out of ever being retried.
+                    handoffsInFlight.remove(sessionId);
                     // Guarded on the session actually being gone, not on which
                     // branch this is: the delete may have committed even when
                     // the launch that followed it failed, and that state must
@@ -2957,10 +2998,21 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                         Alert alert = new Alert(Alert.AlertType.WARNING);
                         alert.setTitle("Could not hand off this session");
                         alert.setHeaderText("Could not hand off this session");
+                        // deleteSession closes the surface before it writes
+                        // metadata, so whichever branch put us here, this
+                        // session's agent process is already stopped -- that
+                        // has to be said explicitly, not left implied,
+                        // because a delete failure otherwise leaves a session
+                        // sitting in the sidebar with a dead terminal and no
+                        // warning that it is dead.
                         alert.setContentText(UiErrors.unwrap(failure).getMessage()
                                 + "\n\nThe worktree, the branch and every uncommitted change are "
-                                + "untouched. If this session's tab is gone, its work is still on disk "
-                                + "and you can open a new session on the same worktree.");
+                                + "untouched, and this session's agent process has already been stopped. "
+                                + (sessionGone
+                                        ? "This session's tab is gone; its work is still on disk and you "
+                                                + "can open a new session on the same worktree."
+                                        : "This session is still listed, with a dead terminal, and can be "
+                                                + "resumed."));
                         alert.showAndWait();
                     }
                 }));

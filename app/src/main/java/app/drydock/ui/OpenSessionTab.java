@@ -857,7 +857,8 @@ final class OpenSessionTab {
         handoffButton.setFocusTraversable(false);
         handoffButton.setTooltip(new Tooltip("Hand this session's work to another agent. "
                 + "The successor continues in this same worktree, on this branch, over these "
-                + "same uncommitted changes; this session and its conversation are removed."));
+                + "same uncommitted changes; this session and its tab leave drydock, but its "
+                + "conversation stays on disk wherever that agent keeps it."));
         finishButton.getStyleClass().add("finish-button");
         finishButton.setFocusTraversable(false);
         handoffSpinner.setPrefSize(12, 12);
