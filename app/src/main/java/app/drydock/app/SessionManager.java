@@ -512,16 +512,32 @@ public final class SessionManager implements AutoCloseable {
                             : mcpAccessFor(provider, managedSessionId, spawn);
                     CreateContext ctx = new CreateContext(displayName, sessionId, targetWorkingDirectory, remote,
                             mcp, eval);
-                    LaunchPlan plan = provider.buildCreateCommand(ctx);
-                    if (!plan.supported()) {
-                        throw new IllegalStateException(
-                                provider.kind() + " cannot launch this session (remote unsupported)");
+                    // A diagnostic command override (app.drydock.diag.command[.<kind>])
+                    // replaces the provider's built command entirely, so it also
+                    // bypasses the provider's support probe below -- which would
+                    // otherwise throw "cannot launch" for an agent whose CLI is
+                    // not installed (claude on a CI runner). That is what lets a
+                    // terminal-only session run on Windows CI without claude:
+                    // prepareSession mints only metadata, and this override
+                    // supplies the command the terminal actually runs. The MCP
+                    // config is already skipped for an overridden launch (the
+                    // hasDiagOverride guard above), so nothing provider-side
+                    // runs at all.
+                    String command;
+                    boolean sessionIdUsed;
+                    if (hasDiagOverride(provider.kind())) {
+                        command = diagOverride(provider.kind(), null);
+                        sessionIdUsed = false;
+                    } else {
+                        LaunchPlan plan = provider.buildCreateCommand(ctx);
+                        if (!plan.supported()) {
+                            throw new IllegalStateException(
+                                    provider.kind() + " cannot launch this session (remote unsupported)");
+                        }
+                        command = plan.command();
+                        sessionIdUsed = plan.sessionIdUsed() && command.contains(sessionId);
                     }
-                    // contains() rather than plan.sessionIdUsed() alone: a
-                    // diag command override never carries the id even when
-                    // the provider's own plan says it used it.
-                    String command = diagOverride(provider.kind(), plan.command());
-                    return new CreatePlan(command, plan.sessionIdUsed() && command.contains(sessionId));
+                    return new CreatePlan(command, sessionIdUsed);
                 }, backgroundExecutor)
                 .thenCompose(plan -> createSurfaceOnFxThread(app, host, scaleFactor, plan.command(),
                         surfaceWorkingDirectory)

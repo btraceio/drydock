@@ -172,3 +172,37 @@ registerGateTask(
         systemProperty("app.drydock.gate0e.autoExit", "true")
     }
 }
+
+// Boots the REAL app (app.drydock.Main) with no native build, for CI
+// verification of the terminal-only session path on a Windows runner. The
+// app is a JavaFX Application, so this needs a desktop session (windows-latest
+// hosts one). It sets its OWN JVM args rather than applicationDefaultJvmArgs,
+// because the latter carries the macOS-only -Xdock:name that aborts a Windows
+// JVM at launch. Diag/backend selection is driven by -Papp.drydock.diag.* and
+// -Papp.drydock.terminal.backend project properties, forwarded to the forked
+// JVM (Gradle -P never reaches it); the CI job sets those to auto-register a
+// throwaway repo, open a terminal-only session whose command exits on its
+// own, and exit the app after a few seconds -- so the task's exit code is the
+// pass/fail, no kill needed.
+registerGateTask(
+    "bootSpike",
+    "Boots the real app (no native build) for CI verification of the terminal-only session path.",
+    "app.drydock.Main",
+    requireNativeBuild = false,
+) {
+    // Own JVM args: matches the `run` task's needs minus the macOS-only
+    // -Xdock:name/-Xdock:icon (a Windows HotSpot rejects -Xdock:* as an
+    // unrecognized option). --add-exports mirrors `run`.
+    jvmArgs = listOf(
+        "--enable-native-access=ALL-UNNAMED",
+        "--add-exports=javafx.graphics/com.sun.glass.ui=ALL-UNNAMED",
+        "-Dfile.encoding=UTF-8",
+        "-Djava.awt.headless=false",
+    )
+    project.properties.forEach { (key, value) ->
+        if ((key.startsWith("app.drydock.diag.") || key == "app.drydock.terminal.backend")
+            && value != null) {
+            systemProperty(key, value.toString())
+        }
+    }
+}

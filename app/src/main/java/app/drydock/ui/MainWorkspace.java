@@ -2253,8 +2253,20 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         Optional<AgentKind> defaultKind = agentRegistry.resolveDefault(
                 repository.settings().lastUsedAgent(), repository.isRemote());
         if (defaultKind.isEmpty()) {
-            showNoAgentAvailable();
-            return;
+            // A diag command override (app.drydock.diag.command) replaces the
+            // provider built command in SessionManager, so the session runs that
+            // command and needs no installed agent CLI. Proceed with any
+            // registered kind so a terminal-only session boots on a CI runner
+            // without claude; otherwise the diag path bails before the override.
+            if (System.getProperty("app.drydock.diag.command") == null) {
+                showNoAgentAvailable();
+                return;
+            }
+            defaultKind = agentRegistry.agents().stream().findFirst().map(Agent::kind);
+            if (defaultKind.isEmpty()) {
+                showNoAgentAvailable();
+                return;
+            }
         }
         openNewSession(repository, Optional.empty(), defaultKind.get());
     }
