@@ -2526,19 +2526,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         // as openNewSession.
         ManagedAgentSession prepared = sessionManager.prepareWorktreeSession(
                 repository, branch, worktreeRoot, branchCreatedHere, agent, forkedFrom).withEvalMode(eval);
-        OpenSessionTab placeholderTab = showPendingTab(prepared.id(), branch, AgentLabels.displayName(agentRegistry, prepared),
-                prepared.agentKind(), prepared.status() == SessionStatus.UNSUPPORTED_AGENT,
-                Optional.of(repository), worktreeRoot);
-
-        double scale = stage.getOutputScaleX();
-        sessionManager.launchSession(prepared, placeholderTab.app(), placeholderTab.host(), scale, spawn)
-                .whenComplete((result, ex) -> Platform.runLater(() -> {
-                    handleOpenResult(placeholderTab, result, ex);
-                    if (ex == null && result instanceof SessionOpenResult.Opened && task.isPresent()) {
-                        sendTaskWhenReady(placeholderTab, task.get());
-                    }
-                }));
-        return prepared.id();
+        return openPreparedSession(prepared, branch, task, spawn, repository);
     }
 
     /**

@@ -61,11 +61,15 @@ class SessionHandoffServiceTest {
         String lastPrompt;
         AgentKind lastKind;
         ManagedAgentSession lastOutgoing;
+        boolean failNext;
         final ManagedSessionId successorId = ManagedSessionId.newId();
 
         @Override
         public CompletableFuture<ManagedSessionId> start(ManagedAgentSession outgoing, AgentKind kind,
                                                          String seedPrompt) {
+            if (failNext) {
+                return CompletableFuture.failedFuture(new IllegalStateException("launch refused"));
+            }
             startCount++;
             lastOutgoing = outgoing;
             lastKind = kind;
@@ -74,8 +78,14 @@ class SessionHandoffServiceTest {
         }
     }
 
-    /** The delete, unless told to fail -- which is how the abort is exercised. */
-    private static final class FailableDeleter implements SessionHandoffService.SessionDeleter {
+    /**
+     * The delete, unless told to fail -- which is how the abort is exercised.
+     * Mirrors {@code SessionManager.deleteSession} by dropping the session's
+     * brief along with it: without that, a seed composed AFTER the delete
+     * would still see the brief and this fake could not catch the bug the
+     * ordering exists to prevent.
+     */
+    private final class FailableDeleter implements SessionHandoffService.SessionDeleter {
         final List<ManagedSessionId> deleted = new ArrayList<>();
         boolean failNext;
         java.util.function.IntSupplier observeStartCount = () -> -1;
@@ -88,6 +98,7 @@ class SessionHandoffServiceTest {
             }
             startCountAtDelete = observeStartCount.getAsInt();
             deleted.add(sessionId);
+            briefs.remove(sessionId);
             return CompletableFuture.completedFuture(null);
         }
     }
@@ -198,6 +209,20 @@ class SessionHandoffServiceTest {
         assertThrows(IllegalStateException.class, () -> service.handOffBlocking(outgoing, AgentKind.CODEX));
 
         assertEquals(0, launcher.startCount, "no session may be started for a failed handoff");
+    }
+
+    @Test
+    void aFailedLaunchAfterTheDeleteHasAlreadyCommittedLeavesNoSuccessorEither() {
+        // The trade-off this design accepts: the delete must precede the
+        // launch (two agents on one worktree is the hazard it cannot
+        // survive), so a launch failure in this window leaves the outgoing
+        // session deleted with nothing that replaces it -- an orphaned seed
+        // file, not an orphaned worktree.
+        launcher.failNext = true;
+
+        assertThrows(IllegalStateException.class, () -> service.handOffBlocking(outgoing, AgentKind.CODEX));
+
+        assertEquals(List.of(outgoing.id()), deleter.deleted);
     }
 
     @Test

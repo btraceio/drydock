@@ -166,6 +166,13 @@ public final class SessionHandoffService {
      * aborts here, with the outgoing session's surface closed but its
      * metadata intact, rather than leaving two sessions on one tree. The
      * rebind comes last, because it needs the successor's id.</p>
+     *
+     * <p>That ordering leaves one window open: once the delete has committed,
+     * a launch that then fails leaves no session at all -- the outgoing one
+     * is gone and no successor replaced it. That is accepted rather than
+     * fixed here, because the alternative -- launching before deleting -- is
+     * exactly the two-agents-on-one-worktree hazard above, and this window is
+     * the smaller failure.</p>
      */
     public ManagedSessionId handOffBlocking(ManagedAgentSession outgoing, AgentKind target) {
         Path worktree = outgoing.workingDirectory();
