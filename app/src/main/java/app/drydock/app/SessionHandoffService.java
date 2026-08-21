@@ -36,7 +36,10 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Function;
 
 /**
@@ -58,6 +61,23 @@ public final class SessionHandoffService {
 
     private static final Logger LOG = System.getLogger(SessionHandoffService.class.getName());
     private static final Duration PROCESS_TIMEOUT = Duration.ofSeconds(60);
+
+    /**
+     * How long {@link #handOffBlocking} waits for {@link SessionDeleter#delete}
+     * before giving up. Generous relative to {@code deleteSession}'s own
+     * three-second grace period -- this bound exists not because a delete is
+     * expected to take long, but because the surface close it waits on
+     * ({@code GhosttySurface.pollUntilExitedOrTimeout}) invokes its {@code
+     * onDone} callback only from {@code close()}, and {@code close()} can
+     * throw {@code GhosttyNativeCallException} before that callback ever
+     * runs. When that happens the delete future never completes, and without
+     * a bound this method -- and the handoff thread it runs on -- would park
+     * forever with no successor started and no error shown. This is a
+     * mitigation for that specific hazard, not a tuning knob: do not raise it
+     * to work around a slow delete, because a delete that is actually slow
+     * rather than stuck should be investigated, not waited out longer.
+     */
+    private static final Duration DELETE_TIMEOUT = Duration.ofSeconds(30);
 
     /** How long an unread seed file survives before {@link #sweepStaleSeeds} removes it. */
     private static final Duration SEED_RETENTION = Duration.ofDays(7);
@@ -175,6 +195,18 @@ public final class SessionHandoffService {
      * the smaller failure.</p>
      */
     public ManagedSessionId handOffBlocking(ManagedAgentSession outgoing, AgentKind target) {
+        return handOffBlocking(outgoing, target, DELETE_TIMEOUT);
+    }
+
+    /**
+     * As above, with the wait on {@link SessionDeleter#delete} bound to
+     * {@code deleteTimeout} rather than the fixed {@link #DELETE_TIMEOUT} --
+     * package-private so a test can pass a short bound and stay fast rather
+     * than actually waiting out {@link #DELETE_TIMEOUT}, following {@code
+     * SessionManager.closeSession}'s pattern of a public default that calls a
+     * configurable overload.
+     */
+    ManagedSessionId handOffBlocking(ManagedAgentSession outgoing, AgentKind target, Duration deleteTimeout) {
         Path worktree = outgoing.workingDirectory();
         String branch = branchOf(worktree).orElse("HEAD");
         Optional<String> head = gitStatusService.headCommitBlocking(worktree);
@@ -182,7 +214,7 @@ public final class SessionHandoffService {
                 HandoffSeed.compose(briefLookup.apply(outgoing.id()), factsFor(outgoing, worktree, branch, head)),
                 branch);
 
-        join(deleter.delete(outgoing.id()));
+        joinDelete(deleter.delete(outgoing.id()), deleteTimeout);
         ManagedSessionId successor = join(launcher.start(outgoing, target, prompt));
         rebinder.rebind(outgoing.id(), successor);
         return successor;
@@ -229,6 +261,34 @@ public final class SessionHandoffService {
                 throw runtime;
             }
             throw e;
+        }
+    }
+
+    /**
+     * As {@link #join}, but bounded -- specifically for {@link
+     * SessionDeleter#delete}, whose completion depends on a native callback
+     * that is not guaranteed to run (see {@link #DELETE_TIMEOUT}). A timeout
+     * here is translated into a message naming exactly what is known to have
+     * happened (the terminal was closed) and what could not be confirmed (the
+     * session's removal), because the alternative -- letting the handoff
+     * thread park forever -- shows the human neither a successor nor an
+     * error.
+     */
+    private static void joinDelete(CompletableFuture<Void> deleted, Duration timeout) {
+        try {
+            deleted.get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (TimeoutException e) {
+            throw new IllegalStateException("This session's terminal was closed, but drydock could not "
+                    + "confirm within " + timeout.toSeconds() + "s that the session was removed, so no "
+                    + "successor was started.");
+        } catch (ExecutionException e) {
+            if (e.getCause() instanceof RuntimeException runtime) {
+                throw runtime;
+            }
+            throw new IllegalStateException("Could not remove the outgoing session.", e.getCause());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Interrupted while waiting for the outgoing session to be removed.", e);
         }
     }
 

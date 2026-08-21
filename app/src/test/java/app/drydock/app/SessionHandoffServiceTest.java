@@ -88,11 +88,18 @@ class SessionHandoffServiceTest {
     private final class FailableDeleter implements SessionHandoffService.SessionDeleter {
         final List<ManagedSessionId> deleted = new ArrayList<>();
         boolean failNext;
+        // Simulates GhosttySurface.close() throwing before its onDone
+        // callback runs: the surface close never invokes the completion the
+        // delete future is waiting on, so it simply never completes.
+        boolean neverCompletes;
         java.util.function.IntSupplier observeStartCount = () -> -1;
         int startCountAtDelete = -1;
 
         @Override
         public CompletableFuture<Void> delete(ManagedSessionId sessionId) {
+            if (neverCompletes) {
+                return new CompletableFuture<>();
+            }
             if (failNext) {
                 return CompletableFuture.failedFuture(new IllegalStateException("state write refused"));
             }
@@ -209,6 +216,25 @@ class SessionHandoffServiceTest {
         assertThrows(IllegalStateException.class, () -> service.handOffBlocking(outgoing, AgentKind.CODEX));
 
         assertEquals(0, launcher.startCount, "no session may be started for a failed handoff");
+    }
+
+    @Test
+    void aDeleteThatNeverCompletesFailsTheHandoffInsteadOfHangingForever() {
+        // GhosttySurface.close() can throw before its onDone callback runs,
+        // in which case the delete future this blocks on never completes.
+        // Without a bound the handoff thread would park forever, showing the
+        // human neither a successor nor an error. A short bound here keeps
+        // the test itself fast rather than actually waiting out the real
+        // production timeout.
+        deleter.neverCompletes = true;
+
+        long start = System.nanoTime();
+        assertThrows(IllegalStateException.class,
+                () -> service.handOffBlocking(outgoing, AgentKind.CODEX, Duration.ofMillis(200)));
+        long elapsedMillis = Duration.ofNanos(System.nanoTime() - start).toMillis();
+
+        assertTrue(elapsedMillis < 5000, "handOffBlocking should fail within its bound, took " + elapsedMillis + "ms");
+        assertEquals(0, launcher.startCount, "no successor may be started when the delete cannot be confirmed");
     }
 
     @Test

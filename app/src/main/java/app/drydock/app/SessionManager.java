@@ -337,22 +337,7 @@ public final class SessionManager implements AutoCloseable {
     /** As {@link #prepareSession}, for a session living inside an already-created worktree checkout. */
     public ManagedAgentSession prepareWorktreeSession(Repository repository, String displayName, Path worktreeRoot,
                                                         boolean branchCreatedHere, AgentKind agentKind) {
-        return prepareWorktreeSession(repository, displayName, worktreeRoot, branchCreatedHere, agentKind,
-                Optional.empty());
-    }
-
-    /**
-     * As above, recording that this session was forked from {@code forkedFrom}.
-     *
-     * <p>Lineage is set here rather than patched on after launch: it is part of
-     * what the session IS, and a window where a fork does not yet know its
-     * parent is a window where a crash loses the link entirely.</p>
-     */
-    public ManagedAgentSession prepareWorktreeSession(Repository repository, String displayName, Path worktreeRoot,
-                                                        boolean branchCreatedHere, AgentKind agentKind,
-                                                        Optional<ManagedSessionId> forkedFrom) {
-        return newSessionMetadata(repository, displayName, agentKind, Optional.of(worktreeRoot), branchCreatedHere)
-                .withForkedFrom(forkedFrom);
+        return newSessionMetadata(repository, displayName, agentKind, Optional.of(worktreeRoot), branchCreatedHere);
     }
 
     /**
@@ -821,15 +806,15 @@ public final class SessionManager implements AutoCloseable {
      * and who is allowed to make it: this path is never charged against the
      * session's MCP budget, which exists to bound an agent looping and has
      * nothing to say about a person correcting a brief. The stamp matters
-     * downstream -- the fork seed labels an agent brief as testimony, and that
-     * label would be wrong for one the human typed.</p>
+     * downstream -- the handoff seed labels an agent brief as testimony, and
+     * that label would be wrong for one the human typed.</p>
      */
     public HandoffBrief applyHumanHandoff(ManagedSessionId sessionId, McpSessionContext.HandoffDraft draft,
                                           Optional<String> headCommit) {
         return storeHandoff(sessionId, draft, headCommit, HandoffBrief.Author.HUMAN);
     }
 
-    /** Every session's handoff brief, for the banner and the fork seed. */
+    /** Every session's handoff brief, for the banner and the handoff seed. */
     public List<HandoffBrief> handoffBriefs() {
         return stateStore.state().handoffBriefs();
     }
@@ -1100,7 +1085,7 @@ public final class SessionManager implements AutoCloseable {
                 AgentBinding.unlaunched(agentKind),
                 new SessionWorkspace(worktreeRoot.orElse(repository.root()), worktreeRoot, branchCreatedHere),
                 now)
-                .build();   // lineage is set by the fork path, never here
+                .build();   // forkedFrom defaults to empty; nothing ever sets it any more
     }
 
     /**
