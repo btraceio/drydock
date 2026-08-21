@@ -12,7 +12,6 @@ import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionStatus;
 import app.drydock.git.GitExecutableLocator;
 import app.drydock.git.GitStatusService;
-import app.drydock.git.WorktreeTransplant;
 import app.drydock.handoff.HandoffStaleness;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -36,67 +35,78 @@ import java.util.concurrent.ForkJoinPool;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Real repositories, because every invariant here is about what git actually
- * leaves on disk: that the outgoing worktree is untouched, that the dirty tree
- * crosses, and that a failure leaves neither worktree nor branch behind.
+ * Real repositories, because every invariant here is about what git is left
+ * NOT doing: no branch, no worktree, no transplant -- the outgoing worktree
+ * and its dirty tree are exactly what the successor inherits, unmoved.
  */
-class SessionForkServiceTest {
+class SessionHandoffServiceTest {
 
     private Path repositoryRoot;
-    private Path worktreeParent;
     private Path seedDirectory;
     private ManagedAgentSession outgoing;
 
     private final Map<ManagedSessionId, HandoffBrief> briefs = new HashMap<>();
     private RecordingLauncher launcher;
-    private FailableTransplant transplant;
-    private SessionForkService service;
+    private FailableDeleter deleter;
+    private RecordingRebinder rebinder;
+    private SessionHandoffService service;
 
     /** Records what it was asked to start, and never starts anything real. */
-    private static final class RecordingLauncher implements SessionForkService.Launcher {
+    private static final class RecordingLauncher implements SessionHandoffService.Launcher {
         int startCount;
         String lastPrompt;
         AgentKind lastKind;
-        ManagedSessionId lastParent;
-        Path lastWorktree;
-        Path lastRepositoryRoot;
+        ManagedAgentSession lastOutgoing;
+        final ManagedSessionId successorId = ManagedSessionId.newId();
 
         @Override
-        public CompletableFuture<ManagedSessionId> start(Path repositoryRoot, Path worktree, AgentKind kind,
-                                                         String seedPrompt, ManagedSessionId forkedFrom) {
+        public CompletableFuture<ManagedSessionId> start(ManagedAgentSession outgoing, AgentKind kind,
+                                                         String seedPrompt) {
             startCount++;
-            lastRepositoryRoot = repositoryRoot;
-            lastWorktree = worktree;
+            lastOutgoing = outgoing;
             lastKind = kind;
             lastPrompt = seedPrompt;
-            lastParent = forkedFrom;
-            return CompletableFuture.completedFuture(ManagedSessionId.newId());
+            return CompletableFuture.completedFuture(successorId);
         }
     }
 
-    /** The real transplant, unless told to fail -- which is how rollback is exercised. */
-    private static final class FailableTransplant implements SessionForkService.Transplanter {
-        private final WorktreeTransplant real = new WorktreeTransplant();
+    /** The delete, unless told to fail -- which is how the abort is exercised. */
+    private static final class FailableDeleter implements SessionHandoffService.SessionDeleter {
+        final List<ManagedSessionId> deleted = new ArrayList<>();
         boolean failNext;
+        java.util.function.IntSupplier observeStartCount = () -> -1;
+        int startCountAtDelete = -1;
 
         @Override
-        public int transplant(Path source, Path destination) {
+        public CompletableFuture<Void> delete(ManagedSessionId sessionId) {
             if (failNext) {
-                throw new IllegalStateException("transplant refused");
+                return CompletableFuture.failedFuture(new IllegalStateException("state write refused"));
             }
-            return real.transplantBlocking(source, destination);
+            startCountAtDelete = observeStartCount.getAsInt();
+            deleted.add(sessionId);
+            return CompletableFuture.completedFuture(null);
+        }
+    }
+
+    /** Records the rebind so ordering against the launch can be asserted. */
+    private static final class RecordingRebinder implements SessionHandoffService.ScopeRebinder {
+        ManagedSessionId from;
+        ManagedSessionId to;
+
+        @Override
+        public void rebind(ManagedSessionId outgoing, ManagedSessionId successor) {
+            from = outgoing;
+            to = successor;
         }
     }
 
     @BeforeEach
     void setUp(@TempDir Path dir) throws Exception {
         repositoryRoot = Files.createDirectories(dir.resolve("repo"));
-        worktreeParent = Files.createDirectories(dir.resolve("worktrees"));
         seedDirectory = dir.resolve("state").resolve("handoff-seeds");
         git(repositoryRoot, "init", "-b", "main");
         Files.writeString(repositoryRoot.resolve("README.md"), "hello\n");
@@ -109,66 +119,123 @@ class SessionForkServiceTest {
 
         outgoing = session(repositoryRoot);
         launcher = new RecordingLauncher();
-        transplant = new FailableTransplant();
-        service = new SessionForkService(
+        deleter = new FailableDeleter();
+        rebinder = new RecordingRebinder();
+        service = new SessionHandoffService(
                 new GitStatusService(),
-                transplant,
                 new GitExecutableLocator(),
                 launcher,
+                deleter,
+                rebinder,
                 id -> Optional.ofNullable(briefs.get(id)),
-                ignored -> repositoryRoot,
-                (ignored, branch) -> worktreeParent.resolve(branch.replace('/', '-')),
                 id -> List.of("Rework the rail"),
                 seedDirectory,
                 ForkJoinPool.commonPool());
     }
 
     @Test
-    void forksOntoASiblingWorktreeRunningTheChosenAgent() {
-        service.forkBlocking(outgoing, AgentKind.CODEX);
+    void theSuccessorRunsInTheOutgoingSessionsOwnWorktree() {
+        service.handOffBlocking(outgoing, AgentKind.CODEX);
 
         assertEquals(AgentKind.CODEX, launcher.lastKind);
-        assertEquals(Optional.of(outgoing.id()), Optional.of(launcher.lastParent));
-        assertNotEquals(outgoing.workingDirectory(), launcher.lastWorktree);
-        assertTrue(Files.isDirectory(launcher.lastWorktree));
+        assertEquals(outgoing.id(), launcher.lastOutgoing.id());
+        assertEquals(outgoing.workingDirectory(), launcher.lastOutgoing.workingDirectory());
     }
 
     @Test
-    void leavesTheOutgoingWorktreeExactlyAsItWas() throws Exception {
+    void nothingInTheWorkingTreeMovesOrChanges() throws Exception {
+        // The rescue case: the uncommitted work is exactly what must survive,
+        // and the surest way to keep it is never to copy it.
         Files.writeString(repositoryRoot.resolve("wip.txt"), "half done");
         String before = gitCapture(repositoryRoot, "status", "--porcelain");
 
-        service.forkBlocking(outgoing, AgentKind.CODEX);
+        service.handOffBlocking(outgoing, AgentKind.CODEX);
 
         assertEquals(before, gitCapture(repositoryRoot, "status", "--porcelain"));
         assertEquals("feat/work", gitCapture(repositoryRoot, "rev-parse", "--abbrev-ref", "HEAD").strip());
+        assertEquals("half done", Files.readString(repositoryRoot.resolve("wip.txt")));
     }
 
     @Test
-    void carriesTheOutgoingDirtyTreeIntoTheFork() throws Exception {
-        // The rescue case: the uncommitted work is exactly what must survive.
-        Files.writeString(repositoryRoot.resolve("wip.txt"), "half done");
+    void noBranchIsCreated() throws Exception {
+        String before = gitCapture(repositoryRoot, "branch", "--list");
 
-        service.forkBlocking(outgoing, AgentKind.CODEX);
+        service.handOffBlocking(outgoing, AgentKind.CODEX);
 
-        assertEquals("half done", Files.readString(launcher.lastWorktree.resolve("wip.txt")));
+        assertEquals(before, gitCapture(repositoryRoot, "branch", "--list"));
     }
 
     @Test
-    void forkingToTheSameAgentIsAllowed() {
-        // A wedged process is a reason to fork even when the harness is fine.
-        service.forkBlocking(outgoing, AgentKind.CLAUDE);
+    void noWorktreeIsCreated() throws Exception {
+        String before = gitCapture(repositoryRoot, "worktree", "list");
+
+        service.handOffBlocking(outgoing, AgentKind.CODEX);
+
+        assertEquals(before, gitCapture(repositoryRoot, "worktree", "list"));
+    }
+
+    @Test
+    void theOutgoingSessionIsDeletedBeforeTheSuccessorStarts() {
+        // `gitCapture` and `Files.*` throw; any test here that calls them
+        // needs `throws Exception`, as the copied ones already do.
+        // Two agent processes on one worktree is the one hazard this design
+        // has no defence against beyond never creating it.
+        deleter.observeStartCount = () -> launcher.startCount;
+
+        service.handOffBlocking(outgoing, AgentKind.CODEX);
+
+        assertEquals(List.of(outgoing.id()), deleter.deleted);
+        assertEquals(0, deleter.startCountAtDelete);
+        assertEquals(1, launcher.startCount);
+    }
+
+    @Test
+    void aFailedDeleteStartsNoSuccessor() {
+        // The surface is closed but the metadata write lost: degraded, not
+        // damaged. Starting anyway would put two sessions on one worktree.
+        deleter.failNext = true;
+
+        assertThrows(IllegalStateException.class, () -> service.handOffBlocking(outgoing, AgentKind.CODEX));
+
+        assertEquals(0, launcher.startCount, "no session may be started for a failed handoff");
+    }
+
+    @Test
+    void theOutgoingSessionsReviewScopesFollowItToTheSuccessor() {
+        ManagedSessionId successor = service.handOffBlocking(outgoing, AgentKind.CODEX);
+
+        assertEquals(outgoing.id(), rebinder.from);
+        assertEquals(successor, rebinder.to);
+    }
+
+    @Test
+    void anAlreadyDeadSessionIsHandedOffWithoutSpecialCasing() {
+        // The common rescue case. deleteSession closes nothing when there is
+        // no active surface and removes the metadata just the same, so this
+        // path needs no branch of its own -- assert that it has none.
+        ManagedAgentSession dead = session(repositoryRoot).withStatus(SessionStatus.EXITED);
+
+        service.handOffBlocking(dead, AgentKind.CODEX);
+
+        assertEquals(List.of(dead.id()), deleter.deleted);
+        assertEquals(1, launcher.startCount);
+    }
+
+    @Test
+    void handingOffToTheSameAgentIsAllowed() {
+        // A wedged process is a reason to hand off even when the harness is fine.
+        service.handOffBlocking(outgoing, AgentKind.CLAUDE);
 
         assertEquals(AgentKind.CLAUDE, launcher.lastKind);
     }
 
     @Test
-    void seedsTheForkWithTheBriefWhenOneExists() throws Exception {
-        briefs.put(outgoing.id(), brief(outgoing.id(), "Ship the fork gesture"));
+    void seedsTheSuccessorWithTheBriefWhenOneExists() throws Exception {
+        briefs.put(outgoing.id(), brief(outgoing.id(), "Ship the handoff gesture"));
 
-        service.forkBlocking(outgoing, AgentKind.CODEX);
+        service.handOffBlocking(outgoing, AgentKind.CODEX);
 
-        assertTrue(seedFileContents().contains("Ship the fork gesture"), seedFileContents());
+        assertTrue(seedFileContents().contains("Ship the handoff gesture"), seedFileContents());
     }
 
     /**
@@ -179,9 +246,9 @@ class SessionForkServiceTest {
      */
     @Test
     void thePromptIsASingleLineThatSurvivesWhitespaceCollapsing() {
-        briefs.put(outgoing.id(), brief(outgoing.id(), "Ship the fork gesture"));
+        briefs.put(outgoing.id(), brief(outgoing.id(), "Ship the handoff gesture"));
 
-        service.forkBlocking(outgoing, AgentKind.CODEX);
+        service.handOffBlocking(outgoing, AgentKind.CODEX);
 
         assertFalse(launcher.lastPrompt.contains("\n"), launcher.lastPrompt);
         assertFalse(launcher.lastPrompt.contains("\r"), launcher.lastPrompt);
@@ -191,23 +258,23 @@ class SessionForkServiceTest {
 
     @Test
     void thePromptPointsAtTheSeedFileAndAsksForItsDeletion() {
-        service.forkBlocking(outgoing, AgentKind.CODEX);
+        service.handOffBlocking(outgoing, AgentKind.CODEX);
 
         assertTrue(launcher.lastPrompt.contains(seedFile().toString()), launcher.lastPrompt);
         assertTrue(launcher.lastPrompt.toLowerCase(Locale.ROOT).contains("delete"), launcher.lastPrompt);
     }
 
     @Test
-    void theSeedFileLivesOutsideTheWorktreeSoItNeverEntersTheForksDiff() throws Exception {
-        service.forkBlocking(outgoing, AgentKind.CODEX);
+    void theSeedFileLivesOutsideTheWorktreeSoItNeverEntersTheDiff() throws Exception {
+        service.handOffBlocking(outgoing, AgentKind.CODEX);
 
-        assertFalse(seedFile().startsWith(launcher.lastWorktree), seedFile().toString());
-        assertEquals("", gitCapture(launcher.lastWorktree, "status", "--porcelain").strip());
+        assertFalse(seedFile().startsWith(outgoing.workingDirectory()), seedFile().toString());
+        assertEquals("", gitCapture(repositoryRoot, "status", "--porcelain").strip());
     }
 
     @Test
     void theSeedFileIsOwnerOnlyBecauseABriefCanQuoteAnything() throws Exception {
-        service.forkBlocking(outgoing, AgentKind.CODEX);
+        service.handOffBlocking(outgoing, AgentKind.CODEX);
 
         assertEquals("rw-------", PosixFilePermissions.toString(Files.getPosixFilePermissions(seedFile())));
     }
@@ -215,7 +282,7 @@ class SessionForkServiceTest {
     @Test
     void staleSeedsAreSweptEvenThoughTheAgentWasAskedToDeleteTheirs() throws Exception {
         // The request to delete goes to an agent, so it is not a guarantee.
-        service.forkBlocking(outgoing, AgentKind.CODEX);
+        service.handOffBlocking(outgoing, AgentKind.CODEX);
         Path seed = seedFile();
 
         service.sweepStaleSeeds(Instant.now().plus(Duration.ofDays(8)));
@@ -225,7 +292,7 @@ class SessionForkServiceTest {
 
     @Test
     void aFreshSeedSurvivesTheSweep() throws Exception {
-        service.forkBlocking(outgoing, AgentKind.CODEX);
+        service.handOffBlocking(outgoing, AgentKind.CODEX);
         Path seed = seedFile();
 
         service.sweepStaleSeeds(Instant.now());
@@ -247,14 +314,14 @@ class SessionForkServiceTest {
 
     @Test
     void saysSoWhenNoBriefWasRecorded() throws Exception {
-        service.forkBlocking(outgoing, AgentKind.CODEX);
+        service.handOffBlocking(outgoing, AgentKind.CODEX);
 
         assertTrue(seedFileContents().contains("No handoff brief was recorded"), seedFileContents());
     }
 
     @Test
     void theSeedCarriesFactsDrydockDerivedItself() throws Exception {
-        service.forkBlocking(outgoing, AgentKind.CODEX);
+        service.handOffBlocking(outgoing, AgentKind.CODEX);
 
         String seed = seedFileContents();
         assertTrue(seed.contains("add a.txt"), seed);
@@ -269,7 +336,7 @@ class SessionForkServiceTest {
             Files.writeString(repositoryRoot.resolve("scratch-" + i + ".txt"), "x");
         }
 
-        service.forkBlocking(outgoing, AgentKind.CODEX);
+        service.handOffBlocking(outgoing, AgentKind.CODEX);
 
         String seed = seedFileContents();
         assertTrue(seed.contains("and 10 more"), seed);
@@ -281,40 +348,19 @@ class SessionForkServiceTest {
     void theSeedCarriesTheOutgoingSessionsOpenReviewIntents() throws Exception {
         // The most concrete statement of what is still open; a successor that
         // re-litigates a settled intent does the work twice.
-        service.forkBlocking(outgoing, AgentKind.CODEX);
+        service.handOffBlocking(outgoing, AgentKind.CODEX);
 
         assertTrue(seedFileContents().contains("Rework the rail"), seedFileContents());
         assertTrue(seedFileContents().contains("Open review intents"), seedFileContents());
     }
 
     @Test
-    void passesTheRepositoryRootToTheLauncherSoItCanIdentifyTheOwner() {
-        service.forkBlocking(outgoing, AgentKind.CODEX);
+    void theSeedIsWrittenBeforeTheDeleteTakesTheBriefWithIt() throws Exception {
+        briefs.put(outgoing.id(), brief(outgoing.id(), "Ship the handoff gesture"));
 
-        assertEquals(repositoryRoot, launcher.lastRepositoryRoot);
-    }
+        service.handOffBlocking(outgoing, AgentKind.CODEX);
 
-    @Test
-    void suffixesTheBranchNameWhenTheNaturalOneIsTaken() throws Exception {
-        git(repositoryRoot, "branch", "feat/work-codex");
-
-        service.forkBlocking(outgoing, AgentKind.CODEX);
-
-        String branch = gitCapture(launcher.lastWorktree, "rev-parse", "--abbrev-ref", "HEAD").strip();
-        assertNotEquals("feat/work-codex", branch);
-        assertTrue(branch.startsWith("feat/work-codex-"), branch);
-    }
-
-    @Test
-    void aFailedTransplantLeavesNoWorktreeNoBranchAndNoSession() throws Exception {
-        transplant.failNext = true;
-
-        assertThrows(IllegalStateException.class, () -> service.forkBlocking(outgoing, AgentKind.CODEX));
-
-        assertFalse(gitCapture(repositoryRoot, "worktree", "list").contains("feat-work-codex"));
-        assertFalse(gitCapture(repositoryRoot, "branch", "--list", "feat/work-codex")
-                .contains("feat/work-codex"));
-        assertEquals(0, launcher.startCount, "no session may be started for a failed fork");
+        assertTrue(seedFileContents().contains("Ship the handoff gesture"), seedFileContents());
     }
 
     @Test

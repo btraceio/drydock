@@ -10,9 +10,8 @@ import app.drydock.agent.api.ConversationSource;
 import app.drydock.agent.api.ConversationSource.Conversation;
 import app.drydock.activity.SessionActivityWatcher;
 import app.drydock.domain.ManagedAgentSession;
-import app.drydock.app.SessionForkService;
+import app.drydock.app.SessionHandoffService;
 import app.drydock.git.GitExecutableLocator;
-import app.drydock.git.WorktreeTransplant;
 import app.drydock.domain.HandoffBrief;
 import app.drydock.handoff.HandoffStaleness;
 import app.drydock.domain.ManagedSessionId;
@@ -220,7 +219,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * Built on first use rather than in the constructor: it probes for the git
      * executable, and workspace construction is on the FX thread.
      */
-    private SessionForkService forkService;
+    private SessionHandoffService handoffService;
     private final AgentRegistry agentRegistry;
     private final RepositoryManager repositoryManager;
     private final GitStatusService gitStatusService;
@@ -2718,38 +2717,23 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         refreshHandoffBanner(sessionId);
     }
 
-    private SessionForkService forkService() {
-        if (forkService == null) {
-            forkService = new SessionForkService(
+    private SessionHandoffService handoffService() {
+        if (handoffService == null) {
+            handoffService = new SessionHandoffService(
                     gitStatusService,
-                    new WorktreeTransplant()::transplantBlocking,
                     new GitExecutableLocator(),
-                    this::launchForkedSession,
+                    this::launchSuccessorSession,
+                    sessionManager::deleteSession,
+                    reviewScopeRegistry::rebind,
                     id -> sessionManager.handoffBriefs().stream()
                             .filter(brief -> brief.sessionId().equals(id))
                             .findFirst(),
-                    session -> repositoryManager.repositories().stream()
-                            .filter(repository -> repository.id().equals(session.repositoryId()))
-                            .map(Repository::root)
-                            .findFirst()
-                            .orElseGet(() -> session.worktreeRoot().orElse(session.workingDirectory())),
-                    (session, branch) -> WorktreeNaming.defaultDirectory(Path.of(System.getProperty("user.home")),
-                            UserConfig.load().worktreesDirectory(), forkedWorktreeOwner(session), branch),
                     this::openIntentTitles,
                     stateDirectory.resolve("handoff-seeds"),
                     HANDOFF_EXECUTOR);
-            forkService.sweepStaleSeeds(Instant.now());
+            handoffService.sweepStaleSeeds(Instant.now());
         }
-        return forkService;
-    }
-
-    /** Repository folder name used for the fork's worktree directory. */
-    private String forkedWorktreeOwner(ManagedAgentSession outgoing) {
-        return repositoryManager.repositories().stream()
-                .filter(repository -> repository.id().equals(outgoing.repositoryId()))
-                .map(Repository::displayName)
-                .findFirst()
-                .orElse("drydock");
+        return handoffService;
     }
 
     /**
@@ -2794,36 +2778,53 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         return List.copyOf(titles);
     }
 
-    /** Opens the forked session's tab. Hops to FX; the fork service waits on the future. */
-    private CompletableFuture<ManagedSessionId> launchForkedSession(Path repositoryRoot, Path worktree,
-                                                                    AgentKind kind, String seedPrompt,
-                                                                    ManagedSessionId forkedFrom) {
+    /**
+     * Opens the successor in the outgoing session's own checkout. Everything
+     * the successor inherits is decided by {@code
+     * SessionManager.prepareSuccessorSession}; this method only finds the
+     * owning repository, shows the pending tab, and launches.
+     */
+    private CompletableFuture<ManagedSessionId> launchSuccessorSession(ManagedAgentSession outgoing,
+                                                                       AgentKind kind, String seedPrompt) {
         CompletableFuture<ManagedSessionId> opened = new CompletableFuture<>();
         Platform.runLater(() -> {
             try {
                 Optional<Repository> owner = repositoryManager.repositories().stream()
-                        .filter(repository -> repository.root().equals(repositoryRoot))
+                        .filter(repository -> repository.id().equals(outgoing.repositoryId()))
                         .findFirst();
                 if (owner.isEmpty()) {
                     opened.completeExceptionally(new IllegalStateException(
-                            "No registered repository owns " + worktree));
+                            "No registered repository owns " + outgoing.workingDirectory()));
                     return;
                 }
-                String branch = worktree.getFileName().toString();
-                // A fork inherits the outgoing session's eval mode: continuing
-                // eval-gated work stays on the eval account.
-                boolean eval = sessionManager.sessions().stream()
-                        .filter(s -> s.id().equals(forkedFrom))
-                        .map(ManagedAgentSession::evalMode)
-                        .findFirst()
-                        .orElse(false);
-                opened.complete(openWorktreeSession(owner.get(), branch, worktree, Optional.of(seedPrompt),
-                        true, kind, Spawn.ALLOWED, Optional.of(forkedFrom), eval));
+                ManagedAgentSession prepared =
+                        sessionManager.prepareSuccessorSession(owner.get(), outgoing, kind);
+                opened.complete(openPreparedSession(prepared, prepared.displayName(),
+                        Optional.of(seedPrompt), Spawn.ALLOWED, owner.get()));
             } catch (RuntimeException e) {
                 opened.completeExceptionally(e);
             }
         });
         return opened;
+    }
+
+    /** The shared launch tail: pending tab, launch, then the seeded prompt when it is ready. */
+    private ManagedSessionId openPreparedSession(ManagedAgentSession prepared, String tabLabel,
+                                                 Optional<String> task, Spawn spawn, Repository repository) {
+        OpenSessionTab placeholderTab = showPendingTab(prepared.id(), tabLabel,
+                AgentLabels.displayName(agentRegistry, prepared), prepared.agentKind(),
+                prepared.status() == SessionStatus.UNSUPPORTED_AGENT,
+                Optional.of(repository), prepared.workingDirectory());
+
+        double scale = stage.getOutputScaleX();
+        sessionManager.launchSession(prepared, placeholderTab.app(), placeholderTab.host(), scale, spawn)
+                .whenComplete((result, ex) -> Platform.runLater(() -> {
+                    handleOpenResult(placeholderTab, result, ex);
+                    if (ex == null && result instanceof SessionOpenResult.Opened && task.isPresent()) {
+                        sendTaskWhenReady(placeholderTab, task.get());
+                    }
+                }));
+        return prepared.id();
     }
 
     /**
@@ -2841,7 +2842,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         }
         boolean running = !tab.isProcessExited();
         CompletableFuture
-                .supplyAsync(() -> forkService().stalenessBlocking(session.get()), HANDOFF_EXECUTOR)
+                .supplyAsync(() -> handoffService().stalenessBlocking(session.get()), HANDOFF_EXECUTOR)
                 .whenComplete((staleness, failure) -> Platform.runLater(() -> {
                     if (failure == null) {
                         tab.handoffBanner().update(staleness, running);
@@ -2906,7 +2907,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         sessionManager.sessions().stream()
                 .filter(candidate -> candidate.id().equals(sessionId))
                 .findFirst()
-                .ifPresent(session -> forkService().fork(session, target)
+                .ifPresent(session -> handoffService().handOff(session, target)
                         .whenComplete((forked, failure) -> Platform.runLater(() -> {
                             if (failure != null) {
                                 // A failed fork is additive-only, so nothing was

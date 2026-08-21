@@ -11,7 +11,6 @@ import app.drydock.git.GitException;
 import app.drydock.git.GitExecutableNotFoundException;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.WorktreeNaming;
-import app.drydock.git.WorktreeTransplant;
 import app.drydock.handoff.HandoffFacts;
 import app.drydock.handoff.HandoffSeed;
 import app.drydock.handoff.HandoffStaleness;
@@ -38,25 +37,27 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
-import java.util.function.BiFunction;
 import java.util.function.Function;
 
 /**
- * Forks a session onto a sibling worktree running a chosen agent.
+ * Hands a session's work to another agent, in place.
  *
- * <p>Every switch is a fork. Nothing is switched in place, no live tab is
- * operated on, and the outgoing session -- its branch, its worktree, its
- * metadata -- is never written to. The whole operation is additive, so a fork
- * that fails cannot cost work, and the rollback below exists only for the one
- * thing a failure can leave behind: a half-populated destination.</p>
+ * <p>The successor takes the outgoing session's place: same repository, same
+ * worktree, same branch, same working tree exactly as it stands. Nothing is
+ * copied, so nothing can be copied wrongly -- the uncommitted work the rescue
+ * case exists to save never moves at all.</p>
+ *
+ * <p>The outgoing session is deleted rather than closed. A superseded session
+ * left resumable is a trap: its transcript describes a tree that has since
+ * moved on under a different agent, and reopening it would put a confident
+ * model with stale context onto live files. Deleting it also keeps one
+ * worktree to one session, which is what lets the sidebar go on matching them
+ * one-to-one.</p>
  */
-public final class SessionForkService {
+public final class SessionHandoffService {
 
-    private static final Logger LOG = System.getLogger(SessionForkService.class.getName());
+    private static final Logger LOG = System.getLogger(SessionHandoffService.class.getName());
     private static final Duration PROCESS_TIMEOUT = Duration.ofSeconds(60);
-
-    /** How many suffixed branch names to try before giving up. */
-    private static final int MAX_BRANCH_SUFFIX = 100;
 
     /** How long an unread seed file survives before {@link #sweepStaleSeeds} removes it. */
     private static final Duration SEED_RETENTION = Duration.ofDays(7);
@@ -78,106 +79,106 @@ public final class SessionForkService {
     private static final int MAX_CHANGED_FILES = 50;
 
     /**
-     * Starts the forked session.
+     * Starts the successor session and completes with its id.
+     *
+     * <p>Takes the whole outgoing session rather than extracted fields: it is
+     * an immutable record, so the value stays valid after {@link
+     * SessionDeleter} removes the entry from state, and every inheritance rule
+     * then lives in one place ({@code SessionManager.prepareSuccessorSession})
+     * instead of being spread across this signature.</p>
      *
      * <p>A seam rather than a direct call into the workspace, for the same
      * reason {@code McpSessionContext} is one: the build has no mocking
      * library, and a service that reached into JavaFX could only be exercised
-     * on the FX thread.</p>
+     * on the FX thread. Asynchronous because opening a session is FX-thread
+     * work while {@link #handOffBlocking} runs on a background thread.</p>
      */
     public interface Launcher {
-        /**
-         * Opens the forked session and completes with its id.
-         *
-         * <p>Asynchronous because opening a session is FX-thread work while
-         * {@link #forkBlocking} runs on a background thread. Returning a
-         * future rather than hopping and joining inside the implementation
-         * keeps the deadline in one place: this service already unwraps and
-         * joins, and a second join inside the launcher would be a second
-         * timeout to reason about.</p>
-         */
-        CompletableFuture<ManagedSessionId> start(Path repositoryRoot, Path worktree, AgentKind kind,
-                                                  String seedPrompt, ManagedSessionId forkedFrom);
+        CompletableFuture<ManagedSessionId> start(ManagedAgentSession outgoing, AgentKind kind,
+                                                  String seedPrompt);
     }
 
     /**
-     * Carries the outgoing worktree's dirty state onto the fork. A seam for
-     * the same reason {@link Launcher} is: {@link WorktreeTransplant} is final
-     * and does real git work, so a test that needs it to fail cannot subclass
-     * it and should not have to break a real repository to get there.
+     * Removes the outgoing session. Matches {@code
+     * SessionManager::deleteSession}, which closes the surface, releases the
+     * MCP config, and drops the session and its brief from state.
      */
-    public interface Transplanter {
-        int transplant(Path source, Path destination);
+    public interface SessionDeleter {
+        CompletableFuture<Void> delete(ManagedSessionId sessionId);
+    }
+
+    /**
+     * Moves the outgoing session's review scopes onto the successor. Matches
+     * {@code ReviewScopeRegistry::rebind}.
+     */
+    public interface ScopeRebinder {
+        void rebind(ManagedSessionId outgoing, ManagedSessionId successor);
     }
 
     private final GitStatusService gitStatusService;
-    private final Transplanter transplant;
     private final GitExecutableLocator locator;
     private final Launcher launcher;
+    private final SessionDeleter deleter;
+    private final ScopeRebinder rebinder;
     private final Function<ManagedSessionId, Optional<HandoffBrief>> briefLookup;
-    private final Function<ManagedAgentSession, Path> repositoryRootLookup;
-    private final BiFunction<ManagedAgentSession, String, Path> worktreeDirectory;
     private final Function<ManagedSessionId, List<String>> openIntentLookup;
     private final Path seedDirectory;
     private final Executor backgroundExecutor;
 
-    public SessionForkService(GitStatusService gitStatusService,
-                              Transplanter transplant,
-                              GitExecutableLocator locator,
-                              Launcher launcher,
-                              Function<ManagedSessionId, Optional<HandoffBrief>> briefLookup,
-                              Function<ManagedAgentSession, Path> repositoryRootLookup,
-                              BiFunction<ManagedAgentSession, String, Path> worktreeDirectory,
-                              Function<ManagedSessionId, List<String>> openIntentLookup,
-                              Path seedDirectory,
-                              Executor backgroundExecutor) {
+    public SessionHandoffService(GitStatusService gitStatusService,
+                                 GitExecutableLocator locator,
+                                 Launcher launcher,
+                                 SessionDeleter deleter,
+                                 ScopeRebinder rebinder,
+                                 Function<ManagedSessionId, Optional<HandoffBrief>> briefLookup,
+                                 Function<ManagedSessionId, List<String>> openIntentLookup,
+                                 Path seedDirectory,
+                                 Executor backgroundExecutor) {
         this.gitStatusService = gitStatusService;
-        this.transplant = transplant;
         this.locator = locator;
         this.launcher = launcher;
+        this.deleter = deleter;
+        this.rebinder = rebinder;
         this.briefLookup = briefLookup;
-        this.repositoryRootLookup = repositoryRootLookup;
-        this.worktreeDirectory = worktreeDirectory;
         this.openIntentLookup = openIntentLookup;
         this.seedDirectory = seedDirectory;
         this.backgroundExecutor = backgroundExecutor;
     }
 
-    public CompletableFuture<ManagedSessionId> fork(ManagedAgentSession outgoing, AgentKind target) {
-        return CompletableFuture.supplyAsync(() -> forkBlocking(outgoing, target), backgroundExecutor);
+    /** Runs {@link #handOffBlocking} on the background executor. */
+    public CompletableFuture<ManagedSessionId> handOff(ManagedAgentSession outgoing, AgentKind target) {
+        return CompletableFuture.supplyAsync(() -> handOffBlocking(outgoing, target), backgroundExecutor);
     }
 
     /**
      * Blocking; never call on the FX thread.
      *
      * <p>{@code target} may be the agent {@code outgoing} is already running:
-     * a wedged process is a legitimate reason to fork even when the harness
-     * itself is fine, and so is wanting a second opinion from the same
-     * model.</p>
+     * a wedged process is a legitimate reason to hand off even when the
+     * harness itself is fine, and so is wanting a second opinion from the
+     * same model.</p>
+     *
+     * <p>The order is load-bearing. The seed is composed and written FIRST,
+     * because {@code deleteSession} takes the brief with the session it
+     * describes. The delete comes before the launch, because two agent
+     * processes editing one worktree is the one hazard this design has no
+     * defence against beyond never creating it -- so a delete that fails
+     * aborts here, with the outgoing session's surface closed but its
+     * metadata intact, rather than leaving two sessions on one tree. The
+     * rebind comes last, because it needs the successor's id.</p>
      */
-    public ManagedSessionId forkBlocking(ManagedAgentSession outgoing, AgentKind target) {
-        Path repositoryRoot = repositoryRootLookup.apply(outgoing);
-        Path sourceWorktree = outgoing.workingDirectory();
-        String baseBranch = branchOf(sourceWorktree).orElse("HEAD");
-        String branch = availableBranchName(repositoryRoot, baseBranch, target);
+    public ManagedSessionId handOffBlocking(ManagedAgentSession outgoing, AgentKind target) {
+        Path worktree = outgoing.workingDirectory();
+        String branch = branchOf(worktree).orElse("HEAD");
+        Optional<String> head = gitStatusService.headCommitBlocking(worktree);
+        String prompt = seedPointer(
+                HandoffSeed.compose(briefLookup.apply(outgoing.id()), factsFor(outgoing, worktree, branch, head)),
+                branch);
 
-        // An unborn branch has no HEAD to fork from, so the worktree is cut
-        // from the repository's current HEAD instead and the seed says so.
-        Optional<String> head = gitStatusService.headCommitBlocking(sourceWorktree);
-        Path created = join(gitStatusService.createWorktree(
-                repositoryRoot, worktreeDirectory.apply(outgoing, branch), branch, head));
-
-        try {
-            initSubmodules(created);
-            transplant.transplant(sourceWorktree, created);
-            String seed = HandoffSeed.compose(briefLookup.apply(outgoing.id()),
-                    factsFor(outgoing, sourceWorktree, branch, head));
-            return join(launcher.start(repositoryRoot, created, target, seedPointer(seed, branch),
-                    outgoing.id()));
-        } catch (RuntimeException e) {
-            rollback(repositoryRoot, created, branch);
-            throw e;
-        }
+        join(deleter.delete(outgoing.id()));
+        ManagedSessionId successor = join(launcher.start(outgoing, target, prompt));
+        rebinder.rebind(outgoing.id(), successor);
+        return successor;
     }
 
     /**
@@ -224,14 +225,13 @@ public final class SessionForkService {
         }
     }
 
-    private HandoffFacts factsFor(ManagedAgentSession outgoing, Path sourceWorktree, String branch,
+    private HandoffFacts factsFor(ManagedAgentSession outgoing, Path worktree, String branch,
                                   Optional<String> head) {
         List<String> subjects = head.isEmpty()
                 ? List.of()
-                : lines(gitOut(sourceWorktree, "log", "--format=%s",
+                : lines(gitOut(worktree, "log", "--format=%s",
                         "-n", String.valueOf(MAX_COMMIT_SUBJECTS), "HEAD"));
-        List<String> changed = capped(lines(gitOut(sourceWorktree, "status", "--porcelain")),
-                MAX_CHANGED_FILES);
+        List<String> changed = capped(lines(gitOut(worktree, "status", "--porcelain")), MAX_CHANGED_FILES);
         // The intents the human has not settled are the most concrete
         // statement of what is still open; a successor that re-litigates a
         // resolved one is doing the work twice.
@@ -341,58 +341,6 @@ public final class SessionForkService {
         } catch (IOException e) {
             LOG.log(Level.DEBUG, () -> "Could not list " + seedDirectory + ": " + e.getMessage());
         }
-    }
-
-    /**
-     * A fresh worktree's submodules are empty, and a successor that inherits a
-     * repository which will not build has been handed a different problem than
-     * the one it was briefed on. Local only -- the objects already live in the
-     * shared {@code .git/modules}, so this never touches the network.
-     */
-    private void initSubmodules(Path worktree) {
-        ProcessResult result = run(List.of(git().toString(), "-C", worktree.toString(),
-                "submodule", "update", "--init", "--recursive"));
-        if (result.exitCode() != 0) {
-            throw new GitCommandFailedException(List.of("git", "submodule", "update", "--init"),
-                    result.exitCode(), ProcessRunner.excerpt(result.stderr()));
-        }
-    }
-
-    /**
-     * Best-effort, and deliberately swallowing: a rollback that itself fails
-     * must not mask the original failure, which is the one the human needs to
-     * read.
-     */
-    private void rollback(Path repositoryRoot, Path worktree, String branch) {
-        try {
-            run(List.of(git().toString(), "-C", repositoryRoot.toString(),
-                    "worktree", "remove", "--force", worktree.toString()));
-            run(List.of(git().toString(), "-C", repositoryRoot.toString(), "branch", "-D", branch));
-        } catch (RuntimeException e) {
-            LOG.log(Level.WARNING, () -> "Could not roll back the failed fork at " + worktree + ": " + e);
-        }
-    }
-
-    /** {@code <outgoing branch>-<agent>}, suffixed until free. */
-    private String availableBranchName(Path repositoryRoot, String baseBranch, AgentKind target) {
-        String base = baseBranch + "-" + target.persistedName();
-        if (!branchExists(repositoryRoot, base)) {
-            return base;
-        }
-        for (int suffix = 2; suffix < MAX_BRANCH_SUFFIX; suffix++) {
-            String candidate = base + "-" + suffix;
-            if (!branchExists(repositoryRoot, candidate)) {
-                return candidate;
-            }
-        }
-        throw new GitCommandFailedException(List.of("git", "branch"), -1,
-                "no free branch name near " + base);
-    }
-
-    private boolean branchExists(Path repositoryRoot, String branch) {
-        ProcessResult result = run(List.of(git().toString(), "-C", repositoryRoot.toString(),
-                "rev-parse", "--verify", "--quiet", "refs/heads/" + branch));
-        return result.exitCode() == 0;
     }
 
     private Optional<String> branchOf(Path worktree) {
