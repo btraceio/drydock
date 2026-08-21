@@ -2936,6 +2936,16 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         }
         handoffService().handOff(session.get(), target)
                 .whenComplete((successor, failure) -> Platform.runLater(() -> {
+                    // Guarded on the session actually being gone, not on which
+                    // branch this is: the delete may have committed even when
+                    // the launch that followed it failed, and that state must
+                    // stop showing in the tab strip and the sidebar exactly
+                    // when it happens, regardless of what happens after it.
+                    boolean sessionGone = sessionManager.sessions().stream()
+                            .noneMatch(candidate -> candidate.id().equals(sessionId));
+                    if (sessionGone) {
+                        dropHandedOffSessionTab(sessionId);
+                    }
                     if (failure != null) {
                         // Deliberately vague about what survives, because it
                         // depends on how far the handoff got: a failure before
@@ -2952,10 +2962,32 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                                 + "untouched. If this session's tab is gone, its work is still on disk "
                                 + "and you can open a new session on the same worktree.");
                         alert.showAndWait();
-                        return;
                     }
-                    publishSessions();
                 }));
+    }
+
+    /**
+     * Removes the outgoing session's tab once a handoff has actually deleted
+     * it -- the tab half of {@link #noteSessionDeleted}, deliberately without
+     * its annotation half. That omission is the point: a handoff never
+     * orphans review data the way a plain delete does. On success the data
+     * has already been rebound to the successor; after a failed launch it is
+     * still addressable by whatever session next opens on this worktree,
+     * because scope identity is {@code (kind, repoRoot, worktree, pr)} and
+     * does not include the session id. Calling {@link #noteSessionDeleted}
+     * here would wipe that data in the failure case, for a worktree whose
+     * diff never changed.
+     */
+    private void dropHandedOffSessionTab(ManagedSessionId sessionId) {
+        OpenSessionTab open = openTabs.get(sessionId);
+        if (open == null) {
+            open = pendingTabs.get(sessionId);
+        }
+        if (open != null) {
+            removeTab(open);
+        }
+        forgetActivity(sessionId);
+        publishSessions();
     }
 
     /**
