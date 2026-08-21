@@ -319,6 +319,22 @@ public record HandoffFacts(String branch, Optional<String> headCommit, List<Stri
 
 Delete `app/src/main/java/app/drydock/handoff/ForkFacts.java`.
 
+`SessionForkService` is `ForkFacts`'s other consumer, and deleting the record
+without touching it breaks the **main** source set, which would stop gradle
+running any test at all. Keep it compiling with the smallest possible edit —
+Task 4 rewrites this method anyway. In `SessionForkService`, change the import
+to `HandoffFacts`, drop the now-unused `baseBranch` parameter from `factsFor`
+and from its single call site in `forkBlocking`, and construct the new record:
+
+```java
+    private HandoffFacts factsFor(ManagedAgentSession outgoing, Path sourceWorktree, String branch,
+                                  Optional<String> head) {
+        ...unchanged body...
+        return new HandoffFacts(branch, head, subjects, changed,
+                capped(openIntentLookup.apply(outgoing.id()), MAX_CHANGED_FILES));
+    }
+```
+
 In `HandoffSeed`, change the parameter type of `compose` and `appendFacts`
 from `ForkFacts` to `HandoffFacts`, change the class javadoc's "forked
 session" to "successor session", and replace `appendFacts`'s branch line:
@@ -352,9 +368,14 @@ that prefix.
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `./gradlew :app:test --tests "app.drydock.handoff.HandoffSeedTest"`
-Expected: PASS. `SessionForkServiceTest` will not compile at this point —
-Task 4 replaces it wholesale, so ignore it until then and do not run the whole
-suite yet.
+Expected: PASS.
+
+Then confirm the module as a whole still builds, since `SessionForkService`
+was edited too:
+
+Run: `./gradlew :app:test --tests "app.drydock.app.SessionForkServiceTest"`
+Expected: PASS. That test asserts on seed content but never on the
+`forked from` wording, so the branch-line change does not reach it.
 
 - [ ] **Step 5: Commit**
 
@@ -699,7 +720,7 @@ and add these tests:
     }
 
     @Test
-    void nothingInTheWorkingTreeMovesOrChanges() {
+    void nothingInTheWorkingTreeMovesOrChanges() throws Exception {
         // The rescue case: the uncommitted work is exactly what must survive,
         // and the surest way to keep it is never to copy it.
         Files.writeString(repositoryRoot.resolve("wip.txt"), "half done");
@@ -713,7 +734,7 @@ and add these tests:
     }
 
     @Test
-    void noBranchIsCreated() {
+    void noBranchIsCreated() throws Exception {
         String before = gitCapture(repositoryRoot, "branch", "--list");
 
         service.handOffBlocking(outgoing, AgentKind.CODEX);
@@ -722,7 +743,7 @@ and add these tests:
     }
 
     @Test
-    void noWorktreeIsCreated() {
+    void noWorktreeIsCreated() throws Exception {
         String before = gitCapture(repositoryRoot, "worktree", "list");
 
         service.handOffBlocking(outgoing, AgentKind.CODEX);
@@ -732,6 +753,8 @@ and add these tests:
 
     @Test
     void theOutgoingSessionIsDeletedBeforeTheSuccessorStarts() {
+        // `gitCapture` and `Files.*` throw; any test here that calls them
+        // needs `throws Exception`, as the copied ones already do.
         // Two agent processes on one worktree is the one hazard this design
         // has no defence against beyond never creating it.
         deleter.observeStartCount = () -> launcher.startCount;
@@ -784,7 +807,7 @@ and add these tests:
     }
 
     @Test
-    void theSeedIsWrittenBeforeTheDeleteTakesTheBriefWithIt() {
+    void theSeedIsWrittenBeforeTheDeleteTakesTheBriefWithIt() throws Exception {
         briefs.put(outgoing.id(), brief(outgoing.id(), "Ship the handoff gesture"));
 
         service.handOffBlocking(outgoing, AgentKind.CODEX);
@@ -793,7 +816,7 @@ and add these tests:
     }
 
     @Test
-    void theSeedFileLivesOutsideTheWorktreeSoItNeverEntersTheDiff() {
+    void theSeedFileLivesOutsideTheWorktreeSoItNeverEntersTheDiff() throws Exception {
         service.handOffBlocking(outgoing, AgentKind.CODEX);
 
         assertFalse(seedFile().startsWith(outgoing.workingDirectory()), seedFile().toString());
