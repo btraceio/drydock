@@ -166,7 +166,7 @@ class HandoffBannerTest extends ApplicationTest {
      * passed against the bug. Measured thresholds, unfixed: intact at 500px,
      * truncating at 435px, Edit at zero width by 300px.</p>
      *
-     * <p>Fork no longer lives on the banner (it graduated to the session
+     * <p>Hand off no longer lives on the banner (it graduated to the session
      * header), so only Refresh and Edit are pinned here.</p>
      */
     @Test

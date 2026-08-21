@@ -15,7 +15,7 @@ import java.util.Optional;
  * HandoffBrief#writtenAtCommit()} can.</p>
  *
  * <p>Pure: the git counting is the caller's job (see {@code
- * SessionForkService}), so this is testable without a repository.</p>
+ * SessionHandoffService}), so this is testable without a repository.</p>
  */
 public record HandoffStaleness(int commitsSince, int changedFiles, boolean briefMissing) {
 

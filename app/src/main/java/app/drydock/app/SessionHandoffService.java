@@ -274,10 +274,10 @@ public final class SessionHandoffService {
      *
      * <p>So the structure lives in a file and the prompt is a pointer. The
      * file is written OUTSIDE the worktree, in drydock's own state directory:
-     * putting it in the tree would show up in the fork's very first diff and
-     * in the review rail, and the spec rejected a worktree file as the brief's
-     * home for that reason. This is a delivery artifact for one launch, not
-     * the store.</p>
+     * putting it in the tree would show up in the successor's very first diff
+     * and in the review rail, and the spec rejected a worktree file as the
+     * brief's home for that reason. This is a delivery artifact for one
+     * launch, not the store.</p>
      *
      * <p>Owner-only, like the MCP config: a brief can quote anything the
      * previous session was working on.</p>
@@ -315,7 +315,7 @@ public final class SessionHandoffService {
     }
 
     /**
-     * What to say when the brief could not be handed over at all. The fork
+     * What to say when the brief could not be handed over at all. The handoff
      * itself is still worth having -- the tree, branch and commits are real --
      * so this degrades to a session that knows it is missing context, rather
      * than failing the whole operation.

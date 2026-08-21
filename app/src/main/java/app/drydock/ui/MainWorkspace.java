@@ -2687,21 +2687,21 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         return written;
     }
 
-    // ---- handoff: driving the banner verbs and the header fork control -------
+    // ---- handoff: driving the banner verbs and the header handoff control ----
 
     /**
      * Connects one tab's banner verbs (Refresh, Edit) and the session header's
      * persistent Hand off control, and gives the banner its first reading. Done
      * once per tab, when the tab is registered: the controls outlive every
-     * republish, so re-binding them on each would be churn. Fork lives on the
-     * header rather than the banner so it stays reachable once the brief is
+     * republish, so re-binding them on each would be churn. Hand off lives on
+     * the header rather than the banner so it stays reachable once the brief is
      * current and the warning bar hides.
      */
     private void wireHandoffBanner(ManagedSessionId sessionId, OpenSessionTab tab) {
         HandoffBanner banner = tab.handoffBanner();
         banner.refreshButton().setOnAction(event -> requestHandoffRefresh(sessionId));
         banner.editButton().setOnAction(event -> editHandoffBrief(sessionId));
-        tab.forkButton().setOnShowing(event -> populateHandoffMenu(tab.forkButton(), sessionId));
+        tab.handoffButton().setOnShowing(event -> populateHandoffMenu(tab.handoffButton(), sessionId));
         refreshHandoffBanner(sessionId);
     }
 
@@ -3080,7 +3080,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         if (active == null) {
             return "no open or pending tab";
         }
-        MenuButton handoff = active.getValue().forkButton();   // renamed in Task 6
+        MenuButton handoff = active.getValue().handoffButton();
         // Fully qualified: GitHubReviewRequest.Event is imported here too.
         EventHandler<javafx.event.Event> onShowing = handoff.getOnShowing();
         if (onShowing == null) {

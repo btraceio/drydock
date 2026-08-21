@@ -106,7 +106,7 @@ public final class HandoffEditDialog extends Dialog<HandoffEditDialog.Result> {
      * whole-record cap is the one that actually binds (six full slots are
      * 12,000 code points against a 8,000 limit), and control characters
      * matter most on this path, because a brief pasted out of terminal output
-     * is later flattened into the fork seed and <em>typed as keystrokes</em>
+     * is later flattened into the handoff seed and <em>typed as keystrokes</em>
      * into the successor's terminal. An ESC that survives to there drives
      * escape sequences, which is exactly what {@link
      * PromptSafety#checkInboundText} refuses on the agent's side.</p>

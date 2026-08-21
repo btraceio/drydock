@@ -26,9 +26,9 @@ import java.util.Optional;
  * time (see {@code app.drydock.handoff.HandoffStaleness}). It is empty for a
  * session whose branch had no commits when the brief was written.</p>
  *
- * <p>{@link #author()} exists because the seed a fork is launched with labels
- * an agent-written brief as the previous session's testimony -- a label that
- * would be wrong for a brief the human typed themselves.</p>
+ * <p>{@link #author()} exists because the seed a successor is launched with
+ * labels an agent-written brief as the previous session's testimony -- a
+ * label that would be wrong for a brief the human typed themselves.</p>
  */
 public record HandoffBrief(
         ManagedSessionId sessionId,

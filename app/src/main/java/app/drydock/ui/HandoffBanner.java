@@ -25,11 +25,11 @@ import java.util.List;
  * at all, because the failure is invisible at exactly the moment the human is
  * deciding whether to trust the brief.</p>
  *
- * <p>Forking is not a corrective verb -- it proceeds whether the brief is
+ * <p>Handing off is not a corrective verb -- it proceeds whether the brief is
  * stale or current -- so it lives in the session header as a persistent
  * control, not here. This banner warns; it does not host the primary action,
  * because hosting it meant the action vanished the moment the warning cleared
- * (see the {@code Fork to…} control on {@code OpenSessionTab}).</p>
+ * (see the {@code Hand off to…} control on {@code OpenSessionTab}).</p>
  */
 public final class HandoffBanner extends HBox {
 
@@ -80,7 +80,7 @@ public final class HandoffBanner extends HBox {
         refresh.setTooltip(new Tooltip(sessionRunning
                 ? "Ask this session's agent to rewrite its handoff brief now."
                 : "This session is not running, so its agent cannot be asked for a brief. "
-                        + "Edit the brief yourself, or fork anyway."));
+                        + "Edit the brief yourself, or hand off anyway."));
 
         // Edit stays enabled whatever the session is doing: it is exactly
         // what the human needs when the agent is the thing that died.

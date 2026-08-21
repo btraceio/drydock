@@ -1599,10 +1599,10 @@
     -fx-font-size: 10px;
     -fx-padding: 1 7 1 7;
 }
-/* The persistent Fork control in the session header. Bordered and quiet so
-   it reads as a header action, not a call to arms; forking is always
+/* The persistent Hand off control in the session header. Bordered and quiet
+   so it reads as a header action, not a call to arms; handing off is always
    available, so it must not share the banner's warning-only visibility. */
-.header-fork-button {
+.header-handoff-button {
     -fx-background-color: transparent;
     -fx-background-radius: 9px;
     -fx-border-color: -drydock-border-strong;
@@ -1613,11 +1613,11 @@
     -fx-padding: 4 10 4 10;
     -fx-cursor: hand;
 }
-.header-fork-button:hover {
+.header-handoff-button:hover {
     -fx-background-color: -drydock-hover;
     -fx-text-fill: -drydock-text;
 }
-.header-fork-button.showing {
+.header-handoff-button.showing {
     -fx-background-color: -drydock-hover;
     -fx-text-fill: -drydock-text;
 }
