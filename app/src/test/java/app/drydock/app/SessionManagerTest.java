@@ -439,6 +439,7 @@ class SessionManagerTest {
         assertEquals(Optional.of(Path.of("/repo/wt")), successor.worktreeRoot());
         assertEquals(Path.of("/repo/wt"), successor.workingDirectory());
         assertEquals(AgentKind.CODEX, successor.agentKind());
+        assertTrue(successor.branchCreatedHere());
     }
 
     @Test
