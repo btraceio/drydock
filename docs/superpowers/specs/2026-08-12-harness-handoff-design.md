@@ -65,7 +65,7 @@ The brief is maintained *during* the session and replaced wholesale on each
 update. There are no merge semantics and no partial writes.
 
 The alternative — the agent appending `decision` / `ruled-out` / `correction`
-events that drydock composes into a brief at fork time — is cheaper per call
+events that drydock composes into a brief at handoff time — is cheaper per call
 and yields a real timeline, but forty entries is a log, not a briefing, and
 turning one into the other means owning a summariser and keeping it good.
 Wholesale replacement keeps the brief permanently coherent: it reads as a
@@ -136,9 +136,9 @@ Two mitigations, both structural rather than filtering:
 1. The seed marks the brief as *reported by the previous session* and
    distinguishes it from the facts drydock derived itself. The successor is
    told which half is testimony.
-2. Fork is a **UI gesture only** and deliberately not an MCP tool, so
-   `session_start`'s "started sessions may not start further sessions"
-   restriction stays intact. No agent can fork itself, and therefore no
+2. The handoff is a **UI gesture only** and deliberately not an MCP tool,
+   so `session_start`'s "started sessions may not start further sessions"
+   restriction stays intact. No agent can hand itself off, and therefore no
    injected brief can either.
 
 ### It has to be advertised
@@ -185,36 +185,40 @@ can type it faster than any agent round-trip. A human edit stamps `writtenAt`
 and `writtenAtCommit` fresh, which clears the warning honestly, because the
 brief now is current.
 
-**Fork anyway** proceeds, and is safe by construction. See the next section.
+**Hand off anyway** proceeds. The handoff moves nothing, so a stale brief
+costs the successor context and never the tree. See the next section.
 
-## The fork
+## The handoff
 
-Every switch is a fork to a sibling. Nothing is ever switched in place, no
-live tab is operated on, and the outgoing session, its branch and its worktree
-are never written to. The whole operation is additive, so a fork that fails
-cannot cost work.
+The successor takes the outgoing session's place. Same repository, same
+worktree, same branch, same working tree exactly as it stands — only the
+harness changes, and only the conversation is lost. Nothing is copied, so
+nothing can be copied wrongly: the uncommitted work that the rescue case
+exists to save never moves at all.
 
 The seed handed to the new session is always **the brief plus facts drydock
-derives fresh at fork time**: branch, base commit, commit subjects, changed
-files and open review intents. That floor needs no cooperation from a dead
-session and costs nothing, so a stale brief is always bounded by current
-mechanical truth — and when there is no brief at all, the successor is *told*
-that rather than quietly starting uninformed.
+derives fresh at handoff time**: branch, commit subjects, changed files and
+open review intents. That floor needs no cooperation from a dead session and
+costs nothing, so a stale brief is always bounded by current mechanical truth
+— and when there is no brief at all, the successor is *told* that rather than
+quietly starting uninformed.
 
 The operation:
 
-1. Create a branch at the outgoing session's `HEAD` (suffixing on collision).
-2. Mint a worktree for it, via the machinery behind `worktree_create`.
-3. Initialise submodules in the new worktree — locally, from the shared
-   `.git/modules`, no network. A fresh worktree's `third_party/` is empty, and
-   a successor that inherits a repo which will not build has been handed a
-   different problem than the one it was briefed on.
-4. Transplant the outgoing worktree's dirty state — tracked edits, deletions
-   and untracked files, excluding ignored ones — and leave it **uncommitted**,
-   so the review rail sees a real diff.
-5. Write the composed seed to a file in drydock's state directory, and start a
-   session there with the chosen `AgentKind`, with `forkedFrom` set, whose
-   prompt is a **single line pointing at that file**.
+1. Compose the seed and write it to a file in drydock's state directory.
+2. Read what the successor inherits from the outgoing session: its title and
+   whether a human pinned it, whether drydock created the branch, and its
+   eval mode.
+3. Delete the outgoing session through `SessionManager.deleteSession`, which
+   closes its surface, releases its MCP config and removes its metadata.
+4. Start a session on the same worktree with the chosen `AgentKind`, carrying
+   the inherited fields, whose prompt is a **single line pointing at the seed
+   file**.
+5. Rebind the outgoing session's review scopes to the new session.
+
+Steps 1 and 2 come before step 3 because `deleteSession` takes the brief with
+the session it describes, and the inherited fields go with it. Step 5 comes
+after step 4 because it needs the successor's id.
 
 ### Why the seed is a file and the prompt is a pointer
 
@@ -227,7 +231,7 @@ rather than formatting.
 
 So the structure lives in a file and the prompt is one line pointing at it.
 The file is written **outside** the worktree, in drydock's own state
-directory: a file in the tree would appear in the fork's first diff and in the
+directory: a file in the tree would appear in the successor's first diff and in the
 review rail, which is exactly why a worktree file was rejected as the brief's
 *home*. This is a delivery artifact for one launch, not the store -- a
 distinction worth keeping, because the two look alike and only one of them
@@ -239,51 +243,101 @@ request to an agent rather than a guarantee, drydock also sweeps seeds older
 than seven days.
 
 The chosen `AgentKind` may be the same one the outgoing session is running.
-Forking to the same harness is a legitimate rescue — the harness is fine, that
-particular process is wedged — and a legitimate second opinion, so nothing
-excludes it.
+Handing off to the same harness is a legitimate rescue — the harness is fine,
+that particular process is wedged — and a legitimate second opinion, so
+nothing excludes it.
 
 The new session starts with **no brief of its own**. The inherited brief is
 in its seed, as testimony; its own `HandoffBrief` entry is created the first
 time it calls `session_handoff`. Copying the parent's brief forward would make
 a successor that never writes one look current forever, which is the exact
-failure the staleness banner exists to catch.
+failure the staleness banner exists to catch — and the parent's entry is
+deleted with the parent in any case.
 
-Step 4 is what makes the fork safe for the rescue case: forking into a clean
-worktree would strand the uncommitted work that is precisely what the rescue
-is trying to save.
+### Why the outgoing session is deleted rather than kept
 
-### Lineage
+A superseded session left resumable is a trap. Its transcript describes a
+worktree that has since moved on under a different agent, and resuming it puts
+a confident model with stale context onto live files — the one failure this
+design would otherwise introduce, arriving hours later with nothing on screen
+to warn the human. So the handoff removes it.
 
-`ManagedAgentSession` gains one field, `forkedFrom: Optional<ManagedSessionId>`.
-That is the entire lineage model. Nothing mutates on a switch — the outgoing
-session is untouched and the incoming one records its parent — and chain
-depth ("this is the third harness on this work") is derived by walking links
-rather than stored.
+`deleteSession` already draws the line in the right place: it removes
+drydock's metadata and the brief, and touches nothing of the harness's own
+on-disk transcript. The conversation still exists wherever Claude, Codex or Pi
+keeps it. What is gone is drydock's offer to resume it into a tree that is no
+longer the one it remembers.
+
+That deletion is also what keeps one worktree to one session.
+`SidebarChildren` matches worktrees to sessions one-to-one; a superseded
+session sharing a worktree with its successor would take the worktree's row
+from it and inflate the header count. Deleting instead of closing means that
+case never arises and the sidebar needs no change.
+
+### No lineage
+
+The earlier design carried `forkedFrom: Optional<ManagedSessionId>` and
+derived chain depth ("the third harness on this work") by walking the links.
+With the parent deleted, that id resolves to nothing, so the handoff stops
+writing it. The record component and its persisted member stay — they are a
+wire contract and old state files still decode — but nothing new sets them.
+Losing the chain is the price of not leaving a resumable trap behind, and the
+successor is told it inherited the work by its seed regardless.
 
 ### Where it appears
 
-A "Fork to…" gesture on the session tab and its sidebar row, listing
+A "Hand off to…" gesture on the session tab and its sidebar row, listing
 `AgentRegistry.agents()`. Unavailable agents are shown disabled with
 `describeSearched()`, exactly as the existing picker does.
 
+It asks for confirmation first, naming what goes: this session's tab and its
+conversation are removed and the chosen agent takes over the worktree. The
+gesture removes a session rather than adding one, which puts it among
+drydock's destructive sequences, and those are confirmed.
+
+### Review scopes move with the work
+
+A `ReviewScope` is bound to a `ManagedSessionId`, and
+`ReviewScopeRegistry.isAddressableBy` gates every review tool on that binding.
+Deleting the outgoing session would strand its scopes: the findings the human
+recorded would still exist and nobody could answer them. A new
+`ReviewScopeRegistry.rebind(from, to)` moves them to the successor.
+
+Rebinding rather than revoking is the point. A review is about the worktree's
+diff, and the handoff does not change the diff by so much as a line — so the
+scope is still exactly as valid as it was a second earlier. Revoking would
+throw away the human's findings and make them review the same diff twice,
+which is the opposite of what a handoff is for.
+
 ## Failure modes
 
-The transplant is the risky part and is **all-or-nothing**. Binary files,
-deletions, symlinks, permission bits and a partially applied patch all fail
-the same way: the new worktree and branch are removed and the fork reports
-why. A half-populated worktree that looks like a successful fork is worse than
-a visible failure, because the human would start working in it.
+The transplant was the risky part, and it is gone with the sibling worktree —
+no files are copied, no branch is created, nothing in git is written at all.
+What is left is the one hazard the shared worktree introduces: two agent
+processes editing one tree. The design has no defence against that beyond
+never creating it, which is why the outgoing session is gone before the
+successor starts, and why the two steps are ordered rather than concurrent.
+
+Closing the outgoing surface cannot itself fail: `closeGracefully` waits out
+its grace period and then calls `destroyForcibly`, and it always invokes its
+completion callback. The step that can fail is the metadata write inside
+`deleteSession`. It degrades safely — the surface is closed but the session is
+still listed, which is the resumable state this design rejected but not a
+damaged one — and the handoff stops there rather than launching the successor,
+so one worktree never ends up with two sessions on it. The human sees why and
+can try again.
 
 Everything else resolves to a plain refusal or a stated fallback:
 
 | case | behaviour |
 |---|---|
-| outgoing session has no commits yet | fork from the base commit, and say so in the seed |
+| outgoing session already dead | proceeds; closing a dead surface is a no-op |
+| outgoing session has no commits yet | proceeds; the seed says the branch is unborn |
+| metadata write fails during delete | handoff stops; no successor is started |
 | target agent unavailable | never offered; disabled with `describeSearched()` |
-| branch name collides | suffix and continue |
-| brief absent | fork proceeds; the seed states that no brief was recorded |
+| brief absent | proceeds; the seed states that no brief was recorded |
 | brief oversize | `session_handoff` refuses with the limit; nothing is stored |
+| seed file cannot be written | proceeds; the successor is told no brief reached it |
 | outgoing session dead, Refresh pressed | not reachable — the control is disabled with the reason |
 
 ## Verification
@@ -300,12 +354,17 @@ JUnit, for everything that is logic:
   case that a `char` loop would miss.
 - `session_handoff` argument validation, caps, and charge/refund behaviour.
 
-Real-git tests for the transplant matrix — tracked edits, untracked files,
-deletions, binary content, submodule present — plus the rollback case,
-asserting that neither worktree nor branch survives a failure.
+For the handoff itself, against hand-written seams rather than a real
+repository: the successor is launched on the outgoing session's own worktree
+and branch; the outgoing session is deleted before the successor starts; a
+delete that fails leaves no successor; an already-dead session is handed off
+without special-casing; the title, `namePinned`, `branchCreatedHere` and eval
+mode reach the successor; `forkedFrom` is not written; and the outgoing
+session's review scopes end up addressable by the successor and by nobody
+else.
 
-The staleness banner and the disabled-Refresh-with-reason are visual state
-with no headless-FX harness behind them. Per `docs/architecture.md`, those are
+The staleness banner, the disabled-Refresh-with-reason and the handoff's
+confirmation are visual state with no headless-FX harness behind them. Per `docs/architecture.md`, those are
 checked with a diag script and its `shot:` scene snapshot, and the
 implementation report says so plainly rather than claiming "tested".
 
@@ -332,6 +391,24 @@ a record behind one MCP tool, and a proxy could fill the same record from
 richer sources, or supply full transcripts alongside it, without any consumer
 of `HandoffBrief` changing.
 
-**Switching in place.** Rejected because every in-place variant is destructive
-in some failure mode, and because "always fork" needs no special case for the
-dead-session path — there is no live tab to operate on.
+**The sibling worktree.** An earlier version of this design cut a branch at
+the outgoing session's `HEAD`, minted a worktree for it, initialised
+submodules and transplanted the dirty tree across, so the outgoing session
+kept running untouched. It bought one capability — a second harness working
+the same code in isolation while the first carried on — at the cost of the
+whole transplant matrix, its rollback path, and a copy of the working tree
+that could go wrong in ways the original could not. That capability is gone.
+Two harnesses on one piece of work in parallel is a different feature, and if
+it is wanted it should be asked for as one rather than arriving as a side
+effect of switching harness.
+
+**Resuming the superseded session.** The outgoing session's drydock entry is
+deleted, so it cannot be reopened from the sidebar. Its transcript survives in
+the harness's own store and can be resumed with that CLI directly, outside
+drydock, by a human who knows the tree has moved on. What is deliberately
+unavailable is the one-click path back into a worktree that no longer matches
+what the conversation remembers.
+
+**Lineage chains.** With the parent deleted there is nothing to point at, so
+`forkedFrom` is no longer written and "this is the third harness on this work"
+cannot be derived. Nothing in the design consumed it.
