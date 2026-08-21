@@ -330,6 +330,14 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     private Optional<ManagedSessionId> pendingRestoreSelection = Optional.empty();
 
     /**
+     * True once {@link #closeAllSessions()} has captured the open-session
+     * list for the next launch. Subsequent tab removals must NOT persist the
+     * shrinking list (otherwise the next launch restores nothing), and the
+     * one save already queued keeps {@code stop()}'s state flush fast.
+     */
+    private boolean shuttingDown;
+
+    /**
      * Placeholder tabs for sessions whose open/resume is still in flight
      * (registered in {@link #openTabs} only once the surface attaches). A
      * second resume request arriving in that window must focus the pending
@@ -490,7 +498,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             // Tab selection only moves the active-row highlight; the model
             // turns this into activeSessionChanged, never a tree rebuild.
             viewModel.setActiveSession(activeSessionId());
-            if (restoringSessionIds.isEmpty()) {
+            if (restoringSessionIds.isEmpty() && !shuttingDown) {
                 repositoryManager.updateSelectedSession(activeSessionId());
             }
             // Every selection path funnels through here, so this is the one
@@ -499,7 +507,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         });
         tabPane.getTabs().addListener((ListChangeListener<Tab>) change -> {
             updatePickerVisibility();
-            if (restoringSessionIds.isEmpty()) {
+            if (restoringSessionIds.isEmpty() && !shuttingDown) {
                 persistOpenSessionIds();
             }
         });
@@ -3463,6 +3471,15 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
     /** Plan section 9 "Application shutdown prompts once for all active processes": closes every open tab. */
     public CompletableFuture<Void> closeAllSessions() {
+        // Capture what was open BEFORE closing anything, then suppress the
+        // per-tab persistence that removeTab/listener would otherwise do.
+        // Without this, each close writes the shrinking list and the next
+        // launch restores nothing; and the N queued saves stall stop()'s
+        // state flush on the FX thread.
+        shuttingDown = true;
+        persistOpenSessionIds();
+        repositoryManager.updateSelectedSession(activeSessionId());
+
         Set<ManagedSessionId> all = new HashSet<>(openTabs.keySet());
         all.addAll(pendingTabs.keySet());
         ManagedSessionId[] ids = all.toArray(new ManagedSessionId[0]);
@@ -3784,7 +3801,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         openTabs.remove(openTab.sessionId(), openTab);
         pendingTabs.remove(openTab.sessionId(), openTab);
         exitRecorded.remove(openTab.sessionId());
-        if (restoringSessionIds.remove(openTab.sessionId())) {
+        if (!shuttingDown && restoringSessionIds.remove(openTab.sessionId())) {
             persistOpenSessionIds();
         }
         openTab.disposeNativeResources();
