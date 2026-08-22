@@ -232,14 +232,17 @@ public final class IntentGrouping {
         Collections.sort(sortedFiles);
         List<String> sortedHunks = new ArrayList<>(section.hunkIds());
         Collections.sort(sortedHunks);
-        // Files and hunks are hashed SEPARATELY, then the two digests are
-        // concatenated -- rather than joined into one string with a
-        // separator, which is one more thing to get exactly right. Each
-        // digest is already unambiguous within its own sorted, newline-
-        // joined list, so nothing is lost by keeping them apart.
+        // Files and hunks are hashed SEPARATELY, then 8 hex characters are
+        // taken from EACH digest, rather than truncating one concatenated
+        // string -- that would keep only the leading digest's bytes and
+        // silently drop the other, which is exactly the bug this id exists
+        // to avoid: the id must depend on both the file set and the hunk
+        // set, since the file set alone is what tells two hunkless sections
+        // apart, and the hunk set alone is what makes the id survive a
+        // reordering that touches neither section's own hunks.
         String files = sha256Hex(String.join("\n", sortedFiles));
         String hunks = sha256Hex(String.join("\n", sortedHunks));
-        return "computed:" + (files + hunks).substring(0, 16);
+        return "computed:" + files.substring(0, 8) + hunks.substring(0, 8);
     }
 
     private static String sha256Hex(String material) {
