@@ -121,6 +121,72 @@ class ChangeGraphTest {
                 List.copyOf(graph.filesReferencing("src/Core.java")));
     }
 
+    // ---- the hunk-level view ------------------------------------------------
+
+    private static UnifiedDiff.FileDiff multiHunk(String path, String... oneLinePerHunk) {
+        List<UnifiedDiff.Hunk> hunks = new ArrayList<>();
+        int n = 1;
+        for (String text : oneLinePerHunk) {
+            hunks.add(new UnifiedDiff.Hunk("@@",
+                    List.of(new UnifiedDiff.Line(UnifiedDiff.Line.Kind.ADD,
+                            OptionalInt.empty(), OptionalInt.of(n), text))));
+            n += 20;
+        }
+        return new UnifiedDiff.FileDiff(path, "M", hunks.size(), 0, false, false, hunks);
+    }
+
+    /**
+     * The reference belongs to the hunk that makes it, not to every hunk of
+     * the file. A marker under a hunk that references nothing is a false
+     * statement about that hunk.
+     */
+    @Test
+    void aReferenceBelongsToTheHunkThatMakesIt() {
+        ChangeGraph graph = ChangeGraph.of(new UnifiedDiff(List.of(
+                file("src/guards.cpp", "class JmpCtxScope { };"),
+                multiHunk("src/big.cpp",
+                        "void one() { new JmpCtxScope(); }",
+                        "void two() { }",
+                        "void three() { }"))));
+
+        assertEquals(List.of("JmpCtxScope"),
+                List.copyOf(graph.referencesIn(new ChangeGraph.Hunk("src/big.cpp", 0))));
+        assertEquals(List.of(),
+                List.copyOf(graph.referencesIn(new ChangeGraph.Hunk("src/big.cpp", 1))));
+        assertEquals(List.of(),
+                List.copyOf(graph.referencesIn(new ChangeGraph.Hunk("src/big.cpp", 2))));
+        // The file-level answer is unchanged, and is the union.
+        assertEquals(List.of("src/guards.cpp"),
+                List.copyOf(graph.filesReferencedBy("src/big.cpp")));
+    }
+
+    @Test
+    void aDeclarationBelongsToTheHunkThatMakesIt() {
+        ChangeGraph graph = ChangeGraph.of(new UnifiedDiff(List.of(
+                multiHunk("src/guards.cpp", "class Alpha { };", "class Beta { };"),
+                file("src/use.cpp", "void go() { new Beta(); }"))));
+
+        assertEquals(List.of("Alpha"),
+                List.copyOf(graph.declarationsIn(new ChangeGraph.Hunk("src/guards.cpp", 0))));
+        assertEquals(List.of("Beta"),
+                List.copyOf(graph.declarationsIn(new ChangeGraph.Hunk("src/guards.cpp", 1))));
+        assertEquals(List.of(new ChangeGraph.Hunk("src/guards.cpp", 1)),
+                List.copyOf(graph.hunksDeclaring("Beta")));
+        assertEquals(List.of(new ChangeGraph.Hunk("src/use.cpp", 0)),
+                List.copyOf(graph.hunksReferencingSymbol("Beta")));
+    }
+
+    /** An intra-file use is noise at either granularity, by the same rule. */
+    @Test
+    void theHunkViewIsCrossFileToo() {
+        ChangeGraph graph = ChangeGraph.of(new UnifiedDiff(List.of(
+                multiHunk("src/solo.cpp", "class Solo { };", "void use() { new Solo(); }"))));
+
+        assertEquals(List.of(),
+                List.copyOf(graph.referencesIn(new ChangeGraph.Hunk("src/solo.cpp", 1))));
+        assertEquals(List.of(), List.copyOf(graph.hunksReferencingSymbol("Solo")));
+    }
+
     /** Determinism: iteration order is a property this graph must keep (spec §9.5). */
     @Test
     void everyExposedCollectionIsSorted() {
