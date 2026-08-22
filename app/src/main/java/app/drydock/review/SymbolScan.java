@@ -10,6 +10,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Matcher;
@@ -22,7 +23,9 @@ import java.util.regex.Matcher;
  * the parse tree. Without one, every occurrence is a <em>use</em> and the
  * file declares nothing -- a lexical scan cannot tell a declaration from a
  * call without guessing, and a wrong declaration would mint wrong edges
- * everywhere the name appears.</p>
+ * everywhere the name appears. A file that is not plausibly code at all
+ * (see {@link #NOT_CODE}) takes neither front end and contributes
+ * nothing.</p>
  *
  * <p><strong>A hunk, not a line, is the parsing unit.</strong> The first
  * design parsed one diff line at a time, on the reasoning that a diff line
@@ -100,11 +103,45 @@ public final class SymbolScan {
      */
     private static final Set<String> NAME_FIELDS = Set.of("name", "declarator");
 
+    /**
+     * Extensions whose files are not code, and so contribute nothing --
+     * not even uses.
+     *
+     * <p>"A file with no grammar contributes uses only" was written for an
+     * unsupported <em>language</em>, not for prose. Measured on this
+     * branch's own 54-file diff, 51 of 337 reference edges (15%) originated
+     * in files that are not code at all: a design document quoting Java in
+     * fenced blocks minted an edge to each of seventeen changed classes, and
+     * {@code app.css} reached {@code Sections.java} through a style class
+     * name. Those edges are not wrong about the text; they are wrong about
+     * the code, and they merge sections that have no structural relation.</p>
+     *
+     * <p>An explicit denylist rather than a cleverer test. Anything that
+     * tried to infer "is this code" would be a guess whose failures are
+     * invisible, and the honest cost of a denylist is stated rather than
+     * hidden: it lets through every extension nobody listed, and every file
+     * with no extension at all -- {@code Makefile} and {@code gradlew} are
+     * code and should pass, {@code LICENSE} and {@code CODEOWNERS} are not
+     * and still contribute uses. Those are prose without identifiers, so
+     * they mint few edges; a document full of code blocks is the case that
+     * actually mattered, and it has an extension.</p>
+     */
+    private static final Set<String> NOT_CODE = Set.of(
+            "md", "markdown", "txt", "rst", "adoc", "org",
+            "css", "scss", "sass", "less",
+            "json", "yaml", "yml", "toml", "ini", "cfg", "conf", "lock",
+            "html", "htm", "xml", "xsd", "dtd", "svg",
+            "png", "jpg", "jpeg", "gif", "ico", "webp", "pdf",
+            "properties", "csv", "tsv", "patch", "diff", "log");
+
     private SymbolScan() {
     }
 
     /** {@code file}'s symbols, in reading order within each hunk. */
     public static List<Symbol> of(UnifiedDiff.FileDiff file) {
+        if (!plausiblyCode(file.path())) {
+            return List.of();
+        }
         Optional<TSLanguage> grammar = GrammarRegistry.forPath(file.path());
         List<Symbol> symbols = new ArrayList<>();
         for (UnifiedDiff.Hunk hunk : file.hunks()) {
@@ -123,6 +160,23 @@ public final class SymbolScan {
             }
         }
         return List.copyOf(symbols);
+    }
+
+    /**
+     * Whether {@code path} is worth scanning at all. Extension-only, matched
+     * the way {@link GrammarRegistry} matches: the last dot after the last
+     * slash, lowercased.
+     */
+    private static boolean plausiblyCode(String path) {
+        if (path == null || path.endsWith("/")) {
+            return false;
+        }
+        int dot = path.lastIndexOf('.');
+        int slash = path.lastIndexOf('/');
+        if (dot < 0 || dot < slash || dot == path.length() - 1) {
+            return true;
+        }
+        return !NOT_CODE.contains(path.substring(dot + 1).toLowerCase(Locale.ROOT));
     }
 
     /**

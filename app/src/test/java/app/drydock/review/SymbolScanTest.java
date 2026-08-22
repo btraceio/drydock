@@ -134,6 +134,23 @@ class SymbolScanTest {
     }
 
     /**
+     * Prose is not code. A design document quoting Java, or a stylesheet
+     * whose class names happen to spell a changed type, minted reference
+     * edges to every symbol it mentioned -- 15% of the edges on this
+     * branch's own diff. The "no grammar means uses only" rule was written
+     * for unsupported languages, not for a {@code .md} file.
+     */
+    @Test
+    void aFileThatIsNotPlausiblyCodeContributesNothingAtAll() {
+        assertTrue(SymbolScan.of(file("docs/design.md",
+                "Then `JmpCtxScope` arms the guard:",
+                "",
+                "    class JmpCtxScope { void arm(); }")).isEmpty());
+        assertTrue(SymbolScan.of(file("app/src/main/resources/app.css",
+                ".sections-rail { -fx-padding: 4; }")).isEmpty());
+    }
+
+    /**
      * A hunk holds ADD, DEL and CONTEXT lines at once. Both states are
      * scanned: the deleted line's symbols are still reported, and still
      * count as changed, so removing a call is part of the same change as
