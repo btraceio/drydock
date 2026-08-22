@@ -253,17 +253,18 @@ tasks.named<JavaExec>("run") {
     javaLauncher.set(javaToolchains.launcherFor(java.toolchain))
     workingDir = rootProject.projectDir
 
-    // Diagnostic support: forward -Papp.drydock.diag.* project properties to
-    // the run task's application JVM as system properties (the Gradle
-    // client's own -D flags never reach the forked app JVM; same pattern
-    // as gate0eSpike's property forwarding in the drydock.spikes plugin). Used by
-    // automated visual verification: app.drydock.diag.stateFile isolates
-    // persisted state to a throwaway file, and
-    // app.drydock.diag.autoCreateSession=true plus app.drydock.diag.repo=<path>
-    // auto-registers a repository and opens a session in it on startup
-    // (see DrydockApplication.start).
+    // Diagnostic support: forward -Papp.drydock.diag.* and
+    // -Papp.drydock.terminal.backend project properties to the run task's
+    // application JVM as system properties (the Gradle client's own -D flags
+    // never reach the forked app JVM; same pattern as bootSpike's property
+    // forwarding in the drydock.spikes plugin). Used by automated visual
+    // verification: app.drydock.diag.stateFile isolates persisted state to a
+    // throwaway file, and app.drydock.diag.autoCreateSession=true plus
+    // app.drydock.diag.repo=<path> auto-registers a repository and opens a
+    // session in it on startup (see DrydockApplication.start).
     project.properties.forEach { (key, value) ->
-        if (key.startsWith("app.drydock.diag.") && value != null) {
+        if (value == null) return@forEach
+        if (key.startsWith("app.drydock.diag.") || key == "app.drydock.terminal.backend") {
             systemProperty(key, value.toString())
         }
     }

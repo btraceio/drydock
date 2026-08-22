@@ -202,9 +202,9 @@ jobs:
         shell: bash
         run: |
           ./gradlew --no-daemon :app:run \
-            -Dapp.drydock.terminal.backend=jediterm \
-            -Dapp.drydock.diag.repo=build/boot-repo \
-            -Dapp.drydock.diag.autoCreateSession=true \
-            '-Dapp.drydock.diag.command=echo DRYDOCK_SESSION_OK' \
-            -Dapp.drydock.diag.autoExitSeconds=15 \
-            -Dapp.drydock.diag.stateFile=build/diag-state.json
+            -Papp.drydock.terminal.backend=jediterm \
+            -Papp.drydock.diag.repo=build/boot-repo \
+            -Papp.drydock.diag.autoCreateSession=true \
+            '-Papp.drydock.diag.command=echo DRYDOCK_SESSION_OK' \
+            -Papp.drydock.diag.autoExitSeconds=15 \
+            -Papp.drydock.diag.stateFile=build/diag-state.json
