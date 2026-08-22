@@ -2025,6 +2025,11 @@ public final class SessionReviewView extends BorderPane {
         });
     }
 
+    /** Diagnostic-only: the current rail's intent ids, in rendered order. */
+    List<String> diagIntentIds() {
+        return ReviewDiagFxThread.call(() -> intents().stream().map(ReviewIntent::id).toList());
+    }
+
     /**
      * Diagnostic-only: the findings margin's cards, read in the order they
      * are rendered, by the text their body actually shows -- the same text
