@@ -179,6 +179,7 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
             case HUNK -> "next unread hunk";
             case SECTION -> "section";
             case FILE -> "file";
+            case PATH_STEP -> "hunk";
         };
     }
 

@@ -113,6 +113,56 @@ class ReviewPathModeTest extends ReviewViewFixture {
         assertTrue(ShortcutsOverlay.reviewShortcutKeys().contains("p"));
     }
 
+    /**
+     * CRITICAL fix, mutation-verified below: {@code a} in PATH mode must
+     * settle exactly the selected row's one hunk, never the whole INTENTS
+     * section that hunk happens to also belong to. {@link ReviewViewFixture}'s
+     * board groups {@link #FILE_A}'s two hunks and {@link #FILE_B}'s one into
+     * "section-1" -- if {@code a} still settled by section (the bug a real
+     * screenshot caught: the verdict bar read "Approve (section)" with a
+     * PATH row selected), approving row 0 would silently record THREE
+     * verdicts instead of one.
+     */
+    @Test
+    void aInPathModeSettlesOnlyTheSelectedRowNotTheWholeSection() {
+        pressP();
+        awaitPathReady();
+        assertEquals(0, view.selectedPathStepForTest());
+        String selectedRow = view.pathRowTextsForTest().get(0);
+
+        press(KeyCode.A).release(KeyCode.A);
+        WaitForAsyncUtils.waitForFxEvents();
+
+        List<String> allDigests = List.of(digestOf(FILE_A, 0), digestOf(FILE_A, 1),
+                digestOf(FILE_B, 0), digestOf(FILE_C, 0));
+        long settledCount = allDigests.stream().filter(d -> host.verdict(scope, d).isPresent()).count();
+        assertEquals(1, settledCount, "row 0 is " + selectedRow + "; exactly its one hunk must be "
+                + "settled, not the whole section: " + allDigests.stream()
+                        .map(d -> host.verdict(scope, d).isPresent()).toList());
+    }
+
+    /**
+     * {@code u} undoes exactly what PATH mode's {@code a} last recorded --
+     * the same one-hunk precision the settle side needs, mirrored on undo.
+     */
+    @Test
+    void uInPathModeUndoesOnlyWhatAJustSettled() {
+        pressP();
+        awaitPathReady();
+
+        press(KeyCode.A).release(KeyCode.A);
+        WaitForAsyncUtils.waitForFxEvents();
+        List<String> allDigests = List.of(digestOf(FILE_A, 0), digestOf(FILE_A, 1),
+                digestOf(FILE_B, 0), digestOf(FILE_C, 0));
+        assertEquals(1, allDigests.stream().filter(d -> host.verdict(scope, d).isPresent()).count());
+
+        press(KeyCode.U).release(KeyCode.U);
+        WaitForAsyncUtils.waitForFxEvents();
+
+        assertTrue(allDigests.stream().noneMatch(d -> host.verdict(scope, d).isPresent()),
+                "u must clear the one verdict a just recorded, leaving nothing settled");
+    }
+
     // ---- helpers --------------------------------------------------------------
 
     private void pressP() {
