@@ -84,10 +84,16 @@ final class ReviewVerdictBar extends VBox {
     private final HBox actionRow = new HBox(10);
 
     private ReviewIntent intent;
-    private Optional<ReviewVerdict> verdict = Optional.empty();
+    /**
+     * The SECTION's decision, derived from its hunks by {@code VerdictMerge}
+     * -- not a stored {@link ReviewVerdict}. Sections overlap and so cannot
+     * own a verdict of their own; what the bar shows is what their hunks add
+     * up to.
+     */
+    private Optional<ReviewVerdict.Decision> decision = Optional.empty();
     private boolean blocked;
-    private int settledCount;
-    private int totalCount;
+    private int settledHunks;
+    private int totalHunks;
 
     ReviewVerdictBar(Host host) {
         this.host = host;
@@ -178,22 +184,33 @@ final class ReviewVerdictBar extends VBox {
     }
 
     /**
-     * Updates everything the bar shows.
+     * Updates what the bar says about the intent now being settled.
      *
+     * @param currentDecision the section's decision, derived from its hunks;
+     *                        empty while any of them is unread
      * @param blocked whether an open blocking finding refuses approval of this intent
      */
-    void update(ReviewIntent currentIntent, Optional<ReviewVerdict> currentVerdict, boolean blocked,
-                int settled, int total) {
+    void update(ReviewIntent currentIntent, Optional<ReviewVerdict.Decision> currentDecision,
+                boolean blocked) {
         this.intent = currentIntent;
-        this.verdict = currentVerdict;
+        this.decision = currentDecision;
         this.blocked = blocked;
-        this.settledCount = settled;
-        this.totalCount = total;
         // Whatever changed enough to call update() again supersedes a
         // stale-diff refusal from an earlier click -- the reader has moved
         // on (a different scope, a diff that landed), so the message would
         // now be talking about a click that is no longer the most recent one.
         clearSubmitRefused();
+        render();
+    }
+
+    /**
+     * Progress is counted in distinct hunks, never in sections: sections
+     * overlap, so the sum of their sizes exceeds the number of hunks and
+     * "n/m sections settled" measures nothing (spec §5.6).
+     */
+    void showProgress(int settled, int total) {
+        this.settledHunks = settled;
+        this.totalHunks = total;
         render();
     }
 
@@ -234,14 +251,14 @@ final class ReviewVerdictBar extends VBox {
         previousButton.setDisable(false);
         nextButton.setDisable(false);
 
-        navHint.setText(settledCount >= totalCount
+        navHint.setText(settledHunks >= totalHunks
                 ? "all settled — ⏎ submits"
-                : (totalCount - settledCount) + " left · n jumps to the next");
+                : (totalHunks - settledHunks) + " hunks left · n jumps to the next");
 
-        if (verdict.isPresent()) {
-            settledLabel.setText(verdict.get().decision().label());
+        if (decision.isPresent()) {
+            settledLabel.setText(decision.get().label());
             settledLabel.getStyleClass().removeIf(styleClass -> styleClass.startsWith("decision-"));
-            settledLabel.getStyleClass().add("decision-" + verdict.get().decision().wireName());
+            settledLabel.getStyleClass().add("decision-" + decision.get().wireName());
             actionRow.getChildren().setAll(previousButton, nextButton, intentLabel,
                     settledLabel, undoButton, actionSpacer, navHint);
         } else {
@@ -256,13 +273,13 @@ final class ReviewVerdictBar extends VBox {
         }
         fitActionRow(actionRow.getWidth());
 
-        progressLabel.setText(settledCount + "/" + totalCount + " intents settled");
+        progressLabel.setText(settledHunks + "/" + totalHunks + " hunks reviewed");
         progressTrack.setPrefWidth(120);
-        progressFill.setPrefWidth(totalCount == 0 ? 0 : 120.0 * settledCount / totalCount);
+        progressFill.setPrefWidth(totalHunks == 0 ? 0 : 120.0 * settledHunks / totalHunks);
         submitButton.setDisable(false);
-        submitButton.setText(settledCount >= totalCount
+        submitButton.setText(settledHunks >= totalHunks
                 ? "Submit review ⏎"
-                : "Submit (" + (totalCount - settledCount) + " left)");
+                : "Submit (" + (totalHunks - settledHunks) + " left)");
     }
 
     /**

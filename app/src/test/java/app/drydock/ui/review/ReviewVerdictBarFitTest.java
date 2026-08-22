@@ -85,8 +85,7 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
     @Test
     void aSettledIntentFitsAsWell() {
         show(intent(2, "drydock/review · 4 files"),
-                Optional.of(new ReviewVerdict("rs_x", "auto:2", ReviewVerdict.Decision.APPROVED,
-                        Optional.empty(), java.time.Instant.EPOCH, "base-1", "head-1")));
+                Optional.of(ReviewVerdict.Decision.APPROVED));
 
         assertNothingTruncated();
     }
@@ -131,8 +130,11 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
     }
 
 
-    private void show(ReviewIntent intent, Optional<ReviewVerdict> verdict) {
-        interact(() -> bar.update(intent, verdict, false, 1, 7));
+    private void show(ReviewIntent intent, Optional<ReviewVerdict.Decision> decision) {
+        interact(() -> {
+            bar.update(intent, decision, false);
+            bar.showProgress(1, 7);
+        });
         WaitForAsyncUtils.waitForFxEvents();
         interact(() -> bar.getScene().getRoot().layout());
         WaitForAsyncUtils.waitForFxEvents();

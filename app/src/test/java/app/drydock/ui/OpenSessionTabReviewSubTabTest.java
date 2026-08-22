@@ -4,6 +4,7 @@ import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
+import app.drydock.review.BaseMove;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
@@ -33,6 +34,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.TreeSet;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -490,12 +492,23 @@ class OpenSessionTabReviewSubTabTest extends ApplicationTest {
         }
 
         @Override
-        public Optional<ReviewVerdict> verdict(ReviewScope scope, ReviewIntent intent) {
+        public Optional<ReviewVerdict> verdict(ReviewScope scope, String hunkDigest) {
             return Optional.empty();
         }
 
         @Override
-        public void setVerdict(ReviewScope scope, ReviewIntent intent, Optional<ReviewVerdict.Decision> decision) {
+        public void setVerdict(ReviewScope scope, ReviewIntent intent, List<String> hunkDigests,
+                               Optional<ReviewVerdict.Decision> decision) {
+        }
+
+        @Override
+        public String currentBase(ReviewScope scope) {
+            return SessionReviewView.UNRESOLVED_BASE;
+        }
+
+        @Override
+        public BaseMove.Delta baseMove(ReviewScope scope, String recordedBase) {
+            return new BaseMove.Delta(true, new TreeSet<>());
         }
 
         @Override

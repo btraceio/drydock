@@ -48,7 +48,7 @@ class ReviewVerdictBarNavigationTest extends ApplicationTest {
 
     @Test
     void theBarNamesTheIntentItIsSettling() {
-        interact(() -> bar.update(intent(2, "Rename the parser"), Optional.empty(), false, 1, 4));
+        interact(() -> bar.update(intent(2, "Rename the parser"), Optional.empty(), false));
 
         assertEquals("2 · Rename the parser",
                 ((Label) lookup(".review-verdict-intent").query()).getText());
@@ -56,7 +56,7 @@ class ReviewVerdictBarNavigationTest extends ApplicationTest {
 
     @Test
     void theNavigationControlsReachTheSameActionsAsTheKeys() {
-        interact(() -> bar.update(intent(2, "Rename the parser"), Optional.empty(), false, 1, 4));
+        interact(() -> bar.update(intent(2, "Rename the parser"), Optional.empty(), false));
 
         interact(() -> ((Button) lookup(".review-verdict-previous").query()).fire());
         interact(() -> ((Button) lookup(".review-verdict-next").query()).fire());
@@ -66,7 +66,7 @@ class ReviewVerdictBarNavigationTest extends ApplicationTest {
 
     @Test
     void withNoIntentTheBarSaysSoAndDisablesNavigation() {
-        interact(() -> bar.update(null, Optional.empty(), false, 0, 0));
+        interact(() -> bar.update(null, Optional.empty(), false));
 
         assertEquals("no intent", ((Label) lookup(".review-verdict-intent").query()).getText());
         assertTrue(((Button) lookup(".review-verdict-next").query()).isDisabled());

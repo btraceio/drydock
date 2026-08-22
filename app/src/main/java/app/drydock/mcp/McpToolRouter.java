@@ -7,11 +7,13 @@ import app.drydock.mcp.AnnotationLines.LineRef;
 import app.drydock.mcp.McpSessionContext.RenameOutcome;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.review.AnnotationStatus;
+import app.drydock.review.IntentHunks;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewVerdict;
 import app.drydock.review.Severity;
+import app.drydock.review.VerdictMerge;
 import app.drydock.state.json.JsonValue;
 import app.drydock.state.json.JsonValue.JsonArray;
 import app.drydock.state.json.JsonValue.JsonBoolean;
@@ -375,11 +377,9 @@ public final class McpToolRouter {
      * be known right now" (the same absent-vs-zero rule the sidebar's
      * {@code ◨n} badge follows).</p>
      *
-     * <p>TODO(task-6): intent.id() stands in for the hunk digest a verdict
-     * is actually looked up by (same placeholder as {@code
-     * MainWorkspace}/{@code FakeReviewHost}'s {@code setVerdict}); once an
-     * intent's verdict is derived from its hunks' real digests, this lookup
-     * becomes a real many-to-one join instead of an identity one.</p>
+     * <p>The join is many-to-one: a verdict is keyed by a hunk's content
+     * digest, and an intent covers several hunks, so what is reported is what
+     * {@link VerdictMerge} makes of them -- never a single stored verdict.</p>
      */
     private JsonValue reviewState(ManagedSessionId caller, JsonValue arguments) throws McpToolException {
         requireLiveSession(caller);
@@ -409,15 +409,25 @@ public final class McpToolRouter {
         UnifiedDiff diff = context.reviewDiff(scope);
         List<JsonValue> intents = new ArrayList<>();
         for (ReviewIntent intent : context.intentsOf(scope.id(), diff)) {
-            ReviewVerdict verdict = verdictsByDigest.get(intent.id());
-            if (verdict == null) {
+            List<Optional<ReviewVerdict>> perHunk = IntentHunks.digestsOf(intent, diff).stream()
+                    .map(digest -> Optional.ofNullable(verdictsByDigest.get(digest)))
+                    .toList();
+            Optional<ReviewVerdict.Decision> decision = VerdictMerge.derive(perHunk);
+            if (decision.isEmpty()) {
                 continue;
             }
+            // The first note any of the section's hunks carries. A section has
+            // no note of its own -- notes are written against hunks -- and
+            // concatenating several would report text nobody wrote.
+            Optional<String> note = perHunk.stream()
+                    .flatMap(Optional::stream)
+                    .map(ReviewVerdict::note)
+                    .flatMap(Optional::stream)
+                    .findFirst();
             intents.add(JsonObject.empty()
                     .put("id", new JsonString(intent.id()))
-                    .put("verdict", new JsonString(verdict.decision().wireName()))
-                    .put("note", verdict.note()
-                            .<JsonValue>map(JsonString::new).orElse(JsonNull.INSTANCE)));
+                    .put("verdict", new JsonString(decision.get().wireName()))
+                    .put("note", note.<JsonValue>map(JsonString::new).orElse(JsonNull.INSTANCE)));
         }
         return intents;
     }

@@ -60,8 +60,13 @@ final class ReviewIntentRail extends VBox {
     private final Map<String, Button> buttonsByIntentId = new LinkedHashMap<>();
 
     private List<ReviewIntent> intents = List.of();
-    private java.util.function.Function<ReviewIntent, Optional<ReviewVerdict>> verdictLookup =
-            intent -> Optional.empty();
+    /**
+     * How a card learns what its section adds up to. A section has no verdict
+     * of its own now -- overlapping sections cannot own one -- so the rail is
+     * handed the derived state rather than a stored {@link ReviewVerdict}.
+     */
+    private java.util.function.Function<ReviewIntent, SessionReviewView.SectionState> stateLookup =
+            intent -> SessionReviewView.SectionState.unknown();
     private Consumer<ReviewIntent> onSelected = intent -> { };
     private Runnable onToggleCollapse = () -> { };
     private String selectedId;
@@ -97,8 +102,11 @@ final class ReviewIntentRail extends VBox {
         this.onToggleCollapse = handler == null ? () -> { } : handler;
     }
 
-    void setVerdictLookup(java.util.function.Function<ReviewIntent, Optional<ReviewVerdict>> lookup) {
-        this.verdictLookup = lookup == null ? intent -> Optional.empty() : lookup;
+    void setSectionStateLookup(
+            java.util.function.Function<ReviewIntent, SessionReviewView.SectionState> lookup) {
+        this.stateLookup = lookup == null
+                ? intent -> SessionReviewView.SectionState.unknown()
+                : lookup;
     }
 
     /**
@@ -229,10 +237,12 @@ final class ReviewIntentRail extends VBox {
         header.setTitleVisible(!collapsed);
         header.setHintVisible(!collapsed);
 
+        // Sections, not hunks: the verdict bar below counts hunks, and two
+        // counts of the same thing in two places is one of them being wrong.
         long counted = intents.stream().filter(ReviewIntent::countsTowardProgress).count();
         long settled = intents.stream()
                 .filter(ReviewIntent::countsTowardProgress)
-                .filter(intent -> verdictLookup.apply(intent).isPresent())
+                .filter(intent -> stateLookup.apply(intent).decision().isPresent())
                 .count();
         header.setHint(settled + "/" + counted + " · i");
 
@@ -267,10 +277,14 @@ final class ReviewIntentRail extends VBox {
         Label number = new Label(String.valueOf(intent.number()));
         number.getStyleClass().add("review-intent-number");
 
-        Optional<ReviewVerdict> verdict = verdictLookup.apply(intent);
-        boolean settled = verdict.isPresent() || intent.autoApprove();
+        SessionReviewView.SectionState state = stateLookup.apply(intent);
+        Optional<ReviewVerdict.Decision> decision = state.decision();
+        boolean settled = decision.isPresent() || intent.autoApprove();
         if (settled) {
             card.getStyleClass().add("settled");
+        }
+        if (state.stale()) {
+            card.getStyleClass().add("stale");
         }
 
         Region heat = new Region();
@@ -284,7 +298,7 @@ final class ReviewIntentRail extends VBox {
                 // the reader to guess what it said.
                 Region dot = new Region();
                 dot.getStyleClass().addAll("review-intent-dot",
-                        decisionStyleClass(verdict, intent));
+                        decisionStyleClass(decision, intent));
                 content.getChildren().add(dot);
             }
             card.setGraphic(content);
@@ -332,10 +346,33 @@ final class ReviewIntentRail extends VBox {
         });
         content.getChildren().add(heat);
         if (settled) {
-            Label label = new Label(verdict.map(v -> v.decision().label())
+            Label label = new Label(decision.map(ReviewVerdict.Decision::label)
                     .orElse(ReviewVerdict.Decision.AUTO_APPROVED.label()));
-            label.getStyleClass().addAll("review-intent-settled", decisionStyleClass(verdict, intent));
+            label.getStyleClass().addAll("review-intent-settled", decisionStyleClass(decision, intent));
             content.getChildren().add(label);
+        } else if (state.settledHunks() > 0) {
+            // Part-settled reads as untouched otherwise: the card looks
+            // exactly like one nobody has opened, and the reader re-reads
+            // hunks they already signed off.
+            Label progress = new Label(state.settledHunks() + "/" + state.totalHunks() + " hunks");
+            progress.getStyleClass().add("review-intent-hunk-progress");
+            content.getChildren().add(progress);
+        }
+        if (!state.settledElsewhere().isEmpty()) {
+            // Settling one section settles hunks another shares. Naming where
+            // it happened is what keeps that from reading as state changing
+            // on its own.
+            Label elsewhere = new Label("✓ reviewed in "
+                    + String.join(" ", state.settledElsewhere()));
+            elsewhere.getStyleClass().add("review-intent-settled-elsewhere");
+            elsewhere.setWrapText(true);
+            content.getChildren().add(elsewhere);
+        }
+        if (state.stale()) {
+            Label stale = new Label("⚠ base moved — confirm");
+            stale.getStyleClass().add("review-intent-stale");
+            stale.setWrapText(true);
+            content.getChildren().add(stale);
         }
         // Bound to the CARDS COLUMN, never to the card. A Button takes its
         // width from its graphic, so a graphic bound back to the button is a
@@ -350,11 +387,12 @@ final class ReviewIntentRail extends VBox {
         return card;
     }
 
-    private static String decisionStyleClass(Optional<ReviewVerdict> verdict, ReviewIntent intent) {
-        ReviewVerdict.Decision decision = verdict.map(ReviewVerdict::decision)
+    private static String decisionStyleClass(Optional<ReviewVerdict.Decision> decision,
+                                             ReviewIntent intent) {
+        return "decision-" + decision
                 .orElse(intent.autoApprove() ? ReviewVerdict.Decision.AUTO_APPROVED
-                        : ReviewVerdict.Decision.APPROVED);
-        return "decision-" + decision.wireName();
+                        : ReviewVerdict.Decision.APPROVED)
+                .wireName();
     }
 
     /** Diagnostic-only: how many cards the rail drew, and how tall each one is. */
