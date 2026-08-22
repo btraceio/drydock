@@ -1733,6 +1733,23 @@ public final class SessionReviewView extends BorderPane {
     }
 
     /**
+     * The REAL intents (sections overlap, so possibly several) that
+     * actually cover {@code step}'s one hunk -- what {@link
+     * #blockingFindingOpenForPathStep} resolves a step through, since a
+     * blocking finding cannot be asked about a throwaway synthetic id
+     * ({@link #pathStepAsIntent}) it could never actually name.
+     */
+    private List<ReviewIntent> intentsCoveringPathStep(ReadingPath.Step step) {
+        Optional<ReviewIntent.Anchor> anchor = pathStepAsIntent(step).anchor();
+        if (anchor.isEmpty()) {
+            return List.of();
+        }
+        return intents().stream()
+                .filter(intent -> intent.containsHunk(anchor.get().file(), anchor.get().hunkIndex()))
+                .toList();
+    }
+
+    /**
      * Test-only: the row {@code [} / {@code ]} / {@code n} last selected in
      * PATH mode. Routed through {@link ReviewDiagFxThread} like every other
      * {@code diag*}-shaped accessor: {@link #pathIndex} is written only on
@@ -2191,7 +2208,7 @@ public final class SessionReviewView extends BorderPane {
             return;
         }
         host.setVerdict(scope.get(), synthetic, digests, Optional.of(decision),
-                blockingFindingOpen(scope.get(), synthetic));
+                blockingFindingOpenForPathStep(scope.get(), step, wholeFile));
         boolean applied = digests.stream().allMatch(digest -> host.verdict(scope.get(), digest)
                 .filter(v -> v.decision() == decision).isPresent());
         if (!applied) {
@@ -2205,6 +2222,44 @@ public final class SessionReviewView extends BorderPane {
         // ever going to be from this one keypress -- advance the same way
         // verdictAction's intents-mode branch does.
         nextUnsettledPathStep();
+    }
+
+    /**
+     * Whether a still-open finding blocks approving PATH mode's current
+     * settle target -- {@code step}'s own hunk, or, for {@code wholeFile},
+     * every hunk of its file (spec §4.6).
+     *
+     * <p>PATH mode has no real intent of its own to hand {@link
+     * #blockingFindingOpen}: {@link #pathStepAsIntent}'s synthetic {@code
+     * "path:" + hunkId} can never equal a finding's named {@code intentId},
+     * so asking about it directly answered "not blocked" for every
+     * agent-attributed finding -- the common case, and the whole reason
+     * {@code review_finding} carries an id at all. This asks the SAME
+     * question {@link #belongsToIntent} already answers for INTENTS mode,
+     * but resolved through whichever REAL section(s) actually cover the
+     * hunk(s) about to be settled, so a finding naming one of them still
+     * refuses exactly as it would from that section's own card.</p>
+     */
+    private boolean blockingFindingOpenForPathStep(ReviewScope scope, ReadingPath.Step step,
+                                                   boolean wholeFile) {
+        Optional<ReviewIntent.Anchor> anchor = pathStepAsIntent(step).anchor();
+        if (anchor.isEmpty()) {
+            return false;
+        }
+        String file = anchor.get().file();
+        List<ReviewIntent> covering = wholeFile
+                ? intents().stream().filter(intent -> intent.touches(file)).toList()
+                : intentsCoveringPathStep(step);
+        if (!covering.isEmpty()) {
+            return covering.stream().anyMatch(intent -> blockingFindingOpen(scope, intent));
+        }
+        // No real intent claims this hunk/file at all (a grouping that has
+        // drifted, or an empty rail) -- fall back to whether any finding on
+        // the file blocks, the same fallback belongsToIntent itself uses for
+        // a finding naming nothing resolvable.
+        return host.findings(scope).stream()
+                .filter(finding -> finding.file().equals(file))
+                .anyMatch(ReviewAnnotation::blocksApproval);
     }
 
     /** Every hunk digest of {@code file}, across the whole {@code diff} -- what {@code ⇧A}/{@code ⇧R} settle in PATH mode. */

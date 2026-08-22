@@ -1,7 +1,11 @@
 package app.drydock.ui.review;
 
+import app.drydock.review.AnnotationStatus;
+import app.drydock.review.Confidence;
 import app.drydock.review.HunkDigest;
+import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewVerdict;
+import app.drydock.review.Severity;
 import app.drydock.ui.ShortcutsOverlay;
 
 import javafx.scene.input.KeyCode;
@@ -13,6 +17,7 @@ import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -161,6 +166,40 @@ class ReviewPathModeTest extends ReviewViewFixture {
 
         assertTrue(allDigests.stream().noneMatch(d -> host.verdict(scope, d).isPresent()),
                 "u must clear the one verdict a just recorded, leaving nothing settled");
+    }
+
+    /**
+     * CRITICAL fix: a blocking finding attributed to a REAL intent must
+     * still refuse {@code a} in PATH mode. {@code pathStepAsIntent}'s
+     * synthetic {@code "path:" + hunkId} can never equal a finding's named
+     * {@code intentId}, so asking {@code blockingFindingOpen} about the
+     * synthetic id directly (the bug: proved by execution, INTENTS mode
+     * refused the identical finding while PATH mode approved anyway, with
+     * the bar simultaneously reading "a blocking finding is still open")
+     * would silently let this through. {@code "section-1"} is the real
+     * intent {@link ReviewViewFixture} already groups {@link #FILE_B} into,
+     * and PATH mode's entry point (index 0) is {@link #FILE_B}'s own hunk.
+     */
+    @Test
+    void aInPathModeIsRefusedByABlockingFindingNamingTheRealSection() {
+        host.store.upsert(new ReviewAnnotation(scope.id(), "f1", Optional.of("section-1"), FILE_B,
+                "n1", "n1", Severity.BLOCKING, Confidence.HIGH, Optional.of("blocker"), "Claude",
+                Instant.EPOCH, List.of(), Optional.empty(), Optional.empty(), List.of(), List.of(),
+                Optional.empty(), AnnotationStatus.OPEN, Optional.empty(), false));
+
+        pressP();
+        awaitPathReady();
+        assertEquals(0, view.selectedPathStepForTest());
+        assertTrue(view.pathRowTextsForTest().get(0).contains(FILE_B),
+                "row 0 must be " + FILE_B + "'s own hunk for this test to mean anything: "
+                        + view.pathRowTextsForTest());
+
+        press(KeyCode.A).release(KeyCode.A);
+        WaitForAsyncUtils.waitForFxEvents();
+
+        assertFalse(host.verdict(scope, digestOf(FILE_B, 0)).isPresent(),
+                "a blocking finding naming section-1 (the REAL section this hunk belongs to) must "
+                        + "refuse approval in PATH mode exactly as it does in INTENTS mode");
     }
 
     // ---- helpers --------------------------------------------------------------
