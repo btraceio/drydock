@@ -6,7 +6,10 @@ import app.drydock.state.json.JsonValue.JsonArray;
 import app.drydock.state.json.JsonValue.JsonObject;
 import app.drydock.state.json.JsonWriter;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.OptionalInt;
@@ -129,7 +132,119 @@ class McpToolRouterSectionsTest extends McpRouterFixture {
         assertNotNull(field(result, "files"));
     }
 
+    // ---- the fan-in scan behind the ordering ---------------------------------
+
+    /**
+     * Fix round 1, item 3. The board and this payload must agree on which
+     * card is ① -- that is the whole reason {@code computeSections} reorders
+     * through {@code ReadingPath} rather than handing out {@code Sections}'
+     * own order. Out-of-diff fan-in is that ordering's FIRST rank term, so a
+     * router that does not scan disagrees with a board that does, and an
+     * agent then names sections a human sees in a different order.
+     *
+     * <p>Pinned through a REAL repository, because the previous wiring had
+     * seven mutations against it and not one of them landed here: with the
+     * scan reverted to the old "unavailable" placeholder this whole file
+     * stayed green. {@code Zeta} sorts after {@code Alpha} and neither
+     * references the other, so nothing but the scan can put it first.</p>
+     */
+    @Test
+    void sectionsAreOrderedByTheRealOutOfDiffFanIn(@TempDir Path dir) throws Exception {
+        bindScopeTo(repoWhereZetaIsCalledFromOutside(dir));
+        context.reviewDiff = twoIndependentFilesDiff();
+
+        JsonValue result = callReviewScopeValue(scopeId(), "sections", null,
+                McpToolRouter.DEFAULT_SCOPE_BYTES);
+
+        List<JsonValue> sections = ((JsonArray) field(result, "sections")).elements();
+        assertTrue(sections.size() >= 2, "the two pairs must not collapse into one section");
+        assertTrue(hunkIdsOf(sections.get(0)).contains("h_src/Zeta.java_0"),
+                "the file called from outside the change is read FIRST; sections came out as "
+                        + JsonWriter.write(new JsonArray(sections)));
+    }
+
+    /**
+     * Fix round 1, item 4 (an amended ruling). Without a cache every {@code
+     * review_scope} call that asks for sections rebuilds the whole {@code
+     * ChangeGraph} AND spawns a fresh full-worktree {@code git grep} -- so an
+     * agent polling during a review runs one 30s-bounded grep per poll,
+     * concurrently with the board's own.
+     *
+     * <p>The graph-build count is the proxy for the whole computation: the
+     * scan is inside the same cached block, so a second call that rebuilds
+     * nothing greps nothing either.</p>
+     */
+    @Test
+    void aRepeatedSectionsReadIsServedFromTheCache() {
+        callReviewScope(scopeId(), "sections");
+        callReviewScope(scopeId(), "sections");
+
+        assertEquals(1, graphBuilds(),
+                "a second read of the SAME diff must not recompute the grouping (nor re-grep for it)");
+    }
+
+    /** A genuinely new diff is a genuinely new answer; the cache is keyed, not blind. */
+    @Test
+    void aNewDiffIsRecomputedRatherThanServedStale() {
+        callReviewScope(scopeId(), "sections");
+        context.reviewDiff = twoIndependentFilesDiff();
+
+        String second = callReviewScope(scopeId(), "sections");
+
+        assertEquals(2, graphBuilds(), "a different diff must be regrouped");
+        assertTrue(second.contains("src/Zeta.java"), "and the answer must describe THAT diff: " + second);
+    }
+
     // ---- fixtures -----------------------------------------------------------
+
+    private static List<String> hunkIdsOf(JsonValue section) {
+        return ((JsonArray) field(section, "hunkIds")).elements().stream()
+                .map(id -> ((JsonValue.JsonString) id).value())
+                .toList();
+    }
+
+    /**
+     * Two independent PAIRS -- {@code Alpha} with its user, {@code Zeta} with
+     * its -- so {@code Sections} has real edges to work from and produces two
+     * sections rather than falling back to one (kind, directory) cluster.
+     * Nothing connects the two pairs, and neither head has any in-diff
+     * advantage over the other, so the fan-in scan is the ONLY thing that can
+     * decide which is read first: without it {@code ReadingPath}'s tie-breaks
+     * end at the path, which puts {@code Alpha} there.
+     */
+    private static UnifiedDiff twoIndependentFilesDiff() {
+        return new UnifiedDiff(List.of(
+                oneFile("src/Alpha.java", "class AlphaOnly { }"),
+                oneFile("src/AlphaUser.java", "class AlphaUser { void a() { new AlphaOnly(); } }"),
+                oneFile("src/Zeta.java", "class ZetaSym { }"),
+                oneFile("src/ZetaUser.java", "class ZetaUser { void z() { new ZetaSym(); } }")));
+    }
+
+    /** A committed repository whose only out-of-diff file calls {@code ZetaSym}. */
+    private static Path repoWhereZetaIsCalledFromOutside(Path parent) throws Exception {
+        Path repo = Files.createDirectories(parent.resolve("repo"));
+        Files.createDirectories(repo.resolve("src"));
+        Files.writeString(repo.resolve("src/Alpha.java"), "class AlphaOnly { }\n");
+        Files.writeString(repo.resolve("src/Zeta.java"), "class ZetaSym { }\n");
+        Files.writeString(repo.resolve("src/Outside.java"), "void a() { new ZetaSym(); }\n");
+        runGit(repo, "init", "-b", "main");
+        runGit(repo, "config", "user.name", "Test");
+        runGit(repo, "config", "user.email", "test@example.com");
+        runGit(repo, "add", "-A");
+        runGit(repo, "commit", "-m", "seed");
+        return repo;
+    }
+
+    private static void runGit(Path repo, String... args) throws Exception {
+        List<String> command = new ArrayList<>(List.of("git"));
+        command.addAll(List.of(args));
+        Process process = new ProcessBuilder(command).directory(repo.toFile())
+                .redirectErrorStream(true).start();
+        String output = new String(process.getInputStream().readAllBytes());
+        if (process.waitFor() != 0) {
+            throw new IllegalStateException("git " + String.join(" ", args) + ": " + output);
+        }
+    }
 
     /**
      * One shared foundation file plus {@code count} independent files that

@@ -183,6 +183,80 @@ class OutOfDiffFanInTest {
         assertEquals(Map.of(), result.bySymbol());
     }
 
+    // ---- word boundaries: an inflated count reorders what a human reads ----
+
+    /**
+     * {@code ZetaSymHelper} is not two uses of {@code ZetaSym}; it is a
+     * different class that happens to start with those letters. Before this
+     * fix, both halves of the match were plain substring tests -- {@code git
+     * grep -F} finding the lines and {@code text.contains(symbol)}
+     * attributing them -- so the rail rendered "called from 2 places outside
+     * the change" and the popover listed two lines that are not usages at
+     * all.
+     *
+     * <p>Worth a real spawn rather than a unit test of the filter: it is
+     * {@code -w} on the git side that has to be right too, and a filter
+     * fixed alone would still be handed lines the symbol never appears in.
+     * This number is the reading path's FIRST rank term, so an inflated one
+     * does not merely read wrong -- it reorders what a reviewer reads
+     * next.</p>
+     */
+    @Test
+    void aLongerIdentifierThatMerelyStartsWithTheSymbolIsNotAUse(@TempDir Path dir)
+            throws IOException, InterruptedException {
+        Path repo = Files.createDirectories(dir.resolve("repo"));
+        runGit(repo, "init", "-b", "main");
+        runGit(repo, "config", "user.name", "Test");
+        runGit(repo, "config", "user.email", "test@example.com");
+        Files.createDirectories(repo.resolve("src"));
+        Files.writeString(repo.resolve("src/Zeta.java"), "class ZetaSym { }\n", StandardCharsets.UTF_8);
+        Files.writeString(repo.resolve("src/Caller.java"),
+                "void a() { new ZetaSymHelper(); }\nvoid b() { ZetaSymHelper.of(); }\n",
+                StandardCharsets.UTF_8);
+        runGit(repo, "add", "-A");
+        runGit(repo, "commit", "-m", "initial commit");
+        ChangeGraph graph = ChangeGraph.of(new UnifiedDiff(
+                List.of(file("src/Zeta.java", "class ZetaSym { }"))));
+
+        OutOfDiffFanIn.Result result = OutOfDiffFanIn.scan(repo, graph, Set.of("src/Zeta.java"));
+
+        assertFalse(result.unavailable());
+        assertEquals(Map.of(), result.bySymbol(),
+                "ZetaSymHelper is a different identifier; counting it inflates rank term 1");
+    }
+
+    /**
+     * The other half: when one changed declaration's name is a prefix of
+     * another's, a line using the LONGER one comes back from {@code git grep
+     * -w} legitimately -- and must then be attributed to that one only.
+     * {@code git grep -w} cannot make this distinction for us, which is why
+     * {@link OutOfDiffFanIn#mentions} exists rather than a plain {@code
+     * contains}.
+     */
+    @Test
+    void aLineIsAttributedOnlyToTheSymbolItActuallyNames(@TempDir Path dir)
+            throws IOException, InterruptedException {
+        Path repo = Files.createDirectories(dir.resolve("repo"));
+        runGit(repo, "init", "-b", "main");
+        runGit(repo, "config", "user.name", "Test");
+        runGit(repo, "config", "user.email", "test@example.com");
+        Files.createDirectories(repo.resolve("src"));
+        Files.writeString(repo.resolve("src/Pair.java"), "class Foo { }\nclass FooBar { }\n",
+                StandardCharsets.UTF_8);
+        Files.writeString(repo.resolve("src/Caller.java"), "void a() { new FooBar(); }\n",
+                StandardCharsets.UTF_8);
+        runGit(repo, "add", "-A");
+        runGit(repo, "commit", "-m", "initial commit");
+        ChangeGraph graph = ChangeGraph.of(new UnifiedDiff(
+                List.of(file("src/Pair.java", "class Foo { }", "class FooBar { }"))));
+
+        OutOfDiffFanIn.Result result = OutOfDiffFanIn.scan(repo, graph, Set.of("src/Pair.java"));
+
+        assertFalse(result.unavailable());
+        assertEquals(Set.of("FooBar"), result.bySymbol().keySet(),
+                "the caller names FooBar, not Foo: " + result.bySymbol());
+    }
+
     private static Path initCommittedRepoWithFanIn(Path parent) throws IOException, InterruptedException {
         Path repo = Files.createDirectories(parent.resolve("repo"));
         runGit(repo, "init", "-b", "main");

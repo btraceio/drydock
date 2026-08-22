@@ -56,10 +56,20 @@ class McpRouterFixture {
         });
 
         context.grant(caller, SCOPE);
-        context.reviewScopes.put(SCOPE, new ReviewScope(SCOPE, ReviewScope.Kind.WORKTREE,
-                Path.of("/repos/drydock"), Optional.of(Path.of("/wt/feat")), "master", "feat",
-                Optional.empty(), Optional.empty(), Optional.empty()));
+        bindScopeTo(Path.of("/wt/feat"));
         context.reviewDiff = parseableDiff();
+    }
+
+    /**
+     * Points the bound scope's worktree at {@code worktree}. The default is
+     * a path that does not exist, so the out-of-diff fan-in scan behind
+     * {@code sections} reports "unavailable" and costs nothing; a test that
+     * wants a REAL scan hands in a real repository.
+     */
+    void bindScopeTo(Path worktree) {
+        context.reviewScopes.put(SCOPE, new ReviewScope(SCOPE, ReviewScope.Kind.WORKTREE,
+                Path.of("/repos/drydock"), Optional.of(worktree), "master", "feat",
+                Optional.empty(), Optional.empty(), Optional.empty()));
     }
 
     String scopeId() {

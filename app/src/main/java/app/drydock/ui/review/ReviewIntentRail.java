@@ -15,6 +15,7 @@ import javafx.scene.Node;
 import javafx.scene.Parent;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
+import javafx.scene.control.Labeled;
 import javafx.scene.control.ScrollPane;
 import javafx.scene.control.Tooltip;
 import javafx.scene.layout.HBox;
@@ -24,10 +25,13 @@ import javafx.scene.layout.VBox;
 import javafx.util.Duration;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -56,6 +60,13 @@ final class ReviewIntentRail extends VBox {
      * {@code .review-intent-card} in {@code app.css}.
      */
     private static final double CARD_WIDTH_INSET = 2 * (6 + 8 + 1);
+
+    /**
+     * How much narrower a fan-in row's reason is than the rest of the card:
+     * {@code .review-fanin-count}'s own 3px side padding, both sides. See
+     * {@link #reasonNode}.
+     */
+    private static final double FANIN_TEXT_INSET = 2 * 3;
 
     // The handler is read at click time, so it can be installed after construction.
     private final PanelHeader header = PanelHeader.left(
@@ -548,7 +559,29 @@ final class ReviewIntentRail extends VBox {
         }
         Button button = new Button();
         button.getStyleClass().add("review-fanin-count");
-        button.setGraphic(reason);
+        // The reason has to WRAP inside the button, and a wrapping Label
+        // wraps at the width it is asked to measure itself at. A Button asks
+        // its graphic for prefHeight(-1), and a wrapping Label answers THAT
+        // as a single line -- so the button sized itself to one line and cut
+        // the rest, which the Label renders as an ellipsis. A real screenshot
+        // of the running app caught exactly that: "file called from 16 places
+        // outside the…" on the rail's only row. This project has shipped that
+        // truncation once already ("R..", "...").
+        //
+        // Same fix, same shape, as buildPathRow's own content VBox: a holder
+        // that substitutes its real width for the -1, bound to the CARDS
+        // COLUMN and never to the button around it -- a graphic bound back to
+        // its own container is the feedback loop this file documents.
+        VBox holder = new VBox(reason) {
+            @Override
+            protected double computePrefHeight(double width) {
+                return super.computePrefHeight(width < 0 ? getPrefWidth() : width);
+            }
+        };
+        holder.prefWidthProperty().bind(
+                cards.widthProperty().subtract(CARD_WIDTH_INSET + FANIN_TEXT_INSET));
+        holder.maxWidthProperty().bind(holder.prefWidthProperty());
+        button.setGraphic(holder);
         button.setMaxWidth(Double.MAX_VALUE);
         button.setAlignment(Pos.TOP_LEFT);
         button.setTooltip(new Tooltip("Show where this file's changed symbols are used "
@@ -718,6 +751,41 @@ final class ReviewIntentRail extends VBox {
                 .wireName();
     }
 
+    /**
+     * Diagnostic-only: opens the first {@code PATH} row's fan-in popover by
+     * firing that row's OWN control, never by calling the handler behind it.
+     * The popover is a {@code Popup} -- a separate window a scene snapshot of
+     * the primary stage cannot see and synthetic Robot input cannot reach in
+     * a diag run -- so a visual pass over it needs this hook; firing the real
+     * button means the hook fails if the control is ever left unwired.
+     */
+    String diagOpenFanIn() {
+        for (Button row : buttonsByHunkId.values()) {
+            Button fanIn = firstFanIn(row.getGraphic());
+            if (fanIn != null) {
+                fanIn.fire();
+                return "fired " + labelTexts(fanIn).stream().findFirst().orElse("(no label)");
+            }
+        }
+        return "no fan-in control on any of " + buttonsByHunkId.size() + " path rows";
+    }
+
+    private static Button firstFanIn(Node node) {
+        if (node instanceof Button button
+                && button.getStyleClass().contains("review-fanin-count")) {
+            return button;
+        }
+        if (node instanceof Parent parent) {
+            for (Node child : parent.getChildrenUnmodifiable()) {
+                Button found = firstFanIn(child);
+                if (found != null) {
+                    return found;
+                }
+            }
+        }
+        return null;
+    }
+
     /** Diagnostic-only: how many cards the rail drew, and how tall each one is. */
     String diagCards() {
         StringBuilder sb = new StringBuilder(intents.size() + " intents · "
@@ -757,16 +825,37 @@ final class ReviewIntentRail extends VBox {
     /** Every {@link Label}'s text under {@code node}, depth-first. */
     private static List<String> labelTexts(Node node) {
         List<String> texts = new ArrayList<>();
-        collectLabelTexts(node, texts);
+        collectLabelTexts(node, texts,
+                Collections.newSetFromMap(new IdentityHashMap<Node, Boolean>()));
         return texts;
     }
 
-    private static void collectLabelTexts(Node node, List<String> into) {
+    /**
+     * <strong>Reads {@code getGraphic()} explicitly, not just children.</strong>
+     * A {@link Labeled}'s graphic becomes one of its children only once its
+     * SKIN exists, which is a layout pulse away from the moment the row is
+     * built -- and {@link #reasonNode} now hangs a fan-in row's reason Label
+     * off a nested Button as exactly that graphic. Walking children alone
+     * therefore reported a fan-in row with NO reason text at all for the
+     * first pulse or two after a render, which makes any assertion over
+     * these texts timing-dependent: an {@code assertFalse(anyMatch(...))}
+     * could pass because the text had not been parented yet rather than
+     * because it was absent. {@code seen} keeps the graphic from being
+     * counted twice once the skin does parent it.
+     */
+    private static void collectLabelTexts(Node node, List<String> into, Set<Node> seen) {
+        if (node == null || !seen.add(node)) {
+            return;
+        }
         if (node instanceof Label label) {
             into.add(label.getText());
-        } else if (node instanceof Parent parent) {
+        }
+        if (node instanceof Labeled labeled) {
+            collectLabelTexts(labeled.getGraphic(), into, seen);
+        }
+        if (node instanceof Parent parent) {
             for (Node child : parent.getChildrenUnmodifiable()) {
-                collectLabelTexts(child, into);
+                collectLabelTexts(child, into, seen);
             }
         }
     }

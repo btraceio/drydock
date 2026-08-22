@@ -207,12 +207,20 @@ final class FakeReviewHost implements SessionReviewView.Host {
         store.mutate(finding.key(), current -> current.withSeverityOverride(severity));
     }
 
+    /**
+     * Whether a session is bound to hand work to. False models the real
+     * "no session, or its tab is closed" case, which the real host reports
+     * through {@code sendToBoundSession}'s own boolean.
+     */
+    boolean sessionBound = true;
+
     @Override
-    public void askAgentToFix(ReviewScope scope, ReviewIntent intent, List<ReviewAnnotation> findings) {
-        if (findings.isEmpty()) {
-            return;
+    public boolean askAgentToFix(ReviewScope scope, ReviewIntent intent, List<ReviewAnnotation> findings) {
+        if (findings.isEmpty() || !sessionBound) {
+            return false;
         }
         handedOffPrompts.add(intent.title() + ": " + findings.size() + " findings");
+        return true;
     }
 
     @Override
