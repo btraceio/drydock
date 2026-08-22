@@ -180,7 +180,15 @@ public record ReviewIntent(
         return Optional.empty();
     }
 
-    private static Optional<Anchor> parseHunkId(String hunkId) {
+    /**
+     * The inverse of {@link #hunkId}: {@code file} and {@code index} back out
+     * of a raw hunk id, or empty for anything not shaped like one. Public so
+     * a caller that only HAS a hunk id -- {@link
+     * app.drydock.review.ReadingPath.Link#targetHunkId()}, most notably --
+     * can resolve it without building a throwaway one-hunk {@link
+     * ReviewIntent} purely to call {@link #anchor()} on it.
+     */
+    public static Optional<Anchor> parseHunkId(String hunkId) {
         if (hunkId == null || !hunkId.startsWith(HUNK_ID_PREFIX)) {
             return Optional.empty();
         }

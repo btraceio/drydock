@@ -3,7 +3,9 @@ package app.drydock.ui.review;
 import app.drydock.git.DiffScope;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
+import app.drydock.review.ReadingPath;
 import app.drydock.review.ReviewAnnotation;
+import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.Severity;
 import app.drydock.ui.UiErrors;
@@ -37,6 +39,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
@@ -225,6 +228,15 @@ final class ReviewDiffColumn extends BorderPane {
     private Popup lensPopup;
     private boolean showContext = true;
     private final Set<ReviewDiffRow.RunKey> expandedRuns = new HashSet<>();
+
+    /**
+     * Each hunk's {@link ReadingPath.Link}s, keyed by {@link ReviewIntent#hunkId}
+     * -- see {@link #setLinks}. Empty until the host has a {@link
+     * app.drydock.review.ChangeGraph} to compute them from, which is fine: a
+     * hunk absent from this map simply gets no footer row (spec §7.2), not a
+     * wrong one.
+     */
+    private Map<String, List<ReadingPath.Link>> linksByHunk = Map.of();
 
     /**
      * The intent the column is filtered to, or {@code null} for the whole
@@ -1062,7 +1074,30 @@ final class ReviewDiffColumn extends BorderPane {
     }
 
     private ReviewDiffRows.Options buildOptions() {
-        return new ReviewDiffRows.Options(showContext, expandedRuns, MAX_RENDERED_ROWS, hunkFilter());
+        return new ReviewDiffRows.Options(showContext, expandedRuns, MAX_RENDERED_ROWS, hunkFilter(), linksByHunk);
+    }
+
+    /**
+     * What each hunk has to do with the rest of the diff (spec §7.2), keyed
+     * by {@link ReviewIntent#hunkId}. The host calls this whenever its
+     * {@link ReadingPath.Path} changes -- most often once its {@link
+     * app.drydock.review.ChangeGraph} finishes building, well after the diff
+     * itself rendered.
+     *
+     * <p>Deliberately not {@link #rebuild()}: that scrolls back to the top,
+     * and the host calls this on state changes that have nothing to do with
+     * where the reader is scrolled to (the same reason {@link #expandRun}
+     * avoids it). A no-op re-publish of the same map -- the common case,
+     * since most refreshes have nothing new to say about links -- skips the
+     * rebuild entirely rather than re-computing identical rows.</p>
+     */
+    void setLinks(Map<String, List<ReadingPath.Link>> byHunkId) {
+        Map<String, List<ReadingPath.Link>> copy = Map.copyOf(byHunkId);
+        if (copy.equals(linksByHunk)) {
+            return;
+        }
+        linksByHunk = copy;
+        rows.setAll(ReviewDiffRows.build(displayedDiff, buildOptions()));
     }
 
     /**
@@ -1188,6 +1223,7 @@ final class ReviewDiffColumn extends BorderPane {
                 case ReviewDiffRow.Truncation truncation ->
                         message("… diff truncated at " + truncation.limit() + " rows");
                 case ReviewDiffRow.Message text -> message(text.text());
+                case ReviewDiffRow.LinkRow linkRow -> buildLinkRow(linkRow);
             };
             if (node instanceof Region region) {
                 // Width only, and to the VIEWPORT -- never to this cell. See
@@ -1530,6 +1566,53 @@ final class ReviewDiffColumn extends BorderPane {
         button.setTooltip(new Tooltip("Show these " + run.count() + " unchanged lines"));
         button.setOnAction(e -> expandRun(run));
         return button;
+    }
+
+    /**
+     * A hunk's footer row: what it has to do with a hunk in another file
+     * (spec §7.2). {@code link.label()} already names a file and a symbol --
+     * never {@link ReadingPath.Link#targetHunkId()} -- so the button's own
+     * text is exactly that label with a glyph naming the relationship in
+     * front of it.
+     *
+     * <p>{@code .review-link-row} carries its OWN {@code -fx-text-fill} in
+     * {@code app.css}, the same fix {@code .review-collapsed-run} already
+     * needed: a plain {@code Button.setText} has no fill of its own here --
+     * only {@code .review-intent-card}'s child {@code Label}s do -- so it
+     * falls back to modena's light-button default against this column's dark
+     * background (Task 18's 1.13:1 defect, on a different row).</p>
+     */
+    private Region buildLinkRow(ReviewDiffRow.LinkRow row) {
+        ReadingPath.Link link = row.link();
+        Button button = new Button(glyphFor(link.kind()) + "  " + link.label());
+        button.getStyleClass().add("review-link-row");
+        button.setMaxWidth(Double.MAX_VALUE);
+        button.setAlignment(Pos.CENTER_LEFT);
+        button.setTooltip(new Tooltip("Jump to " + link.label()));
+        button.setOnAction(e -> selectLinkTarget(link.targetHunkId()));
+        return button;
+    }
+
+    /** The arrow a link row opens with, naming the relationship {@link ReadingPath.Link#label()} does not. */
+    private static String glyphFor(String kind) {
+        if (ReadingPath.CALLS.equals(kind)) {
+            return "↳ calls";
+        }
+        if (ReadingPath.CALLED_BY.equals(kind)) {
+            return "↳ called by";
+        }
+        return "↔";
+    }
+
+    /**
+     * Resolves a raw hunk id -- exactly what a link's own label never shows
+     * -- back to the (file, index) {@link #revealHunk} already knows how to
+     * scroll to. The same scroll-into-view path an intent or a PATH step
+     * uses, so a link click and a rail click land the reader in the same
+     * place through the same code.
+     */
+    private void selectLinkTarget(String hunkId) {
+        ReviewIntent.parseHunkId(hunkId).ifPresent(anchor -> revealHunk(anchor.file(), anchor.hunkIndex()));
     }
 
     private static Region message(String text) {

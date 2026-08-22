@@ -2572,12 +2572,14 @@
     -fx-border-radius: 8px 8px 0 0;
 }
 .review-diff-cell.card-body > .review-code-row,
-.review-diff-cell.card-body > .review-collapsed-run {
+.review-diff-cell.card-body > .review-collapsed-run,
+.review-diff-cell.card-body > .review-link-row {
     -fx-border-color: transparent -drydock-border transparent -drydock-border;
     -fx-border-width: 0 1 0 1;
 }
 .review-diff-cell.card-bottom > .review-code-row,
-.review-diff-cell.card-bottom > .review-collapsed-run {
+.review-diff-cell.card-bottom > .review-collapsed-run,
+.review-diff-cell.card-bottom > .review-link-row {
     -fx-border-color: transparent -drydock-border -drydock-border -drydock-border;
     -fx-border-width: 0 1 1 1;
     -fx-background-radius: 0 0 8px 8px;
@@ -2747,6 +2749,31 @@
     -fx-border-width: 0 0 0 2;
 }
 
+/* A hunk's link footer (Task 19, spec §7.2): what it has to do with a hunk
+ * elsewhere in the diff. Built the same way .review-collapsed-run is --
+ * Button.setText with its OWN -fx-text-fill here -- rather than the
+ * .review-path-row fix (child Labels), because a footer is one line with no
+ * internal parts that need different emphasis. Left unfixed it would be
+ * Task 18's defect again: modena's light-button default text colour against
+ * this column's dark background, 1.13:1 measured there. */
+.review-link-row {
+    -fx-background-color: -drydock-code-bg;
+    -fx-background-radius: 0;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 10.5px;
+    -fx-alignment: center-left;
+    -fx-cursor: hand;
+}
+.review-link-row:hover {
+    -fx-text-fill: -drydock-text;
+    -fx-background-color: -drydock-hover;
+}
+.review-link-row:focused {
+    -fx-text-fill: -drydock-text;
+    -fx-border-color: -drydock-accent;
+    -fx-border-width: 0 0 0 2;
+}
+
 /* Density (spec 4.8) -- code font size and row height. The px literals are
    what UiFontScale scales, so density stays a relative choice on top of the
    user's absolute interface size.
@@ -2764,7 +2791,8 @@
     -fx-font-size: 12.5px;
 }
 .density-cozy .review-code-row,
-.density-cozy .review-collapsed-run {
+.density-cozy .review-collapsed-run,
+.density-cozy .review-link-row {
     -fx-min-height: 20px;
     -fx-padding: 0 10 0 10;
 }
@@ -2774,7 +2802,8 @@
     -fx-font-size: 11.5px;
 }
 .density-compact .review-code-row,
-.density-compact .review-collapsed-run {
+.density-compact .review-collapsed-run,
+.density-compact .review-link-row {
     -fx-min-height: 16px;
     -fx-padding: 0 10 0 10;
 }
@@ -2784,7 +2813,8 @@
     -fx-font-size: 11px;
 }
 .density-dense .review-code-row,
-.density-dense .review-collapsed-run {
+.density-dense .review-collapsed-run,
+.density-dense .review-link-row {
     -fx-min-height: 14px;
     -fx-padding: 0 10 0 10;
 }
