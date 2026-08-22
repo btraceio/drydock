@@ -365,6 +365,7 @@ class McpToolRouterReviewTest {
     @Test
     void reviewStateReportsVerdictsFindingsAndSubmission() throws Exception {
         context.annotations.add(finding("f1", Severity.BLOCKING));
+        router.call(caller, "review_intents", intentsArgs(intentJson("i1", "Change", "MED")));
         context.verdicts.add(new ReviewVerdict(SCOPE, "i1", ReviewVerdict.Decision.CHANGES,
                 Optional.of("needs a test"), Instant.EPOCH, "base-1", "head-1"));
         context.submitted.add(SCOPE);
@@ -376,6 +377,30 @@ class McpToolRouterReviewTest {
         assertEquals("changes", str(intent, "verdict"));
         assertEquals("f1", str(((JsonArray) field(result, "findings")).elements().get(0), "id"));
         assertTrue(((JsonBoolean) field(result, "submitted")).value());
+    }
+
+    /**
+     * Pins the id-space of {@code review_state}'s intents: the wire {@code
+     * id} is the intent's own id, looked up by (today, placeholder) digest --
+     * never whatever key a verdict happens to be stored under. A verdict
+     * stored under a key that names no registered intent -- exactly what a
+     * real hunk digest looks like once Task 6 wires one -- must never
+     * surface as an "intent" id; the old code (reporting {@code
+     * verdict.hunkDigest()} straight through) would have let it through.
+     */
+    @Test
+    void reviewStateReportsTheIntentIdNotTheVerdictsStorageKey() throws Exception {
+        router.call(caller, "review_intents", intentsArgs(intentJson("i1", "Change", "MED")));
+        context.verdicts.add(new ReviewVerdict(SCOPE, "i1", ReviewVerdict.Decision.APPROVED,
+                Optional.empty(), Instant.EPOCH, "base-1", "head-1"));
+        context.verdicts.add(new ReviewVerdict(SCOPE, "orphan-digest-not-an-intent-id",
+                ReviewVerdict.Decision.APPROVED, Optional.empty(), Instant.EPOCH, "base-1", "head-1"));
+
+        JsonValue result = router.call(caller, "review_state", args("scopeId", SCOPE));
+
+        List<String> ids = ((JsonArray) field(result, "intents")).elements().stream()
+                .map(intent -> str(intent, "id")).toList();
+        assertEquals(List.of("i1"), ids, "only a registered intent's own id may appear here");
     }
 
     /** So a follow-up run fixes the right things and does not re-flag settled ones. */
@@ -423,6 +448,14 @@ class McpToolRouterReviewTest {
         obj.put("risk", new JsonString(risk));
         obj.put("rationale", new JsonString("because"));
         return obj;
+    }
+
+    /** {@code review_intents} args registering one intent, for tests that need review_state to know it. */
+    private static JsonObject intentsArgs(JsonObject intent) {
+        JsonObject args = JsonObject.empty();
+        args.put("scopeId", new JsonString(SCOPE));
+        args.put("intents", new JsonArray(List.of(intent)));
+        return args;
     }
 
     private static JsonObject findingJson(String id, String severity, String body) {

@@ -312,33 +312,6 @@ public final class AnnotationStore implements AutoCloseable {
         persistAsync();
     }
 
-    /**
-     * The group's decision, or empty when its files do not support one.
-     *
-     * <p>Deliberately asymmetric, because the two directions carry different
-     * risk: any {@code CHANGES} among the group's members makes the group
-     * {@code CHANGES} -- "something in here needs work" stays true of a
-     * group however it is drawn -- while {@code APPROVED} needs EVERY member
-     * to have been settled, since approving a group is a claim that the
-     * human read all of it. Silently approving code nobody looked at is the
-     * one outcome this must never produce.</p>
-     */
-    private static Optional<ReviewVerdict.Decision> merge(List<ReviewVerdict> covering) {
-        if (covering.stream().anyMatch(verdict -> verdict != null
-                && verdict.decision() == ReviewVerdict.Decision.CHANGES)) {
-            return Optional.of(ReviewVerdict.Decision.CHANGES);
-        }
-        if (covering.stream().anyMatch(Objects::isNull)) {
-            return Optional.empty();
-        }
-        // A human's approval outranks an agent's auto-approval: the merged
-        // verdict must not claim less human attention than was actually paid.
-        return Optional.of(covering.stream()
-                .anyMatch(verdict -> verdict.decision() == ReviewVerdict.Decision.APPROVED)
-                ? ReviewVerdict.Decision.APPROVED
-                : ReviewVerdict.Decision.AUTO_APPROVED);
-    }
-
     /** {@code u}: undoes the verdict on one hunk. */
     public void clearVerdict(String scopeId, String hunkDigest) {
         if (clearVerdictInternal(scopeId, hunkDigest)) {
