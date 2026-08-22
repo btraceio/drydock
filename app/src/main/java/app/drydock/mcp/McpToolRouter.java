@@ -362,7 +362,7 @@ public final class McpToolRouter {
 
         List<JsonValue> intents = context.verdictsOf(scope.id()).stream()
                 .map(verdict -> (JsonValue) JsonObject.empty()
-                        .put("id", new JsonString(verdict.intentId()))
+                        .put("id", new JsonString(verdict.hunkDigest()))
                         .put("verdict", new JsonString(verdict.decision().wireName()))
                         .put("note", verdict.note()
                                 .<JsonValue>map(JsonString::new).orElse(JsonNull.INSTANCE)))

@@ -1952,15 +1952,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
         @Override
         public List<ReviewIntent> intents(ReviewScope scope, UnifiedDiff diff) {
-            List<ReviewIntent> grouped = intentGrouping.intentsFor(scope.id(), diff);
-            // Verdicts are keyed by intent id, and the fallback grouping's
-            // ids changed when it stopped emitting one intent per file --
-            // so an approval given before that would read as unsettled.
-            // Called here rather than once at startup because the grouping is
-            // only knowable after the scope's diff resolves; the store makes
-            // it idempotent and cheap once there is nothing left to carry.
-            annotationStore.migrateLegacyVerdicts(scope.id(), grouped);
-            return grouped;
+            return intentGrouping.intentsFor(scope.id(), diff);
         }
 
         @Override
@@ -1983,8 +1975,12 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                     && blockingFindingOpen(scope, intent)) {
                 return;
             }
+            // intent.id() stands in for the hunk digest until Task 6 moves
+            // this seam onto hunk keys; see the controller note in the
+            // task 2+3 brief. scope.base()/scope.head() are what this was
+            // actually judged against, so those are wired for real already.
             annotationStore.putVerdict(new ReviewVerdict(scope.id(), intent.id(), decision.get(),
-                    Optional.empty(), Instant.now()));
+                    Optional.empty(), Instant.now(), scope.base(), scope.head()));
         }
 
         @Override

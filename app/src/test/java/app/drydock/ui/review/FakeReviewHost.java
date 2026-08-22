@@ -96,12 +96,7 @@ final class FakeReviewHost implements SessionReviewView.Host {
 
     @Override
     public List<ReviewIntent> intents(ReviewScope scope, UnifiedDiff diff) {
-        List<ReviewIntent> grouped = intents.intentsFor(scope.id(), diff);
-        // The real host migrates here too. A fake that skipped it would be
-        // fine right up until the migration broke, which is the one moment a
-        // fake earns its keep.
-        store.migrateLegacyVerdicts(scope.id(), grouped);
-        return grouped;
+        return intents.intentsFor(scope.id(), diff);
     }
 
     @Override
@@ -119,8 +114,10 @@ final class FakeReviewHost implements SessionReviewView.Host {
         if (decision.get() == ReviewVerdict.Decision.APPROVED && blocked(scope, intent)) {
             return;
         }
+        // intent.id() stands in for the hunk digest until Task 6 moves this
+        // seam onto hunk keys (see the controller note in the task 2+3 brief).
         store.putVerdict(new ReviewVerdict(scope.id(), intent.id(), decision.get(),
-                Optional.empty(), Instant.now()));
+                Optional.empty(), Instant.now(), scope.base(), scope.head()));
     }
 
     private boolean blocked(ReviewScope scope, ReviewIntent intent) {
