@@ -218,11 +218,13 @@ final class ReviewToolCodec {
     }
 
     /**
-     * Byte cost of an encoded hunk, measured on its own serialization rather
+     * Byte cost of an encoded value, measured on its own serialization rather
      * than estimated: the budget exists to keep a response under a hard limit,
      * and an estimate that drifts would either waste the budget or blow it.
+     * Package-private so {@link McpToolRouter} can charge the {@code
+     * sections} include against the same budget {@code hunks} pays from.
      */
-    private static int approximateBytes(JsonValue value) {
+    static int approximateBytes(JsonValue value) {
         return app.drydock.state.json.JsonWriter.write(value).getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
     }
 
