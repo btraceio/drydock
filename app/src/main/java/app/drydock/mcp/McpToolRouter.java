@@ -7,11 +7,13 @@ import app.drydock.mcp.AnnotationLines.LineRef;
 import app.drydock.mcp.McpSessionContext.RenameOutcome;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.review.AnnotationStatus;
+import app.drydock.review.ChangeGraph;
 import app.drydock.review.IntentHunks;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewVerdict;
+import app.drydock.review.Sections;
 import app.drydock.review.Severity;
 import app.drydock.review.VerdictMerge;
 import app.drydock.state.json.JsonValue;
@@ -100,7 +102,10 @@ public final class McpToolRouter {
                                 .put("scopeId", schemaString("Review scope handle to read."))
                                 .put("cursor", schemaString("Resume token from a previous page. Omit to start."))
                                 .put("maxBytes", schemaString("Byte budget for this page; default "
-                                        + DEFAULT_SCOPE_BYTES + ".")),
+                                        + DEFAULT_SCOPE_BYTES + "."))
+                                .put("include", schemaString("Optional extras, comma-separated. "
+                                        + "\"sections\" returns drydock's computed grouping: "
+                                        + "accept and name it, or regroup deliberately.")),
                         "scopeId"),
                 descriptor("review_intents",
                         "Replaces a scope's intent grouping: what the change is trying to do, at what risk, "
@@ -262,9 +267,9 @@ public final class McpToolRouter {
 
         int maxBytes = Math.clamp(optionalIntArg(args, "maxBytes", DEFAULT_SCOPE_BYTES),
                 1_000, MAX_SCOPE_BYTES);
+        Optional<String> cursor = optionalStringArg(args, "cursor");
         UnifiedDiff diff = context.reviewDiff(scope);
-        ReviewToolCodec.ScopePage page = ReviewToolCodec.pageHunks(diff,
-                optionalStringArg(args, "cursor"), maxBytes);
+        ReviewToolCodec.ScopePage page = ReviewToolCodec.pageHunks(diff, cursor, maxBytes);
 
         JsonObject result = JsonObject.empty()
                 .put("scope", ReviewToolCodec.scopeToJson(scope))
@@ -281,7 +286,29 @@ public final class McpToolRouter {
         result.put("priorThreads", new JsonArray(context.findingsOf(scope.id()).stream()
                 .map(ReviewToolCodec::findingStateToJson)
                 .toList()));
+
+        // Computed only on the FIRST page of a read (cursor absent), and only
+        // when asked: ChangeGraph.of parses every changed file and can trigger
+        // a first-time native grammar load, so it must never be a cost a plain
+        // review_scope call pays, and a multi-page read must not pay it again
+        // on every page for a payload that would not have changed anyway.
+        if (cursor.isEmpty() && includesSections(args)) {
+            result.put("sections", ReviewToolCodec.sectionsToJson(Sections.of(diff, ChangeGraph.of(diff))));
+        }
         return result;
+    }
+
+    /**
+     * Whether the comma-separated {@code include} argument names {@code
+     * sections}. An unknown token, or a missing/blank argument, is silently
+     * false -- this is an optional read, and a typo must not fail the call.
+     */
+    private static boolean includesSections(JsonObject args) throws McpToolException {
+        return optionalStringArg(args, "include")
+                .map(value -> Stream.of(value.split(","))
+                        .map(String::strip)
+                        .anyMatch("sections"::equals))
+                .orElse(false);
     }
 
     private JsonValue reviewIntents(ManagedSessionId caller, JsonValue arguments) throws McpToolException {
