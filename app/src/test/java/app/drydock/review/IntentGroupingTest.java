@@ -9,6 +9,7 @@ import java.util.Optional;
 import java.util.OptionalInt;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -67,6 +68,46 @@ class IntentGroupingTest {
 
         assertEquals(first, second,
                 "hashing over a section's own sorted hunk ids must be reproducible across a rebuild");
+    }
+
+    /**
+     * The discriminating case a positional {@code "computed:" + number}
+     * cannot pass: the SAME diff's own sections, reached through a
+     * DIFFERENT topological order. An unrelated extra file that sorts
+     * before {@code src/a.cpp} is enough on its own -- it becomes its own
+     * standalone section ahead of everything else, pushing a.cpp's
+     * position back with none of a.cpp's own hunks touched. A positional id
+     * would re-point at the section now sitting where a.cpp used to.
+     */
+    @Test
+    void aSurvivingSectionKeepsItsIdAfterAnUnrelatedFileShiftsTheOrder() {
+        UnifiedDiff diffWithout = diffOf("src", 1);
+        IntentGrouping groupingWithout = new IntentGrouping();
+        List<ReviewIntent> before =
+                groupingWithout.intentsFor("scope", diffWithout, Optional.of(ChangeGraph.of(diffWithout)));
+        ReviewIntent survivorBefore = before.stream()
+                .filter(intent -> intent.title().startsWith("a.cpp"))
+                .findFirst().orElseThrow();
+        assertEquals(0, before.indexOf(survivorBefore), "a.cpp must lead before the extra file exists");
+
+        List<UnifiedDiff.FileDiff> files = new ArrayList<>(diffWithout.files());
+        files.add(new UnifiedDiff.FileDiff("other/n.cpp", "M", 1, 0, false, false,
+                List.of(new UnifiedDiff.Hunk("@@", List.of(new UnifiedDiff.Line(
+                        UnifiedDiff.Line.Kind.ADD, OptionalInt.empty(), OptionalInt.of(1),
+                        "class Standalone {};"))))));
+        UnifiedDiff diffWith = new UnifiedDiff(files);
+        IntentGrouping groupingWith = new IntentGrouping();
+        List<ReviewIntent> after =
+                groupingWith.intentsFor("scope", diffWith, Optional.of(ChangeGraph.of(diffWith)));
+        ReviewIntent survivorAfter = after.stream()
+                .filter(intent -> intent.id().equals(survivorBefore.id()))
+                .findFirst().orElseThrow(() -> new AssertionError(
+                        "a.cpp's id must still be present after the reorder: " + after));
+
+        assertNotEquals(0, after.indexOf(survivorAfter),
+                "the extra file must actually have shifted a.cpp's position, or this test proves nothing");
+        assertEquals(survivorBefore.hunkIds(), survivorAfter.hunkIds(),
+                "a.cpp's own hunks must be unaffected by an unrelated file elsewhere in the diff");
     }
 
     // ---- nothing structural: the fallback's own ids survive -----------------
