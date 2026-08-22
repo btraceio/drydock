@@ -9,6 +9,7 @@ import app.drydock.review.Severity;
 import app.drydock.ui.ShortcutsOverlay;
 
 import javafx.scene.control.Button;
+import javafx.scene.control.Label;
 import javafx.scene.input.KeyCode;
 import org.junit.jupiter.api.Test;
 import org.testfx.util.WaitForAsyncUtils;
@@ -260,6 +261,76 @@ class ReviewPathModeTest extends ReviewViewFixture {
                         + "refuse approval in PATH mode exactly as it does in INTENTS mode");
     }
 
+    /**
+     * The eighth "correct behaviour shipped with no test that could catch
+     * its loss" in this plan, per the coordinator: {@code
+     * renderVerdictBarForPathStep}'s dispatch had no regression test at
+     * all. Settling section-1 (via one {@code a} with the rail focused,
+     * SECTION unit) auto-advances the INTENTS cursor to section-2
+     * ("Profiler", still unsettled -- its own {@link #FILE_C} hunk is
+     * unread) while ALSO settling {@link #FILE_B}'s hunk as a side effect
+     * (it is section-1's own third hunk). PATH mode's row 0 is exactly
+     * that now-settled {@link #FILE_B} hunk, so the two states genuinely
+     * disagree: a bar still reading off the intents cursor would show
+     * "2 · Profiler", unsettled; a bar reading the selected row shows
+     * {@link #FILE_B}'s own name, settled.
+     */
+    @Test
+    void theVerdictBarNamesAndSettlesOffTheSelectedRowNotTheIntentsCursor() {
+        press(KeyCode.A).release(KeyCode.A);
+        WaitForAsyncUtils.waitForFxEvents();
+        assertTrue(host.verdict(scope, digestOf(FILE_B, 0)).isPresent(),
+                "setup: guards.cpp's hunk must be settled as part of section-1's approval");
+
+        pressP();
+        awaitPathReady();
+        assertEquals(0, view.selectedPathStepForTest());
+        assertTrue(view.pathRowTextsForTest().get(0).contains(FILE_B),
+                "row 0 must be " + FILE_B + "'s own hunk for this test to mean anything");
+
+        String label = intentLabelText();
+        assertTrue(label.contains(FILE_B),
+                "the bar's label must name the SELECTED ROW's file (" + FILE_B + "): " + label);
+        assertFalse(label.contains("Profiler"),
+                "the bar must not still show the intents cursor's title ('Profiler', section-2, "
+                        + "which is still unsettled): " + label);
+        assertFalse(lookup(".review-verdict-settled").queryAll().isEmpty(),
+                "the bar must render SETTLED, matching the selected row's own state -- the "
+                        + "intents cursor (section-2) is still unsettled, so a bar reading that "
+                        + "instead would show Approve/Request-changes buttons here, not a decision");
+    }
+
+    /**
+     * {@code askAgentToFix} resolved through the step's REAL covering
+     * intents (shared with the blocking-finding fix via {@code
+     * intentsCoveringPathStep}), so it must hand off ONLY the findings
+     * belonging to {@link #FILE_C}'s own section (section-2), not every
+     * finding on the board. Two findings on section-1, one on section-2,
+     * PATH mode selecting {@link #FILE_C}'s row.
+     */
+    @Test
+    void askAgentToFixInPathModeHandsOffOnlyTheSelectedRowsFindings() {
+        addFinding("f1", "section-1", FILE_A);
+        addFinding("f2", "section-1", FILE_B);
+        addFinding("f3", "section-2", FILE_C);
+
+        pressP();
+        awaitPathReady();
+        // Steps: FILE_B (entry), FILE_A#0, FILE_A#1, FILE_C#0 -- walk to FILE_C's row.
+        press(KeyCode.CLOSE_BRACKET).release(KeyCode.CLOSE_BRACKET);
+        press(KeyCode.CLOSE_BRACKET).release(KeyCode.CLOSE_BRACKET);
+        press(KeyCode.CLOSE_BRACKET).release(KeyCode.CLOSE_BRACKET);
+        WaitForAsyncUtils.waitForFxEvents();
+        assertTrue(view.pathRowTextsForTest().get(view.selectedPathStepForTest()).contains(FILE_C),
+                "the walk above must land on " + FILE_C + "'s row: " + view.pathRowTextsForTest());
+
+        clickAskAgentButton();
+
+        assertTrue(host.handedOffPrompts.stream().anyMatch(entry -> entry.endsWith(": 1 findings")),
+                "PATH mode must hand off exactly the SELECTED ROW's one finding: "
+                        + host.handedOffPrompts);
+    }
+
     // ---- helpers --------------------------------------------------------------
 
     private void pressP() {
@@ -314,5 +385,29 @@ class ReviewPathModeTest extends ReviewViewFixture {
                 .orElseThrow(() -> new AssertionError("no Undo button found"))
                 .fire());
         WaitForAsyncUtils.waitForFxEvents();
+    }
+
+    private void clickAskAgentButton() {
+        interact(() -> lookup(".review-verdict-action").queryAll().stream()
+                .map(Button.class::cast)
+                .filter(button -> "Ask the agent to fix it".equals(button.getText()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("no Ask-the-agent button found"))
+                .fire());
+        WaitForAsyncUtils.waitForFxEvents();
+    }
+
+    private String intentLabelText() {
+        String[] text = new String[1];
+        interact(() -> text[0] = ((Label) lookup(".review-verdict-intent").queryAll().iterator().next())
+                .getText());
+        return text[0];
+    }
+
+    private void addFinding(String id, String intentId, String file) {
+        host.store.upsert(new ReviewAnnotation(scope.id(), id, Optional.of(intentId), file,
+                "n1", "n1", Severity.NIT, Confidence.HIGH, Optional.empty(), "Claude",
+                Instant.EPOCH, List.of(), Optional.empty(), Optional.empty(), List.of(), List.of(),
+                Optional.empty(), AnnotationStatus.OPEN, Optional.empty(), false));
     }
 }
