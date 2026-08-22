@@ -8,6 +8,7 @@ import app.drydock.review.ReviewVerdict;
 import app.drydock.review.Severity;
 import app.drydock.ui.ShortcutsOverlay;
 
+import javafx.scene.control.Button;
 import javafx.scene.input.KeyCode;
 import org.junit.jupiter.api.Test;
 import org.testfx.util.WaitForAsyncUtils;
@@ -169,6 +170,63 @@ class ReviewPathModeTest extends ReviewViewFixture {
     }
 
     /**
+     * The verdict bar's own Undo button must act on the SAME target the
+     * settle actions do -- the row on screen -- not the intents cursor.
+     * Reproduces the coordinator's own trace: settle every hunk via
+     * INTENTS mode's {@code a},{@code a} (settleUnit SECTION, since focus
+     * stays on the rail), switch to PATH mode (selected row is {@link
+     * #FILE_B}'s own hunk, the entry point), click Undo. Before the fix,
+     * the bar rendered off the intents cursor regardless of mode, so Undo
+     * cleared "section-2"'s two hunks -- neither of them the visible row --
+     * and left the visible row's own verdict untouched.
+     */
+    @Test
+    void theVerdictBarsUndoButtonClearsOnlyTheSelectedRow() {
+        press(KeyCode.A).release(KeyCode.A);
+        WaitForAsyncUtils.waitForFxEvents();
+        press(KeyCode.A).release(KeyCode.A);
+        WaitForAsyncUtils.waitForFxEvents();
+        String onScreen = digestOf(FILE_B, 0);
+        List<String> offScreen = List.of(digestOf(FILE_A, 0), digestOf(FILE_A, 1), digestOf(FILE_C, 0));
+        assertTrue(host.verdict(scope, onScreen).isPresent(), "setup: guards.cpp must start settled");
+        assertTrue(offScreen.stream().allMatch(d -> host.verdict(scope, d).isPresent()),
+                "setup: a,a in INTENTS mode must settle every hunk on this board");
+
+        pressP();
+        awaitPathReady();
+        assertEquals(0, view.selectedPathStepForTest());
+        assertTrue(view.pathRowTextsForTest().get(0).contains(FILE_B),
+                "row 0 must be " + FILE_B + "'s own hunk for this test to mean anything");
+
+        clickUndoButton();
+
+        assertFalse(host.verdict(scope, onScreen).isPresent(),
+                "Undo must clear the row actually on screen (guards.cpp)");
+        assertTrue(offScreen.stream().allMatch(d -> host.verdict(scope, d).isPresent()),
+                "Undo must NOT touch hunks nowhere near the selected row: " + offScreen.stream()
+                        .map(d -> host.verdict(scope, d).isPresent()).toList());
+    }
+
+    /**
+     * The verdict bar's own ‹/› buttons must step the SAME thing {@code [}/
+     * {@code ]} do -- PATH rows, not the (invisible) intents cursor. Before
+     * this fix, {@code VerdictHost.previousIntent}/{@code nextIntent} called
+     * {@code moveIntent} unconditionally.
+     */
+    @Test
+    void theVerdictBarsNextButtonStepsPathRowsInPathMode() {
+        pressP();
+        awaitPathReady();
+        assertEquals(0, view.selectedPathStepForTest());
+
+        interact(() -> ((Button) lookup(".review-verdict-next").queryAll().iterator().next()).fire());
+        WaitForAsyncUtils.waitForFxEvents();
+
+        assertEquals(1, view.selectedPathStepForTest(),
+                "the bar's own next button must move the PATH cursor, not the intents one");
+    }
+
+    /**
      * CRITICAL fix: a blocking finding attributed to a REAL intent must
      * still refuse {@code a} in PATH mode. {@code pathStepAsIntent}'s
      * synthetic {@code "path:" + hunkId} can never equal a finding's named
@@ -240,5 +298,21 @@ class ReviewPathModeTest extends ReviewViewFixture {
                 .findFirst()
                 .map(candidate -> HunkDigest.of(file, candidate.hunks().get(hunkIndex)))
                 .orElseThrow();
+    }
+
+    /**
+     * Fires the verdict bar's own Undo button -- {@code undoButton}'s text
+     * is {@code "change"}, and it shares {@code .review-verdict-action}
+     * with several other buttons, so it is found by text rather than by
+     * style class alone.
+     */
+    private void clickUndoButton() {
+        interact(() -> lookup(".review-verdict-action").queryAll().stream()
+                .map(Button.class::cast)
+                .filter(button -> "change".equals(button.getText()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("no Undo button found"))
+                .fire());
+        WaitForAsyncUtils.waitForFxEvents();
     }
 }

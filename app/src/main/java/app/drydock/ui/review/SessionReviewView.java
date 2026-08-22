@@ -1515,8 +1515,12 @@ public final class SessionReviewView extends BorderPane {
     }
 
     private void renderVerdictBar(ReviewScope scope) {
-        Optional<ReviewIntent> current = currentIntent();
         Optional<SectionStates.Board> board = board();
+        if (pathMode) {
+            renderVerdictBarForPathStep(scope, board);
+            return;
+        }
+        Optional<ReviewIntent> current = currentIntent();
         if (current.isEmpty() || board.isEmpty()) {
             verdictBar.update(null, Optional.empty(), false);
             verdictBar.showProgress(0, 0);
@@ -1533,6 +1537,41 @@ public final class SessionReviewView extends BorderPane {
         verdictBar.showStale(state.staleness() == SectionStates.Staleness.MOVED
                 ? Optional.of(new ReviewVerdictBar.StaleInfo(
                         sections.oldBaseOf(board.get(), current.get()), host.currentBase(scope)))
+                : Optional.empty());
+        verdictBar.showActingUnit(settleUnit());
+    }
+
+    /**
+     * PATH mode's own verdict-bar render: the SELECTED ROW's own state, not
+     * the (now invisible) intents cursor's -- a screenshot proved the bar
+     * used to read "2 · Profiler" with a completely different row selected,
+     * and clicking Undo cleared two hunks nowhere near the one on screen.
+     * Reuses {@link SectionStates} against a throwaway single-hunk {@link
+     * ReviewIntent} ({@link #pathStepAsIntent}) rather than deriving
+     * anything new: asking "what does this one-hunk grouping's state look
+     * like" is exactly the question {@code SectionStates.stateOf} already
+     * answers correctly for any {@link ReviewIntent}, real or synthetic.
+     * Progress stays the whole-review count either way -- it was never the
+     * current intent's own count, so PATH mode changes nothing about it.
+     */
+    private void renderVerdictBarForPathStep(ReviewScope scope, Optional<SectionStates.Board> board) {
+        Optional<ReadingPath.Step> step = currentPathStep();
+        if (step.isEmpty() || board.isEmpty()) {
+            verdictBar.update(null, Optional.empty(), false);
+            verdictBar.showProgress(0, 0);
+            verdictBar.showStale(Optional.empty());
+            verdictBar.showActingUnit(settleUnit());
+            return;
+        }
+        ReviewIntent synthetic = pathStepAsIntent(step.get());
+        boolean blocked = blockingFindingOpenForPathStep(scope, step.get(), false);
+        SectionStates.SectionState state = sectionState(synthetic);
+        verdictBar.update(synthetic, state.decision(), blocked);
+        verdictBar.showProgress(sections.settledHunkCount(board.get()),
+                sections.distinctDigests(board.get()).size());
+        verdictBar.showStale(state.staleness() == SectionStates.Staleness.MOVED
+                ? Optional.of(new ReviewVerdictBar.StaleInfo(
+                        sections.oldBaseOf(board.get(), synthetic), host.currentBase(scope)))
                 : Optional.empty());
         verdictBar.showActingUnit(settleUnit());
     }
@@ -1732,12 +1771,22 @@ public final class SessionReviewView extends BorderPane {
         return digests.isEmpty() ? Optional.empty() : Optional.of(digests.get(0));
     }
 
+    /** The row PATH mode is currently showing, if any -- empty exactly when {@link #currentPath()} has no steps. */
+    private Optional<ReadingPath.Step> currentPathStep() {
+        List<ReadingPath.Step> steps = currentPath().steps();
+        if (steps.isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.of(steps.get(Math.clamp(pathIndex, 0, steps.size() - 1)));
+    }
+
     /**
      * The REAL intents (sections overlap, so possibly several) that
      * actually cover {@code step}'s one hunk -- what {@link
-     * #blockingFindingOpenForPathStep} resolves a step through, since a
-     * blocking finding cannot be asked about a throwaway synthetic id
-     * ({@link #pathStepAsIntent}) it could never actually name.
+     * #blockingFindingOpenForPathStep} and {@link #openFindingsForPathStep}
+     * both resolve a step through, since neither a blocking finding nor an
+     * agent hand-off can be asked about a throwaway synthetic id ({@link
+     * #pathStepAsIntent}) a finding could never actually name.
      */
     private List<ReviewIntent> intentsCoveringPathStep(ReadingPath.Step step) {
         Optional<ReviewIntent.Anchor> anchor = pathStepAsIntent(step).anchor();
@@ -1746,6 +1795,24 @@ public final class SessionReviewView extends BorderPane {
         }
         return intents().stream()
                 .filter(intent -> intent.containsHunk(anchor.get().file(), anchor.get().hunkIndex()))
+                .toList();
+    }
+
+    /**
+     * The still-open findings {@code step} hands to the agent (spec's own
+     * "ask the agent to fix" gesture) -- resolved through {@code step}'s
+     * REAL covering intents so a finding naming one of them is included the
+     * same way {@link #belongsToCurrentIntent} would from that intent's own
+     * card, with an unnamed/unresolvable finding falling back to the file
+     * when no real intent claims this hunk at all.
+     */
+    private List<ReviewAnnotation> openFindingsForPathStep(ReviewScope scope, ReadingPath.Step step) {
+        List<ReviewIntent> covering = intentsCoveringPathStep(step);
+        return host.findings(scope).stream()
+                .filter(finding -> !finding.resolved())
+                .filter(finding -> covering.isEmpty()
+                        ? finding.file().equals(step.file())
+                        : covering.stream().anyMatch(intent -> belongsToIntent(finding, intent)))
                 .toList();
     }
 
@@ -1873,6 +1940,16 @@ public final class SessionReviewView extends BorderPane {
 
         @Override
         public void askAgentToFix(ReviewIntent intent) {
+            // Routed through the SELECTED ROW in PATH mode, not the intent
+            // the bar happened to be handed (see the class-level javadoc on
+            // renderVerdictBarForPathStep for why that intent no longer
+            // reflects what is on screen).
+            if (pathMode) {
+                currentPathStep().ifPresent(step -> selectedScope().ifPresent(scope ->
+                        host.askAgentToFix(scope, pathStepAsIntent(step),
+                                openFindingsForPathStep(scope, step))));
+                return;
+            }
             selectedScope().ifPresent(scope -> host.askAgentToFix(scope, intent,
                     host.findings(scope).stream()
                             .filter(finding -> !finding.resolved())
@@ -1887,12 +1964,32 @@ public final class SessionReviewView extends BorderPane {
             // undo is never refused, so the flag here is inert -- passed
             // for the sole reason that host.setVerdict has one parameter,
             // not two overloads to keep in sync.
+            //
+            // PATH mode clears exactly the SELECTED ROW's one hunk, never
+            // digestsOf(intent) over the (invisible) intents cursor's whole
+            // section -- a screenshot proved that click cleared two hunks
+            // nowhere near the row on screen and left the visible one alone.
+            if (pathMode) {
+                currentPathStep().ifPresent(step -> selectedScope().ifPresent(scope ->
+                        loadedDiff().flatMap(diff -> digestOfPathStep(diff, step)).ifPresent(digest ->
+                                host.setVerdict(scope, pathStepAsIntent(step), List.of(digest),
+                                        Optional.empty(), false))));
+                return;
+            }
             selectedScope().ifPresent(scope ->
                     host.setVerdict(scope, intent, digestsOf(intent), Optional.empty(), false));
         }
 
         @Override
         public void confirmStillGood(ReviewIntent intent) {
+            if (pathMode) {
+                currentPathStep().ifPresent(step -> selectedScope().ifPresent(scope ->
+                        loadedDiff().flatMap(diff -> digestOfPathStep(diff, step)).ifPresent(digest -> {
+                            host.confirmStillGood(scope, List.of(digest));
+                            refreshReviewState();
+                        })));
+                return;
+            }
             selectedScope().ifPresent(scope -> {
                 host.confirmStillGood(scope, digestsOf(intent));
                 refreshReviewState();
@@ -1901,7 +1998,11 @@ public final class SessionReviewView extends BorderPane {
 
         @Override
         public void nextUnsettled() {
-            nextUnsettledIntent();
+            // Not nextUnsettledIntent() directly: this overrides an
+            // interface method of the SAME name, so an unqualified call
+            // here would recurse into itself rather than reaching the
+            // outer class's dispatcher.
+            SessionReviewView.this.nextUnsettled();
         }
 
         @Override
@@ -1911,12 +2012,12 @@ public final class SessionReviewView extends BorderPane {
 
         @Override
         public void previousIntent() {
-            moveIntent(-1);
+            moveSelection(-1);
         }
 
         @Override
         public void nextIntent() {
-            moveIntent(1);
+            moveSelection(1);
         }
     }
 
