@@ -500,7 +500,7 @@ class OpenSessionTabReviewSubTabTest extends ApplicationTest {
 
         @Override
         public void setVerdict(ReviewScope scope, ReviewIntent intent, List<String> hunkDigests,
-                               Optional<ReviewVerdict.Decision> decision) {
+                               Optional<ReviewVerdict.Decision> decision, boolean blocked) {
         }
 
         @Override
