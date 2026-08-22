@@ -189,6 +189,86 @@ class ReviewHunkProgressTest extends ApplicationTest {
                 "the rail must name the section that settled it, got: " + railText());
     }
 
+    /**
+     * A sibling that settled ONE shared hunk moves this card's count by
+     * exactly as much as a fully settled sibling does. Marking only the
+     * fully-settled case solves the easy half of "state changing on its own"
+     * and leaves the other half exactly as mysterious.
+     */
+    @Test
+    void aPartlySettledSiblingIsNamedToo() {
+        showOverlappingSections();
+
+        approve(GUARDS_H);
+
+        assertEquals(List.of("②"), view.diagSectionState(0).settledElsewhere(),
+                "section ① shares its settled hunk with ②, which is not itself settled");
+        assertEquals(List.of("①"), view.diagSectionState(1).settledElsewhere());
+        assertTrue(railText().contains("✓ reviewed in ①"), railText());
+    }
+
+    /** A settled card explains itself with its own verdict; the marker would be noise. */
+    @Test
+    void aFullySettledCardDoesNotAlsoPointElsewhere() {
+        showOverlappingSections();
+
+        approve(GUARDS_H);
+        approve(GUARDS_CPP);
+
+        assertFalse(railText().contains("✓ reviewed in ②"),
+                "settled section ① must not point at ②, got: " + railText());
+    }
+
+    // ---- a grouping that drifted off the diff -------------------------------
+
+    /**
+     * Hunk ids are positional ({@code h_<file>_<index>}), so an agent's
+     * grouping can name hunks a later diff does not have. Such a section can
+     * never be settled; counting it toward progress refuses Submit forever
+     * and jumps to the one card that cannot be settled.
+     */
+    @Test
+    void aSectionWhoseHunksLeftTheDiffIsNotCountedAndSaysSo() {
+        showSectionsWithOneAdrift();
+
+        assertTrue(view.diagSectionState(1).hunksMissing(),
+                "a section naming hunks the diff does not have is adrift, not unread");
+        assertEquals("0/2 hunks reviewed", progressText(),
+                "only the resolvable section's hunks may be counted");
+        assertTrue(railLabels(".review-intent-adrift")
+                        .contains("hunks are no longer in this diff"),
+                "the card has to say why it can never be settled");
+    }
+
+    /** With every countable hunk settled, Submit must go through. */
+    @Test
+    void anAdriftSectionDoesNotDeadlockSubmit() {
+        showSectionsWithOneAdrift();
+        approve(GUARDS_H);
+        approve(GUARDS_CPP);
+
+        press(KeyCode.ENTER).release(KeyCode.ENTER);
+        WaitForAsyncUtils.waitForFxEvents();
+
+        assertEquals(List.of(scope.id()), host.submittedScopes,
+                "a section with nothing to settle must not hold the review hostage");
+    }
+
+    /** {@code n} must not park the cursor on a card that can never be settled. */
+    @Test
+    void nextUnsettledSkipsAnAdriftSection() {
+        showSectionsWithOneAdrift();
+        approve(GUARDS_H);
+        approve(GUARDS_CPP);
+
+        press(KeyCode.N).release(KeyCode.N);
+        WaitForAsyncUtils.waitForFxEvents();
+
+        assertFalse(view.diagSectionState(1).hunksMissing()
+                        && intentLabel().startsWith("2 "),
+                "n must not land on the adrift section, got: " + intentLabel());
+    }
+
     // ---- carry-forward (a): verdicts are keyed by a real digest -------------
 
     @Test
@@ -232,8 +312,9 @@ class ReviewHunkProgressTest extends ApplicationTest {
         recordAgainstBase(GUARDS_H, "0".repeat(40));
         recordAgainstBase(GUARDS_CPP, "0".repeat(40));
 
-        assertTrue(view.diagSectionState(0).stale(),
+        assertEquals(SessionReviewView.Staleness.MOVED, view.diagSectionState(0).staleness(),
                 "the base moved under a file this section covers");
+        assertTrue(railLabels(".review-intent-stale").contains("⚠ base moved — confirm"));
     }
 
     /** A base move that provably could not matter must not spend the reader's attention. */
@@ -245,7 +326,7 @@ class ReviewHunkProgressTest extends ApplicationTest {
         recordAgainstBase(GUARDS_H, "0".repeat(40));
         recordAgainstBase(GUARDS_CPP, "0".repeat(40));
 
-        assertFalse(view.diagSectionState(0).stale(),
+        assertEquals(SessionReviewView.Staleness.FRESH, view.diagSectionState(0).staleness(),
                 "nothing this section covers moved");
     }
 
@@ -256,7 +337,26 @@ class ReviewHunkProgressTest extends ApplicationTest {
 
         approve(GUARDS_H);
 
-        assertFalse(view.diagSectionState(0).stale());
+        assertEquals(SessionReviewView.Staleness.FRESH, view.diagSectionState(0).staleness());
+    }
+
+    /**
+     * While the delta is still being computed -- or the old base can no
+     * longer be diffed -- nothing is known, and nothing may be claimed. A
+     * confirm-me banner on every settled card of a review nobody touched is
+     * worse than no banner: it trains the reader to click it reflexively.
+     */
+    @Test
+    void anUnresolvableDeltaSaysNothingRatherThanWarning() {
+        host.baseDelta = new BaseMove.Delta(true, new TreeSet<>());
+        showOverlappingSections();
+        recordAgainstBase(GUARDS_H, "0".repeat(40));
+        recordAgainstBase(GUARDS_CPP, "0".repeat(40));
+
+        assertEquals(SessionReviewView.Staleness.UNKNOWN, view.diagSectionState(0).staleness(),
+                "an unanswered question is not a finding");
+        assertTrue(railLabels(".review-intent-stale").isEmpty(),
+                "no card may warn about a move nothing established");
     }
 
     // ---- helpers ------------------------------------------------------------
@@ -272,6 +372,25 @@ class ReviewHunkProgressTest extends ApplicationTest {
         host.intents.set(scope.id(), List.of(
                 section("section-1", "Guards", GUARDS_H, GUARDS_CPP),
                 section("section-2", "Profiler", GUARDS_H, PROFILER)));
+        interact(() -> view.showScopes(new SessionReviewScopes.Scopes(scope, Optional.empty()),
+                SessionReviewScopes.Choice.LOCAL));
+        interact(() -> view.diagShowDiff(scope, host.diff));
+        WaitForAsyncUtils.waitForFxEvents();
+    }
+
+    /**
+     * Section ① covers both guards files; section ② names a hunk index that
+     * file does not have, which is what a stale positional id looks like.
+     */
+    private void showSectionsWithOneAdrift() {
+        scope = registry.mint(ReviewScopeRegistry.spec(ReviewScope.Kind.WORKING_TREE,
+                Path.of("/tmp/nowhere"), Optional.of(Path.of("/tmp/nowhere")), "main", "main",
+                Optional.empty(), Optional.empty()));
+        ReviewIntent adrift = new ReviewIntent("section-2", 0, "Profiler",
+                ReviewIntent.Kind.CHANGE, ReviewIntent.Risk.MED, "",
+                List.of(ReviewIntent.hunkId(PROFILER, 7)), Optional.empty(), false);
+        host.intents.set(scope.id(), List.of(
+                section("section-1", "Guards", GUARDS_H, GUARDS_CPP), adrift));
         interact(() -> view.showScopes(new SessionReviewScopes.Scopes(scope, Optional.empty()),
                 SessionReviewScopes.Choice.LOCAL));
         interact(() -> view.diagShowDiff(scope, host.diff));
@@ -325,6 +444,19 @@ class ReviewHunkProgressTest extends ApplicationTest {
         List<Node> cards = new ArrayList<>();
         interact(() -> cards.addAll(lookup(".review-intent-card").queryAll()));
         return cards.stream().filter(card -> card.getStyleClass().contains("settled")).count();
+    }
+
+    /** The texts of every label the rail drew under {@code selector}. */
+    private List<String> railLabels(String selector) {
+        List<Node> labels = new ArrayList<>();
+        interact(() -> labels.addAll(lookup(selector).queryAll()));
+        return labels.stream().map(node -> ((Label) node).getText()).toList();
+    }
+
+    private String intentLabel() {
+        List<Node> labels = new ArrayList<>();
+        interact(() -> labels.addAll(lookup(".review-verdict-intent").queryAll()));
+        return labels.stream().map(node -> ((Label) node).getText()).findFirst().orElse("");
     }
 
     private String railText() {

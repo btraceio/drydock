@@ -26,6 +26,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.function.Consumer;
+import java.util.function.Function;
 
 /**
  * The intent rail (spec §4.2): one card per intent, with its number, title,
@@ -65,7 +66,7 @@ final class ReviewIntentRail extends VBox {
      * of its own now -- overlapping sections cannot own one -- so the rail is
      * handed the derived state rather than a stored {@link ReviewVerdict}.
      */
-    private java.util.function.Function<ReviewIntent, SessionReviewView.SectionState> stateLookup =
+    private Function<ReviewIntent, SessionReviewView.SectionState> stateLookup =
             intent -> SessionReviewView.SectionState.unknown();
     private Consumer<ReviewIntent> onSelected = intent -> { };
     private Runnable onToggleCollapse = () -> { };
@@ -102,8 +103,7 @@ final class ReviewIntentRail extends VBox {
         this.onToggleCollapse = handler == null ? () -> { } : handler;
     }
 
-    void setSectionStateLookup(
-            java.util.function.Function<ReviewIntent, SessionReviewView.SectionState> lookup) {
+    void setSectionStateLookup(Function<ReviewIntent, SessionReviewView.SectionState> lookup) {
         this.stateLookup = lookup == null
                 ? intent -> SessionReviewView.SectionState.unknown()
                 : lookup;
@@ -280,11 +280,15 @@ final class ReviewIntentRail extends VBox {
         SessionReviewView.SectionState state = stateLookup.apply(intent);
         Optional<ReviewVerdict.Decision> decision = state.decision();
         boolean settled = decision.isPresent() || intent.autoApprove();
+        boolean moved = state.staleness() == SessionReviewView.Staleness.MOVED;
         if (settled) {
             card.getStyleClass().add("settled");
         }
-        if (state.stale()) {
+        if (moved) {
             card.getStyleClass().add("stale");
+        }
+        if (state.hunksMissing()) {
+            card.getStyleClass().add("adrift");
         }
 
         Region heat = new Region();
@@ -350,6 +354,14 @@ final class ReviewIntentRail extends VBox {
                     .orElse(ReviewVerdict.Decision.AUTO_APPROVED.label()));
             label.getStyleClass().addAll("review-intent-settled", decisionStyleClass(decision, intent));
             content.getChildren().add(label);
+        } else if (state.hunksMissing()) {
+            // Not "unread": there is nothing here to read. Said outright,
+            // because such a section can never be settled and the reader
+            // would otherwise hunt for the hunks it is asking about.
+            Label adrift = new Label("hunks are no longer in this diff");
+            adrift.getStyleClass().add("review-intent-adrift");
+            adrift.setWrapText(true);
+            content.getChildren().add(adrift);
         } else if (state.settledHunks() > 0) {
             // Part-settled reads as untouched otherwise: the card looks
             // exactly like one nobody has opened, and the reader re-reads
@@ -358,9 +370,12 @@ final class ReviewIntentRail extends VBox {
             progress.getStyleClass().add("review-intent-hunk-progress");
             content.getChildren().add(progress);
         }
-        if (!state.settledElsewhere().isEmpty()) {
-            // Settling one section settles hunks another shares. Naming where
-            // it happened is what keeps that from reading as state changing
+        // Only while the section is unsettled: on a settled card its own
+        // verdict already explains the state, and the marker would be noise.
+        if (!settled && !state.settledElsewhere().isEmpty()) {
+            // A hunk this section shares was settled elsewhere, which moved
+            // this card's count without the reader touching it. Naming where
+            // it is shared is what keeps that from reading as state changing
             // on its own.
             Label elsewhere = new Label("✓ reviewed in "
                     + String.join(" ", state.settledElsewhere()));
@@ -368,7 +383,9 @@ final class ReviewIntentRail extends VBox {
             elsewhere.setWrapText(true);
             content.getChildren().add(elsewhere);
         }
-        if (state.stale()) {
+        // UNKNOWN says nothing: the delta is still in flight, or the old base
+        // cannot be diffed. Neither is evidence that the base moved.
+        if (moved) {
             Label stale = new Label("⚠ base moved — confirm");
             stale.getStyleClass().add("review-intent-stale");
             stale.setWrapText(true);
