@@ -153,3 +153,58 @@ jobs:
             '-Papp.drydock.diag.command=echo DRYDOCK_SESSION_OK' \
             -Papp.drydock.diag.autoExitSeconds=15 \
             -Papp.drydock.diag.stateFile=build/diag-state.json
+
+  gradle-run-smoke:
+    name: gradleRunSmoke (Windows)
+    # Verifies the production `gradlew :app:run` task launches on Windows --
+    # stronger than the boot-spike job above because bootSpike uses a typed
+    # JavaExec that sets its OWN jvmArgs, so it bypasses the
+    # applicationDefaultJvmArgs list that gates `gradlew run`. This job runs
+    # the actual `run` task with the diag flags forwarded via `-D`, opening
+    # a real JavaFX window on the windows-latest desktop session, exercising
+    # SessionManager/OpenSessionTab/TerminalFactory/JediTermFX the same way
+    # a colleague would when launching from a checkout. The app's own
+    # diagQuit watchdog (app.drydock.diag.autoExitSeconds) shuts it down
+    # cleanly so the task exit code is the pass/fail. Catches the regression
+    # where a -Xdock:*/-Dglass.platform-style JVM flag is added to
+    # applicationDefaultJvmArgs unguarded and would crash a Windows JVM at
+    # launch (see commit "Drop -Xdock:name from applicationDefaultJvmArgs
+    # on non-macOS").
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          submodules: false
+
+      - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: 26
+          cache: gradle
+
+      - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Create throwaway repo
+        shell: bash
+        run: |
+          mkdir -p build/boot-repo && cd build/boot-repo
+          git init -q
+          git config user.email t@t.t
+          git config user.name t
+          printf 'hi\n' > README.md
+          git add . && git commit -qm init
+
+      - name: gradle :app:run smoke (terminal-only session via ConPTY)
+        shell: bash
+        run: |
+          ./gradlew --no-daemon :app:run \
+            -Dapp.drydock.terminal.backend=jediterm \
+            -Dapp.drydock.diag.repo=build/boot-repo \
+            -Dapp.drydock.diag.autoCreateSession=true \
+            '-Dapp.drydock.diag.command=echo DRYDOCK_SESSION_OK' \
+            -Dapp.drydock.diag.autoExitSeconds=15 \
+            -Dapp.drydock.diag.stateFile=build/diag-state.json
