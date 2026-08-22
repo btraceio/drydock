@@ -5,6 +5,7 @@ import app.drydock.domain.ManagedSessionId;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.review.BaseMove;
+import app.drydock.review.ChangeGraph;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
@@ -487,7 +488,8 @@ class OpenSessionTabReviewSubTabTest extends ApplicationTest {
         }
 
         @Override
-        public List<ReviewIntent> intents(ReviewScope scope, UnifiedDiff diff) {
+        public List<ReviewIntent> intents(ReviewScope scope, UnifiedDiff diff,
+                                          Optional<ChangeGraph> graph) {
             return List.of();
         }
 

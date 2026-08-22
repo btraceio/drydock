@@ -4,6 +4,7 @@ import app.drydock.git.UnifiedDiff;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.AnnotationStore;
 import app.drydock.review.BaseMove;
+import app.drydock.review.ChangeGraph;
 import app.drydock.review.IntentGrouping;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewIntent;
@@ -113,8 +114,9 @@ final class FakeReviewHost implements SessionReviewView.Host {
     }
 
     @Override
-    public List<ReviewIntent> intents(ReviewScope scope, UnifiedDiff diff) {
-        return intents.intentsFor(scope.id(), diff);
+    public List<ReviewIntent> intents(ReviewScope scope, UnifiedDiff diff,
+                                      Optional<ChangeGraph> graph) {
+        return intents.intentsFor(scope.id(), diff, graph);
     }
 
     @Override

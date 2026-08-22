@@ -5,6 +5,8 @@ import app.drydock.git.ReviewBase;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.mcp.McpActivityLog;
 import app.drydock.review.BaseMove;
+import app.drydock.review.ChangeGraph;
+import app.drydock.review.IntentGrouping;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
@@ -33,7 +35,10 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 import java.util.function.Consumer;
 
 /**
@@ -82,16 +87,22 @@ public final class SessionReviewView extends BorderPane {
 
         /**
          * The intents of {@code scope}, grouping {@code diff}: the reviewer's
-         * grouping when one was supplied, otherwise one intent per changed
-         * file of the diff handed in.
+         * grouping when one was supplied, otherwise the computed sections of
+         * {@code graph} when one has finished building, otherwise one intent
+         * per (kind, directory) cluster of the diff handed in.
          *
          * <p>The diff is a parameter rather than something the host fetches,
          * because the only correct diff here is the one the caller has
          * already established belongs to {@code scope}. A host that looked it
          * up would be free to look up the wrong one, which is exactly the
          * defect this shape removes.</p>
+         *
+         * <p>{@code graph} is empty both before one has been requested and
+         * while it is still building -- {@link ChangeGraph#of} is blocking
+         * and runs off the FX thread, so this view hands through whatever it
+         * has on hand rather than waiting.</p>
          */
-        List<ReviewIntent> intents(ReviewScope scope, UnifiedDiff diff);
+        List<ReviewIntent> intents(ReviewScope scope, UnifiedDiff diff, Optional<ChangeGraph> graph);
 
         /**
          * The verdict recorded on one hunk, if any -- keyed by the hunk's
@@ -287,6 +298,34 @@ public final class SessionReviewView extends BorderPane {
      */
     private final Map<String, DiffOutcome> outcomeByScope = new HashMap<>();
 
+    /**
+     * Virtual threads for building a scope's {@link ChangeGraph} -- off the
+     * FX thread, because {@link ChangeGraph#of} parses every changed file
+     * and can trigger a first-time native grammar load. Separate from any
+     * git-lookup executor purely so a stack trace says which of the two is
+     * stuck.
+     */
+    private static final Executor SECTION_GRAPH_EXECUTOR =
+            runnable -> Thread.ofVirtual().name("drydock-section-graph").start(runnable);
+
+    /**
+     * Each scope's {@link ChangeGraph}, once built. Absent while none has
+     * been requested yet, or one is still building -- {@link #intents()}
+     * passes {@link Optional#empty()} through in that gap, and {@link
+     * IntentGrouping} falls back to the (kind, directory) clustering, so the
+     * rail is never empty while the graph is in flight.
+     */
+    private final Map<String, ChangeGraph> graphByScope = new HashMap<>();
+
+    /**
+     * Guards a superseded graph build from overwriting a newer one: bumped
+     * every time a fresh diff for a scope starts a new build, and checked
+     * before the result is published. Without it, a scope re-diffed twice in
+     * quick succession could have its second, current diff's graph
+     * overwritten by the first, slower build finishing last.
+     */
+    private final Map<String, Integer> graphGenerationByScope = new HashMap<>();
+
     /** The scopes this session offers, once {@link SessionReviewScopes} has measured them. */
     private Optional<SessionReviewScopes.Scopes> scopes = Optional.empty();
 
@@ -432,6 +471,11 @@ public final class SessionReviewView extends BorderPane {
         // from an empty diff and never recovers.
         diffColumn.setOnDiffResolved((scopeId, outcome) -> {
             outcomeByScope.put(scopeId, outcome);
+            if (outcome instanceof DiffOutcome.Loaded loaded) {
+                requestGraph(scopeId, loaded.diff());
+            } else {
+                graphByScope.remove(scopeId);
+            }
             // Only the selected scope's arrival changes what is on screen;
             // a superseded one still records its outcome, so coming back to
             // it does not re-run git.
@@ -862,9 +906,40 @@ public final class SessionReviewView extends BorderPane {
             return List.of();
         }
         if (selectedOutcome().orElse(null) instanceof DiffOutcome.Loaded loaded) {
-            return host.intents(scope.get(), loaded.diff());
+            return host.intents(scope.get(), loaded.diff(),
+                    Optional.ofNullable(graphByScope.get(scope.get().id())));
         }
         return List.of();
+    }
+
+    /**
+     * Kicks off building {@code diff}'s {@link ChangeGraph} on {@link
+     * #SECTION_GRAPH_EXECUTOR}, off the FX thread. Until it finishes, {@code
+     * scopeId} has no entry in {@link #graphByScope}, so {@link #intents()}
+     * passes {@link Optional#empty()} through and the rail shows the (kind,
+     * directory) clustering rather than nothing.
+     */
+    private void requestGraph(String scopeId, UnifiedDiff diff) {
+        int generation = graphGenerationByScope.merge(scopeId, 1, Integer::sum);
+        graphByScope.remove(scopeId);
+        CompletableFuture.supplyAsync(() -> ChangeGraph.of(diff), SECTION_GRAPH_EXECUTOR)
+                .whenComplete((graph, failure) -> Platform.runLater(() -> {
+                    if (failure != null
+                            || !Objects.equals(graphGenerationByScope.get(scopeId), generation)) {
+                        // Either the parse failed -- in which case the
+                        // (kind, directory) fallback is the honest answer,
+                        // not a broken rail -- or a newer diff for this
+                        // scope started a second build before this one
+                        // finished, and publishing a graph for a diff no
+                        // longer on screen would be worse than the fallback
+                        // it displaced.
+                        return;
+                    }
+                    graphByScope.put(scopeId, graph);
+                    if (selectedScope().map(scope -> scope.id().equals(scopeId)).orElse(false)) {
+                        refreshReviewState();
+                    }
+                }));
     }
 
     /**

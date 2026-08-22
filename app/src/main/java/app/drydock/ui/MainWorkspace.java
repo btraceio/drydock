@@ -48,6 +48,7 @@ import app.drydock.mcp.WorkspaceMcpSessionContext;
 import app.drydock.process.SshCommandBuilder;
 import app.drydock.review.AnnotationStore;
 import app.drydock.review.BaseMove;
+import app.drydock.review.ChangeGraph;
 import app.drydock.review.IntentGrouping;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewIntent;
@@ -1970,8 +1971,9 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         }
 
         @Override
-        public List<ReviewIntent> intents(ReviewScope scope, UnifiedDiff diff) {
-            return intentGrouping.intentsFor(scope.id(), diff);
+        public List<ReviewIntent> intents(ReviewScope scope, UnifiedDiff diff,
+                                          Optional<ChangeGraph> graph) {
+            return intentGrouping.intentsFor(scope.id(), diff, graph);
         }
 
         @Override

@@ -183,7 +183,7 @@ class ReviewCommentComposerTest extends ApplicationTest {
 
         Optional<String> intentId = host.findings(scope).get(0).intentId();
         assertTrue(intentId.isPresent(), "the comment must name an intent");
-        assertTrue(host.intents(scope, host.diff).stream()
+        assertTrue(host.intents(scope, host.diff, Optional.empty()).stream()
                         .anyMatch(intent -> intent.id().equals(intentId.get())),
                 "and it must be an intent that exists: " + intentId.get());
     }
