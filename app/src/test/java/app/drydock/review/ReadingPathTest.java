@@ -42,6 +42,17 @@ class ReadingPathTest {
         return new UnifiedDiff.Hunk("@@", lines);
     }
 
+    /** A file of several hunks, one line each, twenty lines apart. */
+    private static UnifiedDiff.FileDiff multiHunk(String path, String... oneLinePerHunk) {
+        List<UnifiedDiff.Hunk> hunks = new ArrayList<>();
+        int n = 1;
+        for (String text : oneLinePerHunk) {
+            hunks.add(hunk(n, text));
+            n += 20;
+        }
+        return new UnifiedDiff.FileDiff(path, "M", hunks.size(), 0, false, false, hunks);
+    }
+
     private static List<ReadingPath.Step> pathOf(UnifiedDiff diff, OutOfDiffFanIn.Result fanIn) {
         ChangeGraph graph = ChangeGraph.of(diff);
         return ReadingPath.of(diff, graph, Sections.of(diff, graph), fanIn);
@@ -242,6 +253,85 @@ class ReadingPathTest {
         }
     }
 
+    /**
+     * The reviewer's case: a three-hunk file where only hunk 0 references the
+     * changed symbol. A link renders as a footer beneath ONE hunk (§7.2), so
+     * a file-level answer spread over the file would ship "calls guards.cpp"
+     * under two hunks that call nothing -- a false statement about a specific
+     * hunk, not a soft one about the file.
+     */
+    @Test
+    void aLinkSitsOnlyOnTheHunkThatMakesTheReference() {
+        List<ReadingPath.Step> path = pathOf(new UnifiedDiff(List.of(
+                file("src/guards.cpp", "class JmpCtxScope { };"),
+                multiHunk("src/big.cpp",
+                        "void one() { new JmpCtxScope(); }",
+                        "void two() { }",
+                        "void three() { }"))), NO_FAN_IN);
+
+        assertEquals(List.of("calls"), kindsOn(path, ReviewIntent.hunkId("src/big.cpp", 0)));
+        assertEquals(List.of(), kindsOn(path, ReviewIntent.hunkId("src/big.cpp", 1)));
+        assertEquals(List.of(), kindsOn(path, ReviewIntent.hunkId("src/big.cpp", 2)));
+    }
+
+    /**
+     * The guards hunk is linked from the hunk that uses it, and only that
+     * one: "called by" points at a hunk, not at a file's first hunk.
+     */
+    @Test
+    void aCalledByLinkPointsAtTheHunkThatMakesTheCall() {
+        List<ReadingPath.Step> path = pathOf(new UnifiedDiff(List.of(
+                file("src/guards.cpp", "class JmpCtxScope { };"),
+                multiHunk("src/big.cpp",
+                        "void one() { }",
+                        "void two() { new JmpCtxScope(); }"))), NO_FAN_IN);
+
+        ReadingPath.Link link = stepFor(path, "src/guards.cpp").links().stream()
+                .filter(candidate -> candidate.kind().equals("called by"))
+                .findFirst().orElseThrow();
+        assertEquals(ReviewIntent.hunkId("src/big.cpp", 1), link.targetHunkId());
+    }
+
+    /**
+     * Deduplication by target hunk drops one direction of a mutual pair. At
+     * hunk granularity that only happens where the same two HUNKS reference
+     * each other -- where the directions sit in different hunks, both
+     * survive, which they did not when links were a file's answer copied
+     * onto each of its hunks.
+     */
+    @Test
+    void aMutualPairKeepsBothDirectionsWhenTheHunksDiffer() {
+        List<ReadingPath.Step> path = pathOf(new UnifiedDiff(List.of(
+                multiHunk("src/alpha.cpp", "class Alpha { };", "void a() { new Beta(); }"),
+                multiHunk("src/beta.cpp", "class Beta { };", "void b() { new Alpha(); }"))),
+                NO_FAN_IN);
+
+        assertEquals(List.of("called by"),
+                kindsOn(path, ReviewIntent.hunkId("src/alpha.cpp", 0)));
+        assertEquals(List.of("calls"),
+                kindsOn(path, ReviewIntent.hunkId("src/alpha.cpp", 1)));
+        assertEquals(ReviewIntent.hunkId("src/beta.cpp", 1),
+                linkOn(path, ReviewIntent.hunkId("src/alpha.cpp", 0)).targetHunkId());
+        assertEquals(ReviewIntent.hunkId("src/beta.cpp", 0),
+                linkOn(path, ReviewIntent.hunkId("src/alpha.cpp", 1)).targetHunkId());
+    }
+
+    /** Same concept points at the hunk that touches the symbol, not at hunk 0. */
+    @Test
+    void aSameConceptLinkPointsAtTheHunkThatTouchesTheSymbol() {
+        List<ReadingPath.Step> path = pathOf(new UnifiedDiff(List.of(
+                file("src/guards.cpp", "class JmpCtxScope { };"),
+                multiHunk("src/a.cpp", "void a0() { }", "void a1() { new JmpCtxScope(); }"),
+                multiHunk("src/b.cpp", "void b0() { }", "void b1() { new JmpCtxScope(); }"))),
+                NO_FAN_IN);
+
+        ReadingPath.Link shared = linksOn(path, ReviewIntent.hunkId("src/a.cpp", 1)).stream()
+                .filter(link -> link.kind().equals("same concept"))
+                .findFirst().orElseThrow();
+        assertEquals(ReviewIntent.hunkId("src/b.cpp", 1), shared.targetHunkId());
+        assertEquals(List.of(), kindsOn(path, ReviewIntent.hunkId("src/a.cpp", 0)));
+    }
+
     /** Cross-file only: two hunks of one file are not a relationship. */
     @Test
     void aFileDoesNotLinkToItself() {
@@ -253,6 +343,24 @@ class ReadingPathTest {
 
         assertEquals(2, path.size());
         assertTrue(path.stream().allMatch(step -> step.links().isEmpty()));
+    }
+
+    /**
+     * Cross-FILE, not merely cross-hunk. Two overloads in one file both
+     * declare the name, so both hunks touch it -- and linking them would put
+     * a footer under a hunk pointing at its own file, which §6.3 excludes at
+     * every kind.
+     */
+    @Test
+    void twoHunksOfOneFileSharingASymbolAreNotLinked() {
+        List<ReadingPath.Step> path = pathOf(new UnifiedDiff(List.of(
+                multiHunk("src/solo.cpp",
+                        "void render(int a) { }",
+                        "void render(float b) { }"))), NO_FAN_IN);
+
+        assertEquals(2, path.size());
+        assertTrue(path.stream().allMatch(step -> step.links().isEmpty()),
+                path.toString());
     }
 
     @Test
@@ -366,6 +474,19 @@ class ReadingPathTest {
     @Test
     void anEmptyDiffHasNoPath() {
         assertEquals(List.of(), pathOf(new UnifiedDiff(List.of()), NO_FAN_IN));
+    }
+
+    private static List<ReadingPath.Link> linksOn(List<ReadingPath.Step> path, String hunkId) {
+        return path.stream().filter(step -> step.hunkId().equals(hunkId))
+                .findFirst().orElseThrow().links();
+    }
+
+    private static List<String> kindsOn(List<ReadingPath.Step> path, String hunkId) {
+        return linksOn(path, hunkId).stream().map(ReadingPath.Link::kind).toList();
+    }
+
+    private static ReadingPath.Link linkOn(List<ReadingPath.Step> path, String hunkId) {
+        return linksOn(path, hunkId).get(0);
     }
 
     private static ReadingPath.Step stepFor(List<ReadingPath.Step> path, String file) {

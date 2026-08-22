@@ -50,11 +50,13 @@ import java.util.TreeSet;
  * unit level, where a cycle's members each have in-degree from inside the
  * cycle while the unit as a whole is an endpoint.</p>
  *
- * <p><strong>Links are file-level.</strong> {@link SymbolScan.Symbol} does
- * not carry a line, so nothing here can tell which hunk of a file a symbol
- * sits in. Every hunk of a file therefore carries that file's links, and a
- * link points at the first hunk of its target file. Narrowing this needs a
- * line on {@code Symbol}, not a guess here.</p>
+ * <p><strong>Links are per hunk, on both ends.</strong> A link renders as a
+ * footer row beneath one hunk (§7.2), so a file-level answer spread over a
+ * file's hunks would put "calls guards.cpp" under hunks that call nothing --
+ * a false statement about a specific hunk, which is the one thing a surface
+ * built on true markers may not ship. {@link ChangeGraph.Hunk} carries the
+ * finer view and {@link SymbolScan.Symbol} the hunk index it is built
+ * from.</p>
  *
  * <p>{@link #of} is string work over an already-built graph, but {@link
  * ChangeGraph#of} is blocking -- it parses every changed file and can
@@ -132,7 +134,6 @@ public final class ReadingPath {
 
         Map<String, Integer> sectionByHunk = sectionNumbers(sections);
         Map<String, Integer> fanInByFile = fanInByFile(graph, fanIn);
-        Map<String, Map<String, SortedSet<String>>> concepts = concepts(graph);
         Comparator<String> rank = rank(graph, fanInByFile);
 
         List<List<String>> units =
@@ -145,11 +146,12 @@ public final class ReadingPath {
                 if (fileDiff == null) {
                     continue;
                 }
-                List<Link> links = linksFrom(file, graph, concepts, byPath, sectionByHunk);
                 String reason = reasonFor(file, graph, byPath, sectionByHunk,
                         fanInByFile.getOrDefault(file, 0), fanIn.unavailable());
-                for (int hunk = 0; hunk < fileDiff.hunks().size(); hunk++) {
-                    String hunkId = ReviewIntent.hunkId(file, hunk);
+                for (int index = 0; index < fileDiff.hunks().size(); index++) {
+                    String hunkId = ReviewIntent.hunkId(file, index);
+                    List<Link> links = linksFrom(new ChangeGraph.Hunk(file, index), graph,
+                            byPath, sectionByHunk);
                     steps.add(new Step(hunkId, file, sectionByHunk.getOrDefault(hunkId, 0),
                             reason, links, steps.isEmpty()));
                 }
@@ -272,108 +274,92 @@ public final class ReadingPath {
     // ---- links --------------------------------------------------------------
 
     /**
-     * {@code file}'s links, cross-file and deduplicated by target hunk.
+     * {@code hunk}'s links, cross-file and deduplicated by target hunk.
      *
-     * <p>Kinds are emitted in a fixed order -- calls, called by, same concept
-     * -- and the first one to claim a target hunk keeps it. That is what
-     * "deduplicated by target hunk" has to mean for a pair that is both: a
-     * file that calls another and shares its symbol is one relationship, and
-     * the call is the more specific thing to say about it. It is also why
-     * same-concept ends up meaning what §2.2 wants -- two files that use the
-     * same thing without either defining it -- rather than restating every
-     * edge.</p>
+     * <p>Per hunk, not per file. A link renders as a footer row beneath one
+     * hunk (§7.2), so "calls guards.cpp" under a hunk that references
+     * nothing is a false statement about that hunk -- not a loose one about
+     * the file -- and this surface is worth having only while its markers
+     * state true things.</p>
+     *
+     * <p>Kinds are emitted in a fixed order -- calls, called by, same
+     * concept -- and the first one to claim a target hunk keeps it. That is
+     * what "deduplicated by target hunk" has to mean for a pair that is
+     * both: the call is the more specific thing to say. It is also why
+     * same-concept ends up meaning what §2.2 wants -- two hunks that use the
+     * same thing, neither declaring it -- rather than restating every edge.
+     * Two hunks that genuinely reference each other therefore show one link
+     * rather than two; the cycle that makes is named by its section (§6.1),
+     * which is where a mutual dependency belongs on this surface.</p>
      */
-    private static List<Link> linksFrom(String file, ChangeGraph graph,
-                                        Map<String, Map<String, SortedSet<String>>> concepts,
+    private static List<Link> linksFrom(ChangeGraph.Hunk hunk, ChangeGraph graph,
                                         Map<String, UnifiedDiff.FileDiff> byPath,
                                         Map<String, Integer> sectionByHunk) {
-        List<Link> links = new ArrayList<>();
-        Set<String> claimed = new LinkedHashSet<>();
+        SortedSet<String> declared = graph.declarationsIn(hunk);
+        SortedSet<String> referenced = graph.referencesIn(hunk);
 
-        for (String target : graph.filesReferencedBy(file)) {
-            // The symbols target declares that file uses: a real location in
-            // the target, so the label may point at it.
-            String symbol = best(sharedBetween(graph, target, file), graph);
-            addLink(links, claimed, byPath, sectionByHunk, CALLS, target,
-                    symbol == null ? "" : ":" + symbol);
-        }
-        for (String source : graph.filesReferencing(file)) {
-            // The symbols file declares that source uses. They live HERE, not
-            // in the target, so the label says what the target does with them
-            // rather than pointing into it.
-            String symbol = best(sharedBetween(graph, file, source), graph);
-            addLink(links, claimed, byPath, sectionByHunk, CALLED_BY, source,
-                    symbol == null ? "" : " · uses " + symbol);
-        }
-        Map<String, SortedSet<String>> sharedWith =
-                concepts.getOrDefault(file, Map.of());
-        for (Map.Entry<String, SortedSet<String>> shared : sharedWith.entrySet()) {
-            String symbol = best(shared.getValue(), graph);
-            addLink(links, claimed, byPath, sectionByHunk, SAME_CONCEPT, shared.getKey(),
-                    " · both touch " + symbol);
-        }
-        return List.copyOf(links);
-    }
-
-    private static void addLink(List<Link> links, Set<String> claimed,
-                                Map<String, UnifiedDiff.FileDiff> byPath,
-                                Map<String, Integer> sectionByHunk,
-                                String kind, String target, String suffix) {
-        UnifiedDiff.FileDiff targetDiff = byPath.get(target);
-        if (targetDiff == null || targetDiff.hunks().isEmpty()) {
-            // Nothing to click through to; a link to no hunk is a dead row.
-            return;
-        }
-        String hunkId = ReviewIntent.hunkId(target, 0);
-        if (!claimed.add(hunkId)) {
-            return;
-        }
-        String marker = marker(sectionByHunk.getOrDefault(hunkId, 0));
-        String label = (marker.isEmpty() ? "" : marker + " ")
-                + FallbackIntents.fileName(target) + suffix;
-        links.add(new Link(kind, hunkId, label));
-    }
-
-    /** The changed names {@code declarer} declares and {@code user} references. */
-    private static SortedSet<String> sharedBetween(ChangeGraph graph, String declarer,
-                                                  String user) {
-        SortedSet<String> shared = new TreeSet<>();
-        for (String symbol : graph.declarationsIn(declarer)) {
-            if (graph.filesReferencingSymbol(symbol).contains(user)) {
-                shared.add(symbol);
+        Map<ChangeGraph.Hunk, SortedSet<String>> calls = new TreeMap<>();
+        for (String symbol : referenced) {
+            for (ChangeGraph.Hunk target : graph.hunksDeclaring(symbol)) {
+                calls.computeIfAbsent(target, key -> new TreeSet<>()).add(symbol);
             }
         }
-        return shared;
-    }
-
-    /**
-     * For each changed file, every other changed file it shares a changed
-     * symbol with and the names they share. A file touches a symbol by
-     * declaring it or by referencing it; the name has to be uniquely declared
-     * in the scope, which {@link ChangeGraph#changedDeclarations()} already
-     * guarantees -- the same test an edge passes (§4.2), so an ambiguous name
-     * links nothing.
-     *
-     * <p>Built once for the whole change rather than per file: the question
-     * is symmetric, and asking it file by file re-walks every changed
-     * declaration once per changed file.</p>
-     */
-    private static Map<String, Map<String, SortedSet<String>>> concepts(ChangeGraph graph) {
-        Map<String, Map<String, SortedSet<String>>> byFile = new TreeMap<>();
-        for (String symbol : graph.changedDeclarations()) {
-            SortedSet<String> touching = new TreeSet<>(graph.filesReferencingSymbol(symbol));
-            graph.fileDeclaring(symbol).ifPresent(touching::add);
-            for (String file : touching) {
-                for (String other : touching) {
-                    if (!other.equals(file)) {
-                        byFile.computeIfAbsent(file, key -> new TreeMap<>())
-                                .computeIfAbsent(other, key -> new TreeSet<>())
-                                .add(symbol);
-                    }
+        Map<ChangeGraph.Hunk, SortedSet<String>> calledBy = new TreeMap<>();
+        for (String symbol : declared) {
+            for (ChangeGraph.Hunk source : graph.hunksReferencingSymbol(symbol)) {
+                calledBy.computeIfAbsent(source, key -> new TreeSet<>()).add(symbol);
+            }
+        }
+        // A hunk touches a symbol by declaring it or by referencing it; an
+        // unresolvable name touches nothing, because neither lookup below
+        // knows it -- the same test an edge passes (§4.2).
+        Map<ChangeGraph.Hunk, SortedSet<String>> shared = new TreeMap<>();
+        SortedSet<String> touched = new TreeSet<>(declared);
+        touched.addAll(referenced);
+        for (String symbol : touched) {
+            SortedSet<ChangeGraph.Hunk> touching = new TreeSet<>(graph.hunksDeclaring(symbol));
+            touching.addAll(graph.hunksReferencingSymbol(symbol));
+            for (ChangeGraph.Hunk other : touching) {
+                if (!other.file().equals(hunk.file())) {
+                    shared.computeIfAbsent(other, key -> new TreeSet<>()).add(symbol);
                 }
             }
         }
-        return byFile;
+
+        List<Link> links = new ArrayList<>();
+        Set<String> claimed = new LinkedHashSet<>();
+        // The symbol is declared in the target, so the label may point at it.
+        emit(links, claimed, byPath, sectionByHunk, CALLS, calls, graph, ":");
+        // The symbols live HERE, not in the target, so the label says what
+        // the target does with them rather than pointing into it.
+        emit(links, claimed, byPath, sectionByHunk, CALLED_BY, calledBy, graph, " · uses ");
+        emit(links, claimed, byPath, sectionByHunk, SAME_CONCEPT, shared, graph,
+                " · both touch ");
+        return List.copyOf(links);
+    }
+
+    private static void emit(List<Link> links, Set<String> claimed,
+                             Map<String, UnifiedDiff.FileDiff> byPath,
+                             Map<String, Integer> sectionByHunk, String kind,
+                             Map<ChangeGraph.Hunk, SortedSet<String>> targets,
+                             ChangeGraph graph, String relation) {
+        for (Map.Entry<ChangeGraph.Hunk, SortedSet<String>> target : targets.entrySet()) {
+            ChangeGraph.Hunk to = target.getKey();
+            UnifiedDiff.FileDiff targetDiff = byPath.get(to.file());
+            if (targetDiff == null || to.index() >= targetDiff.hunks().size()) {
+                // Nothing to click through to; a link to no hunk is a dead row.
+                continue;
+            }
+            String hunkId = ReviewIntent.hunkId(to.file(), to.index());
+            if (!claimed.add(hunkId)) {
+                continue;
+            }
+            String marker = marker(sectionByHunk.getOrDefault(hunkId, 0));
+            String label = (marker.isEmpty() ? "" : marker + " ")
+                    + FallbackIntents.fileName(to.file())
+                    + relation + best(target.getValue(), graph);
+            links.add(new Link(kind, hunkId, label));
+        }
     }
 
     /**
