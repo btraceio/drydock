@@ -156,6 +156,34 @@ class SectionStatesTest {
         assertTrue(sections.stateOf(board, board.sections().get(0)).settledElsewhere().isEmpty());
     }
 
+    /**
+     * Task 18's correction 6b, unreachable until sections overlapped: with
+     * THREE sections sharing one hunk, a verdict is keyed {@code (scopeId,
+     * hunkDigest)} alone -- nothing records which of them the reader actually
+     * settled it through -- so naming every sharer would credit sections
+     * that, as far as this model can tell, reviewed nothing. At most one is
+     * named per card; the two-section tests above (still passing, unchanged)
+     * are the case where "at most one" and "the only one" coincide.
+     */
+    @Test
+    void threeSectionsSharingAHunkNameAtMostOneEach() {
+        SectionStates.Board board = board(List.of(
+                section("section-1", GUARDS_H, GUARDS_CPP),
+                section("section-2", GUARDS_H, PROFILER),
+                section("section-3", GUARDS_H)));
+        approve(GUARDS_H);
+
+        assertEquals(List.of("②"),
+                sections.stateOf(board, board.sections().get(0)).settledElsewhere(),
+                "section 1 must name at most one sharer, not both 2 and 3");
+        assertEquals(List.of("①"),
+                sections.stateOf(board, board.sections().get(1)).settledElsewhere(),
+                "section 2 must name at most one sharer, not both 1 and 3");
+        assertEquals(List.of("①"),
+                sections.stateOf(board, board.sections().get(2)).settledElsewhere(),
+                "section 3 must name at most one sharer, not both 1 and 2");
+    }
+
     // ---- staleness has three states, not two --------------------------------
 
     @Test
@@ -197,6 +225,27 @@ class SectionStatesTest {
         assertEquals(2, state.totalHunks());
         assertEquals(Optional.of(ReviewVerdict.Decision.APPROVED), state.decision(),
                 "the decision persists across staleness -- only its freshness is in question");
+    }
+
+    /**
+     * Task 18's correction 6a: a section with one stale-approved hunk and one
+     * genuinely UNREAD hunk has {@code settledHunks()==0} -- correct, nothing
+     * here is safely settled -- but the card must not read as though NOTHING
+     * was ever recorded either. {@code recordedHunks()} is what the rail's
+     * progress LABEL reads instead, so "1/2 hunks" survives exactly this gap.
+     */
+    @Test
+    void recordedHunksCountsAStaleVerdictEvenWhenNothingElseIsSettled() {
+        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
+        SectionStates.Board board = overlapping();
+        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
+        // GUARDS_CPP is left entirely unread -- no verdict of any kind.
+
+        SectionStates.SectionState state = sections.stateOf(board, board.sections().get(0));
+        assertEquals(0, state.settledHunks(), "the stale hunk must not count as SETTLED");
+        assertEquals(1, state.recordedHunks(),
+                "but it WAS recorded -- the card must not understate to zero hunks touched");
+        assertEquals(2, state.totalHunks());
     }
 
     /** A move that provably could not matter must not spend the reader's attention. */

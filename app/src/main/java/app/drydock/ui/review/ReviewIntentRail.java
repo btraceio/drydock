@@ -595,11 +595,18 @@ final class ReviewIntentRail extends VBox {
             adrift.getStyleClass().add("review-intent-adrift");
             adrift.setWrapText(true);
             content.getChildren().add(adrift);
-        } else if (state.settledHunks() > 0) {
+        } else if (state.recordedHunks() > 0) {
             // Part-settled reads as untouched otherwise: the card looks
             // exactly like one nobody has opened, and the reader re-reads
-            // hunks they already signed off.
-            Label progress = new Label(state.settledHunks() + "/" + state.totalHunks() + " hunks");
+            // hunks they already signed off. recordedHunks, not
+            // settledHunks (spec correction 6a): a section with one
+            // stale-approved hunk and one genuinely unread one has
+            // settledHunks()==0, which would drop this whole label and
+            // understate to "untouched" even though one hunk WAS recorded
+            // -- ⚠ base moved is the only thing that would still say so.
+            // The two agree whenever nothing here is stale, so this only
+            // ever changes what the label shows in exactly that gap.
+            Label progress = new Label(state.recordedHunks() + "/" + state.totalHunks() + " hunks");
             progress.getStyleClass().add("review-intent-hunk-progress");
             content.getChildren().add(progress);
         }

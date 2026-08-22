@@ -110,7 +110,7 @@ class ReviewIntentRailCardHeightTest extends ApplicationTest {
     void theSettledElsewhereMarkerNamingSeveralSectionsFitsAtNarrowWidth() {
         narrow();
         rail.setSectionStateLookup(intent -> new SectionStates.SectionState(
-                Optional.empty(), 1, 3, SectionStates.Staleness.FRESH,
+                Optional.empty(), 1, 1, 3, SectionStates.Staleness.FRESH,
                 List.of("①", "②", "③", "④", "⑤"), false));
         showIntents(List.of(intent(1, "guards.h", ReviewIntent.Kind.CHANGE, "shared hunk")));
 
@@ -130,7 +130,7 @@ class ReviewIntentRailCardHeightTest extends ApplicationTest {
     void theStaleBannerFitsAtNarrowWidth() {
         narrow();
         rail.setSectionStateLookup(intent -> new SectionStates.SectionState(
-                Optional.of(ReviewVerdict.Decision.APPROVED), 2, 2,
+                Optional.of(ReviewVerdict.Decision.APPROVED), 2, 2, 2,
                 SectionStates.Staleness.MOVED, List.of(), false));
         showIntents(List.of(intent(1, "guards.h", ReviewIntent.Kind.CHANGE, "")));
 
