@@ -4,6 +4,7 @@ import app.drydock.git.UnifiedDiff;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Locale;
 import java.util.OptionalInt;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -92,6 +93,6 @@ class HunkDigestTest {
         String digest = HunkDigest.of("src/a.c", hunk(List.of(add(1, "x"))));
 
         assertEquals(64, digest.length());
-        assertEquals(digest.toLowerCase(java.util.Locale.ROOT), digest);
+        assertEquals(digest.toLowerCase(Locale.ROOT), digest);
     }
 }
