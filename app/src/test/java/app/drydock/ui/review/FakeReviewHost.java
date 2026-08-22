@@ -120,6 +120,16 @@ final class FakeReviewHost implements SessionReviewView.Host {
     }
 
     @Override
+    public long groupingVersion(ReviewScope scope) {
+        return intents.version(scope.id());
+    }
+
+    @Override
+    public boolean hasReviewerGrouping(ReviewScope scope) {
+        return intents.hasReviewerGrouping(scope.id());
+    }
+
+    @Override
     public Optional<ReviewVerdict> verdict(ReviewScope scope, String hunkDigest) {
         return store.verdict(scope.id(), hunkDigest);
     }
