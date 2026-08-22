@@ -30,6 +30,16 @@ import java.util.function.Consumer;
  */
 public final class IntentGrouping {
 
+    /**
+     * The reading path's rank has no out-of-diff fan-in scan behind it here
+     * (Task 18 follow-up, correction 4): {@link OutOfDiffFanIn#scan} spawns a
+     * blocking {@code git grep} per scope, a separate concern from reordering
+     * a grouping already in hand. {@code unavailable=true} is the honest
+     * input for a signal nothing computed -- the same choice the rail and
+     * {@code McpToolRouter} both make.
+     */
+    private static final OutOfDiffFanIn.Result NO_FAN_IN_SCAN = new OutOfDiffFanIn.Result(Map.of(), true);
+
     private final Map<String, List<ReviewIntent>> byScope = new ConcurrentHashMap<>();
     private final List<Consumer<String>> listeners = new CopyOnWriteArrayList<>();
 
@@ -104,7 +114,11 @@ public final class IntentGrouping {
      *
      * <p>A reviewer's grouping is never re-sorted or re-drawn. It came from
      * something that read the change; recomputing over it would be drydock
-     * overruling the reviewer.</p>
+     * overruling the reviewer -- so its {@code number}s stay exactly {@link
+     * #set}'s own dense 1..N over whatever order the reviewer supplied,
+     * unrelated to {@link ReadingPath}'s reading order. Only the COMPUTED
+     * path below is renumbered against it, because only there is drydock
+     * itself the one deciding what card is (1).</p>
      *
      * <p>When the graph turns out to have nothing structural to add --
      * {@link Sections#of} takes the same (kind, directory) clustering itself
@@ -126,9 +140,21 @@ public final class IntentGrouping {
             return fallback;
         }
         List<Sections.Section> sections = Sections.of(diff, graph.get());
+        // sameAsFallback compares against Sections.of's own (unreordered)
+        // list -- the ONE case that matters here is content equality with
+        // the fallback, which reordering cannot create or hide.
         if (sameAsFallback(sections, fallback)) {
             return fallback;
         }
+        // Numbered in the SAME order the rail's PATH mode and
+        // McpToolRouter's review_scope both use (Task 18, correction 4):
+        // ReadingPath.of reorders Sections.of's own list by reading order,
+        // so a human looking at computed card (1) here and an agent reading
+        // section (1) off review_scope never disagree about which section
+        // that is -- and pressing p in the rail does not silently renumber
+        // every card underneath whichever intent a finding or verdict named.
+        List<Sections.Section> ordered =
+                ReadingPath.of(diff, graph.get(), sections, NO_FAN_IN_SCAN).sections();
         Map<String, ReviewIntent> fallbackByHunk = new LinkedHashMap<>();
         for (ReviewIntent intent : fallback) {
             for (String hunkId : intent.hunkIds()) {
@@ -137,7 +163,7 @@ public final class IntentGrouping {
         }
         List<ReviewIntent> computed = new ArrayList<>();
         int number = 1;
-        for (Sections.Section section : sections) {
+        for (Sections.Section section : ordered) {
             computed.add(new ReviewIntent(computedId(section), number,
                     section.title(), kindOf(section, fallbackByHunk), riskOf(section, fallbackByHunk),
                     rationale(section), section.hunkIds(), Optional.empty(), false));
