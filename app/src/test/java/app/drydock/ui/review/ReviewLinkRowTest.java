@@ -137,6 +137,39 @@ class ReviewLinkRowTest extends ApplicationTest {
         assertTrue(link.isFocusTraversable());
     }
 
+    /**
+     * PATH mode narrows the column to a synthetic one-hunk intent
+     * ({@code SessionReviewView.pathStepAsIntent}) before any footer's click
+     * can even fire -- a link is cross-file by construction (spec §7.2), so
+     * its target is routinely a hunk that narrow filter does not show at
+     * all. Left unfixed, the click fires {@link ReviewDiffColumn#revealHunk}
+     * against a row list that never contained the target, which silently
+     * does nothing -- exactly the display/action divergence the brief
+     * warns about.
+     */
+    @Test
+    void clickingALinkFilteredOutOfTheCurrentViewWidensAndReachesItsTarget() {
+        showTwoFilesFarApart();
+        ReviewIntent onlyFileA = new ReviewIntent("path:only-a", 1, FILE_A, ReviewIntent.Kind.CHANGE,
+                ReviewIntent.Risk.NONE, "", List.of(ReviewIntent.hunkId(FILE_A, 0)), Optional.empty(), false);
+        interact(() -> column.setIntent(onlyFileA));
+        assertFalse(renderedHunkFiles().contains(FILE_B),
+                "the narrowed filter must exclude the link's target file up front");
+
+        String targetHunkId = ReviewIntent.hunkId(FILE_B, 0);
+        setLinks(Map.of(ReviewIntent.hunkId(FILE_A, 0),
+                List.of(new ReadingPath.Link(ReadingPath.CALLS, targetHunkId, "guards.cpp:x"))));
+
+        Button link = (Button) lookup(".review-link-row").query();
+        interact(link::fire);
+        WaitForAsyncUtils.waitForFxEvents();
+
+        assertTrue(renderedHunkFiles().contains(FILE_B),
+                "a cross-file link must widen out of a one-hunk filter to reach its target, the "
+                        + "way PATH mode narrows the column before every footer click; rendered "
+                        + renderedHunkFiles());
+    }
+
 
 
     /**
