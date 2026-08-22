@@ -54,6 +54,10 @@ class ReadingPathTest {
     }
 
     private static List<ReadingPath.Step> pathOf(UnifiedDiff diff, OutOfDiffFanIn.Result fanIn) {
+        return fullPathOf(diff, fanIn).steps();
+    }
+
+    private static ReadingPath.Path fullPathOf(UnifiedDiff diff, OutOfDiffFanIn.Result fanIn) {
         ChangeGraph graph = ChangeGraph.of(diff);
         return ReadingPath.of(diff, graph, Sections.of(diff, graph), fanIn);
     }
@@ -381,16 +385,14 @@ class ReadingPathTest {
 
     @Test
     void everyStepCarriesTheSectionItsHunkIsIn() {
-        UnifiedDiff diff = new UnifiedDiff(List.of(
+        ReadingPath.Path path = fullPathOf(new UnifiedDiff(List.of(
                 file("src/guards.cpp", "class JmpCtxScope { };"),
-                file("src/profiler.cpp", "void go() { new JmpCtxScope(); }")));
-        ChangeGraph graph = ChangeGraph.of(diff);
-        List<Sections.Section> sections = Sections.of(diff, graph);
+                file("src/profiler.cpp", "void go() { new JmpCtxScope(); }"))), NO_FAN_IN);
 
-        for (ReadingPath.Step step : ReadingPath.of(diff, graph, sections, NO_FAN_IN)) {
+        for (ReadingPath.Step step : path.steps()) {
             int expected = 0;
-            for (int index = 0; index < sections.size(); index++) {
-                if (sections.get(index).hunkIds().contains(step.hunkId())) {
+            for (int index = 0; index < path.sections().size(); index++) {
+                if (path.sections().get(index).hunkIds().contains(step.hunkId())) {
                     expected = index + 1;
                     break;
                 }
@@ -398,6 +400,75 @@ class ReadingPathTest {
             assertNotEquals(0, expected, step.hunkId());
             assertEquals(expected, step.sectionNumber(), step.hunkId());
         }
+    }
+
+    /**
+     * The rail and the path are one order. Sections orders its units by path
+     * -- it has no entry-point rank to consult -- so on this diff its own
+     * first card is NOT the entry point's section. A rail listing sections in
+     * that order while badging the entry point would put START HERE on card
+     * 2, which is the failure the rank-inside-the-sort rule exists to
+     * prevent, one level up.
+     */
+    @Test
+    void theSectionOrderAgreesWithThePathAboutWhatComesFirst() {
+        UnifiedDiff diff = new UnifiedDiff(List.of(
+                file("src/internal.cpp", "class Internal { };"),
+                file("src/user.cpp", "void u() { new Internal(); }"),
+                file("src/zeta.cpp", "class PublicThing { };")));
+        ChangeGraph graph = ChangeGraph.of(diff);
+        List<Sections.Section> asGrouped = Sections.of(diff, graph);
+        String entry = ReviewIntent.hunkId("src/zeta.cpp", 0);
+
+        ReadingPath.Path path =
+                ReadingPath.of(diff, graph, asGrouped, fanIn("PublicThing", 1));
+
+        // The fixture is only worth anything if the two orders disagree.
+        assertFalse(asGrouped.get(0).hunkIds().contains(entry), asGrouped.toString());
+        assertEquals(entry, path.steps().get(0).hunkId());
+        assertTrue(path.steps().get(0).entryPoint());
+        assertEquals(1, path.steps().get(0).sectionNumber());
+        assertTrue(path.sections().get(0).hunkIds().contains(entry),
+                path.sections().toString());
+    }
+
+    /**
+     * A section the path never reaches goes to the end of the rail, not out
+     * of it. A card falling out is worse than one sitting last.
+     */
+    @Test
+    void aSectionThePathNeverReachesIsKeptAtTheEnd() {
+        UnifiedDiff diff = new UnifiedDiff(List.of(
+                file("src/guards.cpp", "class JmpCtxScope { };"),
+                file("src/profiler.cpp", "void go() { new JmpCtxScope(); }")));
+        ChangeGraph graph = ChangeGraph.of(diff);
+        Sections.Section orphan = new Sections.Section("Orphan", List.of(),
+                List.of(ReviewIntent.hunkId("src/gone.cpp", 0)), Optional.empty(), List.of());
+        List<Sections.Section> withOrphan = new ArrayList<>(Sections.of(diff, graph));
+        withOrphan.add(0, orphan);
+
+        List<Sections.Section> ordered =
+                ReadingPath.of(diff, graph, withOrphan, NO_FAN_IN).sections();
+
+        assertEquals(withOrphan.size(), ordered.size());
+        assertEquals(orphan, ordered.get(ordered.size() - 1));
+    }
+
+    /** Reordering the rail may not lose a card from it. */
+    @Test
+    void everySectionKeepsItsPlaceInTheRail() {
+        UnifiedDiff diff = new UnifiedDiff(List.of(
+                file("src/internal.cpp", "class Internal { };"),
+                file("src/user.cpp", "void u() { new Internal(); }"),
+                file("src/zeta.cpp", "class PublicThing { };")));
+        ChangeGraph graph = ChangeGraph.of(diff);
+        List<Sections.Section> asGrouped = Sections.of(diff, graph);
+
+        List<Sections.Section> ordered =
+                ReadingPath.of(diff, graph, asGrouped, fanIn("PublicThing", 1)).sections();
+
+        assertEquals(asGrouped.size(), ordered.size());
+        assertTrue(ordered.containsAll(asGrouped), ordered.toString());
     }
 
     @Test
