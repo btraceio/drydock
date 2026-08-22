@@ -1622,7 +1622,27 @@ final class ReviewDiffColumn extends BorderPane {
      * place through the same code.
      */
     private void selectLinkTarget(String hunkId) {
-        ReviewIntent.parseHunkId(hunkId).ifPresent(anchor -> revealHunk(anchor.file(), anchor.hunkIndex()));
+        ReviewIntent.parseHunkId(hunkId).ifPresent(anchor -> {
+            // A link crosses files by construction (spec §7.2: cross-file
+            // only), so its target is routinely a hunk the CURRENT filter
+            // does not show at all -- PATH mode narrows the column to a
+            // synthetic one-hunk intent, and an ordinary intent filter can
+            // just as easily name only some of a file's hunks. Widening
+            // FIRST is what makes the click land instead of silently
+            // scrolling nowhere on a column revealHunk cannot search.
+            if (!hunkFilter().includes(anchor.file(), anchor.hunkIndex())) {
+                showWholeScope = true;
+                rebuild();
+            }
+            boolean reached = revealHunk(anchor.file(), anchor.hunkIndex());
+            if (!reached) {
+                // Not swallowed: a link whose target could not be reached
+                // (past the row cap, most likely) must not look identical to
+                // one that worked -- the same display/action divergence this
+                // whole row exists to avoid.
+                LOG.log(Level.WARNING, "Link footer could not reach its target hunk: " + hunkId);
+            }
+        });
     }
 
     private static Region message(String text) {
