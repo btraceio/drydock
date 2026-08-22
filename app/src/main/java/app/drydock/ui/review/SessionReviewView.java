@@ -327,6 +327,18 @@ public final class SessionReviewView extends BorderPane {
     private final Map<String, Integer> graphGenerationByScope = new HashMap<>();
 
     /**
+     * The diff instance each scope's current (or in-flight) graph was built
+     * from, so {@link #requestGraph} can tell "a genuinely new diff landed"
+     * from "the same cached {@code Loaded} outcome was re-published" -- a
+     * scope switch back to a cached diff re-publishes the SAME {@link
+     * UnifiedDiff} object through {@code onDiffResolved} (see {@link
+     * #outcomeByScope}'s own javadoc on exactly why), and re-parsing an
+     * unchanged diff through {@link ChangeGraph#of} on every such switch
+     * would waste the very work that cache exists to avoid.
+     */
+    private final Map<String, UnifiedDiff> graphedDiffByScope = new HashMap<>();
+
+    /**
      * Set by {@link #close()}. A graph build already running when a view
      * closes is left to finish -- there is no cancelling a virtual thread
      * mid-parse -- but its completion must not still touch this view's state
@@ -975,8 +987,20 @@ public final class SessionReviewView extends BorderPane {
      * scopeId} has no entry in {@link #graphByScope}, so {@link #intents()}
      * passes {@link Optional#empty()} through and the rail shows the (kind,
      * directory) clustering rather than nothing.
+     *
+     * <p>A no-op when {@code diff} is the SAME instance already graphed (or
+     * being graphed) for this scope -- every scope flip back to a cached
+     * {@code Loaded} outcome, and every untracked-files toggle, republishes
+     * that diff through {@code onDiffResolved} again, and re-parsing an
+     * unchanged diff on every one of those would re-open the window a
+     * superseded build could publish a stale graph into, for no new
+     * information.</p>
      */
     private void requestGraph(String scopeId, UnifiedDiff diff) {
+        if (graphedDiffByScope.get(scopeId) == diff) {
+            return;
+        }
+        graphedDiffByScope.put(scopeId, diff);
         int generation = graphGenerationByScope.merge(scopeId, 1, Integer::sum);
         graphByScope.remove(scopeId);
         CompletableFuture.supplyAsync(() -> ChangeGraph.of(diff), SECTION_GRAPH_EXECUTOR)
