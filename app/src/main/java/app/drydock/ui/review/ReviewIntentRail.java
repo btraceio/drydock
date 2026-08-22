@@ -66,8 +66,8 @@ final class ReviewIntentRail extends VBox {
      * of its own now -- overlapping sections cannot own one -- so the rail is
      * handed the derived state rather than a stored {@link ReviewVerdict}.
      */
-    private Function<ReviewIntent, SessionReviewView.SectionState> stateLookup =
-            intent -> SessionReviewView.SectionState.unknown();
+    private Function<ReviewIntent, SectionStates.SectionState> stateLookup =
+            intent -> SectionStates.SectionState.unknown();
     private Consumer<ReviewIntent> onSelected = intent -> { };
     private Runnable onToggleCollapse = () -> { };
     private String selectedId;
@@ -103,9 +103,9 @@ final class ReviewIntentRail extends VBox {
         this.onToggleCollapse = handler == null ? () -> { } : handler;
     }
 
-    void setSectionStateLookup(Function<ReviewIntent, SessionReviewView.SectionState> lookup) {
+    void setSectionStateLookup(Function<ReviewIntent, SectionStates.SectionState> lookup) {
         this.stateLookup = lookup == null
-                ? intent -> SessionReviewView.SectionState.unknown()
+                ? intent -> SectionStates.SectionState.unknown()
                 : lookup;
     }
 
@@ -277,10 +277,10 @@ final class ReviewIntentRail extends VBox {
         Label number = new Label(String.valueOf(intent.number()));
         number.getStyleClass().add("review-intent-number");
 
-        SessionReviewView.SectionState state = stateLookup.apply(intent);
+        SectionStates.SectionState state = stateLookup.apply(intent);
         Optional<ReviewVerdict.Decision> decision = state.decision();
         boolean settled = decision.isPresent() || intent.autoApprove();
-        boolean moved = state.staleness() == SessionReviewView.Staleness.MOVED;
+        boolean moved = state.staleness() == SectionStates.Staleness.MOVED;
         if (settled) {
             card.getStyleClass().add("settled");
         }
