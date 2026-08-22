@@ -3448,17 +3448,25 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         return sessionManager.closeSession(sessionId);
     }
 
-    /** Closes a specific tab: the session's surface first, then always the tab itself. */
+    /**
+     * Closes a specific tab: the session's surface first, then always the tab itself.
+     * The returned future completes only after every ephemeral terminal's
+     * surface is closed too -- on the shutdown path this is what keeps
+     * {@code closeAllSessions} (and therefore {@code stage.close()}) from
+     * racing the terminals' {@code PauseTransition}-based graceful close
+     * (see {@link OpenSessionTab#disposeNativeResources}).
+     */
     private CompletableFuture<Void> closeTab(OpenSessionTab open) {
         open.showClosingState();
-        return sessionManager.closeSession(open.sessionId()).thenRunAsync(() -> {
+        return sessionManager.closeSession(open.sessionId()).thenComposeAsync(unused -> {
             // The SessionEnd hook cannot be relied on to clear this: a claude
             // sitting at a permission prompt ignores Ctrl+D and is force-killed
             // after the grace period, so it never runs its hooks. Without this,
             // a closed session keeps reporting NEEDS_ATTENTION.
             forgetActivity(open.sessionId());
-            removeTab(open);
+            CompletableFuture<Void> terminalClose = removeTab(open);
             publishSessions();
+            return terminalClose;
         }, Platform::runLater);
     }
 
@@ -3715,6 +3723,12 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 publishSessions();
             });
         }
+        // Ephemeral terminals have no SessionManager lifecycle, so they are
+        // reaped here too: a terminal whose shell exited (e.g. `exit`) closes
+        // its tab, unlike the Claude surface whose dead tab stays to resume.
+        for (OpenSessionTab open : openTabs.values()) {
+            open.pollExitedTerminals();
+        }
     }
 
     /** Wired by {@code DrydockApplication} after the activity hooks are installed. */
@@ -3804,7 +3818,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         tabPane.getSelectionModel().select(openTab.tab);
     }
 
-    private void removeTab(OpenSessionTab openTab) {
+    private CompletableFuture<Void> removeTab(OpenSessionTab openTab) {
         // First: the Explorer's unsaved edits go to disk while the tab is
         // still whole, and its I/O executor thread is released here rather
         // than leaking for the life of the process.
@@ -3827,7 +3841,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         if (!shuttingDown && restoringSessionIds.remove(openTab.sessionId())) {
             persistOpenSessionIds();
         }
-        openTab.disposeNativeResources();
+        return openTab.disposeNativeResources();
     }
 
     /**

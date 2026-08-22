@@ -45,6 +45,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -833,6 +834,28 @@ final class OpenSessionTab {
      * the last terminal closes the Terminal sub-tab returns to the Agent
      * (Claude) view, so the user is never left looking at an empty terminal.
      */
+    /**
+     * Closes every Terminal sub-tab terminal whose child process has exited
+     * on its own (e.g. the user typed {@code exit}). Unlike the Claude
+     * surface -- whose dead tab stays so the user can resume -- an ephemeral
+     * terminal has nothing to resume, so its tab is reaped the moment its
+     * shell exits. Called from MainWorkspace's exit watcher (FX thread).
+     * {@link #closeTerminal} is reused so the already-exited surface is freed
+     * through the same path: closeGracefully sees processExited and fires its
+     * onDone (dispose) synchronously, so no poll is wasted on a dead child.
+     */
+    void pollExitedTerminals() {
+        List<TerminalPane> exited = new ArrayList<>();
+        for (TerminalPane p : terminals) {
+            if (p.bridge.isProcessExited()) {
+                exited.add(p);
+            }
+        }
+        for (TerminalPane p : exited) {
+            closeTerminal(p);
+        }
+    }
+
     private void closeTerminal(TerminalPane pane) {
         int idx = terminals.indexOf(pane);
         if (idx < 0) {
@@ -1550,8 +1573,19 @@ final class OpenSessionTab {
      * Frees this tab's native resources. Must be called only after the
      * session's {@link TerminalSurface} is already confirmed closed; see
      * {@link TerminalBridge#disposeNativeResources}.
+     *
+     * <p>The Claude bridge and Review view are freed synchronously. The
+     * ephemeral terminals are closed via {@link TerminalSurface#closeGracefully},
+     * which polls on a {@link javafx.animation.PauseTransition} (FX-thread
+     * async); the returned future completes only once every terminal's
+     * surface is confirmed closed and its runtime/host freed. Callers on the
+     * shutdown path MUST await this future before letting the FX thread
+     * block in {@code stop()} -- otherwise the {@code PauseTransition} polls
+     * never fire (no FX pulses while {@code stop()} blocks), the terminals'
+     * live shell children keep their ptys open, and the JVM never exits.
+     * Returns an already-completed future when there are no terminals to close.
      */
-    void disposeNativeResources() {
+    CompletableFuture<Void> disposeNativeResources() {
         bridge.host().embeddedNode().ifPresent(placeholder.getChildren()::remove);
         bridge.disposeNativeResources();
         // The Review view's own close() detaches its MCP activity panel's
@@ -1565,29 +1599,40 @@ final class OpenSessionTab {
             reviewView.close();
             reviewView = null;
         }
-        if (!terminals.isEmpty()) {
-            // The ephemeral terminals have no SessionManager-managed lifecycle,
-            // so they are reaped here -- but NEVER via a direct close(): a
-            // login shell sitting at its prompt is a live child, and
-            // freeing the surface under a live child is the documented
-            // uncatchable-JVM-abort scenario (see TerminalSurface#close /
-            // SessionManager.closeSession). closeGracefully sends the exit
-            // request, polls, and only then frees; the runtime/host are
-            // freed from its onDone callback.
-            List<TerminalPane> toClose = new ArrayList<>(terminals);
-            terminals.clear();
-            activeTerminal = -1;
-            for (TerminalPane p : toClose) {
-                p.bridge.markSurfaceClosing();
-                p.bridge.host().embeddedNode().ifPresent(p.placeholder.getChildren()::remove);
-                if (p.surface != null) {
-                    p.surface.closeGracefully(SHELL_CLOSE_GRACE_MILLIS, SHELL_CLOSE_POLL_MILLIS,
-                            p.bridge::disposeNativeResources);
-                } else {
+        if (terminals.isEmpty()) {
+            return CompletableFuture.completedFuture(null);
+        }
+        // The ephemeral terminals have no SessionManager-managed lifecycle,
+        // so they are reaped here -- but NEVER via a direct close(): a
+        // login shell sitting at its prompt is a live child, and
+        // freeing the surface under a live child is the documented
+        // uncatchable-JVM-abort scenario (see TerminalSurface#close /
+        // SessionManager.closeSession). closeGracefully sends the exit
+        // request, polls, and only then frees; the runtime/host are
+        // freed from its onDone callback. Each terminal's close completes
+        // its own future, so the caller (closeTab, on the shutdown path)
+        // can await all of them before letting the FX thread block in stop().
+        List<TerminalPane> toClose = new ArrayList<>(terminals);
+        terminals.clear();
+        activeTerminal = -1;
+        CompletableFuture<?>[] futures = new CompletableFuture<?>[toClose.size()];
+        for (int i = 0; i < toClose.size(); i++) {
+            TerminalPane p = toClose.get(i);
+            CompletableFuture<Void> f = new CompletableFuture<>();
+            futures[i] = f;
+            p.bridge.markSurfaceClosing();
+            p.bridge.host().embeddedNode().ifPresent(p.placeholder.getChildren()::remove);
+            if (p.surface != null) {
+                p.surface.closeGracefully(SHELL_CLOSE_GRACE_MILLIS, SHELL_CLOSE_POLL_MILLIS, () -> {
                     p.bridge.disposeNativeResources();
-                }
+                    f.complete(null);
+                });
+            } else {
+                p.bridge.disposeNativeResources();
+                f.complete(null);
             }
         }
+        return CompletableFuture.allOf(futures);
     }
 
     /** The staleness banner for this session's handoff brief; the workspace drives it. */
