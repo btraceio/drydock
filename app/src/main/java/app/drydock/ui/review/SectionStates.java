@@ -65,8 +65,15 @@ final class SectionStates {
     /**
      * One section's rendered state, derived from its hunks (spec §9.1).
      *
-     * @param decision what its hunks merge to, empty while any is unread
-     * @param settledHunks how many of its hunks carry a verdict
+     * @param decision what its hunks merge to, empty while any is unread --
+     *              includes a stale hunk's verdict; the decision is not
+     *              what staleness puts in question
+     * @param settledHunks how many of its hunks carry a verdict that is
+     *              NOT stale (spec §9.2) -- a hunk whose base has moved in
+     *              a way that could matter does not count here, the same
+     *              rule {@link #settledHunkCount} applies globally, so a
+     *              card's own "n/total" and the verdict bar's progress line
+     *              cannot disagree about what is actually settled
      * @param totalHunks how many hunks it covers at all
      * @param staleness whether a base move since a verdict could have changed
      *              what was approved
@@ -286,13 +293,23 @@ final class SectionStates {
             Optional<ReviewVerdict> verdict = host.verdict(board.scope(), digest);
             perHunk.add(verdict);
             if (verdict.isPresent()) {
-                settled++;
                 // MOVED outranks UNKNOWN outranks FRESH: one hunk known to
                 // have moved is the strongest thing true of the section.
                 Staleness hunk = stalenessOf(board, verdict.get(), base, files);
                 if (hunk == Staleness.MOVED
                         || (hunk == Staleness.UNKNOWN && staleness == Staleness.FRESH)) {
                     staleness = hunk;
+                }
+                // A stale verdict still merges into the section's DECISION
+                // (perHunk, below) -- the decision persists, only its
+                // freshness is in question -- but does not count toward
+                // the numeric "n/total", the same exclusion
+                // settledHunkCount applies globally (spec §9.2). Without
+                // this a card could read "3/3 hunks" while the verdict
+                // bar's own progress line, one floor up, read "2/3" for
+                // the identical section.
+                if (hunk != Staleness.MOVED) {
+                    settled++;
                 }
                 collectSharingSections(board, digest, intent, elsewhere);
             }
