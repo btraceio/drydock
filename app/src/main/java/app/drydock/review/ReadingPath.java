@@ -50,6 +50,15 @@ import java.util.TreeSet;
  * unit level, where a cycle's members each have in-degree from inside the
  * cycle while the unit as a whole is an endpoint.</p>
  *
+ * <p><strong>One reading order, not two.</strong> {@link Sections} orders
+ * its units by path, having no entry-point rank to consult. This class
+ * orders by rank. A rail listing sections in the first order while badging
+ * the entry point computed by the second puts START HERE on card 2 -- the
+ * same failure the rank-inside-the-sort rule exists to prevent, one level
+ * up. So {@link #of} returns the section order its own path implies
+ * together with the numbering that indexes into it, and there is nothing
+ * left for a consumer to reconcile.</p>
+ *
  * <p><strong>Links are per hunk, on both ends.</strong> A link renders as a
  * footer row beneath one hunk (§7.2), so a file-level answer spread over a
  * file's hunks would put "calls guards.cpp" under hunks that call nothing --
@@ -97,9 +106,10 @@ public final class ReadingPath {
 
     /**
      * One hunk, in reading order. {@code sectionNumber} is the 1-based place
-     * in the rail of the first section carrying this hunk -- sections overlap
-     * by design (§5.6), and a step names the one a reviewer meets first.
-     * {@code entryPoint} is true for the first step and no other.
+     * in {@link Path#sections()} of the first section carrying this hunk --
+     * sections overlap by design (§5.6), and a step names the one a reviewer
+     * meets first. {@code entryPoint} is true for the first step and no
+     * other.
      */
     public record Step(String hunkId, String file, int sectionNumber, String reason,
                        List<Link> links, boolean entryPoint) {
@@ -112,52 +122,87 @@ public final class ReadingPath {
     }
 
     /**
-     * {@code diff}'s hunks in reading order. Blocking only in the sense its
-     * inputs are; never call the {@link ChangeGraph#of} that feeds it on the
-     * FX thread.
+     * The path: its hunks in reading order, and the sections in the order the
+     * path reaches them.
+     *
+     * <p>Both, from one call, because there is no such thing as two reading
+     * orders. {@link Sections} orders its units by path -- it has no
+     * entry-point rank to consult -- and this class orders by rank, so a rail
+     * listing sections in {@code Sections} order while badging the entry
+     * point would put START HERE on card 2. That is the exact failure the
+     * rank-inside-the-sort rule exists to prevent, one level up. Returning
+     * the ordering together with the numbering that indexes into it leaves a
+     * consumer nothing to reconcile: render {@link #sections()} down the
+     * rail, and {@code step.sectionNumber()} is its 1-based place there,
+     * which is also the number every reason and label mints.</p>
+     */
+    public record Path(List<Step> steps, List<Sections.Section> sections) {
+        public Path {
+            steps = List.copyOf(steps);
+            sections = List.copyOf(sections);
+        }
+    }
+
+    /**
+     * {@code diff}'s hunks in reading order, and {@code sections} in the
+     * order that path reaches them. Blocking only in the sense its inputs
+     * are; never call the {@link ChangeGraph#of} that feeds it on the FX
+     * thread.
      *
      * <p>{@code fanIn.unavailable()} is honoured rather than read as zero: a
      * scan that could not run contributes no rank, and the reason it writes
      * says the outside callers are unknown instead of implying there are
      * none.</p>
      */
-    public static List<Step> of(UnifiedDiff diff, ChangeGraph graph,
-                                List<Sections.Section> sections, OutOfDiffFanIn.Result fanIn) {
+    public static Path of(UnifiedDiff diff, ChangeGraph graph,
+                          List<Sections.Section> sections, OutOfDiffFanIn.Result fanIn) {
         Map<String, UnifiedDiff.FileDiff> byPath = new TreeMap<>();
         for (UnifiedDiff.FileDiff file : diff.files()) {
             byPath.put(file.path(), file);
         }
         SortedSet<String> nodes = new TreeSet<>(byPath.keySet());
         if (nodes.isEmpty()) {
-            return List.of();
+            return new Path(List.of(), List.copyOf(sections));
         }
 
-        Map<String, Integer> sectionByHunk = sectionNumbers(sections);
         Map<String, Integer> fanInByFile = fanInByFile(graph, fanIn);
         Comparator<String> rank = rank(graph, fanInByFile);
-
         List<List<String>> units =
                 Graphs.topologicalOrder(nodes, file -> dependencies(graph, nodes, file), rank);
 
-        List<Step> steps = new ArrayList<>();
+        // Hunk order first, because the section order is read off it, and the
+        // numbering off that.
+        List<String> hunkIds = new ArrayList<>();
+        List<String> files = new ArrayList<>();
         for (List<String> unit : units) {
             for (String file : unit) {
                 UnifiedDiff.FileDiff fileDiff = byPath.get(file);
                 if (fileDiff == null) {
                     continue;
                 }
-                String reason = reasonFor(file, graph, byPath, sectionByHunk,
-                        fanInByFile.getOrDefault(file, 0), fanIn.unavailable());
+                files.add(file);
                 for (int index = 0; index < fileDiff.hunks().size(); index++) {
-                    String hunkId = ReviewIntent.hunkId(file, index);
-                    List<Link> links = linksFrom(new ChangeGraph.Hunk(file, index), graph,
-                            byPath, sectionByHunk);
-                    steps.add(new Step(hunkId, file, sectionByHunk.getOrDefault(hunkId, 0),
-                            reason, links, steps.isEmpty()));
+                    hunkIds.add(ReviewIntent.hunkId(file, index));
                 }
             }
         }
-        return List.copyOf(steps);
+        List<Sections.Section> ordered = sectionOrder(sections, hunkIds);
+        Map<String, Integer> sectionByHunk = sectionNumbers(ordered);
+
+        List<Step> steps = new ArrayList<>();
+        for (String file : files) {
+            UnifiedDiff.FileDiff fileDiff = byPath.get(file);
+            String reason = reasonFor(file, graph, byPath, sectionByHunk,
+                    fanInByFile.getOrDefault(file, 0), fanIn.unavailable());
+            for (int index = 0; index < fileDiff.hunks().size(); index++) {
+                String hunkId = ReviewIntent.hunkId(file, index);
+                List<Link> links = linksFrom(new ChangeGraph.Hunk(file, index), graph,
+                        byPath, sectionByHunk);
+                steps.add(new Step(hunkId, file, sectionByHunk.getOrDefault(hunkId, 0),
+                        reason, links, steps.isEmpty()));
+            }
+        }
+        return new Path(steps, ordered);
     }
 
     // ---- order --------------------------------------------------------------
@@ -384,9 +429,46 @@ public final class ReadingPath {
     // ---- sections -----------------------------------------------------------
 
     /**
-     * Each hunk's section number, 1-based. Sections overlap (§5.6), so a hunk
-     * can be in several; the first one wins, which is the one the reviewer
-     * meets first in the rail.
+     * {@code sections} in the order the path first reaches them.
+     *
+     * <p>A section's place is decided by its earliest hunk in the path, so
+     * the entry point's section is card 1 and START HERE sits on it in both
+     * dimensions -- the same construction that makes the first STEP the entry
+     * point. Ties go to the order {@link Sections} produced, so two sections
+     * first reached by the same hunk keep their relative order. A section the
+     * path never reaches -- one carrying no hunk of this diff -- is appended
+     * rather than dropped: a card falling out of the rail is worse than one
+     * sitting at the end of it.</p>
+     */
+    private static List<Sections.Section> sectionOrder(List<Sections.Section> sections,
+                                                       List<String> hunkIds) {
+        Map<String, SortedSet<Integer>> carrying = new TreeMap<>();
+        for (int index = 0; index < sections.size(); index++) {
+            for (String hunkId : sections.get(index).hunkIds()) {
+                carrying.computeIfAbsent(hunkId, key -> new TreeSet<>()).add(index);
+            }
+        }
+        Set<Integer> placed = new LinkedHashSet<>();
+        for (String hunkId : hunkIds) {
+            SortedSet<Integer> here = carrying.get(hunkId);
+            if (here != null) {
+                placed.addAll(here);
+            }
+        }
+        for (int index = 0; index < sections.size(); index++) {
+            placed.add(index);
+        }
+        List<Sections.Section> ordered = new ArrayList<>();
+        for (Integer index : placed) {
+            ordered.add(sections.get(index));
+        }
+        return ordered;
+    }
+
+    /**
+     * Each hunk's section number, 1-based over the READING order. Sections
+     * overlap (§5.6), so a hunk can be in several; the one the reviewer meets
+     * first wins.
      */
     private static Map<String, Integer> sectionNumbers(List<Sections.Section> sections) {
         Map<String, Integer> numbers = new TreeMap<>();
