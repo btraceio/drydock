@@ -212,6 +212,83 @@ class SectionsTest {
                 "dropping the card must not drop the file from the sections that need it");
     }
 
+    /**
+     * The flagship case, and the one the first cut got wrong: two files, two
+     * declarations, neither referenced by anything in a two-file change, so
+     * fan-in cannot separate them. The card must still read JmpCtxScope --
+     * a folder title here is the exact failure this class was commissioned
+     * to fix.
+     */
+    @Test
+    void aConventionJoinedPairIsTitledByItsTypeNotItsFolder() {
+        List<Sections.Section> sections = sectionsOf(new UnifiedDiff(List.of(
+                file("src/guards.h", "class JmpCtxScope { };"),
+                file("src/guards.cpp", "void install() { }"))));
+
+        Sections.Section guard = sectionContaining(sections, "src/guards.h");
+        assertEquals(Optional.of("JmpCtxScope"), guard.hubSymbol());
+        assertTrue(guard.title().startsWith("JmpCtxScope"), "got: " + guard.title());
+    }
+
+    /**
+     * Fan-in on its own titles cards after loop variables. Measured on this
+     * repository's own branch, ranking by fan-in produced "hunk · 29 files"
+     * and "isEmpty", beating BaseMove and HunkDigest by a reference or two.
+     * A type is what a group of files is about; a member name is what they
+     * happen to have in common.
+     */
+    @Test
+    void aTypeOutranksAMoreWidelyUsedMemberName() {
+        List<Sections.Section> sections = sectionsOf(new UnifiedDiff(List.of(
+                file("src/core.cpp", "class Widget { };", "void helper() { }"),
+                file("src/one.cpp", "void runOne() { helper(); }"),
+                file("src/two.cpp", "void runTwo() { helper(); }"),
+                file("src/three.cpp", "void runThree() { new Widget(); }"))));
+
+        Sections.Section core = sectionContaining(sections, "src/core.cpp");
+        assertEquals(Optional.of("Widget"), core.hubSymbol(),
+                "helper has the higher fan-in and is still not what the section is about");
+    }
+
+    /**
+     * FallbackIntents guarantees two cards can never read the same, because
+     * a grouping is only useful if its entries can be told apart. This makes
+     * the same guarantee: on the first real diff it was run against, three
+     * cards read identically.
+     */
+    @Test
+    void noTwoCardsReadTheSame() {
+        List<Sections.Section> sections = sectionsOf(new UnifiedDiff(List.of(
+                file("a/util.cpp", "void alpha() { }", "void bravo() { }"),
+                file("b/util.cpp", "void charlie() { }", "void delta() { }"),
+                file("src/guards.cpp", "class JmpCtxScope { };"),
+                file("src/user.cpp", "void use() { new JmpCtxScope(); }"))));
+
+        List<String> titles = sections.stream().map(Sections.Section::title).toList();
+        assertEquals(titles.size(), titles.stream().distinct().count(), "duplicate titles: " + titles);
+        assertTrue(titles.contains("a/util.cpp · 1 file"), "got: " + titles);
+        assertTrue(titles.contains("b/util.cpp · 1 file"), "got: " + titles);
+    }
+
+    /**
+     * A card names something it actually contains. The first cut read the
+     * directory off the first file in reading order -- a pulled-in
+     * foundation, not a member -- and titled a card after a package holding
+     * none of the files the card was about.
+     */
+    @Test
+    void anUnnameableCardNamesAFileItIsActuallyAbout() {
+        List<Sections.Section> sections = sectionsOf(new UnifiedDiff(List.of(
+                file("src/guards.cpp", "class JmpCtxScope { };"),
+                file("other/mixed.cpp", "void alpha() { new JmpCtxScope(); }", "void bravo() { }"))));
+
+        Sections.Section mixed = sectionContaining(sections, "other/mixed.cpp");
+        assertEquals(Optional.empty(), mixed.hubSymbol(), "two unreferenced functions name nothing");
+        assertTrue(mixed.files().contains("src/guards.cpp"), "guards is carried as foundation");
+        assertTrue(mixed.title().startsWith("mixed.cpp"),
+                "the card must name a file it is about, got: " + mixed.title());
+    }
+
     /** With nothing to consult, today's behaviour survives unchanged. */
     @Test
     void anEdgelessDiffFallsBackToDirectoryClustering() {

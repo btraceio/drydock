@@ -12,6 +12,7 @@ import java.util.SortedSet;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -48,6 +49,15 @@ import java.util.regex.Pattern;
  * and every caller gets its own section further down the rail. The reviewed
  * flag is keyed to hunk content, so a file shown three times is still read
  * once (spec §5.6, §9).</p>
+ *
+ * <p><strong>What a card says.</strong> A section is named after the changed
+ * symbol its unit declares that most looks like the thing it is about --
+ * type-shaped first, fan-in only breaking ties within a shape, because fan-in
+ * alone titles cards after loop variables. A unit that declares nothing
+ * nameable is named after its own most substantial file, never after a
+ * directory: the grouping is not directory-derived, so a directory title
+ * misdescribes it. No two cards may read the same, which {@link
+ * FallbackIntents} guarantees and this has to guarantee too.</p>
  *
  * <p>Tests are NOT split out. A test references the symbol under test, so
  * the graph already places it; splitting on {@code /test/} would be a path
@@ -147,7 +157,7 @@ public final class Sections {
             byPath.put(file.path(), file);
         }
 
-        List<Section> sections = new ArrayList<>();
+        List<Draft> drafts = new ArrayList<>();
         for (List<String> unit : units) {
             SortedSet<String> members = new TreeSet<>(unit);
             for (String file : unit) {
@@ -155,15 +165,26 @@ public final class Sections {
             }
             List<String> ordered = new ArrayList<>(members);
             ordered.sort(readingOrder);
-            Optional<String> hub = hubOf(unit, graph);
-            sections.add(new Section(
-                    title(ordered, hub),
-                    ordered,
-                    hunkIdsOf(byPath, ordered),
-                    hub,
-                    cyclesIn(unit, depends)));
+            drafts.add(new Draft(ordered, hunkIdsOf(byPath, ordered),
+                    hubOf(unit, ordered, graph), cyclesIn(unit, depends),
+                    primaryOf(unit, byPath)));
         }
-        return readable(sections);
+        return titled(readable(drafts));
+    }
+
+    /**
+     * A section before it is named. Titling needs the whole rail in hand --
+     * no two cards may read the same -- so it cannot happen while the
+     * sections are still being built one at a time.
+     *
+     * <p>{@code primary} is the unit's own most substantial file, and it is
+     * what names a section no symbol can name. Units are disjoint, so no two
+     * drafts can carry the same primary, which is what makes the
+     * disambiguation in {@link #titled} terminate rather than merely
+     * usually work.</p>
+     */
+    private record Draft(List<String> files, List<String> hunkIds, Optional<String> hub,
+                         List<String> cycleWith, String primary) {
     }
 
     /**
@@ -176,25 +197,25 @@ public final class Sections {
      * hunk can fall out of the rail; of two sections carrying the same
      * files, the one that reads first is the one kept.
      */
-    private static List<Section> readable(List<Section> sections) {
-        List<Section> visible = new ArrayList<>();
-        for (int index = 0; index < sections.size(); index++) {
-            Section section = sections.get(index);
-            if (section.hubSymbol().isEmpty() && coveredByAnother(sections, index)) {
+    private static List<Draft> readable(List<Draft> drafts) {
+        List<Draft> visible = new ArrayList<>();
+        for (int index = 0; index < drafts.size(); index++) {
+            Draft draft = drafts.get(index);
+            if (draft.hub().isEmpty() && coveredByAnother(drafts, index)) {
                 continue;
             }
-            visible.add(section);
+            visible.add(draft);
         }
         return List.copyOf(visible);
     }
 
-    private static boolean coveredByAnother(List<Section> sections, int index) {
-        List<String> files = sections.get(index).files();
-        for (int other = 0; other < sections.size(); other++) {
-            if (other == index || !sections.get(other).files().containsAll(files)) {
+    private static boolean coveredByAnother(List<Draft> drafts, int index) {
+        List<String> files = drafts.get(index).files();
+        for (int other = 0; other < drafts.size(); other++) {
+            if (other == index || !drafts.get(other).files().containsAll(files)) {
                 continue;
             }
-            if (sections.get(other).files().size() > files.size() || other < index) {
+            if (drafts.get(other).files().size() > files.size() || other < index) {
                 return true;
             }
         }
@@ -306,50 +327,181 @@ public final class Sections {
     // ---- naming -------------------------------------------------------------
 
     /**
-     * The section's most-referenced changed symbol: what the section is
-     * about. Counted per symbol, not per declaring file -- a file's fan-in
-     * is the same number for every name it declares, so ranking by it would
-     * title the section with whichever name sorted first.
+     * What the section is about: the most promising changed symbol its own
+     * unit declares.
+     *
+     * <p>Fan-in alone is not it. Measured on this branch's own 54-file diff,
+     * ranking by fan-in titled cards {@code hunk}, {@code isEmpty},
+     * {@code has} and {@code files} -- loop variables and one-line accessors
+     * whose names simply recur in many files -- while the names a reviewer
+     * would recognise ({@code BaseMove}, {@code HunkDigest},
+     * {@code ChangeGraph}) sat one or two references below them. A
+     * <em>type</em> is what a group of files is about; a member name is what
+     * they happen to have in common. So a type-shaped name outranks any
+     * member name, and fan-in only breaks ties within a shape.</p>
+     *
+     * <p>Type-shaped means an initial capital. That is a naming convention
+     * rather than a fact from the parse tree -- it is right for Java,
+     * Kotlin, C++, Go, Rust, TypeScript and Python types, and wrong for a C
+     * codebase spelling structs in lower case, which lands on the member
+     * name it would have picked anyway.</p>
+     *
+     * <p>Fan-in is counted twice: within the section (how central the name
+     * is to what this card shows) and across the change. A foundation
+     * section holds only itself -- its referencing files are, by
+     * construction, in the sections further down the rail -- so requiring an
+     * in-section reference would leave exactly the cards that name real hubs
+     * unnamed. In-section count therefore ranks, and the change-wide count
+     * is what a candidate has to have any of.</p>
      *
      * <p>Only the unit's own files are candidates. The foundation a section
      * carries for context is what some other section is about, and naming
      * this one after it would give two cards the same title.</p>
-     *
-     * <p>A symbol nothing references wins only when it is the unit's single
-     * declaration -- then there is nothing to be wrong about. Several, all
-     * unreferenced, and there is no hub: the honest answer is no symbol at
-     * all, and {@link #title} falls back to the directory.</p>
      */
-    private static Optional<String> hubOf(List<String> unit, ChangeGraph graph) {
+    private static Optional<String> hubOf(List<String> unit, List<String> sectionFiles,
+                                          ChangeGraph graph) {
         SortedSet<String> declarations = new TreeSet<>();
         for (String file : unit) {
             declarations.addAll(graph.declarationsIn(file));
         }
-        String best = null;
-        int bestFanIn = -1;
-        // Ascending order plus a strict >: ties keep the alphabetically
-        // first name, so the title cannot depend on iteration order.
+        if (declarations.isEmpty()) {
+            return Optional.empty();
+        }
+        SortedSet<String> section = new TreeSet<>(sectionFiles);
+        List<Candidate> referenced = new ArrayList<>();
         for (String symbol : declarations) {
-            int fanIn = graph.filesReferencingSymbol(symbol).size();
-            if (fanIn > bestFanIn) {
-                best = symbol;
-                bestFanIn = fanIn;
+            SortedSet<String> referencing = new TreeSet<>(graph.filesReferencingSymbol(symbol));
+            int across = referencing.size();
+            referencing.retainAll(section);
+            if (across > 0) {
+                referenced.add(new Candidate(symbol, typeShaped(symbol),
+                        referencing.size(), across));
             }
         }
-        return bestFanIn > 0 || declarations.size() == 1
-                ? Optional.ofNullable(best)
-                : Optional.empty();
+        if (!referenced.isEmpty()) {
+            referenced.sort(Sections::byPromise);
+            return Optional.of(referenced.get(0).name());
+        }
+        // Nothing here is referenced at all, so there is no hub to measure --
+        // only a name to recognise. One declaration is unambiguous; a name
+        // matching the unit's own file name is the file's subject by
+        // convention; a lone type among functions is the thing the functions
+        // are for. That last rung is what titles the guards.h/guards.cpp
+        // pair "JmpCtxScope" instead of after its folder, which is the case
+        // this class was commissioned to fix.
+        if (declarations.size() == 1) {
+            return Optional.of(declarations.first());
+        }
+        Optional<String> named = onlyOne(declarations, symbol -> matchesFileName(symbol, unit));
+        return named.isPresent() ? named : onlyOne(declarations, Sections::typeShaped);
     }
 
-    private static String title(List<String> files, Optional<String> hub) {
-        String count = files.size() + (files.size() == 1 ? " file" : " files");
-        return hub.map(symbol -> symbol + " · " + count)
-                // No symbol dominates: the directory is still the most
-                // specific true thing that can be said.
-                .orElseGet(() -> {
-                    String directory = FallbackIntents.directoryOf(files.get(0));
-                    return (directory.isEmpty() ? "repository root" : directory) + " · " + count;
-                });
+    /** One possible hub, with the two counts and the shape that rank it. */
+    private record Candidate(String name, boolean type, int inSection, int acrossChange) {
+    }
+
+    private static int byPromise(Candidate left, Candidate right) {
+        if (left.type() != right.type()) {
+            return left.type() ? -1 : 1;
+        }
+        if (left.inSection() != right.inSection()) {
+            return Integer.compare(right.inSection(), left.inSection());
+        }
+        if (left.acrossChange() != right.acrossChange()) {
+            return Integer.compare(right.acrossChange(), left.acrossChange());
+        }
+        return left.name().compareTo(right.name());
+    }
+
+    private static boolean typeShaped(String symbol) {
+        return !symbol.isEmpty() && Character.isUpperCase(symbol.charAt(0));
+    }
+
+    private static boolean matchesFileName(String symbol, List<String> unit) {
+        for (String file : unit) {
+            if (stem(FallbackIntents.fileName(file)).equalsIgnoreCase(symbol)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** {@code symbol} when exactly one matches, so a guess is never made from several. */
+    private static Optional<String> onlyOne(SortedSet<String> symbols, Predicate<String> matches) {
+        String found = null;
+        for (String symbol : symbols) {
+            if (!matches.test(symbol)) {
+                continue;
+            }
+            if (found != null) {
+                return Optional.empty();
+            }
+            found = symbol;
+        }
+        return Optional.ofNullable(found);
+    }
+
+    /**
+     * The unit's own most substantial file: what names a card no symbol can
+     * name. The most-changed file first, ties by path.
+     *
+     * <p>Deliberately NOT the directory. A section is not directory-derived,
+     * so a directory title misdescribes the grouping -- and the first
+     * attempt proved it, titling a card after a package containing none of
+     * the files the card was about, because it read the directory off the
+     * first file in reading order, which is a pulled-in foundation rather
+     * than a member.</p>
+     */
+    private static String primaryOf(List<String> unit, Map<String, UnifiedDiff.FileDiff> byPath) {
+        String best = null;
+        int bestHunks = -1;
+        for (String file : unit) {
+            UnifiedDiff.FileDiff diff = byPath.get(file);
+            int hunks = diff == null ? 0 : diff.hunks().size();
+            if (hunks > bestHunks) {
+                best = file;
+                bestHunks = hunks;
+            }
+        }
+        return best;
+    }
+
+    /**
+     * The rail, named. {@link FallbackIntents} guarantees that two cards can
+     * never read the same, and a grouping is only useful if its entries can
+     * be told apart -- so this makes the same guarantee rather than hoping
+     * for it. A hub symbol is declared in exactly one file and units are
+     * disjoint, so hub titles are already unique; a file name is not, and
+     * any that repeats is re-spelled as the full path of a file only that
+     * card is about.
+     */
+    private static List<Section> titled(List<Draft> drafts) {
+        List<String> provisional = new ArrayList<>();
+        Map<String, Integer> seen = new TreeMap<>();
+        for (Draft draft : drafts) {
+            String title = name(draft, false);
+            provisional.add(title);
+            seen.merge(title, 1, Integer::sum);
+        }
+        List<Section> sections = new ArrayList<>();
+        for (int index = 0; index < drafts.size(); index++) {
+            Draft draft = drafts.get(index);
+            boolean clashes = seen.get(provisional.get(index)) > 1;
+            sections.add(new Section(clashes ? name(draft, true) : provisional.get(index),
+                    draft.files(), draft.hunkIds(), draft.hub(), draft.cycleWith()));
+        }
+        return List.copyOf(sections);
+    }
+
+    private static String name(Draft draft, boolean qualified) {
+        int size = draft.files().size();
+        String count = size + (size == 1 ? " file" : " files");
+        String subject = draft.hub()
+                .map(hub -> qualified ? hub + " (" + draft.primary() + ")" : hub)
+                .orElseGet(() -> qualified
+                        ? draft.primary()
+                        : FallbackIntents.fileName(draft.primary()));
+        return subject + " · " + count;
     }
 
     // ---- cycles -------------------------------------------------------------
