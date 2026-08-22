@@ -108,15 +108,81 @@ public final class IntentGrouping {
         if (sameAsFallback(sections, fallback)) {
             return fallback;
         }
+        Map<String, ReviewIntent> fallbackByHunk = new LinkedHashMap<>();
+        for (ReviewIntent intent : fallback) {
+            for (String hunkId : intent.hunkIds()) {
+                fallbackByHunk.put(hunkId, intent);
+            }
+        }
         List<ReviewIntent> computed = new ArrayList<>();
         int number = 1;
         for (Sections.Section section : sections) {
             computed.add(new ReviewIntent(computedId(section), number,
-                    section.title(), ReviewIntent.Kind.CHANGE, ReviewIntent.Risk.NONE,
+                    section.title(), kindOf(section, fallbackByHunk), riskOf(section, fallbackByHunk),
                     rationale(section), section.hunkIds(), Optional.empty(), false));
             number++;
         }
         return List.copyOf(computed);
+    }
+
+    /**
+     * What kind of change a computed section is: the most significant kind
+     * among the fallback intents whose hunks it covers, in the same
+     * (production change over its own tests, generated output or config)
+     * priority {@link FallbackIntents} itself orders the rail by. A section
+     * merging a header with its implementation, or a change with the test
+     * that covers it, must not flatten to a bare {@code change} tag just
+     * because {@code Sections} does not itself infer kind -- the fallback
+     * already worked that out per file, and grouping the hunks differently
+     * is no reason to discard it.
+     */
+    private static ReviewIntent.Kind kindOf(Sections.Section section, Map<String, ReviewIntent> fallbackByHunk) {
+        ReviewIntent.Kind best = null;
+        for (String hunkId : section.hunkIds()) {
+            ReviewIntent covering = fallbackByHunk.get(hunkId);
+            if (covering == null) {
+                continue;
+            }
+            if (best == null || kindPriority(covering.kind()) < kindPriority(best)) {
+                best = covering.kind();
+            }
+        }
+        return best == null ? ReviewIntent.Kind.CHANGE : best;
+    }
+
+    /**
+     * Mirrors {@link FallbackIntents}' own (private) reading-order priority:
+     * a production change is more significant than the tests or config that
+     * came with it, so ONE kind has to win when a section spans several, and
+     * this is the same choice the rail's own ordering already makes.
+     */
+    private static int kindPriority(ReviewIntent.Kind kind) {
+        return switch (kind) {
+            case CHANGE -> 0;
+            case REFACTOR -> 1;
+            case MOVE -> 2;
+            case CONFIG -> 3;
+            case TESTS -> 4;
+            case GENERATED -> 5;
+        };
+    }
+
+    /**
+     * A computed section's risk: the worst of the fallback intents whose
+     * hunks it covers. A section is only as safe to wave through as its
+     * riskiest part, so the churn-derived HIGH/MED/LOW the fallback already
+     * measured per file must not vanish into a flat {@code NONE} the moment
+     * {@code Sections} regroups those same hunks.
+     */
+    private static ReviewIntent.Risk riskOf(Sections.Section section, Map<String, ReviewIntent> fallbackByHunk) {
+        ReviewIntent.Risk worst = ReviewIntent.Risk.NONE;
+        for (String hunkId : section.hunkIds()) {
+            ReviewIntent covering = fallbackByHunk.get(hunkId);
+            if (covering != null && covering.risk().ordinal() < worst.ordinal()) {
+                worst = covering.risk();
+            }
+        }
+        return worst;
     }
 
     /**
