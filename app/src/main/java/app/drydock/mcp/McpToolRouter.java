@@ -366,6 +366,15 @@ public final class McpToolRouter {
      * verdict's own storage key must not leak onto this wire, or the join
      * silently breaks the moment that key stops being intent-shaped.
      *
+     * <p>The join needs a diff (to know the scope's current intents), but
+     * findings and submission status do not -- so a scope whose diff cannot
+     * be produced (a PR with no local checkout, or a git failure) still
+     * reports those two. The {@code intents} key is omitted entirely rather
+     * than emitted empty in that case: an empty array reads as "nothing is
+     * settled", a false claim, whereas an absent key correctly says "cannot
+     * be known right now" (the same absent-vs-zero rule the sidebar's
+     * {@code ◨n} badge follows).</p>
+     *
      * <p>TODO(task-6): intent.id() stands in for the hunk digest a verdict
      * is actually looked up by (same placeholder as {@code
      * MainWorkspace}/{@code FakeReviewHost}'s {@code setVerdict}); once an
@@ -377,6 +386,22 @@ public final class McpToolRouter {
         JsonObject args = asObject(arguments);
         ReviewScope scope = requireScope(caller, args);
 
+        JsonObject result = JsonObject.empty();
+        try {
+            result.put("intents", new JsonArray(intentsStateToJson(scope)));
+        } catch (McpToolException e) {
+            LOG.log(Level.WARNING, "review_state: could not compute a diff for scope "
+                    + scope.id() + "; omitting intents: " + e.getMessage());
+        }
+        result.put("findings", new JsonArray(context.findingsOf(scope.id()).stream()
+                        .map(ReviewToolCodec::findingStateToJson)
+                        .toList()))
+                .put("submitted", new JsonBoolean(context.reviewSubmitted(scope.id())));
+        return result;
+    }
+
+    /** The scope's intents joined against their verdicts, as {@code review_state} reports them. */
+    private List<JsonValue> intentsStateToJson(ReviewScope scope) throws McpToolException {
         Map<String, ReviewVerdict> verdictsByDigest = new LinkedHashMap<>();
         for (ReviewVerdict verdict : context.verdictsOf(scope.id())) {
             verdictsByDigest.put(verdict.hunkDigest(), verdict);
@@ -394,12 +419,7 @@ public final class McpToolRouter {
                     .put("note", verdict.note()
                             .<JsonValue>map(JsonString::new).orElse(JsonNull.INSTANCE)));
         }
-        return JsonObject.empty()
-                .put("intents", new JsonArray(intents))
-                .put("findings", new JsonArray(context.findingsOf(scope.id()).stream()
-                        .map(ReviewToolCodec::findingStateToJson)
-                        .toList()))
-                .put("submitted", new JsonBoolean(context.reviewSubmitted(scope.id())));
+        return intents;
     }
 
     // ---- review_comments -----------------------------------------------

@@ -99,6 +99,16 @@ final class FakeMcpSessionContext implements McpSessionContext {
     /** The diff {@link #reviewDiff} returns. */
     UnifiedDiff reviewDiff = new UnifiedDiff(List.of());
 
+    /**
+     * When set, {@link #reviewDiff} throws this instead of returning {@link
+     * #reviewDiff}. Separate from {@link #failure} so a test can fail the
+     * diff path without also failing worktree creation and session start --
+     * the real {@code WorkspaceMcpSessionContext.reviewDiff} throws for a
+     * PR with no local checkout, or a git failure, and this is how a test
+     * models that without touching either of those.
+     */
+    McpToolException reviewDiffFailure;
+
     /** The last intent grouping {@link #putIntents} received. */
     final Map<String, List<ReviewIntent>> intents = new HashMap<>();
 
@@ -122,7 +132,10 @@ final class FakeMcpSessionContext implements McpSessionContext {
     }
 
     @Override
-    public UnifiedDiff reviewDiff(app.drydock.review.ReviewScope scope) {
+    public UnifiedDiff reviewDiff(app.drydock.review.ReviewScope scope) throws McpToolException {
+        if (reviewDiffFailure != null) {
+            throw reviewDiffFailure;
+        }
         return reviewDiff;
     }
 

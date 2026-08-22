@@ -403,6 +403,29 @@ class McpToolRouterReviewTest {
         assertEquals(List.of("i1"), ids, "only a registered intent's own id may appear here");
     }
 
+    /**
+     * A scope whose diff cannot be produced -- a PR with no local checkout,
+     * or a git failure -- must not fail {@code review_state} outright:
+     * findings and submission status do not depend on a diff, only the
+     * per-intent verdict list does. That list is omitted entirely rather
+     * than reported empty, because an empty array reads as "nothing is
+     * settled" -- a false claim -- while an absent key correctly says
+     * "cannot be known right now" (the sidebar's {@code ◨n} badge follows
+     * the same absent-vs-zero rule for the same reason).
+     */
+    @Test
+    void reviewStateOmitsIntentsWhenTheDiffFailsButKeepsFindingsAndSubmission() throws Exception {
+        context.annotations.add(finding("f1", Severity.BLOCKING));
+        context.submitted.add(SCOPE);
+        context.reviewDiffFailure = new McpToolException("pull request #7 is not checked out");
+
+        JsonValue result = router.call(caller, "review_state", args("scopeId", SCOPE));
+
+        assertFalse(((JsonObject) result).has("intents"), "an unproducible diff must omit intents, not empty it");
+        assertEquals("f1", str(((JsonArray) field(result, "findings")).elements().get(0), "id"));
+        assertTrue(((JsonBoolean) field(result, "submitted")).value());
+    }
+
     /** So a follow-up run fixes the right things and does not re-flag settled ones. */
     @Test
     void reviewStateShowsAResolvedFindingAsResolved() throws Exception {
