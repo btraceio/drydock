@@ -35,7 +35,7 @@ class ReviewVerdictBarNavigationTest extends ApplicationTest {
             @Override public void requestChanges(ReviewIntent intent, SessionReviewView.SettleUnit unit) {
                 calls.add("changes");
             }
-            @Override public void askAgentToFix(ReviewIntent intent) { calls.add("ask"); }
+            @Override public boolean askAgentToFix(ReviewIntent intent) { calls.add("ask"); return true; }
             @Override public void undo(ReviewIntent intent) { calls.add("undo"); }
             @Override public void confirmStillGood(ReviewIntent intent) { calls.add("confirm"); }
             @Override public void nextUnsettled() { calls.add("nextUnsettled"); }

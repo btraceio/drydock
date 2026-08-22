@@ -562,6 +562,74 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
         return minted;
     }
 
+    /**
+     * Fix round 2. "Ask the agent to fix it" hands the intent's open findings
+     * to the bound session -- and with no session bound it hands over
+     * NOTHING while looking exactly as though it worked. That is the defect
+     * ruling 1 legislated against for the Explorer jump and round 1 fixed on
+     * the fan-in popover; this is the same defect on the verdict bar, and it
+     * is a button a reader can press all day for no effect and no word.
+     */
+    @Test
+    void askingTheAgentWithNoBoundSessionSaysSoOnTheBar() {
+        seed(finding("f1", Severity.NIT));
+        host.sessionBound = false;
+
+        clickAskAgent();
+
+        assertTrue(host.handedOffPrompts.isEmpty(), "nothing can be sent with no session");
+        assertEquals("⚠ nothing to send, or nowhere to send it", askRefusal(),
+                "a click that handed nothing over must say so");
+    }
+
+    /** The other half: a hand-off that WORKED must not leave a refusal on the bar. */
+    @Test
+    void askingTheAgentWithASessionBoundReportsNoRefusal() {
+        seed(finding("f1", Severity.NIT));
+        host.sessionBound = true;
+
+        clickAskAgent();
+
+        assertEquals(1, host.handedOffPrompts.size(), "the findings must reach the session");
+        assertEquals("", askRefusal(), "a hand-off that worked must say nothing");
+    }
+
+    /**
+     * The refusal describes ONE CLICK, not a state, so anything that
+     * re-renders the bar supersedes it -- otherwise a message about a click
+     * the reader has long moved on from sits there looking current.
+     */
+    @Test
+    void theAskRefusalIsClearedByTheNextBarUpdate() {
+        seed(finding("f1", Severity.NIT));
+        host.sessionBound = false;
+        clickAskAgent();
+        assertFalse(askRefusal().isBlank());
+
+        type(KeyCode.CLOSE_BRACKET);
+
+        assertEquals("", askRefusal(), "moving to another intent must clear it");
+    }
+
+    private void clickAskAgent() {
+        interact(() -> lookup(".review-verdict-action").queryAll().stream()
+                .map(Button.class::cast)
+                .filter(button -> "Ask the agent to fix it".equals(button.getText()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("no Ask-the-agent button found"))
+                .fire());
+        WaitForAsyncUtils.waitForFxEvents();
+    }
+
+    /** The text of the verdict bar's ask-refusal label; blank when it is not showing. */
+    private String askRefusal() {
+        return lookup(".review-verdict-ask-refusal").queryAll().stream()
+                .filter(Node::isVisible)
+                .map(node -> ((Label) node).getText())
+                .findFirst()
+                .orElse("");
+    }
+
     /** The text of the verdict bar's submit-refusal label; blank when it is not showing. */
     private String submitRefusal() {
         return lookup(".review-verdict-submit-refusal").queryAll().stream()

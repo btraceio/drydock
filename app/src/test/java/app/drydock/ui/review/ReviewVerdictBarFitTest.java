@@ -5,6 +5,7 @@ import app.drydock.review.ReviewVerdict;
 
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
+import javafx.scene.Node;
 import javafx.scene.control.Label;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
@@ -39,7 +40,7 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
         bar = new ReviewVerdictBar(new ReviewVerdictBar.Host() {
             @Override public void approve(ReviewIntent intent, SessionReviewView.SettleUnit unit) { }
             @Override public void requestChanges(ReviewIntent intent, SessionReviewView.SettleUnit unit) { }
-            @Override public void askAgentToFix(ReviewIntent intent) { }
+            @Override public boolean askAgentToFix(ReviewIntent intent) { return askSucceeds; }
             @Override public void undo(ReviewIntent intent) { }
             @Override public void confirmStillGood(ReviewIntent intent) { }
             @Override public void nextUnsettled() { }
@@ -62,8 +63,12 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
 
     private Stage stage;
 
+    /** Whether the stub host's hand-off succeeds; false drives the refusal. */
+    private boolean askSucceeds = true;
+
     @AfterEach
     void restoreTheFloor() {
+        askSucceeds = true;
         atTheFloor();
     }
 
@@ -174,6 +179,32 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
         }
     }
 
+    /**
+     * Fix round 2's refusal is a FOURTH thing competing for the action row
+     * at the floor, and this file exists because that row has truncated
+     * before ("Approv…", "Request c…"). A refusal the reader cannot read is
+     * no better than the silence it replaced.
+     */
+    @Test
+    void theAskRefusalFitsAtTheCodeColumnFloor() {
+        askSucceeds = false;
+        show(intent(2, "drydock/review · 4 files"), Optional.empty());
+
+        interact(() -> lookup(".button").queryAll().stream()
+                .map(Button.class::cast)
+                .filter(button -> "Ask the agent to fix it".equals(button.getText()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("no Ask-the-agent button"))
+                .fire());
+        WaitForAsyncUtils.waitForFxEvents();
+        interact(() -> bar.getScene().getRoot().layout());
+        WaitForAsyncUtils.waitForFxEvents();
+
+        assertTrue(lookup(".review-verdict-ask-refusal").queryAll().stream().anyMatch(Node::isVisible),
+                "the refusal must be showing, or this measures nothing");
+        assertNothingTruncated();
+    }
+
     private static String unitWord(SessionReviewView.SettleUnit unit) {
         return switch (unit) {
             case HUNK -> "next unread hunk";
@@ -278,6 +309,20 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
                         squeezed.add("'" + label.getText() + "' wrapped to roughly "
                                 + Math.round(actual / oneLine) + " lines ("
                                 + Math.round(actual) + "px)");
+                    }
+                }));
+        // A refusal label is NOT wrapText, so it elides rather than reflows --
+        // invisible to both checks above. Measured the same way the buttons
+        // are (laid-out width against asked-for width), which keeps it
+        // independent of the CI machine's font.
+        interact(() -> lookup(".review-verdict-refusal").queryAll().stream()
+                .map(Label.class::cast)
+                .filter(Label::isVisible)
+                .forEach(label -> {
+                    double wanted = label.prefWidth(-1);
+                    if (label.getWidth() + 0.5 < wanted) {
+                        squeezed.add("'" + label.getText() + "' got "
+                                + Math.round(label.getWidth()) + " of " + Math.round(wanted));
                     }
                 }));
         assertTrue(squeezed.isEmpty(), "at " + (int) RailLayout.CODE_MIN_WIDTH

@@ -2299,22 +2299,30 @@ public final class SessionReviewView extends BorderPane {
         }
 
         @Override
-        public void askAgentToFix(ReviewIntent intent) {
+        public boolean askAgentToFix(ReviewIntent intent) {
             // Routed through the SELECTED ROW in PATH mode, not the intent
             // the bar happened to be handed (see the class-level javadoc on
             // renderVerdictBarForPathStep for why that intent no longer
             // reflects what is on screen).
+            //
+            // The answer is RETURNED, not swallowed: with no session bound
+            // (or nothing open to send) this hands over nothing at all, and
+            // a button that then looks exactly as though it worked is the
+            // silent failure ruling 1 legislated against -- already fixed
+            // once on the fan-in popover, and this is the same defect one
+            // surface over.
             if (pathMode) {
-                currentPathStep().ifPresent(step -> selectedScope().ifPresent(scope ->
-                        host.askAgentToFix(scope, pathStepAsIntent(step),
-                                openFindingsForPathStep(scope, step))));
-                return;
+                return currentPathStep().flatMap(step -> selectedScope().map(scope ->
+                                host.askAgentToFix(scope, pathStepAsIntent(step),
+                                        openFindingsForPathStep(scope, step))))
+                        .orElse(false);
             }
-            selectedScope().ifPresent(scope -> host.askAgentToFix(scope, intent,
-                    host.findings(scope).stream()
-                            .filter(finding -> !finding.resolved())
-                            .filter(SessionReviewView.this::belongsToCurrentIntent)
-                            .toList()));
+            return selectedScope().map(scope -> host.askAgentToFix(scope, intent,
+                            host.findings(scope).stream()
+                                    .filter(finding -> !finding.resolved())
+                                    .filter(SessionReviewView.this::belongsToCurrentIntent)
+                                    .toList()))
+                    .orElse(false);
         }
 
         @Override

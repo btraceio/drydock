@@ -44,8 +44,18 @@ final class ReviewVerdictBar extends VBox {
 
         void requestChanges(ReviewIntent intent, SessionReviewView.SettleUnit unit);
 
-        /** "Ask the agent to fix it" -- hands the intent's findings to the bound session. */
-        void askAgentToFix(ReviewIntent intent);
+        /**
+         * "Ask the agent to fix it" -- hands the intent's open findings to
+         * the bound session. False when nothing was handed over: there is no
+         * session to hand them to, or the intent has no open finding to send.
+         *
+         * <p>A boolean for the same reason {@code openInExplorer} and {@code
+         * SessionReviewView.Host#askAgentToFix} are: this button can do
+         * NOTHING while looking exactly as though it worked, and a control
+         * that reports nothing when it did nothing is the defect family this
+         * branch has now spent three rounds on.</p>
+         */
+        boolean askAgentToFix(ReviewIntent intent);
 
         /** {@code u} -- undoes this intent's verdict; also "Re-review" on the stale banner. */
         void undo(ReviewIntent intent);
@@ -92,6 +102,20 @@ final class ReviewVerdictBar extends VBox {
     private final Button undoButton = new Button("change");
     private final Label settledLabel = new Label();
     private final Label refusalLabel = new Label();
+    /**
+     * Why an "Ask the agent to fix it" click handed nothing over -- a THIRD
+     * refusal, and a third Label, for the reason {@link #submitRefusalLabel}
+     * documents: the three are independently true (an intent can have a
+     * blocking finding open, no session to hand it to, AND a diff that has
+     * not landed). This one sits in the FOOTER rather than beside its own
+     * button -- see {@link #showAskRefused} for the measurement that put it
+     * there.
+     *
+     * <p>Transient, unlike {@link #refusalLabel}: it describes one click,
+     * not a state, so {@link #update} clears it the moment anything the bar
+     * renders from has changed.</p>
+     */
+    private final Label askRefusalLabel = new Label();
     /** The stale-verdict banner (spec §9.2): text plus its two answers. */
     private final Label staleLabel = new Label();
     private final Button confirmStillGoodButton = new Button("Confirm still good");
@@ -195,7 +219,27 @@ final class ReviewVerdictBar extends VBox {
 
         askAgentButton.getStyleClass().add("review-verdict-action");
         askAgentButton.setTooltip(new Tooltip("Hand this intent's open findings to the bound session"));
-        askAgentButton.setOnAction(e -> withIntent(host::askAgentToFix));
+        askAgentButton.setOnAction(e -> withIntent(intent -> {
+            if (host.askAgentToFix(intent)) {
+                clearAskRefused();
+                return;
+            }
+            // Both causes, because the bar cannot tell them apart from a
+            // boolean and must not guess at one: naming the wrong one is
+            // worse than naming the pair. Short because the footer at the
+            // code column's floor has room for about forty characters and
+            // not one more -- see showAskRefused -- so the sentence lives in
+            // the tooltip, the way intentLabel's does.
+            showAskRefused("nothing to send, or nowhere to send it",
+                    "This intent has no open finding to hand over, or this scope has no bound "
+                            + "session to hand it to. Open the scope's session first.");
+        }));
+        // Both classes, exactly as submitRefusalLabel does: the shared one
+        // for the visual treatment, its own so a test can find THIS label
+        // rather than the blocking-finding one beside it.
+        askRefusalLabel.getStyleClass().addAll("review-verdict-refusal", "review-verdict-ask-refusal");
+        askRefusalLabel.setVisible(false);
+        askRefusalLabel.setManaged(false);
 
         undoButton.getStyleClass().add("review-verdict-action");
         undoButton.setTooltip(new Tooltip("Undo this intent's verdict (u)"));
@@ -247,8 +291,8 @@ final class ReviewVerdictBar extends VBox {
 
         Region footerSpacer = new Region();
         HBox.setHgrow(footerSpacer, Priority.ALWAYS);
-        HBox footer = new HBox(10, progressLabel, progressBar, hintLabel, submitRefusalLabel,
-                footerSpacer, submitButton);
+        HBox footer = new HBox(10, progressLabel, progressBar, hintLabel, askRefusalLabel,
+                submitRefusalLabel, footerSpacer, submitButton);
         footer.setAlignment(Pos.CENTER_LEFT);
         footer.getStyleClass().add("review-verdict-footer");
 
@@ -292,6 +336,9 @@ final class ReviewVerdictBar extends VBox {
         // on (a different scope, a diff that landed), so the message would
         // now be talking about a click that is no longer the most recent one.
         clearSubmitRefused();
+        // Same reasoning, one row up: whatever changed enough to call
+        // update() supersedes a hand-off refusal from an earlier click.
+        clearAskRefused();
         render();
     }
 
@@ -368,6 +415,7 @@ final class ReviewVerdictBar extends VBox {
         submitRefusalLabel.setVisible(true);
         submitRefusalLabel.setManaged(true);
         submitButton.pseudoClassStateChanged(javafx.css.PseudoClass.getPseudoClass("refused"), true);
+        fitFooter();
     }
 
     /** The short form a human recognises a commit by; the sha itself if it is already short. */
@@ -375,10 +423,64 @@ final class ReviewVerdictBar extends VBox {
         return sha.length() > 7 ? sha.substring(0, 7) : sha;
     }
 
+    /**
+     * Says why an "Ask the agent to fix it" click handed nothing over, in
+     * the same visual language {@link #refusalLabel} uses for a refused
+     * approval and {@link #showSubmitRefused} for a refused submit. Cleared
+     * by the next {@link #update}.
+     *
+     * <p><strong>In the footer, not beside its own button</strong>, and that
+     * was measured rather than chosen. At {@code RailLayout.CODE_MIN_WIDTH}
+     * -- the width the bar has to be operable at, since with every rail
+     * collapsed it is the only surface left -- the action row has about 25px
+     * of slack once its four actions have taken their preferred widths, and
+     * this label was laid out at 25 of the 319px it asked for. A refusal
+     * elided to an unreadable sliver is the same defect as the silence it
+     * replaces. The footer is the row immediately below, already the home of
+     * {@link #submitRefusalLabel}, and {@link #askAgentButton} carries the
+     * {@code :refused} pseudo-class meanwhile, so the two read as one
+     * event.</p>
+     */
+    private void showAskRefused(String reason, String detail) {
+        askRefusalLabel.setText("⚠ " + reason);
+        askRefusalLabel.setTooltip(new Tooltip(detail));
+        askRefusalLabel.setVisible(true);
+        askRefusalLabel.setManaged(true);
+        askAgentButton.pseudoClassStateChanged(
+                javafx.css.PseudoClass.getPseudoClass("refused"), true);
+        fitFooter();
+    }
+
+    private void clearAskRefused() {
+        askRefusalLabel.setVisible(false);
+        askRefusalLabel.setManaged(false);
+        askAgentButton.pseudoClassStateChanged(
+                javafx.css.PseudoClass.getPseudoClass("refused"), false);
+        fitFooter();
+    }
+
+    /**
+     * The footer's own version of {@link #fitActionRow}'s trade: while a
+     * refusal is showing, the standing hint gives up its room to it.
+     *
+     * <p>Measured, not assumed. At the {@code CODE_MIN_WIDTH} floor the
+     * footer had 264px for a refusal that asked for 319 -- and taking it
+     * squeezed {@code Submit} to 39px of the 95 it wanted, which trades one
+     * unreadable control for another. "press ? for shortcuts" is a standing
+     * reminder; a refusal is about the click the reader just made, and it
+     * outranks it for as long as it is up.</p>
+     */
+    private void fitFooter() {
+        boolean refusing = askRefusalLabel.isManaged() || submitRefusalLabel.isManaged();
+        hintLabel.setVisible(!refusing);
+        hintLabel.setManaged(!refusing);
+    }
+
     private void clearSubmitRefused() {
         submitRefusalLabel.setVisible(false);
         submitRefusalLabel.setManaged(false);
         submitButton.pseudoClassStateChanged(javafx.css.PseudoClass.getPseudoClass("refused"), false);
+        fitFooter();
     }
 
     private void render() {
