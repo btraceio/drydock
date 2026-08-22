@@ -5,6 +5,7 @@ import app.drydock.git.UnifiedDiff;
 import app.drydock.mcp.McpSessionRegistry.Spawn;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.Confidence;
+import app.drydock.review.HunkDigest;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
@@ -365,8 +366,8 @@ class McpToolRouterReviewTest {
     @Test
     void reviewStateReportsVerdictsFindingsAndSubmission() throws Exception {
         context.annotations.add(finding("f1", Severity.BLOCKING));
-        router.call(caller, "review_intents", intentsArgs(intentJson("i1", "Change", "MED")));
-        context.verdicts.add(new ReviewVerdict(SCOPE, "i1", ReviewVerdict.Decision.CHANGES,
+        router.call(caller, "review_intents", intentsArgs(intentJson("i1", "Change", "MED", 0)));
+        context.verdicts.add(new ReviewVerdict(SCOPE, digestOfHunk(0), ReviewVerdict.Decision.CHANGES,
                 Optional.of("needs a test"), Instant.EPOCH, "base-1", "head-1"));
         context.submitted.add(SCOPE);
 
@@ -381,17 +382,16 @@ class McpToolRouterReviewTest {
 
     /**
      * Pins the id-space of {@code review_state}'s intents: the wire {@code
-     * id} is the intent's own id, looked up by (today, placeholder) digest --
-     * never whatever key a verdict happens to be stored under. A verdict
-     * stored under a key that names no registered intent -- exactly what a
-     * real hunk digest looks like once Task 6 wires one -- must never
-     * surface as an "intent" id; the old code (reporting {@code
+     * id} is the intent's own id, joined to its hunks' verdicts -- never
+     * whatever key a verdict happens to be stored under. A verdict stored
+     * under a digest that belongs to no registered intent must never surface
+     * as an "intent" id; the old code (reporting {@code
      * verdict.hunkDigest()} straight through) would have let it through.
      */
     @Test
     void reviewStateReportsTheIntentIdNotTheVerdictsStorageKey() throws Exception {
-        router.call(caller, "review_intents", intentsArgs(intentJson("i1", "Change", "MED")));
-        context.verdicts.add(new ReviewVerdict(SCOPE, "i1", ReviewVerdict.Decision.APPROVED,
+        router.call(caller, "review_intents", intentsArgs(intentJson("i1", "Change", "MED", 0)));
+        context.verdicts.add(new ReviewVerdict(SCOPE, digestOfHunk(0), ReviewVerdict.Decision.APPROVED,
                 Optional.empty(), Instant.EPOCH, "base-1", "head-1"));
         context.verdicts.add(new ReviewVerdict(SCOPE, "orphan-digest-not-an-intent-id",
                 ReviewVerdict.Decision.APPROVED, Optional.empty(), Instant.EPOCH, "base-1", "head-1"));
@@ -471,6 +471,27 @@ class McpToolRouterReviewTest {
         obj.put("risk", new JsonString(risk));
         obj.put("rationale", new JsonString("because"));
         return obj;
+    }
+
+    /**
+     * As above, but naming the hunks the intent covers. {@code review_state}
+     * derives an intent's verdict from its hunks now, so an intent that names
+     * none covers the whole diff and needs every one of its twelve hunks
+     * settled before it reports anything.
+     */
+    private static JsonObject intentJson(String id, String title, String risk, int... hunks) {
+        JsonObject obj = intentJson(id, title, risk);
+        List<JsonValue> ids = new ArrayList<>();
+        for (int hunk : hunks) {
+            ids.add(new JsonString(ReviewIntent.hunkId("src/Main.java", hunk)));
+        }
+        obj.put("hunkIds", new JsonArray(ids));
+        return obj;
+    }
+
+    /** The digest the {@code index}-th hunk of {@link #diff}'s only file is keyed by. */
+    private static String digestOfHunk(int index) {
+        return HunkDigest.of("src/Main.java", diff(12).files().get(0).hunks().get(index));
     }
 
     /** {@code review_intents} args registering one intent, for tests that need review_state to know it. */

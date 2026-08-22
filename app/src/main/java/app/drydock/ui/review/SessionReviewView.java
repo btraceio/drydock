@@ -4,6 +4,8 @@ import app.drydock.git.DiffService;
 import app.drydock.git.ReviewBase;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.mcp.McpActivityLog;
+import app.drydock.review.BaseMove;
+import app.drydock.review.IntentHunks;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
@@ -11,6 +13,7 @@ import app.drydock.review.ReviewVerdict;
 import app.drydock.review.SessionReviewScopes;
 import app.drydock.review.Severity;
 import app.drydock.review.SubmitPlan;
+import app.drydock.review.VerdictMerge;
 
 import javafx.application.Platform;
 import javafx.geometry.Pos;
@@ -29,9 +32,13 @@ import javafx.scene.layout.VBox;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.TreeSet;
 import java.util.function.Consumer;
 
 /**
@@ -91,12 +98,56 @@ public final class SessionReviewView extends BorderPane {
          */
         List<ReviewIntent> intents(ReviewScope scope, UnifiedDiff diff);
 
-        /** The verdict recorded on one intent, if any. */
-        Optional<ReviewVerdict> verdict(ReviewScope scope, ReviewIntent intent);
+        /**
+         * The verdict recorded on one hunk, if any -- keyed by the hunk's
+         * content digest, never by an intent id. A section has no verdict of
+         * its own: sections overlap, and an agent may regroup them at any
+         * time, so a verdict keyed on a grouping would be orphaned by that
+         * regrouping (spec §9.2). What a section shows is what its hunks
+         * merge to, which is this view's job to derive.
+         */
+        Optional<ReviewVerdict> verdict(ReviewScope scope, String hunkDigest);
 
-        /** Records a verdict; {@code decision} empty undoes it. */
-        void setVerdict(ReviewScope scope, ReviewIntent intent,
+        /**
+         * Records one verdict per hunk of {@code intent}; {@code decision}
+         * empty undoes them all.
+         *
+         * <p>{@code hunkDigests} is computed by the caller rather than by the
+         * host, for the reason {@link #intents} takes its diff as a parameter:
+         * only this view knows which diff the human is actually looking at,
+         * and a host free to re-derive them is free to derive them from a
+         * different one. {@code intent} still comes along because the host
+         * refuses an approval over an open blocking finding, and that refusal
+         * is stated in terms of the intent (spec §4.6).</p>
+         */
+        void setVerdict(ReviewScope scope, ReviewIntent intent, List<String> hunkDigests,
                         Optional<ReviewVerdict.Decision> decision);
+
+        /**
+         * The commit {@code scope}'s base ref resolves to now, or {@link
+         * #UNRESOLVED_BASE} when it cannot be resolved.
+         *
+         * <p>A commit, never the ref name: {@link
+         * ReviewVerdict#staleAgainst} is {@code !baseCommit.equals(currentBase)},
+         * so a verdict recorded against {@code "main"} and compared against
+         * {@code "main"} could never be stale and staleness would be an inert
+         * no-op. {@code "unresolved"} can equal no real sha, so a scope whose
+         * base cannot be resolved reads as stale until a human confirms it --
+         * fail-safe with no second code path.</p>
+         */
+        String currentBase(ReviewScope scope);
+
+        /**
+         * What moved between {@code recordedBase} and {@code scope}'s current
+         * base, so a base move that provably could not touch a section does
+         * not spend the reader's attention on it (see {@link BaseMove}).
+         *
+         * <p>Called on the FX thread, so it must never block: a host that
+         * cannot answer yet returns an {@link BaseMove.Delta#unresolvable}
+         * delta -- "could matter", the safe direction -- rather than a
+         * confident empty one.</p>
+         */
+        BaseMove.Delta baseMove(ReviewScope scope, String recordedBase);
 
         /** Resolve / Reopen one finding. */
         void setResolved(ReviewScope scope, ReviewAnnotation finding, boolean resolved);
@@ -162,6 +213,48 @@ public final class SessionReviewView extends BorderPane {
         boolean runReview(ReviewScope scope);
     }
 
+    /**
+     * The base a scope resolves to when its ref cannot be resolved at all --
+     * a branch that is not in this checkout, or a git that would not run.
+     *
+     * <p>A literal string rather than an {@code Optional} or a sentinel with
+     * its own comparison rule: {@link ReviewVerdict#staleAgainst} already
+     * asks {@code !baseCommit.equals(currentBase)}, and no real sha can equal
+     * this, so an unresolvable base reads as stale through the code path that
+     * was already there. Fail-safe by construction.</p>
+     */
+    public static final String UNRESOLVED_BASE = "unresolved";
+
+    /**
+     * One section's rendered state, derived from its hunks (spec §9.1).
+     *
+     * @param decision what its hunks merge to, empty while any is unread
+     * @param settledHunks how many of its hunks carry a verdict
+     * @param totalHunks how many hunks it covers at all
+     * @param stale whether a base move since a verdict could have changed
+     *              what was approved
+     * @param settledElsewhere the marks of the other sections that settled
+     *              hunks this one shares, so settling one section does not
+     *              silently change another
+     */
+    record SectionState(Optional<ReviewVerdict.Decision> decision, int settledHunks,
+                        int totalHunks, boolean stale, List<String> settledElsewhere) {
+
+        SectionState {
+            settledElsewhere = List.copyOf(settledElsewhere);
+        }
+
+        /**
+         * A section nothing can be said about yet -- no diff, or no scope.
+         * Distinct from a section with nothing settled: this one renders no
+         * counts at all, because zero hunks reviewed and "not known yet" are
+         * not the same claim.
+         */
+        static SectionState unknown() {
+            return new SectionState(Optional.empty(), 0, 0, false, List.of());
+        }
+    }
+
     private final Host host;
     private final ReviewScopeSwitcher switcher = new ReviewScopeSwitcher();
     private final ReviewDiffColumn diffColumn;
@@ -187,6 +280,21 @@ public final class SessionReviewView extends BorderPane {
      * it.</p>
      */
     private final Map<String, DiffOutcome> outcomeByScope = new HashMap<>();
+
+    /**
+     * One diff's hunk digests, memoized per intent. Every card of the rail
+     * asks for its section's state on every rebuild, and each answer walks the
+     * diff hashing hunks -- on a large diff that is thousands of SHA-256s per
+     * keystroke, on the FX thread.
+     *
+     * <p>Keyed by the whole {@link ReviewIntent}, not by its id: a reviewer
+     * may re-issue the same id over DIFFERENT hunks, and an id-keyed memo
+     * would then answer with the hunks of a grouping that no longer exists.
+     * Emptied whenever the diff INSTANCE changes (identity, not equality),
+     * since re-scoping and reloading both hand over a new one.</p>
+     */
+    private UnifiedDiff digestedDiff;
+    private final Map<ReviewIntent, List<String>> digestsByIntent = new LinkedHashMap<>();
 
     /** The scopes this session offers, once {@link SessionReviewScopes} has measured them. */
     private Optional<SessionReviewScopes.Scopes> scopes = Optional.empty();
@@ -291,8 +399,7 @@ public final class SessionReviewView extends BorderPane {
 
         margin.setOnToggleCollapse(() -> setMarginCollapsed(!margin.collapsed()));
         intentRail.setOnToggleCollapse(() -> setIntentsCollapsed(!intentRail.collapsed()));
-        intentRail.setVerdictLookup(intent ->
-                selectedScope().flatMap(scope -> host.verdict(scope, intent)));
+        intentRail.setSectionStateLookup(this::sectionState);
         intentRail.setOnSelected(intent -> {
             List<ReviewIntent> current = intents();
             int index = current.indexOf(intent);
@@ -628,7 +735,8 @@ public final class SessionReviewView extends BorderPane {
         updateCountsLabel();
         if (scope.isEmpty()) {
             margin.setFindings(List.of());
-            verdictBar.update(null, Optional.empty(), false, 0, 0);
+            verdictBar.update(null, Optional.empty(), false);
+            verdictBar.showProgress(0, 0);
             // No scope selected means no rail: leaving the previous scope's
             // cards up here is how the rail came to list a departed item's
             // files (see the whole-branch review this fixes).
@@ -762,11 +870,148 @@ public final class SessionReviewView extends BorderPane {
         return Optional.of(intents.get(Math.clamp(intentIndex, 0, intents.size() - 1)));
     }
 
+    /**
+     * The selected scope's diff, once it has loaded. Empty covers both "still
+     * diffing" and "there is no scope" -- neither of which is a diff with no
+     * hunks in it.
+     */
+    private Optional<UnifiedDiff> loadedDiff() {
+        return selectedOutcome().orElse(null) instanceof DiffOutcome.Loaded loaded
+                ? Optional.of(loaded.diff())
+                : Optional.empty();
+    }
+
+    /**
+     * The content digests of the hunks {@code intent} covers, memoized for
+     * the diff they were taken from (see {@link #digestsByIntent}).
+     */
+    private List<String> digestsOf(ReviewIntent intent) {
+        UnifiedDiff diff = loadedDiff().orElse(null);
+        if (diff == null) {
+            return List.of();
+        }
+        if (diff != digestedDiff) {
+            digestedDiff = diff;
+            digestsByIntent.clear();
+        }
+        return digestsByIntent.computeIfAbsent(intent,
+                key -> IntentHunks.digestsOf(key, diff));
+    }
+
+    /**
+     * The files a section covers, for {@link BaseMove#couldMatter}. An intent
+     * that names no hunks covers the whole diff (see {@link
+     * ReviewIntent#containsHunk}), so its files are the diff's -- an empty
+     * list there would read as "touches nothing" and quietly make every base
+     * move irrelevant to it.
+     */
+    private List<String> filesOf(ReviewIntent intent) {
+        List<String> named = intent.files();
+        if (!named.isEmpty()) {
+            return named;
+        }
+        return loadedDiff().map(diff -> diff.files().stream()
+                .map(UnifiedDiff.FileDiff::path).toList()).orElse(List.of());
+    }
+
+    /** The commit the selected scope's base ref resolves to; see {@link #UNRESOLVED_BASE}. */
+    private String currentBase() {
+        return selectedScope().map(host::currentBase).orElse(UNRESOLVED_BASE);
+    }
+
+    /** What moved between {@code recordedBase} and {@link #currentBase()}. */
+    private BaseMove.Delta baseDelta(String recordedBase) {
+        return selectedScope()
+                .map(scope -> host.baseMove(scope, recordedBase))
+                // No scope means nothing to compare; unresolvable rather than
+                // an empty delta, so an absent answer is never read as "clean".
+                .orElseGet(() -> new BaseMove.Delta(true, new TreeSet<>()));
+    }
+
+    /**
+     * What a section's hunks merge to (spec §9.1) -- {@link VerdictMerge}'s
+     * rule, over the verdicts of the hunks it covers.
+     *
+     * <p>Deliberately free of {@link #settlingSectionOf}: that asks whether
+     * ANOTHER section is settled, and answering it through the full {@link
+     * #sectionState} would recurse between two sections that share a hunk.</p>
+     */
+    private Optional<ReviewVerdict.Decision> decisionOf(ReviewIntent intent) {
+        Optional<ReviewScope> scope = selectedScope();
+        if (scope.isEmpty()) {
+            return Optional.empty();
+        }
+        return VerdictMerge.derive(digestsOf(intent).stream()
+                .map(digest -> host.verdict(scope.get(), digest))
+                .toList());
+    }
+
+    /**
+     * The mark of the first OTHER settled section covering {@code digest}, so
+     * a card can say "reviewed in (1)" instead of appearing to settle itself.
+     *
+     * <p>{@code sections} is passed in rather than read from {@link
+     * #intents()}: that regroups the whole diff on every call, and this runs
+     * once per settled hunk of every card the rail draws.</p>
+     */
+    private Optional<String> settlingSectionOf(String digest, ReviewIntent self,
+                                               List<ReviewIntent> sections) {
+        for (ReviewIntent other : sections) {
+            if (other.id().equals(self.id()) || !other.countsTowardProgress()) {
+                continue;
+            }
+            if (digestsOf(other).contains(digest) && decisionOf(other).isPresent()) {
+                return Optional.of(sectionMark(other.number()));
+            }
+        }
+        return Optional.empty();
+    }
+
+    /** How a section is named in another section's card: its number, circled. */
+    private static String sectionMark(int number) {
+        // U+2460 is (1); the run is twenty long, and beyond it a plain "#21"
+        // is better than a glyph half the fonts on a machine do not carry.
+        return number >= 1 && number <= 20
+                ? String.valueOf((char) ('\u2460' + number - 1))
+                : "#" + number;
+    }
+
+    /** One section's rendered state, derived from its hunks (spec §9.1). */
+    private SectionState sectionState(ReviewIntent intent) {
+        Optional<ReviewScope> scope = selectedScope();
+        List<String> digests = digestsOf(intent);
+        if (scope.isEmpty() || digests.isEmpty()) {
+            return SectionState.unknown();
+        }
+        String base = currentBase();
+        List<ReviewIntent> sections = intents();
+        List<String> files = filesOf(intent);
+        List<Optional<ReviewVerdict>> perHunk = new ArrayList<>();
+        Set<String> elsewhere = new LinkedHashSet<>();
+        boolean stale = false;
+        int settled = 0;
+        for (String digest : digests) {
+            Optional<ReviewVerdict> verdict = host.verdict(scope.get(), digest);
+            perHunk.add(verdict);
+            if (verdict.isPresent()) {
+                settled++;
+                if (verdict.get().staleAgainst(base)
+                        && BaseMove.couldMatter(baseDelta(verdict.get().baseCommit()), files)) {
+                    stale = true;
+                }
+                settlingSectionOf(digest, intent, sections).ifPresent(elsewhere::add);
+            }
+        }
+        return new SectionState(VerdictMerge.derive(perHunk), settled, digests.size(),
+                stale, List.copyOf(elsewhere));
+    }
+
     private void renderVerdictBar(ReviewScope scope) {
         List<ReviewIntent> intents = intents();
         Optional<ReviewIntent> current = currentIntent();
         if (current.isEmpty()) {
-            verdictBar.update(null, Optional.empty(), false, 0, 0);
+            verdictBar.update(null, Optional.empty(), false);
+            verdictBar.showProgress(0, 0);
             return;
         }
         // Collapsed intents do not count toward progress: the point of the
@@ -774,14 +1019,24 @@ public final class SessionReviewView extends BorderPane {
         List<ReviewIntent> counted = intents.stream()
                 .filter(ReviewIntent::countsTowardProgress)
                 .toList();
-        long settled = counted.stream()
-                .filter(intent -> host.verdict(scope, intent).isPresent())
-                .count();
+        // The UNION of the counted sections' hunks, counted once. Sections
+        // overlap, so the sum of their sizes exceeds the number of hunks and
+        // would let a shared hunk be "settled" twice (spec §5.6).
+        Set<String> distinct = new LinkedHashSet<>();
+        for (ReviewIntent intent : counted) {
+            distinct.addAll(digestsOf(intent));
+        }
+        int settled = 0;
+        for (String digest : distinct) {
+            if (host.verdict(scope, digest).isPresent()) {
+                settled++;
+            }
+        }
         boolean blocked = host.findings(scope).stream()
                 .filter(this::belongsToCurrentIntent)
                 .anyMatch(ReviewAnnotation::blocksApproval);
-        verdictBar.update(current.get(), host.verdict(scope, current.get()), blocked,
-                (int) settled, counted.size());
+        verdictBar.update(current.get(), sectionState(current.get()).decision(), blocked);
+        verdictBar.showProgress(settled, distinct.size());
     }
 
     /**
@@ -826,7 +1081,7 @@ public final class SessionReviewView extends BorderPane {
         for (int offset = 1; offset <= intents.size(); offset++) {
             int candidate = (intentIndex + offset) % intents.size();
             ReviewIntent intent = intents.get(candidate);
-            if (intent.countsTowardProgress() && host.verdict(scope.get(), intent).isEmpty()) {
+            if (intent.countsTowardProgress() && decisionOf(intent).isEmpty()) {
                 intentIndex = candidate;
                 refreshReviewState();
                 revealCurrentIntent();
@@ -910,14 +1165,14 @@ public final class SessionReviewView extends BorderPane {
     private final class VerdictHost implements ReviewVerdictBar.Host {
         @Override
         public void approve(ReviewIntent intent) {
-            selectedScope().ifPresent(scope ->
-                    host.setVerdict(scope, intent, Optional.of(ReviewVerdict.Decision.APPROVED)));
+            selectedScope().ifPresent(scope -> host.setVerdict(scope, intent,
+                    digestsOf(intent), Optional.of(ReviewVerdict.Decision.APPROVED)));
         }
 
         @Override
         public void requestChanges(ReviewIntent intent) {
-            selectedScope().ifPresent(scope ->
-                    host.setVerdict(scope, intent, Optional.of(ReviewVerdict.Decision.CHANGES)));
+            selectedScope().ifPresent(scope -> host.setVerdict(scope, intent,
+                    digestsOf(intent), Optional.of(ReviewVerdict.Decision.CHANGES)));
         }
 
         @Override
@@ -931,7 +1186,8 @@ public final class SessionReviewView extends BorderPane {
 
         @Override
         public void undo(ReviewIntent intent) {
-            selectedScope().ifPresent(scope -> host.setVerdict(scope, intent, Optional.empty()));
+            selectedScope().ifPresent(scope ->
+                    host.setVerdict(scope, intent, digestsOf(intent), Optional.empty()));
         }
 
         @Override
@@ -1004,8 +1260,8 @@ public final class SessionReviewView extends BorderPane {
                 .toList();
         List<ReviewVerdict.Decision> decisions = new ArrayList<>();
         for (int i = 0; i < counted.size(); i++) {
-            Optional<ReviewVerdict> verdict = host.verdict(scope.get(), counted.get(i));
-            if (verdict.isEmpty()) {
+            Optional<ReviewVerdict.Decision> decision = decisionOf(counted.get(i));
+            if (decision.isEmpty()) {
                 intentIndex = intents().indexOf(counted.get(i));
                 refreshReviewState();
                 revealCurrentIntent();
@@ -1013,7 +1269,7 @@ public final class SessionReviewView extends BorderPane {
                         "an intent still needs a verdict (approve or request changes); jumped to it");
                 return;
             }
-            decisions.add(verdict.get().decision());
+            decisions.add(decision.get());
         }
         host.submit(scope.get(), buildDiffIndex(diffColumn.displayedDiff()), decisions);
     }
@@ -1172,9 +1428,9 @@ public final class SessionReviewView extends BorderPane {
         Optional<ReviewScope> scope = selectedScope();
         Optional<ReviewIntent> intent = currentIntent();
         if (scope.isPresent() && intent.isPresent()) {
-            host.setVerdict(scope.get(), intent.get(), Optional.of(decision));
-            if (host.verdict(scope.get(), intent.get()).map(ReviewVerdict::decision)
-                    .filter(decision::equals).isPresent()) {
+            host.setVerdict(scope.get(), intent.get(), digestsOf(intent.get()),
+                    Optional.of(decision));
+            if (decisionOf(intent.get()).filter(decision::equals).isPresent()) {
                 lastSettledIntentId = Optional.of(intent.get().id());
                 nextUnsettledIntent();
             }
@@ -1214,7 +1470,8 @@ public final class SessionReviewView extends BorderPane {
             // sane to undo or jump to.
             return;
         }
-        host.setVerdict(scope.get(), current.get(index), Optional.empty());
+        host.setVerdict(scope.get(), current.get(index), digestsOf(current.get(index)),
+                Optional.empty());
         intentIndex = index;
         refreshReviewState();
         revealCurrentIntent();
@@ -1450,6 +1707,21 @@ public final class SessionReviewView extends BorderPane {
      */
     void diagShowDiff(ReviewScope forScope, UnifiedDiff diff) {
         diffColumn.showDiff(forScope, diff);
+    }
+
+    /**
+     * Diagnostic-only: the derived state of the {@code index}-th section.
+     * Routed through {@link ReviewDiagFxThread} like every other {@code diag*}
+     * accessor -- it reads the store and the rail's own grouping, both of
+     * which the FX thread mutates.
+     */
+    SectionState diagSectionState(int index) {
+        return ReviewDiagFxThread.call(() -> {
+            List<ReviewIntent> current = intents();
+            return index >= 0 && index < current.size()
+                    ? sectionState(current.get(index))
+                    : SectionState.unknown();
+        });
     }
 
     /**

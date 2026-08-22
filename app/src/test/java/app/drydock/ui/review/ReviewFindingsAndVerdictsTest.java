@@ -4,6 +4,7 @@ import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.Confidence;
+import app.drydock.review.HunkDigest;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
@@ -268,7 +269,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
         type(KeyCode.A);
 
         assertEquals(ReviewVerdict.Decision.APPROVED,
-                host.store.verdict(scope.id(), "auto:change:src").orElseThrow().decision());
+                host.store.verdict(scope.id(), digestOfMain()).orElseThrow().decision());
     }
 
     /** Spec §4.6: approval is refused while a blocking finding of the intent is open. */
@@ -278,7 +279,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
 
         type(KeyCode.A);
 
-        assertTrue(host.store.verdict(scope.id(), "auto:change:src").isEmpty(),
+        assertTrue(host.store.verdict(scope.id(), digestOfMain()).isEmpty(),
                 "an open blocking finding must refuse approval");
         assertFalse(lookup(".review-verdict-refusal").queryAll().isEmpty(),
                 "the refusal must be visible, not silent");
@@ -288,14 +289,14 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
     void resolvingTheBlockerLetsTheApprovalThrough() {
         seed(finding("f1", Severity.BLOCKING));
         type(KeyCode.A);
-        assertTrue(host.store.verdict(scope.id(), "auto:change:src").isEmpty());
+        assertTrue(host.store.verdict(scope.id(), digestOfMain()).isEmpty());
 
         host.store.mutate(new ReviewAnnotation.Key(scope.id(), "f1"),
                 current -> current.withStatus(AnnotationStatus.RESOLVED));
         interact(view::refreshReviewState);
         type(KeyCode.A);
 
-        assertTrue(host.store.verdict(scope.id(), "auto:change:src").isPresent());
+        assertTrue(host.store.verdict(scope.id(), digestOfMain()).isPresent());
     }
 
     /** A human downgrade after a discussion is the other way past a blocker. */
@@ -306,7 +307,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
         interact(() -> fire(".review-card-action", "Downgrade"));
         type(KeyCode.A);
 
-        assertTrue(host.store.verdict(scope.id(), "auto:change:src").isPresent());
+        assertTrue(host.store.verdict(scope.id(), digestOfMain()).isPresent());
         assertEquals(Severity.BLOCKING, host.store.byId(scope.id(), "f1").orElseThrow().severity(),
                 "the reviewer's original opinion is kept alongside the override");
     }
@@ -317,10 +318,10 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
 
         type(KeyCode.R);
         assertEquals(ReviewVerdict.Decision.CHANGES,
-                host.store.verdict(scope.id(), "auto:change:src").orElseThrow().decision());
+                host.store.verdict(scope.id(), digestOfMain()).orElseThrow().decision());
 
         type(KeyCode.U);
-        assertTrue(host.store.verdict(scope.id(), "auto:change:src").isEmpty());
+        assertTrue(host.store.verdict(scope.id(), digestOfMain()).isEmpty());
     }
 
     @Test
@@ -620,6 +621,15 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
                 Optional.empty(), Optional.empty(), List.of(),
                 List.of(new ReviewAnnotation.Message("Claude", Instant.EPOCH, "body of " + id)),
                 Optional.empty(), AnnotationStatus.OPEN, Optional.empty(), false);
+    }
+
+    /**
+     * The digest {@code src/Main.java}'s only hunk is approved under -- what
+     * a verdict is keyed by now that sections may overlap. The intent id
+     * ({@code auto:change:src}) keys nothing.
+     */
+    private static String digestOfMain() {
+        return HunkDigest.of("src/Main.java", file("src/Main.java").hunks().get(0));
     }
 
     private static UnifiedDiff.FileDiff file(String path) {

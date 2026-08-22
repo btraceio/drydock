@@ -3,6 +3,7 @@ package app.drydock.ui.review;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.AnnotationStore;
+import app.drydock.review.BaseMove;
 import app.drydock.review.IntentGrouping;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewIntent;
@@ -16,6 +17,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.TreeSet;
 
 /**
  * A {@link SessionReviewView.Host} backed by a real {@link AnnotationStore}
@@ -42,6 +44,22 @@ final class FakeReviewHost implements SessionReviewView.Host {
 
     /** What {@link #intents} groups by when no reviewer has supplied a grouping. */
     UnifiedDiff diff = new UnifiedDiff(List.of());
+
+    /**
+     * What {@code scope.base()} / {@code scope.head()} RESOLVE to. Refs are
+     * branch names; a verdict stamped with one and compared against the same
+     * one could never be stale, so the real host resolves them through git
+     * and this fake stands in for that answer. Tests move {@link #baseCommit}
+     * to make a verdict stale.
+     */
+    String baseCommit = "1".repeat(40);
+    String headCommit = "2".repeat(40);
+
+    /**
+     * What a base move touched, as {@code BaseMove.between} would report it.
+     * Empty and resolvable by default: a move that provably could not matter.
+     */
+    BaseMove.Delta baseDelta = new BaseMove.Delta(false, new TreeSet<>());
 
     /** Whether the Explorer jump can succeed (no session bound = false). */
     boolean explorerAvailable;
@@ -100,25 +118,36 @@ final class FakeReviewHost implements SessionReviewView.Host {
     }
 
     @Override
-    public Optional<ReviewVerdict> verdict(ReviewScope scope, ReviewIntent intent) {
-        return store.verdict(scope.id(), intent.id());
+    public Optional<ReviewVerdict> verdict(ReviewScope scope, String hunkDigest) {
+        return store.verdict(scope.id(), hunkDigest);
     }
 
     @Override
-    public void setVerdict(ReviewScope scope, ReviewIntent intent,
+    public void setVerdict(ReviewScope scope, ReviewIntent intent, List<String> hunkDigests,
                            Optional<ReviewVerdict.Decision> decision) {
         if (decision.isEmpty()) {
-            store.clearVerdict(scope.id(), intent.id());
+            for (String digest : hunkDigests) {
+                store.clearVerdict(scope.id(), digest);
+            }
             return;
         }
         if (decision.get() == ReviewVerdict.Decision.APPROVED && blocked(scope, intent)) {
             return;
         }
-        // TODO(task-6): intent.id() stands in for HunkDigest.of(...).
-        // TODO(task-6): scope.base()/head() are ref names, not commit shas;
-        // staleness is inert until these resolve.
-        store.putVerdict(new ReviewVerdict(scope.id(), intent.id(), decision.get(),
-                Optional.empty(), Instant.now(), scope.base(), scope.head()));
+        for (String digest : hunkDigests) {
+            store.putVerdict(new ReviewVerdict(scope.id(), digest, decision.get(),
+                    Optional.empty(), Instant.now(), baseCommit, headCommit));
+        }
+    }
+
+    @Override
+    public String currentBase(ReviewScope scope) {
+        return baseCommit;
+    }
+
+    @Override
+    public BaseMove.Delta baseMove(ReviewScope scope, String recordedBase) {
+        return baseDelta;
     }
 
     private boolean blocked(ReviewScope scope, ReviewIntent intent) {

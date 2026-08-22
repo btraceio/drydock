@@ -554,6 +554,55 @@ class GitStatusServiceTest {
                 .anyMatch(branch -> branch.name().equals("origin/added-later")));
     }
 
+    // ---- resolving a ref to a commit ------------------------------------
+
+    /**
+     * A verdict is stamped with a COMMIT, never with the branch name a scope
+     * carries: recorded against {@code "main"} and compared against
+     * {@code "main"}, it could never be stale.
+     */
+    @Test
+    void aBranchNameResolvesToItsCommit(@TempDir Path repo) throws Exception {
+        initRepo(repo, "main");
+        writeFile(repo, "a.txt", "one");
+        runGit(repo, "add", ".");
+        commit(repo, "first");
+
+        String resolved = service.commitForRefBlocking(repo, "main").orElseThrow();
+
+        assertEquals(service.headCommitBlocking(repo).orElseThrow(), resolved);
+        assertEquals(40, resolved.length(), "a full sha, not an abbreviation: " + resolved);
+    }
+
+    /** Empty, not an exception and not the ref name -- the caller stores "unresolved". */
+    @Test
+    void anUnknownRefResolvesToNothing(@TempDir Path repo) throws Exception {
+        initRepo(repo, "main");
+        writeFile(repo, "a.txt", "one");
+        runGit(repo, "add", ".");
+        commit(repo, "first");
+
+        assertTrue(service.commitForRefBlocking(repo, "no-such-branch").isEmpty());
+    }
+
+    /**
+     * A base is a string this service is handed, not one it chose, and a
+     * string beginning with {@code -} is an option to git unless
+     * {@code --end-of-options} says otherwise -- {@code git rev-parse
+     * --verify --git-dir} answers with the repository's git directory rather
+     * than refusing. It must resolve to nothing, never to whatever a flag
+     * would have printed.
+     */
+    @Test
+    void aRefBeginningWithADashIsReadAsARefNeverAsAnOption(@TempDir Path repo) throws Exception {
+        initRepo(repo, "main");
+        writeFile(repo, "a.txt", "one");
+        runGit(repo, "add", ".");
+        commit(repo, "first");
+
+        assertTrue(service.commitForRefBlocking(repo, "--git-dir").isEmpty());
+    }
+
     private GitStatus getStatus(Path repo) throws ExecutionException, InterruptedException {
         CompletableFuture<GitStatus> future = service.getStatus(repo);
         return future.get();
