@@ -2,6 +2,7 @@ package app.drydock.ui.review;
 
 import app.drydock.git.UnifiedDiff;
 import app.drydock.review.BaseMove;
+import app.drydock.review.ChangeGraph;
 import app.drydock.review.HunkDigest;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
@@ -232,6 +233,30 @@ class SectionStatesTest {
         SectionStates.Board board = overlapping();
         record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
         record(GUARDS_CPP, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
+
+        assertEquals(SectionStates.Staleness.MOVED,
+                sections.stateOf(board, board.sections().get(0)).staleness());
+    }
+
+    /**
+     * The half Task 5 deferred: a base commit touching a file this section
+     * does not change but DOES reference can have moved the ground under an
+     * approval, and only the change graph -- when already in hand -- makes
+     * that visible (spec §9.2). Section-1 here names only Profiler.java;
+     * the base move touches only Guards.java, which Profiler.java
+     * references. Without the graph's widening this reads FRESH -- the
+     * scope's own files never touch Guards.java at all.
+     */
+    @Test
+    void aBaseMoveTouchingAReferencedButUnchangedFileIsMoved() {
+        UnifiedDiff graphDiff = new UnifiedDiff(List.of(
+                file("src/Guards.java", "class JmpCtxScope { }"),
+                file("src/Profiler.java", "void go() { new JmpCtxScope(); }")));
+        ChangeGraph graph = ChangeGraph.of(graphDiff);
+        SectionStates.Board board = new SectionStates.Board(scope, graphDiff,
+                List.of(section("section-1", "src/Profiler.java")), Optional.of(graph));
+        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of("src/Guards.java")));
+        record(graphDiff, "src/Profiler.java", ReviewVerdict.Decision.APPROVED, "0".repeat(40));
 
         assertEquals(SectionStates.Staleness.MOVED,
                 sections.stateOf(board, board.sections().get(0)).staleness());
@@ -505,12 +530,21 @@ class SectionStatesTest {
     }
 
     private void record(String file, ReviewVerdict.Decision decision, String base) {
-        host.store.putVerdict(new ReviewVerdict(scope.id(), digestOf(file), decision,
+        record(diff, file, decision, base);
+    }
+
+    /** As {@link #record(String, ReviewVerdict.Decision, String)}, over a diff other than the fixture's. */
+    private void record(UnifiedDiff source, String file, ReviewVerdict.Decision decision, String base) {
+        host.store.putVerdict(new ReviewVerdict(scope.id(), digestOf(source, file), decision,
                 Optional.empty(), Instant.EPOCH, base, host.headCommit));
     }
 
     private String digestOf(String file) {
-        return diff.files().stream()
+        return digestOf(diff, file);
+    }
+
+    private static String digestOf(UnifiedDiff source, String file) {
+        return source.files().stream()
                 .filter(candidate -> candidate.path().equals(file))
                 .findFirst()
                 .map(candidate -> HunkDigest.of(file, candidate.hunks().get(0)))

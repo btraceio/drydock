@@ -1274,7 +1274,8 @@ public final class SessionReviewView extends BorderPane {
      */
     private Optional<SectionStates.Board> board() {
         return selectedScope().flatMap(scope -> loadedDiff()
-                .map(diff -> new SectionStates.Board(scope, diff, intents())));
+                .map(diff -> new SectionStates.Board(scope, diff, intents(),
+                        Optional.ofNullable(graphByScope.get(scope.id())))));
     }
 
     /** The content digests of the hunks {@code intent} covers; none without a diff. */

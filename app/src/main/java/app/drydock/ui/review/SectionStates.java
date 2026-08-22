@@ -2,6 +2,7 @@ package app.drydock.ui.review;
 
 import app.drydock.git.UnifiedDiff;
 import app.drydock.review.BaseMove;
+import app.drydock.review.ChangeGraph;
 import app.drydock.review.HunkDigest;
 import app.drydock.review.IntentHunks;
 import app.drydock.review.ReviewIntent;
@@ -10,6 +11,7 @@ import app.drydock.review.ReviewVerdict;
 import app.drydock.review.VerdictMerge;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -17,6 +19,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.SortedSet;
+import java.util.TreeSet;
 
 /**
  * What a section of the review board says about itself, derived from the
@@ -122,12 +126,24 @@ final class SectionStates {
      * caller cannot derive one section against the scope now selected and its
      * neighbour against the one before it. The view assembles it once per
      * render from the same three things the rail is built from.</p>
+     *
+     * <p>{@code graph} is empty both before one has been requested and while
+     * it is still building off the FX thread (see {@link
+     * SessionReviewView.Host#intents}) -- staleness widening falls back to a
+     * section's own files rather than ever triggering a build itself.</p>
      */
-    record Board(ReviewScope scope, UnifiedDiff diff, List<ReviewIntent> sections) {
+    record Board(ReviewScope scope, UnifiedDiff diff, List<ReviewIntent> sections,
+                Optional<ChangeGraph> graph) {
         Board {
             Objects.requireNonNull(scope, "scope");
             Objects.requireNonNull(diff, "diff");
+            Objects.requireNonNull(graph, "graph");
             sections = List.copyOf(sections);
+        }
+
+        /** Convenience for callers with no graph on hand -- most tests. */
+        Board(ReviewScope scope, UnifiedDiff diff, List<ReviewIntent> sections) {
+            this(scope, diff, sections, Optional.empty());
         }
     }
 
@@ -243,7 +259,7 @@ final class SectionStates {
         Set<String> stale = new LinkedHashSet<>();
         String base = host.currentBase(board.scope());
         for (ReviewIntent intent : counted(board)) {
-            List<String> files = filesOf(board, intent);
+            Collection<String> files = filesAffectingScope(board, intent);
             for (String digest : digestsOf(board, intent)) {
                 if (stale.contains(digest)) {
                     continue;
@@ -284,7 +300,7 @@ final class SectionStates {
                     : SectionState.notInDiff();
         }
         String base = host.currentBase(board.scope());
-        List<String> files = filesOf(board, intent);
+        Collection<String> files = filesAffectingScope(board, intent);
         List<Optional<ReviewVerdict>> perHunk = new ArrayList<>();
         Set<String> elsewhere = new LinkedHashSet<>();
         Staleness staleness = Staleness.FRESH;
@@ -326,7 +342,7 @@ final class SectionStates {
      * move and must not be rendered as one.
      */
     private Staleness stalenessOf(Board board, ReviewVerdict verdict, String base,
-                                  List<String> files) {
+                                  Collection<String> files) {
         if (!verdict.staleAgainst(base)) {
             return Staleness.FRESH;
         }
@@ -335,6 +351,28 @@ final class SectionStates {
             return Staleness.UNKNOWN;
         }
         return BaseMove.couldMatter(delta, files) ? Staleness.MOVED : Staleness.FRESH;
+    }
+
+    /**
+     * The files a base move has to touch before it can matter to {@code
+     * intent}: its own files ({@link #filesOf}), plus -- when the scope's
+     * {@link ChangeGraph} is already in hand -- the files declaring symbols
+     * those files reference (spec §9.2's second half). Falls back to {@link
+     * #filesOf} alone when the graph is absent (still building, failed, or
+     * never requested for a reviewer-supplied grouping): widening is an
+     * improvement over the narrower set, never a reason to build one.
+     */
+    private static Collection<String> filesAffectingScope(Board board, ReviewIntent intent) {
+        List<String> own = filesOf(board, intent);
+        Optional<ChangeGraph> graph = board.graph();
+        if (graph.isEmpty()) {
+            return own;
+        }
+        SortedSet<String> widened = new TreeSet<>(own);
+        for (String file : own) {
+            widened.addAll(graph.get().filesReferencedBy(file));
+        }
+        return widened;
     }
 
     /**
