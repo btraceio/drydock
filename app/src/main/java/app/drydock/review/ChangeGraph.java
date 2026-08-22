@@ -86,14 +86,16 @@ public final class ChangeGraph {
         Map<String, SortedSet<String>> in = new TreeMap<>();
         for (Map.Entry<String, List<SymbolScan.Symbol>> entry : scans.entrySet()) {
             for (SymbolScan.Symbol symbol : entry.getValue()) {
-                // The use itself must be part of this change, not a context
-                // line pulled into the hunk window by an unrelated nearby
-                // edit -- otherwise an edge could be minted from a line
-                // nobody touched, coincidentally sitting near real changes
-                // in the same file.
-                if (!symbol.onChangedLine()) {
-                    continue;
-                }
+                // A use counts wherever it sits in the diff window, changed
+                // line or context line. The node set is already restricted
+                // to changed files, so this cannot drag in unrelated code --
+                // it only connects files already under review together. A
+                // declaration changing behaviour without most of its call
+                // sites being touched is the single most common shape of
+                // the coupling this graph exists to surface; requiring the
+                // use itself to be edited would split that section in half
+                // to buy edge purity the node-set restriction already gives
+                // for free.
                 String target = unique.get(symbol.name());
                 // Cross-file only: an intra-file match is noise from
                 // short-name matching, not a relationship worth showing.
