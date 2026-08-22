@@ -171,6 +171,51 @@ class IntentGroupingTest {
                         + "against the fallback's own id the moment the graph finished");
     }
 
+    // ---- computed cards are numbered off the reading path, not Sections.of's own order -----
+
+    /**
+     * Task 18's correction 4: {@code McpToolRouter}'s {@code review_scope}
+     * and the rail's PATH mode both number sections off {@link
+     * ReadingPath#of}'s reading order, not {@link Sections#of}'s own
+     * (rank-free) topological order -- so the plain INTENTS cards this class
+     * mints must agree, or a human looking at computed card (1) and an agent
+     * reading section (1) off {@code review_scope} would disagree about
+     * which section that is. Mirrors {@code ReadingPathTest
+     * .theWiderFoundationIsReadFirst}: {@code zbase.cpp} carries in-degree 2
+     * (referenced by both {@code u1.cpp} and {@code u2.cpp}) and sorts LAST;
+     * {@code mid.cpp} carries in-degree 1 and sorts FIRST. {@code
+     * Sections.of}'s own order (no entry-point rank, alphabetical tie-break
+     * among files ready at each step) puts {@code mid.cpp}'s section first;
+     * {@link ReadingPath}'s rank puts {@code zbase.cpp}'s first, because
+     * in-degree outranks the alphabetical tie-break.
+     */
+    @Test
+    void computedIntentsAreNumberedOffTheReadingPathNotSectionsOwnOrder() {
+        List<UnifiedDiff.FileDiff> files = new ArrayList<>();
+        files.add(oneLineFile("src/mid.cpp", "class Mid { };"));
+        files.add(oneLineFile("src/u1.cpp", "void u1() { new Base(); new Mid(); }"));
+        files.add(oneLineFile("src/u2.cpp", "void u2() { new Base(); }"));
+        files.add(oneLineFile("src/zbase.cpp", "class Base { };"));
+        UnifiedDiff diff = new UnifiedDiff(files);
+
+        IntentGrouping grouping = new IntentGrouping();
+        List<ReviewIntent> computed =
+                grouping.intentsFor("scope", diff, Optional.of(ChangeGraph.of(diff)));
+
+        ReviewIntent first = computed.get(0);
+        assertTrue(first.hunkIds().contains(ReviewIntent.hunkId("src/zbase.cpp", 0)),
+                "card 1 must be zbase.cpp's section (the reading path's entry point -- in-degree "
+                        + "2 outranks mid.cpp's alphabetical lead), not Sections.of's own "
+                        + "alphabetically-first card: " + computed);
+        assertEquals(1, first.number());
+    }
+
+    private static UnifiedDiff.FileDiff oneLineFile(String path, String line) {
+        return new UnifiedDiff.FileDiff(path, "M", 1, 0, false, false, List.of(
+                new UnifiedDiff.Hunk("@@", List.of(new UnifiedDiff.Line(
+                        UnifiedDiff.Line.Kind.ADD, OptionalInt.empty(), OptionalInt.of(1), line)))));
+    }
+
     // ---- a computed section carries over kind and risk ---------------------
 
     @Test
