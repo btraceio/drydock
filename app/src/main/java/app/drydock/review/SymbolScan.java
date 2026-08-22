@@ -73,9 +73,20 @@ public final class SymbolScan {
      * grammars. {@code simple_identifier} is Kotlin's spelling -- without it
      * every Kotlin name (declared or used) is invisible to this scan, since
      * Kotlin never emits plain {@code identifier} nodes.
+     *
+     * <p>{@code namespace_identifier} is the qualifier of a C/C++ {@code
+     * A::b}, and it is here so that a qualified name references what
+     * qualifies it: {@code void JmpCtxScope::arm() &#123;&#125;} in a
+     * {@code .cpp} otherwise names nothing its own header declares, and the
+     * pair never links by symbol. The equivalent shapes in the other shipped
+     * languages need no entry -- confirmed by dumping their trees, Java's
+     * {@code Foo.bar()}, Rust's {@code Foo::bar} and Go's {@code pkg.Sym}
+     * all spell the qualifier with a plain {@code identifier}, which is
+     * already listed.</p>
      */
     private static final List<String> NAME_NODES = List.of(
-            "identifier", "type_identifier", "field_identifier", "simple_identifier");
+            "identifier", "type_identifier", "field_identifier", "simple_identifier",
+            "namespace_identifier");
 
     /**
      * Child field names that mark an identifier as the thing being

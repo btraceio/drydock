@@ -119,6 +119,21 @@ class SymbolScanTest {
     }
 
     /**
+     * A qualified name references its qualifier. Without this {@code
+     * guards.cpp} names nothing its own header declares, so the pair never
+     * links by symbol -- the qualifier IS the reference.
+     */
+    @Test
+    void aQualifiedDefinitionReferencesItsQualifier() {
+        List<SymbolScan.Symbol> symbols = SymbolScan.of(file("src/guards.cpp",
+                "#include \"guards.h\"",
+                "",
+                "void JmpCtxScope::arm() { }"));
+
+        assertTrue(has(symbols, "JmpCtxScope", false));
+    }
+
+    /**
      * A hunk holds ADD, DEL and CONTEXT lines at once. Both states are
      * scanned: the deleted line's symbols are still reported, and still
      * count as changed, so removing a call is part of the same change as
