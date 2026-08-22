@@ -128,8 +128,8 @@ In scope: a change graph over the scope's diff; a **grouping** computed from
 it that replaces the fallback's directory clustering; a reading path over
 that grouping; a second mode for the intent rail; per-hunk links in the diff
 column; `reads` on `review_intents` and a `sections` include on
-`review_scope`; content-derived intent ids; and tree-sitter parsing with a
-lexical fallback.
+`review_scope`; overlapping section membership with reviewed state keyed to
+hunk content; and tree-sitter parsing with a lexical fallback.
 
 Also in scope, and an earlier draft was wrong to exclude it: **the verdict
 model**. Sections overlap (§5.6), so they no longer partition the change, and
