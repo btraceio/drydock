@@ -549,7 +549,9 @@ asserts on its own authority, not what the reviewer can find out.
 
 ## 8. MCP surface
 
-One optional field, no new tool.
+Two optional fields and one new tool — the tool being `review_recheck`, whose
+case is made in §9.7 rather than here, because it exists to serve the
+staleness model and not the navigation one.
 
 `review_intents` gains per-intent **`reads: [intentId]`** — the intents this
 one is built on. Drydock renders the assertion and never verifies it, which
@@ -745,6 +747,59 @@ there is one flag. That is the intended behaviour and the reason the
 `✓ reviewed in ①` marker exists: the effect has to be visible in the other
 section, or it reads as state changing on its own.
 
+### 9.7 The agent rechecks staleness, and may only add to it
+
+§9.2's relevance filter is file-level and lexical, and it names its own blind
+spot: a base change that alters behaviour without touching a file this scope
+names is invisible to it. An agent has no such boundary — it can read the
+base delta and the approved hunk and say whether the change actually
+undermines the reading, which is the one thing neither the digest nor the
+intersection can do.
+
+**It may not clear an approval.** That is the line the whole MCP surface is
+drawn around: the human-side writes were kept off the tool list because
+exposing them *"would let an agent approve its own work"*, `propose*` is
+recorded and never applied, and `AUTO_APPROVED` is labelled as the agent's
+assertion rather than the human's. A recheck does not get an exception.
+
+**But the two directions are not equally risky, and treating them alike would
+waste the capability:**
+
+| Assessment | Effect |
+|---|---|
+| **Affected** | Applied. The verdict is marked stale, or stays stale, with the agent's reason. |
+| **Unaffected** | Rendered as advice beside the stale mark. Never clears it; the human still confirms. |
+
+"Affected" applies because it can only ever *add* staleness — it asks for
+more reading, never less — and because it is exactly how §9.2's blind spot
+gets closed. An agent wrong in that direction costs a wasted re-read. An
+agent wrong in the other direction would cost an approval on code nobody
+re-read, which is the outcome this whole section refuses, so that direction
+stays advisory.
+
+This is `migrateLegacyVerdicts`' asymmetry — any `CHANGES` wins, `APPROVED`
+needs everything — applied to a different question.
+
+**Trigger.** A base move that marks anything stale dispatches a bounded
+recheck through the subagent review form (`AgentCapabilities.supportsSubagents`;
+inline harnesses simply do not get one), so the assessment is usually already
+present when the reviewer returns. It is a small, bounded task by
+construction — it reads one base delta and the stale hunks, not the change —
+which is why it is worth a dispatch of its own rather than a full re-review.
+
+**Tool.** `review_recheck(scopeId, assessments[{hunkId, affected, why}])`.
+Assessments render as **claimed**, not measured (§6.5). It is the only new
+tool in this design, and it is here because nothing existing carries a
+statement *about a verdict* — findings are about code and are anchored to
+line keys, and folding this into `review_finding` would put staleness opinions
+into the open-findings count that drives the `◨n` badge.
+
+**What it does not fix.** The reviewer still clicks *confirm still good*
+(§14). What changes is what they are looking at when they click: "9 of these
+12 are untouched by this base move; these 3 are, and here is why". Reflexive
+confirmation of nine uninteresting items is a far smaller loss than reflexive
+confirmation of all twelve, and the three get read.
+
 ## 10. Parsing and packaging
 
 ### 10.1 The binding
@@ -815,7 +870,8 @@ class (Kahn, Tarjan), the rail's PATH mode, per-hunk link footer rows, the
 `p` shortcut and its overlay row, `reads` on `review_intents`, provenance
 marking on order and links (§6.5), the out-of-diff caller popover source
 (§7.4), overlapping section membership (§5.6), hunk-keyed reviewed state
-(§9), file- and section-level settle actions (§9.6), the
+(§9), file- and section-level settle actions (§9.6), the `review_recheck`
+tool and its subagent dispatch (§9.7), the
 `sections` include on `review_scope` (§5.5), and the tree-sitter
 dependencies.
 
@@ -877,6 +933,13 @@ Headless tests:
 - Settle actions: `a` on a focused rail settles the section's unsettled
   hunks, `⇧A` the current file, `a` on a focused diff column one hunk; each
   is visible in the other sections that share those hunks.
+- Recheck: an "affected" assessment marks a verdict stale even when the
+  file-level intersection found nothing; an "unaffected" assessment never
+  clears one, and a scope where every assessment says unaffected still
+  refuses submit until the human confirms; a harness without subagent support
+  gets no dispatch and no error.
+- Relevance: a base move touching only unrelated files marks nothing and
+  updates the recorded base; an unresolvable old base marks everything.
 - Staleness: a base move marks verdicts stale rather than deleting them,
   stale verdicts do not count as settled, submit refuses with a reason, and
   *confirm still good* clears the mark without re-opening the hunk.
@@ -949,6 +1012,11 @@ In the running app, with screenshots rather than assertions about them:
   the ordinary case and because the alternative is silence, but it is not a
   guarantee, and nothing else in this design may be built on the assumption
   that a confirmed verdict was re-read.
+
+  The agent recheck (§9.7) is the one thing that meaningfully helps, and it
+  helps by changing what the reviewer is looking at rather than by removing
+  the click. It does not make the mark trustworthy; it makes the mark
+  *sorted*.
 
 ## 15. Open items
 
