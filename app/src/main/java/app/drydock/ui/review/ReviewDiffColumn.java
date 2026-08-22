@@ -3,6 +3,7 @@ package app.drydock.ui.review;
 import app.drydock.git.DiffScope;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
+import app.drydock.review.OutOfDiffFanIn;
 import app.drydock.review.ReadingPath;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewIntent;
@@ -1553,6 +1554,133 @@ final class ReviewDiffColumn extends BorderPane {
                 lensPopup.show(anchor, bounds.getMinX(), bounds.getMaxY() + 4);
             }
         });
+    }
+
+    /**
+     * The out-of-diff fan-in popover (spec §7.4): every place the symbols
+     * {@code file} declares are used OUTSIDE this change, with the file and
+     * line of each.
+     *
+     * <p>The symbol lens's popover on a third source, deliberately: same
+     * frame, same chips, same one-click occurrence rows, and the SAME {@code
+     * lensPopup} field -- so it is already part of Escape's unwind order
+     * ({@link #lensOpen}, {@link #hideLens}) and opening either one closes
+     * the other, with no second popover to keep in sync. Inventing a second
+     * interaction for the same gesture is how two popovers start
+     * disagreeing.</p>
+     *
+     * <p>The rows are NOT contorted into {@link SymbolIndex.Occurrence}:
+     * that record's {@code inDiff} flag drives the lens's in-diff /
+     * not-touched chip, and every occurrence here is out-of-diff by
+     * construction -- so the chip says exactly that instead of pretending to
+     * a distinction this source cannot make.</p>
+     *
+     * <p>{@code bySymbol} is rendered in its own iteration order; the caller
+     * owns determinism (see {@code SessionReviewView.fanInOccurrences}).</p>
+     */
+    void showFanIn(String file, Map<String, List<OutOfDiffFanIn.Occurrence>> bySymbol,
+                   Node anchor, Runnable askTheAgent) {
+        if (bySymbol.isEmpty()) {
+            return;
+        }
+        hideLens();
+        int total = bySymbol.values().stream().mapToInt(List::size).sum();
+
+        VBox content = new VBox(6);
+        content.getStyleClass().add("review-lens");
+
+        Label title = new Label(file);
+        title.getStyleClass().add("review-lens-title");
+        title.setWrapText(true);
+        // "usages", in those words: this list IS the usages view, so it says
+        // so rather than linking somewhere else for it.
+        Label summary = new Label(total + (total == 1 ? " usage" : " usages")
+                + " outside this change · " + bySymbol.size()
+                + (bySymbol.size() == 1 ? " changed symbol" : " changed symbols"));
+        summary.getStyleClass().add("review-lens-summary");
+        Label caveat = new Label("Lexical git grep of the worktree — occurrences, not resolved "
+                + "references. It cannot tell you whether a change here breaks any of them.");
+        caveat.getStyleClass().add("review-lens-caveat");
+        caveat.setWrapText(true);
+
+        // Where the design is honest about its ceiling: nothing mechanical
+        // and diff-scoped can say whether this change breaks these callers,
+        // so the popover puts the reader one click from the party that can.
+        Button ask = new Button("Ask the agent about these callers");
+        ask.getStyleClass().add("review-fanin-ask");
+        ask.setMaxWidth(Double.MAX_VALUE);
+        ask.setOnAction(e -> {
+            hideLens();
+            askTheAgent.run();
+        });
+
+        // Reused by every row: the Explorer jump can fail (no session, or
+        // its tab is closed), and a row that silently does nothing is worse
+        // than one that says why.
+        Label notice = new Label();
+        notice.getStyleClass().add("review-fanin-notice");
+        notice.setWrapText(true);
+        notice.setVisible(false);
+        notice.setManaged(false);
+
+        content.getChildren().addAll(title, summary, caveat, ask, notice);
+
+        for (Map.Entry<String, List<OutOfDiffFanIn.Occurrence>> entry : bySymbol.entrySet()) {
+            Label symbol = new Label(entry.getKey());
+            symbol.getStyleClass().add("review-fanin-symbol");
+            content.getChildren().add(symbol);
+            for (OutOfDiffFanIn.Occurrence occurrence : entry.getValue()) {
+                Label chip = new Label("outside this change");
+                chip.getStyleClass().addAll("review-lens-chip", "not-touched");
+                Label where = new Label(occurrence.file() + ":" + occurrence.line());
+                where.getStyleClass().add("review-lens-where");
+                Button jump = new Button(occurrence.text().strip().length() > 60
+                        ? occurrence.text().strip().substring(0, 59) + "…"
+                        : occurrence.text().strip());
+                jump.getStyleClass().add("review-lens-line");
+                jump.setOnAction(e -> openOutsideFile(occurrence, notice));
+                HBox row = new HBox(6, chip, where);
+                row.setAlignment(Pos.CENTER_LEFT);
+                content.getChildren().addAll(row, jump);
+            }
+        }
+
+        ScrollPane scroll = new ScrollPane(content);
+        scroll.setFitToWidth(true);
+        scroll.setMaxHeight(320);
+        scroll.getStyleClass().add("review-lens-scroll");
+
+        lensPopup = new Popup();
+        lensPopup.setAutoHide(true);
+        lensPopup.getContent().add(scroll);
+        var bounds = anchor.localToScreen(anchor.getBoundsInLocal());
+        if (bounds != null) {
+            lensPopup.show(anchor, bounds.getMinX(), bounds.getMaxY() + 4);
+        }
+    }
+
+    /**
+     * Opens one out-of-diff occurrence in the Explorer. Unlike the lens's
+     * own rows, {@link #revealLine} is no use here: the file is OUTSIDE the
+     * diff, so this column has no row to reveal. A refused jump writes into
+     * {@code notice} rather than being swallowed -- {@link
+     * ExplorerBridge#openFileAtLine} returns false when there is nowhere to
+     * open it, and this branch has twice had to fix a control that reported
+     * nothing when it did nothing.
+     */
+    private void openOutsideFile(OutOfDiffFanIn.Occurrence occurrence, Label notice) {
+        if (displayedScope == null) {
+            return;
+        }
+        if (explorerBridge.openFileAtLine(displayedScope, Path.of(occurrence.file()),
+                occurrence.line())) {
+            hideLens();
+            return;
+        }
+        notice.setText("Could not open " + occurrence.file()
+                + " — open this scope's session first; the Explorer lives in it.");
+        notice.setVisible(true);
+        notice.setManaged(true);
     }
 
     /** Closes the lens popover; part of Escape's unwind order. */

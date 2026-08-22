@@ -1,5 +1,6 @@
 package app.drydock.review;
 
+import app.drydock.git.UnifiedDiff;
 import app.drydock.process.ProcessResult;
 import app.drydock.process.ProcessRunner;
 import app.drydock.process.ProcessTimeoutException;
@@ -13,9 +14,11 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.SortedSet;
 import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -84,6 +87,31 @@ public final class OutOfDiffFanIn {
     }
 
     private OutOfDiffFanIn() {
+    }
+
+    /**
+     * The scan for one scope's diff: the same {@link #scan} with the two
+     * inputs every caller would otherwise have to derive for itself -- the
+     * worktree to grep, and the diff's own files as the "inside the change"
+     * set.
+     *
+     * <p>A scope with no worktree is {@code unavailable}, not empty: there
+     * is no checkout to grep, so nothing was measured. That is the same
+     * distinction {@link Result#unavailable} draws everywhere else, and the
+     * one thing a surface built on this may not blur.</p>
+     *
+     * <p>Blocking, like {@link #scan}; never call on the FX thread.</p>
+     */
+    public static Result forScope(ReviewScope scope, ChangeGraph graph, UnifiedDiff diff) {
+        Optional<Path> worktree = scope.worktree();
+        if (worktree.isEmpty()) {
+            return new Result(Map.of(), true);
+        }
+        SortedSet<String> changedFiles = new TreeSet<>();
+        for (UnifiedDiff.FileDiff file : diff.files()) {
+            changedFiles.add(file.path());
+        }
+        return scan(worktree.get(), graph, changedFiles);
     }
 
     /**
