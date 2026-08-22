@@ -43,15 +43,24 @@ import java.util.logging.Logger;
  * occurrence popover.</p>
  *
  * <p>A grep match is a lexical count, not a call count: it cannot tell a
- * real reference from an unrelated identifier that happens to contain the
- * same text, the same trade this codebase already makes for an
- * ungrammared file (see {@link SymbolScan}). Attributing an occurrence to
- * every changed declaration whose name it textually contains -- rather than
- * resolving which one, if any, it actually refers to -- can occasionally
- * over-attribute when one changed symbol's name is a substring of
- * another's; a repository-wide semantic index would not have this
- * imprecision, which is exactly the cost this class is built to avoid
- * paying.</p>
+ * real reference from an unrelated identifier spelled the same way, the
+ * same trade this codebase already makes for an ungrammared file (see
+ * {@link SymbolScan}). What it will NOT do is count a line that does not
+ * contain the symbol at all. Attribution is therefore word-bounded ({@link
+ * #mentions}), with {@code git grep -w} narrowing what comes back in the
+ * first place, because a plain substring match reports
+ * {@code ZetaSymHelper} as two uses of {@code ZetaSym}, and this number is
+ * the reading path's FIRST rank term (see {@link ReadingPath}): an inflated
+ * count does not merely read wrong, it reorders what a human reads next. A
+ * repository-wide semantic index would still resolve more than this does --
+ * a same-named symbol from another package is counted here -- and that is
+ * exactly the cost this class is built to avoid paying. The popover says
+ * "occurrences, not resolved references" for that residue; it was never a
+ * licence to list lines the symbol is absent from.</p>
+ *
+ * <p>One line that genuinely mentions two changed declarations is counted
+ * once for each. That is not double counting: it is a use of both, and the
+ * popover lists it under both names.</p>
  *
  * <p><b>Path quoting.</b> Plain {@code git grep -n -F} C-quotes any path
  * with a non-ASCII byte or a special character -- {@code café.txt} comes
@@ -129,7 +138,15 @@ public final class OutOfDiffFanIn {
         try {
             patterns = Files.createTempFile("drydock-fanin-", ".patterns");
             Files.writeString(patterns, String.join("\n", symbols), StandardCharsets.UTF_8);
-            List<String> command = List.of("git", "grep", "-z", "-n", "-F", "-f",
+            // -w is a PRE-FILTER, not the correctness mechanism: {@link
+            // #mentions} below is, and it subsumes this (a mutation dropping
+            // -w alone changes no result, which was checked rather than
+            // assumed). It earns its place by keeping git from streaming
+            // back -- and this class from allocating an Occurrence for --
+            // every line that merely contains a changed name as a substring,
+            // which for a short declaration like `id` is most of a
+            // repository. Do not read it as the reason the count is right.
+            List<String> command = List.of("git", "grep", "-z", "-n", "-F", "-w", "-f",
                     patterns.toString(), "--end-of-options");
             ProcessResult result = ProcessRunner.run(command, worktree, TIMEOUT);
             // git grep exits 1 for "no matches", a valid empty answer, not a
@@ -143,7 +160,7 @@ public final class OutOfDiffFanIn {
             Map<String, List<Occurrence>> bySymbol = new TreeMap<>();
             for (String symbol : symbols) {
                 List<Occurrence> hits = occurrences.stream()
-                        .filter(occurrence -> occurrence.text().contains(symbol))
+                        .filter(occurrence -> mentions(occurrence.text(), symbol))
                         .toList();
                 if (!hits.isEmpty()) {
                     bySymbol.put(symbol, hits);
@@ -168,6 +185,41 @@ public final class OutOfDiffFanIn {
                 }
             }
         }
+    }
+
+    /**
+     * Whether {@code text} uses {@code symbol} as a whole word.
+     *
+     * <p>{@code git grep -w} decides which LINES come back; this decides
+     * which of the scanned symbols each line is attributed to, and the two
+     * have to agree or a line matched as a whole word for one symbol gets
+     * attributed by substring to another ({@code Foo} collecting every use
+     * of {@code FooBar}). Word characters are letters, digits and
+     * underscore -- git's own definition, and the one {@link SymbolWords}'
+     * identifiers are built from.</p>
+     */
+    static boolean mentions(String text, String symbol) {
+        if (symbol.isEmpty()) {
+            return false;
+        }
+        int from = 0;
+        while (true) {
+            int at = text.indexOf(symbol, from);
+            if (at < 0) {
+                return false;
+            }
+            boolean leftClear = at == 0 || !isWordCharacter(text.charAt(at - 1));
+            int after = at + symbol.length();
+            boolean rightClear = after == text.length() || !isWordCharacter(text.charAt(after));
+            if (leftClear && rightClear) {
+                return true;
+            }
+            from = at + 1;
+        }
+    }
+
+    private static boolean isWordCharacter(char c) {
+        return Character.isLetterOrDigit(c) || c == '_';
     }
 
     /**

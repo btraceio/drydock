@@ -552,7 +552,8 @@ class OpenSessionTabReviewSubTabTest extends ApplicationTest {
         }
 
         @Override
-        public void askAgentToFix(ReviewScope scope, ReviewIntent intent, List<ReviewAnnotation> findings) {
+        public boolean askAgentToFix(ReviewScope scope, ReviewIntent intent, List<ReviewAnnotation> findings) {
+            return false;
         }
 
         @Override

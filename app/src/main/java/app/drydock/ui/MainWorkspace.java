@@ -1740,6 +1740,17 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * showing" means now that review is something a session HAS rather than
      * a place the app navigates to.
      */
+    /**
+     * Diagnostic-only: opens the Review board's out-of-diff fan-in popover
+     * (see {@code SessionReviewView#diagOpenFanIn}). Only the {@code
+     * diag.tabScript} driver calls this.
+     */
+    public String diagOpenFanIn() {
+        return showingReviewBoard()
+                .map(SessionReviewView::diagOpenFanIn)
+                .orElse("no review board showing");
+    }
+
     private Optional<SessionReviewView> showingReviewBoard() {
         return currentlySelected()
                 .filter(open -> open.activeSubTab() == OpenSessionTab.SubTab.REVIEW)
@@ -2090,10 +2101,10 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         }
 
         @Override
-        public void askAgentToFix(ReviewScope scope, ReviewIntent intent,
-                                  List<ReviewAnnotation> findings) {
+        public boolean askAgentToFix(ReviewScope scope, ReviewIntent intent,
+                                     List<ReviewAnnotation> findings) {
             if (findings.isEmpty()) {
-                return;
+                return false;
             }
             StringBuilder prompt = new StringBuilder("Address these review findings on \"")
                     .append(intent.title()).append("\", then summarize what you changed: ");
@@ -2103,12 +2114,14 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                         .append(finding.startKey()).append(": ")
                         .append(finding.displayTitle().replaceAll("\\s+", " ")).append(". ");
             }
-            if (sendToBoundSession(scope, prompt.toString().strip())) {
-                for (ReviewAnnotation finding : findings) {
-                    annotationStore.mutate(finding.key(),
-                            current -> current.withStatus(AnnotationStatus.SENT));
-                }
+            if (!sendToBoundSession(scope, prompt.toString().strip())) {
+                return false;
             }
+            for (ReviewAnnotation finding : findings) {
+                annotationStore.mutate(finding.key(),
+                        current -> current.withStatus(AnnotationStatus.SENT));
+            }
+            return true;
         }
 
         @Override

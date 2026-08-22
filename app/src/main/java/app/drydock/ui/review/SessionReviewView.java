@@ -248,8 +248,16 @@ public final class SessionReviewView extends BorderPane {
         /** Records the human's severity override. */
         void overrideSeverity(ReviewScope scope, ReviewAnnotation finding, Severity severity);
 
-        /** Hands an intent's open findings to the scope's bound session. */
-        void askAgentToFix(ReviewScope scope, ReviewIntent intent, List<ReviewAnnotation> findings);
+        /**
+         * Hands an intent's open findings to the scope's bound session.
+         * False when there is no session to hand them to (or nothing to
+         * hand), so a caller can say so rather than appear to have asked --
+         * the same contract, and for the same reason, as {@link
+         * #openInExplorer}: a control that reports nothing when it did
+         * nothing is the silent failure this branch has now had to fix
+         * three times.
+         */
+        boolean askAgentToFix(ReviewScope scope, ReviewIntent intent, List<ReviewAnnotation> findings);
 
         /**
          * Posts the review once every intent is settled. {@code index}
@@ -545,6 +553,16 @@ public final class SessionReviewView extends BorderPane {
 
     /** The scope {@link #lastIntents} belongs to; a scope switch must not reanchor against it. */
     private String lastIntentsScopeId;
+
+    /**
+     * PATH mode's counterpart to {@link #lastIntents}: the steps the rail
+     * last rendered, so a path that RE-SORTS under the reader can be told
+     * from one that merely re-rendered -- see {@link #reanchorPathCursor}.
+     */
+    private List<ReadingPath.Step> lastPathSteps = List.of();
+
+    /** The scope {@link #lastPathSteps} belongs to; a scope switch must not reanchor against it. */
+    private String lastPathScopeId;
 
     /**
      * The id of the intent {@code a}/{@code r} last recorded a verdict on,
@@ -1111,6 +1129,19 @@ public final class SessionReviewView extends BorderPane {
         diffColumn.setLinks(linksByHunk());
         if (pathMode) {
             List<ReadingPath.Step> steps = currentPath().steps();
+            // The same re-anchoring reanchorCursor does for INTENTS, for the
+            // same reason and with more at stake: pathIndex is a POSITION,
+            // and the out-of-diff fan-in scan is the reading path's first
+            // rank term, so a scan landing mid-read re-sorts these steps
+            // under the reader. Clamping alone would leave the cursor on
+            // whatever hunk now occupies that position -- and since
+            // settleUnit() is PATH_STEP unconditionally in this mode, the
+            // reader's next `a` would approve a hunk they were never shown.
+            if (scopeId.equals(lastPathScopeId) && !steps.equals(lastPathSteps)) {
+                pathIndex = reanchorPathCursor(steps);
+            }
+            lastPathSteps = steps;
+            lastPathScopeId = scopeId;
             if (!steps.isEmpty()) {
                 pathIndex = Math.clamp(pathIndex, 0, steps.size() - 1);
             }
@@ -1966,6 +1997,32 @@ public final class SessionReviewView extends BorderPane {
         }
     }
 
+    /**
+     * Where the reader's hunk sits in a path that has just been recomputed.
+     *
+     * <p>Called only when the step list actually CHANGED (see the caller),
+     * so a plain {@code [}/{@code ]} move -- which writes {@link #pathIndex}
+     * and then refreshes against an unchanged list -- is never dragged back
+     * to where it came from.</p>
+     *
+     * <p>Identity is the hunk id, never the position. A hunk that is no
+     * longer in the path at all (a newly-arrived diff dropped it) leaves the
+     * index alone for the caller's clamp to own: there is nowhere honest to
+     * put a cursor whose hunk has gone.</p>
+     */
+    private int reanchorPathCursor(List<ReadingPath.Step> steps) {
+        if (lastPathSteps.isEmpty() || steps.isEmpty()) {
+            return pathIndex;
+        }
+        String hunkId = lastPathSteps.get(Math.clamp(pathIndex, 0, lastPathSteps.size() - 1)).hunkId();
+        for (int index = 0; index < steps.size(); index++) {
+            if (steps.get(index).hunkId().equals(hunkId)) {
+                return index;
+            }
+        }
+        return pathIndex;
+    }
+
     /** {@code step}'s hunk id, as the single-hunk {@link ReviewIntent} the diff column filters on. */
     private static ReviewIntent pathStepAsIntent(ReadingPath.Step step) {
         return new ReviewIntent("path:" + step.hunkId(), step.sectionNumber(), step.file(),
@@ -1995,12 +2052,12 @@ public final class SessionReviewView extends BorderPane {
      * what this surface can honestly do is point the party that can answer
      * at the right file rather than leaving the reader to retype it.</p>
      */
-    private void askAboutFanIn(ReadingPath.Step step) {
+    private boolean askAboutFanIn(ReadingPath.Step step) {
         Optional<ReviewScope> scope = selectedScope();
         Map<String, List<OutOfDiffFanIn.Occurrence>> bySymbol = fanInOccurrences(step.file());
         Optional<String> lineKey = lineKeyOfPathStep(step);
         if (scope.isEmpty() || bySymbol.isEmpty() || lineKey.isEmpty()) {
-            return;
+            return false;
         }
         int total = bySymbol.values().stream().mapToInt(List::size).sum();
         String question = "This change alters " + String.join(", ", bySymbol.keySet())
@@ -2020,9 +2077,13 @@ public final class SessionReviewView extends BorderPane {
                 .map(ReviewIntent::id);
         ReviewAnnotation stamped = asked.withIntentId(intentId);
         host.addComment(scope.get(), stamped);
-        host.askAgentToFix(scope.get(), pathStepAsIntent(step), List.of(stamped));
+        boolean handedOff = host.askAgentToFix(scope.get(), pathStepAsIntent(step), List.of(stamped));
         refreshReviewState();
         diffColumn.refreshPins();
+        // Returned, not swallowed: with no bound session the comment is
+        // filed and NOTHING is sent, and a popover that closed on that would
+        // leave the reviewer waiting for an answer nobody was asked for.
+        return handedOff;
     }
 
     /**
@@ -2112,6 +2173,21 @@ public final class SessionReviewView extends BorderPane {
      * {@code diag*} accessor is: it reads the rail's {@code ObservableList}
      * of rows, which the FX thread rebuilds wholesale on every render.
      */
+    /**
+     * Diagnostic-only: enters PATH mode if it is not already showing, then
+     * opens the first fan-in popover. The visual pass over that popover has
+     * no other way in -- it is a separate {@code Popup} window, and Robot
+     * input never reaches a diag run.
+     */
+    public String diagOpenFanIn() {
+        return ReviewDiagFxThread.call(() -> {
+            if (!pathMode) {
+                togglePathMode();
+            }
+            return intentRail.diagOpenFanIn();
+        });
+    }
+
     /** See {@link #fanInScanThread} -- the thread the last fan-in scan ran on. */
     String diagFanInScanThread() {
         return fanInScanThread;

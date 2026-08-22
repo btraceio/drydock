@@ -43,6 +43,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.BooleanSupplier;
 
 /**
  * The Review diff column (spec §4.4): hunk cards over a virtualized row
@@ -1579,7 +1580,7 @@ final class ReviewDiffColumn extends BorderPane {
      * owns determinism (see {@code SessionReviewView.fanInOccurrences}).</p>
      */
     void showFanIn(String file, Map<String, List<OutOfDiffFanIn.Occurrence>> bySymbol,
-                   Node anchor, Runnable askTheAgent) {
+                   Node anchor, BooleanSupplier askTheAgent) {
         if (bySymbol.isEmpty()) {
             return;
         }
@@ -1606,13 +1607,14 @@ final class ReviewDiffColumn extends BorderPane {
         // Where the design is honest about its ceiling: nothing mechanical
         // and diff-scoped can say whether this change breaks these callers,
         // so the popover puts the reader one click from the party that can.
-        Button ask = new Button("Ask the agent about these callers");
+        // The label says what the button DOES, both halves of it: the
+        // question is filed as a review comment on this file whether or not
+        // a session is there to receive it, and a reviewer who is not told
+        // that finds a stray comment they did not knowingly write.
+        Button ask = new Button("Ask the agent — files a review comment");
         ask.getStyleClass().add("review-fanin-ask");
         ask.setMaxWidth(Double.MAX_VALUE);
-        ask.setOnAction(e -> {
-            hideLens();
-            askTheAgent.run();
-        });
+        ask.setWrapText(true);
 
         // Reused by every row: the Explorer jump can fail (no session, or
         // its tab is closed), and a row that silently does nothing is worse
@@ -1622,6 +1624,22 @@ final class ReviewDiffColumn extends BorderPane {
         notice.setWrapText(true);
         notice.setVisible(false);
         notice.setManaged(false);
+
+        // Wired AFTER `notice` exists, and it does NOT hide the popover
+        // first: a hand-off that could not happen has to have somewhere to
+        // say so, and hiding the only surface before running the action
+        // leaves nowhere. Exactly the ordering openOutsideFile uses.
+        ask.setOnAction(e -> {
+            if (askTheAgent.getAsBoolean()) {
+                hideLens();
+                return;
+            }
+            notice.setText("Filed as a review comment on " + file
+                    + ", but nothing was sent — open this scope's session first; "
+                    + "the agent is asked through it.");
+            notice.setVisible(true);
+            notice.setManaged(true);
+        });
 
         content.getChildren().addAll(title, summary, caveat, ask, notice);
 
@@ -1655,7 +1673,13 @@ final class ReviewDiffColumn extends BorderPane {
         lensPopup.getContent().add(scroll);
         var bounds = anchor.localToScreen(anchor.getBoundsInLocal());
         if (bounds != null) {
-            lensPopup.show(anchor, bounds.getMinX(), bounds.getMaxY() + 4);
+            // Positioned by the anchor, OWNED by this column. A Popup hides
+            // itself the moment its owner node leaves the scene, and the
+            // anchor here is a rail row that every refresh replaces -- so
+            // owning it would close this popover on the next refresh,
+            // including the one its own "ask" button causes. This column
+            // outlives every such rebuild.
+            lensPopup.show(this, bounds.getMinX(), bounds.getMaxY() + 4);
         }
     }
 

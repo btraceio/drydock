@@ -35,6 +35,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.Optional;
 import java.util.function.Function;
 import java.util.logging.Level;
@@ -70,6 +71,28 @@ public final class McpToolRouter {
     private final McpSessionContext context;
     private final McpSessionRegistry registry;
     private final Function<UnifiedDiff, ChangeGraph> graphBuilder;
+
+    /**
+     * One scope's computed grouping, keyed by the diff it was computed from.
+     *
+     * <p>Without it, every {@code review_scope} call that asks for {@code
+     * sections} rebuilds the whole {@link ChangeGraph} AND spawns a fresh
+     * full-worktree {@code git grep} -- so an agent polling during a review
+     * runs one 30s-bounded grep per poll, concurrently with the board's own.
+     * One duplicate scan across the UI/MCP boundary is the price of these
+     * two surfaces having no common owner; one per poll is not.</p>
+     *
+     * <p>Keyed on the diff INSTANCE, the same identity test the board's
+     * graph cache uses: a re-read that produced a genuinely new diff gets a
+     * genuinely new grouping, and a repeated read of the same one does not
+     * pay twice. Concurrent because MCP calls arrive on the server's threads,
+     * not on one.</p>
+     */
+    private final Map<String, SectionsCacheEntry> sectionsByScope = new ConcurrentHashMap<>();
+
+    /** One completed {@link #computeSections} result, keyed by what it was computed from. */
+    private record SectionsCacheEntry(UnifiedDiff diff, List<Sections.Section> sections) {
+    }
 
     public McpToolRouter(McpSessionContext context, McpSessionRegistry registry) {
         this(context, registry, ChangeGraph::of);
@@ -360,11 +383,22 @@ public final class McpToolRouter {
      * worse than making it wait.</p>
      */
     private Optional<JsonValue> computeSections(ReviewScope scope, UnifiedDiff diff) {
+        SectionsCacheEntry cached = sectionsByScope.get(scope.id());
+        if (cached != null && cached.diff() == diff) {
+            return Optional.of(ReviewToolCodec.sectionsToJson(cached.sections()));
+        }
         try {
             ChangeGraph graph = graphBuilder.apply(diff);
             List<Sections.Section> sections = Sections.of(diff, graph);
             ReadingPath.Path path = ReadingPath.of(diff, graph, sections,
                     OutOfDiffFanIn.forScope(scope, graph, diff));
+            // Cached as the ordered sections rather than as the rendered
+            // JSON: the response is assembled per call (a later page adds
+            // its own keys to it), and handing every caller the same mutable
+            // object is a defect waiting for the first one that edits it.
+            // Only a SUCCESSFUL build is cached -- a parse edge case must
+            // stay retryable rather than being pinned as this scope's answer.
+            sectionsByScope.put(scope.id(), new SectionsCacheEntry(diff, path.sections()));
             return Optional.of(ReviewToolCodec.sectionsToJson(path.sections()));
         } catch (RuntimeException e) {
             LOG.log(Level.WARNING, "review_scope: could not compute sections for scope "
