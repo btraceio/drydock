@@ -38,6 +38,27 @@ import java.util.regex.Matcher;
  * so joining its lines is far likelier to parse as real syntax, and it is
  * one parse per hunk rather than per line.</p>
  *
+ * <p><strong>A name inside a comment is not a use.</strong> This falls out
+ * of parsing a hunk rather than a line, but it is a policy and not an
+ * accident, so it is stated here. A whole {@code //} line always parsed as
+ * a comment; what did NOT was an INTERIOR line of a block comment, which
+ * is most of the documentation in this codebase. Read alone,
+ * {@code  * ranks &#123;@code BaseMove&#125; above &#123;@link
+ * HunkDigest&#125;} is not a comment -- it is an asterisk and some
+ * identifiers -- so line-at-a-time lexed the doc words as names and minted
+ * real reference edges from them. Measured on this branch's own diff that
+ * was 108 of 337 edges, more than the non-code denylist removes. With the
+ * hunk in hand the grammar sees one comment node and yields nothing from
+ * it.</p>
+ *
+ * <p>The new behaviour is the right one: prose that NAMES a thing is not
+ * code that DEPENDS on it, and nobody ever decided that a
+ * {@code &#123;@link&#125;} should couple two files in the review rail.
+ * Guarded by {@code aNameThatAppearsOnlyInACommentIsNotAUse}, because a
+ * {@link #walk} change or a grammar bump that starts descending into
+ * comments again would otherwise restore those 108 edges with no signal at
+ * all.</p>
+ *
  * <p>Blocking: parsing -- and, the first time any language is used, loading
  * its native grammar library via {@link GrammarRegistry} -- both do real
  * work (native calls, disk I/O). Never call {@link #of} on the FX thread.</p>

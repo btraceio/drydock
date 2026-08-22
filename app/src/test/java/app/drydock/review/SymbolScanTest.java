@@ -199,6 +199,48 @@ class SymbolScanTest {
     }
 
     /**
+     * A name that appears only in documentation contributes nothing. This
+     * is the largest single behaviour change per-hunk parsing brought, and
+     * it arrived as a side effect, so it is asserted rather than assumed.
+     *
+     * <p>The fixture is deliberately a MULTI-LINE block comment. A whole
+     * {@code //} line, or a one-line {@code /** ... *}{@code /}, was already
+     * a comment node to the line-at-a-time scan and never leaked. What
+     * leaked was an INTERIOR line of a block comment: {@code  * ranks
+     * &#123;@code BaseMove&#125; above &#123;@link HunkDigest&#125;} is not
+     * a comment on its own, so it lexed as bare identifiers and minted real
+     * reference edges -- 108 of this branch's 337. Verified against the
+     * pre-change class: it reports all five doc names, this reports none.
+     * A {@link SymbolScan} change that starts descending into comments
+     * again would otherwise restore all 108 with no signal.</p>
+     */
+    @Test
+    void aNameThatAppearsOnlyInACommentIsNotAUse() {
+        List<SymbolScan.Symbol> symbols = SymbolScan.of(file("src/Guards.java",
+                "/**",
+                " * Ranks {@code BaseMove} above {@link HunkDigest}, leaving",
+                " * {@link SectionStates.Staleness#UNKNOWN} last.",
+                " */",
+                "class Guards {",
+                "    void install() { helper(); }",
+                "}"));
+
+        assertFalse(named(symbols, "BaseMove"));
+        assertFalse(named(symbols, "HunkDigest"));
+        assertFalse(named(symbols, "SectionStates"));
+        assertFalse(named(symbols, "Staleness"));
+        assertFalse(named(symbols, "UNKNOWN"));
+        // The code around the documentation is still read.
+        assertTrue(has(symbols, "Guards", true));
+        assertTrue(has(symbols, "install", true));
+        assertTrue(has(symbols, "helper", false));
+    }
+
+    private static boolean named(List<SymbolScan.Symbol> symbols, String name) {
+        return symbols.stream().anyMatch(s -> s.name().equals(name));
+    }
+
+    /**
      * A hunk fragment is many lines of UTF-8, and tree-sitter answers in
      * BYTE offsets. A multi-byte character on an early line shifts every
      * later offset, so a line table counted in characters would slice the
