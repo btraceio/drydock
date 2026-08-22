@@ -28,8 +28,10 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
 /**
@@ -103,6 +105,21 @@ final class ReviewIntentRail extends VBox {
 
     private Consumer<ReadingPath.Step> onPathSelected = step -> { };
 
+    /**
+     * Which {@code PATH} rows have somewhere to click their fan-in, and what
+     * to do when a reader clicks it (spec §7.4).
+     *
+     * <p>Asked per row rather than carried on {@link ReadingPath.Step},
+     * because the scan lands after the path is first computed: the rail is
+     * rebuilt on the refresh that follows it, and this reads whatever is
+     * true at that moment. False by default, so a rail with nothing wired --
+     * every rail test that does not care -- renders exactly today's plain
+     * reason label.</p>
+     */
+    private Predicate<ReadingPath.Step> fanInAvailable = step -> false;
+
+    private BiConsumer<ReadingPath.Step, Node> onFanIn = (step, anchor) -> { };
+
     private List<ReviewIntent> intents = List.of();
     /**
      * How a card learns what its section adds up to. A section has no verdict
@@ -164,6 +181,17 @@ final class ReviewIntentRail extends VBox {
 
     void setOnPathSelected(Consumer<ReadingPath.Step> handler) {
         this.onPathSelected = handler == null ? step -> { } : handler;
+    }
+
+    /**
+     * Wires {@code PATH} mode's fan-in affordance: {@code available} decides
+     * which rows get one, {@code onRequested} is handed the row and the
+     * control it was clicked on, so a popover can anchor to it.
+     */
+    void setFanIn(Predicate<ReadingPath.Step> available,
+                  BiConsumer<ReadingPath.Step, Node> onRequested) {
+        this.fanInAvailable = available == null ? step -> false : available;
+        this.onFanIn = onRequested == null ? (step, anchor) -> { } : onRequested;
     }
 
     void setOnToggleCollapse(Runnable handler) {
@@ -472,7 +500,7 @@ final class ReviewIntentRail extends VBox {
         reason.getStyleClass().add("review-path-reason");
         reason.setWrapText(true);
 
-        VBox content = new VBox(4, headerRow, reason) {
+        VBox content = new VBox(4, headerRow, reasonNode(step, reason)) {
             @Override
             protected double computePrefHeight(double width) {
                 // Same reason buildCard's own content VBox overrides this:
@@ -497,6 +525,44 @@ final class ReviewIntentRail extends VBox {
         content.maxWidthProperty().bind(content.prefWidthProperty());
         row.setGraphic(content);
         return row;
+    }
+
+    /**
+     * The reason line, as a control when there is something behind it to
+     * open (spec §7.4). A fan-in reason -- "called from 7 places outside the
+     * change" -- is the one reason on this rail that names evidence the
+     * reader cannot see from here, and a count with nowhere to click is a
+     * statistic rather than comprehension.
+     *
+     * <p>The very same {@code reason} Label becomes the button's graphic
+     * rather than the button minting its own text: {@link ReadingPath} is
+     * the one author of that sentence, so there is no second copy to drift,
+     * the "file " prefix that scopes the claim to the FILE survives, and the
+     * text stays on a {@code Label} carrying its own {@code -fx-text-fill}
+     * -- a plain {@code Button.setText} here is the 1.13:1 contrast defect
+     * {@link #buildPathRow}'s own javadoc documents.</p>
+     */
+    private Node reasonNode(ReadingPath.Step step, Label reason) {
+        if (!fanInAvailable.test(step)) {
+            return reason;
+        }
+        Button button = new Button();
+        button.getStyleClass().add("review-fanin-count");
+        button.setGraphic(reason);
+        button.setMaxWidth(Double.MAX_VALUE);
+        button.setAlignment(Pos.TOP_LEFT);
+        button.setTooltip(new Tooltip("Show where this file's changed symbols are used "
+                + "outside the change"));
+        button.setOnAction(e -> {
+            // CONSUMED, or this row's own Button catches the same
+            // ActionEvent on its way up, selects the row, and rebuilds the
+            // rail -- which detaches the node the popover is anchored to and
+            // hides it again in the same gesture that opened it. Asking to
+            // see the callers is not asking to move the cursor.
+            e.consume();
+            onFanIn.accept(step, button);
+        });
+        return button;
     }
 
     private Button buildCard(ReviewIntent intent) {

@@ -38,6 +38,7 @@ import javafx.scene.layout.VBox;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -452,15 +453,47 @@ public final class SessionReviewView extends BorderPane {
     private boolean pathMode;
 
     /**
-     * The reading path's rank has no out-of-diff fan-in scan behind it here:
-     * {@link OutOfDiffFanIn#scan} spawns a blocking {@code git grep} per
-     * scope, and wiring that in is a separate concern from giving the rail a
-     * second mode. {@code unavailable=true} is the honest input for a signal
-     * that was never computed -- {@link ReadingPath#of}'s own reason text
-     * says so ("outside callers unknown") rather than reading a scan that
-     * did not run as one that found nothing.
+     * What a scope's fan-in is until its scan has actually run: {@code
+     * unavailable=true}, the honest input for a signal nothing has measured
+     * yet. {@link ReadingPath#of}'s own reason text says so ("outside callers
+     * unknown") rather than reading a scan that did not run as one that
+     * found nothing -- which is the whole distinction the fan-in affordance
+     * rests on (spec §4.3).
      */
-    private static final OutOfDiffFanIn.Result NO_FAN_IN_SCAN = new OutOfDiffFanIn.Result(Map.of(), true);
+    private static final OutOfDiffFanIn.Result FAN_IN_NOT_SCANNED =
+            new OutOfDiffFanIn.Result(Map.of(), true);
+
+    /**
+     * Each scope's out-of-diff fan-in scan, once it has finished. Absent
+     * until then, which {@link #fanInFor} reads as {@link
+     * #FAN_IN_NOT_SCANNED}.
+     *
+     * <p>Populated off the FX thread on {@link #SECTION_GRAPH_EXECUTOR},
+     * from {@link #requestGraph}'s own completion: {@link
+     * OutOfDiffFanIn#scan} spawns a blocking {@code git grep} with a 30s
+     * timeout, and it needs the {@link ChangeGraph}'s changed declarations
+     * as its patterns, so it can neither run on the FX thread nor run
+     * before the graph exists.</p>
+     */
+    private final Map<String, OutOfDiffFanIn.Result> fanInByScope = new HashMap<>();
+
+    /**
+     * Guards a superseded fan-in scan from overwriting a newer one, exactly
+     * as {@link #graphGenerationByScope} does for the graph build -- the
+     * scan is the slower of the two, so the window it is stale in is wider.
+     */
+    private final Map<String, Integer> fanInGenerationByScope = new HashMap<>();
+
+    /**
+     * Diagnostics: the thread the last fan-in scan actually ran on.
+     *
+     * <p>Recorded rather than assumed. "It runs off the FX thread" is the one
+     * property of this scan a reader cannot see and a refactor can silently
+     * take away -- {@code Sections.of} on the FX thread already froze this
+     * board for ~2.7 seconds once -- so it is written down where a test can
+     * assert it. Volatile: written on a virtual thread, read on the FX one.</p>
+     */
+    private volatile String fanInScanThread;
 
     /** The row the verdict bar's {@code [} / {@code ]} / {@code n} move in PATH mode. */
     private int pathIndex;
@@ -476,8 +509,13 @@ public final class SessionReviewView extends BorderPane {
 
     private static final ReadingPath.Path EMPTY_PATH = new ReadingPath.Path(List.of(), List.of());
 
-    /** One completed {@link #currentPath()} lookup, keyed by what it was computed from. */
-    private record PathCacheEntry(String scopeId, UnifiedDiff diff, ChangeGraph graph, ReadingPath.Path path) {
+    /**
+     * One completed {@link #currentPath()} lookup, keyed by what it was
+     * computed from -- the fan-in result included, so the path recomputes
+     * once a scan lands rather than serving the pre-scan order forever.
+     */
+    private record PathCacheEntry(String scopeId, UnifiedDiff diff, ChangeGraph graph,
+                                  OutOfDiffFanIn.Result fanIn, ReadingPath.Path path) {
     }
 
     /** The scopes this session offers, once {@link SessionReviewScopes} has measured them. */
@@ -641,6 +679,12 @@ public final class SessionReviewView extends BorderPane {
                 revealCurrentPathStep();
             }
         });
+        // The fan-in count is an affordance, not a statistic (spec §7.4):
+        // "called from 7 places outside the change" is the one reason on the
+        // rail naming evidence the reader cannot see from where they are.
+        intentRail.setFanIn(step -> !fanInOccurrences(step.file()).isEmpty(),
+                (step, anchor) -> diffColumn.showFanIn(step.file(),
+                        fanInOccurrences(step.file()), anchor, () -> askAboutFanIn(step)));
         margin.setOnFilterChanged(filter -> refreshReviewState());
         diffColumn.setPinSource(new PinSource());
         diffColumn.setCommentSink(annotation -> selectedScope().ifPresent(scope -> {
@@ -1293,14 +1337,15 @@ public final class SessionReviewView extends BorderPane {
         if (graph == null) {
             return EMPTY_PATH;
         }
+        OutOfDiffFanIn.Result fanIn = fanInFor(scopeId);
         PathCacheEntry cached = pathCache;
         if (cached != null && cached.scopeId().equals(scopeId) && cached.diff() == diff
-                && cached.graph() == graph) {
+                && cached.graph() == graph && cached.fanIn() == fanIn) {
             return cached.path();
         }
         ReadingPath.Path computed =
-                ReadingPath.of(diff, graph, Sections.of(diff, graph), NO_FAN_IN_SCAN);
-        pathCache = new PathCacheEntry(scopeId, diff, graph, computed);
+                ReadingPath.of(diff, graph, Sections.of(diff, graph), fanIn);
+        pathCache = new PathCacheEntry(scopeId, diff, graph, fanIn, computed);
         return computed;
     }
 
@@ -1344,6 +1389,12 @@ public final class SessionReviewView extends BorderPane {
         graphedDiffByScope.put(scopeId, diff);
         int generation = graphGenerationByScope.merge(scopeId, 1, Integer::sum);
         graphByScope.remove(scopeId);
+        // A new diff invalidates the old scan as surely as it does the old
+        // graph: fan-in is measured against THIS diff's changed
+        // declarations, and serving the previous one's counts would put a
+        // clickable "called from 7 places" on a file that no longer declares
+        // any of them.
+        fanInByScope.remove(scopeId);
         graphBuilding.add(scopeId);
         CompletableFuture.supplyAsync(() -> ChangeGraph.of(diff), SECTION_GRAPH_EXECUTOR)
                 .whenComplete((graph, failure) -> {
@@ -1374,6 +1425,7 @@ public final class SessionReviewView extends BorderPane {
                         graphBuilding.remove(scopeId);
                         if (failure == null) {
                             graphByScope.put(scopeId, graph);
+                            requestFanIn(scopeId, diff, graph);
                         } else {
                             // The (kind, directory) fallback is the honest
                             // answer, not a broken rail -- but a failed
@@ -1402,6 +1454,131 @@ public final class SessionReviewView extends BorderPane {
                         }
                     });
                 });
+    }
+
+    /**
+     * Runs {@code scopeId}'s out-of-diff fan-in scan (spec §4.3) on {@link
+     * #SECTION_GRAPH_EXECUTOR}, off the FX thread.
+     *
+     * <p>Off the FX thread is not a preference: {@link OutOfDiffFanIn#scan}
+     * spawns a {@code git grep} over the whole worktree and waits up to 30
+     * seconds for it. {@code Sections.of} on the FX thread already froze
+     * this board for over a second on this branch's own diff; a subprocess
+     * would be far worse.</p>
+     *
+     * <p>Kicked off from {@link #requestGraph}'s completion rather than
+     * beside it, because the scan's patterns ARE the graph's changed
+     * declarations -- there is nothing to grep for before one exists. It
+     * inherits that build's cache for free as a result: one scan per (scope,
+     * diff), since one graph is built per (scope, diff).</p>
+     */
+    private void requestFanIn(String scopeId, UnifiedDiff diff, ChangeGraph graph) {
+        Optional<ReviewScope> target = scopeById(scopeId);
+        if (target.isEmpty()) {
+            return;
+        }
+        ReviewScope scope = target.get();
+        int generation = fanInGenerationByScope.merge(scopeId, 1, Integer::sum);
+        CompletableFuture
+                .supplyAsync(() -> {
+                    fanInScanThread = Thread.currentThread().getName();
+                    return OutOfDiffFanIn.forScope(scope, graph, diff);
+                }, SECTION_GRAPH_EXECUTOR)
+                .whenComplete((result, failure) -> {
+                    // Closed already: do not even queue FX work for it, for
+                    // the reason requestGraph's own guard exists.
+                    if (closed) {
+                        return;
+                    }
+                    Platform.runLater(() -> {
+                        if (closed
+                                || !Objects.equals(fanInGenerationByScope.get(scopeId), generation)) {
+                            // A newer diff started a second scan before this
+                            // one finished; that scan's completion owns the
+                            // answer.
+                            return;
+                        }
+                        if (failure != null) {
+                            // Nothing is recorded, so fanInFor keeps
+                            // reporting "not scanned" -- absent, never zero.
+                            LOG.log(Level.WARNING, "Could not scan out-of-diff fan-in for scope "
+                                    + scopeId, failure);
+                            return;
+                        }
+                        // A scan that confirms what the board is already
+                        // showing does not disturb the reader. The common
+                        // case is a scope with nothing to grep (no worktree,
+                        // or a checkout git cannot read): the answer is the
+                        // same "unavailable, nothing measured" the board
+                        // started with, and re-rendering the rail and
+                        // re-narrowing the diff column to say so would move
+                        // the ground under whoever is mid-review.
+                        OutOfDiffFanIn.Result previous = fanInFor(scopeId);
+                        if (previous.unavailable() == result.unavailable()
+                                && previous.bySymbol().equals(result.bySymbol())) {
+                            return;
+                        }
+                        fanInByScope.put(scopeId, result);
+                        if (selectedScope().map(current -> current.id().equals(scopeId))
+                                .orElse(false)) {
+                            refreshReviewState();
+                            // The scan is the reading path's FIRST rank term,
+                            // so a landing scan can reorder the rail under
+                            // the reader: the selected index then names a
+                            // different step, and the diff column is narrowed
+                            // to the old one until something re-reveals it.
+                            revealCurrentSelection();
+                        }
+                    });
+                });
+    }
+
+    /**
+     * {@code scopeId}'s fan-in scan, or {@link #FAN_IN_NOT_SCANNED} while
+     * none has finished. Never a bare empty {@link OutOfDiffFanIn.Result}:
+     * "the scan has not run" and "nothing outside the change uses this" are
+     * different facts, and every surface downstream of this draws that
+     * distinction.
+     */
+    private OutOfDiffFanIn.Result fanInFor(String scopeId) {
+        return fanInByScope.getOrDefault(scopeId, FAN_IN_NOT_SCANNED);
+    }
+
+    /**
+     * Every out-of-diff use of what {@code file} declares, by symbol.
+     *
+     * <p>Iterated over {@link ChangeGraph#changedDeclarations()} -- a sorted
+     * set -- rather than over {@code bySymbol()}, whose iteration order is
+     * the scan's to choose and therefore not something a rendered list may
+     * rest on. {@link ReadingPath} documents the same rule for the same
+     * reason; a popover that listed the same callers in a different order on
+     * a second run would be a determinism defect (spec §9.5), not a
+     * cosmetic one.</p>
+     *
+     * <p>Empty for an unavailable scan, so a count that was never measured
+     * cannot render as one that came out zero.</p>
+     */
+    private Map<String, List<OutOfDiffFanIn.Occurrence>> fanInOccurrences(String file) {
+        Optional<ReviewScope> scope = selectedScope();
+        if (scope.isEmpty()) {
+            return Map.of();
+        }
+        ChangeGraph graph = graphByScope.get(scope.get().id());
+        OutOfDiffFanIn.Result fanIn = fanInFor(scope.get().id());
+        if (graph == null || fanIn.unavailable()) {
+            return Map.of();
+        }
+        Map<String, List<OutOfDiffFanIn.Occurrence>> bySymbol = new LinkedHashMap<>();
+        for (String symbol : graph.changedDeclarations()) {
+            if (!graph.fileDeclaring(symbol).filter(file::equals).isPresent()) {
+                continue;
+            }
+            List<OutOfDiffFanIn.Occurrence> occurrences = fanIn.bySymbol().get(symbol);
+            if (occurrences != null && !occurrences.isEmpty()) {
+                bySymbol.put(symbol, List.copyOf(occurrences));
+            }
+        }
+        return bySymbol;
     }
 
     /**
@@ -1802,6 +1979,77 @@ public final class SessionReviewView extends BorderPane {
         return digests.isEmpty() ? Optional.empty() : Optional.of(digests.get(0));
     }
 
+    /**
+     * "Ask the agent" from the fan-in popover: posts the question as a real
+     * review comment on {@code step}'s file and hands it to the scope's bound
+     * session, through the two seams that already exist for exactly those
+     * two things ({@link Host#addComment}, {@link Host#askAgentToFix}).
+     *
+     * <p>Not a new key. {@code a} is the approve gesture on this board, and
+     * a popover that stole it would be Task 18's "acted on something the
+     * reader could not see" defect again; this is a button in the popover
+     * and nothing else.</p>
+     *
+     * <p>The question names the symbols and the file they are declared in --
+     * the fan-in list is lexical and cannot say whether a caller breaks, so
+     * what this surface can honestly do is point the party that can answer
+     * at the right file rather than leaving the reader to retype it.</p>
+     */
+    private void askAboutFanIn(ReadingPath.Step step) {
+        Optional<ReviewScope> scope = selectedScope();
+        Map<String, List<OutOfDiffFanIn.Occurrence>> bySymbol = fanInOccurrences(step.file());
+        Optional<String> lineKey = lineKeyOfPathStep(step);
+        if (scope.isEmpty() || bySymbol.isEmpty() || lineKey.isEmpty()) {
+            return;
+        }
+        int total = bySymbol.values().stream().mapToInt(List::size).sum();
+        String question = "This change alters " + String.join(", ", bySymbol.keySet())
+                + " in " + step.file() + ", and " + total
+                + (total == 1 ? " place" : " places") + " outside the change reference "
+                + (bySymbol.size() == 1 ? "it" : "them")
+                + ". Do any of those callers break, and which ones should I read?";
+        ReviewAnnotation asked = ReviewAnnotation.human(scope.get().id(), step.file(),
+                lineKey.get(), lineKey.get(),
+                new ReviewAnnotation.Message("You", Instant.now(), question));
+        // Stamped with the intent that owns the file, exactly as the gutter
+        // composer's comments are -- a comment outside the grouping is one
+        // the margin has to fall back to matching by file.
+        Optional<String> intentId = intents().stream()
+                .filter(intent -> intent.touches(step.file()))
+                .findFirst()
+                .map(ReviewIntent::id);
+        ReviewAnnotation stamped = asked.withIntentId(intentId);
+        host.addComment(scope.get(), stamped);
+        host.askAgentToFix(scope.get(), pathStepAsIntent(step), List.of(stamped));
+        refreshReviewState();
+        diffColumn.refreshPins();
+    }
+
+    /**
+     * The line key {@link #askAboutFanIn}'s comment is anchored to: the first
+     * line of {@code step}'s own hunk. Walked with the same {@link
+     * ReviewIntent#containsHunk} test {@link IntentHunks} uses, so the
+     * comment lands on the hunk the row is about rather than on the file's
+     * first one.
+     */
+    private Optional<String> lineKeyOfPathStep(ReadingPath.Step step) {
+        ReviewIntent synthetic = pathStepAsIntent(step);
+        return loadedDiff().flatMap(diff -> {
+            for (UnifiedDiff.FileDiff file : diff.files()) {
+                if (!file.path().equals(step.file())) {
+                    continue;
+                }
+                for (int index = 0; index < file.hunks().size(); index++) {
+                    UnifiedDiff.Hunk hunk = file.hunks().get(index);
+                    if (synthetic.containsHunk(file.path(), index) && !hunk.lines().isEmpty()) {
+                        return Optional.of(hunk.lines().get(0).lineKey());
+                    }
+                }
+            }
+            return Optional.<String>empty();
+        });
+    }
+
     /** The row PATH mode is currently showing, if any -- empty exactly when {@link #currentPath()} has no steps. */
     private Optional<ReadingPath.Step> currentPathStep() {
         List<ReadingPath.Step> steps = currentPath().steps();
@@ -1864,6 +2112,11 @@ public final class SessionReviewView extends BorderPane {
      * {@code diag*} accessor is: it reads the rail's {@code ObservableList}
      * of rows, which the FX thread rebuilds wholesale on every render.
      */
+    /** See {@link #fanInScanThread} -- the thread the last fan-in scan ran on. */
+    String diagFanInScanThread() {
+        return fanInScanThread;
+    }
+
     List<String> pathRowTextsForTest() {
         return ReviewDiagFxThread.call(intentRail::diagPathRowTexts);
     }

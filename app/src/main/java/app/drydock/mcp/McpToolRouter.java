@@ -338,32 +338,33 @@ public final class McpToolRouter {
     }
 
     /**
-     * A live surface (the Review board's rail) numbers its cards off the
-     * reading path's order, not {@link Sections#of}'s own grouping order --
-     * see {@link ReadingPath.Path#sections()}. An agent reading {@code
-     * sections} here off the plain grouping would disagree with the human
-     * looking at the same review over which card is ①, so this reorders the
-     * SAME sections through {@link ReadingPath#of} before handing them out,
-     * exactly as the rail does. No out-of-diff fan-in scan backs the rank
-     * here -- {@link OutOfDiffFanIn#scan} spawns a blocking {@code git grep}
-     * per call, a separate concern from reordering an existing payload -- so
-     * {@code unavailable=true} is the honest input for a signal nothing
-     * computed, the same choice the rail makes.
-     */
-    private static final OutOfDiffFanIn.Result NO_FAN_IN_SCAN = new OutOfDiffFanIn.Result(Map.of(), true);
-
-    /**
      * {@code sections}, or empty if none was requested or the graph could not
      * be built. {@link ChangeGraph#of} (via {@link SymbolScan}) can throw
      * unchecked on a parse edge case; that must cost this ONE optional extra,
      * never the whole call -- a caller who merely opted into {@code sections}
      * must still get {@code hunks}, {@code scope} and {@code files}.
+     *
+     * <p>A live surface (the Review board's rail) numbers its cards off the
+     * reading path's order, not {@link Sections#of}'s own grouping order --
+     * see {@link ReadingPath.Path#sections()}. An agent reading {@code
+     * sections} off the plain grouping would disagree with the human looking
+     * at the same review over which card is ①, so this reorders the SAME
+     * sections through {@link ReadingPath#of} before handing them out,
+     * exactly as the rail does -- fan-in scan included, so the two agree on
+     * the rank's first term as well as on the ordering.</p>
+     *
+     * <p>Scanned synchronously, unlike the board's own background scan:
+     * an MCP tool call already runs off the FX thread, {@link
+     * OutOfDiffFanIn#scan} bounds itself with a 30s timeout, and handing an
+     * agent a first-call-always-unavailable answer it will then act on is
+     * worse than making it wait.</p>
      */
     private Optional<JsonValue> computeSections(ReviewScope scope, UnifiedDiff diff) {
         try {
             ChangeGraph graph = graphBuilder.apply(diff);
             List<Sections.Section> sections = Sections.of(diff, graph);
-            ReadingPath.Path path = ReadingPath.of(diff, graph, sections, NO_FAN_IN_SCAN);
+            ReadingPath.Path path = ReadingPath.of(diff, graph, sections,
+                    OutOfDiffFanIn.forScope(scope, graph, diff));
             return Optional.of(ReviewToolCodec.sectionsToJson(path.sections()));
         } catch (RuntimeException e) {
             LOG.log(Level.WARNING, "review_scope: could not compute sections for scope "

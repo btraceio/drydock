@@ -3566,6 +3566,50 @@
 .review-lens-line:hover { -fx-background-color: -drydock-hover; }
 .review-lens-line:focused { -fx-border-color: -drydock-accent; }
 
+/* The out-of-diff fan-in popover: the lens's frame on a third source. */
+.review-fanin-symbol {
+    -fx-text-fill: -drydock-code-fn;
+    -fx-font-size: 11px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-padding: 4 0 0 0;
+}
+.review-fanin-ask {
+    -fx-background-color: transparent;
+    -fx-background-radius: 6px;
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 6px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 10.5px;
+    -fx-alignment: center-left;
+    -fx-cursor: hand;
+}
+.review-fanin-ask:hover { -fx-background-color: -drydock-hover; }
+.review-fanin-ask:focused { -fx-border-color: -drydock-accent; }
+.review-fanin-notice {
+    -fx-text-fill: -drydock-dirty;
+    -fx-font-size: 10px;
+}
+
+/*
+ * The rail's fan-in count, as a control. Transparent and borderless: it
+ * wraps the reason Label already inside a card and must not read as a
+ * second card. Its TEXT lives on that child Label (.review-path-reason,
+ * which carries its own -fx-text-fill selected and not) -- a plain
+ * Button.setText here is the 1.13:1 contrast defect ReviewIntentRail
+ * documents.
+ */
+.review-fanin-count {
+    -fx-background-color: transparent;
+    -fx-background-radius: 4px;
+    -fx-border-color: transparent;
+    -fx-border-radius: 4px;
+    -fx-padding: 1 3 1 3;
+    -fx-alignment: top-left;
+    -fx-cursor: hand;
+}
+.review-fanin-count:hover { -fx-background-color: -drydock-hover; }
+.review-fanin-count:focused { -fx-border-color: -drydock-accent; }
+
 .review-mcp-panel {
     -fx-background-color: -drydock-code-bg;
     -fx-border-color: -drydock-border transparent transparent transparent;
