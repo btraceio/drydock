@@ -21,7 +21,7 @@ class DiffLineSelectionTest {
     }
 
     private static ReviewDiffRow.HunkHeader header(String file) {
-        return new ReviewDiffRow.HunkHeader(file, "L1-2", 1, false, false);
+        return new ReviewDiffRow.HunkHeader(file, "L1-2", 1, false, false, 0);
     }
 
     @Test

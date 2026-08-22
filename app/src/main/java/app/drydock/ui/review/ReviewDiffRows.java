@@ -121,7 +121,7 @@ final class ReviewDiffRows {
         }
         List<ReviewDiffRow> card = new ArrayList<>();
         card.add(new ReviewDiffRow.HunkHeader(file.path(), rangeLabel(hunk), startLine(hunk),
-                file.untracked(), file.staged()));
+                file.untracked(), file.staged(), hunkIndex));
         card.addAll(body);
         String hunkId = ReviewIntent.hunkId(file.path(), hunkIndex);
         for (ReadingPath.Link link : options.linksByHunk().getOrDefault(hunkId, List.of())) {

@@ -34,13 +34,21 @@ sealed interface ReviewDiffRow {
      * jump into the Explorer. {@code startLine} is the 1-based new-file line
      * the jump targets (the old-file line for a pure deletion).
      *
+     * <p>{@code hunkIndex} is the hunk's REAL index within its file's own
+     * {@code UnifiedDiff.FileDiff.hunks()} -- not its position among the
+     * headers a filtered render happens to show. {@link ReviewDiffColumn#revealHunk}
+     * used to count rendered headers instead, which matched the wrong hunk
+     * (and reported success doing it) the moment a filter hid some of a
+     * file's hunks: exactly the shape {@code hunkFilter} produces for an
+     * intent that names only some of a file's hunks.</p>
+     *
      * <p>{@code untracked} and {@code staged} carry {@link UnifiedDiff.FileDiff}'s
      * own flags for the {@code untracked}/{@code staged} chip -- they travel
      * with the row rather than being re-derived in the renderer, because
      * {@code buildHunkHeader} only ever sees the row, never the file it came
      * from.</p>
      */
-    record HunkHeader(String file, String range, int startLine, boolean untracked, boolean staged)
+    record HunkHeader(String file, String range, int startLine, boolean untracked, boolean staged, int hunkIndex)
             implements ReviewDiffRow {
         @Override
         public Edge edge() {

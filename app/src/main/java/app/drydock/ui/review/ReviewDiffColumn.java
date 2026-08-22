@@ -882,10 +882,21 @@ final class ReviewDiffColumn extends BorderPane {
     }
 
     /**
-     * Scrolls to the {@code hunkIndex}-th hunk card of {@code file} -- what
-     * selecting an intent brings into view. Falls back to the file's first
-     * card when it has fewer hunks than that (the diff was re-read and the
-     * grouping is one generation behind).
+     * Scrolls to {@code file}'s hunk whose REAL index (into its own
+     * {@code UnifiedDiff.FileDiff.hunks()}) is {@code hunkIndex} -- what
+     * selecting an intent, a PATH step, or a link footer brings into view.
+     * Falls back to the file's first rendered card when that exact hunk is
+     * not among them (the diff was re-read and the grouping is one
+     * generation behind, or the column is filtered to hunks that do not
+     * include it).
+     *
+     * <p>Matched by {@link ReviewDiffRow.HunkHeader#hunkIndex()} rather than
+     * by counting rendered headers in order: a filter that hides some of a
+     * file's hunks (an intent naming only some of them) used to make the
+     * Nth RENDERED header stand in for hunk N, landing on the wrong hunk
+     * while still reporting success -- a link footer for hunk 2 of a
+     * three-hunk file would land on whichever hunk happened to render
+     * first if hunk 2 itself were filtered out.</p>
      *
      * <p>Returns whether the file was reached. It can genuinely be absent:
      * the intent rail is built from the whole diff while these rows stop at
@@ -897,7 +908,6 @@ final class ReviewDiffColumn extends BorderPane {
      */
     boolean revealHunk(String file, int hunkIndex) {
         int firstCard = -1;
-        int seen = 0;
         for (int i = 0; i < rows.size(); i++) {
             if (!(rows.get(i) instanceof ReviewDiffRow.HunkHeader header)
                     || !header.file().equals(file)) {
@@ -906,7 +916,7 @@ final class ReviewDiffColumn extends BorderPane {
             if (firstCard < 0) {
                 firstCard = i;
             }
-            if (seen++ == hunkIndex) {
+            if (header.hunkIndex() == hunkIndex) {
                 list.scrollTo(i);
                 return true;
             }
