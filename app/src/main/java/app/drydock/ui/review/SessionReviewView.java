@@ -30,6 +30,8 @@ import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
 import javafx.scene.layout.VBox;
 
+import java.lang.System.Logger;
+import java.lang.System.Logger.Level;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -61,6 +63,8 @@ import java.util.function.Consumer;
  * and owns none of the workspace's tab or terminal machinery.</p>
  */
 public final class SessionReviewView extends BorderPane {
+
+    private static final Logger LOG = System.getLogger(SessionReviewView.class.getName());
 
     /** What the view needs from the workspace. All calls happen on the FX thread. */
     public interface Host {
@@ -1131,26 +1135,37 @@ public final class SessionReviewView extends BorderPane {
                     }
                     Platform.runLater(() -> {
                         boolean current = Objects.equals(graphGenerationByScope.get(scopeId), generation);
-                        if (current) {
-                            // Only the CURRENT generation clears "building":
-                            // a stale callback's own build really is done,
-                            // but a newer one superseded it before this one
-                            // arrived and is presumably still in flight, so
-                            // the rail should still say so.
-                            graphBuilding.remove(scopeId);
-                        }
-                        if (closed || failure != null || !current) {
-                            // Either the parse failed -- in which case the
-                            // (kind, directory) fallback is the honest
-                            // answer, not a broken rail -- or a newer diff
-                            // for this scope started a second build before
-                            // this one finished, and publishing a graph for
-                            // a diff no longer on screen would be worse
-                            // than the fallback it displaced.
+                        if (!current) {
+                            // A newer diff for this scope started a second
+                            // build before this one finished; this callback
+                            // is stale, and the newer build's own callback
+                            // owns clearing "building" and refreshing.
                             return;
                         }
-                        graphByScope.put(scopeId, graph);
-                        if (selectedScope().map(scope -> scope.id().equals(scopeId)).orElse(false)) {
+                        // The CURRENT generation clears "building" and
+                        // refreshes either way, success or failure: a stale
+                        // "refining grouping..." banner is exactly the
+                        // regression a build that settles without a refresh
+                        // produces, and it would otherwise sit there until
+                        // some unrelated store change happened to refresh.
+                        graphBuilding.remove(scopeId);
+                        if (failure == null) {
+                            graphByScope.put(scopeId, graph);
+                        } else {
+                            // The (kind, directory) fallback is the honest
+                            // answer, not a broken rail -- but a failed
+                            // build must not be permanent: graphedDiffByScope
+                            // recorded this diff BEFORE the parse ran, so
+                            // without clearing it here, requestGraph's own
+                            // "already graphed" guard would treat every
+                            // later republish of this same diff instance as
+                            // nothing new and never retry.
+                            graphedDiffByScope.remove(scopeId);
+                            LOG.log(Level.WARNING, "Could not build a section graph for scope "
+                                    + scopeId, failure);
+                        }
+                        if (!closed && selectedScope().map(scope -> scope.id().equals(scopeId))
+                                .orElse(false)) {
                             refreshReviewState();
                         }
                     });
