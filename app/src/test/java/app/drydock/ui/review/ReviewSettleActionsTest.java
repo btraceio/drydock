@@ -114,7 +114,33 @@ class ReviewSettleActionsTest extends ReviewViewFixture {
 
         focusDiffColumn();
         WaitForAsyncUtils.waitForFxEvents();
-        assertEquals("Approve (hunk)", approveButtonText());
+        assertEquals("Approve (next unread hunk)", approveButtonText());
+    }
+
+    /**
+     * A real mouse press on a focusable {@code Button} requests focus on
+     * press (see {@code app.css}'s {@code .review-verdict-action:focused}),
+     * which moves Scene focus off the diff column onto the button itself
+     * BEFORE the button's own action fires on release -- so if the acting
+     * unit were re-read at release time, "Approve (next unread hunk)" would
+     * settle the whole section instead, silently, because the reader's
+     * focus change (into the button they are pressing) looks identical to
+     * a genuine "I clicked the rail" to {@code settleUnit()}. Only a real
+     * press-then-release ({@code clickOn}, not {@code Button.fire()})
+     * reproduces this: {@code fire()} never presses at all, so it never
+     * moves focus and could not have caught the bug.
+     */
+    @Test
+    void aRealMousePressCapturesTheUnitBeforeTheFocusChangeItCauses() {
+        focusDiffColumn();
+        assertEquals("Approve (next unread hunk)", approveButtonText());
+
+        clickOn(".review-verdict-action");
+        WaitForAsyncUtils.waitForFxEvents();
+
+        assertEquals(1, view.diagSectionState(0).settledHunks(),
+                "a real button press must settle what the button showed when pressed, not "
+                        + "whatever settleUnit() became after the press moved focus onto it");
     }
 
     private String approveButtonText() {
