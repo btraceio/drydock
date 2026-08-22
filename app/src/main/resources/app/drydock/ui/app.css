@@ -3136,6 +3136,15 @@
     -fx-border-color: -drydock-blocking;
     -fx-text-fill: -drydock-text-faint;
 }
+/* The same, for a non-primary action that refused: "Ask the agent to fix it"
+   when there is no session to hand anything to. Its own rule rather than a
+   relaxed selector, so the primary's transparent-background treatment above
+   is not silently applied to every action button that ever gains the
+   pseudo-class. */
+.review-verdict-action:refused {
+    -fx-border-color: -drydock-blocking;
+    -fx-text-fill: -drydock-text-faint;
+}
 .review-verdict-refusal {
     -fx-text-fill: -drydock-blocking;
     -fx-font-size: 11px;
