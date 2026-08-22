@@ -59,6 +59,19 @@ final class ReviewIntentRail extends VBox {
     private final VBox cards = new VBox();
     private final ScrollPane scroll = new ScrollPane(cards);
 
+    /**
+     * See {@link #groupingPending}. Its own row rather than folded into the
+     * header's hint: the hint already carries "{@code N/M · i}" in the same
+     * ~154px the header's padding and title leave out of the rail's 232px
+     * (196px narrow) width, and appending "· refining grouping…" (another
+     * ~190px at 10px) either truncated the whole hint under {@code
+     * ELLIPSIS} overrun or ate the settled/counted counter beside it --
+     * exactly the "{@code R..}"/"{@code ...}" truncation this project has
+     * shipped once already. Wrapped, on its own line, it cannot collide
+     * with anything else in the header.
+     */
+    private final Label pendingBanner = new Label("refining grouping…");
+
     private final Map<String, Button> buttonsByIntentId = new LinkedHashMap<>();
 
     private List<ReviewIntent> intents = List.of();
@@ -79,8 +92,9 @@ final class ReviewIntentRail extends VBox {
      * True while the grouping shown is provisional: a computed
      * {@link ChangeGraph} is still building, and what is on screen is the
      * (kind, directory) fallback the real grouping may still replace. Shown
-     * in the header's hint rather than silently, so a reviewer mid-read is
-     * not surprised by cards changing under them with no warning at all.
+     * via {@link #pendingBanner} rather than silently, so a reviewer
+     * mid-read is not surprised by cards changing under them with no
+     * warning at all.
      */
     private boolean groupingPending;
 
@@ -102,7 +116,12 @@ final class ReviewIntentRail extends VBox {
         scroll.getStyleClass().add("review-intent-scroll");
         VBox.setVgrow(scroll, Priority.ALWAYS);
 
-        getChildren().setAll(header.node(), scroll);
+        pendingBanner.getStyleClass().add("review-intent-pending");
+        pendingBanner.setWrapText(true);
+        pendingBanner.setManaged(false);
+        pendingBanner.setVisible(false);
+
+        getChildren().setAll(header.node(), pendingBanner, scroll);
     }
 
     void setOnSelected(Consumer<ReviewIntent> handler) {
@@ -263,8 +282,11 @@ final class ReviewIntentRail extends VBox {
                 .filter(ReviewIntent::countsTowardProgress)
                 .filter(intent -> stateLookup.apply(intent).decision().isPresent())
                 .count();
-        header.setHint(settled + "/" + counted + " · i"
-                + (groupingPending ? "  ·  refining grouping…" : ""));
+        header.setHint(settled + "/" + counted + " · i");
+
+        boolean showBanner = groupingPending && !collapsed;
+        pendingBanner.setManaged(showBanner);
+        pendingBanner.setVisible(showBanner);
 
         buttonsByIntentId.clear();
         List<Node> nodes = new ArrayList<>();

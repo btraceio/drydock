@@ -3159,6 +3159,14 @@
     -fx-padding: 0 6 8 6;
     -fx-spacing: 4;
 }
+/* The provisional-grouping banner: its own wrapped row, never sharing space
+ * with the header's N/M counter -- see ReviewIntentRail#pendingBanner. */
+.review-intent-pending {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 11px;
+    -fx-font-style: italic;
+    -fx-padding: 0 10 6 10;
+}
 .review-intent-card {
     -fx-background-color: transparent;
     -fx-background-radius: 6px;
