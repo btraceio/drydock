@@ -137,6 +137,45 @@ class ReviewLinkRowTest extends ApplicationTest {
         assertTrue(link.isFocusTraversable());
     }
 
+
+
+    /**
+     * Three hunks in one file: a tiny one (index 0, excluded by the
+     * filter), a GIANT one (index 1, included -- pushes index 2 below the
+     * fold), and a tiny one (index 2, included). {@link
+     * ReviewDiffColumn#revealHunk} used to count RENDERED headers in order
+     * rather than match the real hunk index carried on {@link
+     * ReviewDiffRow.HunkHeader#hunkIndex()}, so asking for real hunk 2 (the
+     * second and last rendered header once hunk 0 is filtered out) fell
+     * through that off-by-one onto hunk 1 -- the FIRST rendered header --
+     * while still reporting success.
+     */
+    @Test
+    void revealHunkLandsOnTheRealHunkIndexNotThePositionAmongRenderedHeaders() {
+        UnifiedDiff diff = new UnifiedDiff(List.of(threeHunkFile()));
+        interact(() -> column.showDiff(scope(), diff));
+        WaitForAsyncUtils.waitForFxEvents();
+
+        ReviewIntent excludeFirstHunk = new ReviewIntent("only-1-and-2", 1, FILE_A, ReviewIntent.Kind.CHANGE,
+                ReviewIntent.Risk.NONE, "",
+                List.of(ReviewIntent.hunkId(FILE_A, 1), ReviewIntent.hunkId(FILE_A, 2)), Optional.empty(), false);
+        interact(() -> column.setIntent(excludeFirstHunk));
+
+        assertFalse(renderedRangeLabels().contains("L300"),
+                "hunk 2 must start below the fold, behind the giant hunk 1; rendered "
+                        + renderedRangeLabels());
+
+        boolean[] reached = new boolean[1];
+        interact(() -> reached[0] = column.revealHunk(FILE_A, 2));
+        WaitForAsyncUtils.waitForFxEvents();
+
+        assertTrue(reached[0]);
+        assertTrue(renderedRangeLabels().contains("L300"),
+                "revealHunk(file, 2) must land on the REAL hunk 2 (\"L300\"), not on hunk 1 -- the "
+                        + "first RENDERED header, and the old counting bug's target; rendered "
+                        + renderedRangeLabels());
+    }
+
     // ---- helpers --------------------------------------------------------------
 
     private void setLinks(Map<String, List<ReadingPath.Link>> byHunkId) {
@@ -157,6 +196,30 @@ class ReviewLinkRowTest extends ApplicationTest {
                 .forEach(node -> files.add(((Label) node).getText())));
         return files;
     }
+    private List<String> renderedRangeLabels() {
+        List<String> labels = new ArrayList<>();
+        interact(() -> lookup(".review-hunk-range").queryAll()
+                .forEach(node -> labels.add(((Label) node).getText())));
+        return labels;
+    }
+
+    /** See {@link #revealHunkLandsOnTheRealHunkIndexNotThePositionAmongRenderedHeaders}. */
+    private static UnifiedDiff.FileDiff threeHunkFile() {
+        UnifiedDiff.Hunk hunk0 = new UnifiedDiff.Hunk("@@ -0,0 +1 @@",
+                List.of(new UnifiedDiff.Line(UnifiedDiff.Line.Kind.ADD, OptionalInt.empty(),
+                        OptionalInt.of(1), "void a();")));
+        List<UnifiedDiff.Line> giant = new ArrayList<>();
+        for (int i = 100; i < 250; i++) {
+            giant.add(new UnifiedDiff.Line(UnifiedDiff.Line.Kind.ADD, OptionalInt.empty(),
+                    OptionalInt.of(i), "int f" + i + ";"));
+        }
+        UnifiedDiff.Hunk hunk1 = new UnifiedDiff.Hunk("@@ -0,0 +100,150 @@", giant);
+        UnifiedDiff.Hunk hunk2 = new UnifiedDiff.Hunk("@@ -0,0 +300 @@",
+                List.of(new UnifiedDiff.Line(UnifiedDiff.Line.Kind.ADD, OptionalInt.empty(),
+                        OptionalInt.of(300), "void c();")));
+        return new UnifiedDiff.FileDiff(FILE_A, "M", 152, 0, false, false, List.of(hunk0, hunk1, hunk2));
+    }
+
 
     private void showTwoFileDiff() {
         UnifiedDiff diff = new UnifiedDiff(List.of(
