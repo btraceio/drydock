@@ -33,10 +33,12 @@ import javafx.scene.layout.VBox;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.function.Consumer;
@@ -339,6 +341,14 @@ public final class SessionReviewView extends BorderPane {
     private final Map<String, UnifiedDiff> graphedDiffByScope = new HashMap<>();
 
     /**
+     * Scopes with a {@link ChangeGraph} build currently in flight, so the
+     * rail can say the grouping on screen is provisional -- the (kind,
+     * directory) fallback, not necessarily the final computed one -- rather
+     * than silently swapping cards under a reviewer with no warning at all.
+     */
+    private final Set<String> graphBuilding = new HashSet<>();
+
+    /**
      * Set by {@link #close()}. A graph build already running when a view
      * closes is left to finish -- there is no cancelling a virtual thread
      * mid-parse -- but its completion must not still touch this view's state
@@ -396,6 +406,17 @@ public final class SessionReviewView extends BorderPane {
 
     /** The intent the verdict bar is settling; {@code [} / {@code ]} / {@code n} move it. */
     private int intentIndex;
+
+    /**
+     * {@link #intents()}'s result as of the last {@link #refreshReviewState}
+     * pass, purely so the NEXT pass can tell whether the grouping changed
+     * underneath the same scope and re-anchor {@link #intentIndex} by
+     * content when it did -- see {@link #reanchorCursor}.
+     */
+    private List<ReviewIntent> lastIntents = List.of();
+
+    /** The scope {@link #lastIntents} belongs to; a scope switch must not reanchor against it. */
+    private String lastIntentsScopeId;
 
     /**
      * The id of the intent {@code a}/{@code r} last recorded a verdict on,
@@ -874,17 +895,75 @@ public final class SessionReviewView extends BorderPane {
             // cards up here is how the rail came to list a departed item's
             // files (see the whole-branch review this fixes).
             intentRail.setIntents(List.of(), null, ReviewIntentRail.Empty.NONE);
+            intentRail.setGroupingPending(false);
             mcpPanel.ifPresent(panel -> panel.setScope(null));
+            lastIntents = List.of();
+            lastIntentsScopeId = null;
             return;
         }
+        String scopeId = scope.get().id();
+        List<ReviewIntent> currentIntents = intents();
+        // Re-anchor the cursor BEFORE anything below reads it: a grouping
+        // swap for the SAME scope (the computed graph landing over the
+        // fallback shown while it built, or a reviewer's own regroup) must
+        // not leave intentIndex pointing at whatever now happens to sit at
+        // the same position -- verdictAction reads currentIntent() fresh at
+        // keypress time, so a swap between a read and a keypress would
+        // otherwise record an approval against hunks never actually read.
+        if (scopeId.equals(lastIntentsScopeId) && !currentIntents.equals(lastIntents)) {
+            reanchorCursor(lastIntents, currentIntents);
+        }
+        lastIntents = currentIntents;
+        lastIntentsScopeId = scopeId;
+
         margin.invalidate(null);
         margin.setFindings(findingsForMargin(scope.get()));
         diffColumn.refreshPins();
-        intentRail.setIntents(intents(), currentIntent().map(ReviewIntent::id).orElse(null),
+        intentRail.setIntents(currentIntents, currentIntent().map(ReviewIntent::id).orElse(null),
                 emptyReason());
+        intentRail.setGroupingPending(graphBuilding.contains(scopeId));
         mcpPanel.filter(Node::isVisible)
                 .ifPresent(panel -> panel.setScope(scope.get()));
         renderVerdictBar(scope.get());
+    }
+
+    /**
+     * Re-anchors {@link #intentIndex} across a grouping change for the same
+     * scope: to the same id when it still exists (nothing about the
+     * selected intent actually changed), otherwise to whichever new intent
+     * overlaps it in the most hunks (the grouping changed identity, not the
+     * code being read). Left alone -- clamped to the new list's bounds at
+     * most -- only when nothing in the new grouping shares any hunk with
+     * what was selected, which a scope switch already guards this from
+     * being asked to do at all (see the call site).
+     */
+    private void reanchorCursor(List<ReviewIntent> previous, List<ReviewIntent> current) {
+        if (previous.isEmpty() || current.isEmpty()) {
+            return;
+        }
+        ReviewIntent previouslySelected = previous.get(Math.clamp(intentIndex, 0, previous.size() - 1));
+        for (int i = 0; i < current.size(); i++) {
+            if (current.get(i).id().equals(previouslySelected.id())) {
+                intentIndex = i;
+                return;
+            }
+        }
+        Set<String> previousHunks = new HashSet<>(previouslySelected.hunkIds());
+        int bestIndex = -1;
+        int bestOverlap = 0;
+        for (int i = 0; i < current.size(); i++) {
+            int overlap = 0;
+            for (String hunkId : current.get(i).hunkIds()) {
+                if (previousHunks.contains(hunkId)) {
+                    overlap++;
+                }
+            }
+            if (overlap > bestOverlap) {
+                bestOverlap = overlap;
+                bestIndex = i;
+            }
+        }
+        intentIndex = bestIndex >= 0 ? bestIndex : Math.clamp(intentIndex, 0, current.size() - 1);
     }
 
     /**
@@ -1003,6 +1082,7 @@ public final class SessionReviewView extends BorderPane {
         graphedDiffByScope.put(scopeId, diff);
         int generation = graphGenerationByScope.merge(scopeId, 1, Integer::sum);
         graphByScope.remove(scopeId);
+        graphBuilding.add(scopeId);
         CompletableFuture.supplyAsync(() -> ChangeGraph.of(diff), SECTION_GRAPH_EXECUTOR)
                 .whenComplete((graph, failure) -> {
                     // Closed already: do not even queue FX work for it. A
@@ -1015,8 +1095,16 @@ public final class SessionReviewView extends BorderPane {
                         return;
                     }
                     Platform.runLater(() -> {
-                        if (closed || failure != null
-                                || !Objects.equals(graphGenerationByScope.get(scopeId), generation)) {
+                        boolean current = Objects.equals(graphGenerationByScope.get(scopeId), generation);
+                        if (current) {
+                            // Only the CURRENT generation clears "building":
+                            // a stale callback's own build really is done,
+                            // but a newer one superseded it before this one
+                            // arrived and is presumably still in flight, so
+                            // the rail should still say so.
+                            graphBuilding.remove(scopeId);
+                        }
+                        if (closed || failure != null || !current) {
                             // Either the parse failed -- in which case the
                             // (kind, directory) fallback is the honest
                             // answer, not a broken rail -- or a newer diff
