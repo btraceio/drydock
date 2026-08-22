@@ -93,13 +93,24 @@ public interface McpSessionContext {
     /** Replaces a scope's intent grouping ({@code review_intents}). */
     void putIntents(String scopeId, List<ReviewIntent> intents);
 
+    /**
+     * {@code scopeId}'s intents over {@code diff}: the reviewer's grouping
+     * when {@link #putIntents} supplied one, otherwise the by-file fallback
+     * -- the same choice {@code SessionReviewView.Host#intents} makes for the
+     * UI. {@code review_state} joins this against {@link #verdictsOf} to
+     * report a verdict under the id an agent actually sent to {@code
+     * review_intents}, rather than whatever internal key a verdict happens
+     * to be stored under.
+     */
+    List<ReviewIntent> intentsOf(String scopeId, UnifiedDiff diff);
+
     /** Upserts findings on {@code finding.id}, so a re-run keeps existing threads. */
     void upsertFindings(List<ReviewAnnotation> findings);
 
     /** Every finding of one scope, whatever its state. */
     List<ReviewAnnotation> findingsOf(String scopeId);
 
-    /** The verdicts recorded on one scope's intents. */
+    /** The verdicts recorded on one scope's hunks (spec §9.2). */
     List<ReviewVerdict> verdictsOf(String scopeId);
 
     /** Whether the human has submitted this scope's review. */

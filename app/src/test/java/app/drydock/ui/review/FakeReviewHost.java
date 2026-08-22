@@ -114,8 +114,9 @@ final class FakeReviewHost implements SessionReviewView.Host {
         if (decision.get() == ReviewVerdict.Decision.APPROVED && blocked(scope, intent)) {
             return;
         }
-        // intent.id() stands in for the hunk digest until Task 6 moves this
-        // seam onto hunk keys (see the controller note in the task 2+3 brief).
+        // TODO(task-6): intent.id() stands in for HunkDigest.of(...).
+        // TODO(task-6): scope.base()/head() are ref names, not commit shas;
+        // staleness is inert until these resolve.
         store.putVerdict(new ReviewVerdict(scope.id(), intent.id(), decision.get(),
                 Optional.empty(), Instant.now(), scope.base(), scope.head()));
     }

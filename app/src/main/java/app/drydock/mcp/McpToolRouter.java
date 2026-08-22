@@ -10,6 +10,7 @@ import app.drydock.review.AnnotationStatus;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
+import app.drydock.review.ReviewVerdict;
 import app.drydock.review.Severity;
 import app.drydock.state.json.JsonValue;
 import app.drydock.state.json.JsonValue.JsonArray;
@@ -24,7 +25,9 @@ import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -355,18 +358,42 @@ public final class McpToolRouter {
                 .put("messages", JsonNumber.of(updated.thread().size()));
     }
 
+    /**
+     * The wire {@code id} here is intent-keyed, not hunk-keyed: an agent
+     * correlates it against the ids it sent to {@code review_intents}, so
+     * this joins the scope's intents against their verdicts rather than
+     * reporting {@link ReviewVerdict#hunkDigest()} straight through -- a
+     * verdict's own storage key must not leak onto this wire, or the join
+     * silently breaks the moment that key stops being intent-shaped.
+     *
+     * <p>TODO(task-6): intent.id() stands in for the hunk digest a verdict
+     * is actually looked up by (same placeholder as {@code
+     * MainWorkspace}/{@code FakeReviewHost}'s {@code setVerdict}); once an
+     * intent's verdict is derived from its hunks' real digests, this lookup
+     * becomes a real many-to-one join instead of an identity one.</p>
+     */
     private JsonValue reviewState(ManagedSessionId caller, JsonValue arguments) throws McpToolException {
         requireLiveSession(caller);
         JsonObject args = asObject(arguments);
         ReviewScope scope = requireScope(caller, args);
 
-        List<JsonValue> intents = context.verdictsOf(scope.id()).stream()
-                .map(verdict -> (JsonValue) JsonObject.empty()
-                        .put("id", new JsonString(verdict.hunkDigest()))
-                        .put("verdict", new JsonString(verdict.decision().wireName()))
-                        .put("note", verdict.note()
-                                .<JsonValue>map(JsonString::new).orElse(JsonNull.INSTANCE)))
-                .toList();
+        Map<String, ReviewVerdict> verdictsByDigest = new LinkedHashMap<>();
+        for (ReviewVerdict verdict : context.verdictsOf(scope.id())) {
+            verdictsByDigest.put(verdict.hunkDigest(), verdict);
+        }
+        UnifiedDiff diff = context.reviewDiff(scope);
+        List<JsonValue> intents = new ArrayList<>();
+        for (ReviewIntent intent : context.intentsOf(scope.id(), diff)) {
+            ReviewVerdict verdict = verdictsByDigest.get(intent.id());
+            if (verdict == null) {
+                continue;
+            }
+            intents.add(JsonObject.empty()
+                    .put("id", new JsonString(intent.id()))
+                    .put("verdict", new JsonString(verdict.decision().wireName()))
+                    .put("note", verdict.note()
+                            .<JsonValue>map(JsonString::new).orElse(JsonNull.INSTANCE)));
+        }
         return JsonObject.empty()
                 .put("intents", new JsonArray(intents))
                 .put("findings", new JsonArray(context.findingsOf(scope.id()).stream()

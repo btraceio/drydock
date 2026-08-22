@@ -325,6 +325,11 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
     }
 
     @Override
+    public List<ReviewIntent> intentsOf(String scopeId, UnifiedDiff diff) {
+        return intentGrouping.intentsFor(scopeId, diff);
+    }
+
+    @Override
     public void upsertFindings(List<ReviewAnnotation> findings) {
         findings.forEach(annotationStore::upsert);
         annotationStore.flushPendingSaves();

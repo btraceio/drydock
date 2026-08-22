@@ -2,9 +2,12 @@ package app.drydock.mcp;
 
 import app.drydock.domain.HandoffBrief;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.git.UnifiedDiff;
 import app.drydock.mcp.McpSessionContext.RenameKind;
 import app.drydock.mcp.McpSessionContext.RenameOutcome;
+import app.drydock.review.FallbackIntents;
 import app.drydock.review.ReviewAnnotation;
+import app.drydock.review.ReviewIntent;
 
 import java.nio.file.Path;
 import java.time.Instant;
@@ -94,10 +97,10 @@ final class FakeMcpSessionContext implements McpSessionContext {
     final Map<String, app.drydock.review.ReviewScope> reviewScopes = new HashMap<>();
 
     /** The diff {@link #reviewDiff} returns. */
-    app.drydock.git.UnifiedDiff reviewDiff = new app.drydock.git.UnifiedDiff(List.of());
+    UnifiedDiff reviewDiff = new UnifiedDiff(List.of());
 
     /** The last intent grouping {@link #putIntents} received. */
-    final Map<String, List<app.drydock.review.ReviewIntent>> intents = new HashMap<>();
+    final Map<String, List<ReviewIntent>> intents = new HashMap<>();
 
     final List<app.drydock.review.ReviewVerdict> verdicts = new ArrayList<>();
     final Set<String> submitted = new LinkedHashSet<>();
@@ -119,13 +122,19 @@ final class FakeMcpSessionContext implements McpSessionContext {
     }
 
     @Override
-    public app.drydock.git.UnifiedDiff reviewDiff(app.drydock.review.ReviewScope scope) {
+    public UnifiedDiff reviewDiff(app.drydock.review.ReviewScope scope) {
         return reviewDiff;
     }
 
     @Override
-    public void putIntents(String scopeId, List<app.drydock.review.ReviewIntent> newIntents) {
+    public void putIntents(String scopeId, List<ReviewIntent> newIntents) {
         intents.put(scopeId, List.copyOf(newIntents));
+    }
+
+    @Override
+    public List<ReviewIntent> intentsOf(String scopeId, UnifiedDiff diff) {
+        List<ReviewIntent> supplied = intents.get(scopeId);
+        return supplied != null ? supplied : FallbackIntents.group(diff);
     }
 
     @Override

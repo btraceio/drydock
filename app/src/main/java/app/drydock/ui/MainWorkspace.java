@@ -1975,10 +1975,9 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                     && blockingFindingOpen(scope, intent)) {
                 return;
             }
-            // intent.id() stands in for the hunk digest until Task 6 moves
-            // this seam onto hunk keys; see the controller note in the
-            // task 2+3 brief. scope.base()/scope.head() are what this was
-            // actually judged against, so those are wired for real already.
+            // TODO(task-6): intent.id() stands in for HunkDigest.of(...).
+            // TODO(task-6): scope.base()/head() are ref names, not commit
+            // shas; staleness is inert until these resolve.
             annotationStore.putVerdict(new ReviewVerdict(scope.id(), intent.id(), decision.get(),
                     Optional.empty(), Instant.now(), scope.base(), scope.head()));
         }
