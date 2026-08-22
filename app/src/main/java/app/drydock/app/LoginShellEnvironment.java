@@ -35,6 +35,15 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * {@code getenv(3)}, so {@link #mergeLoginShellPath()} can finish its
  * {@code setenv(3)} before the snapshot is ever taken -- which is also why
  * it must be the first thing {@code Main.main} does.</p>
+ *
+ * <p>This is a macOS-only fix. The POSIX libc calls ({@code popen},
+ * {@code setenv}) it depends on are not exposed by the JDK's
+ * {@code defaultLookup} on Windows, and the underlying launchd-PATH
+ * problem does not exist there. {@link #SUPPORTED} gates the class so
+ * {@link #mergeLoginShellPath()} is a no-op (and the downcall handles
+ * stay {@code null}) on non-macOS hosts -- including the Windows CI
+ * runner that boots this class to verify the rest of the application
+ * startup.</p>
  */
 public final class LoginShellEnvironment {
 
@@ -46,19 +55,36 @@ public final class LoginShellEnvironment {
     private static final String MARKER_START = "__DRYDOCK_PATH__";
     private static final String MARKER_END = "__DRYDOCK_END__";
 
+    /**
+     * True only on hosts whose process environment the JDK exposes POSIX
+     * libc symbols ({@code popen}, {@code setenv}, ...) through
+     * {@code Linker.defaultLookup()} -- in practice, macOS (Linux is
+     * untested by this class but would also satisfy the check; the macOS
+     * check is the narrow one that matches this project's stated
+     * supported platforms and keeps the gate honest). Read once at class
+     * init; the downcall handles below are resolved only when this is
+     * true, so the class can load on Windows without throwing.
+     */
+    private static final boolean SUPPORTED = isMacOs();
+
+    private static boolean isMacOs() {
+        String os = System.getProperty("os.name", "");
+        return os.startsWith("Mac OS X") || os.startsWith("macOS");
+    }
+
     private static final Linker LINKER = Linker.nativeLinker();
-    private static final MethodHandle POPEN = downcall("popen",
-            FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
-    private static final MethodHandle PCLOSE = downcall("pclose",
-            FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS));
-    private static final MethodHandle FGETS = downcall("fgets",
+    private static final MethodHandle POPEN = SUPPORTED ? downcall("popen",
+            FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)) : null;
+    private static final MethodHandle PCLOSE = SUPPORTED ? downcall("pclose",
+            FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS)) : null;
+    private static final MethodHandle FGETS = SUPPORTED ? downcall("fgets",
             FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS,
-                    ValueLayout.JAVA_INT, ValueLayout.ADDRESS));
-    private static final MethodHandle GETENV = downcall("getenv",
-            FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
-    private static final MethodHandle SETENV = downcall("setenv",
+                    ValueLayout.JAVA_INT, ValueLayout.ADDRESS)) : null;
+    private static final MethodHandle GETENV = SUPPORTED ? downcall("getenv",
+            FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS)) : null;
+    private static final MethodHandle SETENV = SUPPORTED ? downcall("setenv",
             FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS,
-                    ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
+                    ValueLayout.ADDRESS, ValueLayout.JAVA_INT)) : null;
 
     private LoginShellEnvironment() {
     }
@@ -69,9 +95,13 @@ public final class LoginShellEnvironment {
      * launches with whatever PATH it inherited (correct for terminal
      * launches, bare for Finder launches). Runs the probe on a daemon
      * thread so a login shell that hangs (e.g. a blocking zshrc) cannot
-     * hang application startup past {@link #PROBE_TIMEOUT_MILLIS}.
+     * hang application startup past {@link #PROBE_TIMEOUT_MILLIS}. A no-op
+     * on non-macOS hosts (see {@link #SUPPORTED}).
      */
     public static void mergeLoginShellPath() {
+        if (!SUPPORTED) {
+            return;
+        }
         // Once the timeout expires the application proceeds (and the JDK
         // may take its one-time environment snapshot at any moment); the
         // still-running daemon worker must then never call setenv(3) -- a
