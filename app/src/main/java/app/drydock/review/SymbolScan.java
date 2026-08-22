@@ -65,8 +65,16 @@ import java.util.regex.Matcher;
  */
 public final class SymbolScan {
 
-    /** One symbol occurrence. */
-    public record Symbol(String name, String path, boolean declaration, boolean onChangedLine) {
+    /**
+     * One symbol occurrence. {@code hunk} is its index within {@code path}'s
+     * hunks, the same index {@link ReviewIntent#hunkId} counts, so a caller
+     * can say which hunk a name is in and not merely which file. It is free
+     * here -- {@link #of} is already looping hunks -- and it is the whole
+     * difference between "these two files are related" and a claim about a
+     * specific hunk.
+     */
+    public record Symbol(String name, String path, int hunk, boolean declaration,
+                         boolean onChangedLine) {
     }
 
     /**
@@ -165,18 +173,19 @@ public final class SymbolScan {
         }
         Optional<TSLanguage> grammar = GrammarRegistry.forPath(file.path());
         List<Symbol> symbols = new ArrayList<>();
-        for (UnifiedDiff.Hunk hunk : file.hunks()) {
+        for (int index = 0; index < file.hunks().size(); index++) {
+            UnifiedDiff.Hunk hunk = file.hunks().get(index);
             if (grammar.isPresent()) {
                 // The new state first (context + additions), then the old
                 // one, so the output is stable and a context line is
                 // reported exactly once.
-                scanView(grammar.get(), file.path(), hunk, UnifiedDiff.Line.Kind.ADD, true,
-                        symbols);
-                scanView(grammar.get(), file.path(), hunk, UnifiedDiff.Line.Kind.DEL, false,
-                        symbols);
+                scanView(grammar.get(), file.path(), index, hunk, UnifiedDiff.Line.Kind.ADD,
+                        true, symbols);
+                scanView(grammar.get(), file.path(), index, hunk, UnifiedDiff.Line.Kind.DEL,
+                        false, symbols);
             } else {
                 for (UnifiedDiff.Line line : hunk.lines()) {
-                    lexical(symbols, file.path(), line.text(), isChanged(line));
+                    lexical(symbols, file.path(), index, line.text(), isChanged(line));
                 }
             }
         }
@@ -226,9 +235,9 @@ public final class SymbolScan {
      * ts_*_delete} when the object becomes unreachable. There is nothing a
      * manual call could free that the Cleaner does not already own.</p>
      */
-    private static void scanView(TSLanguage language, String path, UnifiedDiff.Hunk hunk,
-                                 UnifiedDiff.Line.Kind changedKind, boolean reportContext,
-                                 List<Symbol> out) {
+    private static void scanView(TSLanguage language, String path, int hunkIndex,
+                                 UnifiedDiff.Hunk hunk, UnifiedDiff.Line.Kind changedKind,
+                                 boolean reportContext, List<Symbol> out) {
         List<UnifiedDiff.Line> lines = new ArrayList<>();
         boolean anyReported = false;
         for (UnifiedDiff.Line line : hunk.lines()) {
@@ -261,12 +270,13 @@ public final class SymbolScan {
             // look the same.
             for (int index = 0; index < lines.size(); index++) {
                 if (fragment.reports(index)) {
-                    lexical(out, path, lines.get(index).text(), fragment.changed(index));
+                    lexical(out, path, hunkIndex, lines.get(index).text(),
+                            fragment.changed(index));
                 }
             }
             return;
         }
-        walk(tree.getRootNode(), fragment, path, out);
+        walk(tree.getRootNode(), fragment, path, hunkIndex, out);
     }
 
     /**
@@ -349,7 +359,8 @@ public final class SymbolScan {
      * field name), so when a declaration node's child has none, the first
      * bare name-shaped child stands in for the missing field.
      */
-    private static void walk(TSNode node, Fragment fragment, String path, List<Symbol> out) {
+    private static void walk(TSNode node, Fragment fragment, String path, int hunkIndex,
+                             List<Symbol> out) {
         if (DECLARATION_NODES.contains(node.getType())) {
             int count = node.getChildCount();
             for (int i = 0; i < count; i++) {
@@ -358,19 +369,19 @@ public final class SymbolScan {
                 boolean isDeclaredName = isNameNode(child)
                         && (field == null || NAME_FIELDS.contains(field));
                 if (isDeclaredName) {
-                    addSymbol(out, fragment, child, path, true);
+                    addSymbol(out, fragment, child, path, hunkIndex, true);
                 } else {
-                    walk(child, fragment, path, out);
+                    walk(child, fragment, path, hunkIndex, out);
                 }
             }
             return;
         }
         if (isNameNode(node)) {
-            addSymbol(out, fragment, node, path, false);
+            addSymbol(out, fragment, node, path, hunkIndex, false);
             return;
         }
         for (int i = 0; i < node.getChildCount(); i++) {
-            walk(node.getChild(i), fragment, path, out);
+            walk(node.getChild(i), fragment, path, hunkIndex, out);
         }
     }
 
@@ -386,7 +397,7 @@ public final class SymbolScan {
      * counts as changed.
      */
     private static void addSymbol(List<Symbol> out, Fragment fragment, TSNode node, String path,
-                                  boolean declaration) {
+                                  int hunkIndex, boolean declaration) {
         int start = node.getStartByte();
         int index = fragment.lineAt(start);
         if (!fragment.reports(index)) {
@@ -395,16 +406,17 @@ public final class SymbolScan {
         String name = new String(fragment.utf8(), start, node.getEndByte() - start,
                 StandardCharsets.UTF_8);
         if (SymbolWords.isSymbol(name)) {
-            out.add(new Symbol(name, path, declaration, fragment.changed(index)));
+            out.add(new Symbol(name, path, hunkIndex, declaration, fragment.changed(index)));
         }
     }
 
-    private static void lexical(List<Symbol> out, String path, String text, boolean changed) {
+    private static void lexical(List<Symbol> out, String path, int hunkIndex, String text,
+                                boolean changed) {
         Matcher matcher = SymbolWords.IDENTIFIER.matcher(text);
         while (matcher.find()) {
             String name = matcher.group();
             if (SymbolWords.isSymbol(name)) {
-                out.add(new Symbol(name, path, false, changed));
+                out.add(new Symbol(name, path, hunkIndex, false, changed));
             }
         }
     }

@@ -32,6 +32,56 @@ class SymbolScanTest {
                 List.of(new UnifiedDiff.Hunk("@@ -1,0 +1," + addedLines.length + " @@", lines)));
     }
 
+    /**
+     * A file of several hunks, each starting at the line number given, so a
+     * symbol's hunk index can be told apart from its line.
+     */
+    private static UnifiedDiff.FileDiff multiHunk(String path, String... oneLinePerHunk) {
+        List<UnifiedDiff.Hunk> hunks = new java.util.ArrayList<>();
+        int n = 1;
+        for (String text : oneLinePerHunk) {
+            hunks.add(new UnifiedDiff.Hunk("@@ -" + n + ",0 +" + n + ",1 @@",
+                    List.of(new UnifiedDiff.Line(UnifiedDiff.Line.Kind.ADD,
+                            OptionalInt.empty(), OptionalInt.of(n), text))));
+            n += 20;
+        }
+        return new UnifiedDiff.FileDiff(path, "M", hunks.size(), 0, false, false, hunks);
+    }
+
+    /**
+     * A symbol knows which hunk it is in, not just which file. Everything
+     * downstream that claims something about one hunk -- a link footer under
+     * it, most of all -- is false without this.
+     */
+    @Test
+    void aSymbolKnowsWhichHunkItIsIn() {
+        List<SymbolScan.Symbol> symbols = SymbolScan.of(multiHunk("src/guards.cpp",
+                "void one() { alpha(); }",
+                "void two() { }",
+                "void three() { beta(); }"));
+
+        assertEquals(List.of(0), hunksOf(symbols, "alpha"));
+        assertEquals(List.of(2), hunksOf(symbols, "beta"));
+        assertEquals(List.of(0), hunksOf(symbols, "one"));
+        assertEquals(List.of(1), hunksOf(symbols, "two"));
+        assertEquals(List.of(2), hunksOf(symbols, "three"));
+    }
+
+    /** A file with no grammar still places its names in the right hunk. */
+    @Test
+    void anUngrammaredFileStillPlacesItsNamesInAHunk() {
+        List<SymbolScan.Symbol> symbols = SymbolScan.of(multiHunk("build/setup.zig",
+                "const alpha = 1;", "const beta = 2;"));
+
+        assertEquals(List.of(0), hunksOf(symbols, "alpha"));
+        assertEquals(List.of(1), hunksOf(symbols, "beta"));
+    }
+
+    private static List<Integer> hunksOf(List<SymbolScan.Symbol> symbols, String name) {
+        return symbols.stream().filter(s -> s.name().equals(name))
+                .map(SymbolScan.Symbol::hunk).distinct().sorted().toList();
+    }
+
     private static boolean has(List<SymbolScan.Symbol> symbols, String name, boolean declaration) {
         return symbols.stream().anyMatch(s -> s.name().equals(name)
                 && s.declaration() == declaration);
