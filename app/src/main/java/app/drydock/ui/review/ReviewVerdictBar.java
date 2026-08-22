@@ -72,18 +72,15 @@ final class ReviewVerdictBar extends VBox {
     private final Label intentLabel = new Label();
     private final Button previousButton = new Button("‹");
     private final Button nextButton = new Button("›");
-    private final Button approveButton = new Button("Approve intent");
-    private final Button requestChangesButton = new Button("Request change");
+    // Text and tooltip are both rewritten by render() to name the acting
+    // unit ("Approve (hunk)"); the constructor's construction argument is
+    // only ever visible for the single frame before the first render().
+    private final Button approveButton = new Button();
+    private final Button requestChangesButton = new Button();
     private final Button askAgentButton = new Button("Ask the agent to fix it");
     private final Button undoButton = new Button("change");
     private final Label settledLabel = new Label();
     private final Label refusalLabel = new Label();
-    /**
-     * Names the unit {@code a}/{@code r}/{@code u} act on right now (spec
-     * §9.6): a key whose target depends on focus has to say what it is
-     * about to do, or the reader is guessing.
-     */
-    private final Label actingUnitLabel = new Label();
     /** The stale-verdict banner (spec §9.2): text plus its two answers. */
     private final Label staleLabel = new Label();
     private final Button confirmStillGoodButton = new Button("Confirm still good");
@@ -120,6 +117,15 @@ final class ReviewVerdictBar extends VBox {
     private int settledHunks;
     private int totalHunks;
     private Optional<StaleInfo> stale = Optional.empty();
+    /**
+     * What {@code a}/{@code r}/{@code u} act on right now (spec §9.6),
+     * stated on the Approve/Request-changes buttons themselves ("Approve
+     * (hunk)") rather than in a separate label: a droppable label is not on
+     * screen at the code column's floor, and a button whose own text
+     * contradicts what it does ("Approve intent" acting on one hunk) is
+     * worse than no unit statement at all.
+     */
+    private SessionReviewView.SettleUnit actingUnit = SessionReviewView.SettleUnit.SECTION;
 
     ReviewVerdictBar(Host host) {
         this.host = host;
@@ -150,11 +156,9 @@ final class ReviewVerdictBar extends VBox {
         nextButton.setOnAction(e -> host.nextIntent());
 
         approveButton.getStyleClass().addAll("review-verdict-action", "primary");
-        approveButton.setTooltip(new Tooltip("Approve this intent (a)"));
         approveButton.setOnAction(e -> withIntent(host::approve));
 
         requestChangesButton.getStyleClass().add("review-verdict-action");
-        requestChangesButton.setTooltip(new Tooltip("Request changes on this intent (r)"));
         requestChangesButton.setOnAction(e -> withIntent(host::requestChanges));
 
         askAgentButton.getStyleClass().add("review-verdict-action");
@@ -180,8 +184,6 @@ final class ReviewVerdictBar extends VBox {
 
         staleLabel.getStyleClass().add("review-verdict-stale");
         staleLabel.setWrapText(true);
-
-        actingUnitLabel.getStyleClass().add("review-verdict-unit");
 
         settledLabel.getStyleClass().add("review-verdict-settled");
         refusalLabel.getStyleClass().add("review-verdict-refusal");
@@ -273,20 +275,23 @@ final class ReviewVerdictBar extends VBox {
     }
 
     /**
-     * Names the unit {@code a}/{@code r}/{@code u} act on right now (spec
-     * §9.6): a key whose target depends on focus has to say what it is
-     * about to do.
+     * Told what {@code a}/{@code r}/{@code u} act on right now (spec §9.6),
+     * so the Approve/Request-changes buttons can say so: a key whose target
+     * depends on focus has to state what it is about to do, or the reader
+     * is guessing.
      */
     void showActingUnit(SessionReviewView.SettleUnit unit) {
-        actingUnitLabel.setText(switch (unit) {
-            case HUNK -> "acts on: hunk";
-            case SECTION -> "acts on: section";
-            case FILE -> "acts on: file";
-        });
-        actingUnitLabel.setTooltip(new Tooltip(
-                "a, r and u act on the unit named here -- click into the diff column for a "
-                        + "single hunk, the rail for the whole section, or use ⇧A / ⇧R for the file"));
+        this.actingUnit = unit;
         render();
+    }
+
+    /** The word the unit reads as on a button: "Approve (hunk)", "Request changes (section)". */
+    private static String unitWord(SessionReviewView.SettleUnit unit) {
+        return switch (unit) {
+            case HUNK -> "hunk";
+            case SECTION -> "section";
+            case FILE -> "file";
+        };
     }
 
     /**
@@ -343,22 +348,30 @@ final class ReviewVerdictBar extends VBox {
             staleLabel.setText("⚠ approved against base " + shortSha(stale.get().oldBase())
                     + " · base is now " + shortSha(stale.get().newBase()));
             actionRow.getChildren().setAll(previousButton, nextButton, intentLabel,
-                    actingUnitLabel, staleLabel, confirmStillGoodButton, reReviewButton,
-                    actionSpacer, navHint);
+                    staleLabel, confirmStillGoodButton, reReviewButton, actionSpacer, navHint);
         } else if (decision.isPresent()) {
             settledLabel.setText(decision.get().label());
             settledLabel.getStyleClass().removeIf(styleClass -> styleClass.startsWith("decision-"));
             settledLabel.getStyleClass().add("decision-" + decision.get().wireName());
             actionRow.getChildren().setAll(previousButton, nextButton, intentLabel,
-                    actingUnitLabel, settledLabel, undoButton, actionSpacer, navHint);
+                    settledLabel, undoButton, actionSpacer, navHint);
         } else {
+            // Named after the acting unit, not "intent": a button whose own
+            // label contradicts what it is about to do (spec §9.6) is worse
+            // than no unit statement, and this is the one surface that is
+            // never dropped for width, unlike a separate label would be.
+            String unit = unitWord(actingUnit);
+            approveButton.setText("Approve (" + unit + ")");
+            approveButton.setTooltip(new Tooltip("Approve this " + unit + " (a)"));
+            requestChangesButton.setText("Request changes (" + unit + ")");
+            requestChangesButton.setTooltip(new Tooltip("Request changes on this " + unit + " (r)"));
             refusalLabel.setText("⚠ a blocking finding is still open");
             refusalLabel.setVisible(blocked);
             refusalLabel.setManaged(blocked);
             approveButton.pseudoClassStateChanged(
                     javafx.css.PseudoClass.getPseudoClass("refused"), blocked);
             actionRow.getChildren().setAll(previousButton, nextButton, intentLabel,
-                    actingUnitLabel, approveButton, requestChangesButton, askAgentButton,
+                    approveButton, requestChangesButton, askAgentButton,
                     refusalLabel, actionSpacer, navHint);
         }
         fitActionRow(actionRow.getWidth());
@@ -410,32 +423,19 @@ final class ReviewVerdictBar extends VBox {
                 + INTENT_LABEL_MIN;
         int slots = 0;
         for (javafx.scene.Node child : actionRow.getChildren()) {
-            if (!child.isManaged() && child != navHint && child != actingUnitLabel) {
+            if (!child.isManaged() && child != navHint) {
                 continue;
             }
             slots++;
-            if (child == actionSpacer || child == navHint || child == intentLabel
-                    || child == actingUnitLabel) {
+            if (child == actionSpacer || child == navHint || child == intentLabel) {
                 continue;
             }
             needed += child.prefWidth(-1);
         }
         needed += actionRow.getSpacing() * Math.max(0, slots - 1);
-
-        // The acting-unit label is checked first, and against the actions
-        // ALONE: it says what a/r/u are about to do, which matters more than
-        // navHint's "n jumps to the next" progress note, so a hint that
-        // would otherwise fit does not get to crowd it out. Never partially
-        // shown -- like the hint, it is either fully there or not at all.
-        double spacing = actionRow.getSpacing();
-        boolean roomForUnit = width - needed >= actingUnitLabel.prefWidth(-1) + spacing;
-        actingUnitLabel.setVisible(roomForUnit);
-        actingUnitLabel.setManaged(roomForUnit);
-
-        double afterUnit = needed + (roomForUnit ? actingUnitLabel.prefWidth(-1) + spacing : 0);
-        boolean roomForHint = width - afterUnit >= navHint.prefWidth(-1);
-        navHint.setVisible(roomForHint);
-        navHint.setManaged(roomForHint);
+        boolean room = width - needed >= navHint.prefWidth(-1);
+        navHint.setVisible(room);
+        navHint.setManaged(room);
     }
 
     /** Test-only: whether approval is currently being refused. */
