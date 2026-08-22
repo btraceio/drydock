@@ -29,6 +29,12 @@ public final class GhosttyKeyTranslator {
     public static final int KEY_RETURN = 36;
     /** kVK_ANSI_D -- used by {@link GhosttySurface#closeGracefully}'s Ctrl+D exit request. */
     public static final int KEY_D = 2;
+    /** kVK_ANSI_T -- ⌘T spawns a new terminal (matched by character, but named for readability). */
+    public static final int KEY_T = 17;
+    /** kVK_ANSI_RightBracket (0x1E) -- ⌥⌘] cycles to the next terminal. */
+    public static final int KEY_RIGHT_BRACKET = 30;
+    /** kVK_ANSI_LeftBracket (0x21) -- ⌥⌘[ cycles to the previous terminal. */
+    public static final int KEY_LEFT_BRACKET = 33;
 
     // -- ghostty_input_mods_e bitmask ---------------------------------------
 
@@ -141,20 +147,41 @@ public final class GhosttyKeyTranslator {
                                       String characters, String unshiftedCharacters) {
         int mods = translateModifiers(nsModifierFlags);
         String shortcutChars = characters.isEmpty() ? unshiftedCharacters : characters;
-        if ((mods & MODS_SUPER) != 0 && !shortcutChars.isEmpty()) {
-            int cp = shortcutChars.codePointAt(0);
-            Shortcut shortcut = switch (cp) {
-                case '1' -> Shortcut.CLAUDE_SUB_TAB;
-                case '2' -> Shortcut.TERMINAL_SUB_TAB;
-                case '3' -> Shortcut.EXPLORER_SUB_TAB;
-                case '4' -> Shortcut.REVIEW_SUB_TAB;
-                case '[', '{' -> Shortcut.PREVIOUS_SESSION_TAB;
-                case ']', '}' -> Shortcut.NEXT_SESSION_TAB;
-                case '0' -> Shortcut.TOGGLE_SIDEBAR;
-                default -> null;
-            };
-            if (shortcut != null) {
-                return new AppShortcut(shortcut, keyDown);
+        if ((mods & MODS_SUPER) != 0) {
+            // ⌥⌘] / ⌥⌘[ cycle terminals WITHIN the Terminal sub-tab. Option is a
+            // character-composing modifier on macOS, so it remaps ']' / '[' into
+            // unrelated glyphs (e.g. U+201D / U+2018 on US layout) and the
+            // character-based match below cannot see them. Match by physical
+            // keycode instead -- it is stable across the option-key remap and
+            // the same ANSI-layout assumption the existing ⌘[ / ⌘] bindings
+            // already rely on. Checked before the character switch so the
+            // alt-modified bracket never falls through to a session-tab cycle.
+            if ((mods & MODS_ALT) != 0) {
+                Shortcut terminalShortcut = switch (keyCode) {
+                    case KEY_RIGHT_BRACKET -> Shortcut.NEXT_TERMINAL;
+                    case KEY_LEFT_BRACKET -> Shortcut.PREVIOUS_TERMINAL;
+                    default -> null;
+                };
+                if (terminalShortcut != null) {
+                    return new AppShortcut(terminalShortcut, keyDown);
+                }
+            }
+            if (!shortcutChars.isEmpty()) {
+                int cp = shortcutChars.codePointAt(0);
+                Shortcut shortcut = switch (cp) {
+                    case '1' -> Shortcut.CLAUDE_SUB_TAB;
+                    case '2' -> Shortcut.TERMINAL_SUB_TAB;
+                    case '3' -> Shortcut.EXPLORER_SUB_TAB;
+                    case '4' -> Shortcut.REVIEW_SUB_TAB;
+                    case 't' -> Shortcut.NEW_TERMINAL;
+                    case '[', '{' -> Shortcut.PREVIOUS_SESSION_TAB;
+                    case ']', '}' -> Shortcut.NEXT_SESSION_TAB;
+                    case '0' -> Shortcut.TOGGLE_SIDEBAR;
+                    default -> null;
+                };
+                if (shortcut != null) {
+                    return new AppShortcut(shortcut, keyDown);
+                }
             }
         }
         boolean isShortcut = (mods & (MODS_CTRL | MODS_SUPER)) != 0;

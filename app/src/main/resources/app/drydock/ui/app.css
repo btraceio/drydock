@@ -971,6 +971,54 @@
     -fx-font-family: "JetBrains Mono", "Menlo", monospace;
 }
 
+/* ---- Terminal sub-tab: the per-terminal stripe (⌘T spawns; ⌥⌘[ / ⌥⌘] cycle) -- */
+
+.terminal-stripe {
+    -fx-background-color: -drydock-tabbar;
+    -fx-border-color: -drydock-border transparent transparent transparent;
+    -fx-border-width: 1 0 0 0;
+    -fx-min-height: 28px;
+    -fx-pref-height: 28px;
+    -fx-max-height: 28px;
+    -fx-padding: 0 8 0 4;
+    -fx-spacing: 4;
+    -fx-alignment: CENTER_LEFT;
+}
+.terminal-stripe-tab {
+    -fx-alignment: CENTER;
+    -fx-spacing: 2;
+}
+.terminal-stripe-tab .session-subtab {
+    -fx-padding: 2 8 2 8;
+    -fx-font-size: 11px;
+}
+.terminal-stripe-close {
+    -fx-background-color: transparent;
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 13px;
+    -fx-padding: 0 4 0 0;
+    -fx-cursor: hand;
+}
+.terminal-stripe-close:hover {
+    -fx-text-fill: -drydock-text;
+}
+.terminal-stripe-new {
+    -fx-background-color: transparent;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 15px;
+    -fx-font-weight: bold;
+    -fx-padding: 0 8 0 8;
+    -fx-cursor: hand;
+}
+.terminal-stripe-new:hover {
+    -fx-text-fill: -drydock-text;
+}
+.terminal-stripe-hint {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+
 /* ---- Session Explorer: search rail -------------------------------------- */
 
 .explorer-root {

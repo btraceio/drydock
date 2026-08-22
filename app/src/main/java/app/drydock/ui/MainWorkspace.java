@@ -946,6 +946,16 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         currentlySelected().ifPresent(open -> open.showSubTab(OpenSessionTab.SubTab.TERMINAL));
     }
 
+    /** ⌘T: spawns a new terminal in the selected session's Terminal sub-tab. */
+    public void newTerminal() {
+        currentlySelected().ifPresent(OpenSessionTab::spawnTerminal);
+    }
+
+    /** ⌥⌘] / ⌥⌘[: cycle the selected session's terminals by {@code direction} (+1 / -1). */
+    public void cycleTerminal(int direction) {
+        currentlySelected().ifPresent(open -> open.cycleTerminal(direction));
+    }
+
     /** ⌘3: switches the selected session tab to its Explorer sub-tab. */
     public void showExplorerSubTab() {
         currentlySelected().ifPresent(open -> open.showSubTab(OpenSessionTab.SubTab.EXPLORER));

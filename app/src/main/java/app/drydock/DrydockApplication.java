@@ -974,6 +974,15 @@ public final class DrydockApplication extends Application {
                     appShell.toggleTheme();
                 }
                 event.consume();
+            } else if (cmd && event.isAltDown() && event.getCode() == KeyCode.CLOSE_BRACKET) {
+                // ⌥⌘] cycles terminals within the Terminal sub-tab. Checked
+                // before the plain ⌘] session-tab branch so the alt-modified
+                // bracket never falls through to it.
+                mainWorkspace.cycleTerminal(1);
+                event.consume();
+            } else if (cmd && event.isAltDown() && event.getCode() == KeyCode.OPEN_BRACKET) {
+                mainWorkspace.cycleTerminal(-1);
+                event.consume();
             } else if (cmd && event.getCode() == KeyCode.OPEN_BRACKET) {
                 // Inside the Explorer these are the trail's back/forward
                 // (Explorer delta, part 1). They fall through to the session
@@ -987,6 +996,15 @@ public final class DrydockApplication extends Application {
                 if (!mainWorkspace.navigateExplorerTrail(1)) {
                     mainWorkspace.selectNextSessionTab();
                 }
+                event.consume();
+            } else if (cmd && event.getCode() == KeyCode.T) {
+                // ⌘T spawns a new terminal in the selected session's
+                // Terminal sub-tab (and switches to it). The terminal-side
+                // intercept (GhosttyKeyTranslator) handles the case where a
+                // terminal is focused and its NSEvent monitor eats the key
+                // before this scene filter; this branch covers every other
+                // focus owner.
+                mainWorkspace.newTerminal();
                 event.consume();
             } else if (cmd && event.getCode() == KeyCode.DOWN) {
                 sidebar.focusAdjacentLiveSession(+1);

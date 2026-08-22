@@ -32,6 +32,8 @@ final class ShortcutsOverlay {
                     {"Rename session", "⌘R"},
                     {"Agent view", "⌘1"},
                     {"Terminal view", "⌘2"},
+                    {"New terminal", "⌘T"},
+                    {"Previous / next terminal", "⌥⌘[ / ⌥⌘]"},
                     {"Explorer view", "⌘3"},
                     {"Review this session's changes", "⌘4"},
                     {"Previous / next session tab", "⌘[ / ⌘]"},

@@ -12,6 +12,7 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 
 class GhosttyKeyTranslatorTest {
@@ -82,12 +83,60 @@ class GhosttyKeyTranslatorTest {
             "], NEXT_SESSION_TAB",
             "}, NEXT_SESSION_TAB",
             "0, TOGGLE_SIDEBAR",
+            "t, NEW_TERMINAL",
     })
     void commandShortcutsAreIntercepted(String character, Shortcut expected) {
         KeyAction action = GhosttyKeyTranslator.translate(18, NS_COMMAND, true, character, character);
         AppShortcut shortcut = assertInstanceOf(AppShortcut.class, action);
         assertEquals(expected, shortcut.shortcut());
         assertEquals(true, shortcut.keyDown());
+    }
+
+    @Test
+    void optionCommandBracketsCycleTerminalsByPhysicalKeycode() {
+        // ⌥ remaps the character (Option is a composing modifier on macOS),
+        // so ⌥⌘] resolves to an unrelated glyph in `characters` (here "›",
+        // U+203A, the US-layout ⌥+] glyph). The translator must match by
+        // physical keycode (kVK_ANSI_RightBracket = 30 / LeftBracket = 33)
+        // rather than by character, else the gesture is lost.
+        KeyAction next = GhosttyKeyTranslator.translate(
+                GhosttyKeyTranslator.KEY_RIGHT_BRACKET, NS_COMMAND | NS_OPTION, true, "›", "]");
+        AppShortcut nextShortcut = assertInstanceOf(AppShortcut.class, next);
+        assertEquals(Shortcut.NEXT_TERMINAL, nextShortcut.shortcut());
+
+        KeyAction prev = GhosttyKeyTranslator.translate(
+                GhosttyKeyTranslator.KEY_LEFT_BRACKET, NS_COMMAND | NS_OPTION, true, "‹", "[");
+        AppShortcut prevShortcut = assertInstanceOf(AppShortcut.class, prev);
+        assertEquals(Shortcut.PREVIOUS_TERMINAL, prevShortcut.shortcut());
+    }
+
+    @Test
+    void optionCommandBracketDoesNotFallThroughToSessionTabCycle() {
+        // ⌥⌘] must NOT also match the ⌘] session-tab binding: with ⌥ held the
+        // alt-keycode branch wins, so the session-tab shortcut is never
+        // produced for an alt-modified bracket.
+        KeyAction action = GhosttyKeyTranslator.translate(
+                GhosttyKeyTranslator.KEY_RIGHT_BRACKET, NS_COMMAND | NS_OPTION, true, "›", "]");
+        AppShortcut shortcut = assertInstanceOf(AppShortcut.class, action);
+        assertEquals(Shortcut.NEXT_TERMINAL, shortcut.shortcut());
+        assertNotEquals(Shortcut.NEXT_SESSION_TAB, shortcut.shortcut());
+    }
+
+    @Test
+    void commandTIsInterceptedAsNewTerminal() {
+        KeyAction action = GhosttyKeyTranslator.translate(
+                GhosttyKeyTranslator.KEY_T, NS_COMMAND, true, "t", "t");
+        AppShortcut shortcut = assertInstanceOf(AppShortcut.class, action);
+        assertEquals(Shortcut.NEW_TERMINAL, shortcut.shortcut());
+    }
+
+    @Test
+    void commandShiftTIsNotANewTerminalShortcut() {
+        // ⌘⇧T resolves to 'T' and is NOT an app shortcut: it must reach the
+        // terminal as a forwarded key event, leaving ⌘⇧T free for future use.
+        KeyAction action = GhosttyKeyTranslator.translate(
+                GhosttyKeyTranslator.KEY_T, NS_COMMAND | NS_SHIFT, true, "T", "t");
+        assertInstanceOf(ForwardKey.class, action);
     }
 
     @Test
