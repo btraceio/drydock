@@ -114,21 +114,28 @@ public final class SymbolScan {
      */
     private static List<Symbol> parsed(TSLanguage language, String path, String text,
                                        boolean changed) {
+        TSTree tree;
         try {
             TSParser parser = new TSParser();
             parser.setLanguage(language);
-            TSTree tree = parser.parseString(null, text);
-            byte[] utf8 = text.getBytes(StandardCharsets.UTF_8);
-            List<Symbol> symbols = new ArrayList<>();
-            walk(tree.getRootNode(), utf8, path, changed, symbols);
-            return symbols;
+            tree = parser.parseString(null, text);
         } catch (RuntimeException e) {
             // A fragment the grammar cannot even tokenise (verified: a lone
             // unpaired UTF-16 surrogate throws "Invalid UTF-8 source input"
             // from the native layer) is not a reason to lose the file --
             // fall back to the same lexical scan an ungrammared file gets.
+            //
+            // Scoped to just the native-facing calls: catching a wider block
+            // here would let a bug in walk() -- our own Java, not the
+            // grammar -- disappear into this same "expected fallback" path
+            // with no log and no test signal. Absent and broken must not
+            // look the same.
             return lexical(path, text, changed);
         }
+        byte[] utf8 = text.getBytes(StandardCharsets.UTF_8);
+        List<Symbol> symbols = new ArrayList<>();
+        walk(tree.getRootNode(), utf8, path, changed, symbols);
+        return symbols;
     }
 
     /**
