@@ -34,6 +34,27 @@ public final class IntentGrouping {
     private final List<Consumer<String>> listeners = new CopyOnWriteArrayList<>();
 
     /**
+     * How many times each scope's grouping has changed -- bumped by {@link
+     * #notifyChanged}, so a caller that caches {@link #intentsFor}'s result
+     * across more than one call (nothing else here can go stale: {@code
+     * diff} and {@code graph} are plain values a caller can compare by
+     * identity) has a single number to compare instead of recomputing on
+     * every call to find out nothing changed.
+     */
+    private final Map<String, Long> versionByScope = new ConcurrentHashMap<>();
+
+    /**
+     * {@code scopeId}'s current grouping version -- 0 until the first
+     * {@link #set}/{@link #clear}, and incremented by every one after that.
+     * Never decreases and never repeats for a scope, so two reads that
+     * differ mean the reviewer's grouping genuinely changed in between; two
+     * reads that agree mean it provably did not, however far apart in time.
+     */
+    public long version(String scopeId) {
+        return versionByScope.getOrDefault(scopeId, 0L);
+    }
+
+    /**
      * Replaces {@code scopeId}'s grouping with what a reviewer supplied.
      * Numbering is assigned here rather than trusted from the caller, so the
      * rail's {@code 1..N} is always dense and in order.
@@ -310,6 +331,7 @@ public final class IntentGrouping {
     }
 
     private void notifyChanged(String scopeId) {
+        versionByScope.merge(scopeId, 1L, Long::sum);
         for (Consumer<String> listener : listeners) {
             listener.accept(scopeId);
         }

@@ -2,9 +2,11 @@ package app.drydock.ui.review;
 
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
+import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
 import app.drydock.review.SessionReviewScopes;
+import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
@@ -22,6 +24,8 @@ import java.util.OptionalInt;
 import java.util.concurrent.Callable;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -110,6 +114,79 @@ class SectionRailSwapTest extends ApplicationTest {
                             + "fallback's auto: identity: " + id);
         }
         assertEquals(ids.size(), ids.stream().distinct().count(), "every computed card must have its own id");
+    }
+
+    /**
+     * The point of the version-keyed cache: an unrelated refresh -- nothing
+     * about scope, diff, graph or the reviewer's grouping changed -- must
+     * reuse the SAME {@link List} instance {@link SessionReviewView#intents}
+     * last computed, not merely an equal one, or {@code Sections.of} is
+     * still running on every keypress underneath an equals() check that
+     * happens to pass. Then an actual reviewer regroup (the one thing the
+     * cache key does not already cover via scope/diff/graph identity) must
+     * still invalidate it.
+     */
+    @Test
+    void theIntentsCacheSurvivesAnUnrelatedRefreshAndInvalidatesOnARegroup() {
+        UnifiedDiff diff = fourFileDiff();
+        host.diff = diff;
+        ReviewScope scope = registry.mint(ReviewScopeRegistry.spec(ReviewScope.Kind.WORKING_TREE,
+                Path.of("/tmp/nowhere"), Optional.of(Path.of("/tmp/nowhere")), "main", "main",
+                Optional.empty(), Optional.empty()));
+
+        interact(() -> view.showScopes(new SessionReviewScopes.Scopes(scope, Optional.empty()),
+                SessionReviewScopes.Choice.LOCAL));
+        interact(() -> view.diagShowDiff(scope, diff));
+        awaitCardCount(3);
+
+        List<ReviewIntent> first = view.diagIntents();
+        interact(view::refreshReviewState);
+        List<ReviewIntent> second = view.diagIntents();
+        assertSame(first, second,
+                "an unrelated refresh (nothing in the cache key changed) must reuse the cached "
+                        + "list, not recompute an equal one");
+
+        host.intents.set(scope.id(), List.of(new ReviewIntent("agent-1", 1, "Regrouped",
+                ReviewIntent.Kind.CHANGE, ReviewIntent.Risk.HIGH, "",
+                List.of(ReviewIntent.hunkId("src/z.cpp", 0)), Optional.empty(), false)));
+        interact(view::refreshReviewState);
+        List<ReviewIntent> third = view.diagIntents();
+        assertNotSame(second, third, "a reviewer's own regroup must invalidate the cache");
+        assertEquals(List.of("Regrouped"), third.stream().map(ReviewIntent::title).toList());
+    }
+
+    /**
+     * A reviewer's grouping always wins over the computed sections, so
+     * building the {@link app.drydock.review.ChangeGraph} it would take to
+     * compute them is pure waste when one is already supplied -- real
+     * parsing work, and a background completion that would fire a needless
+     * extra refresh. The rail must never even claim to be "refining" for a
+     * scope that already has a reviewer's answer.
+     */
+    @Test
+    void noGraphIsBuiltWhenAReviewerHasAlreadySuppliedAGrouping() {
+        UnifiedDiff diff = fourFileDiff();
+        host.diff = diff;
+        ReviewScope scope = registry.mint(ReviewScopeRegistry.spec(ReviewScope.Kind.WORKING_TREE,
+                Path.of("/tmp/nowhere"), Optional.of(Path.of("/tmp/nowhere")), "main", "main",
+                Optional.empty(), Optional.empty()));
+        host.intents.set(scope.id(), List.of(new ReviewIntent("agent-1", 1, "Reviewed",
+                ReviewIntent.Kind.CHANGE, ReviewIntent.Risk.HIGH, "",
+                List.of(ReviewIntent.hunkId("src/z.cpp", 0)), Optional.empty(), false)));
+
+        interact(() -> view.showScopes(new SessionReviewScopes.Scopes(scope, Optional.empty()),
+                SessionReviewScopes.Choice.LOCAL));
+        interact(() -> view.diagShowDiff(scope, diff));
+
+        // Generous, fixed wait rather than a poll-until: there is no
+        // "settled" event to wait for when nothing is ever going to build,
+        // which is exactly the property under test.
+        sleep(500);
+
+        assertEquals(List.of("agent-1"), view.diagIntentIds(),
+                "the reviewer's own id must be showing, never a computed: one");
+        assertTrue(call(() -> lookup(".review-intent-pending").queryAll()).stream().noneMatch(Node::isVisible),
+                "no graph was requested, so the rail must never claim to be refining one");
     }
 
     private int cardCount() {

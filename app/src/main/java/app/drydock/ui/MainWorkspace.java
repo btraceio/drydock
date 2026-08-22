@@ -1977,6 +1977,16 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         }
 
         @Override
+        public long groupingVersion(ReviewScope scope) {
+            return intentGrouping.version(scope.id());
+        }
+
+        @Override
+        public boolean hasReviewerGrouping(ReviewScope scope) {
+            return intentGrouping.hasReviewerGrouping(scope.id());
+        }
+
+        @Override
         public Optional<ReviewVerdict> verdict(ReviewScope scope, String hunkDigest) {
             return annotationStore.verdict(scope.id(), hunkDigest);
         }

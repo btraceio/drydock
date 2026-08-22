@@ -494,6 +494,16 @@ class OpenSessionTabReviewSubTabTest extends ApplicationTest {
         }
 
         @Override
+        public long groupingVersion(ReviewScope scope) {
+            return 0;
+        }
+
+        @Override
+        public boolean hasReviewerGrouping(ReviewScope scope) {
+            return false;
+        }
+
+        @Override
         public Optional<ReviewVerdict> verdict(ReviewScope scope, String hunkDigest) {
             return Optional.empty();
         }
