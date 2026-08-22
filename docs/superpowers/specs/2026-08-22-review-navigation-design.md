@@ -512,7 +512,7 @@ muscle memory survives. `n` remains "next unsettled intent" in both modes,
 because it walks unsettled work, and §9 makes that a property of hunks rather
 than of whatever the rail is currently showing.
 
-`a` / `r` / `u` keep their keys and gain a focus-dependent unit (§9.5), and
+`a` / `r` / `u` keep their keys and gain a focus-dependent unit (§9.6), and
 `⇧A` / `⇧R` settle the current file. `ShortcutsOverlay` gains rows for `p`,
 `⇧A` and `⇧R`, and the `a` / `r` / `u` rows are reworded to name the unit:
 advertised and bound must match.
@@ -599,27 +599,76 @@ it runs on every render rather than once.
 *claimed* rather than *measured* (§6.5), so a section approved entirely on
 the agent's assertion reads as one.
 
-### 9.2 The anchor is a content digest, not a position
+### 9.2 An approval is valid only for the content and the base it was given against
 
 The obvious key is the existing stable line key (`n<new>` / `o<old>`) that
 findings already use. **It is the wrong one here.** It is positional: an
 author pushing one commit shifts every key below the insertion, so a clean
 flag recorded at `n42` comes back covering lines nobody read. That is the one
-outcome `migrateLegacyVerdicts` exists to refuse — *"silently approving code
-nobody looked at is the one outcome this must never produce."* A finding
-landing a few lines off is a visible annoyance; an approval landing a few
-lines off is a silent lie about what was reviewed.
+outcome `migrateLegacyVerdicts`' merge exists to refuse — *"silently
+approving code nobody looked at is the one outcome this must never
+produce."* A finding landing a few lines off is a visible annoyance; an
+approval landing a few lines off is a silent lie about what was reviewed.
 
-So a hunk's verdict is keyed by a **digest of its changed lines** (with its
-file path), and that makes a re-diff correct by construction:
+**The digest.** A hunk's verdict is keyed by a digest over its file path, its
+changed lines **and the context lines around them**. Context is included
+because a hunk means what it means in place: change the line above it and its
+changed lines are byte-identical, so a changed-lines-only digest would leave
+the approval standing over code whose surroundings moved. Review already
+fetches twelve lines of context per hunk, so this costs nothing to compute.
 
-- a hunk that only moved keeps its digest, and stays settled;
-- a hunk whose content changed gets a new digest, and is unsettled — which is
-  right, because it is not the code that was read;
-- a hunk appearing in three sections is one digest, so it is one flag, which
-  is what makes §5.6 work at all.
+That makes a re-diff correct by construction:
 
-### 9.3 What this supersedes
+| Change | Effect |
+|---|---|
+| Edit inside the hunk | Unsettled |
+| Edit within the hunk's context | Unsettled |
+| Edit elsewhere in the same file | Stays approved |
+| Hunk moves, text identical | Stays approved |
+| Same hunk in three sections | One digest, one flag (§5.6) |
+
+The third row is the deliberate limit. A file-wide digest would unsettle every
+hunk whenever a file is touched again, which re-reviews code nobody changed;
+the context window is where the line is drawn, and it is drawn at the point
+the reviewer could actually see while reading.
+
+**The base.** A diff means what it means *against a base*, and a digest over
+its own text cannot see the base move. A rebase, or the base branch
+advancing, can leave every hunk byte-identical while the code they sit on
+changed underneath — so a content digest alone reproduces, one level up, the
+same mistake as the positional line key.
+
+Every verdict therefore records the `(base, head)` it was given against. When
+the scope's base moves, verdicts are **not deleted**: they are marked stale,
+render as `⚠ approved against base a1b2c3 · base is now d4e5f6 (+7
+commits)`, and offer *confirm still good* / *re-review*. A stale verdict does
+not count toward "everything settled", so the review cannot be submitted on
+it — through `ReviewVerdictBar`'s existing `submitRefusalLabel`, which is
+already the mechanism for "you cannot submit yet, and here is why".
+
+Deleting them instead was considered and rejected: a rebase is routine, and a
+tool that discards a forty-hunk review every time the base branch advances
+teaches reviewers not to mark anything, which costs more than it protects.
+Keeping them silently was rejected for the reason the whole section exists.
+Stale is a third state because the honest answer is neither "still valid" nor
+"never happened".
+
+### 9.3 No migration, and one thing that follows from that
+
+Re-keying verdicts would normally need a one-way rewrite of the human's
+records, and an earlier draft carried one as this design's least recoverable
+step. **There are no recorded verdicts to migrate**, so it is deleted rather
+than written — the new key simply starts empty.
+
+One consequence worth acting on rather than parking: with no verdicts under
+the old `file:` scheme either, `AnnotationStore.migrateLegacyVerdicts` has no
+remaining caller once this lands. Its `merge` helper is kept and promoted
+(§9.1); the migration wrapper around it is dead code, and AGENTS.md is
+explicit that dead code is deleted rather than parked. Flagged here rather
+than assumed, since confirming "no verdicts anywhere" is a check, not a
+reading of the source.
+
+### 9.4 What this supersedes
 
 An earlier draft of this section derived **intent ids** from content and
 re-anchored verdicts across a regrouping by hunk overlap. Both existed for
@@ -637,7 +686,7 @@ Content-derived intent ids are kept only where they still earn their place:
 content-derived ids keeps an ordering assertion meaningful across a re-run.
 Nothing persists under them.
 
-### 9.4 Determinism is a requirement, not a property
+### 9.5 Determinism is a requirement, not a property
 
 Calling the computed layer stable is a claim the code has to keep:
 
@@ -651,7 +700,7 @@ Calling the computed layer stable is a claim the code has to keep:
 - The same diff produces a byte-identical grouping and reading path, twice in
   one process and across two processes (§13).
 
-### 9.5 Settling more than one hunk at once
+### 9.6 Settling more than one hunk at once
 
 Reading is per hunk; settling is often not. Three units, one action each:
 
@@ -741,17 +790,17 @@ class (Kahn, Tarjan), the rail's PATH mode, per-hunk link footer rows, the
 `p` shortcut and its overlay row, `reads` on `review_intents`, provenance
 marking on order and links (§6.5), the out-of-diff caller popover source
 (§7.4), overlapping section membership (§5.6), hunk-keyed reviewed state
-(§9), file- and section-level settle actions (§9.5), the
+(§9), file- and section-level settle actions (§9.6), the
 `sections` include on `review_scope` (§5.5), and the tree-sitter
 dependencies.
 
 **Changed**: `FallbackIntents` (graph-backed grouping, with today's
 directory clustering kept as its own fallback), `ReviewVerdict` (keyed by
-hunk content digest, not `intentId`), `AnnotationStore` (verdicts stored per
-hunk; `migrateLegacyVerdicts`' merge promoted from a one-off migration to the
-live section derivation, plus a one-way migration of existing intent-keyed
-verdicts), `ReviewVerdictBar` (progress counted in hunks; the acting unit
-named), `ReviewIntentRail` (two modes, derived section state, `✓ reviewed in
+hunk content digest and carrying the `(base, head)` it was given against, not
+`intentId`), `AnnotationStore` (verdicts stored per hunk;
+`migrateLegacyVerdicts`' merge promoted from a one-off migration to the live
+section derivation), `ReviewVerdictBar` (progress counted in hunks; the
+acting unit named; stale verdicts refuse submit), `ReviewIntentRail` (two modes, derived section state, `✓ reviewed in
 ①` markers), `ReviewDiffColumn` (footer
 rows), `ReviewDiffRows` (the row model gains a link row), `ReviewToolCodec`
 and `McpToolRouter` (`reads`, and content-derived ids at decode),
@@ -796,20 +845,21 @@ Headless tests:
   derived state follows the asymmetric merge (any `CHANGES` wins, `APPROVED`
   needs every hunk); progress counts distinct hunks, not the sum of section
   sizes.
-- Re-diff: a hunk that only moved keeps its verdict; a hunk whose content
-  changed loses it; and a scope whose every hunk changed comes back fully
-  unsettled rather than fully settled.
+- Re-diff: a hunk that only moved keeps its verdict; a hunk whose changed
+  lines or context changed loses it; an edit elsewhere in the same file does
+  not; and a scope whose every hunk changed comes back fully unsettled rather
+  than fully settled.
 - Settle actions: `a` on a focused rail settles the section's unsettled
   hunks, `⇧A` the current file, `a` on a focused diff column one hunk; each
   is visible in the other sections that share those hunks.
-- Migration: verdicts stored under the old `(scopeId, intentId)` key are
-  carried onto hunks once, and a partially-covered section is left unapproved
-  rather than approved.
+- Staleness: a base move marks verdicts stale rather than deleting them,
+  stale verdicts do not count as settled, submit refuses with a reason, and
+  *confirm still good* clears the mark without re-opening the hunk.
 - Stability: the same diff yields a byte-identical grouping and reading path twice in one
   process **and** across two processes (the cross-process run is what catches
   a hash-ordered collection).
 - Regrouping: an agent re-run that produces a completely different grouping
-  changes no reviewed state at all — the regression that pins §9.3.
+  changes no reviewed state at all — the regression that pins §9.4.
 - `GrammarRegistry`: a missing grammar takes the lexical path and logs
   nothing; a failing native load logs once and takes the lexical path.
 - `review_intents` with `reads`: order follows it; a `reads` cycle is named;
@@ -850,16 +900,19 @@ In the running app, with screenshots rather than assertions about them:
   rather than as a bug in the grouping. Overlap (§5.6) drains most of it — a
   component no longer has to absorb a file merely to keep it visible — and
   placing tests in context (§5.3) pushes modestly the other way.
-- **Re-keying verdicts rewrites the human's records once.** Verdicts stored
-  under `(scopeId, intentId)` are carried onto hunks on first read. It is the
-  same shape as the migration that already exists and it is one-way, which
-  makes it the place in this design where a mistake is least recoverable.
-- **A digest is unforgiving, deliberately.** Reformatting a file, or a
-  rebase that rewrites whitespace, changes every digest and unsettles a
-  review that was substantively finished. The alternative — a fuzzier anchor
-  — buys comfort by risking the one outcome §9.2 refuses, so the strictness
-  is chosen rather than accepted. Whether to normalise whitespace before
-  digesting is left open (§15).
+- **A digest is unforgiving, deliberately, and including context widens
+  that.** Reformatting a file, or a rebase that rewrites whitespace,
+  unsettles a review that was substantively finished — and with context in
+  the digest, an edit *near* a hunk unsettles it too. The alternative, a
+  fuzzier anchor, buys comfort by risking the one outcome §9.2 refuses, so
+  the strictness is chosen rather than accepted. Whether to normalise
+  whitespace before digesting is left open (§15).
+- **Staleness could become noise on an active base.** A scope whose base
+  branch moves several times a day will mark verdicts stale repeatedly, and a
+  *confirm still good* button clicked reflexively is worth less than no
+  button. The mitigation is that staleness is per-scope and one click, not
+  per-hunk — but if the base moves faster than the review is read, the signal
+  degrades, and nothing here prevents that.
 
 ## 15. Open items
 
