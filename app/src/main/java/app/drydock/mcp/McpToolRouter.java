@@ -15,6 +15,7 @@ import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewVerdict;
 import app.drydock.review.Sections;
 import app.drydock.review.Severity;
+import app.drydock.review.SymbolScan;
 import app.drydock.review.VerdictMerge;
 import app.drydock.state.json.JsonValue;
 import app.drydock.state.json.JsonValue.JsonArray;
@@ -33,6 +34,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.Function;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.stream.Stream;
@@ -65,10 +67,24 @@ public final class McpToolRouter {
 
     private final McpSessionContext context;
     private final McpSessionRegistry registry;
+    private final Function<UnifiedDiff, ChangeGraph> graphBuilder;
 
     public McpToolRouter(McpSessionContext context, McpSessionRegistry registry) {
+        this(context, registry, ChangeGraph::of);
+    }
+
+    /**
+     * Test seam: swaps how a scope's {@link ChangeGraph} is built (mirrors
+     * {@code GitStatusService}'s ssh-executable constructor). Package-private
+     * -- its only reason to exist is letting a test count builds, or fail
+     * them, without a mocking library; production callers always get the
+     * real, blocking {@link ChangeGraph#of}.
+     */
+    McpToolRouter(McpSessionContext context, McpSessionRegistry registry,
+                  Function<UnifiedDiff, ChangeGraph> graphBuilder) {
         this.context = context;
         this.registry = registry;
+        this.graphBuilder = graphBuilder;
     }
 
     public List<JsonValue> toolDescriptors() {
@@ -269,7 +285,24 @@ public final class McpToolRouter {
                 1_000, MAX_SCOPE_BYTES);
         Optional<String> cursor = optionalStringArg(args, "cursor");
         UnifiedDiff diff = context.reviewDiff(scope);
-        ReviewToolCodec.ScopePage page = ReviewToolCodec.pageHunks(diff, cursor, maxBytes);
+
+        // Computed only on the FIRST page of a read (cursor absent), and only
+        // when asked: ChangeGraph.of parses every changed file and can trigger
+        // a first-time native grammar load, so it must never be a cost a plain
+        // review_scope call pays, and a multi-page read must not pay it again
+        // on every page for a payload that would not have changed anyway.
+        Optional<JsonValue> sectionsJson = cursor.isEmpty() && includesSections(args)
+                ? computeSections(scope, diff)
+                : Optional.empty();
+        // Charged against the SAME budget as hunks, not on top of it: sections
+        // overlap by design (a shared foundation file appears in every section
+        // that needs it), so their payload scales as sections x shared files,
+        // not by file count the way scope/files/priorThreads do -- an
+        // unaccounted addition here could dwarf a small maxBytes with no
+        // signal at all.
+        int sectionsBytes = sectionsJson.map(ReviewToolCodec::approximateBytes).orElse(0);
+        int hunkBudget = Math.max(0, maxBytes - sectionsBytes);
+        ReviewToolCodec.ScopePage page = ReviewToolCodec.pageHunks(diff, cursor, hunkBudget);
 
         JsonObject result = JsonObject.empty()
                 .put("scope", ReviewToolCodec.scopeToJson(scope))
@@ -287,15 +320,37 @@ public final class McpToolRouter {
                 .map(ReviewToolCodec::findingStateToJson)
                 .toList()));
 
-        // Computed only on the FIRST page of a read (cursor absent), and only
-        // when asked: ChangeGraph.of parses every changed file and can trigger
-        // a first-time native grammar load, so it must never be a cost a plain
-        // review_scope call pays, and a multi-page read must not pay it again
-        // on every page for a payload that would not have changed anyway.
-        if (cursor.isEmpty() && includesSections(args)) {
-            result.put("sections", ReviewToolCodec.sectionsToJson(Sections.of(diff, ChangeGraph.of(diff))));
+        if (sectionsJson.isPresent()) {
+            result.put("sections", sectionsJson.get());
+            // The grouping is never truncated mid-array -- that would hand an
+            // agent a lie it could act on -- so when it alone is bigger than
+            // the whole budget, the overage is reported rather than hidden:
+            // a caller that asked for this explicitly gets all of it, plus a
+            // signal that maxBytes was not honoured, instead of a silently
+            // blown budget.
+            if (sectionsBytes > maxBytes) {
+                result.put("sectionsOverBudget", new JsonBoolean(true));
+            }
         }
         return result;
+    }
+
+    /**
+     * {@code sections}, or empty if none was requested or the graph could not
+     * be built. {@link ChangeGraph#of} (via {@link SymbolScan}) can throw
+     * unchecked on a parse edge case; that must cost this ONE optional extra,
+     * never the whole call -- a caller who merely opted into {@code sections}
+     * must still get {@code hunks}, {@code scope} and {@code files}.
+     */
+    private Optional<JsonValue> computeSections(ReviewScope scope, UnifiedDiff diff) {
+        try {
+            return Optional.of(ReviewToolCodec.sectionsToJson(
+                    Sections.of(diff, graphBuilder.apply(diff))));
+        } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, "review_scope: could not compute sections for scope "
+                    + scope.id() + "; omitting: " + e.getMessage(), e);
+            return Optional.empty();
+        }
     }
 
     /**
