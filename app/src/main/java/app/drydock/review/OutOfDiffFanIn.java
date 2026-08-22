@@ -69,7 +69,13 @@ public final class OutOfDiffFanIn {
     private static final Duration TIMEOUT = Duration.ofSeconds(30);
     private static final char FIELD_SEPARATOR = '\0';
 
-    /** One place {@code symbol} is used, outside the change. */
+    /**
+     * One place {@code symbol} is used, outside the change. {@code text} is
+     * kept exactly as {@code git grep} reports it, leading whitespace
+     * included -- deliberately, not a missed {@code .strip()}: the popover
+     * this feeds is showing a source line, and its original indentation is
+     * part of reading it, not noise to trim.
+     */
     public record Occurrence(String file, int line, String text) {
     }
 
