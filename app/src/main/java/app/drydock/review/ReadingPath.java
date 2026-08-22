@@ -41,11 +41,14 @@ import java.util.TreeSet;
  * ranked ahead of the kind order deliberately (§6.1): the kind order is what
  * the rank degrades to, not one of its signals.</p>
  *
- * <p>Not-a-leaf is, at file granularity, exactly "in-degree is zero", so the
- * signal ahead of it has already decided every case it could decide. It is
- * written out anyway because it is one of the four signals §6.2 names, and a
- * chain that reads like the spec is worth more than one comparator step
- * saved; see the task report for the finding.</p>
+ * <p>§6.2's fourth signal, not-a-leaf, is NOT in the chain. At file
+ * granularity a leaf is exactly in-degree zero, so the term ahead of it has
+ * already decided every case it could decide -- proved analytically and then
+ * empirically, by 300 generated diffs coming out byte-identical with it
+ * removed. A comparator step that cannot discriminate asserts a distinction
+ * that does not exist. It would become real only if "leaf" were redefined at
+ * unit level, where a cycle's members each have in-degree from inside the
+ * cycle while the unit as a whole is an endpoint.</p>
  *
  * <p><strong>Links are file-level.</strong> {@link SymbolScan.Symbol} does
  * not carry a line, so nothing here can tell which hunk of a file a symbol
@@ -160,7 +163,8 @@ public final class ReadingPath {
     /**
      * The entry-point rank (§6.2), as a TOTAL comparator over changed files:
      * fan-in from outside the change, then in-degree within it, then
-     * not-a-test, then not-a-leaf, then the kind order, then the path.
+     * not-a-test, then the kind order, then the path. §6.2's not-a-leaf is
+     * absent on purpose: see the class javadoc.
      *
      * <p>Counts are negated rather than reversed so the whole chain reads in
      * one direction: smaller is earlier.</p>
@@ -170,7 +174,6 @@ public final class ReadingPath {
                 .comparingInt((String file) -> -fanInByFile.getOrDefault(file, 0))
                 .thenComparingInt(file -> -graph.filesReferencing(file).size())
                 .thenComparingInt(file -> FallbackIntents.isTestPath(file) ? 1 : 0)
-                .thenComparingInt(file -> graph.filesReferencing(file).isEmpty() ? 1 : 0)
                 .thenComparingInt(
                         file -> FallbackIntents.readingOrder(FallbackIntents.kindOf(file)))
                 .thenComparing(Comparator.naturalOrder());
