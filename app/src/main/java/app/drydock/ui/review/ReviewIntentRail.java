@@ -1,5 +1,6 @@
 package app.drydock.ui.review;
 
+import app.drydock.review.ChangeGraph;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewVerdict;
 import app.drydock.ui.PanelHeader;
@@ -76,11 +77,10 @@ final class ReviewIntentRail extends VBox {
 
     /**
      * True while the grouping shown is provisional: a computed
-     * {@link app.drydock.review.ChangeGraph} is still building, and what is
-     * on screen is the (kind, directory) fallback the real grouping may
-     * still replace. Shown in the header's hint rather than silently, so a
-     * reviewer mid-read is not surprised by cards changing under them with
-     * no warning at all.
+     * {@link ChangeGraph} is still building, and what is on screen is the
+     * (kind, directory) fallback the real grouping may still replace. Shown
+     * in the header's hint rather than silently, so a reviewer mid-read is
+     * not surprised by cards changing under them with no warning at all.
      */
     private boolean groupingPending;
 
