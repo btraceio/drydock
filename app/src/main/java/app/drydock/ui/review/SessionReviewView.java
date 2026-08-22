@@ -326,6 +326,18 @@ public final class SessionReviewView extends BorderPane {
      */
     private final Map<String, Integer> graphGenerationByScope = new HashMap<>();
 
+    /**
+     * Set by {@link #close()}. A graph build already running when a view
+     * closes is left to finish -- there is no cancelling a virtual thread
+     * mid-parse -- but its completion must not still touch this view's state
+     * or post to the FX thread afterwards: a closed view's {@link
+     * SessionReviewView} instances pile up across a test suite (a fresh one
+     * per test method), and an unguarded completion queues a {@code
+     * Platform.runLater} for every one of them that outlives its own test,
+     * competing for the FX thread with whatever runs next.
+     */
+    private volatile boolean closed;
+
     /** The scopes this session offers, once {@link SessionReviewScopes} has measured them. */
     private Optional<SessionReviewScopes.Scopes> scopes = Optional.empty();
 
@@ -923,23 +935,34 @@ public final class SessionReviewView extends BorderPane {
         int generation = graphGenerationByScope.merge(scopeId, 1, Integer::sum);
         graphByScope.remove(scopeId);
         CompletableFuture.supplyAsync(() -> ChangeGraph.of(diff), SECTION_GRAPH_EXECUTOR)
-                .whenComplete((graph, failure) -> Platform.runLater(() -> {
-                    if (failure != null
-                            || !Objects.equals(graphGenerationByScope.get(scopeId), generation)) {
-                        // Either the parse failed -- in which case the
-                        // (kind, directory) fallback is the honest answer,
-                        // not a broken rail -- or a newer diff for this
-                        // scope started a second build before this one
-                        // finished, and publishing a graph for a diff no
-                        // longer on screen would be worse than the fallback
-                        // it displaced.
+                .whenComplete((graph, failure) -> {
+                    // Closed already: do not even queue FX work for it. A
+                    // closed view still building a graph is common under a
+                    // test suite -- a fresh view per test method -- and left
+                    // unguarded, every one of them posts to the FX thread
+                    // whenever its parse happens to finish, well after its
+                    // own test moved on.
+                    if (closed) {
                         return;
                     }
-                    graphByScope.put(scopeId, graph);
-                    if (selectedScope().map(scope -> scope.id().equals(scopeId)).orElse(false)) {
-                        refreshReviewState();
-                    }
-                }));
+                    Platform.runLater(() -> {
+                        if (closed || failure != null
+                                || !Objects.equals(graphGenerationByScope.get(scopeId), generation)) {
+                            // Either the parse failed -- in which case the
+                            // (kind, directory) fallback is the honest
+                            // answer, not a broken rail -- or a newer diff
+                            // for this scope started a second build before
+                            // this one finished, and publishing a graph for
+                            // a diff no longer on screen would be worse
+                            // than the fallback it displaced.
+                            return;
+                        }
+                        graphByScope.put(scopeId, graph);
+                        if (selectedScope().map(scope -> scope.id().equals(scopeId)).orElse(false)) {
+                            refreshReviewState();
+                        }
+                    });
+                });
     }
 
     /**
@@ -1770,6 +1793,7 @@ public final class SessionReviewView extends BorderPane {
      * OpenSessionTab.disposeNativeResources}.</p>
      */
     public void close() {
+        closed = true;
         mcpPanel.ifPresent(ReviewMcpActivityPanel::detach);
         intentRail.stopWidthAnimation();
         if (getScene() != null) {
