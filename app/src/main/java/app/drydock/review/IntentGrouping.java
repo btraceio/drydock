@@ -2,7 +2,12 @@ package app.drydock.review;
 
 import app.drydock.git.UnifiedDiff;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -106,12 +111,43 @@ public final class IntentGrouping {
         List<ReviewIntent> computed = new ArrayList<>();
         int number = 1;
         for (Sections.Section section : sections) {
-            computed.add(new ReviewIntent("computed:" + number, number,
+            computed.add(new ReviewIntent(computedId(section), number,
                     section.title(), ReviewIntent.Kind.CHANGE, ReviewIntent.Risk.NONE,
                     rationale(section), section.hunkIds(), Optional.empty(), false));
             number++;
         }
         return List.copyOf(computed);
+    }
+
+    /**
+     * The id one computed section is addressed by: derived from WHICH hunks
+     * it covers, never from where it happens to sit in the rail.
+     *
+     * <p>{@link Sections#of} orders sections topologically, so an edit
+     * elsewhere in the diff can shift a section's position in that order
+     * without changing what it is about. A positional {@code computed:N}
+     * id would then quietly re-point any verdict or finding recorded
+     * against {@code N} at a DIFFERENT section covering different hunks --
+     * worse than losing track of it, because nothing about the result looks
+     * wrong. Hashed over the section's own hunk ids instead, sorted so the
+     * identity is the SET of hunks, not the order {@link Sections} happened
+     * to read them in.</p>
+     */
+    private static String computedId(Sections.Section section) {
+        List<String> sorted = new ArrayList<>(section.hunkIds());
+        Collections.sort(sorted);
+        return "computed:" + sha256Hex(String.join("\n", sorted)).substring(0, 16);
+    }
+
+    private static String sha256Hex(String material) {
+        try {
+            MessageDigest sha = MessageDigest.getInstance("SHA-256");
+            return HexFormat.of().formatHex(sha.digest(material.getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException e) {
+            // SHA-256 is mandated by the platform; its absence is not a
+            // condition this application can meaningfully continue past.
+            throw new IllegalStateException("SHA-256 unavailable", e);
+        }
     }
 
     /**
