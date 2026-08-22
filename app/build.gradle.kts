@@ -130,6 +130,24 @@ dependencies {
     implementation("org.jetbrains.pty4j:pty4j:0.13.10")
     runtimeOnly("org.slf4j:slf4j-jdk14:2.0.13")
 
+    // Structural parsing for the Review board's change graph (docs/superpowers/
+    // specs/2026-08-22-review-navigation-design.md §10). The core artifact
+    // bundles aarch64/x86_64 macOS, x86_64 Windows and both Linux natives --
+    // exactly the platforms this app supports -- and extracts the matching one
+    // to ~/.tree-sitter/tree-sitter-lib/ on first use. A grammar missing from
+    // the classpath is the lexical path (GrammarRegistry), not an error, so
+    // this list is a packaging decision and may differ per artifact.
+    implementation("io.github.bonede:tree-sitter:0.25.3")
+    implementation("io.github.bonede:tree-sitter-java:0.23.4")
+    implementation("io.github.bonede:tree-sitter-kotlin:0.3.8.1")
+    implementation("io.github.bonede:tree-sitter-python:0.23.4")
+    implementation("io.github.bonede:tree-sitter-javascript:0.23.1")
+    implementation("io.github.bonede:tree-sitter-typescript:0.23.2")
+    implementation("io.github.bonede:tree-sitter-go:0.23.3")
+    implementation("io.github.bonede:tree-sitter-rust:0.23.1")
+    implementation("io.github.bonede:tree-sitter-c:0.23.2")
+    implementation("io.github.bonede:tree-sitter-cpp:0.23.4")
+
     testImplementation(platform("org.junit:junit-bom:5.11.4"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
