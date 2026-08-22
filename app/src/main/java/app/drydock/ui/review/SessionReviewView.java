@@ -6,6 +6,7 @@ import app.drydock.git.UnifiedDiff;
 import app.drydock.mcp.McpActivityLog;
 import app.drydock.review.BaseMove;
 import app.drydock.review.ChangeGraph;
+import app.drydock.review.HunkDigest;
 import app.drydock.review.IntentGrouping;
 import app.drydock.review.IntentHunks;
 import app.drydock.review.OutOfDiffFanIn;
@@ -285,8 +286,8 @@ public final class SessionReviewView extends BorderPane {
 
     /**
      * What {@code a} / {@code r} / {@code u} act on (spec §9.6). Reading is
-     * per hunk; settling usually is not, so one key needs three possible
-     * targets rather than three keys needing one each.
+     * per hunk; settling usually is not, so one key needs several possible
+     * targets rather than one key needing one each.
      */
     enum SettleUnit {
         /** The rail has focus: every hunk of the current section, as before this task. */
@@ -294,7 +295,17 @@ public final class SessionReviewView extends BorderPane {
         /** The diff column has focus: just the hunk it is anchored on. */
         HUNK,
         /** {@code ⇧A} / {@code ⇧R}: every hunk of the current file, regardless of focus. */
-        FILE
+        FILE,
+        /**
+         * PATH mode is showing (Task 18): exactly the row selected there,
+         * regardless of where real Scene focus is. Unlike {@code HUNK} --
+         * which settles a SECTION's next unread hunk, never literally the
+         * one under the pointer (see {@code ReviewVerdictBar#unitWord}) --
+         * this settles the literal hunk the rail is displaying, because a
+         * reader looking at one specific row and pressing {@code a} must not
+         * have something else entirely recorded.
+         */
+        PATH_STEP
     }
 
     private final Host host;
@@ -516,6 +527,21 @@ public final class SessionReviewView extends BorderPane {
      * approval or under-clear a whole-file one.
      */
     private List<String> lastSettledDigests = List.of();
+
+    /**
+     * Whether {@link #lastSettledDigests} was recorded by {@link
+     * #pathVerdictAction} rather than {@link #verdictAction}'s intents-mode
+     * branch -- {@code u} has to know which of the two to undo through,
+     * since a step has no {@code id} the way an intent does (a step's own
+     * identity is its hunk id, tracked in {@link #lastSettledPathHunkId}
+     * instead). Set at the moment a verdict actually took, not read from
+     * {@link #pathMode} at undo time: pressing {@code p} between settling
+     * and undoing must not change which of the two {@code u} reaches for.
+     */
+    private boolean lastSettledWasPath;
+
+    /** PATH mode's counterpart to {@link #lastSettledIntentId}: the exact step {@code u} snaps back to. */
+    private Optional<String> lastSettledPathHunkId = Optional.empty();
 
     /** Set by {@code m}/{@code f}; remembered independently of the responsive collapse. */
     private boolean marginCollapsedByUser;
@@ -874,6 +900,8 @@ public final class SessionReviewView extends BorderPane {
         // intent in the WRONG scope.
         lastSettledIntentId = Optional.empty();
         lastSettledDigests = List.of();
+        lastSettledPathHunkId = Optional.empty();
+        lastSettledWasPath = false;
         // The cursor is reset BEFORE the body is built, which the destination
         // did the other way round: a cached diff publishes Loaded
         // synchronously from inside bodyFor, and the diff-resolved handler
@@ -1464,6 +1492,14 @@ public final class SessionReviewView extends BorderPane {
      * that kind of staleness.</p>
      */
     SettleUnit settleUnit() {
+        // PATH mode wins outright, regardless of focus: the whole point of
+        // the mode is that the reader is looking at one specific hunk, and
+        // "focus happens to be elsewhere" must not silently widen what a/r/u
+        // touch back out to a whole section the reader never opened -- see
+        // the CRITICAL fix this constant carries (Task 18 follow-up).
+        if (pathMode) {
+            return SettleUnit.PATH_STEP;
+        }
         return isDescendantOf(getScene() == null ? null : getScene().getFocusOwner(), diffColumn)
                 ? SettleUnit.HUNK
                 : SettleUnit.SECTION;
@@ -1792,6 +1828,16 @@ public final class SessionReviewView extends BorderPane {
     private final class VerdictHost implements ReviewVerdictBar.Host {
         @Override
         public void approve(ReviewIntent intent, SettleUnit unit) {
+            // The verdict bar's own Approve button, not just the keyboard:
+            // AGENTS.md requires a shortcut to have a working button
+            // equivalent, and vice versa, so a click here must settle
+            // exactly what `a` does -- the selected PATH row, never
+            // whatever `intent`/`unit` the bar's own (intents-cursor-driven)
+            // render happened to capture.
+            if (pathMode) {
+                pathVerdictAction(ReviewVerdict.Decision.APPROVED, false);
+                return;
+            }
             selectedScope().ifPresent(scope -> host.setVerdict(scope, intent,
                     digestsForAction(intent, unit, false), Optional.of(ReviewVerdict.Decision.APPROVED),
                     blockingFindingOpen(scope, intent)));
@@ -1799,6 +1845,10 @@ public final class SessionReviewView extends BorderPane {
 
         @Override
         public void requestChanges(ReviewIntent intent, SettleUnit unit) {
+            if (pathMode) {
+                pathVerdictAction(ReviewVerdict.Decision.CHANGES, false);
+                return;
+            }
             selectedScope().ifPresent(scope -> host.setVerdict(scope, intent,
                     digestsForAction(intent, unit, false), Optional.of(ReviewVerdict.Decision.CHANGES),
                     blockingFindingOpen(scope, intent)));
@@ -2082,6 +2132,15 @@ public final class SessionReviewView extends BorderPane {
      *                  regardless of what has focus
      */
     private void verdictAction(ReviewVerdict.Decision decision, boolean wholeFile) {
+        if (pathMode) {
+            // PATH mode must settle what it shows, never whatever the
+            // intents-mode cursor happens to be sitting on -- the CRITICAL
+            // fix this branch carries. digestsForAction/SectionStates are
+            // deliberately not reached here: they derive digests from an
+            // INTENT, and the whole point is that a PATH row is not one.
+            pathVerdictAction(decision, wholeFile);
+            return;
+        }
         Optional<ReviewScope> scope = selectedScope();
         Optional<ReviewIntent> intent = currentIntent();
         if (scope.isEmpty() || intent.isEmpty()) {
@@ -2098,11 +2157,68 @@ public final class SessionReviewView extends BorderPane {
         if (!applied) {
             return;
         }
+        lastSettledWasPath = false;
         lastSettledIntentId = Optional.of(intent.get().id());
         lastSettledDigests = digests;
         if (decisionOf(intent.get()).filter(decision::equals).isPresent()) {
             nextUnsettledIntent();
         }
+    }
+
+    /**
+     * PATH mode's {@code a}/{@code r} (and the verdict bar's own buttons,
+     * routed here the same way -- see {@link VerdictHost}): settles exactly
+     * the selected row's one hunk, or every hunk of its file for {@code
+     * wholeFile} ({@code ⇧A}/{@code ⇧R}). {@code host.setVerdict} takes an
+     * intent purely as a label/blocking-check key (verdicts themselves are
+     * keyed {@code (scopeId, hunkDigest)}, never by intent), so a throwaway
+     * single-hunk {@link ReviewIntent} is exactly as valid a key as a real
+     * one -- see {@link #pathStepAsIntent}.
+     */
+    private void pathVerdictAction(ReviewVerdict.Decision decision, boolean wholeFile) {
+        Optional<ReviewScope> scope = selectedScope();
+        Optional<UnifiedDiff> diff = loadedDiff();
+        List<ReadingPath.Step> steps = currentPath().steps();
+        if (scope.isEmpty() || diff.isEmpty() || steps.isEmpty()) {
+            return;
+        }
+        ReadingPath.Step step = steps.get(Math.clamp(pathIndex, 0, steps.size() - 1));
+        ReviewIntent synthetic = pathStepAsIntent(step);
+        List<String> digests = wholeFile
+                ? digestsOfFileInDiff(diff.get(), step.file())
+                : digestOfPathStep(diff.get(), step).map(List::of).orElse(List.of());
+        if (digests.isEmpty()) {
+            return;
+        }
+        host.setVerdict(scope.get(), synthetic, digests, Optional.of(decision),
+                blockingFindingOpen(scope.get(), synthetic));
+        boolean applied = digests.stream().allMatch(digest -> host.verdict(scope.get(), digest)
+                .filter(v -> v.decision() == decision).isPresent());
+        if (!applied) {
+            return;
+        }
+        lastSettledWasPath = true;
+        lastSettledPathHunkId = Optional.of(step.hunkId());
+        lastSettledDigests = digests;
+        // Every digest just written now reads as `decision` (that is what
+        // `applied` just confirmed), so this row is as settled as it is
+        // ever going to be from this one keypress -- advance the same way
+        // verdictAction's intents-mode branch does.
+        nextUnsettledPathStep();
+    }
+
+    /** Every hunk digest of {@code file}, across the whole {@code diff} -- what {@code ⇧A}/{@code ⇧R} settle in PATH mode. */
+    private static List<String> digestsOfFileInDiff(UnifiedDiff diff, String file) {
+        for (UnifiedDiff.FileDiff candidate : diff.files()) {
+            if (candidate.path().equals(file)) {
+                List<String> digests = new ArrayList<>();
+                for (UnifiedDiff.Hunk hunk : candidate.hunks()) {
+                    digests.add(HunkDigest.of(file, hunk));
+                }
+                return digests;
+            }
+        }
+        return List.of();
     }
 
     /**
@@ -2120,6 +2236,10 @@ public final class SessionReviewView extends BorderPane {
      * than reaching for an unrelated intent's verdict.
      */
     private void undoVerdict() {
+        if (lastSettledWasPath) {
+            undoPathVerdict();
+            return;
+        }
         Optional<ReviewScope> scope = selectedScope();
         if (scope.isEmpty() || lastSettledIntentId.isEmpty() || lastSettledDigests.isEmpty()) {
             return;
@@ -2147,6 +2267,41 @@ public final class SessionReviewView extends BorderPane {
         intentIndex = index;
         refreshReviewState();
         revealCurrentIntent();
+    }
+
+    /**
+     * PATH mode's {@code u}: the counterpart to {@link #undoVerdict}'s
+     * intents-mode body, keyed by {@link #lastSettledPathHunkId} rather than
+     * an intent id -- a step has no id of its own, only its (stable) hunk
+     * id.
+     */
+    private void undoPathVerdict() {
+        Optional<ReviewScope> scope = selectedScope();
+        if (scope.isEmpty() || lastSettledPathHunkId.isEmpty() || lastSettledDigests.isEmpty()) {
+            return;
+        }
+        List<ReadingPath.Step> steps = currentPath().steps();
+        int index = -1;
+        for (int i = 0; i < steps.size(); i++) {
+            if (steps.get(i).hunkId().equals(lastSettledPathHunkId.get())) {
+                index = i;
+                break;
+            }
+        }
+        List<String> digests = lastSettledDigests;
+        ReadingPath.Step target = index >= 0 ? steps.get(index) : null;
+        lastSettledPathHunkId = Optional.empty();
+        lastSettledDigests = List.of();
+        lastSettledWasPath = false;
+        if (index < 0) {
+            // The path changed under us (a re-diff landed a new graph) and
+            // the step this would have undone no longer exists.
+            return;
+        }
+        host.setVerdict(scope.get(), pathStepAsIntent(target), digests, Optional.empty(), false);
+        pathIndex = index;
+        refreshReviewState();
+        revealCurrentPathStep();
     }
 
     /**

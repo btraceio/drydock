@@ -347,6 +347,11 @@ final class ReviewVerdictBar extends VBox {
             case HUNK -> "next unread hunk";
             case SECTION -> "section";
             case FILE -> "file";
+            // PATH mode: literally the row on screen, never a hunt through
+            // a section -- distinct wording from HUNK on purpose, since HUNK
+            // promises "the next unread one," a promise this case does not
+            // make or need.
+            case PATH_STEP -> "hunk";
         };
     }
 
