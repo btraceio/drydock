@@ -366,7 +366,7 @@ class McpToolRouterReviewTest {
     void reviewStateReportsVerdictsFindingsAndSubmission() throws Exception {
         context.annotations.add(finding("f1", Severity.BLOCKING));
         context.verdicts.add(new ReviewVerdict(SCOPE, "i1", ReviewVerdict.Decision.CHANGES,
-                Optional.of("needs a test"), Instant.EPOCH));
+                Optional.of("needs a test"), Instant.EPOCH, "base-1", "head-1"));
         context.submitted.add(SCOPE);
 
         JsonValue result = router.call(caller, "review_state", args("scopeId", SCOPE));

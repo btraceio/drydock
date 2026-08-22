@@ -86,7 +86,7 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
     void aSettledIntentFitsAsWell() {
         show(intent(2, "drydock/review · 4 files"),
                 Optional.of(new ReviewVerdict("rs_x", "auto:2", ReviewVerdict.Decision.APPROVED,
-                        Optional.empty(), java.time.Instant.EPOCH)));
+                        Optional.empty(), java.time.Instant.EPOCH, "base-1", "head-1")));
 
         assertNothingTruncated();
     }
