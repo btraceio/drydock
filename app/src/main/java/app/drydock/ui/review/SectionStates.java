@@ -78,6 +78,16 @@ final class SectionStates {
      *              rule {@link #settledHunkCount} applies globally, so a
      *              card's own "n/total" and the verdict bar's progress line
      *              cannot disagree about what is actually settled
+     * @param recordedHunks how many of its hunks carry ANY verdict at all,
+     *              stale or not (Task 18 follow-up, correction 6a). A section
+     *              with one stale-approved hunk and one genuinely unread one
+     *              has {@code settledHunks() == 0} -- correct for "is this
+     *              settled" -- but a card that reads NOTHING at all still
+     *              understates what happened: one hunk WAS recorded, it is
+     *              only its freshness in question, and {@code ⚠ base moved}
+     *              is the only thing on the card that says so. This is what
+     *              the progress LABEL reads instead, so "1/2 hunks" survives
+     *              a stale hunk the way the numeric decision does not have to.
      * @param totalHunks how many hunks it covers at all
      * @param staleness whether a base move since a verdict could have changed
      *              what was approved
@@ -89,8 +99,8 @@ final class SectionStates {
      *              which must not be mistaken for a section nobody has read
      */
     record SectionState(Optional<ReviewVerdict.Decision> decision, int settledHunks,
-                        int totalHunks, Staleness staleness, List<String> settledElsewhere,
-                        boolean hunksMissing) {
+                        int recordedHunks, int totalHunks, Staleness staleness,
+                        List<String> settledElsewhere, boolean hunksMissing) {
 
         SectionState {
             settledElsewhere = List.copyOf(settledElsewhere);
@@ -103,7 +113,7 @@ final class SectionStates {
          * not the same claim.
          */
         static SectionState unknown() {
-            return new SectionState(Optional.empty(), 0, 0, Staleness.UNKNOWN, List.of(), false);
+            return new SectionState(Optional.empty(), 0, 0, 0, Staleness.UNKNOWN, List.of(), false);
         }
 
         /**
@@ -114,7 +124,7 @@ final class SectionStates {
          * and would otherwise refuse Submit forever with no visible reason.
          */
         static SectionState notInDiff() {
-            return new SectionState(Optional.empty(), 0, 0, Staleness.FRESH, List.of(), true);
+            return new SectionState(Optional.empty(), 0, 0, 0, Staleness.FRESH, List.of(), true);
         }
     }
 
@@ -305,10 +315,12 @@ final class SectionStates {
         Set<String> elsewhere = new LinkedHashSet<>();
         Staleness staleness = Staleness.FRESH;
         int settled = 0;
+        int recorded = 0;
         for (String digest : digests) {
             Optional<ReviewVerdict> verdict = host.verdict(board.scope(), digest);
             perHunk.add(verdict);
             if (verdict.isPresent()) {
+                recorded++;
                 // MOVED outranks UNKNOWN outranks FRESH: one hunk known to
                 // have moved is the strongest thing true of the section.
                 Staleness hunk = stalenessOf(board, verdict.get(), base, files);
@@ -323,14 +335,17 @@ final class SectionStates {
                 // settledHunkCount applies globally (spec §9.2). Without
                 // this a card could read "3/3 hunks" while the verdict
                 // bar's own progress line, one floor up, read "2/3" for
-                // the identical section.
+                // the identical section. recordedHunks is the escape hatch:
+                // it counts this hunk anyway, so the card's PROSE progress
+                // label does not understate to zero just because the one
+                // thing it has to say is stale (spec correction 6a).
                 if (hunk != Staleness.MOVED) {
                     settled++;
                 }
                 collectSharingSections(board, digest, intent, elsewhere);
             }
         }
-        return new SectionState(VerdictMerge.derive(perHunk), settled, digests.size(),
+        return new SectionState(VerdictMerge.derive(perHunk), settled, recorded, digests.size(),
                 staleness, List.copyOf(elsewhere), false);
     }
 
@@ -376,13 +391,25 @@ final class SectionStates {
     }
 
     /**
-     * The marks of the OTHER sections sharing {@code digest}, so a count that
-     * advanced without the reader touching this card is explained.
+     * The mark of the FIRST other section sharing {@code digest} (in rail
+     * order), so a count that advanced without the reader touching this card
+     * is explained.
      *
      * <p>Not conditioned on the sibling being fully settled. A sibling that
      * settled one shared hunk moves this card's count by exactly as much as a
      * fully settled one does, and leaving that case unmarked solves the
      * "state changing on its own" problem only for the easy half of it.</p>
+     *
+     * <p><strong>Named at most once, never every sharer</strong> (spec
+     * correction 6b). A verdict is keyed {@code (scopeId, hunkDigest)} alone
+     * -- nothing records WHICH section's card the reader actually settled it
+     * through -- so with three or more sections sharing one hunk there is no
+     * way to single out the one that "reviewed" it; naming all of them
+     * credited sections that, as far as this model can tell, reviewed
+     * nothing. Stopping at the first candidate is the fix this can honestly
+     * make without inventing provenance a verdict does not carry: with
+     * exactly one other sharer -- every case this class is tested against
+     * today -- it names that same one section as before.</p>
      */
     private void collectSharingSections(Board board, String digest, ReviewIntent self,
                                         Set<String> into) {
@@ -392,6 +419,7 @@ final class SectionStates {
             }
             if (digestsOf(board, other).contains(digest)) {
                 into.add(sectionMark(other.number()));
+                return;
             }
         }
     }
