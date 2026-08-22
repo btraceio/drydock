@@ -2004,6 +2004,17 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         }
 
         @Override
+        public void confirmStillGood(ReviewScope scope, List<String> hunkDigests) {
+            ReviewBaseline baseline = baselineOf(scope);
+            Instant now = Instant.now();
+            for (String digest : hunkDigests) {
+                annotationStore.verdict(scope.id(), digest).ifPresent(verdict ->
+                        annotationStore.putVerdict(
+                                verdict.confirmedAgainst(baseline.base(), baseline.head(), now)));
+            }
+        }
+
+        @Override
         public String currentBase(ReviewScope scope) {
             return baselineOf(scope).base();
         }

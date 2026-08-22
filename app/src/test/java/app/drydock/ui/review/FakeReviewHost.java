@@ -141,6 +141,15 @@ final class FakeReviewHost implements SessionReviewView.Host {
     }
 
     @Override
+    public void confirmStillGood(ReviewScope scope, List<String> hunkDigests) {
+        Instant now = Instant.now();
+        for (String digest : hunkDigests) {
+            store.verdict(scope.id(), digest).ifPresent(verdict ->
+                    store.putVerdict(verdict.confirmedAgainst(baseCommit, headCommit, now)));
+        }
+    }
+
+    @Override
     public String currentBase(ReviewScope scope) {
         return baseCommit;
     }

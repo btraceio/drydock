@@ -1,6 +1,7 @@
 package app.drydock.ui.review;
 
 import app.drydock.review.ReviewIntent;
+import app.drydock.review.ReviewVerdict;
 
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
@@ -93,6 +94,66 @@ class ReviewIntentRailCardHeightTest extends ApplicationTest {
         double height = cardHeights().get(0);
         assertTrue(height < SANE_CARD_HEIGHT,
                 "the only card is " + Math.round(height) + "px tall; " + diagCard());
+    }
+
+    // ---- Task 6's three new card elements, at the narrow rail width --------
+
+    /**
+     * The gate that closed Phase 1 found these three -- the settled-
+     * elsewhere marker, the adrift message and the stale banner -- with
+     * presence coverage but no fit coverage at either rail width. All three
+     * are {@code wrapText} labels, so "fit" here means what this class
+     * already measures: a sane card height, not the hundreds of pixels a
+     * label wrapped at zero width produces (see the class javadoc).
+     */
+    @Test
+    void theSettledElsewhereMarkerNamingSeveralSectionsFitsAtNarrowWidth() {
+        narrow();
+        rail.setSectionStateLookup(intent -> new SectionStates.SectionState(
+                Optional.empty(), 1, 3, SectionStates.Staleness.FRESH,
+                List.of("①", "②", "③", "④", "⑤"), false));
+        showIntents(List.of(intent(1, "guards.h", ReviewIntent.Kind.CHANGE, "shared hunk")));
+
+        assertSaneHeight(cardHeights().get(0));
+    }
+
+    @Test
+    void theAdriftMessageFitsAtNarrowWidth() {
+        narrow();
+        rail.setSectionStateLookup(intent -> SectionStates.SectionState.notInDiff());
+        showIntents(List.of(intent(1, "profiler.cpp", ReviewIntent.Kind.CHANGE, "")));
+
+        assertSaneHeight(cardHeights().get(0));
+    }
+
+    @Test
+    void theStaleBannerFitsAtNarrowWidth() {
+        narrow();
+        rail.setSectionStateLookup(intent -> new SectionStates.SectionState(
+                Optional.of(ReviewVerdict.Decision.APPROVED), 2, 2,
+                SectionStates.Staleness.MOVED, List.of(), false));
+        showIntents(List.of(intent(1, "guards.h", ReviewIntent.Kind.CHANGE, "")));
+
+        assertSaneHeight(cardHeights().get(0));
+    }
+
+    /**
+     * Sets the rail's resolved width directly to {@link
+     * ReviewIntentRail#NARROW_WIDTH} rather than through {@code setNarrow},
+     * whose collapse/expand path animates over 160ms -- this needs the
+     * width in place before the very first layout, not 160ms after it.
+     */
+    private void narrow() {
+        interact(() -> {
+            rail.setMinWidth(ReviewIntentRail.NARROW_WIDTH);
+            rail.setPrefWidth(ReviewIntentRail.NARROW_WIDTH);
+            rail.setMaxWidth(ReviewIntentRail.NARROW_WIDTH);
+        });
+    }
+
+    private void assertSaneHeight(double height) {
+        assertTrue(height > 0 && height < SANE_CARD_HEIGHT,
+                "card is " + Math.round(height) + "px tall; cards are tens of pixels, not hundreds");
     }
 
     // ---- helpers --------------------------------------------------------
