@@ -646,6 +646,31 @@ not count toward "everything settled", so the review cannot be submitted on
 it — through `ReviewVerdictBar`'s existing `submitRefusalLabel`, which is
 already the mechanism for "you cannot submit yet, and here is why".
 
+**Only when the base move could matter.** Marking stale on *any* base move
+treats "main advanced by seven commits in an unrelated subsystem"
+identically to "main advanced by a commit rewriting a function this hunk
+calls". Only the second can invalidate a reading, and on an active repository
+the first is the overwhelming majority.
+
+So the base delta is intersected before anything is marked: one
+`git diff --name-only <old>..<new>` through `ProcessRunner`, against the
+scope's own files **and** the files declaring symbols the scope's hunks
+reference — the same unique-name rule and the same graph §4.2 already
+produces. An empty intersection updates the recorded base and marks nothing.
+
+Two ways this is deliberately imprecise, both erring the same way:
+
+- If the old base cannot be resolved — a force-push, a garbage-collected
+  commit — everything is marked stale. Failing to the safe side is the only
+  defensible default for a signal about what was read.
+- The intersection is file-level and lexical. A base change that alters
+  behaviour without touching a file this scope names or references will not
+  mark anything, which is §4.3's boundary reappearing: drydock does not index
+  the repository, so it cannot see that far.
+
+This narrows when the mark fires. It does not fix what happens when it fires
+often anyway — see §14.
+
 Deleting them instead was considered and rejected: a rebase is routine, and a
 tool that discards a forty-hunk review every time the base branch advances
 teaches reviewers not to mark anything, which costs more than it protects.
@@ -907,12 +932,23 @@ In the running app, with screenshots rather than assertions about them:
   fuzzier anchor, buys comfort by risking the one outcome §9.2 refuses, so
   the strictness is chosen rather than accepted. Whether to normalise
   whitespace before digesting is left open (§15).
-- **Staleness could become noise on an active base.** A scope whose base
-  branch moves several times a day will mark verdicts stale repeatedly, and a
-  *confirm still good* button clicked reflexively is worth less than no
-  button. The mitigation is that staleness is per-scope and one click, not
-  per-hunk — but if the base moves faster than the review is read, the signal
-  degrades, and nothing here prevents that.
+- **Staleness noise has no solution, and this is accepted rather than
+  mitigated.** A reviewer working in a hot area will be marked stale
+  repeatedly and will learn to click *confirm still good* without reading,
+  at which point the mark is worth less than no mark. The relevance filter
+  (§9.2) narrows *when* it fires; it cannot change what a human does when it
+  fires often anyway, and no arrangement of this feature can — the signal's
+  value comes from being rare, and whether it is rare is a property of the
+  repository, not of the design.
+
+  What follows from accepting it has to be said rather than left implied:
+  **submit-blocking rests on a signal that degrades exactly where it matters
+  most.** In a fast-moving area — the area most likely to invalidate a
+  reading — reflexive confirmation is the expected behaviour, so a blocked
+  submit is theatre precisely there. The block is kept because it is right in
+  the ordinary case and because the alternative is silence, but it is not a
+  guarantee, and nothing else in this design may be built on the assumption
+  that a confirmed verdict was re-read.
 
 ## 15. Open items
 
