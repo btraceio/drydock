@@ -176,6 +176,28 @@ class SectionStatesTest {
                 sections.stateOf(board, board.sections().get(0)).staleness());
     }
 
+    /**
+     * Same exclusion {@link #settledHunkCount} applies globally, one layer
+     * down: a card's own "n/total" must not count a stale hunk either, or
+     * the card could read fully settled while the verdict bar's progress
+     * line, for the SAME hunks, read one short of it (coordinator's review).
+     * The DECISION still merges the stale verdict -- only the numeric count
+     * excludes it.
+     */
+    @Test
+    void settledHunksExcludesAStaleOneButTheDecisionStillMergesIt() {
+        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
+        SectionStates.Board board = overlapping();
+        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
+        approve(GUARDS_CPP);
+
+        SectionStates.SectionState state = sections.stateOf(board, board.sections().get(0));
+        assertEquals(1, state.settledHunks(), "the stale GUARDS_H verdict must not be counted");
+        assertEquals(2, state.totalHunks());
+        assertEquals(Optional.of(ReviewVerdict.Decision.APPROVED), state.decision(),
+                "the decision persists across staleness -- only its freshness is in question");
+    }
+
     /** A move that provably could not matter must not spend the reader's attention. */
     @Test
     void aBaseMoveElsewhereIsFresh() {

@@ -314,6 +314,26 @@ class ReviewHunkProgressTest extends ApplicationTest {
                 .findFirst().orElse("<no nav hint>");
     }
 
+    /**
+     * Same bug as {@link #theProgressLineExcludesAStaleHunk}, one layer up
+     * (coordinator's review): {@link SectionStates#stateOf} used to count a
+     * stale verdict toward its OWN section's "n/total", so a card could
+     * read fully settled while the verdict bar's global progress line, for
+     * the identical hunks, read one short of it.
+     */
+    @Test
+    void theRailCardsOwnCountExcludesAStaleHunkTooNotJustTheBar() {
+        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
+        showOverlappingSections();
+        recordAgainstBase(GUARDS_H, "0".repeat(40));
+        approve(GUARDS_CPP);
+
+        SectionStates.SectionState state = view.diagSectionState(0);
+        assertEquals(1, state.settledHunks(),
+                "section ①'s own count must exclude the stale GUARDS_H verdict, same as the bar's");
+        assertEquals(2, state.totalHunks());
+    }
+
     // ---- a grouping that drifted off the diff -------------------------------
 
     /**
