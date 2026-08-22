@@ -29,7 +29,7 @@ class RepositoryPullRequestsTest {
 
     private static WorktreeService.Worktree worktree(String path, String branch) {
         return new WorktreeService.Worktree(Path.of(path), Optional.of(branch),
-                false, false, false, false, Optional.empty());
+                false, false, false, false, Optional.empty(), false);
     }
 
     @Test

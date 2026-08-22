@@ -9,9 +9,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -68,7 +70,17 @@ public final class WorktreeService implements AutoCloseable {
      * {@code git worktree add} on that branch.
      */
     public record Worktree(Path path, Optional<String> branch, boolean mainCheckout, boolean detached,
-                           boolean prunable, boolean locked, Optional<String> lockReason) {
+                           boolean prunable, boolean locked, Optional<String> lockReason, boolean merged) {
+
+        /**
+         * Reconstructs this worktree with a different {@code merged} flag;
+         * every other field is carried unchanged. Used by {@code listBlocking}
+         * to stamp merge-ness (computed from the main checkout's branch)
+         * onto the pure {@code parse} result.
+         */
+        public Worktree withMerged(boolean newMerged) {
+            return new Worktree(path, branch, mainCheckout, detached, prunable, locked, lockReason, newMerged);
+        }
     }
 
     /**
@@ -142,7 +154,72 @@ public final class WorktreeService implements AutoCloseable {
             }
             throw new GitCommandFailedException(command, result.exitCode(), ProcessRunner.excerpt(result.stderr()));
         }
-        return parse(result.stdout());
+        return stampMerged(git, repositoryRoot, parse(result.stdout()));
+    }
+
+    /**
+     * Marks each non-main worktree whose branch is reachable from the main
+     * checkout's branch as {@link Worktree#merged() merged}, so the sidebar's
+     * stale bucket can offer them for the Clean action. A merged branch is one
+     * whose tip is an ancestor of the base; {@code git branch --merged <base>}
+     * lists exactly those. Best-effort: a detached main checkout (no base),
+     * an unknown base, or any git failure yields no merged marks -- the
+     * worktree simply stays in the open bucket rather than failing
+     * discovery.
+     */
+    private static List<Worktree> stampMerged(Path git, Path repositoryRoot, List<Worktree> parsed) {
+        if (parsed.isEmpty()) {
+            return parsed;
+        }
+        Optional<String> base = parsed.get(0).branch();
+        if (base.isEmpty() || base.get().isBlank()) {
+            return parsed;
+        }
+        Set<String> merged = mergedBranchesBlocking(git, repositoryRoot, base.get());
+        if (merged.isEmpty()) {
+            return parsed;
+        }
+        List<Worktree> stamped = new ArrayList<>();
+        for (Worktree worktree : parsed) {
+            boolean isMerged = !worktree.mainCheckout()
+                    && worktree.branch().isPresent()
+                    && merged.contains(worktree.branch().get());
+            stamped.add(isMerged ? worktree.withMerged(true) : worktree);
+        }
+        return List.copyOf(stamped);
+    }
+
+    /**
+     * Runs {@code git branch --merged <base>} and returns the branch names
+     * whose tips are reachable from {@code base}. Returns an empty set for
+     * any failure (unknown base, git unavailable, non-zero exit) so a bad
+     * call degrades to "nothing merged" rather than failing the whole
+     * worktree list.
+     */
+    private static Set<String> mergedBranchesBlocking(Path git, Path repositoryRoot, String base) {
+        List<String> command = List.of(
+                git.toString(), "-C", repositoryRoot.toString(),
+                "branch", "--merged", "--end-of-options", base);
+        ProcessResult result;
+        try {
+            result = run(command);
+        } catch (RuntimeException e) {
+            return Set.of();
+        }
+        if (result.exitCode() != 0) {
+            return Set.of();
+        }
+        Set<String> merged = new HashSet<>();
+        for (String line : result.stdout().split("\n", -1)) {
+            String name = line.strip();
+            if (name.startsWith("* ")) {
+                name = name.substring(2).strip();
+            }
+            if (!name.isEmpty() && !name.contains(" ")) {
+                merged.add(name);
+            }
+        }
+        return merged;
     }
 
     /**
@@ -710,7 +787,7 @@ public final class WorktreeService implements AutoCloseable {
             String line = rawLine.strip();
             if (line.isEmpty()) {
                 if (path != null && !bare) {
-                    worktrees.add(new Worktree(path, branch, worktrees.isEmpty(), detached, prunable, locked, lockReason));
+                    worktrees.add(new Worktree(path, branch, worktrees.isEmpty(), detached, prunable, locked, lockReason, false));
                 }
                 path = null;
                 branch = Optional.empty();
@@ -738,7 +815,7 @@ public final class WorktreeService implements AutoCloseable {
             }
         }
         if (path != null && !bare) {
-            worktrees.add(new Worktree(path, branch, worktrees.isEmpty(), detached, prunable, locked, lockReason));
+            worktrees.add(new Worktree(path, branch, worktrees.isEmpty(), detached, prunable, locked, lockReason, false));
         }
         return List.copyOf(worktrees);
     }

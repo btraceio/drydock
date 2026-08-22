@@ -29,12 +29,12 @@ class SidebarChildrenTest {
     private static final Path ROOT = Path.of("/repo");
 
     private static Worktree main() {
-        return new Worktree(ROOT, Optional.of("main"), true, false, false, false, Optional.empty());
+        return new Worktree(ROOT, Optional.of("main"), true, false, false, false, Optional.empty(), false);
     }
 
     private static Worktree wt(String branch, boolean detached, boolean prunable, boolean locked) {
         return new Worktree(Path.of("/wt/" + (branch == null ? "x" : branch)),
-                Optional.ofNullable(branch), false, detached, prunable, locked, Optional.empty());
+                Optional.ofNullable(branch), false, detached, prunable, locked, Optional.empty(), false);
     }
 
     private static ManagedAgentSession session(String name, Path worktreeRoot,
@@ -111,6 +111,31 @@ class SidebarChildrenTest {
     }
 
     @Test
+    void staleRule_mergedBranchNoSession_isStale() {
+        // A worktree whose branch is already merged into the base is stale --
+        // its work is in the base, so the Clean action can offer to remove it.
+        SidebarChildren result = SidebarChildren.classify(
+                List.of(main(), wt("merged", false, false, false).withMerged(true)),
+                List.of(), noActivity());
+        assertEquals(1, result.staleWorktrees().size());
+        assertTrue(result.openWorktrees().stream().noneMatch(w -> !w.mainCheckout()));
+    }
+
+    @Test
+    void staleRule_mergedWithSession_neverStale_staysASession() {
+        // A session-backed worktree is never stale, even if its branch is
+        // merged -- the session owns the row.
+        ManagedAgentSession onMerged = session("onmerged", Path.of("/wt/merged"),
+                SessionStatus.RUNNING, Instant.ofEpochSecond(10));
+        SidebarChildren result = SidebarChildren.classify(
+                List.of(main(), wt("merged", false, false, false).withMerged(true)),
+                List.of(onMerged), noActivity());
+        assertTrue(result.staleWorktrees().isEmpty());
+        assertEquals(List.of("onmerged"),
+                result.liveSessions().stream().map(ManagedAgentSession::displayName).toList());
+    }
+
+    @Test
     void staleRule_prunableWithSession_neverStale_staysASession() {
         ManagedAgentSession onStale = session("onstale", Path.of("/wt/gone"),
                 SessionStatus.RUNNING, Instant.ofEpochSecond(10));
@@ -150,7 +175,7 @@ class SidebarChildrenTest {
 
     @Test
     void staleRule_mainCheckout_neverStale() {
-        Worktree detachedMain = new Worktree(ROOT, Optional.empty(), true, true, false, false, Optional.empty());
+        Worktree detachedMain = new Worktree(ROOT, Optional.empty(), true, true, false, false, Optional.empty(), false);
         SidebarChildren result = SidebarChildren.classify(
                 List.of(detachedMain), List.of(), noActivity());
         assertTrue(result.staleWorktrees().isEmpty());

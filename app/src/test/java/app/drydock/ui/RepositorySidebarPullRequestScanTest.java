@@ -23,7 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class RepositorySidebarPullRequestScanTest {
 
     private static Worktree worktree(String path) {
-        return new Worktree(Path.of(path), Optional.of("branch"), false, false, false, false, Optional.empty());
+        return new Worktree(Path.of(path), Optional.of("branch"), false, false, false, false, Optional.empty(), false);
     }
 
     @Test
