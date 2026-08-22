@@ -1,9 +1,12 @@
 package app.drydock.ui.review;
 
 import app.drydock.git.UnifiedDiff;
+import app.drydock.review.ReadingPath;
+import app.drydock.review.ReviewIntent;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -32,23 +35,34 @@ final class ReviewDiffRows {
         boolean includes(String file, int hunkIndex);
     }
 
-    /** What the column is currently showing. */
+    /**
+     * What the column is currently showing. {@code linksByHunk} carries each
+     * hunk's {@link ReadingPath.Link}s, keyed by {@link ReviewIntent#hunkId};
+     * a hunk absent from the map gets no footer row at all, rather than an
+     * empty one -- the same "no card for nothing to say" rule {@link #build}
+     * already applies to a hunk with no rows to show.
+     */
     record Options(boolean showContext, Set<ReviewDiffRow.RunKey> expandedRuns, int maxRows,
-                   HunkFilter filter) {
+                   HunkFilter filter, Map<String, List<ReadingPath.Link>> linksByHunk) {
         Options {
             expandedRuns = Set.copyOf(expandedRuns);
             if (maxRows <= 0) {
                 throw new IllegalArgumentException("maxRows must be positive: " + maxRows);
             }
             filter = filter == null ? HunkFilter.ALL : filter;
+            linksByHunk = linksByHunk == null ? Map.of() : Map.copyOf(linksByHunk);
         }
 
         Options(boolean showContext, Set<ReviewDiffRow.RunKey> expandedRuns, int maxRows) {
-            this(showContext, expandedRuns, maxRows, HunkFilter.ALL);
+            this(showContext, expandedRuns, maxRows, HunkFilter.ALL, Map.of());
+        }
+
+        Options(boolean showContext, Set<ReviewDiffRow.RunKey> expandedRuns, int maxRows, HunkFilter filter) {
+            this(showContext, expandedRuns, maxRows, filter, Map.of());
         }
 
         static Options defaults(int maxRows) {
-            return new Options(true, Set.of(), maxRows, HunkFilter.ALL);
+            return new Options(true, Set.of(), maxRows, HunkFilter.ALL, Map.of());
         }
     }
 
@@ -90,10 +104,14 @@ final class ReviewDiffRows {
     }
 
     /**
-     * One hunk's card: a header plus its body rows, with the last body row
-     * marked {@link ReviewDiffRow.Edge#BOTTOM} so the card closes. A hunk
-     * whose every line is dropped (all context, with context hidden) yields
-     * no card at all rather than an empty one.
+     * One hunk's card: a header plus its body rows, plus a footer row for
+     * each of the hunk's {@link ReadingPath.Link}s (spec §7.2) -- last, so a
+     * reader reaches "what this hunk has to do with the rest of the diff"
+     * only after having read the hunk itself. Whichever row ends up last,
+     * body or link, is marked {@link ReviewDiffRow.Edge#BOTTOM} so the card
+     * closes on it. A hunk whose every line is dropped (all context, with
+     * context hidden) yields no card at all rather than an empty one --
+     * links belong to a hunk, not to a card with nothing else in it.
      */
     private static List<ReviewDiffRow> buildCard(UnifiedDiff.FileDiff file, UnifiedDiff.Hunk hunk,
                                                  int hunkIndex, Options options) {
@@ -104,8 +122,13 @@ final class ReviewDiffRows {
         List<ReviewDiffRow> card = new ArrayList<>();
         card.add(new ReviewDiffRow.HunkHeader(file.path(), rangeLabel(hunk), startLine(hunk),
                 file.untracked(), file.staged()));
-        card.addAll(body.subList(0, body.size() - 1));
-        card.add(withBottomEdge(body.get(body.size() - 1)));
+        card.addAll(body);
+        String hunkId = ReviewIntent.hunkId(file.path(), hunkIndex);
+        for (ReadingPath.Link link : options.linksByHunk().getOrDefault(hunkId, List.of())) {
+            card.add(new ReviewDiffRow.LinkRow(link, ReviewDiffRow.Edge.BODY));
+        }
+        int last = card.size() - 1;
+        card.set(last, withBottomEdge(card.get(last)));
         return card;
     }
 
@@ -155,6 +178,7 @@ final class ReviewDiffRows {
             case ReviewDiffRow.CollapsedRun run ->
                     new ReviewDiffRow.CollapsedRun(run.file(), run.hunkIndex(), run.runIndex(), run.count(),
                             ReviewDiffRow.Edge.BOTTOM);
+            case ReviewDiffRow.LinkRow link -> new ReviewDiffRow.LinkRow(link.link(), ReviewDiffRow.Edge.BOTTOM);
             default -> row;
         };
     }

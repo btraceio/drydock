@@ -41,6 +41,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -1062,6 +1063,7 @@ public final class SessionReviewView extends BorderPane {
         margin.invalidate(null);
         margin.setFindings(findingsForMargin(scope.get()));
         diffColumn.refreshPins();
+        diffColumn.setLinks(linksByHunk());
         if (pathMode) {
             List<ReadingPath.Step> steps = currentPath().steps();
             if (!steps.isEmpty()) {
@@ -1289,6 +1291,24 @@ public final class SessionReviewView extends BorderPane {
                 ReadingPath.of(diff, graph, Sections.of(diff, graph), NO_FAN_IN_SCAN);
         pathCache = new PathCacheEntry(scopeId, diff, graph, computed);
         return computed;
+    }
+
+    /**
+     * {@link #currentPath()}'s links, keyed by {@link ReviewIntent#hunkId} --
+     * what the diff column renders as a footer beneath each hunk (spec
+     * §7.2), independent of whether the rail itself is in PATH mode. A step
+     * with no links is left out of the map entirely rather than mapped to an
+     * empty list, so {@link ReviewDiffColumn#setLinks} sees exactly the
+     * hunks that have something to say and none that do not.
+     */
+    private Map<String, List<ReadingPath.Link>> linksByHunk() {
+        Map<String, List<ReadingPath.Link>> byHunk = new LinkedHashMap<>();
+        for (ReadingPath.Step step : currentPath().steps()) {
+            if (!step.links().isEmpty()) {
+                byHunk.put(step.hunkId(), step.links());
+            }
+        }
+        return byHunk;
     }
 
     /**

@@ -1,6 +1,7 @@
 package app.drydock.ui.review;
 
 import app.drydock.git.UnifiedDiff;
+import app.drydock.review.ReadingPath;
 
 /**
  * One row of the Review diff column: pure data (no scene graph), so the
@@ -106,5 +107,22 @@ sealed interface ReviewDiffRow {
         public Edge edge() {
             return Edge.BODY;
         }
+    }
+
+    /**
+     * A link to a related hunk in another file (spec §7.2), appended after
+     * its source hunk's own rows so that folding, density and the
+     * unchanged-run collapse apply to it with no new cases -- a parallel
+     * rendering path for links would drift from this one at the first thing
+     * they disagreed about. {@code edge} follows the same rule every other
+     * card row does: {@link ReviewDiffRows} gives {@code BOTTOM} to whichever
+     * row -- a line, a collapsed run, or the last link -- actually closes the
+     * card.
+     *
+     * <p>{@link ReadingPath.Link#label()} already names a file and a symbol,
+     * never {@link ReadingPath.Link#targetHunkId()} itself -- the id is what
+     * a click acts on, not what the row shows.</p>
+     */
+    record LinkRow(ReadingPath.Link link, Edge edge) implements ReviewDiffRow {
     }
 }
