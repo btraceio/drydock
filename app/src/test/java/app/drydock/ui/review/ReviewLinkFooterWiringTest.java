@@ -2,6 +2,7 @@ package app.drydock.ui.review;
 
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
+import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
 import app.drydock.review.SessionReviewScopes;
@@ -104,7 +105,14 @@ class ReviewLinkFooterWiringTest extends ApplicationTest {
         // build without PATH mode ever being entered.
         interact(() -> view.showScopes(new SessionReviewScopes.Scopes(scope, Optional.empty()),
                 SessionReviewScopes.Choice.LOCAL));
-        interact(() -> view.diagShowDiff(scope, host.diff));
+        // The control half of Task 19 round 2's pin (see the grouped test
+        // below): with no reviewer grouping, the rail's own "refining
+        // grouping…" banner must be up the instant the build starts, or the
+        // grouped test's "banner never shown" assertion would pass just as
+        // well with a banner that is simply broken and never renders at all.
+        assertTrue(showDiffAndSampleBanner(),
+                "control: with no reviewer grouping, \"refining grouping…\" must show the moment "
+                        + "the graph starts building, or the grouped test's absence assertion is vacuous");
         WaitForAsyncUtils.waitForFxEvents();
 
         List<String> footers = awaitLinkFooters();
@@ -130,6 +138,44 @@ class ReviewLinkFooterWiringTest extends ApplicationTest {
                 "the target file must still be reachable after the click resolves its real hunk id");
     }
 
+    /**
+     * The pin for Task 19 round 2's fix at {@code SessionReviewView.java:676}:
+     * a reviewer grouping ({@code host.intents.set(...)}, unlike the test
+     * above) must not stop the diff column's link footers from rendering --
+     * that configuration is the PRIMARY one this feature ships in -- and the
+     * rail's OWN "refining grouping…" banner must never flash for a
+     * grouping that is already final, even while the same graph builds
+     * purely to feed those footers (the fix at {@code :1088-1089}).
+     */
+    @Test
+    void linkFootersStillRenderUnderAReviewerGroupingWithoutFlashingTheBanner() {
+        scope = registry.mint(ReviewScopeRegistry.spec(ReviewScope.Kind.WORKING_TREE,
+                Path.of("/tmp/nowhere"), Optional.of(Path.of("/tmp/nowhere")), "main", "main",
+                Optional.empty(), Optional.empty()));
+        host.intents.set(scope.id(), List.of(new ReviewIntent("agent-1", 1, "Reviewed",
+                ReviewIntent.Kind.CHANGE, ReviewIntent.Risk.HIGH, "",
+                List.of(ReviewIntent.hunkId(DECLARING_FILE, 0), ReviewIntent.hunkId(REFERENCING_FILE, 0)),
+                Optional.empty(), false)));
+
+        interact(() -> view.showScopes(new SessionReviewScopes.Scopes(scope, Optional.empty()),
+                SessionReviewScopes.Choice.LOCAL));
+        // Same synchronous sample as the ungrouped test's control, but here
+        // hasReviewerGrouping is true: the banner must be down at this exact
+        // instant, not just eventually -- see showDiffAndSampleBanner's
+        // javadoc for why this moment, and only this moment, is race-free.
+        assertFalse(showDiffAndSampleBanner(),
+                "a reviewer's already-final grouping must never flash \"refining grouping…\" just "
+                        + "because a graph is building in the background for link footers");
+        WaitForAsyncUtils.waitForFxEvents();
+
+        List<String> footers = awaitLinkFooters();
+        assertTrue(footers.stream().anyMatch(text -> text.contains("called by")),
+                "expected a real called-by footer under a reviewer's own grouping too; rendered "
+                        + footers);
+        assertTrue(footers.stream().anyMatch(text -> text.contains("profiler.cpp")),
+                "the footer must name the referencing file; rendered " + footers);
+    }
+
     /** Building the graph runs on a virtual thread; poll rather than trust one FX pulse. */
     private List<String> awaitLinkFooters() {
         long start = System.nanoTime();
@@ -142,6 +188,34 @@ class ReviewLinkFooterWiringTest extends ApplicationTest {
             sleep(50);
         }
         throw new AssertionError("no link footer ever rendered");
+    }
+
+    /**
+     * Calls {@code diagShowDiff} and, in the very same FX-thread task,
+     * samples whether the rail's "refining grouping…" banner ({@code
+     * .review-intent-pending}, per {@link ReviewIntentRail}) is visible --
+     * the same accessor {@code SectionRailSwapTest} already uses for this
+     * state, since {@link ReviewIntentRail} exposes no test-visible {@code
+     * groupingPending} getter of its own.
+     *
+     * <p>{@code diagShowDiff} -> {@code onDiffResolved} -> {@code
+     * requestGraph} -> {@code refreshReviewState} all run synchronously,
+     * on the FX thread, before this method's own lambda returns -- the
+     * graph itself only starts building on a SEPARATE thread as part of
+     * {@code requestGraph}. Sampling the banner in that same lambda, before
+     * control ever returns to the test thread, is the one moment guaranteed
+     * to reflect what the diff's arrival itself set, rather than racing
+     * however fast the background build happens to finish (which, for a
+     * fixture this small, can beat even a single subsequent {@code
+     * waitForFxEvents} call).</p>
+     */
+    private boolean showDiffAndSampleBanner() {
+        List<Boolean> sample = new ArrayList<>();
+        interact(() -> {
+            view.diagShowDiff(scope, host.diff);
+            sample.add(lookup(".review-intent-pending").queryAll().stream().anyMatch(Node::isVisible));
+        });
+        return sample.get(0);
     }
 
     private List<String> linkRowTexts() {
