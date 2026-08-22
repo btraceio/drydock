@@ -110,6 +110,44 @@ class IntentGroupingTest {
                 "a.cpp's own hunks must be unaffected by an unrelated file elsewhere in the diff");
     }
 
+    /**
+     * Two hunkless sections must not collide. {@code UnifiedDiff} carries no
+     * hunks at all for a binary file or a pure rename, so a section built
+     * from one alone hashes an EMPTY hunk list -- and without the files
+     * hashed in too, every such section would mint the identical id,
+     * silently dropping one from {@code ReviewIntentRail.buttonsByIntentId}.
+     * A convention-merged pair ({@code m.h}/{@code m.cpp}) is included
+     * purely to force the computed path rather than the (kind, directory)
+     * fallback; it plays no other part in the assertion.
+     */
+    @Test
+    void twoHunklessSectionsDoNotCollide() {
+        List<UnifiedDiff.FileDiff> files = new ArrayList<>(diffOf("src", 1).files());
+        files.add(new UnifiedDiff.FileDiff("assets/one.png", "M", 0, 0, false, false, List.of()));
+        files.add(new UnifiedDiff.FileDiff("assets/two.png", "M", 0, 0, false, false, List.of()));
+        UnifiedDiff diff = new UnifiedDiff(files);
+
+        IntentGrouping grouping = new IntentGrouping();
+        List<ReviewIntent> intents =
+                grouping.intentsFor("scope", diff, Optional.of(ChangeGraph.of(diff)));
+
+        // Matched by title, not ReviewIntent#touches: a hunkless section's
+        // hunkIds is empty, so touches() -- which walks hunkIds -- can never
+        // find it. Sections names a hub-less unit after its own file, so
+        // the title is "one.png · 1 file" / "two.png · 1 file".
+        ReviewIntent one = intents.stream()
+                .filter(intent -> intent.title().startsWith("one.png")).findFirst().orElseThrow();
+        ReviewIntent two = intents.stream()
+                .filter(intent -> intent.title().startsWith("two.png")).findFirst().orElseThrow();
+
+        assertTrue(one.hunkIds().isEmpty(), "a binary/rename-only section has no hunks to name");
+        assertTrue(two.hunkIds().isEmpty());
+        assertNotEquals(one.id(), two.id(),
+                "two different hunkless sections must not mint the same id");
+        assertEquals(intents.size(), intents.stream().map(ReviewIntent::id).distinct().count(),
+                "no id collision anywhere in the rail, hunkless or not");
+    }
+
     // ---- nothing structural: the fallback's own ids survive -----------------
 
     @Test

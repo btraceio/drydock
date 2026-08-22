@@ -198,11 +198,27 @@ public final class IntentGrouping {
      * wrong. Hashed over the section's own hunk ids instead, sorted so the
      * identity is the SET of hunks, not the order {@link Sections} happened
      * to read them in.</p>
+     *
+     * <p>The file set is hashed in too, not just the hunks: a binary file or
+     * a pure rename has no hunks at all ({@code UnifiedDiff} carries neither
+     * for those), so a section built from one alone hashes an EMPTY hunk
+     * list -- and every such section would collide on the identical id
+     * without the files to still tell them apart. Positional ids could
+     * never collide this way; content-derived ones must not either.</p>
      */
     private static String computedId(Sections.Section section) {
-        List<String> sorted = new ArrayList<>(section.hunkIds());
-        Collections.sort(sorted);
-        return "computed:" + sha256Hex(String.join("\n", sorted)).substring(0, 16);
+        List<String> sortedFiles = new ArrayList<>(section.files());
+        Collections.sort(sortedFiles);
+        List<String> sortedHunks = new ArrayList<>(section.hunkIds());
+        Collections.sort(sortedHunks);
+        // Files and hunks are hashed SEPARATELY, then the two digests are
+        // concatenated -- rather than joined into one string with a
+        // separator, which is one more thing to get exactly right. Each
+        // digest is already unambiguous within its own sorted, newline-
+        // joined list, so nothing is lost by keeping them apart.
+        String files = sha256Hex(String.join("\n", sortedFiles));
+        String hunks = sha256Hex(String.join("\n", sortedHunks));
+        return "computed:" + (files + hunks).substring(0, 16);
     }
 
     private static String sha256Hex(String material) {
