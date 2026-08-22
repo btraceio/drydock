@@ -1078,6 +1078,15 @@ public final class SessionReviewView extends BorderPane {
      * distinction a stale, no-longer-resolvable id cannot make for itself.
      * Reusing this one method is what keeps the verdict bar's own rendered
      * "blocked" and the write path's refusal from disagreeing.</p>
+     *
+     * <p>This is a deliberate relaxation from the write-path filter this
+     * method replaced, which ended in {@code .orElse(true)}: an unnamed
+     * finding used to block approval of EVERY intent, no matter which files
+     * it actually touched. Here an unnamed finding only blocks the intents
+     * whose files it touches, same as a named-but-stale one -- consistent
+     * with what the verdict bar already showed, but it does mean an unnamed
+     * blocking finding no longer blocks approval of an intent none of whose
+     * files it touches.</p>
      */
     private boolean belongsToIntent(ReviewAnnotation finding, ReviewIntent intent) {
         if (intent == null) {
