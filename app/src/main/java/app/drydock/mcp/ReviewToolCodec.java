@@ -6,6 +6,7 @@ import app.drydock.review.Confidence;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
+import app.drydock.review.Sections;
 import app.drydock.review.Severity;
 import app.drydock.state.json.JsonValue;
 import app.drydock.state.json.JsonValue.JsonArray;
@@ -223,6 +224,27 @@ final class ReviewToolCodec {
      */
     private static int approximateBytes(JsonValue value) {
         return app.drydock.state.json.JsonWriter.write(value).getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+    }
+
+    /**
+     * drydock's computed grouping ({@code review_scope}'s {@code sections}
+     * include), offered so an agent can accept-and-name it rather than
+     * regroup from scratch and lose the header conventions and the
+     * dependency order {@link Sections#of} already worked out.
+     */
+    static JsonValue sectionsToJson(List<Sections.Section> sections) {
+        List<JsonValue> entries = new ArrayList<>();
+        for (Sections.Section section : sections) {
+            JsonObject obj = JsonObject.empty();
+            obj.put("title", new JsonString(section.title()));
+            obj.put("files", new JsonArray(section.files().stream()
+                    .map(file -> (JsonValue) new JsonString(file)).toList()));
+            obj.put("hunkIds", new JsonArray(section.hunkIds().stream()
+                    .map(id -> (JsonValue) new JsonString(id)).toList()));
+            section.hubSymbol().ifPresent(hub -> obj.put("hubSymbol", new JsonString(hub)));
+            entries.add(obj);
+        }
+        return new JsonArray(entries);
     }
 
     // ---- review_intents (agent -> drydock) ----------------------------------
