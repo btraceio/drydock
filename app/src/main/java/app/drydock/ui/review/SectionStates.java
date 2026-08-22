@@ -2,6 +2,7 @@ package app.drydock.ui.review;
 
 import app.drydock.git.UnifiedDiff;
 import app.drydock.review.BaseMove;
+import app.drydock.review.HunkDigest;
 import app.drydock.review.IntentHunks;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
@@ -315,6 +316,50 @@ final class SectionStates {
             return named;
         }
         return board.diff().files().stream().map(UnifiedDiff.FileDiff::path).toList();
+    }
+
+    /**
+     * The digest of the hunk the diff column shows when {@code intent} is
+     * selected -- its anchor (spec §9.6). Selecting a section narrows the
+     * column to that section's hunks and scrolls it to the first one (see
+     * {@code SessionReviewView#revealCurrentIntent}), so that is the one
+     * hunk-scoped {@code a}/{@code r}/{@code u} acts on when the diff
+     * column, rather than the rail, has focus. Empty for a section with no
+     * resolvable hunk at all.
+     */
+    Optional<String> digestOfAnchorHunk(Board board, ReviewIntent intent) {
+        List<String> digests = digestsOf(board, intent);
+        return digests.isEmpty() ? Optional.empty() : Optional.of(digests.get(0));
+    }
+
+    /**
+     * The file the diff column is anchored on when {@code intent} is
+     * selected -- what {@code ⇧A}/{@code ⇧R} settle every hunk of, rather
+     * than just the section's slice of it. The intent's own anchor file
+     * when it names one, else the first file it covers at all (see {@link
+     * #filesOf}).
+     */
+    Optional<String> fileOf(Board board, ReviewIntent intent) {
+        return intent.anchor().map(ReviewIntent.Anchor::file)
+                .or(() -> filesOf(board, intent).stream().findFirst());
+    }
+
+    /**
+     * Every hunk digest of {@code file} across the WHOLE diff, in diff
+     * order -- not just the slice one section names. {@code ⇧A}/{@code ⇧R}
+     * settle the file regardless of which section(s) claim its hunks.
+     */
+    List<String> digestsOfFile(Board board, String file) {
+        for (UnifiedDiff.FileDiff candidate : board.diff().files()) {
+            if (candidate.path().equals(file)) {
+                List<String> digests = new ArrayList<>();
+                for (UnifiedDiff.Hunk hunk : candidate.hunks()) {
+                    digests.add(HunkDigest.of(file, hunk));
+                }
+                return List.copyOf(digests);
+            }
+        }
+        return List.of();
     }
 
     /** How a section is named in another section's card: its number, circled. */

@@ -36,8 +36,15 @@ final class ReviewVerdictBar extends VBox {
         /** "Ask the agent to fix it" -- hands the intent's findings to the bound session. */
         void askAgentToFix(ReviewIntent intent);
 
-        /** {@code u} -- undoes this intent's verdict. */
+        /** {@code u} -- undoes this intent's verdict; also "Re-review" on the stale banner. */
         void undo(ReviewIntent intent);
+
+        /**
+         * "Confirm still good" on the stale banner (spec §9.2): rewrites
+         * the section's stale verdicts against the current base rather than
+         * clearing them.
+         */
+        void confirmStillGood(ReviewIntent intent);
 
         /** {@code n} -- moves to the next unsettled intent. */
         void nextUnsettled();
@@ -52,6 +59,14 @@ final class ReviewVerdictBar extends VBox {
         void nextIntent();
     }
 
+    /**
+     * A section's stale verdict (spec §9.2): the base it was approved
+     * against, and the scope's base now. Not a {@link ReviewVerdict} --
+     * a section owns no verdict of its own, only what its hunks merge to.
+     */
+    record StaleInfo(String oldBase, String newBase) {
+    }
+
     private final Host host;
 
     private final Label intentLabel = new Label();
@@ -63,6 +78,16 @@ final class ReviewVerdictBar extends VBox {
     private final Button undoButton = new Button("change");
     private final Label settledLabel = new Label();
     private final Label refusalLabel = new Label();
+    /**
+     * Names the unit {@code a}/{@code r}/{@code u} act on right now (spec
+     * §9.6): a key whose target depends on focus has to say what it is
+     * about to do, or the reader is guessing.
+     */
+    private final Label actingUnitLabel = new Label();
+    /** The stale-verdict banner (spec §9.2): text plus its two answers. */
+    private final Label staleLabel = new Label();
+    private final Button confirmStillGoodButton = new Button("Confirm still good");
+    private final Button reReviewButton = new Button("Re-review");
     private final Label progressLabel = new Label();
     /** "3 left · n jumps to the next" -- the first thing dropped when the row is tight. */
     private final Label navHint = new Label();
@@ -94,6 +119,7 @@ final class ReviewVerdictBar extends VBox {
     private boolean blocked;
     private int settledHunks;
     private int totalHunks;
+    private Optional<StaleInfo> stale = Optional.empty();
 
     ReviewVerdictBar(Host host) {
         this.host = host;
@@ -108,7 +134,8 @@ final class ReviewVerdictBar extends VBox {
         // title yields. Its tooltip carries what the ellipsis takes.
         intentLabel.setMinWidth(0);
         for (Button action : List.of(previousButton, nextButton, approveButton,
-                requestChangesButton, askAgentButton, undoButton)) {
+                requestChangesButton, askAgentButton, undoButton, confirmStillGoodButton,
+                reReviewButton)) {
             action.setMinWidth(Region.USE_PREF_SIZE);
         }
         navHint.getStyleClass().add("review-verdict-hint");
@@ -137,6 +164,24 @@ final class ReviewVerdictBar extends VBox {
         undoButton.getStyleClass().add("review-verdict-action");
         undoButton.setTooltip(new Tooltip("Undo this intent's verdict (u)"));
         undoButton.setOnAction(e -> withIntent(host::undo));
+
+        // Each also carries a class of its own: the stale banner is the one
+        // place two "review-verdict-action" buttons show at once with no
+        // decision-dependent branch to tell them apart by position alone.
+        confirmStillGoodButton.getStyleClass().addAll("review-verdict-action", "primary",
+                "review-verdict-confirm-stale");
+        confirmStillGoodButton.setTooltip(
+                new Tooltip("Keep this verdict, recorded against the base as it is now"));
+        confirmStillGoodButton.setOnAction(e -> withIntent(host::confirmStillGood));
+
+        reReviewButton.getStyleClass().addAll("review-verdict-action", "review-verdict-re-review");
+        reReviewButton.setTooltip(new Tooltip("Clear this verdict so the section can be re-read"));
+        reReviewButton.setOnAction(e -> withIntent(host::undo));
+
+        staleLabel.getStyleClass().add("review-verdict-stale");
+        staleLabel.setWrapText(true);
+
+        actingUnitLabel.getStyleClass().add("review-verdict-unit");
 
         settledLabel.getStyleClass().add("review-verdict-settled");
         refusalLabel.getStyleClass().add("review-verdict-refusal");
@@ -215,6 +260,36 @@ final class ReviewVerdictBar extends VBox {
     }
 
     /**
+     * Told whether the section now showing has a stale verdict (spec §9.2):
+     * present swaps the normal actions for the banner and its two answers,
+     * "Confirm still good" and "Re-review". Empty renders nothing extra --
+     * {@link SectionStates.Staleness#UNKNOWN} must say nothing, never warn,
+     * so this is only ever called with a value once {@code MOVED} is
+     * actually established.
+     */
+    void showStale(Optional<StaleInfo> info) {
+        this.stale = info;
+        render();
+    }
+
+    /**
+     * Names the unit {@code a}/{@code r}/{@code u} act on right now (spec
+     * §9.6): a key whose target depends on focus has to say what it is
+     * about to do.
+     */
+    void showActingUnit(SessionReviewView.SettleUnit unit) {
+        actingUnitLabel.setText(switch (unit) {
+            case HUNK -> "acts on: hunk";
+            case SECTION -> "acts on: section";
+            case FILE -> "acts on: file";
+        });
+        actingUnitLabel.setTooltip(new Tooltip(
+                "a, r and u act on the unit named here -- click into the diff column for a "
+                        + "single hunk, the rail for the whole section, or use ⇧A / ⇧R for the file"));
+        render();
+    }
+
+    /**
      * Told by the destination that {@link Host#submit()} could not run and
      * why -- e.g. the selected scope's diff has not landed, or failed to
      * load. Shown beside the button with the same visual language {@link
@@ -227,6 +302,11 @@ final class ReviewVerdictBar extends VBox {
         submitRefusalLabel.setVisible(true);
         submitRefusalLabel.setManaged(true);
         submitButton.pseudoClassStateChanged(javafx.css.PseudoClass.getPseudoClass("refused"), true);
+    }
+
+    /** The short form a human recognises a commit by; the sha itself if it is already short. */
+    private static String shortSha(String sha) {
+        return sha.length() > 7 ? sha.substring(0, 7) : sha;
     }
 
     private void clearSubmitRefused() {
@@ -255,12 +335,22 @@ final class ReviewVerdictBar extends VBox {
                 ? "all settled — ⏎ submits"
                 : (totalHunks - settledHunks) + " hunks left · n jumps to the next");
 
-        if (decision.isPresent()) {
+        if (stale.isPresent()) {
+            // Takes priority over the settled branch below: a stale section
+            // DOES have a decision recorded, but it was given against a base
+            // that has since moved, so the plain "settled, here is undo" row
+            // would understate what is actually being asked of the reader.
+            staleLabel.setText("⚠ approved against base " + shortSha(stale.get().oldBase())
+                    + " · base is now " + shortSha(stale.get().newBase()));
+            actionRow.getChildren().setAll(previousButton, nextButton, intentLabel,
+                    actingUnitLabel, staleLabel, confirmStillGoodButton, reReviewButton,
+                    actionSpacer, navHint);
+        } else if (decision.isPresent()) {
             settledLabel.setText(decision.get().label());
             settledLabel.getStyleClass().removeIf(styleClass -> styleClass.startsWith("decision-"));
             settledLabel.getStyleClass().add("decision-" + decision.get().wireName());
             actionRow.getChildren().setAll(previousButton, nextButton, intentLabel,
-                    settledLabel, undoButton, actionSpacer, navHint);
+                    actingUnitLabel, settledLabel, undoButton, actionSpacer, navHint);
         } else {
             refusalLabel.setText("⚠ a blocking finding is still open");
             refusalLabel.setVisible(blocked);
@@ -268,8 +358,8 @@ final class ReviewVerdictBar extends VBox {
             approveButton.pseudoClassStateChanged(
                     javafx.css.PseudoClass.getPseudoClass("refused"), blocked);
             actionRow.getChildren().setAll(previousButton, nextButton, intentLabel,
-                    approveButton, requestChangesButton, askAgentButton, refusalLabel,
-                    actionSpacer, navHint);
+                    actingUnitLabel, approveButton, requestChangesButton, askAgentButton,
+                    refusalLabel, actionSpacer, navHint);
         }
         fitActionRow(actionRow.getWidth());
 
@@ -320,19 +410,32 @@ final class ReviewVerdictBar extends VBox {
                 + INTENT_LABEL_MIN;
         int slots = 0;
         for (javafx.scene.Node child : actionRow.getChildren()) {
-            if (!child.isManaged() && child != navHint) {
+            if (!child.isManaged() && child != navHint && child != actingUnitLabel) {
                 continue;
             }
             slots++;
-            if (child == actionSpacer || child == navHint || child == intentLabel) {
+            if (child == actionSpacer || child == navHint || child == intentLabel
+                    || child == actingUnitLabel) {
                 continue;
             }
             needed += child.prefWidth(-1);
         }
         needed += actionRow.getSpacing() * Math.max(0, slots - 1);
-        boolean room = width - needed >= navHint.prefWidth(-1);
-        navHint.setVisible(room);
-        navHint.setManaged(room);
+
+        // The acting-unit label is checked first, and against the actions
+        // ALONE: it says what a/r/u are about to do, which matters more than
+        // navHint's "n jumps to the next" progress note, so a hint that
+        // would otherwise fit does not get to crowd it out. Never partially
+        // shown -- like the hint, it is either fully there or not at all.
+        double spacing = actionRow.getSpacing();
+        boolean roomForUnit = width - needed >= actingUnitLabel.prefWidth(-1) + spacing;
+        actingUnitLabel.setVisible(roomForUnit);
+        actingUnitLabel.setManaged(roomForUnit);
+
+        double afterUnit = needed + (roomForUnit ? actingUnitLabel.prefWidth(-1) + spacing : 0);
+        boolean roomForHint = width - afterUnit >= navHint.prefWidth(-1);
+        navHint.setVisible(roomForHint);
+        navHint.setManaged(roomForHint);
     }
 
     /** Test-only: whether approval is currently being refused. */

@@ -21,6 +21,7 @@ import javafx.scene.control.Label;
 import javafx.scene.control.TextInputControl;
 import javafx.scene.control.Tooltip;
 import javafx.scene.input.KeyEvent;
+import javafx.scene.input.MouseEvent;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
@@ -116,6 +117,17 @@ public final class SessionReviewView extends BorderPane {
          */
         void setVerdict(ReviewScope scope, ReviewIntent intent, List<String> hunkDigests,
                         Optional<ReviewVerdict.Decision> decision);
+
+        /**
+         * "Confirm still good" (spec §9.2): rewrites each of {@code
+         * hunkDigests}' existing verdict to record it against the scope's
+         * CURRENT base and head rather than the one it was judged against,
+         * through {@link ReviewVerdict#confirmedAgainst}. A digest with no
+         * recorded verdict is left alone -- there is nothing stale to
+         * confirm. Rewriting the base rather than clearing the verdict is
+         * the point: the decision survives, only the staleness does not.
+         */
+        void confirmStillGood(ReviewScope scope, List<String> hunkDigests);
 
         /**
          * The commit {@code scope}'s base ref resolves to now, or {@link
@@ -219,6 +231,20 @@ public final class SessionReviewView extends BorderPane {
      */
     public static final String UNRESOLVED_BASE = "unresolved";
 
+    /**
+     * What {@code a} / {@code r} / {@code u} act on (spec §9.6). Reading is
+     * per hunk; settling usually is not, so one key needs three possible
+     * targets rather than three keys needing one each.
+     */
+    enum SettleUnit {
+        /** The rail has focus: every hunk of the current section, as before this task. */
+        SECTION,
+        /** The diff column has focus: just the hunk it is anchored on. */
+        HUNK,
+        /** {@code ⇧A} / {@code ⇧R}: every hunk of the current file, regardless of focus. */
+        FILE
+    }
+
     private final Host host;
     private final ReviewScopeSwitcher switcher = new ReviewScopeSwitcher();
     private final ReviewDiffColumn diffColumn;
@@ -266,14 +292,38 @@ public final class SessionReviewView extends BorderPane {
 
     /**
      * The id of the intent {@code a}/{@code r} last recorded a verdict on,
-     * so {@code u} can undo THAT one -- see {@link #undoVerdict}. Cleared
-     * once undone, so a second {@code u} with nothing left to undo is inert
-     * rather than reaching for an unrelated intent. Not touched by {@code
-     * [}/{@code ]}/{@code n}: moving the cursor around must not change what
-     * {@code u} targets, or "settle one, look at another, undo" would undo
-     * the wrong one.
+     * so {@code u} can snap the cursor back to it -- see {@link
+     * #undoVerdict}. Cleared once undone, so a second {@code u} with
+     * nothing left to undo is inert rather than reaching for an unrelated
+     * intent. Not touched by {@code [}/{@code ]}/{@code n}: moving the
+     * cursor around must not change what {@code u} targets, or "settle one,
+     * look at another, undo" would undo the wrong one.
      */
     private Optional<String> lastSettledIntentId = Optional.empty();
+
+    /**
+     * The EXACT digests {@code a}/{@code r} last recorded a verdict on, so
+     * {@code u} clears exactly those and nothing more -- since {@code a}/
+     * {@code r} may have settled one hunk, one section or one file
+     * depending on {@link #settleUnit()} at the time, undoing "the whole
+     * current intent" (as before this task) would over-clear a single-hunk
+     * approval or under-clear a whole-file one.
+     */
+    private List<String> lastSettledDigests = List.of();
+
+    /**
+     * Whether the diff column, rather than the rail, is where {@code a}/
+     * {@code r}/{@code u} act (spec §9.6). Tracked from a plain mouse press
+     * on either -- NOT from {@code Node.isFocusWithin()}, which this view's
+     * own rail defeats: {@link ReviewIntentRail#rebuild} replaces every card
+     * {@code Button} on each render, and JavaFX moves focus off a card about
+     * to be discarded via {@code Direction.NEXT} traversal (see the
+     * project's JavaFX-traps memory) -- which can land inside the diff
+     * column and never leave, well after the reader's last click was on the
+     * rail. Defaults to {@code false} (the rail), matching what {@code a}/
+     * {@code r}/{@code u} did before this task.
+     */
+    private boolean diffColumnActedOn;
 
     /** Set by {@code m}/{@code f}; remembered independently of the responsive collapse. */
     private boolean marginCollapsedByUser;
@@ -389,6 +439,13 @@ public final class SessionReviewView extends BorderPane {
             }
         });
 
+        // See diffColumnActedOn's javadoc for why this is a plain mouse-press
+        // filter rather than Node.isFocusWithin(): the rail rebuilds its
+        // cards on every render, which can leave isFocusWithin() stuck true
+        // for the diff column long after the reader's last click was on the
+        // rail.
+        intentRail.addEventFilter(MouseEvent.MOUSE_PRESSED, e -> diffColumnActedOn = false);
+        diffColumn.addEventFilter(MouseEvent.MOUSE_PRESSED, e -> diffColumnActedOn = true);
         widthProperty().addListener((obs, old, width) -> applyResponsiveLayout(width.doubleValue()));
         addEventFilter(KeyEvent.KEY_PRESSED, this::onKeyPressed);
         setFocusTraversable(true);
@@ -563,6 +620,7 @@ public final class SessionReviewView extends BorderPane {
         // scope switch could make u undo, and jump into, a same-named
         // intent in the WRONG scope.
         lastSettledIntentId = Optional.empty();
+        lastSettledDigests = List.of();
         // The cursor is reset BEFORE the body is built, which the destination
         // did the other way round: a cached diff publishes Loaded
         // synchronously from inside bodyFor, and the diff-resolved handler
@@ -865,21 +923,86 @@ public final class SessionReviewView extends BorderPane {
         return board().map(sections::counted).orElse(List.of());
     }
 
+    /**
+     * What {@code a} / {@code r} / {@code u} act on right now (spec §9.6):
+     * the hunk the diff column is anchored on when it has focus, the whole
+     * section otherwise -- the same default the keys have always had, so a
+     * reader who has never clicked into the diff column sees no change.
+     */
+    SettleUnit settleUnit() {
+        return diffColumnActedOn ? SettleUnit.HUNK : SettleUnit.SECTION;
+    }
+
+    /** The one hunk {@link SettleUnit#HUNK} acts on -- see {@link SectionStates#digestOfAnchorHunk}. */
+    private Optional<String> digestOfCurrentHunk() {
+        return currentIntent().flatMap(intent -> board()
+                .flatMap(b -> sections.digestOfAnchorHunk(b, intent)));
+    }
+
+    /** Every hunk of the current file -- what {@code ⇧A}/{@code ⇧R} act on. */
+    private List<String> digestsOfCurrentFile() {
+        return currentIntent().flatMap(intent -> board()
+                .flatMap(b -> sections.fileOf(b, intent).map(file -> sections.digestsOfFile(b, file))))
+                .orElse(List.of());
+    }
+
+    /**
+     * The digests {@code a}/{@code r}/{@code u} act on for {@code intent}
+     * right now: {@code wholeFile} is {@code ⇧A}/{@code ⇧R} and always wins;
+     * otherwise it follows {@link #settleUnit()}.
+     */
+    private List<String> digestsForAction(ReviewIntent intent, boolean wholeFile) {
+        if (wholeFile) {
+            return digestsOfCurrentFile();
+        }
+        return settleUnit() == SettleUnit.HUNK
+                ? digestOfCurrentHunk().map(List::of).orElse(List.of())
+                : digestsOf(intent);
+    }
+
+    /**
+     * The recorded base of a stale verdict in {@code intent}, for the
+     * verdict bar's banner -- the first one found whose base no longer
+     * matches {@code scope}'s current one. Callers only ask this once
+     * {@link SectionStates.Staleness#MOVED} is already established, so one
+     * is guaranteed to exist; the current base is the fallback only because
+     * a method that returns nothing here is worse than one that occasionally
+     * repeats a base that did not move.
+     */
+    private String oldBaseOf(ReviewScope scope, ReviewIntent intent) {
+        String current = host.currentBase(scope);
+        for (String digest : digestsOf(intent)) {
+            Optional<ReviewVerdict> verdict = host.verdict(scope, digest);
+            if (verdict.isPresent() && verdict.get().staleAgainst(current)) {
+                return verdict.get().baseCommit();
+            }
+        }
+        return current;
+    }
+
     private void renderVerdictBar(ReviewScope scope) {
         Optional<ReviewIntent> current = currentIntent();
         Optional<SectionStates.Board> board = board();
         if (current.isEmpty() || board.isEmpty()) {
             verdictBar.update(null, Optional.empty(), false);
             verdictBar.showProgress(0, 0);
+            verdictBar.showStale(Optional.empty());
+            verdictBar.showActingUnit(settleUnit());
             return;
         }
         boolean blocked = host.findings(scope).stream()
                 .filter(this::belongsToCurrentIntent)
                 .anyMatch(ReviewAnnotation::blocksApproval);
-        verdictBar.update(current.get(), sectionState(current.get()).decision(), blocked);
+        SectionStates.SectionState state = sectionState(current.get());
+        verdictBar.update(current.get(), state.decision(), blocked);
         // Progress is the UNION of the counted sections' hunks, counted once.
         verdictBar.showProgress(sections.settledHunkCount(board.get()),
                 sections.distinctDigests(board.get()).size());
+        verdictBar.showStale(state.staleness() == SectionStates.Staleness.MOVED
+                ? Optional.of(new ReviewVerdictBar.StaleInfo(
+                        oldBaseOf(scope, current.get()), host.currentBase(scope)))
+                : Optional.empty());
+        verdictBar.showActingUnit(settleUnit());
     }
 
     /**
@@ -1013,13 +1136,13 @@ public final class SessionReviewView extends BorderPane {
         @Override
         public void approve(ReviewIntent intent) {
             selectedScope().ifPresent(scope -> host.setVerdict(scope, intent,
-                    digestsOf(intent), Optional.of(ReviewVerdict.Decision.APPROVED)));
+                    digestsForAction(intent, false), Optional.of(ReviewVerdict.Decision.APPROVED)));
         }
 
         @Override
         public void requestChanges(ReviewIntent intent) {
             selectedScope().ifPresent(scope -> host.setVerdict(scope, intent,
-                    digestsOf(intent), Optional.of(ReviewVerdict.Decision.CHANGES)));
+                    digestsForAction(intent, false), Optional.of(ReviewVerdict.Decision.CHANGES)));
         }
 
         @Override
@@ -1033,8 +1156,18 @@ public final class SessionReviewView extends BorderPane {
 
         @Override
         public void undo(ReviewIntent intent) {
+            // Re-review, too (spec §9.2): a stale section's banner button and
+            // the plain undo button both just clear what is recorded.
             selectedScope().ifPresent(scope ->
                     host.setVerdict(scope, intent, digestsOf(intent), Optional.empty()));
+        }
+
+        @Override
+        public void confirmStillGood(ReviewIntent intent) {
+            selectedScope().ifPresent(scope -> {
+                host.confirmStillGood(scope, digestsOf(intent));
+                refreshReviewState();
+            });
         }
 
         @Override
@@ -1112,6 +1245,17 @@ public final class SessionReviewView extends BorderPane {
                 revealCurrentIntent();
                 verdictBar.showSubmitRefused(
                         "an intent still needs a verdict (approve or request changes); jumped to it");
+                return;
+            }
+            // A stale verdict does not count toward "everything settled"
+            // (spec §9.2): it was given against a base that has since moved,
+            // so posting it is a decision the reader has not actually made
+            // about the code as it stands now.
+            if (sectionState(counted.get(i)).staleness() == SectionStates.Staleness.MOVED) {
+                intentIndex = intents().indexOf(counted.get(i));
+                refreshReviewState();
+                revealCurrentIntent();
+                verdictBar.showSubmitRefused("approvals were given against an older base");
                 return;
             }
             decisions.add(decision.get());
@@ -1260,31 +1404,48 @@ public final class SessionReviewView extends BorderPane {
     }
 
     /**
-     * {@code a} / {@code r}: records a verdict and, once it actually took
-     * (the host still refuses APPROVED over a blocking finding -- see
-     * {@code MainWorkspace}'s {@code Host#setVerdict} -- so recording is not
-     * guaranteed), advances to the next unsettled intent via the same walk
-     * {@code n} uses. Also remembers this intent as the one {@code u} should
-     * undo (see {@link #undoVerdict}) -- recorded here, after the advance
-     * decision above, so it always names the intent a verdict was just
-     * placed ON, never wherever the cursor lands next.
+     * {@code a} / {@code r}: records a verdict over {@link #settleUnit()}'s
+     * digests -- one hunk, one file, or the whole section -- and, once it
+     * actually took (the host still refuses APPROVED over a blocking
+     * finding -- see {@code MainWorkspace}'s {@code Host#setVerdict} -- so
+     * recording is not guaranteed), remembers those exact digests as what
+     * {@code u} should undo (see {@link #undoVerdict}). Whether the WHOLE
+     * section is now settled is asked separately -- a single hunk of a
+     * multi-hunk section applying must still let {@code u} undo it, even
+     * though the section itself has not merged to a decision yet -- and only
+     * that separate question decides whether to advance to the next
+     * unsettled intent, via the same walk {@code n} uses.
+     *
+     * @param wholeFile {@code ⇧A}/{@code ⇧R}: every hunk of the current file,
+     *                  regardless of what has focus
      */
-    private void verdictAction(ReviewVerdict.Decision decision) {
+    private void verdictAction(ReviewVerdict.Decision decision, boolean wholeFile) {
         Optional<ReviewScope> scope = selectedScope();
         Optional<ReviewIntent> intent = currentIntent();
-        if (scope.isPresent() && intent.isPresent()) {
-            host.setVerdict(scope.get(), intent.get(), digestsOf(intent.get()),
-                    Optional.of(decision));
-            if (decisionOf(intent.get()).filter(decision::equals).isPresent()) {
-                lastSettledIntentId = Optional.of(intent.get().id());
-                nextUnsettledIntent();
-            }
+        if (scope.isEmpty() || intent.isEmpty()) {
+            return;
+        }
+        List<String> digests = digestsForAction(intent.get(), wholeFile);
+        if (digests.isEmpty()) {
+            return;
+        }
+        host.setVerdict(scope.get(), intent.get(), digests, Optional.of(decision));
+        boolean applied = digests.stream().allMatch(digest -> host.verdict(scope.get(), digest)
+                .filter(v -> v.decision() == decision).isPresent());
+        if (!applied) {
+            return;
+        }
+        lastSettledIntentId = Optional.of(intent.get().id());
+        lastSettledDigests = digests;
+        if (decisionOf(intent.get()).filter(decision::equals).isPresent()) {
+            nextUnsettledIntent();
         }
     }
 
     /**
-     * {@code u}: undoes the verdict {@code a}/{@code r} last recorded --
-     * NOT whatever intent the cursor currently sits on. A human who presses
+     * {@code u}: undoes exactly the digests {@code a}/{@code r} last
+     * recorded -- NOT the whole intent the cursor currently sits on, and NOT
+     * whatever {@link #settleUnit()} says right now. A human who presses
      * {@code r}, realises they misread the diff, and presses {@code u}
      * expects the verdict they just placed to disappear; since {@code r}
      * itself advances the cursor (see {@link #verdictAction}), undoing
@@ -1297,7 +1458,7 @@ public final class SessionReviewView extends BorderPane {
      */
     private void undoVerdict() {
         Optional<ReviewScope> scope = selectedScope();
-        if (scope.isEmpty() || lastSettledIntentId.isEmpty()) {
+        if (scope.isEmpty() || lastSettledIntentId.isEmpty() || lastSettledDigests.isEmpty()) {
             return;
         }
         List<ReviewIntent> current = intents();
@@ -1308,15 +1469,16 @@ public final class SessionReviewView extends BorderPane {
                 break;
             }
         }
+        List<String> digests = lastSettledDigests;
         lastSettledIntentId = Optional.empty();
+        lastSettledDigests = List.of();
         if (index < 0) {
             // The grouping changed under us (a reviewer re-ran, say) and the
             // intent this would have undone no longer exists -- nothing
             // sane to undo or jump to.
             return;
         }
-        host.setVerdict(scope.get(), current.get(index), digestsOf(current.get(index)),
-                Optional.empty());
+        host.setVerdict(scope.get(), current.get(index), digests, Optional.empty());
         intentIndex = index;
         refreshReviewState();
         revealCurrentIntent();
@@ -1424,8 +1586,14 @@ public final class SessionReviewView extends BorderPane {
             case OPEN_BRACKET -> { moveIntent(-1); yield true; }
             case CLOSE_BRACKET -> { moveIntent(1); yield true; }
             case N -> { nextUnsettledIntent(); yield true; }
-            case A -> { verdictAction(ReviewVerdict.Decision.APPROVED); yield true; }
-            case R -> { verdictAction(ReviewVerdict.Decision.CHANGES); yield true; }
+            case A -> {
+                verdictAction(ReviewVerdict.Decision.APPROVED, event.isShiftDown());
+                yield true;
+            }
+            case R -> {
+                verdictAction(ReviewVerdict.Decision.CHANGES, event.isShiftDown());
+                yield true;
+            }
             case U -> { undoVerdict(); yield true; }
             case ENTER -> { submitReview(); yield true; }
             // Shift+F is the whole-review filter; plain f is focus mode.

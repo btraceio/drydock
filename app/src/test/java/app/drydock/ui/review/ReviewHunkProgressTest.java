@@ -11,6 +11,7 @@ import app.drydock.review.ReviewVerdict;
 import app.drydock.review.SessionReviewScopes;
 import javafx.scene.Node;
 import javafx.scene.Scene;
+import javafx.scene.control.Button;
 import javafx.scene.control.Label;
 import javafx.scene.input.KeyCode;
 import javafx.stage.Stage;
@@ -228,6 +229,64 @@ class ReviewHunkProgressTest extends ApplicationTest {
                 "an unanswered question is not a finding");
         assertTrue(railLabels(".review-intent-stale").isEmpty(),
                 "no card may warn about a move nothing established");
+    }
+
+    /**
+     * A stale verdict does not count toward "everything settled" (spec
+     * §9.2): Submit must refuse it rather than post a decision nobody has
+     * actually confirmed against the code as it stands now.
+     */
+    @Test
+    void submitRefusesWhileTheCurrentSectionIsStale() {
+        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
+        showOverlappingSections();
+        recordAgainstBase(GUARDS_H, "0".repeat(40));
+        recordAgainstBase(GUARDS_CPP, "0".repeat(40));
+
+        press(KeyCode.ENTER).release(KeyCode.ENTER);
+        WaitForAsyncUtils.waitForFxEvents();
+
+        assertTrue(host.submittedScopes.isEmpty(), "a stale approval must not be posted silently");
+        assertTrue(labels(".review-verdict-submit-refusal").stream()
+                        .anyMatch(text -> text.contains("older base")),
+                "the reader must be told why submit did nothing");
+    }
+
+    /**
+     * "Confirm still good" keeps the decision and rewrites its recorded
+     * base, so the section reads fresh again without a second read.
+     */
+    @Test
+    void confirmStillGoodRewritesTheBaseAndClearsTheBanner() {
+        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
+        showOverlappingSections();
+        recordAgainstBase(GUARDS_H, "0".repeat(40));
+        recordAgainstBase(GUARDS_CPP, "0".repeat(40));
+        assertEquals(SectionStates.Staleness.MOVED, view.diagSectionState(0).staleness());
+
+        interact(() -> ((Button) lookup(".review-verdict-confirm-stale").query()).fire());
+        WaitForAsyncUtils.waitForFxEvents();
+
+        assertEquals(SectionStates.Staleness.FRESH, view.diagSectionState(0).staleness());
+        assertTrue(host.store.verdict(scope.id(), digestOf(GUARDS_H))
+                        .map(v -> v.decision() == ReviewVerdict.Decision.APPROVED).orElse(false),
+                "confirm still good must keep the decision, not clear it");
+    }
+
+    /** "Re-review" is the other answer: it clears the stale verdicts entirely. */
+    @Test
+    void reReviewClearsTheStaleVerdicts() {
+        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
+        showOverlappingSections();
+        recordAgainstBase(GUARDS_H, "0".repeat(40));
+        recordAgainstBase(GUARDS_CPP, "0".repeat(40));
+
+        interact(() -> ((Button) lookup(".review-verdict-re-review").query()).fire());
+        WaitForAsyncUtils.waitForFxEvents();
+
+        assertTrue(host.store.verdict(scope.id(), digestOf(GUARDS_H)).isEmpty(),
+                "re-review must clear the stale verdict so the section can be read again");
+        assertTrue(host.store.verdict(scope.id(), digestOf(GUARDS_CPP)).isEmpty());
     }
 
     // ---- a grouping that drifted off the diff -------------------------------

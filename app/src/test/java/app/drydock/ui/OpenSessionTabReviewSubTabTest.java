@@ -502,6 +502,10 @@ class OpenSessionTabReviewSubTabTest extends ApplicationTest {
         }
 
         @Override
+        public void confirmStillGood(ReviewScope scope, List<String> hunkDigests) {
+        }
+
+        @Override
         public String currentBase(ReviewScope scope) {
             return SessionReviewView.UNRESOLVED_BASE;
         }

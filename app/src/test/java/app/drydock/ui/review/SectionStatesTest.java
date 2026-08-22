@@ -287,6 +287,64 @@ class SectionStatesTest {
         assertEquals("#21", SectionStates.sectionMark(21));
     }
 
+    // ---- what a/r/u act on (spec §9.6) ----------------------------------------
+
+    /** The anchor hunk is the FIRST one named, matching where the diff column scrolls to. */
+    @Test
+    void digestOfAnchorHunkIsTheFirstHunkNamed() {
+        SectionStates.Board board = overlapping();
+        ReviewIntent section1 = board.sections().get(0);
+
+        assertEquals(Optional.of(digestOf(GUARDS_H)), sections.digestOfAnchorHunk(board, section1));
+    }
+
+    @Test
+    void digestOfAnchorHunkIsEmptyForAnUnresolvableSection() {
+        SectionStates.Board board = board(List.of(section("adrift", "src/gone.cpp")));
+
+        assertTrue(sections.digestOfAnchorHunk(board, board.sections().get(0)).isEmpty());
+    }
+
+    @Test
+    void fileOfIsTheAnchorHunksFile() {
+        SectionStates.Board board = overlapping();
+        ReviewIntent section2 = board.sections().get(1);
+
+        assertEquals(Optional.of(GUARDS_H), sections.fileOf(board, section2));
+    }
+
+    /**
+     * An intent naming no hunks at all covers the whole diff (see {@link
+     * ReviewIntent#containsHunk}); {@link SectionStates#fileOf} falls back
+     * to the first file of the diff rather than answering nothing.
+     */
+    @Test
+    void fileOfFallsBackToTheDiffsFirstFileWhenTheSectionNamesNone() {
+        SectionStates.Board board = board(List.of(
+                new ReviewIntent("whole-diff", 1, "Everything", ReviewIntent.Kind.CHANGE,
+                        ReviewIntent.Risk.MED, "", List.of(), Optional.empty(), false)));
+
+        assertEquals(Optional.of(GUARDS_H), sections.fileOf(board, board.sections().get(0)));
+    }
+
+    /**
+     * {@code ⇧A}/{@code ⇧R} settle every hunk of the file across the WHOLE
+     * diff -- not just the hunks the current section happens to name.
+     */
+    @Test
+    void digestsOfFileCoversEveryHunkOfTheFileRegardlessOfSection() {
+        SectionStates.Board board = overlapping();
+
+        assertEquals(List.of(digestOf(GUARDS_H)), sections.digestsOfFile(board, GUARDS_H));
+    }
+
+    @Test
+    void digestsOfFileIsEmptyForAFileNotInTheDiff() {
+        SectionStates.Board board = overlapping();
+
+        assertTrue(sections.digestsOfFile(board, "src/nowhere.cpp").isEmpty());
+    }
+
     // ---- helpers -------------------------------------------------------------
 
     /** Section ① covers both guards files; section ② covers guards.h again and profiler. */
