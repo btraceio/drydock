@@ -238,6 +238,9 @@ public final class IntentGrouping {
         return true;
     }
 
+    /** At most this many cycle members are named before "and N more" takes over. */
+    private static final int CYCLE_NAMES_SHOWN = 3;
+
     /**
      * What a computed section says for itself with no agent to name it: the
      * structural facts, and the cycle when it is in one.
@@ -245,9 +248,30 @@ public final class IntentGrouping {
     private static String rationale(Sections.Section section) {
         String base = section.files().size() + " files  ·  "
                 + section.hunkIds().size() + " hunks  ·  grouped by drydock, no reviewer has run";
-        return section.cycleWith().isEmpty()
-                ? base
-                : base + "  ·  in a dependency cycle with " + String.join(", ", section.cycleWith());
+        if (section.cycleWith().isEmpty()) {
+            return base;
+        }
+        // cycleWith() names members of THIS section's own unit that
+        // reference each other -- the section IS the cycle, not something
+        // pointing outward at one -- so "in a dependency cycle with" reads
+        // as though these files belonged elsewhere, which they do not.
+        return base + "  ·  its files reference each other in a cycle: "
+                + summarizeCycle(section.cycleWith());
+    }
+
+    /**
+     * At most {@link #CYCLE_NAMES_SHOWN} names, "and N more" beyond that. A
+     * unit's cycle can be its entire membership -- this branch's own
+     * ChangeGraph section names 24 files, all mutually referencing -- and
+     * spelling every one of them inline turns a two-line rationale into a
+     * card taller than the rail's own viewport.
+     */
+    private static String summarizeCycle(List<String> names) {
+        if (names.size() <= CYCLE_NAMES_SHOWN) {
+            return String.join(", ", names);
+        }
+        return String.join(", ", names.subList(0, CYCLE_NAMES_SHOWN))
+                + " and " + (names.size() - CYCLE_NAMES_SHOWN) + " more";
     }
 
     /**
