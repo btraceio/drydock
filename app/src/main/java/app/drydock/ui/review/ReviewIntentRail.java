@@ -12,6 +12,7 @@ import javafx.animation.Timeline;
 import javafx.css.PseudoClass;
 import javafx.geometry.Pos;
 import javafx.scene.Node;
+import javafx.scene.Parent;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
 import javafx.scene.control.ScrollPane;
@@ -430,33 +431,72 @@ final class ReviewIntentRail extends VBox {
      * read "builds on ①" under both -- a false statement about a hunk that
      * does not itself build on anything. Prefixing it "file " keeps the claim
      * honest regardless of which hunk of the file this row is.</p>
+     *
+     * <p><strong>Built from Labels, never {@code Button.setText}.</strong> A
+     * plain {@code Button}'s own text has no {@code -fx-text-fill} of its
+     * own in this stylesheet -- {@code .review-intent-card} sets border and
+     * background only -- so it falls back to modena's default button text
+     * colour, tuned for a LIGHT button face, against this rail's dark
+     * background. Measured on a real screenshot: the selected row's own text
+     * came out at 1.13:1 contrast, worse than the unselected 1.70:1, because
+     * the lighter {@code :selected} background made a light-on-light problem
+     * WORSE. {@link #buildCard}'s intents cards never hit this: their text
+     * lives in child {@code Label}s carrying their own {@code -fx-text-fill}
+     * (see {@code .review-intent-title} et al. in {@code app.css}), which
+     * {@code :selected} brightens explicitly. Rebuilt the same way here --
+     * {@code review-path-badge}/{@code -file}/{@code -reason}/{@code -links}
+     * each carry an explicit fill, unselected and selected both.</p>
      */
     private Button buildPathRow(ReadingPath.Step step, int indexInFile, int hunksInFile) {
         Button row = new Button();
-        row.setText(pathRowText(step, indexInFile, hunksInFile));
         row.getStyleClass().add("review-intent-card");
-        row.setWrapText(true);
         row.setMaxWidth(Double.MAX_VALUE);
         row.setAlignment(Pos.TOP_LEFT);
         row.setOnAction(e -> onPathSelected.accept(step));
-        return row;
-    }
 
-    private static String pathRowText(ReadingPath.Step step, int indexInFile, int hunksInFile) {
-        String badge = step.entryPoint()
+        Label badge = new Label(step.entryPoint()
                 ? "START HERE " + SectionStates.sectionMark(step.sectionNumber())
-                : SectionStates.sectionMark(step.sectionNumber());
-        String where = hunksInFile > 1
+                : SectionStates.sectionMark(step.sectionNumber()));
+        badge.getStyleClass().add("review-path-badge");
+
+        Label where = new Label(hunksInFile > 1
                 ? step.file() + "  ·  hunk " + (indexInFile + 1) + "/" + hunksInFile
-                : step.file();
-        StringBuilder text = new StringBuilder(badge).append("  ").append(where)
-                .append('\n').append("file ").append(step.reason());
+                : step.file());
+        where.getStyleClass().add("review-path-file");
+        where.setWrapText(true);
+        HBox.setHgrow(where, Priority.ALWAYS);
+        HBox headerRow = new HBox(6, badge, where);
+        headerRow.setAlignment(Pos.TOP_LEFT);
+
+        Label reason = new Label("file " + step.reason());
+        reason.getStyleClass().add("review-path-reason");
+        reason.setWrapText(true);
+
+        VBox content = new VBox(4, headerRow, reason) {
+            @Override
+            protected double computePrefHeight(double width) {
+                // Same reason buildCard's own content VBox overrides this:
+                // the Button asks for prefHeight(-1), and a wrapping Label
+                // answers that at its MINIMUM width -- one word per line --
+                // unless told the width it will actually render at.
+                return super.computePrefHeight(width < 0 ? getPrefWidth() : width);
+            }
+        };
         if (!step.links().isEmpty()) {
-            text.append('\n').append(step.links().size() == 1 ? "→ " : "→ " + step.links().size() + " links: ")
-                    .append(step.links().stream().map(ReadingPath.Link::label)
-                            .collect(Collectors.joining("; ")));
+            Label links = new Label((step.links().size() == 1 ? "→ " : "→ " + step.links().size() + " links: ")
+                    + step.links().stream().map(ReadingPath.Link::label).collect(Collectors.joining("; ")));
+            links.getStyleClass().add("review-path-links");
+            links.setWrapText(true);
+            content.getChildren().add(links);
         }
-        return text.toString();
+        // Bound to the CARDS COLUMN, exactly as buildCard's own content is,
+        // and for the identical reason: a graphic bound back to its own
+        // Button is a cycle that leaves both wrapping labels measuring at
+        // zero width on the pass that fixes the height.
+        content.prefWidthProperty().bind(cards.widthProperty().subtract(CARD_WIDTH_INSET));
+        content.maxWidthProperty().bind(content.prefWidthProperty());
+        row.setGraphic(content);
+        return row;
     }
 
     private Button buildCard(ReviewIntent intent) {
@@ -631,8 +671,30 @@ final class ReviewIntentRail extends VBox {
      * Test-only: PATH mode's rendered row texts, in rendered order --
      * {@code buttonsByHunkId} is a {@link LinkedHashMap} populated in the
      * same loop that renders {@link #cards}, so its values() order matches.
+     * Reads every {@link Label}'s text inside the row's graphic (badge,
+     * file, reason, links), joined by newlines, since {@link #buildPathRow}
+     * puts the row's text on child Labels rather than the Button itself.
      */
     List<String> diagPathRowTexts() {
-        return buttonsByHunkId.values().stream().map(Button::getText).toList();
+        return buttonsByHunkId.values().stream()
+                .map(button -> String.join("\n", labelTexts(button.getGraphic())))
+                .toList();
+    }
+
+    /** Every {@link Label}'s text under {@code node}, depth-first. */
+    private static List<String> labelTexts(Node node) {
+        List<String> texts = new ArrayList<>();
+        collectLabelTexts(node, texts);
+        return texts;
+    }
+
+    private static void collectLabelTexts(Node node, List<String> into) {
+        if (node instanceof Label label) {
+            into.add(label.getText());
+        } else if (node instanceof Parent parent) {
+            for (Node child : parent.getChildrenUnmodifiable()) {
+                collectLabelTexts(child, into);
+            }
+        }
     }
 }

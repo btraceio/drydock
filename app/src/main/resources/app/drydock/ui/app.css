@@ -3257,6 +3257,41 @@
     -fx-font-style: italic;
 }
 
+/* PATH mode's rows (ReviewIntentRail#buildPathRow, Task 18 follow-up):
+ * mirrors .review-intent-number/.review-intent-title exactly, fill for
+ * fill, unselected and selected both. A row built from Button.setText alone
+ * has no -fx-text-fill of its own here -- .review-intent-card sets border
+ * and background only -- so it fell back to modena's default BUTTON text
+ * colour (tuned for a light button face) against this rail's dark
+ * background: 1.13:1 contrast on the SELECTED row, measured on a real
+ * screenshot, worse than the 1.70:1 the unselected rows still failed at.
+ * Every part of a row lives on its own Label now, so every part gets its
+ * own explicit fill instead of inheriting one meant for something else. */
+.review-path-badge {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10.5px;
+    -fx-font-weight: 700;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-intent-card:selected .review-path-badge { -fx-text-fill: -drydock-accent; }
+.review-path-file {
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 12px;
+    -fx-font-weight: 600;
+}
+.review-intent-card:selected .review-path-file { -fx-text-fill: -drydock-text; }
+.review-path-reason {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10.5px;
+}
+.review-intent-card:selected .review-path-reason { -fx-text-fill: -drydock-text-dim; }
+.review-path-links {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 9.5px;
+    -fx-font-style: italic;
+}
+.review-intent-card:selected .review-path-links { -fx-text-fill: -drydock-text-dim; }
+
 /* The risk heat bar: one bar, keyed to the intent's own risk. */
 .review-intent-heat {
     -fx-min-height: 3px;
