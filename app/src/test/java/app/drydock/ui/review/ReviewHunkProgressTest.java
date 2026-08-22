@@ -35,10 +35,14 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Overlapping sections break the old arithmetic (spec §5.6): the sum of
- * section sizes exceeds the number of hunks, so "3 of 5 intents settled"
- * measures nothing. Progress counts distinct hunks, and a hunk settled in
- * one section shows as settled in the other, marked with where.
+ * What the rail and the verdict bar actually RENDER once progress is counted
+ * in hunks (spec §5.6): the progress label, the settled card, the marker for
+ * a hunk settled in a neighbouring section, the stale banner, and the
+ * keyboard and Submit paths that walk sections.
+ *
+ * <p>The derivation behind all of it -- merge rules, counts, staleness,
+ * adrift groupings -- is {@link SectionStatesTest}, which needs no {@code
+ * Stage}. What is here is only what needs a rendered board.</p>
  *
  * <p>This also re-pins the two assertions {@code ReviewCarriedOverVerdictTest}
  * held before it was deleted with its subject: that a settled card carries
@@ -85,7 +89,7 @@ class ReviewHunkProgressTest extends ApplicationTest {
         host.store.close();
     }
 
-    // ---- progress counts hunks, not section slots ---------------------------
+    // ---- the verdict bar counts distinct hunks ------------------------------
 
     /**
      * Two sections that share {@code guards.h}: four section slots over three
@@ -119,42 +123,6 @@ class ReviewHunkProgressTest extends ApplicationTest {
         assertEquals("3/3 hunks reviewed", progressText());
     }
 
-    // ---- a section's decision is derived from its hunks ---------------------
-
-    @Test
-    void anUnsettledHunkLeavesItsSectionUnsettled() {
-        showOverlappingSections();
-
-        approve(GUARDS_H);
-
-        assertEquals(Optional.empty(), view.diagSectionState(0).decision(),
-                "guards.cpp is still unread, so the section cannot be approved");
-        assertEquals(1, view.diagSectionState(0).settledHunks());
-        assertEquals(2, view.diagSectionState(0).totalHunks());
-    }
-
-    @Test
-    void aSectionWithEveryHunkSettledIsApproved() {
-        showOverlappingSections();
-
-        approve(GUARDS_H);
-        approve(GUARDS_CPP);
-
-        assertEquals(Optional.of(ReviewVerdict.Decision.APPROVED),
-                view.diagSectionState(0).decision());
-    }
-
-    /** Any changes request wins over the rest of the section (VerdictMerge). */
-    @Test
-    void oneChangeRequestMakesTheWholeSectionChanges() {
-        showOverlappingSections();
-
-        record(GUARDS_CPP, ReviewVerdict.Decision.CHANGES);
-
-        assertEquals(Optional.of(ReviewVerdict.Decision.CHANGES),
-                view.diagSectionState(0).decision());
-    }
-
     // ---- re-pinned: the rail's settled card ---------------------------------
 
     /**
@@ -175,7 +143,7 @@ class ReviewHunkProgressTest extends ApplicationTest {
 
     /**
      * Settling section ① settles a hunk section ② also contains. Without
-     * saying where it was settled, ②'s state changes with no visible cause.
+     * saying where, ②'s count changes with no visible cause.
      */
     @Test
     void aHunkSettledElsewhereSaysWhereItWasSettled() {
@@ -184,27 +152,8 @@ class ReviewHunkProgressTest extends ApplicationTest {
         approve(GUARDS_H);
         approve(GUARDS_CPP);
 
-        assertEquals(List.of("①"), view.diagSectionState(1).settledElsewhere());
         assertTrue(railText().contains("✓ reviewed in ①"),
                 "the rail must name the section that settled it, got: " + railText());
-    }
-
-    /**
-     * A sibling that settled ONE shared hunk moves this card's count by
-     * exactly as much as a fully settled sibling does. Marking only the
-     * fully-settled case solves the easy half of "state changing on its own"
-     * and leaves the other half exactly as mysterious.
-     */
-    @Test
-    void aPartlySettledSiblingIsNamedToo() {
-        showOverlappingSections();
-
-        approve(GUARDS_H);
-
-        assertEquals(List.of("②"), view.diagSectionState(0).settledElsewhere(),
-                "section ① shares its settled hunk with ②, which is not itself settled");
-        assertEquals(List.of("①"), view.diagSectionState(1).settledElsewhere());
-        assertTrue(railText().contains("✓ reviewed in ①"), railText());
     }
 
     /** A settled card explains itself with its own verdict; the marker would be noise. */
@@ -219,6 +168,68 @@ class ReviewHunkProgressTest extends ApplicationTest {
                 "settled section ① must not point at ②, got: " + railText());
     }
 
+    // ---- verdicts are keyed by a real digest --------------------------------
+
+    @Test
+    void approvingASectionRecordsOneVerdictPerHunkKeyedByItsDigest() {
+        showOverlappingSections();
+
+        clickOn(".review-verdict-action");
+        WaitForAsyncUtils.waitForFxEvents();
+
+        assertTrue(host.store.verdict(scope.id(), digestOf(GUARDS_H)).isPresent(),
+                "a verdict must be keyed by the hunk's content digest");
+        assertTrue(host.store.verdict(scope.id(), digestOf(GUARDS_CPP)).isPresent());
+        assertTrue(host.store.verdict(scope.id(), "section-1").isEmpty(),
+                "no verdict may be keyed by an intent id");
+    }
+
+    /** {@code u} undoes every hunk of the section it settled, not just one. */
+    @Test
+    void undoingASectionClearsEveryHunkItSettled() {
+        showOverlappingSections();
+        press(KeyCode.A).release(KeyCode.A);
+        WaitForAsyncUtils.waitForFxEvents();
+
+        press(KeyCode.U).release(KeyCode.U);
+        WaitForAsyncUtils.waitForFxEvents();
+
+        assertTrue(host.store.verdictsFor(scope.id()).isEmpty(),
+                "undo must clear the whole section it settled");
+    }
+
+    // ---- the stale banner ---------------------------------------------------
+
+    @Test
+    void aBaseMoveTouchingTheSectionBannersIt() {
+        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
+        showOverlappingSections();
+        recordAgainstBase(GUARDS_H, "0".repeat(40));
+        recordAgainstBase(GUARDS_CPP, "0".repeat(40));
+
+        assertEquals(SectionStates.Staleness.MOVED, view.diagSectionState(0).staleness());
+        assertTrue(railLabels(".review-intent-stale").contains("⚠ base moved — confirm"));
+    }
+
+    /**
+     * While the delta is still being computed -- or the old base can no
+     * longer be diffed -- nothing is known, and nothing may be claimed. A
+     * confirm-me banner on every settled card of a review nobody touched is
+     * worse than no banner: it trains the reader to click it reflexively.
+     */
+    @Test
+    void anUnresolvableDeltaSaysNothingRatherThanWarning() {
+        host.baseDelta = new BaseMove.Delta(true, new TreeSet<>());
+        showOverlappingSections();
+        recordAgainstBase(GUARDS_H, "0".repeat(40));
+        recordAgainstBase(GUARDS_CPP, "0".repeat(40));
+
+        assertEquals(SectionStates.Staleness.UNKNOWN, view.diagSectionState(0).staleness(),
+                "an unanswered question is not a finding");
+        assertTrue(railLabels(".review-intent-stale").isEmpty(),
+                "no card may warn about a move nothing established");
+    }
+
     // ---- a grouping that drifted off the diff -------------------------------
 
     /**
@@ -228,7 +239,7 @@ class ReviewHunkProgressTest extends ApplicationTest {
      * and jumps to the one card that cannot be settled.
      */
     @Test
-    void aSectionWhoseHunksLeftTheDiffIsNotCountedAndSaysSo() {
+    void aSectionWhoseHunksLeftTheDiffSaysSoAndIsNotCounted() {
         showSectionsWithOneAdrift();
 
         assertTrue(view.diagSectionState(1).hunksMissing(),
@@ -264,99 +275,8 @@ class ReviewHunkProgressTest extends ApplicationTest {
         press(KeyCode.N).release(KeyCode.N);
         WaitForAsyncUtils.waitForFxEvents();
 
-        assertFalse(view.diagSectionState(1).hunksMissing()
-                        && intentLabel().startsWith("2 "),
+        assertFalse(intentLabel().startsWith("2 "),
                 "n must not land on the adrift section, got: " + intentLabel());
-    }
-
-    // ---- carry-forward (a): verdicts are keyed by a real digest -------------
-
-    @Test
-    void approvingASectionRecordsOneVerdictPerHunkKeyedByItsDigest() {
-        showOverlappingSections();
-
-        clickOn(".review-verdict-action");
-        WaitForAsyncUtils.waitForFxEvents();
-
-        assertTrue(host.store.verdict(scope.id(), digestOf(GUARDS_H)).isPresent(),
-                "a verdict must be keyed by the hunk's content digest");
-        assertTrue(host.store.verdict(scope.id(), digestOf(GUARDS_CPP)).isPresent());
-        assertTrue(host.store.verdict(scope.id(), "section-1").isEmpty(),
-                "no verdict may be keyed by an intent id");
-    }
-
-    /** {@code u} undoes every hunk of the section it settled, not just one. */
-    @Test
-    void undoingASectionClearsEveryHunkItSettled() {
-        showOverlappingSections();
-        press(KeyCode.A).release(KeyCode.A);
-        WaitForAsyncUtils.waitForFxEvents();
-
-        press(KeyCode.U).release(KeyCode.U);
-        WaitForAsyncUtils.waitForFxEvents();
-
-        assertTrue(host.store.verdictsFor(scope.id()).isEmpty(),
-                "undo must clear the whole section it settled");
-    }
-
-    // ---- carry-forward (b): staleness is measured against a commit ----------
-
-    /**
-     * A verdict given against an older base, where the move touched a file
-     * the section covers, reads as stale.
-     */
-    @Test
-    void aBaseMoveTouchingTheSectionMarksItStale() {
-        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
-        showOverlappingSections();
-        recordAgainstBase(GUARDS_H, "0".repeat(40));
-        recordAgainstBase(GUARDS_CPP, "0".repeat(40));
-
-        assertEquals(SessionReviewView.Staleness.MOVED, view.diagSectionState(0).staleness(),
-                "the base moved under a file this section covers");
-        assertTrue(railLabels(".review-intent-stale").contains("⚠ base moved — confirm"));
-    }
-
-    /** A base move that provably could not matter must not spend the reader's attention. */
-    @Test
-    void aBaseMoveElsewhereLeavesTheSectionFresh() {
-        host.baseDelta = new BaseMove.Delta(false,
-                new TreeSet<>(List.of("docs/README.md")));
-        showOverlappingSections();
-        recordAgainstBase(GUARDS_H, "0".repeat(40));
-        recordAgainstBase(GUARDS_CPP, "0".repeat(40));
-
-        assertEquals(SessionReviewView.Staleness.FRESH, view.diagSectionState(0).staleness(),
-                "nothing this section covers moved");
-    }
-
-    /** A verdict recorded against the current base is never stale. */
-    @Test
-    void aFreshVerdictIsNotStale() {
-        showOverlappingSections();
-
-        approve(GUARDS_H);
-
-        assertEquals(SessionReviewView.Staleness.FRESH, view.diagSectionState(0).staleness());
-    }
-
-    /**
-     * While the delta is still being computed -- or the old base can no
-     * longer be diffed -- nothing is known, and nothing may be claimed. A
-     * confirm-me banner on every settled card of a review nobody touched is
-     * worse than no banner: it trains the reader to click it reflexively.
-     */
-    @Test
-    void anUnresolvableDeltaSaysNothingRatherThanWarning() {
-        host.baseDelta = new BaseMove.Delta(true, new TreeSet<>());
-        showOverlappingSections();
-        recordAgainstBase(GUARDS_H, "0".repeat(40));
-        recordAgainstBase(GUARDS_CPP, "0".repeat(40));
-
-        assertEquals(SessionReviewView.Staleness.UNKNOWN, view.diagSectionState(0).staleness(),
-                "an unanswered question is not a finding");
-        assertTrue(railLabels(".review-intent-stale").isEmpty(),
-                "no card may warn about a move nothing established");
     }
 
     // ---- helpers ------------------------------------------------------------
@@ -366,16 +286,11 @@ class ReviewHunkProgressTest extends ApplicationTest {
      * again and profiler.cpp. Three hunks, four slots.
      */
     private void showOverlappingSections() {
-        scope = registry.mint(ReviewScopeRegistry.spec(ReviewScope.Kind.WORKING_TREE,
-                Path.of("/tmp/nowhere"), Optional.of(Path.of("/tmp/nowhere")), "main", "main",
-                Optional.empty(), Optional.empty()));
+        mintScope();
         host.intents.set(scope.id(), List.of(
                 section("section-1", "Guards", GUARDS_H, GUARDS_CPP),
                 section("section-2", "Profiler", GUARDS_H, PROFILER)));
-        interact(() -> view.showScopes(new SessionReviewScopes.Scopes(scope, Optional.empty()),
-                SessionReviewScopes.Choice.LOCAL));
-        interact(() -> view.diagShowDiff(scope, host.diff));
-        WaitForAsyncUtils.waitForFxEvents();
+        show();
     }
 
     /**
@@ -383,14 +298,22 @@ class ReviewHunkProgressTest extends ApplicationTest {
      * file does not have, which is what a stale positional id looks like.
      */
     private void showSectionsWithOneAdrift() {
-        scope = registry.mint(ReviewScopeRegistry.spec(ReviewScope.Kind.WORKING_TREE,
-                Path.of("/tmp/nowhere"), Optional.of(Path.of("/tmp/nowhere")), "main", "main",
-                Optional.empty(), Optional.empty()));
+        mintScope();
         ReviewIntent adrift = new ReviewIntent("section-2", 0, "Profiler",
                 ReviewIntent.Kind.CHANGE, ReviewIntent.Risk.MED, "",
                 List.of(ReviewIntent.hunkId(PROFILER, 7)), Optional.empty(), false);
         host.intents.set(scope.id(), List.of(
                 section("section-1", "Guards", GUARDS_H, GUARDS_CPP), adrift));
+        show();
+    }
+
+    private void mintScope() {
+        scope = registry.mint(ReviewScopeRegistry.spec(ReviewScope.Kind.WORKING_TREE,
+                Path.of("/tmp/nowhere"), Optional.of(Path.of("/tmp/nowhere")), "main", "main",
+                Optional.empty(), Optional.empty()));
+    }
+
+    private void show() {
         interact(() -> view.showScopes(new SessionReviewScopes.Scopes(scope, Optional.empty()),
                 SessionReviewScopes.Choice.LOCAL));
         interact(() -> view.diagShowDiff(scope, host.diff));
@@ -407,11 +330,7 @@ class ReviewHunkProgressTest extends ApplicationTest {
     }
 
     private void approve(String file) {
-        record(file, ReviewVerdict.Decision.APPROVED);
-    }
-
-    private void record(String file, ReviewVerdict.Decision decision) {
-        put(file, decision, host.baseCommit);
+        put(file, ReviewVerdict.Decision.APPROVED, host.baseCommit);
     }
 
     private void recordAgainstBase(String file, String base) {
@@ -434,9 +353,7 @@ class ReviewHunkProgressTest extends ApplicationTest {
     }
 
     private String progressText() {
-        List<Node> labels = new ArrayList<>();
-        interact(() -> labels.addAll(lookup(".review-verdict-progress-label").queryAll()));
-        return labels.stream().map(node -> ((Label) node).getText())
+        return labels(".review-verdict-progress-label").stream()
                 .findFirst().orElse("<no progress label>");
     }
 
@@ -448,22 +365,22 @@ class ReviewHunkProgressTest extends ApplicationTest {
 
     /** The texts of every label the rail drew under {@code selector}. */
     private List<String> railLabels(String selector) {
-        List<Node> labels = new ArrayList<>();
-        interact(() -> labels.addAll(lookup(selector).queryAll()));
-        return labels.stream().map(node -> ((Label) node).getText()).toList();
+        return labels(selector);
     }
 
     private String intentLabel() {
-        List<Node> labels = new ArrayList<>();
-        interact(() -> labels.addAll(lookup(".review-verdict-intent").queryAll()));
-        return labels.stream().map(node -> ((Label) node).getText()).findFirst().orElse("");
+        return labels(".review-verdict-intent").stream().findFirst().orElse("");
     }
 
     private String railText() {
-        List<Node> labels = new ArrayList<>();
-        interact(() -> labels.addAll(lookup(".review-intent-settled-elsewhere").queryAll()));
-        return labels.stream().map(node -> ((Label) node).getText())
-                .reduce("", (a, b) -> a + " " + b);
+        return String.join(" ", labels(".review-intent-settled-elsewhere"));
+    }
+
+    private List<String> labels(String selector) {
+        List<Node> nodes = new ArrayList<>();
+        interact(() -> nodes.addAll(lookup(selector).queryAll()));
+        return nodes.stream().filter(Label.class::isInstance)
+                .map(node -> ((Label) node).getText()).toList();
     }
 
     private static UnifiedDiff.FileDiff file(String path, String text) {
