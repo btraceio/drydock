@@ -25,9 +25,9 @@ one rung lower down, when it replaced one-intent-per-file whose titles all
 clipped to the same prefix. It stopped one rung too early: **the grouping
 still has no structural input at all.**
 
-The same change, grouped structurally, reads `JmpCtxScope guard` (2 files),
-then `Crash-protected resolve()`, then the tests for each. The difference is
-not presentation. `guards.h` and `guards.cpp` are one idea, a directory key
+The same change, grouped structurally, reads `JmpCtxScope guard` — its
+header, its implementation and the tests that exercise it, in that order —
+and then `Crash-protected resolve()`. The difference is not presentation. `guards.h` and `guards.cpp` are one idea, a directory key
 splits them whenever the tree does, and no amount of better sorting or
 naming recovers a group that was drawn in the wrong place.
 
@@ -257,22 +257,54 @@ one giant section, and Drydock mines no history to build it from. And there
 is no clustering algorithm — a component is a connected component, not a
 community (§2.2).
 
-### 5.3 Tests: Drydock's rule, applied deliberately
+### 5.3 Tests are not split out; the graph places them
 
-Drydock's fallback makes kind part of the group key, so a test never shares a
+`FallbackIntents` makes kind part of the group key, so a test never shares a
 card with its subject, on a stated ground: *"'the change' and 'the tests for
 the change' are the two things a reviewer most wants to look at separately."*
 
-The reference output does both — two test files get their own sections while
-two others stay inside the core section. That is not a principle, it is
-whatever the components fell out as, and inheriting it would make Drydock's
-behaviour depend on the shape of the call graph rather than on a decision.
+**That rule is dropped for computed sections.** An earlier draft kept it and
+applied it inside each component, which was §5.1's own indictment repeated one
+layer later: §5.2 groups by structure precisely because a path heuristic draws
+the wrong boundaries, and then splitting the result on `/test/`, `*_ut.cpp`
+and `*Test.java` is a path heuristic drawing a boundary through a structurally
+sound group.
 
-**The rule is kept, and moved inside the component.** A component splits into
-at most one production section and one test section, adjacent, production
-first. That preserves the existing stated preference and produces the good
-half of the reference output — a test section next to the subject it covers —
-uniformly rather than by luck.
+The signal is already there and already correct. A test file references the
+symbol under test, so a changed declaration in `guards.h` and its exercise in
+`hotspot_crash_protection_ut.cpp` produce an edge (§4.2) and land in one
+component **without a rule**. A test that genuinely does not reference
+anything changed — a test-only change, or tests exercising untouched code —
+forms its own component, which is the honest outcome rather than a
+special case.
+
+This also explains the source design's apparently inconsistent output rather
+than excusing it: two of its test files sit inside the core section because
+they reference changed symbols in it, and one is its own section because it
+is a new test file for a class whose changed surface it does not otherwise
+touch. The graph is right in both cases. A path-based split would have
+flattened them into the same answer.
+
+The rationale quoted above is not wrong so much as obsolete: it was written
+for a world with no structural signal to consult, where separating tests was
+the only way to stop them burying the change. With a component to place them
+in, keeping a test beside the code it pins is what lets a reviewer check that
+the code does what the test claims — which is the thing they were being kept
+apart from.
+
+Two consequences, stated rather than discovered:
+
+- **A mixed section is `Kind.CHANGE`, not `Kind.TESTS`.** `ReviewIntent.Kind`
+  holds one value, and a section containing production code cannot honestly
+  be tagged as tests. The test files stay visible in the section's file
+  badges.
+- **Within a section, tests sort after the code they exercise** — not by a
+  rule, but because the edge runs test→implementation and §6.1 sorts
+  foundation first. "Here is the change; here is what pins it."
+
+`FallbackIntents`' kind key survives untouched in the no-edges fallback
+(§11), where there is no structure to consult and it remains the best
+available guess.
 
 ### 5.4 Titles and explanations: three rungs
 
@@ -344,10 +376,11 @@ Ranked by, in order:
    Explorer and from the agent (§7.4).
 2. **In-degree within the changed set** — the foundation the rest builds on.
 3. **Not a test** — test paths (`*_test.*`, `*Test.java`, `__tests__/`, and
-   the rest of v2's list) rank after production code. This is the one place
-   this design takes a side where v2 offers a preference: Drydock's fallback
-   grouping already puts tests last, and two orderings disagreeing about it
-   would be worse than either.
+   the rest of v2's list) rank after production code. This is a tie-break for
+   when the graph is silent, **not** an override of it: where a test
+   references changed code the edge already orders it (§5.3), and this signal
+   never fires. It decides only the case it should — a test-only section with
+   no edges into it should not be where a reviewer is told to start.
 4. **Not a leaf** — nothing changed depends on it, so it is an endpoint.
 
 The top-ranked unit is marked `START HERE` — by construction the first card
@@ -676,9 +709,11 @@ Headless tests:
   uses but no declarations.
 - `Sections`: a `.h` groups with its same-basename `.cpp`; a header with no
   changed symbol groups with the changed `.cpp` that references it; two
-  components stay two sections; a component splits into adjacent
-  production/test sections, production first; and an edgeless diff reproduces
-  today's (kind, directory) clustering exactly.
+  components stay two sections; a test referencing a changed symbol lands in
+  that symbol's section and sorts after it; a test referencing nothing changed
+  forms its own section; a mixed section is tagged `Kind.CHANGE`; and an
+  edgeless diff reproduces today's (kind, directory) clustering exactly,
+  tests separated included.
 - Section titles: agent title wins; hub symbol when there is one; directory
   tail when no symbol dominates.
 - `ReadingPath`: foundation-before-dependent on a hand-built graph; a cycle
@@ -738,7 +773,8 @@ In the running app, with screenshots rather than assertions about them:
   unrelated sub-changes. A connected component is as large as the call graph
   makes it, and nothing here splits it. No rule is invented for this (§15) —
   it is recorded so that a 9-file section is recognised as the known failure
-  rather than as a bug in the grouping.
+  rather than as a bug in the grouping. Placing tests in context (§5.3) makes
+  a section modestly larger, which trades against this deliberately.
 - **Content-derived ids change the meaning of a stored key.** Verdicts
   written under an agent's string id before this lands are re-anchored by
   overlap on first read, which is the same shape as the migration that
