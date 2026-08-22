@@ -9,6 +9,8 @@ import app.drydock.git.UnifiedDiff;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.ChangeGraph;
 import app.drydock.review.IntentHunks;
+import app.drydock.review.OutOfDiffFanIn;
+import app.drydock.review.ReadingPath;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
@@ -336,6 +338,21 @@ public final class McpToolRouter {
     }
 
     /**
+     * A live surface (the Review board's rail) numbers its cards off the
+     * reading path's order, not {@link Sections#of}'s own grouping order --
+     * see {@link ReadingPath.Path#sections()}. An agent reading {@code
+     * sections} here off the plain grouping would disagree with the human
+     * looking at the same review over which card is ①, so this reorders the
+     * SAME sections through {@link ReadingPath#of} before handing them out,
+     * exactly as the rail does. No out-of-diff fan-in scan backs the rank
+     * here -- {@link OutOfDiffFanIn#scan} spawns a blocking {@code git grep}
+     * per call, a separate concern from reordering an existing payload -- so
+     * {@code unavailable=true} is the honest input for a signal nothing
+     * computed, the same choice the rail makes.
+     */
+    private static final OutOfDiffFanIn.Result NO_FAN_IN_SCAN = new OutOfDiffFanIn.Result(Map.of(), true);
+
+    /**
      * {@code sections}, or empty if none was requested or the graph could not
      * be built. {@link ChangeGraph#of} (via {@link SymbolScan}) can throw
      * unchecked on a parse edge case; that must cost this ONE optional extra,
@@ -344,8 +361,10 @@ public final class McpToolRouter {
      */
     private Optional<JsonValue> computeSections(ReviewScope scope, UnifiedDiff diff) {
         try {
-            return Optional.of(ReviewToolCodec.sectionsToJson(
-                    Sections.of(diff, graphBuilder.apply(diff))));
+            ChangeGraph graph = graphBuilder.apply(diff);
+            List<Sections.Section> sections = Sections.of(diff, graph);
+            ReadingPath.Path path = ReadingPath.of(diff, graph, sections, NO_FAN_IN_SCAN);
+            return Optional.of(ReviewToolCodec.sectionsToJson(path.sections()));
         } catch (RuntimeException e) {
             LOG.log(Level.WARNING, "review_scope: could not compute sections for scope "
                     + scope.id() + "; omitting: " + e.getMessage(), e);

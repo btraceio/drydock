@@ -1,6 +1,7 @@
 package app.drydock.ui.review;
 
 import app.drydock.review.ChangeGraph;
+import app.drydock.review.ReadingPath;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewVerdict;
 import app.drydock.ui.PanelHeader;
@@ -28,6 +29,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.stream.Collectors;
 
 /**
  * The intent rail (spec §4.2): one card per intent, with its number, title,
@@ -73,6 +75,32 @@ final class ReviewIntentRail extends VBox {
     private final Label pendingBanner = new Label("refining grouping…");
 
     private final Map<String, Button> buttonsByIntentId = new LinkedHashMap<>();
+    private final Map<String, Button> buttonsByHunkId = new LinkedHashMap<>();
+
+    /**
+     * The rail's two ways of listing the same diff (spec §7.1): today's
+     * cards, or one row per hunk in reading order. A mode of the rail, not a
+     * fourth column -- the width budget that ruled out a concept map rules
+     * out a new column just as firmly, and {@link RailLayout} is untouched.
+     */
+    enum Mode { INTENTS, PATH }
+
+    private Mode mode = Mode.INTENTS;
+
+    /**
+     * {@code PATH} mode's rows, already in reading order and already
+     * numbered against {@link ReadingPath.Path#sections()} -- see {@link
+     * #showPath}. Never re-sorted or renumbered here: {@link
+     * ReadingPath.Step#sectionNumber} is the one authority for both, and a
+     * rail that recomputed either would risk disagreeing with the entry
+     * point it is handed (spec §6, Task 17).
+     */
+    private List<ReadingPath.Step> pathSteps = List.of();
+
+    /** The hunk id {@code PATH} mode highlights as selected. */
+    private String selectedHunkId;
+
+    private Consumer<ReadingPath.Step> onPathSelected = step -> { };
 
     private List<ReviewIntent> intents = List.of();
     /**
@@ -128,6 +156,15 @@ final class ReviewIntentRail extends VBox {
         this.onSelected = handler == null ? intent -> { } : handler;
     }
 
+    /** Which of the rail's two modes is showing. Whichever of {@link #setIntents}/{@link #showPath} ran last. */
+    Mode mode() {
+        return mode;
+    }
+
+    void setOnPathSelected(Consumer<ReadingPath.Step> handler) {
+        this.onPathSelected = handler == null ? step -> { } : handler;
+    }
+
     void setOnToggleCollapse(Runnable handler) {
         this.onToggleCollapse = handler == null ? () -> { } : handler;
     }
@@ -166,8 +203,27 @@ final class ReviewIntentRail extends VBox {
 
     /** Replaces the rail's contents and marks {@code selectedIntentId} as current. */
     void setIntents(List<ReviewIntent> newIntents, String selectedIntentId, Empty reason) {
+        this.mode = Mode.INTENTS;
         this.intents = List.copyOf(newIntents);
         this.selectedId = selectedIntentId;
+        this.emptyReason = reason == null ? Empty.NONE : reason;
+        rebuild();
+    }
+
+    /**
+     * Switches the rail to {@code PATH} mode: one row per hunk in reading
+     * order, across section boundaries (spec §7.1, Task 18). {@code steps}
+     * is rendered exactly as handed in -- already the path's order, already
+     * numbered against {@link ReadingPath.Path#sections()} -- so the rail
+     * has nothing left to reconcile between "card 1" and the entry point
+     * (see the class-level correction this task was given: rendering the
+     * grouping's own order while numbering off the path's is the exact way
+     * {@code START HERE} ends up on the wrong card).
+     */
+    void showPath(List<ReadingPath.Step> steps, String selectedHunkId, Empty reason) {
+        this.mode = Mode.PATH;
+        this.pathSteps = List.copyOf(steps);
+        this.selectedHunkId = selectedHunkId;
         this.emptyReason = reason == null ? Empty.NONE : reason;
         rebuild();
     }
@@ -274,7 +330,16 @@ final class ReviewIntentRail extends VBox {
         header.showCollapsed(collapsed);
         header.setTitleVisible(!collapsed);
         header.setHintVisible(!collapsed);
+        header.setTitle(mode == Mode.PATH ? "PATH" : "INTENTS");
 
+        if (mode == Mode.PATH) {
+            rebuildPath();
+            return;
+        }
+        rebuildIntents();
+    }
+
+    private void rebuildIntents() {
         // Sections, not hunks: the verdict bar below counts hunks, and two
         // counts of the same thing in two places is one of them being wrong.
         long counted = intents.stream().filter(ReviewIntent::countsTowardProgress).count();
@@ -306,6 +371,92 @@ final class ReviewIntentRail extends VBox {
         }
         cards.getChildren().setAll(nodes);
         applySelection();
+    }
+
+    /**
+     * {@code PATH} mode's render: one row per {@link ReadingPath.Step}, in
+     * the exact order {@link #showPath} was handed -- see that method's
+     * javadoc for why this never re-sorts or renumbers.
+     */
+    private void rebuildPath() {
+        header.setHint(pathSteps.size() + (pathSteps.size() == 1 ? " hunk · i" : " hunks · i"));
+
+        boolean showBanner = groupingPending && !collapsed;
+        pendingBanner.setManaged(showBanner);
+        pendingBanner.setVisible(showBanner);
+
+        buttonsByHunkId.clear();
+        List<Node> nodes = new ArrayList<>();
+        String lastFile = null;
+        int indexInFile = 0;
+        for (int i = 0; i < pathSteps.size(); i++) {
+            ReadingPath.Step step = pathSteps.get(i);
+            indexInFile = step.file().equals(lastFile) ? indexInFile + 1 : 0;
+            lastFile = step.file();
+            int hunksInFile = hunksInFile(step.file());
+            Button row = buildPathRow(step, indexInFile, hunksInFile);
+            buttonsByHunkId.put(step.hunkId(), row);
+            nodes.add(row);
+        }
+        if (nodes.isEmpty() && !collapsed) {
+            Label message = new Label(emptyReason != Empty.NONE
+                    ? emptyReason.message()
+                    : groupingPending
+                            ? "Working out the reading order…"
+                            : "No reading order for this diff");
+            message.getStyleClass().add("review-intent-empty");
+            message.setWrapText(true);
+            nodes.add(message);
+        }
+        cards.getChildren().setAll(nodes);
+        applySelection();
+    }
+
+    private int hunksInFile(String file) {
+        return (int) pathSteps.stream().filter(step -> step.file().equals(file)).count();
+    }
+
+    /**
+     * One {@code PATH} row: its section badge (or {@code START HERE} for the
+     * entry point -- {@link ReadingPath.Step#entryPoint}, which is exactly
+     * the first row here since {@code steps} arrives in reading order), the
+     * file and which of its hunks this is, WHY this file sits where it does,
+     * and its links.
+     *
+     * <p>The reason is stated as a fact about the FILE, never the hunk: a
+     * {@link ReadingPath.Step#reason} is computed once per file and copied
+     * onto every hunk of it (spec's own correction on this task), so a file
+     * with two hunks that do nothing structurally interesting would otherwise
+     * read "builds on ①" under both -- a false statement about a hunk that
+     * does not itself build on anything. Prefixing it "file " keeps the claim
+     * honest regardless of which hunk of the file this row is.</p>
+     */
+    private Button buildPathRow(ReadingPath.Step step, int indexInFile, int hunksInFile) {
+        Button row = new Button();
+        row.setText(pathRowText(step, indexInFile, hunksInFile));
+        row.getStyleClass().add("review-intent-card");
+        row.setWrapText(true);
+        row.setMaxWidth(Double.MAX_VALUE);
+        row.setAlignment(Pos.TOP_LEFT);
+        row.setOnAction(e -> onPathSelected.accept(step));
+        return row;
+    }
+
+    private static String pathRowText(ReadingPath.Step step, int indexInFile, int hunksInFile) {
+        String badge = step.entryPoint()
+                ? "START HERE " + SectionStates.sectionMark(step.sectionNumber())
+                : SectionStates.sectionMark(step.sectionNumber());
+        String where = hunksInFile > 1
+                ? step.file() + "  ·  hunk " + (indexInFile + 1) + "/" + hunksInFile
+                : step.file();
+        StringBuilder text = new StringBuilder(badge).append("  ").append(where)
+                .append('\n').append("file ").append(step.reason());
+        if (!step.links().isEmpty()) {
+            text.append('\n').append(step.links().size() == 1 ? "→ " : "→ " + step.links().size() + " links: ")
+                    .append(step.links().stream().map(ReadingPath.Link::label)
+                            .collect(Collectors.joining("; ")));
+        }
+        return text.toString();
     }
 
     private Button buildCard(ReviewIntent intent) {
@@ -470,5 +621,18 @@ final class ReviewIntentRail extends VBox {
             entry.getValue().pseudoClassStateChanged(PseudoClass.getPseudoClass("selected"),
                     entry.getKey().equals(selectedId));
         }
+        for (Map.Entry<String, Button> entry : buttonsByHunkId.entrySet()) {
+            entry.getValue().pseudoClassStateChanged(PseudoClass.getPseudoClass("selected"),
+                    entry.getKey().equals(selectedHunkId));
+        }
+    }
+
+    /**
+     * Test-only: PATH mode's rendered row texts, in rendered order --
+     * {@code buttonsByHunkId} is a {@link LinkedHashMap} populated in the
+     * same loop that renders {@link #cards}, so its values() order matches.
+     */
+    List<String> diagPathRowTexts() {
+        return buttonsByHunkId.values().stream().map(Button::getText).toList();
     }
 }
