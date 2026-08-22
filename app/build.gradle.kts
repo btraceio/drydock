@@ -234,11 +234,22 @@ tasks.register<Jar>("jbangJar") {
 }
 
 tasks.named<JavaExec>("run") {
-    // The real application now embeds Ghostty terminal surfaces (Milestone
-    // 5's terminal-tabs UI), so `run` needs both native libraries built
-    // first, same as every gateNSpike task (drydock.spikes plugin).
-    dependsOn(rootProject.tasks.named("buildGhosttyNative"))
-    dependsOn(rootProject.tasks.named("buildNativeHost"))
+    // The macOS production app embeds Ghostty terminal surfaces (Milestone
+    // 5's terminal-tabs UI), so on Mac `run` needs libghostty + the AppKit
+    // host shim built first. Neither can be built on Windows -- Zig + Xcode
+    // only -- and on Windows the JediTermFX/pty4j backend is the only path
+    // that runs, so the native deps are skipped there. The dep is gated at
+    // configuration time on os.name (matching the -Xdock:name gating in
+    // applicationDefaultJvmArgs above), so a Windows `gradle :app:run`
+    // proceeds straight to launching the app rather than failing the
+    // ghostty build.
+    val isMacOsHost = System.getProperty("os.name", "").let {
+        it.startsWith("Mac OS X") || it.startsWith("macOS")
+    }
+    if (isMacOsHost) {
+        dependsOn(rootProject.tasks.named("buildGhosttyNative"))
+        dependsOn(rootProject.tasks.named("buildNativeHost"))
+    }
     javaLauncher.set(javaToolchains.launcherFor(java.toolchain))
     workingDir = rootProject.projectDir
 
