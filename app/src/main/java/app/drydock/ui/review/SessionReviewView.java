@@ -338,6 +338,36 @@ public final class SessionReviewView extends BorderPane {
      */
     private volatile boolean closed;
 
+    /**
+     * {@link #intents()}'s last computed result, so one {@link
+     * #refreshReviewState()} pass computes {@code Sections.of} at most ONCE
+     * rather than once per internal caller. {@link #findingsForMargin},
+     * {@link #currentIntent()} (itself called from several places),
+     * {@link #renderVerdictBar} and the rail's own {@code setIntents} call
+     * all read {@link #intents()} independently within a single refresh --
+     * measured at over a second of real work on this branch's own diff, ALL
+     * of it on the FX thread, which {@link Sections#of}'s own contract
+     * forbids.
+     *
+     * <p>Bumped at the top of every {@link #refreshReviewState()} -- the
+     * entry point's own contract is "re-reads ... on every store change", so
+     * a cache that survived past one refresh would go stale exactly when a
+     * reviewer's grouping changed underneath it. Within the one pass that
+     * bump started, {@code scope}, {@code diff} and {@code graph} cannot
+     * change again (nothing here yields back to the FX event queue mid-pass),
+     * so reusing the cached list for the rest of it is exactly as fresh as
+     * recomputing would have been.</p>
+     */
+    private IntentsCacheEntry intentsCache;
+
+    /** One completed {@link #intents()} lookup, keyed by what it was computed from. */
+    private record IntentsCacheEntry(long generation, String scopeId, UnifiedDiff diff,
+                                     ChangeGraph graph, List<ReviewIntent> intents) {
+    }
+
+    /** Bumped at the top of every {@link #refreshReviewState()}; see {@link #intentsCache}. */
+    private long refreshGeneration;
+
     /** The scopes this session offers, once {@link SessionReviewScopes} has measured them. */
     private Optional<SessionReviewScopes.Scopes> scopes = Optional.empty();
 
@@ -815,6 +845,12 @@ public final class SessionReviewView extends BorderPane {
      * from a cached value silently discards the other writer's work.
      */
     public void refreshReviewState() {
+        // Invalidates #intentsCache: this call is the "re-read from the
+        // store" contract above, so every intents() lookup this pass makes
+        // must recompute at least once, even if scope/diff/graph are
+        // unchanged from the last pass -- a reviewer's grouping can have
+        // changed without any of those changing.
+        refreshGeneration++;
         Optional<ReviewScope> scope = selectedScope();
         updateRunReviewButton();
         updateCountsLabel();
@@ -917,11 +953,20 @@ public final class SessionReviewView extends BorderPane {
         if (scope.isEmpty()) {
             return List.of();
         }
-        if (selectedOutcome().orElse(null) instanceof DiffOutcome.Loaded loaded) {
-            return host.intents(scope.get(), loaded.diff(),
-                    Optional.ofNullable(graphByScope.get(scope.get().id())));
+        if (!(selectedOutcome().orElse(null) instanceof DiffOutcome.Loaded loaded)) {
+            return List.of();
         }
-        return List.of();
+        String scopeId = scope.get().id();
+        UnifiedDiff diff = loaded.diff();
+        ChangeGraph graph = graphByScope.get(scopeId);
+        IntentsCacheEntry cached = intentsCache;
+        if (cached != null && cached.generation() == refreshGeneration
+                && cached.scopeId().equals(scopeId) && cached.diff() == diff && cached.graph() == graph) {
+            return cached.intents();
+        }
+        List<ReviewIntent> computed = host.intents(scope.get(), diff, Optional.ofNullable(graph));
+        intentsCache = new IntentsCacheEntry(refreshGeneration, scopeId, diff, graph, computed);
+        return computed;
     }
 
     /**
