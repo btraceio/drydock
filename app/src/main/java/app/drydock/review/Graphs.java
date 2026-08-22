@@ -26,11 +26,12 @@ import java.util.function.Function;
  *
  * <p>The tie-break is supplied by the caller and must be TOTAL: two runs may
  * not order equal units differently (spec §9.5). A caller-supplied edge that
- * points outside {@code nodes} is ignored rather than rejected -- it cannot
- * affect which unit any member of {@code nodes} lands in, so dropping it
- * keeps the output contract (every node in {@code nodes} appears exactly
- * once) rather than failing a caller for a fact about a node it never
- * asked to place.</p>
+ * points outside {@code nodes} is rejected with {@link IllegalArgumentException}
+ * rather than silently dropped -- absent and broken must not look the same.
+ * A node with no such dependency and a node whose dependency the caller
+ * forgot to include would otherwise produce identical output, hiding a bug
+ * in whatever built {@code dependsOn} behind a graph that looks merely
+ * incomplete.</p>
  */
 public final class Graphs {
 
@@ -60,11 +61,14 @@ public final class Graphs {
             prerequisites.put(index, new TreeSet<>());
             dependents.put(index, new TreeSet<>());
         }
+        // stronglyConnected already walked every node's dependsOn and would
+        // have thrown on a target outside nodes, so every prerequisite here
+        // is guaranteed to resolve to a component.
         for (T node : nodes) {
             for (T prerequisite : dependsOn.apply(node)) {
-                Integer from = componentOf.get(prerequisite);
-                Integer to = componentOf.get(node);
-                if (from == null || to == null || from.equals(to)) {
+                int from = componentOf.get(prerequisite);
+                int to = componentOf.get(node);
+                if (from == to) {
                     continue;
                 }
                 prerequisites.get(to).add(from);
@@ -126,7 +130,9 @@ public final class Graphs {
                 if (children.hasNext()) {
                     T child = children.next();
                     if (!nodes.contains(child)) {
-                        continue;
+                        throw new IllegalArgumentException(
+                                "dependsOn(" + node + ") named " + child
+                                        + ", which is not in nodes");
                     }
                     if (!index.containsKey(child)) {
                         index.put(child, counter[0]);
@@ -159,7 +165,6 @@ public final class Graphs {
                 }
             }
         }
-        components.sort(Comparator.comparing(c -> c.get(0), tieBreak));
         return components;
     }
 }
