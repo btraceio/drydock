@@ -64,7 +64,7 @@ public final class FallbackIntents {
      * enum's own ordinal, which is a wire-format concern and would silently
      * reorder the rail the next time a kind is added to it.
      */
-    private static int readingOrder(ReviewIntent.Kind kind) {
+    static int readingOrder(ReviewIntent.Kind kind) {
         return switch (kind) {
             case CHANGE -> 0;
             case REFACTOR -> 1;
@@ -224,6 +224,19 @@ public final class FallbackIntents {
                 || name.endsWith(".pb.go")
                 || name.endsWith("_pb2.py")
                 || name.endsWith(".g.dart");
+    }
+
+    /**
+     * Whether {@code path} is a test path, by the same rules {@link #kindOf}
+     * applies. Exposed for {@link ReadingPath}'s entry-point rank, which
+     * needs the question without the kind: a vendored test is {@link
+     * ReviewIntent.Kind#GENERATED} and still a test. A second copy of this
+     * vocabulary drifted the last time one existed, which is the reason
+     * {@link SymbolWords} is a class at all.
+     */
+    static boolean isTestPath(String path) {
+        String lower = path.toLowerCase(Locale.ROOT);
+        return isTest(lower, fileName(lower));
     }
 
     private static boolean isTest(String lower, String name) {
