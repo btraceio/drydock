@@ -74,6 +74,16 @@ final class ReviewIntentRail extends VBox {
     private boolean collapsed;
     private boolean narrow;
 
+    /**
+     * True while the grouping shown is provisional: a computed
+     * {@link app.drydock.review.ChangeGraph} is still building, and what is
+     * on screen is the (kind, directory) fallback the real grouping may
+     * still replace. Shown in the header's hint rather than silently, so a
+     * reviewer mid-read is not surprised by cards changing under them with
+     * no warning at all.
+     */
+    private boolean groupingPending;
+
     /** Non-zero while the narrow Browse page sizes this rail; see {@link #setSpanWidth}. */
     private double spanWidth;
 
@@ -140,6 +150,15 @@ final class ReviewIntentRail extends VBox {
         this.intents = List.copyOf(newIntents);
         this.selectedId = selectedIntentId;
         this.emptyReason = reason == null ? Empty.NONE : reason;
+        rebuild();
+    }
+
+    /** See {@link #groupingPending}. */
+    void setGroupingPending(boolean pending) {
+        if (groupingPending == pending) {
+            return;
+        }
+        groupingPending = pending;
         rebuild();
     }
 
@@ -244,7 +263,8 @@ final class ReviewIntentRail extends VBox {
                 .filter(ReviewIntent::countsTowardProgress)
                 .filter(intent -> stateLookup.apply(intent).decision().isPresent())
                 .count();
-        header.setHint(settled + "/" + counted + " · i");
+        header.setHint(settled + "/" + counted + " · i"
+                + (groupingPending ? "  ·  refining grouping…" : ""));
 
         buttonsByIntentId.clear();
         List<Node> nodes = new ArrayList<>();
