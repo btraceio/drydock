@@ -662,17 +662,18 @@ public final class SessionReviewView extends BorderPane {
             outcomeByScope.put(scopeId, outcome);
             boolean selected = selectedScope().map(scope -> scope.id().equals(scopeId)).orElse(false);
             if (outcome instanceof DiffOutcome.Loaded loaded) {
-                boolean noReviewerGrouping = scopeById(scopeId)
-                        .map(candidate -> !host.hasReviewerGrouping(candidate)).orElse(true);
-                // PATH mode needs a graph even where a reviewer's own
-                // grouping already made building one for the rail's OWN
-                // purposes pure waste (Host#hasReviewerGrouping) -- a
-                // re-diff of the selected scope while PATH mode is showing
-                // must still refresh what it lists, not silently keep
-                // rendering the previous diff's steps.
-                if (noReviewerGrouping || (pathMode && selected)) {
-                    requestGraph(scopeId, loaded.diff());
-                }
+                // Unconditional (Task 19): the diff column's link footers
+                // (spec §7.2) need this scope's graph regardless of the
+                // rail's own mode or grouping source, not only where a
+                // reviewer's grouping was itself computed from one or where
+                // PATH mode is showing. requestGraph is a no-op for a diff
+                // instance it has already graphed or is already building, so
+                // this costs nothing on a re-diff or a re-selection. The
+                // rail's OWN "refining grouping…" banner is gated
+                // separately in refreshReviewState -- a reviewer's already-
+                // final INTENTS grouping must not flash it while this build
+                // runs purely for links.
+                requestGraph(scopeId, loaded.diff());
             } else {
                 graphByScope.remove(scopeId);
             }
@@ -1075,7 +1076,17 @@ public final class SessionReviewView extends BorderPane {
             intentRail.setIntents(currentIntents, currentIntent().map(ReviewIntent::id).orElse(null),
                     emptyReason());
         }
-        intentRail.setGroupingPending(graphBuilding.contains(scopeId));
+        // The graph now builds unconditionally (Task 19, for the diff
+        // column's link footers), but the rail's OWN "refining grouping…"
+        // banner is about the RAIL's content, not the graph's existence: a
+        // reviewer's INTENTS grouping is already final and does not change
+        // when this build lands, so the banner stays gated on the same two
+        // cases requestGraph used to be gated on before this task widened
+        // its OWN trigger -- PATH mode (which reads the graph directly) and
+        // no reviewer grouping (whose INTENTS fallback is what the graph
+        // completing actually refines).
+        intentRail.setGroupingPending(graphBuilding.contains(scopeId)
+                && (pathMode || !host.hasReviewerGrouping(scope.get())));
         mcpPanel.filter(Node::isVisible)
                 .ifPresent(panel -> panel.setScope(scope.get()));
         renderVerdictBar(scope.get());
