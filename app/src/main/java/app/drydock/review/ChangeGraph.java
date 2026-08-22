@@ -36,17 +36,20 @@ public final class ChangeGraph {
     private final Map<String, String> fileByUniqueDeclaration;
     private final Map<String, SortedSet<String>> referencesOut;
     private final Map<String, SortedSet<String>> referencesIn;
+    private final Map<String, SortedSet<String>> referencesInBySymbol;
 
     private ChangeGraph(SortedSet<String> files,
                         Map<String, SortedSet<String>> declarationsByFile,
                         Map<String, String> fileByUniqueDeclaration,
                         Map<String, SortedSet<String>> referencesOut,
-                        Map<String, SortedSet<String>> referencesIn) {
+                        Map<String, SortedSet<String>> referencesIn,
+                        Map<String, SortedSet<String>> referencesInBySymbol) {
         this.files = files;
         this.declarationsByFile = declarationsByFile;
         this.fileByUniqueDeclaration = fileByUniqueDeclaration;
         this.referencesOut = referencesOut;
         this.referencesIn = referencesIn;
+        this.referencesInBySymbol = referencesInBySymbol;
     }
 
     /**
@@ -84,6 +87,7 @@ public final class ChangeGraph {
 
         Map<String, SortedSet<String>> out = new TreeMap<>();
         Map<String, SortedSet<String>> in = new TreeMap<>();
+        Map<String, SortedSet<String>> inBySymbol = new TreeMap<>();
         for (Map.Entry<String, List<SymbolScan.Symbol>> entry : scans.entrySet()) {
             for (SymbolScan.Symbol symbol : entry.getValue()) {
                 // A use counts wherever it sits in the diff window, changed
@@ -104,11 +108,13 @@ public final class ChangeGraph {
                 }
                 out.computeIfAbsent(entry.getKey(), key -> new TreeSet<>()).add(target);
                 in.computeIfAbsent(target, key -> new TreeSet<>()).add(entry.getKey());
+                inBySymbol.computeIfAbsent(symbol.name(), key -> new TreeSet<>())
+                        .add(entry.getKey());
             }
         }
 
         SortedSet<String> files = new TreeSet<>(scans.keySet());
-        return new ChangeGraph(files, declarationsByFile, unique, out, in);
+        return new ChangeGraph(files, declarationsByFile, unique, out, in, inBySymbol);
     }
 
     /** Every changed file, in this scope. */
@@ -129,6 +135,18 @@ public final class ChangeGraph {
     /** Files that reference {@code file}. */
     public SortedSet<String> filesReferencing(String file) {
         return unmodifiable(referencesIn.get(file));
+    }
+
+    /**
+     * Files that reference {@code symbol} itself, which is not the same
+     * question as {@link #filesReferencing(String)} on its declaring file: a
+     * file declaring ten changed symbols has one fan-in, and its ten symbols
+     * do not. Anything asking which symbol a group of files is ABOUT needs
+     * the per-symbol count, and reading it off the file would answer with
+     * whichever name happened to sort first.
+     */
+    public SortedSet<String> filesReferencingSymbol(String symbol) {
+        return unmodifiable(referencesInBySymbol.get(symbol));
     }
 
     /** The one changed file declaring {@code symbol}, when exactly one does. */

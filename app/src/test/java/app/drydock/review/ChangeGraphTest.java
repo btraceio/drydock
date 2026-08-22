@@ -97,6 +97,30 @@ class ChangeGraphTest {
         assertTrue(graph.filesReferencedBy("src/Profiler.java").contains("src/Guards.java"));
     }
 
+    /**
+     * Fan-in per SYMBOL, which is a different question from fan-in per file:
+     * a file declaring several changed names has one file-level fan-in and
+     * its names have their own. Anything asking which symbol a group of
+     * files is ABOUT has to ask this one, or it answers with whichever name
+     * sorted first.
+     */
+    @Test
+    void fanInIsCountedPerSymbolNotPerDeclaringFile() {
+        ChangeGraph graph = ChangeGraph.of(new UnifiedDiff(List.of(
+                file("src/Core.java", "class AaaHelper { }", "class ZzzEngine { }"),
+                file("src/One.java", "void one() { new ZzzEngine(); }"),
+                file("src/Two.java", "void two() { new ZzzEngine(); }"))));
+
+        assertEquals(List.of("src/One.java", "src/Two.java"),
+                List.copyOf(graph.filesReferencingSymbol("ZzzEngine")));
+        assertEquals(List.of(), List.copyOf(graph.filesReferencingSymbol("AaaHelper")));
+        assertEquals(List.of(), List.copyOf(graph.filesReferencingSymbol("NeverSeen")));
+        // The file both names live in has the union as ITS fan-in, which is
+        // exactly why it cannot stand in for either name's.
+        assertEquals(List.of("src/One.java", "src/Two.java"),
+                List.copyOf(graph.filesReferencing("src/Core.java")));
+    }
+
     /** Determinism: iteration order is a property this graph must keep (spec §9.5). */
     @Test
     void everyExposedCollectionIsSorted() {
