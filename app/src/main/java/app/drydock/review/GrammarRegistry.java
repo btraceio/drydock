@@ -3,9 +3,11 @@ package app.drydock.review;
 import org.treesitter.TSLanguage;
 
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -48,6 +50,8 @@ public final class GrammarRegistry {
     }
 
     private static final Map<String, Optional<TSLanguage>> CACHE = new LinkedHashMap<>();
+    /** Grammar classes already warned about for a reflective-shape problem, so each is logged once, not once per extension. */
+    private static final Set<String> classShapeFailuresLogged = new LinkedHashSet<>();
     private static volatile boolean nativeFailed;
 
     private GrammarRegistry() {
@@ -87,10 +91,23 @@ public final class GrammarRegistry {
             // The grammar was not packaged for this artifact. Normal, and the
             // lexical path handles it -- logging it per file would be noise.
             return Optional.empty();
-        } catch (ReflectiveOperationException | UnsatisfiedLinkError | RuntimeException e) {
-            // The native library could not load: unsupported arch, a failed
-            // extraction, a CRC mismatch. Say it ONCE and fall back for
-            // everything; per-file logging would bury it.
+        } catch (ReflectiveOperationException e) {
+            // The class exists but its reflective shape is not what we
+            // expect -- no no-arg constructor, a visibility change, etc.
+            // That is a problem with THIS grammar only; it must not take
+            // every other language down with it. Log once for the class
+            // (extensions sharing a class, e.g. cpp/h/cc/hpp, would
+            // otherwise each re-trigger it) and leave the native latch alone.
+            if (classShapeFailuresLogged.add(className)) {
+                LOG.log(Level.WARNING, "tree-sitter grammar " + className
+                        + " could not be instantiated; falling back to lexical "
+                        + "scanning for its extensions", e);
+            }
+            return Optional.empty();
+        } catch (UnsatisfiedLinkError | RuntimeException e) {
+            // The native library itself could not load: unsupported arch, a
+            // failed extraction, a CRC mismatch. Say it ONCE and fall back
+            // for everything; per-file logging would bury it.
             if (!nativeFailed) {
                 nativeFailed = true;
                 LOG.log(Level.WARNING, "tree-sitter unavailable; the change graph "
