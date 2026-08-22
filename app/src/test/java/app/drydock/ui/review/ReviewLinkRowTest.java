@@ -126,6 +126,28 @@ class ReviewLinkRowTest extends ApplicationTest {
                 "clicking the link must scroll to the hunk it names; rendered " + renderedHunkFiles());
     }
 
+    /**
+     * The graph a link map is computed from lands asynchronously (spec's own
+     * note: well after the diff itself rendered), so an open comment
+     * composer and an incoming {@code setLinks} call race by construction --
+     * a reader can always be mid-comment when it lands. {@code rebuild()}
+     * re-inserts the composer row after rebuilding {@code rows}; {@code
+     * setLinks} must do the same or every graph completion silently erases
+     * whatever the reader was typing.
+     */
+    @Test
+    void setLinksDoesNotDiscardAnOpenCommentComposer() {
+        showTwoFileDiff();
+        clickGutterForLine("1");
+        assertEquals(1, composerCount(), "the gutter click must open a composer to begin with");
+
+        setLinks(Map.of(ReviewIntent.hunkId(FILE_A, 0),
+                List.of(new ReadingPath.Link(ReadingPath.CALLS, ReviewIntent.hunkId(FILE_B, 0), "guards.cpp:x"))));
+
+        assertEquals(1, composerCount(),
+                "an async graph landing (setLinks) must not silently drop an open comment composer");
+    }
+
     /** No footer row is focus-traversable garbage: it must be reachable by keyboard like the rest of the card. */
     @Test
     void aLinkRowIsFocusTraversable() {
@@ -169,8 +191,6 @@ class ReviewLinkRowTest extends ApplicationTest {
                         + "way PATH mode narrows the column before every footer click; rendered "
                         + renderedHunkFiles());
     }
-
-
 
     /**
      * Three hunks in one file: a tiny one (index 0, excluded by the
@@ -223,12 +243,35 @@ class ReviewLinkRowTest extends ApplicationTest {
         return texts;
     }
 
+    /** Direct handler dispatch, not {@code clickOn}: see {@code ReviewCommentComposerTest} for why. */
+    private void clickGutterForLine(String lineNumber) {
+        List<Node> gutters = new ArrayList<>();
+        interact(() -> gutters.addAll(lookup(".review-code-gutter").queryAll()));
+        Node gutter = gutters.stream()
+                .filter(node -> node.getOnMouseClicked() != null)
+                .filter(node -> lineNumber.equals(((Label) node).getText()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("no clickable gutter for line " + lineNumber));
+        interact(() -> gutter.getOnMouseClicked().handle(new javafx.scene.input.MouseEvent(
+                javafx.scene.input.MouseEvent.MOUSE_CLICKED, 0, 0, 0, 0,
+                javafx.scene.input.MouseButton.PRIMARY, 1,
+                false, false, false, false, true, false, false, true, false, false, null)));
+        WaitForAsyncUtils.waitForFxEvents();
+    }
+
+    private int composerCount() {
+        List<Node> found = new ArrayList<>();
+        interact(() -> found.addAll(lookup(".review-composer").queryAll()));
+        return found.size();
+    }
+
     private List<String> renderedHunkFiles() {
         List<String> files = new ArrayList<>();
         interact(() -> lookup(".review-hunk-file").queryAll()
                 .forEach(node -> files.add(((Label) node).getText())));
         return files;
     }
+
     private List<String> renderedRangeLabels() {
         List<String> labels = new ArrayList<>();
         interact(() -> lookup(".review-hunk-range").queryAll()
@@ -252,7 +295,6 @@ class ReviewLinkRowTest extends ApplicationTest {
                         OptionalInt.of(300), "void c();")));
         return new UnifiedDiff.FileDiff(FILE_A, "M", 152, 0, false, false, List.of(hunk0, hunk1, hunk2));
     }
-
 
     private void showTwoFileDiff() {
         UnifiedDiff diff = new UnifiedDiff(List.of(

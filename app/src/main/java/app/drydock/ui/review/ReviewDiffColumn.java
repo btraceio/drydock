@@ -1108,6 +1108,11 @@ final class ReviewDiffColumn extends BorderPane {
         }
         linksByHunk = copy;
         rows.setAll(ReviewDiffRows.build(displayedDiff, buildOptions()));
+        // The graph this map is computed from lands asynchronously, well
+        // after a reader may have already opened the gutter composer -- a
+        // rebuild that dropped it here would lose an in-progress comment to
+        // a background refresh the reader never asked for.
+        insertComposerRow();
     }
 
     /**
