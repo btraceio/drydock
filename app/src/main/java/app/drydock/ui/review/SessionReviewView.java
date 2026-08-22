@@ -124,12 +124,20 @@ public final class SessionReviewView extends BorderPane {
          * host, for the reason {@link #intents} takes its diff as a parameter:
          * only this view knows which diff the human is actually looking at,
          * and a host free to re-derive them is free to derive them from a
-         * different one. {@code intent} still comes along because the host
-         * refuses an approval over an open blocking finding, and that refusal
-         * is stated in terms of the intent (spec §4.6).</p>
+         * different one. {@code blocked} comes along for the same reason:
+         * the host refuses an {@code APPROVED} decision while it is true
+         * (spec §4.6), and only this view can say so -- it is the one place
+         * with the full current intents list a finding's named id has to be
+         * checked against, which {@link #belongsToIntent} needs to tell a
+         * finding that legitimately names a DIFFERENT, still-current intent
+         * from one whose named id no longer resolves to anything at all. A
+         * host computing its own approximation from {@code intent} alone
+         * previously disagreed with the verdict bar's own rendered "blocked"
+         * for exactly that case -- silently refusing a keypress the bar had
+         * just shown as clear.</p>
          */
         void setVerdict(ReviewScope scope, ReviewIntent intent, List<String> hunkDigests,
-                        Optional<ReviewVerdict.Decision> decision);
+                        Optional<ReviewVerdict.Decision> decision, boolean blocked);
 
         /**
          * "Confirm still good" (spec §9.2): rewrites each of {@code
@@ -998,31 +1006,58 @@ public final class SessionReviewView extends BorderPane {
         return all.stream().filter(finding -> belongsToCurrentIntent(finding)).toList();
     }
 
+    /** Whether a finding belongs under the intent now selected. See {@link #belongsToIntent}. */
+    private boolean belongsToCurrentIntent(ReviewAnnotation finding) {
+        return belongsToIntent(finding, currentIntent().orElse(null));
+    }
+
     /**
-     * Whether a finding belongs under the intent now selected.
+     * Whether {@code finding} belongs under {@code intent}.
      *
      * <p>Matched by id when the finding names an intent the current grouping
      * actually contains, and by file otherwise. That second path is the
      * important one: a finding can name an intent that no longer exists --
-     * a reviewer re-grouped, or the finding was stored under an older
-     * grouping and read back. Matching on the id alone made such a finding
-     * belong to no intent at all, so it silently disappeared from every
-     * margin instead of being shown somewhere. A finding is a thing a human
-     * or an agent went to the trouble of writing down; it must not be
-     * possible for the UI to lose one by regrouping around it.</p>
+     * a reviewer re-grouped, or the computed graph landed over the fallback
+     * grouping the finding was recorded against. Matching on the id alone
+     * made such a finding belong to no intent at all, so it silently
+     * disappeared from every margin instead of being shown somewhere. A
+     * finding is a thing a human or an agent went to the trouble of writing
+     * down; it must not be possible for the UI to lose one by regrouping
+     * around it.</p>
+     *
+     * <p>{@code intent} is a parameter rather than always {@link
+     * #currentIntent()} because {@link #blockingFindingOpen} needs the SAME
+     * rule stated for an arbitrary intent -- a finding naming a DIFFERENT
+     * intent that still exists must not count against this one just because
+     * it happens to touch one of this intent's files, which is exactly the
+     * distinction a stale, no-longer-resolvable id cannot make for itself.
+     * Reusing this one method is what keeps the verdict bar's own rendered
+     * "blocked" and the write path's refusal from disagreeing.</p>
      */
-    private boolean belongsToCurrentIntent(ReviewAnnotation finding) {
-        ReviewIntent current = currentIntent().orElse(null);
-        if (current == null) {
+    private boolean belongsToIntent(ReviewAnnotation finding, ReviewIntent intent) {
+        if (intent == null) {
             return true;
         }
         String named = finding.intentId().orElse(null);
-        if (named != null && intents().stream().anyMatch(intent -> intent.id().equals(named))) {
-            return named.equals(current.id());
+        if (named != null && intents().stream().anyMatch(candidate -> candidate.id().equals(named))) {
+            return named.equals(intent.id());
         }
         // Unnamed, or naming an intent this grouping does not have: fall back
         // to where the finding actually is.
-        return current.touches(finding.file());
+        return intent.touches(finding.file());
+    }
+
+    /**
+     * Whether a still-open finding blocks approving {@code intent} (spec
+     * §4.6) -- the same rule {@link #belongsToIntent} states for the
+     * verdict bar's own rendered "blocked", reused here so the write path
+     * (every {@code host.setVerdict} call site) can never refuse a keypress
+     * the bar just showed as clear, or the reverse.
+     */
+    private boolean blockingFindingOpen(ReviewScope scope, ReviewIntent intent) {
+        return host.findings(scope).stream()
+                .filter(finding -> belongsToIntent(finding, intent))
+                .anyMatch(ReviewAnnotation::blocksApproval);
     }
 
     /**
@@ -1264,9 +1299,7 @@ public final class SessionReviewView extends BorderPane {
             verdictBar.showActingUnit(settleUnit());
             return;
         }
-        boolean blocked = host.findings(scope).stream()
-                .filter(this::belongsToCurrentIntent)
-                .anyMatch(ReviewAnnotation::blocksApproval);
+        boolean blocked = blockingFindingOpen(scope, current.get());
         SectionStates.SectionState state = sectionState(current.get());
         verdictBar.update(current.get(), state.decision(), blocked);
         // Progress is the UNION of the counted sections' hunks, counted once.
@@ -1410,13 +1443,15 @@ public final class SessionReviewView extends BorderPane {
         @Override
         public void approve(ReviewIntent intent, SettleUnit unit) {
             selectedScope().ifPresent(scope -> host.setVerdict(scope, intent,
-                    digestsForAction(intent, unit, false), Optional.of(ReviewVerdict.Decision.APPROVED)));
+                    digestsForAction(intent, unit, false), Optional.of(ReviewVerdict.Decision.APPROVED),
+                    blockingFindingOpen(scope, intent)));
         }
 
         @Override
         public void requestChanges(ReviewIntent intent, SettleUnit unit) {
             selectedScope().ifPresent(scope -> host.setVerdict(scope, intent,
-                    digestsForAction(intent, unit, false), Optional.of(ReviewVerdict.Decision.CHANGES)));
+                    digestsForAction(intent, unit, false), Optional.of(ReviewVerdict.Decision.CHANGES),
+                    blockingFindingOpen(scope, intent)));
         }
 
         @Override
@@ -1431,9 +1466,12 @@ public final class SessionReviewView extends BorderPane {
         @Override
         public void undo(ReviewIntent intent) {
             // Re-review, too (spec §9.2): a stale section's banner button and
-            // the plain undo button both just clear what is recorded.
+            // the plain undo button both just clear what is recorded. An
+            // undo is never refused, so the flag here is inert -- passed
+            // for the sole reason that host.setVerdict has one parameter,
+            // not two overloads to keep in sync.
             selectedScope().ifPresent(scope ->
-                    host.setVerdict(scope, intent, digestsOf(intent), Optional.empty()));
+                    host.setVerdict(scope, intent, digestsOf(intent), Optional.empty(), false));
         }
 
         @Override
@@ -1703,7 +1741,8 @@ public final class SessionReviewView extends BorderPane {
         if (digests.isEmpty()) {
             return;
         }
-        host.setVerdict(scope.get(), intent.get(), digests, Optional.of(decision));
+        host.setVerdict(scope.get(), intent.get(), digests, Optional.of(decision),
+                blockingFindingOpen(scope.get(), intent.get()));
         boolean applied = digests.stream().allMatch(digest -> host.verdict(scope.get(), digest)
                 .filter(v -> v.decision() == decision).isPresent());
         if (!applied) {
@@ -1752,7 +1791,9 @@ public final class SessionReviewView extends BorderPane {
             // sane to undo or jump to.
             return;
         }
-        host.setVerdict(scope.get(), current.get(index), digests, Optional.empty());
+        // An undo is never refused (see the VerdictHost#undo javadoc); false
+        // is inert here, not a claim that nothing is blocking.
+        host.setVerdict(scope.get(), current.get(index), digests, Optional.empty(), false);
         intentIndex = index;
         refreshReviewState();
         revealCurrentIntent();

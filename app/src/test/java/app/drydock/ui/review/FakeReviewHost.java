@@ -126,14 +126,14 @@ final class FakeReviewHost implements SessionReviewView.Host {
 
     @Override
     public void setVerdict(ReviewScope scope, ReviewIntent intent, List<String> hunkDigests,
-                           Optional<ReviewVerdict.Decision> decision) {
+                           Optional<ReviewVerdict.Decision> decision, boolean blocked) {
         if (decision.isEmpty()) {
             for (String digest : hunkDigests) {
                 store.clearVerdict(scope.id(), digest);
             }
             return;
         }
-        if (decision.get() == ReviewVerdict.Decision.APPROVED && blocked(scope, intent)) {
+        if (decision.get() == ReviewVerdict.Decision.APPROVED && blocked) {
             return;
         }
         for (String digest : hunkDigests) {
@@ -159,12 +159,6 @@ final class FakeReviewHost implements SessionReviewView.Host {
     @Override
     public BaseMove.Delta baseMove(ReviewScope scope, String recordedBase) {
         return baseDelta;
-    }
-
-    private boolean blocked(ReviewScope scope, ReviewIntent intent) {
-        return store.forScope(scope.id()).stream()
-                .filter(finding -> finding.intentId().map(id -> id.equals(intent.id())).orElse(true))
-                .anyMatch(ReviewAnnotation::blocksApproval);
     }
 
     @Override

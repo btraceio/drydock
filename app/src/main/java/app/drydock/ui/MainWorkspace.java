@@ -1983,7 +1983,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
         @Override
         public void setVerdict(ReviewScope scope, ReviewIntent intent, List<String> hunkDigests,
-                               Optional<ReviewVerdict.Decision> decision) {
+                               Optional<ReviewVerdict.Decision> decision, boolean blocked) {
             if (decision.isEmpty()) {
                 for (String digest : hunkDigests) {
                     annotationStore.clearVerdict(scope.id(), digest);
@@ -1991,11 +1991,14 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 return;
             }
             // Approval is refused, not merely discouraged, while a blocking
-            // finding of this intent is open (spec §4.6). Checked here as well
-            // as in the bar so the keyboard path cannot slip past the button's
-            // refusal.
-            if (decision.get() == ReviewVerdict.Decision.APPROVED
-                    && blockingFindingOpen(scope, intent)) {
+            // finding of this intent is open (spec §4.6). blocked is the
+            // view's own computation (SessionReviewView#blockingFindingOpen),
+            // not recomputed here: a host free to derive its own answer from
+            // intent alone once disagreed with the verdict bar's rendered
+            // "blocked" for a finding naming a DIFFERENT, still-current
+            // intent that happened to share a file -- the bar showed clear,
+            // and this refused anyway, with no way for a keypress to tell.
+            if (decision.get() == ReviewVerdict.Decision.APPROVED && blocked) {
                 return;
             }
             ReviewBaseline baseline = baselineOf(scope);
@@ -2430,28 +2433,6 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         for (OpenSessionTab open : openTabs.values()) {
             open.reviewView().ifPresent(SessionReviewView::refreshReviewState);
         }
-    }
-
-    /**
-     * Whether a still-open blocking finding names {@code intent} -- or, when
-     * its named id no longer matches literally, whether it still touches one
-     * of {@code intent}'s files. The file fallback matters because a
-     * grouping's ids are not stable across every regrouping (a reviewer's
-     * own re-run, or the computed-sections graph landing after the fallback
-     * shown while it built): matching by id alone would let a finding filed
-     * against an id that no longer resolves silently stop blocking anything,
-     * defeating spec §4.6's refusal for a reason no reviewer caused. Mirrors
-     * {@link SessionReviewView#belongsToCurrentIntent}, which the verdict
-     * bar itself already renders "blocked" from -- this is the second,
-     * write-time guard the keyboard path reaches without going through that
-     * render at all.
-     */
-    private boolean blockingFindingOpen(ReviewScope scope, ReviewIntent intent) {
-        return annotationStore.forScope(scope.id()).stream()
-                .filter(finding -> finding.intentId()
-                        .map(id -> id.equals(intent.id()) || intent.touches(finding.file()))
-                        .orElse(true))
-                .anyMatch(ReviewAnnotation::blocksApproval);
     }
 
     /**
