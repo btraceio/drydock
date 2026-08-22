@@ -8,6 +8,7 @@ import org.treesitter.TSTree;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -23,10 +24,20 @@ import java.util.regex.Matcher;
  * call without guessing, and a wrong declaration would mint wrong edges
  * everywhere the name appears.</p>
  *
- * <p>Blocking: parsing a line -- and, the first time any language is used,
- * loading its native grammar library via {@link GrammarRegistry} -- both do
- * real work (native calls, disk I/O). Never call {@link #of} on the FX
- * thread.</p>
+ * <p><strong>A hunk, not a line, is the parsing unit.</strong> The first
+ * design parsed one diff line at a time, on the reasoning that a diff line
+ * is not a compilation unit. It is worse than that: for anything whose body
+ * spans lines -- which is every real C++ class -- the opening line alone is
+ * an incomplete construct, and tree-sitter reports no name for it. Measured
+ * on the case this feature exists to serve, a five-line
+ * {@code class JmpCtxScope} declared {@code arm} and {@code disarm} and lost
+ * {@code JmpCtxScope} entirely. A hunk is a contiguous region of one file,
+ * so joining its lines is far likelier to parse as real syntax, and it is
+ * one parse per hunk rather than per line.</p>
+ *
+ * <p>Blocking: parsing -- and, the first time any language is used, loading
+ * its native grammar library via {@link GrammarRegistry} -- both do real
+ * work (native calls, disk I/O). Never call {@link #of} on the FX thread.</p>
  */
 public final class SymbolScan {
 
@@ -81,17 +92,22 @@ public final class SymbolScan {
     private SymbolScan() {
     }
 
-    /** {@code file}'s symbols, in source order. */
+    /** {@code file}'s symbols, in reading order within each hunk. */
     public static List<Symbol> of(UnifiedDiff.FileDiff file) {
         Optional<TSLanguage> grammar = GrammarRegistry.forPath(file.path());
         List<Symbol> symbols = new ArrayList<>();
         for (UnifiedDiff.Hunk hunk : file.hunks()) {
-            for (UnifiedDiff.Line line : hunk.lines()) {
-                boolean changed = line.kind() != UnifiedDiff.Line.Kind.CONTEXT;
-                if (grammar.isPresent()) {
-                    symbols.addAll(parsed(grammar.get(), file.path(), line.text(), changed));
-                } else {
-                    symbols.addAll(lexical(file.path(), line.text(), changed));
+            if (grammar.isPresent()) {
+                // The new state first (context + additions), then the old
+                // one, so the output is stable and a context line is
+                // reported exactly once.
+                scanView(grammar.get(), file.path(), hunk, UnifiedDiff.Line.Kind.ADD, true,
+                        symbols);
+                scanView(grammar.get(), file.path(), hunk, UnifiedDiff.Line.Kind.DEL, false,
+                        symbols);
+            } else {
+                for (UnifiedDiff.Line line : hunk.lines()) {
+                    lexical(symbols, file.path(), line.text(), isChanged(line));
                 }
             }
         }
@@ -99,43 +115,140 @@ public final class SymbolScan {
     }
 
     /**
-     * Line-at-a-time parsing. A diff line is not a compilation unit, so the
-     * tree is usually an ERROR node with recognisable children -- enough for
-     * "is this token introducing a name", the only question asked here, and
-     * it avoids reconstructing whole files from a diff.
+     * Scans one state of {@code hunk} into {@code out}.
+     *
+     * <p>A hunk interleaves ADD, DEL and CONTEXT lines, and joining all
+     * three produces a fragment that is not valid source in either state --
+     * a deleted {@code if} and the added one replacing it, both present,
+     * with two bodies and one closing brace. So each state is parsed on its
+     * own: the new state is CONTEXT + ADD, the old state is CONTEXT + DEL,
+     * and each is a coherent view of one file.</p>
+     *
+     * <p>Context lines appear in both views, so exactly one view reports
+     * them: {@code reportContext} is true for the new state and false for
+     * the old, which reports only its DEL lines. Every source line is
+     * therefore scanned once, as it was when this was line-at-a-time, and a
+     * DEL line is still read in the surrounding syntax it was deleted from
+     * rather than in isolation. A hunk with no deletions -- the common case
+     * -- parses once.</p>
      *
      * <p>A fresh {@link TSParser} (and the {@link TSTree} it returns) per
-     * line is deliberate, not a leak: the binding exposes no public {@code
+     * view is deliberate, not a leak: the binding exposes no public {@code
      * close()}/{@code delete()} on either type -- decompiling {@code
      * TSParser}'s and {@code TSTree}'s constructors shows each registers a
      * {@code java.lang.ref.Cleaner} action that calls the native {@code
      * ts_*_delete} when the object becomes unreachable. There is nothing a
      * manual call could free that the Cleaner does not already own.</p>
      */
-    private static List<Symbol> parsed(TSLanguage language, String path, String text,
-                                       boolean changed) {
+    private static void scanView(TSLanguage language, String path, UnifiedDiff.Hunk hunk,
+                                 UnifiedDiff.Line.Kind changedKind, boolean reportContext,
+                                 List<Symbol> out) {
+        List<UnifiedDiff.Line> lines = new ArrayList<>();
+        boolean anyReported = false;
+        for (UnifiedDiff.Line line : hunk.lines()) {
+            if (line.kind() != UnifiedDiff.Line.Kind.CONTEXT && line.kind() != changedKind) {
+                continue;
+            }
+            lines.add(line);
+            anyReported |= reportContext || line.kind() == changedKind;
+        }
+        if (!anyReported) {
+            return;
+        }
+        Fragment fragment = Fragment.of(lines, reportContext);
         TSTree tree;
         try {
             TSParser parser = new TSParser();
             parser.setLanguage(language);
-            tree = parser.parseString(null, text);
+            tree = parser.parseString(null, fragment.text());
         } catch (RuntimeException e) {
             // A fragment the grammar cannot even tokenise (verified: a lone
             // unpaired UTF-16 surrogate throws "Invalid UTF-8 source input"
             // from the native layer) is not a reason to lose the file --
-            // fall back to the same lexical scan an ungrammared file gets.
+            // fall back to the same lexical scan an ungrammared file gets,
+            // for the lines this view is responsible for.
             //
             // Scoped to just the native-facing calls: catching a wider block
             // here would let a bug in walk() -- our own Java, not the
             // grammar -- disappear into this same "expected fallback" path
             // with no log and no test signal. Absent and broken must not
             // look the same.
-            return lexical(path, text, changed);
+            for (int index = 0; index < lines.size(); index++) {
+                if (fragment.reports(index)) {
+                    lexical(out, path, lines.get(index).text(), fragment.changed(index));
+                }
+            }
+            return;
         }
-        byte[] utf8 = text.getBytes(StandardCharsets.UTF_8);
-        List<Symbol> symbols = new ArrayList<>();
-        walk(tree.getRootNode(), utf8, path, changed, symbols);
-        return symbols;
+        walk(tree.getRootNode(), fragment, path, out);
+    }
+
+    /**
+     * One parsed view of a hunk: the joined source, its UTF-8 bytes, and
+     * where each line begins in them.
+     *
+     * <p>The byte offsets are what makes per-hunk parsing keep the
+     * per-symbol answer the line-at-a-time version gave for free. {@link
+     * TSNode#getStartByte()} is a UTF-8 BYTE offset (confirmed: a line with
+     * two-byte characters before an identifier has a byte length longer than
+     * its char length, and the identifier's own node range is the byte span,
+     * not the char span), so {@code lineStart} is measured in bytes too --
+     * counting characters would drift by one per non-ASCII byte and
+     * attribute a symbol to the wrong line, or slice a name in half.</p>
+     *
+     * <p>{@code text} and {@code utf8} are the same content twice on
+     * purpose: the parser takes a {@code String} and answers in bytes, and
+     * re-encoding per symbol would be the same work done once per name
+     * instead of once per hunk. Purely internal -- the array components mean
+     * the generated {@code equals} is identity-based, and nothing compares
+     * two of these.</p>
+     */
+    private record Fragment(String text, byte[] utf8, int[] lineStart,
+                            boolean[] reportedLines, boolean[] changedLines) {
+
+        static Fragment of(List<UnifiedDiff.Line> lines, boolean reportContext) {
+            StringBuilder joined = new StringBuilder();
+            int[] lineStart = new int[lines.size()];
+            boolean[] reported = new boolean[lines.size()];
+            boolean[] changed = new boolean[lines.size()];
+            int offset = 0;
+            for (int index = 0; index < lines.size(); index++) {
+                UnifiedDiff.Line line = lines.get(index);
+                lineStart[index] = offset;
+                reported[index] = reportContext || isChanged(line);
+                changed[index] = isChanged(line);
+                joined.append(line.text()).append('\n');
+                offset += line.text().getBytes(StandardCharsets.UTF_8).length + 1;
+            }
+            String text = joined.toString();
+            return new Fragment(text, text.getBytes(StandardCharsets.UTF_8), lineStart,
+                    reported, changed);
+        }
+
+        /**
+         * The line {@code byteOffset} falls in. {@code lineStart} is
+         * strictly increasing (every line contributes at least its
+         * newline), so the binary search's insertion point is one past the
+         * containing line.
+         */
+        int lineAt(int byteOffset) {
+            int found = Arrays.binarySearch(lineStart, byteOffset);
+            int index = found >= 0 ? found : -found - 2;
+            return Math.min(Math.max(index, 0), lineStart.length - 1);
+        }
+
+        /** Whether this view is the one that reports line {@code index}. */
+        boolean reports(int index) {
+            return reportedLines[index];
+        }
+
+        boolean changed(int index) {
+            return changedLines[index];
+        }
+    }
+
+    private static boolean isChanged(UnifiedDiff.Line line) {
+        return line.kind() != UnifiedDiff.Line.Kind.CONTEXT;
     }
 
     /**
@@ -150,8 +263,7 @@ public final class SymbolScan {
      * field name), so when a declaration node's child has none, the first
      * bare name-shaped child stands in for the missing field.
      */
-    private static void walk(TSNode node, byte[] utf8, String path, boolean changed,
-                             List<Symbol> out) {
+    private static void walk(TSNode node, Fragment fragment, String path, List<Symbol> out) {
         if (DECLARATION_NODES.contains(node.getType())) {
             int count = node.getChildCount();
             for (int i = 0; i < count; i++) {
@@ -160,19 +272,19 @@ public final class SymbolScan {
                 boolean isDeclaredName = isNameNode(child)
                         && (field == null || NAME_FIELDS.contains(field));
                 if (isDeclaredName) {
-                    addSymbol(out, utf8, child, path, true, changed);
+                    addSymbol(out, fragment, child, path, true);
                 } else {
-                    walk(child, utf8, path, changed, out);
+                    walk(child, fragment, path, out);
                 }
             }
             return;
         }
         if (isNameNode(node)) {
-            addSymbol(out, utf8, node, path, false, changed);
+            addSymbol(out, fragment, node, path, false);
             return;
         }
         for (int i = 0; i < node.getChildCount(); i++) {
-            walk(node.getChild(i), utf8, path, changed, out);
+            walk(node.getChild(i), fragment, path, out);
         }
     }
 
@@ -181,33 +293,33 @@ public final class SymbolScan {
     }
 
     /**
-     * {@code node}'s text, sliced from the line's own UTF-8 bytes rather
-     * than {@code String.substring} on the original line. {@link
-     * TSNode#getStartByte()}/{@link TSNode#getEndByte()} are UTF-8 BYTE
-     * offsets (confirmed: a line with two-byte characters before an
-     * identifier has a byte length longer than its char length, and the
-     * identifier's own node range is the byte span, not the char span) --
-     * slicing the {@code String} by char index would misalign, or throw,
-     * for any line with a multi-byte character before the token.
+     * {@code node}'s text, sliced from the fragment's own UTF-8 bytes rather
+     * than {@code String.substring} on the joined text, because the node
+     * range is a byte range (see {@link Fragment}). The line the node starts
+     * on decides both whether this view reports it at all and whether it
+     * counts as changed.
      */
-    private static void addSymbol(List<Symbol> out, byte[] utf8, TSNode node, String path,
-                                  boolean declaration, boolean changed) {
-        String name = new String(utf8, node.getStartByte(), node.getEndByte() - node.getStartByte(),
+    private static void addSymbol(List<Symbol> out, Fragment fragment, TSNode node, String path,
+                                  boolean declaration) {
+        int start = node.getStartByte();
+        int index = fragment.lineAt(start);
+        if (!fragment.reports(index)) {
+            return;
+        }
+        String name = new String(fragment.utf8(), start, node.getEndByte() - start,
                 StandardCharsets.UTF_8);
         if (SymbolWords.isSymbol(name)) {
-            out.add(new Symbol(name, path, declaration, changed));
+            out.add(new Symbol(name, path, declaration, fragment.changed(index)));
         }
     }
 
-    private static List<Symbol> lexical(String path, String text, boolean changed) {
-        List<Symbol> symbols = new ArrayList<>();
+    private static void lexical(List<Symbol> out, String path, String text, boolean changed) {
         Matcher matcher = SymbolWords.IDENTIFIER.matcher(text);
         while (matcher.find()) {
             String name = matcher.group();
             if (SymbolWords.isSymbol(name)) {
-                symbols.add(new Symbol(name, path, false, changed));
+                out.add(new Symbol(name, path, false, changed));
             }
         }
-        return symbols;
     }
 }

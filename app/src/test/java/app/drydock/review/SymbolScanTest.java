@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.OptionalInt;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -79,5 +80,129 @@ class SymbolScanTest {
 
         assertTrue(SymbolScan.of(file).stream()
                 .filter(s -> s.name().equals("helper")).noneMatch(SymbolScan.Symbol::onChangedLine));
+    }
+
+    /**
+     * The defect this file's one-line fixtures hid. A C++ class body spans
+     * lines in every real header; parsed a line at a time, the opening line
+     * alone is an incomplete construct whose name tree-sitter never reports,
+     * so the type vanished and only its members were declared.
+     * Deliberately multi-line -- a one-line fixture here proves nothing.
+     */
+    @Test
+    void aMultiLineClassBodyStillDeclaresItsTypeName() {
+        List<SymbolScan.Symbol> symbols = SymbolScan.of(file("src/guards.h",
+                "class JmpCtxScope {",
+                "public:",
+                "  void arm();",
+                "  void disarm();",
+                "};"));
+
+        assertTrue(has(symbols, "JmpCtxScope", true));
+        assertTrue(has(symbols, "arm", true));
+        assertTrue(has(symbols, "disarm", true));
+    }
+
+    /** The same shape one level up: a multi-line Java type keeps its name. */
+    @Test
+    void aMultiLineJavaTypeKeepsItsNameWhenTheBraceIsOnItsOwnLine() {
+        List<SymbolScan.Symbol> symbols = SymbolScan.of(file("src/Guards.java",
+                "public final class JmpCtxScope",
+                "        implements AutoCloseable",
+                "{",
+                "    void install() { helper(); }",
+                "}"));
+
+        assertTrue(has(symbols, "JmpCtxScope", true));
+        assertTrue(has(symbols, "install", true));
+        assertTrue(has(symbols, "helper", false));
+    }
+
+    /**
+     * A hunk holds ADD, DEL and CONTEXT lines at once. Both states are
+     * scanned: the deleted line's symbols are still reported, and still
+     * count as changed, so removing a call is part of the same change as
+     * what replaced it.
+     */
+    @Test
+    void deletedLinesAreScannedAndCountAsChanged() {
+        UnifiedDiff.FileDiff file = new UnifiedDiff.FileDiff("src/guards.h", "M", 1, 1,
+                false, false, List.of(new UnifiedDiff.Hunk("@@ -1,4 +1,4 @@", List.of(
+                        context(1, 1, "class JmpCtxScope {"),
+                        context(2, 2, "public:"),
+                        deleted(3, "  void armOld();"),
+                        added(3, "  void armNew();"),
+                        context(4, 4, "};")))));
+
+        List<SymbolScan.Symbol> symbols = SymbolScan.of(file);
+
+        assertTrue(has(symbols, "armOld", true));
+        assertTrue(has(symbols, "armNew", true));
+        assertTrue(symbols.stream().filter(s -> s.name().equals("armOld"))
+                .allMatch(SymbolScan.Symbol::onChangedLine));
+        assertTrue(symbols.stream().filter(s -> s.name().equals("armNew"))
+                .allMatch(SymbolScan.Symbol::onChangedLine));
+        // The type name comes from context lines only, so it is not changed.
+        assertTrue(has(symbols, "JmpCtxScope", true));
+        assertTrue(symbols.stream().filter(s -> s.name().equals("JmpCtxScope"))
+                .noneMatch(SymbolScan.Symbol::onChangedLine));
+    }
+
+    /**
+     * A context line is scanned once, not once per parsed state. Reporting
+     * it twice would be harmless to {@link ChangeGraph} (its collections are
+     * sets) and a lie to anything that counts.
+     */
+    @Test
+    void aContextLineIsReportedOnceEvenWhenBothStatesAreParsed() {
+        UnifiedDiff.FileDiff file = new UnifiedDiff.FileDiff("src/guards.cpp", "M", 1, 1,
+                false, false, List.of(new UnifiedDiff.Hunk("@@ -1,3 +1,3 @@", List.of(
+                        context(1, 1, "void install(JmpCtxScope scope) {"),
+                        deleted(2, "  oldHelper();"),
+                        added(2, "  newHelper();"),
+                        context(3, 3, "}")))));
+
+        assertEquals(1, SymbolScan.of(file).stream()
+                .filter(s -> s.name().equals("JmpCtxScope")).count());
+    }
+
+    /**
+     * A hunk fragment is many lines of UTF-8, and tree-sitter answers in
+     * BYTE offsets. A multi-byte character on an early line shifts every
+     * later offset, so a line table counted in characters would slice the
+     * wrong bytes out of a later name and attribute it to the wrong line.
+     */
+    @Test
+    void aMultiByteCharacterEarlierInTheHunkDoesNotShiftLaterSymbols() {
+        UnifiedDiff.FileDiff file = new UnifiedDiff.FileDiff("src/guards.h", "M", 1, 0,
+                false, false, List.of(new UnifiedDiff.Hunk("@@ -1,3 +1,4 @@", List.of(
+                        context(1, 1, "// naïve — a guard, 日本語 too"),
+                        context(2, 2, "class JmpCtxScope {"),
+                        added(3, "  void arm();"),
+                        context(3, 4, "};")))));
+
+        List<SymbolScan.Symbol> symbols = SymbolScan.of(file);
+
+        assertTrue(has(symbols, "arm", true));
+        assertTrue(symbols.stream().filter(s -> s.name().equals("arm"))
+                .allMatch(SymbolScan.Symbol::onChangedLine));
+        assertTrue(has(symbols, "JmpCtxScope", true));
+        assertTrue(symbols.stream().filter(s -> s.name().equals("JmpCtxScope"))
+                .noneMatch(SymbolScan.Symbol::onChangedLine));
+    }
+
+    private static UnifiedDiff.Line context(int oldLine, int newLine, String text) {
+        return new UnifiedDiff.Line(UnifiedDiff.Line.Kind.CONTEXT,
+                OptionalInt.of(oldLine), OptionalInt.of(newLine), text);
+    }
+
+    private static UnifiedDiff.Line added(int newLine, String text) {
+        return new UnifiedDiff.Line(UnifiedDiff.Line.Kind.ADD,
+                OptionalInt.empty(), OptionalInt.of(newLine), text);
+    }
+
+    private static UnifiedDiff.Line deleted(int oldLine, String text) {
+        return new UnifiedDiff.Line(UnifiedDiff.Line.Kind.DEL,
+                OptionalInt.of(oldLine), OptionalInt.empty(), text);
     }
 }
