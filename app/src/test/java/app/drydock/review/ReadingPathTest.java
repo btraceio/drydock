@@ -123,8 +123,8 @@ class ReadingPathTest {
     /**
      * In-degree is a count, not a flag: two files that both have dependents
      * are still ordered by how many. {@code zbase.cpp} sorts last and carries
-     * two, {@code mid.cpp} sorts first and carries one, and neither is a leaf
-     * -- so the not-a-leaf signal cannot decide this one.
+     * two, {@code mid.cpp} sorts first and carries one, so nothing but the
+     * count separates them -- no fan-in, neither a test, both the same kind.
      */
     @Test
     void theWiderFoundationIsReadFirst() {
