@@ -57,4 +57,17 @@ class BaseMoveTest {
     void aScopeWithNoFilesCannotBeAffected() {
         assertFalse(BaseMove.couldMatter(delta("src/guards.h"), List.of()));
     }
+
+    /**
+     * Parsing of git diff --name-only -z output with non-ASCII filenames
+     * must produce them intact without C-style quoting.
+     */
+    @Test
+    void parseNamesHandlesNonAsciiFilenames() {
+        var parsed = BaseMove.parseNames("café.txt\0docs/résumé.md\0src/file.java\0");
+        var expected = new TreeSet<>(List.of("café.txt", "docs/résumé.md", "src/file.java"));
+        var result = new TreeSet<>(parsed);
+        assertTrue(result.equals(expected),
+                "Expected " + expected + " but got " + result);
+    }
 }
