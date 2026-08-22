@@ -226,19 +226,46 @@ public final class SessionReviewView extends BorderPane {
     public static final String UNRESOLVED_BASE = "unresolved";
 
     /**
+     * Whether a base move since a verdict could have changed what was
+     * approved.
+     *
+     * <p>Three states, not two. "The base moved under this" and "we cannot
+     * say yet" are different claims, and while the delta is still being
+     * computed off the FX thread only the second one is true -- warning then
+     * would put a confirm-me banner on every settled card of a review nobody
+     * has touched.</p>
+     */
+    enum Staleness {
+        /** The base has not moved, or the move provably could not touch this section. */
+        FRESH,
+        /** The base moved and could have touched it: the reader has to confirm. */
+        MOVED,
+        /**
+         * Cannot be told -- the delta is still in flight, or the old base can
+         * no longer be diffed at all. Rendered as nothing, never as a
+         * warning: an unanswered question is not a finding.
+         */
+        UNKNOWN
+    }
+
+    /**
      * One section's rendered state, derived from its hunks (spec §9.1).
      *
      * @param decision what its hunks merge to, empty while any is unread
      * @param settledHunks how many of its hunks carry a verdict
      * @param totalHunks how many hunks it covers at all
-     * @param stale whether a base move since a verdict could have changed
+     * @param staleness whether a base move since a verdict could have changed
      *              what was approved
-     * @param settledElsewhere the marks of the other sections that settled
-     *              hunks this one shares, so settling one section does not
-     *              silently change another
+     * @param settledElsewhere the marks of the other sections sharing a
+     *              settled hunk with this one, so a count that advanced
+     *              without the reader touching this card is explained
+     * @param hunksMissing whether this section names hunks and the diff has
+     *              none of them -- a grouping that has drifted off the diff,
+     *              which must not be mistaken for a section nobody has read
      */
     record SectionState(Optional<ReviewVerdict.Decision> decision, int settledHunks,
-                        int totalHunks, boolean stale, List<String> settledElsewhere) {
+                        int totalHunks, Staleness staleness, List<String> settledElsewhere,
+                        boolean hunksMissing) {
 
         SectionState {
             settledElsewhere = List.copyOf(settledElsewhere);
@@ -251,7 +278,18 @@ public final class SessionReviewView extends BorderPane {
          * not the same claim.
          */
         static SectionState unknown() {
-            return new SectionState(Optional.empty(), 0, 0, false, List.of());
+            return new SectionState(Optional.empty(), 0, 0, Staleness.UNKNOWN, List.of(), false);
+        }
+
+        /**
+         * A section whose hunk ids name nothing in the current diff. Hunk ids
+         * are positional ({@code h_<file>_<index>}), so a re-diff can strand
+         * a grouping the agent supplied earlier; the card has to SAY so,
+         * because a section with no settleable hunks can never be approved
+         * and would otherwise refuse Submit forever with no visible reason.
+         */
+        static SectionState notInDiff() {
+            return new SectionState(Optional.empty(), 0, 0, Staleness.FRESH, List.of(), true);
         }
     }
 
@@ -932,9 +970,10 @@ public final class SessionReviewView extends BorderPane {
      * What a section's hunks merge to (spec §9.1) -- {@link VerdictMerge}'s
      * rule, over the verdicts of the hunks it covers.
      *
-     * <p>Deliberately free of {@link #settlingSectionOf}: that asks whether
-     * ANOTHER section is settled, and answering it through the full {@link
-     * #sectionState} would recurse between two sections that share a hunk.</p>
+     * <p>Deliberately the light derivation, free of everything {@link
+     * #sectionState} adds: it is what one section asks of ANOTHER, and asking
+     * through the full state would recurse between two sections sharing a
+     * hunk.</p>
      */
     private Optional<ReviewVerdict.Decision> decisionOf(ReviewIntent intent) {
         Optional<ReviewScope> scope = selectedScope();
@@ -947,24 +986,42 @@ public final class SessionReviewView extends BorderPane {
     }
 
     /**
-     * The mark of the first OTHER settled section covering {@code digest}, so
-     * a card can say "reviewed in (1)" instead of appearing to settle itself.
+     * Whether {@code intent} has any hunk in the current diff at all.
+     *
+     * <p>False for a section whose {@code hunkIds} name hunks the diff no
+     * longer has -- ids are positional, so a re-diff strands them. Such a
+     * section can never be settled (there is nothing to record a verdict
+     * against), so it must not be counted toward progress or demanded by
+     * Submit: doing so refuses Submit forever and jumps to the one card that
+     * cannot be settled.</p>
+     */
+    private boolean hasResolvableHunks(ReviewIntent intent) {
+        return !digestsOf(intent).isEmpty();
+    }
+
+    /**
+     * The marks of the OTHER sections sharing {@code digest}, so a count that
+     * advanced without the reader touching this card is explained.
+     *
+     * <p>Not conditioned on the sibling being fully settled. A sibling that
+     * settled one shared hunk moves this card's count by exactly as much as a
+     * fully settled one does, and leaving that case unmarked solves the
+     * "state changing on its own" problem only for the easy half of it.</p>
      *
      * <p>{@code sections} is passed in rather than read from {@link
      * #intents()}: that regroups the whole diff on every call, and this runs
      * once per settled hunk of every card the rail draws.</p>
      */
-    private Optional<String> settlingSectionOf(String digest, ReviewIntent self,
-                                               List<ReviewIntent> sections) {
+    private void collectSharingSections(String digest, ReviewIntent self,
+                                        List<ReviewIntent> sections, Set<String> into) {
         for (ReviewIntent other : sections) {
             if (other.id().equals(self.id()) || !other.countsTowardProgress()) {
                 continue;
             }
-            if (digestsOf(other).contains(digest) && decisionOf(other).isPresent()) {
-                return Optional.of(sectionMark(other.number()));
+            if (digestsOf(other).contains(digest)) {
+                into.add(sectionMark(other.number()));
             }
         }
-        return Optional.empty();
     }
 
     /** How a section is named in another section's card: its number, circled. */
@@ -976,34 +1033,70 @@ public final class SessionReviewView extends BorderPane {
                 : "#" + number;
     }
 
+    /**
+     * Whether one verdict's base has moved under it, and whether that can be
+     * told at all. An unresolvable delta is {@link Staleness#UNKNOWN}, never
+     * {@code MOVED}: {@link BaseMove#couldMatter} answers true for it because
+     * it is the safe direction for a DECISION, but it is not evidence of a
+     * move and must not be rendered as one.
+     */
+    private Staleness stalenessOf(ReviewVerdict verdict, String base, List<String> files) {
+        if (!verdict.staleAgainst(base)) {
+            return Staleness.FRESH;
+        }
+        BaseMove.Delta delta = baseDelta(verdict.baseCommit());
+        if (delta.unresolvable()) {
+            return Staleness.UNKNOWN;
+        }
+        return BaseMove.couldMatter(delta, files) ? Staleness.MOVED : Staleness.FRESH;
+    }
+
     /** One section's rendered state, derived from its hunks (spec §9.1). */
     private SectionState sectionState(ReviewIntent intent) {
         Optional<ReviewScope> scope = selectedScope();
         List<String> digests = digestsOf(intent);
         if (scope.isEmpty() || digests.isEmpty()) {
-            return SectionState.unknown();
+            // A section that names hunks none of which are in the diff is a
+            // drifted grouping, not an unread section, and says so.
+            return !intent.hunkIds().isEmpty() && loadedDiff().isPresent()
+                    ? SectionState.notInDiff()
+                    : SectionState.unknown();
         }
         String base = currentBase();
         List<ReviewIntent> sections = intents();
         List<String> files = filesOf(intent);
         List<Optional<ReviewVerdict>> perHunk = new ArrayList<>();
         Set<String> elsewhere = new LinkedHashSet<>();
-        boolean stale = false;
+        Staleness staleness = Staleness.FRESH;
         int settled = 0;
         for (String digest : digests) {
             Optional<ReviewVerdict> verdict = host.verdict(scope.get(), digest);
             perHunk.add(verdict);
             if (verdict.isPresent()) {
                 settled++;
-                if (verdict.get().staleAgainst(base)
-                        && BaseMove.couldMatter(baseDelta(verdict.get().baseCommit()), files)) {
-                    stale = true;
+                // MOVED outranks UNKNOWN outranks FRESH: one hunk known to
+                // have moved is the strongest thing true of the section.
+                Staleness hunk = stalenessOf(verdict.get(), base, files);
+                if (hunk == Staleness.MOVED
+                        || (hunk == Staleness.UNKNOWN && staleness == Staleness.FRESH)) {
+                    staleness = hunk;
                 }
-                settlingSectionOf(digest, intent, sections).ifPresent(elsewhere::add);
+                collectSharingSections(digest, intent, sections, elsewhere);
             }
         }
         return new SectionState(VerdictMerge.derive(perHunk), settled, digests.size(),
-                stale, List.copyOf(elsewhere));
+                staleness, List.copyOf(elsewhere), false);
+    }
+
+    /**
+     * The sections progress is measured over and Submit demands a verdict on:
+     * those that count toward progress AND still have a hunk in the diff.
+     */
+    private List<ReviewIntent> countedSections(List<ReviewIntent> all) {
+        return all.stream()
+                .filter(ReviewIntent::countsTowardProgress)
+                .filter(this::hasResolvableHunks)
+                .toList();
     }
 
     private void renderVerdictBar(ReviewScope scope) {
@@ -1015,10 +1108,10 @@ public final class SessionReviewView extends BorderPane {
             return;
         }
         // Collapsed intents do not count toward progress: the point of the
-        // collapse is that there is nothing to read.
-        List<ReviewIntent> counted = intents.stream()
-                .filter(ReviewIntent::countsTowardProgress)
-                .toList();
+        // collapse is that there is nothing to read. Neither does a section
+        // whose hunk ids no longer resolve -- there is nothing to settle in
+        // it, so counting it would make the review permanently incomplete.
+        List<ReviewIntent> counted = countedSections(intents);
         // The UNION of the counted sections' hunks, counted once. Sections
         // overlap, so the sum of their sizes exceeds the number of hunks and
         // would let a shared hunk be "settled" twice (spec §5.6).
@@ -1081,7 +1174,8 @@ public final class SessionReviewView extends BorderPane {
         for (int offset = 1; offset <= intents.size(); offset++) {
             int candidate = (intentIndex + offset) % intents.size();
             ReviewIntent intent = intents.get(candidate);
-            if (intent.countsTowardProgress() && decisionOf(intent).isEmpty()) {
+            if (intent.countsTowardProgress() && hasResolvableHunks(intent)
+                    && decisionOf(intent).isEmpty()) {
                 intentIndex = candidate;
                 refreshReviewState();
                 revealCurrentIntent();
@@ -1255,9 +1349,7 @@ public final class SessionReviewView extends BorderPane {
                 return;
             }
         }
-        List<ReviewIntent> counted = intents().stream()
-                .filter(ReviewIntent::countsTowardProgress)
-                .toList();
+        List<ReviewIntent> counted = countedSections(intents());
         List<ReviewVerdict.Decision> decisions = new ArrayList<>();
         for (int i = 0; i < counted.size(); i++) {
             Optional<ReviewVerdict.Decision> decision = decisionOf(counted.get(i));

@@ -3184,6 +3184,11 @@
 /* Stale: settled, but against a base that has since moved under it. It must
  * not read as done, so it keeps a full-strength border and its own accent. */
 .review-intent-card.stale { -fx-border-color: -drydock-question; -fx-opacity: 1; }
+/* Adrift: the section's hunk ids name nothing in the current diff. Dimmed
+ * like a settled card, because there is nothing here to read either -- but
+ * it is not settled, so it keeps its own muted border rather than the
+ * verdict colours. */
+.review-intent-card.adrift { -fx-opacity: 0.55; -fx-border-color: -drydock-border; }
 
 .review-intent-number {
     -fx-text-fill: -drydock-text-faint;
@@ -3276,6 +3281,11 @@
 .review-intent-stale {
     -fx-font-size: 9.5px;
     -fx-text-fill: -drydock-question;
+}
+.review-intent-adrift {
+    -fx-font-size: 9.5px;
+    -fx-font-style: italic;
+    -fx-text-fill: -drydock-text-faint;
 }
 
 /* Collapsed: a status dot, never a clipped label. */

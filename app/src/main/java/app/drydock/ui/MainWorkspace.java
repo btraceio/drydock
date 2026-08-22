@@ -127,6 +127,7 @@ import java.util.TreeSet;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -184,7 +185,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * on to land, and the budget would stop bounding anything.
      */
     /** Virtual threads for handoff git work; this class has no shared pool. */
-    private static final java.util.concurrent.Executor HANDOFF_EXECUTOR =
+    private static final Executor HANDOFF_EXECUTOR =
             runnable -> Thread.ofVirtual().name("drydock-handoff").start(runnable);
 
     /**
@@ -194,7 +195,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * it; separate from {@link #HANDOFF_EXECUTOR} only so a stack trace says
      * which of the two is stuck.
      */
-    private static final java.util.concurrent.Executor REVIEW_GIT_EXECUTOR =
+    private static final Executor REVIEW_GIT_EXECUTOR =
             runnable -> Thread.ofVirtual().name("drydock-review-git").start(runnable);
 
     /** Bound on diffing one scope to read its intents; the seed is not worth a hang. */
@@ -2337,8 +2338,14 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 .whenComplete((resolved, failure) -> Platform.runLater(() -> {
                     baselineInFlight.remove(scope.id());
                     if (failure != null || resolved == null) {
+                        // Recorded as unresolved rather than left absent: absent
+                        // means baselineOf spawns this again on the very next
+                        // render -- once per card, per rail rebuild, forever.
+                        // A later bodyFor for this scope re-reads it anyway.
                         LOG.log(Level.WARNING, "Could not resolve the review base of scope "
-                                + scope.id() + "; its verdicts read as stale", failure);
+                                + scope.id() + "; its verdicts cannot be dated", failure);
+                        baselineByScope.put(scope.id(), UNRESOLVED_BASELINE);
+                        refreshReviewBoards();
                         return;
                     }
                     baselineByScope.put(scope.id(), resolved);
@@ -2367,6 +2374,15 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      */
     private BaseMove.Delta reviewBaseMove(ReviewScope scope, String recordedBase) {
         String currentBase = baselineOf(scope).base();
+        if (SessionReviewView.UNRESOLVED_BASE.equals(recordedBase)
+                || SessionReviewView.UNRESOLVED_BASE.equals(currentBase)) {
+            // "unresolved" is not a revision. Handing it to git diff spawns a
+            // command that always fails, logs a warning describing no real
+            // problem, and memoizes an answer that the very next baseline
+            // makes wrong. Unresolvable is the honest answer, and the view
+            // renders it as "cannot tell" rather than as "the base moved".
+            return new BaseMove.Delta(true, new TreeSet<>());
+        }
         if (recordedBase.equals(currentBase)) {
             // Not a move at all. Asking git would be a process spawn to be
             // told what the two equal strings already said.
