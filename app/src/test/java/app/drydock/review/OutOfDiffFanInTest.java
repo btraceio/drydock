@@ -160,6 +160,29 @@ class OutOfDiffFanInTest {
         assertEquals(Map.of(), result.bySymbol());
     }
 
+    /**
+     * {@code git grep} exits 1 for "no matches", and that must reach the
+     * caller as an empty-but-available answer. This is the property a
+     * regression narrowing {@code exitCode() > 1} to {@code >= 1} would
+     * silently break, so it is pinned through a REAL spawn (a repo git
+     * actually greps and finds nothing in) rather than through the
+     * could-not-launch path {@code scanReturnsUnavailableWhenGitCannotRun}
+     * already covers.
+     */
+    @Test
+    void aSymbolMatchingNowhereIsAnEmptyAnswerNotUnavailable(@TempDir Path dir)
+            throws IOException, InterruptedException {
+        Path repo = initCommittedRepoWithFanIn(dir);
+        ChangeGraph graph = ChangeGraph.of(new UnifiedDiff(
+                List.of(file("src/Guards.java", "class TotallyAbsentSymbolXyz { }"))));
+
+        OutOfDiffFanIn.Result result = OutOfDiffFanIn.scan(repo, graph, Set.of("src/Guards.java"));
+
+        assertFalse(result.unavailable(),
+                "git grep exit 1 (no matches anywhere) is a valid empty answer, not unavailable");
+        assertEquals(Map.of(), result.bySymbol());
+    }
+
     private static Path initCommittedRepoWithFanIn(Path parent) throws IOException, InterruptedException {
         Path repo = Files.createDirectories(parent.resolve("repo"));
         runGit(repo, "init", "-b", "main");
