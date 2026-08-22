@@ -58,16 +58,24 @@ application {
     // until then. Kept here now so the JVM argument list is version
     // controlled from the start, per plan section 22 ("Keep JVM arguments
     // in version-controlled build configuration").
-    applicationDefaultJvmArgs = listOf(
-        "-Dfile.encoding=UTF-8",
-        "-Djava.awt.headless=false",
-        // macOS: label the dock tile "Drydock" (matches app/packaging/launcher.sh
-        // and the jbang catalog). The menu-bar/Cmd-Tab app name is set separately
-        // by Main's early AWT init; -Xdock:name only covers the dock tile.
-        "-Xdock:name=Drydock",
+    // -Xdock:name=Drydock is a macOS-only dock-tile label (the menu-bar /
+    // Cmd-Tab app name is set separately by Main's early AWT init). The
+    // HotSpot JVM rejects it on Windows with "Unrecognized option:
+    // -Xdock:name=Drydock" at startup, which makes ./gradlew run and the
+    // generated bin/drydock script abort before Application.launch. The
+    // dock tile has no analog on Windows, so the arg is omitted there.
+    val isMacOsHost = System.getProperty("os.name", "").let {
+        it.startsWith("Mac OS X") || it.startsWith("macOS")
+    }
+    applicationDefaultJvmArgs = buildList {
+        add("-Dfile.encoding=UTF-8")
+        add("-Djava.awt.headless=false")
+        if (isMacOsHost) {
+            add("-Xdock:name=Drydock")
+        }
         // Required now that DrydockApplication (Milestone 5's terminal-tabs UI)
         // loads libghostty/the native host shim via FFM.
-        "--enable-native-access=ALL-UNNAMED",
+        add("--enable-native-access=ALL-UNNAMED")
         // Unlike the gateNSpike tasks (drydock.spikes plugin; they force
         // classpath-mode JavaFX via the spike source set's runtimeClasspath,
         // avoiding JPMS enforcement entirely), the `application`/`javafx`
@@ -83,9 +91,10 @@ application {
         // time a terminal tab is opened (this was missed when Milestone 5
         // wired the terminal-tabs UI into the real app, since the `run`
         // task's module-path-vs-classpath distinction from the spike tasks
-        // was overlooked).
-        "--add-exports=javafx.graphics/com.sun.glass.ui=ALL-UNNAMED"
-    )
+        // was overlooked). Harmless on Windows -- the module still exists
+        // in the JDK 26 jmods set even when nothing reaches into it.
+        add("--add-exports=javafx.graphics/com.sun.glass.ui=ALL-UNNAMED")
+    }
 }
 
 repositories {
