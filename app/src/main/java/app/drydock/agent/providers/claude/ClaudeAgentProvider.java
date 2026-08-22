@@ -16,6 +16,7 @@ import app.drydock.agent.providers.AgentCommands;
 import app.drydock.agent.spi.AgentProvider;
 import app.drydock.agent.providers.claude.internal.ClaudeCapabilities;
 import app.drydock.agent.providers.claude.internal.ClaudeCapabilityService;
+import app.drydock.agent.providers.claude.internal.ClaudeEvalProxy;
 import app.drydock.agent.providers.claude.internal.ClaudeExecutableLocator;
 import app.drydock.agent.providers.claude.internal.ClaudeHookInstaller;
 import app.drydock.agent.providers.claude.internal.ConversationCatalog;
@@ -39,6 +40,9 @@ public final class ClaudeAgentProvider implements AgentProvider {
     private ClaudeCapabilityService capabilityService;
     private ClaudeConversationSource conversationSource;
     private ClaudeActivityReporter activityReporter;
+    private final ClaudeEvalProxy evalProxy = new ClaudeEvalProxy();
+    /** Set once by the background probe at {@link #init}; read by {@link #evalAvailable()} on the FX thread. */
+    private volatile boolean evalAvailable;
 
     /** Public no-arg constructor required by {@link java.util.ServiceLoader}. */
     public ClaudeAgentProvider() {
@@ -65,6 +69,11 @@ public final class ClaudeAgentProvider implements AgentProvider {
         this.capabilityService = new ClaudeCapabilityService(locator, ctx.backgroundExecutor());
         this.conversationSource = new ClaudeConversationSource(new ConversationCatalog());
         this.activityReporter = new ClaudeActivityReporter(new ClaudeHookInstaller(ctx.stateDirectory()));
+        // Probe omlx_proxy off the FX thread; the result is cached so the
+        // UI's evalAvailable() read never blocks. omlx_proxy may start later
+        // than drydock -- re-probe on the next launch via markEvalSession's
+        // own probe is not done; restart drydock if the proxy comes up after.
+        ctx.backgroundExecutor().execute(() -> evalAvailable = evalProxy.probe());
     }
 
     @Override
@@ -159,6 +168,21 @@ public final class ClaudeAgentProvider implements AgentProvider {
     @Override
     public Optional<SessionIdDiscovery> idDiscovery() {
         return Optional.empty();   // Claude is PRESET
+    }
+
+    @Override
+    public boolean evalAvailable() {
+        return evalAvailable;
+    }
+
+    @Override
+    public void markEvalSession(String sessionKey) {
+        evalProxy.mark(sessionKey);
+    }
+
+    @Override
+    public void unmarkEvalSession(String sessionKey) {
+        evalProxy.unmark(sessionKey);
     }
 
     /** Uncached, like the pre-seam code: every launch/resume re-probes. Runs on the caller's (background) thread. */

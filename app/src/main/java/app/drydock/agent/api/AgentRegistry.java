@@ -132,6 +132,16 @@ public final class AgentRegistry {
     }
 
     /**
+     * Whether {@code kind}'s provider can actually route an eval session's
+     * traffic to the eval account. Delegates to the provider's cached
+     * {@link app.drydock.agent.spi.AgentProvider#evalAvailable()}; safe to
+     * read on the FX thread.
+     */
+    public boolean evalAvailable(AgentKind kind) {
+        return provider(kind).map(AgentProvider::evalAvailable).orElse(false);
+    }
+
+    /**
      * Whether {@code kind}'s provider reports remote-session support, per
      * {@link app.drydock.agent.spi.AgentProvider#supportsRemote()}. Cached
      * at construction time (alongside {@link #isAvailable}) so callers never

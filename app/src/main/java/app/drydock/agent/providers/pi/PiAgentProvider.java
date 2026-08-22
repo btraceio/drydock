@@ -183,8 +183,15 @@ public final class PiAgentProvider implements AgentProvider {
      */
     private String piCommand(Optional<McpAccess> access, boolean eval) {
         Optional<Path> configFile = access.flatMap(McpAccess::credentialFile);
+        // PI_SESSION_ID: the user's pi models.json sends `x-claude-code-session-id: $PI_SESSION_ID`
+        // to omlx_proxy for per-session correlation, but pi does NOT set PI_SESSION_ID in its
+        // own process env (only for spawned bash subprocesses). It is resolved from the
+        // launch env at config-load time, so a launch without it (e.g. drydock started from
+        // a fresh shell) fails provider auth. drydock sets it per launch -- a non-secret id,
+        // so it rides the env argv like DRYDOCK_EVAL.
+        String piSessionId = "PI_SESSION_ID=" + AgentCommands.shellQuote(java.util.UUID.randomUUID().toString()) + " ";
         if (configFile.isEmpty()) {
-            return evalEnvPrefix(eval) + "pi";
+            return evalEnvPrefix(eval) + piSessionId + "pi";
         }
         // Start BOTH, then join both: the cost is max(probe, write), not the
         // sum. Sequencing them would put up to 35 s in front of the first Pi
@@ -212,10 +219,10 @@ public final class PiAgentProvider implements AgentProvider {
         if (!probed.supportsBridge() || bridgeExtension == null) {
             LOG.log(Level.INFO, "Pi bridge declined for this launch (drydock tools unavailable): "
                     + declineReason(probed, bridgeExtension));
-            return evalEnvPrefix(eval) + "pi";
+            return evalEnvPrefix(eval) + piSessionId + "pi";
         }
         return AgentCommands.envPrefix(ENV_SCRUB, Map.of(CONFIG_ENV_VAR, configFile.get()), Map.of())
-                + evalEnvSuffix(eval) + "pi -e " + AgentCommands.shellQuote(bridgeExtension.toString());
+                + evalEnvSuffix(eval) + piSessionId + "pi -e " + AgentCommands.shellQuote(bridgeExtension.toString());
     }
 
     /**

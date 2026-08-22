@@ -478,6 +478,21 @@
     -fx-text-fill: -drydock-text;
 }
 
+/* The small × inside a ClearableTextField, pinned to the field's right edge.
+   Visible only while the field has text (see ClearableTextField). */
+.clear-text-button {
+    -fx-background-color: transparent;
+    -fx-background-radius: 5px;
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 13px;
+    -fx-padding: 0 2 0 2;
+    -fx-cursor: hand;
+}
+.clear-text-button:hover {
+    -fx-background-color: -drydock-active-bg;
+    -fx-text-fill: -drydock-text;
+}
+
 /* Tab-strip trailing "+" (new session) button. */
 .new-tab-button {
     -fx-min-width: 30px;  -fx-max-width: 30px;

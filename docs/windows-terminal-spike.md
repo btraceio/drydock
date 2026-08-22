@@ -151,10 +151,20 @@ the Windows CI job. macOS `app:test` passes (AppKit path untouched).
 
 ### Remaining (the follow-ups)
 
-- **Full-app boot on Windows** is not yet verified: `DrydockApplication`'s
-  startup, repo registration, and the live session flow on Windows need a
-  manual Windows run (or a headless app-boot CI job). The integration harness
-  verifies the terminal seam, not the whole app.
+- **Full-app boot + terminal-only session on Windows** is verified in CI by
+  the `bootSpike (Windows)` job: it boots the real `app.drydock.Main` on
+  `windows-latest`, registers a throwaway repo, and opens a terminal-only
+  session whose command (`echo ...`) runs via ConPTY through the real
+  `SessionManager`/`OpenSessionTab`/JediTermFX path -- no `claude` installed (a
+  `app.drydock.diag.command` override bypasses the agent provider, and
+  `openNewSessionWithDefaultAgent` proceeds with a registered kind when that
+  override is set). The app exits cleanly via its own `diagQuit` watchdog, so
+  the task's exit code is the pass/fail. A `./gradlew run` on a Windows dev
+  box is still blocked by the macOS-only `-Xdock:name` in
+  `applicationDefaultJvmArgs` (the bootSpike task sets its own JVM args without
+  it); gating that flag to macOS is a separate dev-experience fix. A true
+  end-to-end *Claude* session on Windows remains a manual step (run Drydock on
+  a Windows box with `claude` installed) -- CI cannot install `claude`.
 - **Runtime re-theming** (`TerminalRuntime.updateConfig`) is a no-op on the
   JediTermFX backend -- JediTermFX theming goes through a `SettingsProvider`,
   not a hot config-file reload; a theme bridge is deferred. The terminal opens

@@ -70,23 +70,17 @@ jobs:
     # Two spikes run: jeditermSpike (the raw JediTermFxWidget + pty4j, covers
     # submitLine through ConPTY) and nodeTerminalSpike (drives the real
     # TerminalFactory + the JediTermFX terminal.api impls through
-    # openSurface/processExited/closeGracefully -- the integration layer). The
-    # app's main source now compiles the JediTermFX backend, so this job
-    # builds :app first (the spike classpath requires it).
+    # openSurface/processExited/closeGracefully -- the integration layer).
     #
     # Each opens a real JavaFX window and auto-exits, so they need a desktop
     # session. windows-latest hosts one; if a future runner image cannot, add
     # the Monocle headless path the :app:test job uses (glass.platform=Monocle
-    # + monocle on the spike runtime classpath) rather than dropping the job --
-    # the whole point is to run the real Windows ConPTY + JavaFX render path.
+    # + monocle on the spike runtime classpath) rather than dropping the job.
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          # The spikes need no submodule: third_party/ghostty is read only by
-          # buildGhosttyNative, which neither spike depends on
-          # (requireNativeBuild=false in buildSrc/.../drydock.spikes.gradle.kts).
           submodules: false
 
       - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
@@ -106,8 +100,56 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      # shell: bash so ./gradlew (the POSIX wrapper) runs identically to the
-      # macOS job; Git Bash on windows-latest handles it.
       - name: JediTermFX spikes (raw widget + TerminalFactory integration)
         shell: bash
         run: ./gradlew --no-daemon :app:jeditermSpike :app:nodeTerminalSpike
+
+  boot-spike:
+    name: bootSpike (Windows)
+    # Verifies the REAL app boots on Windows and opens a terminal-only session
+    # through the production SessionManager/OpenSessionTab path -- no claude
+    # installed (a diag command override bypasses the agent provider and runs
+    # `echo` via ConPTY). Stronger than the spikes: it exercises
+    # DrydockApplication startup, repo registration, session open, the
+    # JediTermFX backend through the real TerminalFactory, and orderly shutdown
+    # via the app's own diagQuit. The task's exit code is the pass/fail (the app
+    # exits cleanly via diagQuit's watchdog, no kill). See
+    # docs/windows-terminal-spike.md.
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          submodules: false
+
+      - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: 26
+          cache: gradle
+
+      - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Create throwaway repo
+        shell: bash
+        run: |
+          mkdir -p build/boot-repo && cd build/boot-repo
+          git init -q
+          git config user.email t@t.t
+          git config user.name t
+          printf 'hi\n' > README.md
+          git add . && git commit -qm init
+
+      - name: Boot spike (terminal-only session via ConPTY)
+        shell: bash
+        run: |
+          ./gradlew --no-daemon :app:bootSpike \
+            -Papp.drydock.terminal.backend=jediterm \
+            -Papp.drydock.diag.repo=build/boot-repo \
+            -Papp.drydock.diag.autoCreateSession=true \
+            '-Papp.drydock.diag.command=echo DRYDOCK_SESSION_OK' \
+            -Papp.drydock.diag.autoExitSeconds=15 \
+            -Papp.drydock.diag.stateFile=build/diag-state.json

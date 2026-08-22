@@ -310,7 +310,7 @@ public final class RepositorySidebar extends VBox {
 
         filterBar = new SessionFilterBar(agentRegistry, () -> onFilterChipsChanged());
 
-        VBox header = new VBox(addButton, filterField, filterBar);
+        VBox header = new VBox(addButton, new ClearableTextField(filterField), filterBar);
         header.getStyleClass().add("sidebar-header");
 
         // The same collapse control the Review rails wear, in the same place.
@@ -2493,8 +2493,8 @@ public final class RepositorySidebar extends VBox {
         /** The eval-mode tooltip line, honest per provider: Pi reroutes, Claude and Codex are marked but not rerouted. */
         private static String evalTooltipLine(ManagedAgentSession session) {
             return switch (session.agentKind()) {
-                case PI -> "Eval mode: on (x-target-account: eval)";
-                case CLAUDE -> "Eval mode: on (header injection deferred for Claude; requests are NOT rerouted)";
+                case PI -> "Eval mode: on (x-target-account: eval via the Pi bridge extension)";
+                case CLAUDE -> "Eval mode: on (x-target-account: eval via omlx_proxy)";
                 case CODEX -> "Eval mode: on (not supported for Codex; requests are NOT rerouted)";
             };
         }
@@ -2608,7 +2608,8 @@ public final class RepositorySidebar extends VBox {
             String workingDirectoryText = session.worktreeRoot().isEmpty() && repository.isRemote()
                     ? repository.remote().host() + ":" + repository.remote().remotePath()
                     : session.workingDirectory().toString();
-            rowTip.setText("Status: " + session.status()
+            rowTip.setText(session.displayName()
+                    + "\nStatus: " + session.status()
                     + "\nAgent: " + AgentLabels.displayName(agentRegistry, session)
                     + (session.evalMode() ? "\n" + evalTooltipLine(session) : "")
                     + (activity == SessionActivity.UNKNOWN ? ""
@@ -2684,6 +2685,15 @@ public final class RepositorySidebar extends VBox {
             });
 
             HBox row = new HBox(8, statusCol, name, startPill);
+            // A dirty dot when this checkout has uncommitted changes, matching
+            // the session row's -- the worktree's state is independent of
+            // whether a session is running in it.
+            GitStatus unopenedStatus = viewModel.worktreeStatus(worktree.path()).orElse(null);
+            if (unopenedStatus != null && unopenedStatus.dirty()) {
+                Region dirtyDot = new Region();
+                dirtyDot.getStyleClass().add("dirty-dot");
+                row.getChildren().add(row.getChildren().indexOf(startPill), dirtyDot);
+            }
             findingsBadge(worktree.path(), () -> navigator.startReviewForWorktree(repository, worktree,
                     SessionReviewScopes.Choice.LOCAL))
                     .ifPresent(badge -> row.getChildren().add(row.getChildren().indexOf(startPill), badge));

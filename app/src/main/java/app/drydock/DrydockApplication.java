@@ -903,6 +903,19 @@ public final class DrydockApplication extends Application {
             creator.setDaemon(true);
             creator.start();
         }
+
+        // -Dapp.drydock.diag.autoExitSeconds=N: clean Platform.exit N seconds
+        // after startup so a CI driver gets a task exit code (not a kill).
+        String autoExitSeconds = System.getProperty("app.drydock.diag.autoExitSeconds");
+        if (autoExitSeconds != null && !autoExitSeconds.isBlank()) {
+            long secs = Long.parseLong(autoExitSeconds);
+            PauseTransition exit = new PauseTransition(Duration.seconds(secs));
+            exit.setOnFinished(e -> {
+                System.out.println("[diag] autoExit after " + secs + "s");
+                diagQuit(primaryStage);
+            });
+            exit.play();
+        }
     }
 
     /**

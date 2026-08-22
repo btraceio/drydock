@@ -120,6 +120,16 @@ final class StartSessionModal extends VBox {
             title.setText("Start a " + name + " session");
             taskLabel.setText("Task for " + name);
             taskField.setPromptText("Optional: a task for " + name + "; it is typed into the new session");
+            boolean evalOk = registry.evalAvailable(kind);
+            evalMode.setDisable(!evalOk);
+            if (!evalOk) {
+                evalMode.setSelected(false);
+                evalMode.setTooltip(new Tooltip("Eval routing is not available for " + name
+                        + " (requires the omlx_proxy for Claude, or is unsupported for this agent)."));
+            } else {
+                evalMode.setTooltip(new Tooltip("Route this session's model traffic to the eval account "
+                        + "(x-target-account: eval) so plugin/extension testing is not charged to ordinary usage."));
+            }
             refreshPreview(kind);
         };
 

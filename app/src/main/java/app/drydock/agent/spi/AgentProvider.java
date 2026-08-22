@@ -94,4 +94,36 @@ public interface AgentProvider {
 
     /** Present only for DISCOVERED-strategy providers; empty for PRESET. */
     Optional<SessionIdDiscovery> idDiscovery();
+
+    /**
+     * Whether this provider can actually route an eval session's traffic to
+     * the eval account. Cheap and cached: the UI reads it synchronously to
+     * enable/disable the eval checkbox, so an implementor MUST probe
+     * out-of-band (e.g. at {@link #init}) and return a snapshot here, never
+     * block. Default {@code true} (the provider injects eval through the
+     * command or a side channel); a provider with no working injection path
+     * returns {@code false} so the checkbox is disabled rather than misleading.
+     */
+    default boolean evalAvailable() {
+        return true;
+    }
+
+    /**
+     * Marks {@code sessionKey} as an eval session with whatever side channel
+     * the provider uses (e.g. an HTTP call to a local proxy that injects the
+     * header). Called on a background executor at eval-session launch (new
+     * and resume); best-effort, never fails the launch. Default no-op: a
+     * provider that injects eval purely through the launch command (env var)
+     * needs do nothing. {@code sessionKey} is the agent session id the CLI
+     * sends on its requests (for PRESET providers, the {@code --session-id}
+     * drydock generated).
+     */
+    default void markEvalSession(String sessionKey) { }
+
+    /**
+     * Reverses {@link #markEvalSession}. Called on a background executor when
+     * an eval session closes, exits, or is deleted. Idempotent and safe when
+     * {@code markEvalSession} never ran for {@code sessionKey}.
+     */
+    default void unmarkEvalSession(String sessionKey) { }
 }
