@@ -2432,10 +2432,25 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         }
     }
 
+    /**
+     * Whether a still-open blocking finding names {@code intent} -- or, when
+     * its named id no longer matches literally, whether it still touches one
+     * of {@code intent}'s files. The file fallback matters because a
+     * grouping's ids are not stable across every regrouping (a reviewer's
+     * own re-run, or the computed-sections graph landing after the fallback
+     * shown while it built): matching by id alone would let a finding filed
+     * against an id that no longer resolves silently stop blocking anything,
+     * defeating spec §4.6's refusal for a reason no reviewer caused. Mirrors
+     * {@link SessionReviewView#belongsToCurrentIntent}, which the verdict
+     * bar itself already renders "blocked" from -- this is the second,
+     * write-time guard the keyboard path reaches without going through that
+     * render at all.
+     */
     private boolean blockingFindingOpen(ReviewScope scope, ReviewIntent intent) {
         return annotationStore.forScope(scope.id()).stream()
                 .filter(finding -> finding.intentId()
-                        .map(id -> id.equals(intent.id())).orElse(true))
+                        .map(id -> id.equals(intent.id()) || intent.touches(finding.file()))
+                        .orElse(true))
                 .anyMatch(ReviewAnnotation::blocksApproval);
     }
 
