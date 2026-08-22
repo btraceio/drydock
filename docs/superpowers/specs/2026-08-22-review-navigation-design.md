@@ -131,15 +131,14 @@ column; `reads` on `review_intents` and a `sections` include on
 `review_scope`; content-derived intent ids; and tree-sitter parsing with a
 lexical fallback.
 
-Out of scope, and unchanged: scope identity, the findings margin, the verdict
-model, the submit sheet, and every other `review_*` tool. Nothing here changes
-*what* a human settles — only how the things to be settled are drawn, ordered
-and named.
+Also in scope, and an earlier draft was wrong to exclude it: **the verdict
+model**. Sections overlap (§5.6), so they no longer partition the change, and
+a verdict keyed to a section cannot survive that — §9 moves it to the hunk.
+Excluding it was not a scoping decision, it was an unexamined assumption that
+sections would stay disjoint.
 
-One caveat on that last line, stated because it is the sort of thing that is
-easier to find in a spec than in a bug report: redrawing the groups changes
-what a verdict is *about*, which is why §9 is not optional and why
-`AnnotationStore` appears in §12 despite the paragraph above.
+Out of scope, and unchanged: scope identity, the findings margin, finding
+anchors, the submit sheet's own flow, and every other `review_*` tool.
 
 ## 4. The change graph
 
@@ -342,6 +341,31 @@ The agent may still regroup, and its grouping still wins (§6.4). The include
 is what makes **accept-and-name** the cheap path and regrouping the
 deliberate one.
 
+### 5.6 One hunk, many sections
+
+**A hunk may appear in more than one section, and should.** Sections are
+views for comprehension, not a partition of the change.
+
+This removes a forced choice §5.2 otherwise makes twice over. A header groups
+with its same-basename `.cpp` **and** with every changed `.cpp` that
+references it; those are different sections, and with disjoint membership one
+of them has to lose. `counters.h` in the reference output has exactly this
+shape. With overlap there is nothing to decide: the header appears wherever
+it is needed to understand what is being read.
+
+It also drains most of the over-grouping risk (§14). A component previously
+had to absorb everything transitively connected to it *in order to keep the
+connection visible at all*; now a distant-but-relevant file can be shown in a
+section without being swallowed by it.
+
+What overlap costs is arithmetic, and the cost is real: the sum of section
+sizes now exceeds the number of hunks, so "3 of 5 intents settled" measures
+nothing. **Progress is counted in hunks, not sections** (§9), and a section's
+own state is derived rather than stored. A hunk already settled elsewhere
+renders in place, marked with where it was settled — `✓ reviewed in ①` — so
+a section is never silently incomplete and never asks for a second reading of
+the same lines.
+
 ## 6. The reading path
 
 `app.drydock.review.ReadingPath` computes, from a `ChangeGraph`:
@@ -485,9 +509,20 @@ unchanged.
 whatever the rail is currently listing — intents in INTENTS mode, hunks in
 PATH mode — so the mode adds one key rather than a parallel set, and existing
 muscle memory survives. `n` remains "next unsettled intent" in both modes,
-because progress is intent-keyed regardless of what the rail is showing.
+because it walks unsettled work, and §9 makes that a property of hunks rather
+than of whatever the rail is currently showing.
 
-`ShortcutsOverlay` gains the `p` row: advertised and bound must match.
+`a` / `r` / `u` keep their keys and gain a focus-dependent unit (§9.5), and
+`⇧A` / `⇧R` settle the current file. `ShortcutsOverlay` gains rows for `p`,
+`⇧A` and `⇧R`, and the `a` / `r` / `u` rows are reworded to name the unit:
+advertised and bound must match.
+
+**A collision worth catching before it is written:** `a` already means "ask
+the agent" inside the occurrence popover (§7.4) and "approve" in the review
+board. They do not overlap today because the popover owns the key while it is
+open, and §9.5 does not change that — but the popover is now reachable from a
+card as well as from a symbol, so the two are one keystroke closer together
+than they were.
 
 ### 7.4 Out-of-diff callers, and the one keystroke to the agent
 
@@ -537,68 +572,70 @@ The computed *links* are still not exposed. An include existing so the agent
 can correct Drydock's lexical guesses remains a feature that should be asked
 for before it is built (§15).
 
-## 9. Stability: what survives a re-run
+## 9. Reviewed state: keyed to content, not to a grouping
 
-### 9.1 Two layers that move for different reasons
+### 9.1 The unit moves from the section to the hunk
 
-The computed layer is deterministic given a diff — parse, unique-name match,
-and a sort with a total tie-break (§6.1) — so it moves only when the code
-moves. The agent layer moves when you **ask again**.
+`ReviewVerdict` is keyed `(scopeId, intentId)` and the verdict bar reads
+`n/m intents settled`. Both assume sections partition the change, which §5.6
+ends.
 
-That asymmetry is not a quality judgement; an agent's grouping is the better
-semantic answer and §6.4 stands. It matters because the human's accumulated
-work is keyed to the grouping, and a layer that moves under a reviewer who
-changed nothing will take that work with it.
+The key moves to the hunk, keeping all three decisions — `APPROVED`,
+`CHANGES`, `AUTO_APPROVED`. **A section's state is derived, not stored**, by
+the merge `AnnotationStore.migrateLegacyVerdicts` already implements and
+already argues for:
 
-### 9.2 The defect this closes
+- any `CHANGES` among a section's hunks makes the section `CHANGES` —
+  "something in here needs work" stays true of a section however it is drawn;
+- `APPROVED` requires **every** hunk settled, because approving a section
+  claims the human read all of it.
 
-`ReviewVerdict` is keyed `(scopeId, intentId)` and `IntentGrouping.set`
-replaces a scope's whole grouping. Agent intent ids are whatever string the
-agent emitted. So the routine case — the author pushes a fix, the reviewer
-asks for a re-review — mints new ids, and **every approval the human gave is
-orphaned**. A finished review asks to be done again.
+That rule stops being a migration and becomes the live derivation. It was
+written for exactly this question — how a group's decision follows from its
+members — and the only thing that changes is that its members are hunks and
+it runs on every render rather than once.
 
-The structural version of this bug has already been paid for once.
-`AnnotationStore.migrateLegacyVerdicts` exists because the fallback grouping
-stopped emitting one intent per file, and its merge is deliberately
-asymmetric: any `CHANGES` among a group's files makes the group `CHANGES`,
-but `APPROVED` requires **every** file settled, because *"silently approving
-code nobody looked at is the one outcome this must never produce."* That
-machinery only recognises the `file:` prefix, so it cannot help an agent
-regrouping.
+`AUTO_APPROVED` counts as settled for the derivation and is rendered as
+*claimed* rather than *measured* (§6.5), so a section approved entirely on
+the agent's assertion reads as one.
 
-This predates the present design. It is closed here rather than deferred
-because §8's `reads` makes the **ordering** depend on agent ids too, which
-turns a persistence bug into a navigation one.
+### 9.2 The anchor is a content digest, not a position
 
-### 9.3 Structure supplies identity, the agent supplies semantics
+The obvious key is the existing stable line key (`n<new>` / `o<old>`) that
+findings already use. **It is the wrong one here.** It is positional: an
+author pushing one commit shifts every key below the insertion, so a clean
+flag recorded at `n42` comes back covering lines nobody read. That is the one
+outcome `migrateLegacyVerdicts` exists to refuse — *"silently approving code
+nobody looked at is the one outcome this must never produce."* A finding
+landing a few lines off is a visible annoyance; an approval landing a few
+lines off is a silent lie about what was reviewed.
 
-**Intent ids are content-derived**: a digest over the intent's ordered hunk
-id set, computed at the MCP boundary, not trusted from the agent's string. A
-re-run that produces the same grouping produces the same ids, so verdicts
-survive by construction rather than by migration.
+So a hunk's verdict is keyed by a **digest of its changed lines** (with its
+file path), and that makes a re-diff correct by construction:
 
-The agent's own `id` degrades to a **label local to one call** — what `reads`
-references — and is resolved to content ids at decode time. It is not a
-persisted key, which is the property that made it unsafe.
+- a hunk that only moved keeps its digest, and stays settled;
+- a hunk whose content changed gets a new digest, and is unsettled — which is
+  right, because it is not the code that was read;
+- a hunk appearing in three sections is one digest, so it is one flag, which
+  is what makes §5.6 work at all.
 
-Two consequences worth stating rather than discovering:
+### 9.3 What this supersedes
 
-- **A re-run with the same hunks and a better title is an upsert.** Same id,
-  new title and rationale, verdict intact — the same contract `review_finding`
-  already keeps, where a re-run refreshes the reviewer's statement and the
-  human's decisions survive.
-- **An intent naming no hunks has nothing to key on.** `ReviewIntent` already
-  permits one, and it keeps the agent's string as its id and does not survive
-  a re-run. Documented rather than papered over: there is no content to hash,
-  and inventing stability for it would mean carrying a verdict onto a group
-  whose membership is unknowable.
+An earlier draft of this section derived **intent ids** from content and
+re-anchored verdicts across a regrouping by hunk overlap. Both existed for
+one reason: verdicts were keyed to the grouping, so a probabilistic agent
+regrouping destroyed the human's work.
 
-**Regrouping re-anchors by hunk overlap**, generalising
-`migrateLegacyVerdicts` from its one-off `file:` case to any change of
-grouping, and keeping its asymmetric merge verbatim — any `CHANGES` carries,
-`APPROVED` needs full coverage, a partial group is left for the human to
-re-settle and its old verdicts stay on disk.
+Keying to hunk content removes the reason. Nothing durable is keyed to a
+grouping any more, so an agent may regroup freely, twice, differently — the
+reviewed state does not notice. The earlier concern that agent sections are
+probabilistic while structural ones are stable is answered at its root rather
+than compensated for: **it stops mattering how stable the grouping is.**
+
+Content-derived intent ids are kept only where they still earn their place:
+`reads` (§8) references intents within one call, and resolving those to
+content-derived ids keeps an ordering assertion meaningful across a re-run.
+Nothing persists under them.
 
 ### 9.4 Determinism is a requirement, not a property
 
@@ -607,12 +644,32 @@ Calling the computed layer stable is a claim the code has to keep:
 - The sort's tie-break is total (§6.1), so no two runs can order equal units
   differently.
 - **No `HashMap` or `HashSet` iteration order** anywhere in graph
-  construction, edge matching or the sort. Insertion-ordered or sorted
-  collections only. This is the cheapest way to lose the property and the
-  hardest to notice, because a single-JVM test run will usually agree with
-  itself.
-- The same diff produces a byte-identical reading path, twice in one process
-  and across two processes (§13).
+  construction, edge matching, grouping or the sort. Insertion-ordered or
+  sorted collections only. This is the cheapest way to lose the property and
+  the hardest to notice, because a single-JVM test run will usually agree
+  with itself.
+- The same diff produces a byte-identical grouping and reading path, twice in
+  one process and across two processes (§13).
+
+### 9.5 Settling more than one hunk at once
+
+Reading is per hunk; settling is often not. Three units, one action each:
+
+- **Section** — `a` / `r` / `u` with the rail focused, as today. Expands to
+  the section's unsettled hunks, so the existing key keeps its existing
+  meaning and simply now has a defined effect on overlapping sections.
+- **File** — `⇧A` / `⇧R`, every hunk of the current file in this scope.
+- **Hunk** — `a` / `r` / `u` with the diff column focused.
+
+The unit follows focus rather than adding a parallel key set, which is the
+same rule `[` / `]` already follow (§7.3). The verdict bar names the unit an
+action will hit, because a key whose target depends on focus must say what it
+is about to do.
+
+**Settling a section settles its shared hunks everywhere**, by construction —
+there is one flag. That is the intended behaviour and the reason the
+`✓ reviewed in ①` marker exists: the effect has to be visible in the other
+section, or it reads as state changing on its own.
 
 ## 10. Parsing and packaging
 
@@ -683,17 +740,22 @@ reading path.
 class (Kahn, Tarjan), the rail's PATH mode, per-hunk link footer rows, the
 `p` shortcut and its overlay row, `reads` on `review_intents`, provenance
 marking on order and links (§6.5), the out-of-diff caller popover source
-(§7.4), content-derived intent ids and overlap re-anchoring (§9), the
+(§7.4), overlapping section membership (§5.6), hunk-keyed reviewed state
+(§9), file- and section-level settle actions (§9.5), the
 `sections` include on `review_scope` (§5.5), and the tree-sitter
 dependencies.
 
 **Changed**: `FallbackIntents` (graph-backed grouping, with today's
-directory clustering kept as its own fallback), `ReviewIntentRail` (two
-modes), `ReviewDiffColumn` (footer
+directory clustering kept as its own fallback), `ReviewVerdict` (keyed by
+hunk content digest, not `intentId`), `AnnotationStore` (verdicts stored per
+hunk; `migrateLegacyVerdicts`' merge promoted from a one-off migration to the
+live section derivation, plus a one-way migration of existing intent-keyed
+verdicts), `ReviewVerdictBar` (progress counted in hunks; the acting unit
+named), `ReviewIntentRail` (two modes, derived section state, `✓ reviewed in
+①` markers), `ReviewDiffColumn` (footer
 rows), `ReviewDiffRows` (the row model gains a link row), `ReviewToolCodec`
 and `McpToolRouter` (`reads`, and content-derived ids at decode),
-`AnnotationStore` (re-anchor by hunk overlap, generalising
-`migrateLegacyVerdicts`), `ShortcutsOverlay`, `app/build.gradle.kts`.
+`ShortcutsOverlay`, `app/build.gradle.kts`.
 
 **Deleted**: nothing. This is additive to a surface that works.
 
@@ -729,13 +791,25 @@ Headless tests:
 - Provenance: a measured order and a `reads`-claimed order render with
   different warrants, and a scope carrying both an agent grouping and a
   computed link set marks each correctly.
-- Stability: the same diff yields a byte-identical reading path twice in one
+- Overlap: a header appearing in two sections is one flag; settling it in one
+  shows it settled in the other with a `reviewed in` marker; a section's
+  derived state follows the asymmetric merge (any `CHANGES` wins, `APPROVED`
+  needs every hunk); progress counts distinct hunks, not the sum of section
+  sizes.
+- Re-diff: a hunk that only moved keeps its verdict; a hunk whose content
+  changed loses it; and a scope whose every hunk changed comes back fully
+  unsettled rather than fully settled.
+- Settle actions: `a` on a focused rail settles the section's unsettled
+  hunks, `⇧A` the current file, `a` on a focused diff column one hunk; each
+  is visible in the other sections that share those hunks.
+- Migration: verdicts stored under the old `(scopeId, intentId)` key are
+  carried onto hunks once, and a partially-covered section is left unapproved
+  rather than approved.
+- Stability: the same diff yields a byte-identical grouping and reading path twice in one
   process **and** across two processes (the cross-process run is what catches
   a hash-ordered collection).
-- Intent identity: a re-run with the same hunks keeps its verdicts and
-  refreshes its titles; a re-run that regroups re-anchors by overlap, with
-  `CHANGES` carrying and a partially-settled group left unapproved; an intent
-  naming no hunks keeps the agent's id and is documented as not surviving.
+- Regrouping: an agent re-run that produces a completely different grouping
+  changes no reviewed state at all — the regression that pins §9.3.
 - `GrammarRegistry`: a missing grammar takes the lexical path and logs
   nothing; a failing native load logs once and takes the lexical path.
 - `review_intents` with `reads`: order follows it; a `reads` cycle is named;
@@ -773,16 +847,25 @@ In the running app, with screenshots rather than assertions about them:
   unrelated sub-changes. A connected component is as large as the call graph
   makes it, and nothing here splits it. No rule is invented for this (§15) —
   it is recorded so that a 9-file section is recognised as the known failure
-  rather than as a bug in the grouping. Placing tests in context (§5.3) makes
-  a section modestly larger, which trades against this deliberately.
-- **Content-derived ids change the meaning of a stored key.** Verdicts
-  written under an agent's string id before this lands are re-anchored by
-  overlap on first read, which is the same shape as the migration that
-  already exists — but it is a one-way rewrite of the human's records, and it
-  is the place in this design where a mistake is least recoverable.
+  rather than as a bug in the grouping. Overlap (§5.6) drains most of it — a
+  component no longer has to absorb a file merely to keep it visible — and
+  placing tests in context (§5.3) pushes modestly the other way.
+- **Re-keying verdicts rewrites the human's records once.** Verdicts stored
+  under `(scopeId, intentId)` are carried onto hunks on first read. It is the
+  same shape as the migration that already exists and it is one-way, which
+  makes it the place in this design where a mistake is least recoverable.
+- **A digest is unforgiving, deliberately.** Reformatting a file, or a
+  rebase that rewrites whitespace, changes every digest and unsettles a
+  review that was substantively finished. The alternative — a fuzzier anchor
+  — buys comfort by risking the one outcome §9.2 refuses, so the strictness
+  is chosen rather than accepted. Whether to normalise whitespace before
+  digesting is left open (§15).
 
 ## 15. Open items
 
+- **Whether the hunk digest normalises whitespace** before hashing. Doing so
+  survives reformatting; not doing so keeps the guarantee exact. No evidence
+  yet either way.
 - **Splitting an over-large component** (§14). Articulation points and a
   size cap are the obvious candidates and both can split a section through
   the middle of one idea, which is worse than a large honest section.
