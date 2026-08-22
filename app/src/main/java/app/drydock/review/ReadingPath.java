@@ -27,9 +27,10 @@ import java.util.TreeSet;
  * construction.</p>
  *
  * <p><strong>The rank, in full.</strong> Out-of-diff fan-in, then in-degree
- * within the changed set, then not-a-test, then not-a-leaf, then {@link
- * FallbackIntents}' kind order, then the path. The path is what makes it
- * TOTAL, and total is not a nicety here: {@code Graphs} keeps its ready set
+ * within the changed set, then not-a-test, then {@link FallbackIntents}'
+ * kind order, then the path. That is the whole chain: §6.2's not-a-leaf is
+ * absent from it, for the reason two paragraphs down. The path is what
+ * makes it TOTAL, and total is not a nicety here: {@code Graphs} keeps its ready set
  * in a {@code TreeSet} ordered by this comparator, so two distinct units
  * comparing equal would collapse into one and a unit would silently fall out
  * of the path (spec §9.5).</p>
