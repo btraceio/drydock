@@ -3,7 +3,6 @@ package app.drydock.ui.review;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewVerdict;
 
-import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
@@ -122,9 +121,21 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
     }
 
     /**
-     * The stale banner (spec §9.2) swaps in two more buttons, "Confirm still
-     * good" and "Re-review"; the Phase 1 gate named it -- alongside the
-     * rail's two Task 6 additions -- as new UI with no fit coverage.
+     * The stale banner (spec §9.2) swaps in a label plus two more buttons,
+     * "Confirm still good" and "Re-review"; the Phase 1 gate named it as new
+     * UI with no fit coverage, and the coordinator's review found the gap
+     * was real: {@code assertNothingTruncated} only ever looked at {@code
+     * .button}, so {@code staleLabel} -- a {@code wrapText} label with no
+     * {@code minWidth} -- could reflow silently and the assertion would
+     * never see it.
+     *
+     * <p>Measured (see {@link #assertStaleLabelWrapsCleanlyRatherThanClipping}):
+     * at the {@code CODE_MIN_WIDTH} floor the banner does NOT read as one
+     * line -- {@code "⚠ approved against base a1b2c3d · base is now
+     * d4e5f6a"} wraps to exactly two, 17px each, 34px total. Reported here
+     * rather than designed around: nothing was truncated (wrap, not
+     * ellipsis, so no character is lost), but the floor is real and the row
+     * genuinely gets taller when a section is stale at that width.</p>
      */
     @Test
     void theStaleBannerFitsAtTheCodeColumnFloor() {
@@ -136,66 +147,74 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
         WaitForAsyncUtils.waitForFxEvents();
 
         assertNothingTruncated();
+        assertStaleLabelWrapsCleanlyRatherThanClipping();
     }
 
     /**
-     * The acting-unit label (spec §9.6) is the other new element the gate
-     * named: a key whose target depends on focus has to say what it is
-     * about to do. At the code-column floor there is genuinely no room for
-     * it alongside the primary actions and the title -- confirmed by hand:
-     * widening {@code CODE_MIN_WIDTH} to make room was rejected in favour of
-     * the same rule the progress hint already follows. It drops rather than
-     * clips, and reappears as soon as there is room; it must never show a
-     * half-cut word.
+     * Not "fits on one line" -- it measurably does not, at the floor (see
+     * the test's javadoc). What this guards is the OTHER failure mode:
+     * wrapping past two lines, or collapsing to the near-zero-width,
+     * one-character-per-line pathology this codebase has shipped before
+     * (see {@code ReviewIntentRailCardHeightTest}'s history). Two lines of
+     * 17px is a legible banner; a dozen lines of single characters is not,
+     * and this is what would catch the difference.
+     */
+    private void assertStaleLabelWrapsCleanlyRatherThanClipping() {
+        double[] oneLineHeight = new double[1];
+        double[] actualHeight = new double[1];
+        interact(() -> {
+            Label label = (Label) lookup(".review-verdict-stale").query();
+            oneLineHeight[0] = label.prefHeight(-1);
+            actualHeight[0] = label.getHeight();
+        });
+        assertTrue(actualHeight[0] <= oneLineHeight[0] * 2 + 1,
+                "the stale banner wrapped to roughly " + Math.round(actualHeight[0] / oneLineHeight[0])
+                        + " lines at the " + (int) RailLayout.CODE_MIN_WIDTH + "px floor (one line is "
+                        + Math.round(oneLineHeight[0]) + "px, rendered height is "
+                        + Math.round(actualHeight[0]) + "px)");
+    }
+
+    /**
+     * The unit (spec §9.6) is named on the button itself now, not a separate
+     * droppable label: "Approve intent" (the pre-Task-7 text) contradicted
+     * whatever {@link SessionReviewView#settleUnit()} actually hit, and at
+     * the floor the acting-unit label the first attempt added was hidden by
+     * design -- so the ONLY unit statement visible there was the wrong one.
+     * Naming it on the button is always-visible, which is what makes this
+     * the fit-relevant surface rather than the (now deleted) label.
      */
     @Test
-    void theActingUnitLabelDropsRatherThanClipsAtTheFloor() {
-        show(intent(2, "drydock/review · 4 files"), Optional.empty());
-        interact(() -> bar.showActingUnit(SessionReviewView.SettleUnit.SECTION));
-        WaitForAsyncUtils.waitForFxEvents();
-        interact(() -> bar.getScene().getRoot().layout());
-        WaitForAsyncUtils.waitForFxEvents();
+    void theApproveButtonNamesTheUnitAndFitsForEveryUnitAtTheFloor() {
+        for (SessionReviewView.SettleUnit unit : SessionReviewView.SettleUnit.values()) {
+            show(intent(2, "drydock/review · 4 files"), Optional.empty());
+            interact(() -> bar.showActingUnit(unit));
+            WaitForAsyncUtils.waitForFxEvents();
+            interact(() -> bar.getScene().getRoot().layout());
+            WaitForAsyncUtils.waitForFxEvents();
 
-        assertFalse(actingUnitLabelShowing(),
-                "at the floor there is no room for it; it must hide, never show it clipped");
+            assertTrue(approveButtonText().contains(unitWord(unit)),
+                    "the button must name " + unit + ", got: " + approveButtonText());
+            assertNothingTruncated();
+        }
     }
 
-    /** Same label, back and fully legible as soon as the bar has room, as the hint already is. */
-    @Test
-    void theActingUnitLabelIsBackAsSoonAsThereIsRoomForIt() {
-        show(intent(2, "drydock/review · 4 files"), Optional.empty());
-        interact(() -> bar.showActingUnit(SessionReviewView.SettleUnit.HUNK));
-        WaitForAsyncUtils.waitForFxEvents();
-        assertFalse(actingUnitLabelShowing(), "at the floor the label has to go, same as the hint");
-
-        interact(() -> bar.getScene().getWindow().setWidth(1400));
-        WaitForAsyncUtils.waitForFxEvents();
-        interact(() -> bar.getScene().getRoot().layout());
-        WaitForAsyncUtils.waitForFxEvents();
-
-        assertTrue(actingUnitLabelShowing(), "a wide bar shows the acting-unit label again");
-        assertLabelNotClipped(".review-verdict-unit");
+    private static String unitWord(SessionReviewView.SettleUnit unit) {
+        return switch (unit) {
+            case HUNK -> "hunk";
+            case SECTION -> "section";
+            case FILE -> "file";
+        };
     }
 
-    private boolean actingUnitLabelShowing() {
-        boolean[] showing = new boolean[1];
-        interact(() -> showing[0] = lookup(".review-verdict-unit").queryAll().stream()
-                .anyMatch(Node::isManaged));
-        return showing[0];
-    }
-
-    private void assertLabelNotClipped(String selector) {
-        double[] width = new double[1];
-        double[] pref = new double[1];
+    private String approveButtonText() {
         String[] text = new String[1];
-        interact(() -> {
-            Label label = (Label) lookup(selector).query();
-            width[0] = label.getWidth();
-            pref[0] = label.prefWidth(-1);
-            text[0] = label.getText();
-        });
-        assertTrue(width[0] + 0.5 >= pref[0], "'" + text[0] + "' got " + Math.round(width[0])
-                + "px of " + Math.round(pref[0]) + "px it wanted");
+        interact(() -> text[0] = lookup(".button").queryAll().stream()
+                .map(Button.class::cast)
+                .map(Button::getText)
+                .filter(t -> t.startsWith("Approve ("))
+                .findFirst()
+                .orElse("<no approve button found>"));
+        return text[0];
     }
 
     // ---- helpers --------------------------------------------------------
