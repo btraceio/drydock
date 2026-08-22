@@ -21,7 +21,6 @@ import javafx.scene.control.Label;
 import javafx.scene.control.TextInputControl;
 import javafx.scene.control.Tooltip;
 import javafx.scene.input.KeyEvent;
-import javafx.scene.input.MouseEvent;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
@@ -311,20 +310,6 @@ public final class SessionReviewView extends BorderPane {
      */
     private List<String> lastSettledDigests = List.of();
 
-    /**
-     * Whether the diff column, rather than the rail, is where {@code a}/
-     * {@code r}/{@code u} act (spec §9.6). Tracked from a plain mouse press
-     * on either -- NOT from {@code Node.isFocusWithin()}, which this view's
-     * own rail defeats: {@link ReviewIntentRail#rebuild} replaces every card
-     * {@code Button} on each render, and JavaFX moves focus off a card about
-     * to be discarded via {@code Direction.NEXT} traversal (see the
-     * project's JavaFX-traps memory) -- which can land inside the diff
-     * column and never leave, well after the reader's last click was on the
-     * rail. Defaults to {@code false} (the rail), matching what {@code a}/
-     * {@code r}/{@code u} did before this task.
-     */
-    private boolean diffColumnActedOn;
-
     /** Set by {@code m}/{@code f}; remembered independently of the responsive collapse. */
     private boolean marginCollapsedByUser;
 
@@ -439,13 +424,20 @@ public final class SessionReviewView extends BorderPane {
             }
         });
 
-        // See diffColumnActedOn's javadoc for why this is a plain mouse-press
-        // filter rather than Node.isFocusWithin(): the rail rebuilds its
-        // cards on every render, which can leave isFocusWithin() stuck true
-        // for the diff column long after the reader's last click was on the
-        // rail.
-        intentRail.addEventFilter(MouseEvent.MOUSE_PRESSED, e -> diffColumnActedOn = false);
-        diffColumn.addEventFilter(MouseEvent.MOUSE_PRESSED, e -> diffColumnActedOn = true);
+        // See settleUnit()'s javadoc for why this reads real Scene focus
+        // rather than a hand-tracked region flag: a flag toggled from a
+        // MOUSE_PRESSED filter on the whole rail/column desyncs from a
+        // scrollbar drag, the rail's own collapse toggle, and keyboard-only
+        // navigation, none of which are a click on a card or into the diff.
+        // The label has to stay live across whatever moves real focus, not
+        // just the actions this view itself triggers, so it listens for
+        // that directly rather than piggybacking on refreshReviewState().
+        sceneProperty().addListener((obs, oldScene, newScene) -> {
+            if (newScene != null) {
+                newScene.focusOwnerProperty().addListener(
+                        (o, oldOwner, newOwner) -> verdictBar.showActingUnit(settleUnit()));
+            }
+        });
         widthProperty().addListener((obs, old, width) -> applyResponsiveLayout(width.doubleValue()));
         addEventFilter(KeyEvent.KEY_PRESSED, this::onKeyPressed);
         setFocusTraversable(true);
@@ -907,6 +899,17 @@ public final class SessionReviewView extends BorderPane {
         return board().map(b -> sections.digestsOf(b, intent)).orElse(List.of());
     }
 
+    /**
+     * The digests {@code a}/{@code r}/{@code u} act on for {@code intent}
+     * right now -- see {@link SectionStates#digestsForAction}. None without
+     * a diff to derive them from.
+     */
+    private List<String> digestsForAction(ReviewIntent intent, boolean wholeFile) {
+        return board().map(b -> sections.digestsForAction(b, intent, settleUnit(), wholeFile,
+                        diffColumn.currentLineSelection()))
+                .orElse(List.of());
+    }
+
     /** What {@code intent}'s hunks merge to; nothing without a diff to merge over. */
     private Optional<ReviewVerdict.Decision> decisionOf(ReviewIntent intent) {
         return board().flatMap(b -> sections.decisionOf(b, intent));
@@ -925,59 +928,39 @@ public final class SessionReviewView extends BorderPane {
 
     /**
      * What {@code a} / {@code r} / {@code u} act on right now (spec §9.6):
-     * the hunk the diff column is anchored on when it has focus, the whole
-     * section otherwise -- the same default the keys have always had, so a
-     * reader who has never clicked into the diff column sees no change.
+     * {@code HUNK} when the diff column has real focus, {@code SECTION}
+     * otherwise -- the same default the keys have always had, so a reader
+     * who has never clicked into the diff column sees no change.
+     *
+     * <p>Reads the Scene's actual focus owner and walks its parent chain,
+     * rather than a hand-tracked flag toggled from a {@code MOUSE_PRESSED}
+     * filter on the whole rail or column: that flag desyncs the moment
+     * something else moves real focus without going through this view's own
+     * filters -- dragging the diff's scrollbar, clicking the rail's own
+     * collapse toggle, or Tab-key navigation, none of which are "the reader
+     * clicked a card or into the diff." A live Scene read has none of those
+     * gaps, and is equally immune to the bug an earlier attempt hit with
+     * {@code Node.isFocusWithin()}: that bug was a stuck ref-count (see
+     * {@code ReviewIntentRail#rebuild}'s card replacement and JavaFX's
+     * {@code Direction.NEXT} focus-cleanup traversal, in the project's
+     * JavaFX-traps memory) that read {@code true} while the REAL focus
+     * owner's own parent chain never touched the diff column at all -- a
+     * fresh read of {@code getFocusOwner()} every time never accumulates
+     * that kind of staleness.</p>
      */
     SettleUnit settleUnit() {
-        return diffColumnActedOn ? SettleUnit.HUNK : SettleUnit.SECTION;
+        return isDescendantOf(getScene() == null ? null : getScene().getFocusOwner(), diffColumn)
+                ? SettleUnit.HUNK
+                : SettleUnit.SECTION;
     }
 
-    /** The one hunk {@link SettleUnit#HUNK} acts on -- see {@link SectionStates#digestOfAnchorHunk}. */
-    private Optional<String> digestOfCurrentHunk() {
-        return currentIntent().flatMap(intent -> board()
-                .flatMap(b -> sections.digestOfAnchorHunk(b, intent)));
-    }
-
-    /** Every hunk of the current file -- what {@code ⇧A}/{@code ⇧R} act on. */
-    private List<String> digestsOfCurrentFile() {
-        return currentIntent().flatMap(intent -> board()
-                .flatMap(b -> sections.fileOf(b, intent).map(file -> sections.digestsOfFile(b, file))))
-                .orElse(List.of());
-    }
-
-    /**
-     * The digests {@code a}/{@code r}/{@code u} act on for {@code intent}
-     * right now: {@code wholeFile} is {@code ⇧A}/{@code ⇧R} and always wins;
-     * otherwise it follows {@link #settleUnit()}.
-     */
-    private List<String> digestsForAction(ReviewIntent intent, boolean wholeFile) {
-        if (wholeFile) {
-            return digestsOfCurrentFile();
-        }
-        return settleUnit() == SettleUnit.HUNK
-                ? digestOfCurrentHunk().map(List::of).orElse(List.of())
-                : digestsOf(intent);
-    }
-
-    /**
-     * The recorded base of a stale verdict in {@code intent}, for the
-     * verdict bar's banner -- the first one found whose base no longer
-     * matches {@code scope}'s current one. Callers only ask this once
-     * {@link SectionStates.Staleness#MOVED} is already established, so one
-     * is guaranteed to exist; the current base is the fallback only because
-     * a method that returns nothing here is worse than one that occasionally
-     * repeats a base that did not move.
-     */
-    private String oldBaseOf(ReviewScope scope, ReviewIntent intent) {
-        String current = host.currentBase(scope);
-        for (String digest : digestsOf(intent)) {
-            Optional<ReviewVerdict> verdict = host.verdict(scope, digest);
-            if (verdict.isPresent() && verdict.get().staleAgainst(current)) {
-                return verdict.get().baseCommit();
+    private static boolean isDescendantOf(Node node, Node ancestor) {
+        for (Node n = node; n != null; n = n.getParent()) {
+            if (n == ancestor) {
+                return true;
             }
         }
-        return current;
+        return false;
     }
 
     private void renderVerdictBar(ReviewScope scope) {
@@ -1000,7 +983,7 @@ public final class SessionReviewView extends BorderPane {
                 sections.distinctDigests(board.get()).size());
         verdictBar.showStale(state.staleness() == SectionStates.Staleness.MOVED
                 ? Optional.of(new ReviewVerdictBar.StaleInfo(
-                        oldBaseOf(scope, current.get()), host.currentBase(scope)))
+                        sections.oldBaseOf(board.get(), current.get()), host.currentBase(scope)))
                 : Optional.empty());
         verdictBar.showActingUnit(settleUnit());
     }

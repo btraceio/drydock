@@ -289,6 +289,31 @@ class ReviewHunkProgressTest extends ApplicationTest {
         assertTrue(host.store.verdict(scope.id(), digestOf(GUARDS_CPP)).isEmpty());
     }
 
+    /**
+     * The progress line and the submit gate must not disagree: a stale hunk
+     * does not count as settled in either one, or the reader is told "all
+     * settled -- ⏎ submits" one keystroke before Submit refuses it.
+     */
+    @Test
+    void theProgressLineExcludesAStaleHunk() {
+        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
+        showOverlappingSections();
+        recordAgainstBase(GUARDS_H, "0".repeat(40));
+        approve(GUARDS_CPP);
+        approve(PROFILER);
+
+        assertEquals("2/3 hunks reviewed", progressText(),
+                "the stale GUARDS_H verdict must not read as reviewed");
+        assertFalse(navHintText().contains("all settled"),
+                "the hint must not claim done while a stale hunk would refuse Submit");
+    }
+
+    private String navHintText() {
+        return labels(".review-verdict-hint").stream()
+                .filter(text -> !text.equals("press ? for shortcuts"))
+                .findFirst().orElse("<no nav hint>");
+    }
+
     // ---- a grouping that drifted off the diff -------------------------------
 
     /**

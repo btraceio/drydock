@@ -306,25 +306,101 @@ class SectionStatesTest {
     }
 
     @Test
-    void fileOfIsTheAnchorHunksFile() {
+    void currentFileOfIsTheAnchorHunksFileWhenNothingIsSelected() {
         SectionStates.Board board = overlapping();
         ReviewIntent section2 = board.sections().get(1);
 
-        assertEquals(Optional.of(GUARDS_H), sections.fileOf(board, section2));
+        assertEquals(Optional.of(GUARDS_H), sections.currentFileOf(board, section2, Optional.empty()));
     }
 
     /**
      * An intent naming no hunks at all covers the whole diff (see {@link
-     * ReviewIntent#containsHunk}); {@link SectionStates#fileOf} falls back
-     * to the first file of the diff rather than answering nothing.
+     * ReviewIntent#containsHunk}); the anchor-file fallback inside {@link
+     * SectionStates#currentFileOf} falls back further, to the first file of
+     * the diff, rather than answering nothing.
      */
     @Test
-    void fileOfFallsBackToTheDiffsFirstFileWhenTheSectionNamesNone() {
+    void currentFileOfFallsBackToTheDiffsFirstFileWhenTheSectionNamesNone() {
         SectionStates.Board board = board(List.of(
                 new ReviewIntent("whole-diff", 1, "Everything", ReviewIntent.Kind.CHANGE,
                         ReviewIntent.Risk.MED, "", List.of(), Optional.empty(), false)));
 
-        assertEquals(Optional.of(GUARDS_H), sections.fileOf(board, board.sections().get(0)));
+        assertEquals(Optional.of(GUARDS_H),
+                sections.currentFileOf(board, board.sections().get(0), Optional.empty()));
+    }
+
+    /** A gutter selection wins over the section's own anchor file. */
+    @Test
+    void currentFileOfPrefersTheGutterSelectionOverTheAnchor() {
+        SectionStates.Board board = overlapping();
+        ReviewIntent section1 = board.sections().get(0);
+        String selectionKey = GUARDS_CPP + " n1";
+
+        assertEquals(Optional.of(GUARDS_CPP),
+                sections.currentFileOf(board, section1, Optional.of(selectionKey)));
+    }
+
+    /** A gutter selection resolves to the hunk containing that exact line. */
+    @Test
+    void digestOfCurrentHunkPrefersTheGutterSelection() {
+        SectionStates.Board board = overlapping();
+        ReviewIntent section1 = board.sections().get(0);
+        String selectionKey = GUARDS_CPP + " n1";
+
+        assertEquals(Optional.of(digestOf(GUARDS_CPP)),
+                sections.digestOfCurrentHunk(board, section1, Optional.of(selectionKey)));
+    }
+
+    /**
+     * With nothing selected, HUNK mode must not always answer hunk one:
+     * with the anchor hunk already settled, the next press has to reach
+     * the section's first UNSETTLED hunk, or a reader who never opens the
+     * gutter composer could never approve anything past the first hunk.
+     */
+    @Test
+    void digestOfCurrentHunkFallsBackToTheFirstUnsettledHunk() {
+        SectionStates.Board board = overlapping();
+        ReviewIntent section1 = board.sections().get(0);
+        approve(GUARDS_H);
+
+        assertEquals(Optional.of(digestOf(GUARDS_CPP)),
+                sections.digestOfCurrentHunk(board, section1, Optional.empty()));
+    }
+
+    /** Once every hunk is settled, the anchor is the last fallback left. */
+    @Test
+    void digestOfCurrentHunkFallsBackToTheAnchorWhenEverythingIsSettled() {
+        SectionStates.Board board = overlapping();
+        ReviewIntent section1 = board.sections().get(0);
+        approve(GUARDS_H);
+        approve(GUARDS_CPP);
+
+        assertEquals(Optional.of(digestOf(GUARDS_H)),
+                sections.digestOfCurrentHunk(board, section1, Optional.empty()));
+    }
+
+    /** A stale key -- selected line no longer in the diff -- is not trusted; the walk continues. */
+    @Test
+    void digestOfCurrentHunkIgnoresASelectionTheDiffNoLongerHas() {
+        SectionStates.Board board = overlapping();
+        ReviewIntent section1 = board.sections().get(0);
+
+        assertEquals(Optional.of(digestOf(GUARDS_H)),
+                sections.digestOfCurrentHunk(board, section1, Optional.of(GUARDS_H + " n999")));
+    }
+
+    // ---- what a/r/u act on does not count as settled while stale (spec §9.2) --
+
+    @Test
+    void settledHunkCountExcludesAStaleVerdict() {
+        SectionStates.Board board = overlapping();
+        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
+        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
+        approve(GUARDS_CPP);
+        approve(PROFILER);
+
+        assertEquals(2, sections.settledHunkCount(board),
+                "the stale GUARDS_H verdict must not count toward progress");
     }
 
     /**
@@ -343,6 +419,34 @@ class SectionStatesTest {
         SectionStates.Board board = overlapping();
 
         assertTrue(sections.digestsOfFile(board, "src/nowhere.cpp").isEmpty());
+    }
+
+    @Test
+    void digestsForActionInHunkModeIsJustTheOneHunk() {
+        SectionStates.Board board = overlapping();
+        ReviewIntent section1 = board.sections().get(0);
+
+        assertEquals(List.of(digestOf(GUARDS_H)), sections.digestsForAction(
+                board, section1, SessionReviewView.SettleUnit.HUNK, false, Optional.empty()));
+    }
+
+    @Test
+    void digestsForActionInSectionModeIsEveryHunkTheSectionNames() {
+        SectionStates.Board board = overlapping();
+        ReviewIntent section1 = board.sections().get(0);
+
+        assertEquals(List.of(digestOf(GUARDS_H), digestOf(GUARDS_CPP)), sections.digestsForAction(
+                board, section1, SessionReviewView.SettleUnit.SECTION, false, Optional.empty()));
+    }
+
+    /** {@code wholeFile} wins over the unit even in HUNK mode -- ⇧A/⇧R always mean the file. */
+    @Test
+    void digestsForActionWithWholeFileIgnoresTheUnit() {
+        SectionStates.Board board = overlapping();
+        ReviewIntent section1 = board.sections().get(0);
+
+        assertEquals(List.of(digestOf(GUARDS_H)), sections.digestsForAction(
+                board, section1, SessionReviewView.SettleUnit.HUNK, true, Optional.empty()));
     }
 
     // ---- helpers -------------------------------------------------------------

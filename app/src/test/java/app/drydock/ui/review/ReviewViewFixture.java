@@ -2,12 +2,15 @@ package app.drydock.ui.review;
 
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
+import app.drydock.review.HunkDigest;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
 import app.drydock.review.SessionReviewScopes;
 
+import javafx.scene.Node;
 import javafx.scene.Scene;
+import javafx.scene.control.Label;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -131,12 +134,58 @@ abstract class ReviewViewFixture extends ApplicationTest {
         return 2;
     }
 
+    /**
+     * The gutter of {@link #FILE_A}'s SECOND hunk (new line 11), selected
+     * by its rendered line number rather than position -- a virtualized
+     * {@code ListView} recycles and reorders cells, so "the second gutter"
+     * is not a stable way to name a line (see {@code ReviewDiffGutterSelectionTest}).
+     */
+    final Node gutterForFileASecondHunk() {
+        return gutterForLine("11");
+    }
+
+    private Node gutterForLine(String number) {
+        List<Node> found = new ArrayList<>();
+        interact(() -> found.addAll(lookup(".review-code-gutter").queryAll()));
+        return found.stream()
+                .filter(node -> node.getOnMouseClicked() != null)
+                .filter(node -> number.equals(((Label) node).getText()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("no clickable gutter for line " + number));
+    }
+
+    /** The digest of {@link #FILE_A}'s first hunk -- its anchor. */
+    final String digestOfFirstHunkOfFileA() {
+        return digestOfHunk(FILE_A, 0);
+    }
+
+    /** The digest of {@link #FILE_A}'s second hunk -- what the gutter click above selects. */
+    final String digestOfSecondHunkOfFileA() {
+        return digestOfHunk(FILE_A, 1);
+    }
+
+    private String digestOfHunk(String file, int index) {
+        return host.diff.files().stream()
+                .filter(candidate -> candidate.path().equals(file))
+                .findFirst()
+                .map(candidate -> HunkDigest.of(file, candidate.hunks().get(index)))
+                .orElseThrow();
+    }
+
+    /**
+     * Each hunk's line gets a DIFFERENT new-line number (index*10 + 1), not
+     * a shared {@code 1}: a line key is {@code (file, newLine)}, and two
+     * hunks of the same file both keyed {@code n1} would make a gutter
+     * selection ambiguous between them -- {@code digestOfLine} would always
+     * resolve to whichever hunk it walks to first, silently, regardless of
+     * which one was actually clicked.
+     */
     private static UnifiedDiff.FileDiff file(String path, String... hunkTexts) {
         List<UnifiedDiff.Hunk> hunks = new ArrayList<>();
-        for (String text : hunkTexts) {
+        for (int i = 0; i < hunkTexts.length; i++) {
             hunks.add(new UnifiedDiff.Hunk("@@ -1 +1 @@", List.of(
                     new UnifiedDiff.Line(UnifiedDiff.Line.Kind.ADD, OptionalInt.empty(),
-                            OptionalInt.of(1), text))));
+                            OptionalInt.of(i * 10 + 1), hunkTexts[i]))));
         }
         return new UnifiedDiff.FileDiff(path, "M", hunkTexts.length, 0, false, false, hunks);
     }

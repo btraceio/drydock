@@ -202,15 +202,53 @@ final class SectionStates {
         return List.copyOf(distinct);
     }
 
-    /** How many of {@link #distinctDigests} carry a verdict. */
+    /**
+     * How many of {@link #distinctDigests} carry a verdict that is not
+     * stale (spec §9.2). A stale verdict does not count toward "everything
+     * settled" -- {@link SessionReviewView#submitReview} refuses one, so a
+     * progress line and nav hint that counted it would tell the reader the
+     * opposite of what the key does: "all settled -- ⏎ submits" over a
+     * section Submit is about to refuse.
+     */
     int settledHunkCount(Board board) {
+        Set<String> stale = staleDigests(board);
         int settled = 0;
         for (String digest : distinctDigests(board)) {
-            if (host.verdict(board.scope(), digest).isPresent()) {
+            if (host.verdict(board.scope(), digest).isPresent() && !stale.contains(digest)) {
                 settled++;
             }
         }
         return settled;
+    }
+
+    /**
+     * Every digest among the counted sections' hunks whose verdict is stale
+     * in a way that could matter (spec §9.2) -- what {@link
+     * #settledHunkCount} excludes. Computed directly over each counted
+     * section's own hunks and file list, the same inputs {@link #stateOf}
+     * already uses per section, rather than re-deriving a section from a
+     * bare digest: a hunk shared by two sections is asked once per section
+     * here, but a digest already marked stale by one is not re-checked by
+     * the other, since {@code MOVED} could only be found the same way
+     * twice.
+     */
+    private Set<String> staleDigests(Board board) {
+        Set<String> stale = new LinkedHashSet<>();
+        String base = host.currentBase(board.scope());
+        for (ReviewIntent intent : counted(board)) {
+            List<String> files = filesOf(board, intent);
+            for (String digest : digestsOf(board, intent)) {
+                if (stale.contains(digest)) {
+                    continue;
+                }
+                Optional<ReviewVerdict> verdict = host.verdict(board.scope(), digest);
+                if (verdict.isPresent()
+                        && stalenessOf(board, verdict.get(), base, files) == Staleness.MOVED) {
+                    stale.add(digest);
+                }
+            }
+        }
+        return stale;
     }
 
     /**
@@ -319,13 +357,13 @@ final class SectionStates {
     }
 
     /**
-     * The digest of the hunk the diff column shows when {@code intent} is
-     * selected -- its anchor (spec §9.6). Selecting a section narrows the
-     * column to that section's hunks and scrolls it to the first one (see
-     * {@code SessionReviewView#revealCurrentIntent}), so that is the one
-     * hunk-scoped {@code a}/{@code r}/{@code u} acts on when the diff
-     * column, rather than the rail, has focus. Empty for a section with no
-     * resolvable hunk at all.
+     * The digest of {@code intent}'s FIRST hunk -- its anchor, and where
+     * selecting the section scrolls the diff column to (see {@code
+     * SessionReviewView#revealCurrentIntent}). The ultimate fallback for
+     * HUNK mode (see {@link #digestOfCurrentHunk}): once nothing is
+     * selected and nothing is left unsettled, this is what {@code a}/
+     * {@code r}/{@code u} still have something to act on. Empty for a
+     * section with no resolvable hunk at all.
      */
     Optional<String> digestOfAnchorHunk(Board board, ReviewIntent intent) {
         List<String> digests = digestsOf(board, intent);
@@ -333,15 +371,87 @@ final class SectionStates {
     }
 
     /**
-     * The file the diff column is anchored on when {@code intent} is
-     * selected -- what {@code ⇧A}/{@code ⇧R} settle every hunk of, rather
-     * than just the section's slice of it. The intent's own anchor file
-     * when it names one, else the first file it covers at all (see {@link
-     * #filesOf}).
+     * The first of {@code intent}'s hunks with no verdict yet. The middle
+     * fallback for HUNK mode: with the diff column acting and no gutter
+     * selection open, {@code a} has to walk forward through what is still
+     * unread rather than park on the anchor hunk forever -- pressing it
+     * once approves hunk one, pressing it again must not re-approve hunk
+     * one a second time while hunks two and up sit unread.
      */
-    Optional<String> fileOf(Board board, ReviewIntent intent) {
+    Optional<String> digestOfFirstUnsettledHunk(Board board, ReviewIntent intent) {
+        for (String digest : digestsOf(board, intent)) {
+            if (host.verdict(board.scope(), digest).isEmpty()) {
+                return Optional.of(digest);
+            }
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * The digest HUNK mode acts on (spec §9.6), in priority order: the hunk
+     * under the diff column's gutter selection when one is open ({@code
+     * selectionKey}, {@code "<file> <lineKey>"} -- see {@link
+     * ReviewDiffColumn#currentLineSelection}); else the section's first
+     * unsettled hunk, so the reader can walk forward with repeated presses
+     * of {@code a}/{@code r} rather than re-settling the same hunk forever;
+     * else its anchor hunk, so a fully-settled section still has something
+     * for {@code u} to undo.
+     */
+    Optional<String> digestOfCurrentHunk(Board board, ReviewIntent intent,
+                                          Optional<String> selectionKey) {
+        return selectionKey.flatMap(key -> selectionFile(key)
+                        .flatMap(file -> selectionLineKey(key)
+                                .flatMap(lineKey -> digestOfLine(board, file, lineKey))))
+                .or(() -> digestOfFirstUnsettledHunk(board, intent))
+                .or(() -> digestOfAnchorHunk(board, intent));
+    }
+
+    /** The digest of the hunk containing {@code file}'s line {@code lineKey}, if any. */
+    private Optional<String> digestOfLine(Board board, String file, String lineKey) {
+        for (UnifiedDiff.FileDiff candidate : board.diff().files()) {
+            if (!candidate.path().equals(file)) {
+                continue;
+            }
+            for (UnifiedDiff.Hunk hunk : candidate.hunks()) {
+                for (UnifiedDiff.Line line : hunk.lines()) {
+                    if (line.lineKey().equals(lineKey)) {
+                        return Optional.of(HunkDigest.of(file, hunk));
+                    }
+                }
+            }
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * The file {@code ⇧A}/{@code ⇧R} settle every hunk of (spec §9.6): the
+     * file under the diff column's gutter selection when one is open, else
+     * {@code intent}'s own anchor file (see {@link #fileOf}).
+     */
+    Optional<String> currentFileOf(Board board, ReviewIntent intent, Optional<String> selectionKey) {
+        return selectionKey.flatMap(SectionStates::selectionFile)
+                .or(() -> fileOf(board, intent));
+    }
+
+    /**
+     * The file the diff column is anchored on when {@code intent} is
+     * selected -- the fallback for {@link #currentFileOf} once nothing is
+     * selected. The intent's own anchor file when it names one, else the
+     * first file it covers at all (see {@link #filesOf}).
+     */
+    private Optional<String> fileOf(Board board, ReviewIntent intent) {
         return intent.anchor().map(ReviewIntent.Anchor::file)
                 .or(() -> filesOf(board, intent).stream().findFirst());
+    }
+
+    private static Optional<String> selectionFile(String key) {
+        int lastSpace = key.lastIndexOf(' ');
+        return lastSpace < 0 ? Optional.empty() : Optional.of(key.substring(0, lastSpace));
+    }
+
+    private static Optional<String> selectionLineKey(String key) {
+        int lastSpace = key.lastIndexOf(' ');
+        return lastSpace < 0 ? Optional.empty() : Optional.of(key.substring(lastSpace + 1));
     }
 
     /**
@@ -360,6 +470,44 @@ final class SectionStates {
             }
         }
         return List.of();
+    }
+
+    /**
+     * The digests {@code a}/{@code r}/{@code u} act on for {@code intent}
+     * right now (spec §9.6): {@code wholeFile} is {@code ⇧A}/{@code ⇧R} and
+     * always wins over {@code unit}; otherwise {@code unit} decides between
+     * the whole section and {@link #digestOfCurrentHunk}'s one hunk.
+     */
+    List<String> digestsForAction(Board board, ReviewIntent intent, SessionReviewView.SettleUnit unit,
+                                   boolean wholeFile, Optional<String> selectionKey) {
+        if (wholeFile) {
+            return currentFileOf(board, intent, selectionKey)
+                    .map(file -> digestsOfFile(board, file))
+                    .orElse(List.of());
+        }
+        return unit == SessionReviewView.SettleUnit.HUNK
+                ? digestOfCurrentHunk(board, intent, selectionKey).map(List::of).orElse(List.of())
+                : digestsOf(board, intent);
+    }
+
+    /**
+     * The recorded base of a stale verdict in {@code intent}, for the
+     * verdict bar's banner -- the first one found whose base no longer
+     * matches {@code board}'s scope's current one. Callers only ask this
+     * once {@link Staleness#MOVED} is already established, so one is
+     * guaranteed to exist; the current base is the fallback only because a
+     * method that returns nothing here is worse than one that occasionally
+     * repeats a base that did not move.
+     */
+    String oldBaseOf(Board board, ReviewIntent intent) {
+        String current = host.currentBase(board.scope());
+        for (String digest : digestsOf(board, intent)) {
+            Optional<ReviewVerdict> verdict = host.verdict(board.scope(), digest);
+            if (verdict.isPresent() && verdict.get().staleAgainst(current)) {
+                return verdict.get().baseCommit();
+            }
+        }
+        return current;
     }
 
     /** How a section is named in another section's card: its number, circled. */

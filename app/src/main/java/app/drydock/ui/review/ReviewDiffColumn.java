@@ -19,6 +19,7 @@ import javafx.scene.control.Label;
 import javafx.scene.control.ListCell;
 import javafx.scene.control.ListView;
 import javafx.scene.control.Tooltip;
+import javafx.scene.input.MouseEvent;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
@@ -350,6 +351,14 @@ final class ReviewDiffColumn extends BorderPane {
 
         list.getStyleClass().add("review-diff-list");
         list.setFocusTraversable(false);
+        // Not Tab-traversable (above), but a click still has to plant real
+        // Scene focus here: SessionReviewView.settleUnit() (spec §9.6) reads
+        // the Scene's focus owner to tell a hunk-scoped a/r/u from a
+        // section-scoped one, and a click is the only way a reader lands in
+        // this column today. Node.requestFocus() does not require
+        // focusTraversable -- that flag only gates the Tab engine -- so this
+        // does not reopen Tab-key traversal into the list.
+        list.addEventFilter(MouseEvent.MOUSE_PRESSED, e -> list.requestFocus());
         list.setCellFactory(view -> new DiffCell());
         // Long lines wrap; the column never scrolls sideways. See
         // viewportWidth for what this replaces.
@@ -821,6 +830,21 @@ final class ReviewDiffColumn extends BorderPane {
     /** Diagnostic/test-only: the gutter keys currently painted selected. */
     Set<String> diagSelectedKeys() {
         return Set.copyOf(selectedKeys);
+    }
+
+    /**
+     * One key of the gutter selection -- {@code "<file> <lineKey>"}, the
+     * same shape every key in this class already uses -- so {@link
+     * SessionReviewView} can resolve which hunk a/r/u act on in HUNK mode
+     * (spec §9.6). Any one key of the range answers this: {@link
+     * DiffLineSelection} clamps a selection to a single hunk, so every key
+     * in it names the same one. Empty while nothing is selected -- a
+     * selection lives only as long as its composer does (see {@link
+     * #closeComposer}), so this is naturally empty once the reader has
+     * moved on from a comment.
+     */
+    Optional<String> currentLineSelection() {
+        return selectedKeys.stream().findFirst();
     }
 
     /**
