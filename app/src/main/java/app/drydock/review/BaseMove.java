@@ -51,7 +51,7 @@ public final class BaseMove {
 
     /** The files {@code oldBase..newBase} touched. Blocking; never call on the FX thread. */
     public static Delta between(Path worktree, String oldBase, String newBase) {
-        List<String> command = List.of("git", "diff", "--name-only", "--end-of-options",
+        List<String> command = List.of("git", "diff", "--name-only", "-z", "--end-of-options",
                 oldBase + ".." + newBase);
         try {
             ProcessResult result = ProcessRunner.run(command, worktree, TIMEOUT);
@@ -60,14 +60,7 @@ public final class BaseMove {
                         + ProcessRunner.excerpt(result.stderr()));
                 return new Delta(true, new TreeSet<>());
             }
-            SortedSet<String> files = new TreeSet<>();
-            for (String line : result.stdout().split("\n")) {
-                String path = line.strip();
-                if (!path.isEmpty()) {
-                    files.add(path);
-                }
-            }
-            return new Delta(false, files);
+            return new Delta(false, parseNames(result.stdout()));
         } catch (ProcessTimeoutException e) {
             LOG.log(Level.WARNING, "git diff for base move timed out", e);
             return new Delta(true, new TreeSet<>());
@@ -78,6 +71,20 @@ public final class BaseMove {
             LOG.log(Level.WARNING, "git diff for base move could not run", e);
             return new Delta(true, new TreeSet<>());
         }
+    }
+
+    /**
+     * Parses NUL-separated filenames from git diff output (with {@code -z} flag).
+     * Each path is a raw UTF-8 string with no C-style quoting.
+     */
+    static SortedSet<String> parseNames(String stdout) {
+        SortedSet<String> files = new TreeSet<>();
+        for (String path : stdout.split("\0", -1)) {
+            if (!path.isEmpty()) {
+                files.add(path);
+            }
+        }
+        return files;
     }
 
     /**
