@@ -66,6 +66,35 @@ class ChangeGraphTest {
                 file("src/Guards.java", "class JmpCtxScope { }"))));
 
         assertEquals(Optional.of("src/Guards.java"), graph.fileDeclaring("JmpCtxScope"));
+        assertTrue(graph.declarationsIn("src/Guards.java").contains("JmpCtxScope"));
+        assertTrue(graph.changedDeclarations().contains("JmpCtxScope"));
+    }
+
+    /**
+     * A use counts wherever it sits in the diff window, not only on a
+     * changed line. The node set is already restricted to changed files, so
+     * this cannot pull in unrelated code -- it only connects files already
+     * under review together, and "the declaration's behaviour changed
+     * without touching most of its call sites" is the coupling this graph
+     * exists to surface. Requiring the use itself to be edited too would
+     * split that section for edge purity the node-set restriction already
+     * gives for free.
+     */
+    @Test
+    void aContextLineUseStillMintsAnEdge() {
+        List<UnifiedDiff.Line> profilerLines = List.of(
+                new UnifiedDiff.Line(UnifiedDiff.Line.Kind.CONTEXT,
+                        OptionalInt.of(1), OptionalInt.of(1), "JmpCtxScope local;"),
+                new UnifiedDiff.Line(UnifiedDiff.Line.Kind.ADD,
+                        OptionalInt.empty(), OptionalInt.of(2), "int unrelatedEdit = 1;"));
+        UnifiedDiff.FileDiff profiler = new UnifiedDiff.FileDiff("src/Profiler.java", "M", 1, 0,
+                false, false, List.of(new UnifiedDiff.Hunk("@@", profilerLines)));
+
+        ChangeGraph graph = ChangeGraph.of(new UnifiedDiff(List.of(
+                file("src/Guards.java", "class JmpCtxScope { }"),
+                profiler)));
+
+        assertTrue(graph.filesReferencedBy("src/Profiler.java").contains("src/Guards.java"));
     }
 
     /** Determinism: iteration order is a property this graph must keep (spec §9.5). */
