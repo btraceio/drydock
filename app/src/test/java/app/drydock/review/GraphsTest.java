@@ -9,6 +9,8 @@ import java.util.SortedSet;
 import java.util.TreeSet;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Order and cycles (spec §6.1). Foundation first: if A is referenced by B,
@@ -64,8 +66,10 @@ class GraphsTest {
         assertEquals(List.of(), order(Map.of()));
     }
 
-    // --- Hand-computed cases added to verify the iterative Tarjan (see
-    // task-11-report.md for the by-hand derivation of each expectation). ---
+    // --- The cases below are hand-computed to pin down the iterative
+    // Tarjan and Kahn condensation: each comment traces the expected order
+    // step by step rather than just stating it, since that reasoning is
+    // what would need re-doing if this algorithm is ever touched again. ---
 
     @Test
     void aChainOrdersFoundationFirst() {
@@ -94,7 +98,13 @@ class GraphsTest {
 
     @Test
     void twoDisjointComponentsBothAppearOrderedByTheTieBreak() {
-        // x -> y or w -> z: two independent chains, unrelated to each other.
+        // x -> y and w -> z: two independent chains, unrelated to each
+        // other. Tracing Kahn's ready set step by step (not just the two
+        // chains in isolation) is what this case is for: "y" and "z" are
+        // both foundation nodes, so both are ready first, and "y" < "z"
+        // picks y. Removing y frees x, so the ready set is now {x, z}, and
+        // "x" < "z" picks x next -- interleaving the two chains rather than
+        // draining one chain before starting the other. Then z, then w.
         List<List<String>> result = order(Map.of(
                 "y", set(), "x", set("y"),
                 "z", set(), "w", set("z")));
@@ -127,11 +137,15 @@ class GraphsTest {
     }
 
     @Test
-    void aDependencyOutsideTheNodeSetIsIgnoredRatherThanCorruptingTheResult() {
-        // "b" depends on "ghost", which never appears in nodes. Every given
-        // node still appears exactly once; the phantom edge is dropped.
-        List<List<String>> result = order(Map.of("a", set(), "b", set("a", "ghost")));
+    void aDependencyOutsideTheNodeSetIsRejectedRatherThanSilentlyDropped() {
+        // "b" depends on "ghost", which never appears in nodes. Silently
+        // dropping this edge would make "no such dependency" and "a
+        // dependency on a node the caller forgot to include" produce the
+        // same output, so Graphs throws instead of guessing.
+        IllegalArgumentException thrown = assertThrows(IllegalArgumentException.class,
+                () -> order(Map.of("a", set(), "b", set("a", "ghost"))));
 
-        assertEquals(List.of(List.of("a"), List.of("b")), result);
+        assertTrue(thrown.getMessage().contains("ghost"),
+                "expected the phantom node's name in the message, got: " + thrown.getMessage());
     }
 }
