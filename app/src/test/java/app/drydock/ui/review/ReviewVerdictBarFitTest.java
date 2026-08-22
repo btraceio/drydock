@@ -37,8 +37,8 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
     @Override
     public void start(Stage stage) {
         bar = new ReviewVerdictBar(new ReviewVerdictBar.Host() {
-            @Override public void approve(ReviewIntent intent) { }
-            @Override public void requestChanges(ReviewIntent intent) { }
+            @Override public void approve(ReviewIntent intent, SessionReviewView.SettleUnit unit) { }
+            @Override public void requestChanges(ReviewIntent intent, SessionReviewView.SettleUnit unit) { }
             @Override public void askAgentToFix(ReviewIntent intent) { }
             @Override public void undo(ReviewIntent intent) { }
             @Override public void confirmStillGood(ReviewIntent intent) { }
@@ -124,18 +124,19 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
      * The stale banner (spec §9.2) swaps in a label plus two more buttons,
      * "Confirm still good" and "Re-review"; the Phase 1 gate named it as new
      * UI with no fit coverage, and the coordinator's review found the gap
-     * was real: {@code assertNothingTruncated} only ever looked at {@code
-     * .button}, so {@code staleLabel} -- a {@code wrapText} label with no
-     * {@code minWidth} -- could reflow silently and the assertion would
-     * never see it.
+     * was real TWICE over: {@code assertNothingTruncated} only ever looked
+     * at {@code .button}, so {@code staleLabel} -- a {@code wrapText} label
+     * with no {@code minWidth} -- could reflow silently underneath it, and
+     * nothing asserted the BAR's own height at the floor either. Both are
+     * folded into {@link #assertNothingTruncated} now, so every caller gets
+     * them, not just this test.
      *
-     * <p>Measured (see {@link #assertStaleLabelWrapsCleanlyRatherThanClipping}):
-     * at the {@code CODE_MIN_WIDTH} floor the banner does NOT read as one
-     * line -- {@code "⚠ approved against base a1b2c3d · base is now
-     * d4e5f6a"} wraps to exactly two, 17px each, 34px total. Reported here
-     * rather than designed around: nothing was truncated (wrap, not
-     * ellipsis, so no character is lost), but the floor is real and the row
-     * genuinely gets taller when a section is stale at that width.</p>
+     * <p>Measured, not designed around: at the {@code CODE_MIN_WIDTH} floor
+     * the banner does NOT read as one line -- {@code "⚠ approved against
+     * base a1b2c3d · base is now d4e5f6a"} wraps to exactly two, 17px each.
+     * Nothing is truncated (wrap, not ellipsis -- no character is lost), but
+     * the floor is real and the verdict bar's row genuinely gets one line
+     * taller whenever the current section is stale at that width.</p>
      */
     @Test
     void theStaleBannerFitsAtTheCodeColumnFloor() {
@@ -147,31 +148,6 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
         WaitForAsyncUtils.waitForFxEvents();
 
         assertNothingTruncated();
-        assertStaleLabelWrapsCleanlyRatherThanClipping();
-    }
-
-    /**
-     * Not "fits on one line" -- it measurably does not, at the floor (see
-     * the test's javadoc). What this guards is the OTHER failure mode:
-     * wrapping past two lines, or collapsing to the near-zero-width,
-     * one-character-per-line pathology this codebase has shipped before
-     * (see {@code ReviewIntentRailCardHeightTest}'s history). Two lines of
-     * 17px is a legible banner; a dozen lines of single characters is not,
-     * and this is what would catch the difference.
-     */
-    private void assertStaleLabelWrapsCleanlyRatherThanClipping() {
-        double[] oneLineHeight = new double[1];
-        double[] actualHeight = new double[1];
-        interact(() -> {
-            Label label = (Label) lookup(".review-verdict-stale").query();
-            oneLineHeight[0] = label.prefHeight(-1);
-            actualHeight[0] = label.getHeight();
-        });
-        assertTrue(actualHeight[0] <= oneLineHeight[0] * 2 + 1,
-                "the stale banner wrapped to roughly " + Math.round(actualHeight[0] / oneLineHeight[0])
-                        + " lines at the " + (int) RailLayout.CODE_MIN_WIDTH + "px floor (one line is "
-                        + Math.round(oneLineHeight[0]) + "px, rendered height is "
-                        + Math.round(actualHeight[0]) + "px)");
     }
 
     /**
@@ -200,7 +176,7 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
 
     private static String unitWord(SessionReviewView.SettleUnit unit) {
         return switch (unit) {
-            case HUNK -> "hunk";
+            case HUNK -> "next unread hunk";
             case SECTION -> "section";
             case FILE -> "file";
         };
@@ -244,12 +220,36 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
      * skin's elided string keeps this independent of the font the CI machine
      * happens to have.
      */
+    /**
+     * Generous: a normal one-line row at the floor is under 40px; the
+     * stale banner's own two-line wrap (see the class's history) adds one
+     * more line. What this actually guards against is the OTHER failure
+     * mode this codebase has shipped -- a wrapped label collapsing to a
+     * column of single characters (see {@code ReviewIntentRailCardHeightTest}) --
+     * not the two-line wrap itself, which is real and reported, not hidden.
+     */
+    private static final double SANE_BAR_HEIGHT = 160;
+
     private void assertNothingTruncated() {
         double[] width = new double[1];
-        interact(() -> width[0] = bar.getWidth());
+        double[] barPrefHeight = new double[1];
+        interact(() -> {
+            width[0] = bar.getWidth();
+            // prefHeight, not getHeight(): the bar is the Scene's ROOT, and
+            // a Scene resizes its root to fill its own fixed dimensions
+            // (200px here) regardless of content -- getHeight() would
+            // therefore always read 200 and this assertion would pass
+            // without measuring anything, the same trap the width check
+            // above already guards against.
+            barPrefHeight[0] = bar.prefHeight(RailLayout.CODE_MIN_WIDTH);
+        });
         assertTrue(width[0] <= RailLayout.CODE_MIN_WIDTH + 1,
                 "the bar is " + Math.round(width[0]) + "px, not at the floor -- this assertion "
                         + "would pass without measuring anything");
+        assertTrue(barPrefHeight[0] > 0 && barPrefHeight[0] < SANE_BAR_HEIGHT,
+                "the bar wants " + Math.round(barPrefHeight[0]) + "px tall at the "
+                        + (int) RailLayout.CODE_MIN_WIDTH + "px floor; a wrapped label collapsed to "
+                        + "a column of single characters looks exactly like this");
 
         List<String> squeezed = new ArrayList<>();
         interact(() -> lookup(".button").queryAll().stream()
@@ -262,8 +262,25 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
                                 + Math.round(button.getWidth()) + " of " + Math.round(wanted));
                     }
                 }));
+        // Folded in per the coordinator's review: a wrapText label with no
+        // minWidth (the stale banner) can reflow silently underneath a
+        // button-only check. Not "one line" -- it measurably is not, at
+        // this floor (see theStaleBannerFitsAtTheCodeColumnFloor's javadoc)
+        // -- but it must not wrap past two lines either.
+        interact(() -> lookup(".review-verdict-stale").queryAll().stream()
+                .map(Label.class::cast)
+                .filter(Label::isVisible)
+                .forEach(label -> {
+                    double oneLine = label.prefHeight(-1);
+                    double actual = label.getHeight();
+                    if (actual > oneLine * 2 + 1) {
+                        squeezed.add("'" + label.getText() + "' wrapped to roughly "
+                                + Math.round(actual / oneLine) + " lines ("
+                                + Math.round(actual) + "px)");
+                    }
+                }));
         assertTrue(squeezed.isEmpty(), "at " + (int) RailLayout.CODE_MIN_WIDTH
-                + "px these controls were truncated: " + squeezed);
+                + "px these controls were truncated or mis-wrapped: " + squeezed);
     }
 
     private static ReviewIntent intent(int number, String title) {
