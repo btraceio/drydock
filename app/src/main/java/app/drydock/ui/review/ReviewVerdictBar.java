@@ -7,6 +7,7 @@ import javafx.geometry.Pos;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
 import javafx.scene.control.Tooltip;
+import javafx.scene.input.MouseEvent;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
@@ -29,9 +30,19 @@ final class ReviewVerdictBar extends VBox {
 
     /** What the bar needs from its host. All calls happen on the FX thread. */
     interface Host {
-        void approve(ReviewIntent intent);
+        /**
+         * {@code unit} is the acting unit CAPTURED at the moment the reader
+         * pressed the button (or the live one, for a keyboard/programmatic
+         * fire with no press to capture) -- never re-read at release time.
+         * A real mouse press on this button moves Scene focus off the diff
+         * column before the button's own action fires (JavaFX requests focus
+         * on press for a focusable control), which would otherwise flip
+         * {@link SessionReviewView#settleUnit()} to {@code SECTION}
+         * mid-press and settle the wrong thing on release.
+         */
+        void approve(ReviewIntent intent, SessionReviewView.SettleUnit unit);
 
-        void requestChanges(ReviewIntent intent);
+        void requestChanges(ReviewIntent intent, SessionReviewView.SettleUnit unit);
 
         /** "Ask the agent to fix it" -- hands the intent's findings to the bound session. */
         void askAgentToFix(ReviewIntent intent);
@@ -126,6 +137,18 @@ final class ReviewVerdictBar extends VBox {
      * worse than no unit statement at all.
      */
     private SessionReviewView.SettleUnit actingUnit = SessionReviewView.SettleUnit.SECTION;
+    /**
+     * The acting unit captured at the moment a real mouse press landed on
+     * {@link #approveButton}/{@link #requestChangesButton} -- empty between
+     * presses, and for a keyboard or programmatic {@code fire()} that never
+     * pressed at all. A press moves Scene focus (JavaFX requests it on
+     * press for any focusable control -- see {@code app.css}'s {@code
+     * .review-verdict-action:focused}), which can flip {@link #actingUnit}
+     * mid-press if the reader had the diff column focused; the button must
+     * still act on what it READ when pressed, not what focus became by the
+     * time the reader let go.
+     */
+    private Optional<SessionReviewView.SettleUnit> pressedUnit = Optional.empty();
 
     ReviewVerdictBar(Host host) {
         this.host = host;
@@ -156,10 +179,19 @@ final class ReviewVerdictBar extends VBox {
         nextButton.setOnAction(e -> host.nextIntent());
 
         approveButton.getStyleClass().addAll("review-verdict-action", "primary");
-        approveButton.setOnAction(e -> withIntent(host::approve));
+        approveButton.addEventFilter(MouseEvent.MOUSE_PRESSED, e -> pressedUnit = Optional.of(actingUnit));
+        approveButton.setOnAction(e -> {
+            SessionReviewView.SettleUnit unit = consumePressedUnit();
+            withIntent(intent -> host.approve(intent, unit));
+        });
 
         requestChangesButton.getStyleClass().add("review-verdict-action");
-        requestChangesButton.setOnAction(e -> withIntent(host::requestChanges));
+        requestChangesButton.addEventFilter(MouseEvent.MOUSE_PRESSED,
+                e -> pressedUnit = Optional.of(actingUnit));
+        requestChangesButton.setOnAction(e -> {
+            SessionReviewView.SettleUnit unit = consumePressedUnit();
+            withIntent(intent -> host.requestChanges(intent, unit));
+        });
 
         askAgentButton.getStyleClass().add("review-verdict-action");
         askAgentButton.setTooltip(new Tooltip("Hand this intent's open findings to the bound session"));
@@ -231,6 +263,19 @@ final class ReviewVerdictBar extends VBox {
     }
 
     /**
+     * The unit an Approve/Request-changes press just captured, or the LIVE
+     * one when nothing was captured -- a keyboard activation or a test's
+     * {@code Button.fire()} never presses at all, so those correctly read
+     * whatever is current right now rather than a stale snapshot from
+     * whenever this button was last physically pressed.
+     */
+    private SessionReviewView.SettleUnit consumePressedUnit() {
+        SessionReviewView.SettleUnit unit = pressedUnit.orElse(actingUnit);
+        pressedUnit = Optional.empty();
+        return unit;
+    }
+
+    /**
      * Updates what the bar says about the intent now being settled.
      *
      * @param currentDecision the section's decision, derived from its hunks;
@@ -285,10 +330,21 @@ final class ReviewVerdictBar extends VBox {
         render();
     }
 
-    /** The word the unit reads as on a button: "Approve (hunk)", "Request changes (section)". */
+    /**
+     * The word the unit reads as on a button: "Approve (section)",
+     * "Request changes (file)". HUNK reads as "next unread hunk," not
+     * "hunk" alone (reversed ruling): a completed gutter click opens the
+     * comment composer and steals real keyboard focus into its text field,
+     * which the existing {@code TextInputControl} guard then makes a/r
+     * type into rather than trigger, and closing that composer clears the
+     * gutter selection along with it -- so on every real reader path, HUNK
+     * mode settles the section's first UNSETTLED hunk, never literally the
+     * one under the pointer. The label has to promise what the code
+     * actually does.
+     */
     private static String unitWord(SessionReviewView.SettleUnit unit) {
         return switch (unit) {
-            case HUNK -> "hunk";
+            case HUNK -> "next unread hunk";
             case SECTION -> "section";
             case FILE -> "file";
         };
@@ -362,9 +418,20 @@ final class ReviewVerdictBar extends VBox {
             // never dropped for width, unlike a separate label would be.
             String unit = unitWord(actingUnit);
             approveButton.setText("Approve (" + unit + ")");
-            approveButton.setTooltip(new Tooltip("Approve this " + unit + " (a)"));
             requestChangesButton.setText("Request changes (" + unit + ")");
-            requestChangesButton.setTooltip(new Tooltip("Request changes on this " + unit + " (r)"));
+            // HUNK gets its own plain-language tooltip: "this hunk" would
+            // still read as "the one under the pointer," which is exactly
+            // the promise the reversed ruling says the code cannot keep.
+            if (actingUnit == SessionReviewView.SettleUnit.HUNK) {
+                approveButton.setTooltip(new Tooltip(
+                        "Approves the next unread hunk in this section (a)"));
+                requestChangesButton.setTooltip(new Tooltip(
+                        "Requests changes on the next unread hunk in this section (r)"));
+            } else {
+                approveButton.setTooltip(new Tooltip("Approve this " + unit + " (a)"));
+                requestChangesButton.setTooltip(
+                        new Tooltip("Request changes on this " + unit + " (r)"));
+            }
             refusalLabel.setText("⚠ a blocking finding is still open");
             refusalLabel.setVisible(blocked);
             refusalLabel.setManaged(blocked);

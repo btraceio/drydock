@@ -14,6 +14,7 @@ import app.drydock.review.Severity;
 import app.drydock.review.SubmitPlan;
 
 import javafx.application.Platform;
+import javafx.beans.value.ChangeListener;
 import javafx.geometry.Pos;
 import javafx.scene.Node;
 import javafx.scene.control.Button;
@@ -253,6 +254,20 @@ public final class SessionReviewView extends BorderPane {
     private final ReviewFindingsMargin margin;
     private final ReviewVerdictBar verdictBar;
 
+    /**
+     * Re-renders the verdict bar's acting-unit statement on every Scene
+     * focus change (see {@link #settleUnit()}). Held as a field, rather
+     * than an inline lambda passed straight to {@code addListener}, purely
+     * so {@link #close()} can remove the SAME instance it was added with --
+     * {@code ObservableValue.removeListener} matches by reference, and a
+     * second lambda expression is never {@code equals} to the first.
+     * Assigned in the constructor body (not here) because it closes over
+     * {@link #verdictBar}, itself assigned in the constructor body -- a
+     * field initializer referencing it here runs, per javac's definite-
+     * assignment analysis, before that assignment has happened.
+     */
+    private final ChangeListener<Node> focusOwnerListener;
+
     /** The MCP activity panel; absent when no server is running (tests, headless). */
     private final Optional<ReviewMcpActivityPanel> mcpPanel;
 
@@ -366,6 +381,8 @@ public final class SessionReviewView extends BorderPane {
         this.diffColumn = new ReviewDiffColumn(diffService, host::openInExplorer);
         this.margin = new ReviewFindingsMargin(new MarginHost());
         this.verdictBar = new ReviewVerdictBar(new VerdictHost());
+        this.focusOwnerListener =
+                (obs, oldOwner, newOwner) -> verdictBar.showActingUnit(settleUnit());
         getStyleClass().addAll("review-destination", "session-review");
         // Review must never hold the window open. Its computed minimum is the
         // sum of the rail's and the margin's own minimums plus the code
@@ -432,10 +449,20 @@ public final class SessionReviewView extends BorderPane {
         // The label has to stay live across whatever moves real focus, not
         // just the actions this view itself triggers, so it listens for
         // that directly rather than piggybacking on refreshReviewState().
+        //
+        // focusOwnerListener is held as a field, and this add/remove pair
+        // (repeated in close()) is deliberate: the Scene handed in here is
+        // app-lifetime (AppShell builds one for the whole application), so
+        // a listener added and never removed keeps every SessionReviewView
+        // ever opened -- diff column included -- strongly reachable for
+        // the process's life, and re-attaching without removing the old
+        // one first would stack a second listener under the same Scene.
         sceneProperty().addListener((obs, oldScene, newScene) -> {
+            if (oldScene != null) {
+                oldScene.focusOwnerProperty().removeListener(focusOwnerListener);
+            }
             if (newScene != null) {
-                newScene.focusOwnerProperty().addListener(
-                        (o, oldOwner, newOwner) -> verdictBar.showActingUnit(settleUnit()));
+                newScene.focusOwnerProperty().addListener(focusOwnerListener);
             }
         });
         widthProperty().addListener((obs, old, width) -> applyResponsiveLayout(width.doubleValue()));
@@ -901,11 +928,20 @@ public final class SessionReviewView extends BorderPane {
 
     /**
      * The digests {@code a}/{@code r}/{@code u} act on for {@code intent}
-     * right now -- see {@link SectionStates#digestsForAction}. None without
-     * a diff to derive them from.
+     * over {@code unit} -- see {@link SectionStates#digestsForAction}. None
+     * without a diff to derive them from.
+     *
+     * <p>{@code unit} is a parameter, never {@link #settleUnit()} read
+     * afresh in here: the keyboard path computes it once, at key-press time,
+     * and a mouse click on the verdict bar's own Approve/Request-changes
+     * button captures it at PRESS time (see {@code ReviewVerdictBar}) --
+     * pressing a focusable button moves Scene focus off the diff column
+     * before the button's action fires, and re-reading {@code settleUnit()}
+     * here would silently answer with whatever focus became by release,
+     * not what it was when the reader decided to press.</p>
      */
-    private List<String> digestsForAction(ReviewIntent intent, boolean wholeFile) {
-        return board().map(b -> sections.digestsForAction(b, intent, settleUnit(), wholeFile,
+    private List<String> digestsForAction(ReviewIntent intent, SettleUnit unit, boolean wholeFile) {
+        return board().map(b -> sections.digestsForAction(b, intent, unit, wholeFile,
                         diffColumn.currentLineSelection()))
                 .orElse(List.of());
     }
@@ -1117,15 +1153,15 @@ public final class SessionReviewView extends BorderPane {
     /** The verdict bar's window onto the host, with the scope filled in. */
     private final class VerdictHost implements ReviewVerdictBar.Host {
         @Override
-        public void approve(ReviewIntent intent) {
+        public void approve(ReviewIntent intent, SettleUnit unit) {
             selectedScope().ifPresent(scope -> host.setVerdict(scope, intent,
-                    digestsForAction(intent, false), Optional.of(ReviewVerdict.Decision.APPROVED)));
+                    digestsForAction(intent, unit, false), Optional.of(ReviewVerdict.Decision.APPROVED)));
         }
 
         @Override
-        public void requestChanges(ReviewIntent intent) {
+        public void requestChanges(ReviewIntent intent, SettleUnit unit) {
             selectedScope().ifPresent(scope -> host.setVerdict(scope, intent,
-                    digestsForAction(intent, false), Optional.of(ReviewVerdict.Decision.CHANGES)));
+                    digestsForAction(intent, unit, false), Optional.of(ReviewVerdict.Decision.CHANGES)));
         }
 
         @Override
@@ -1408,7 +1444,7 @@ public final class SessionReviewView extends BorderPane {
         if (scope.isEmpty() || intent.isEmpty()) {
             return;
         }
-        List<String> digests = digestsForAction(intent.get(), wholeFile);
+        List<String> digests = digestsForAction(intent.get(), settleUnit(), wholeFile);
         if (digests.isEmpty()) {
             return;
         }
@@ -1645,12 +1681,25 @@ public final class SessionReviewView extends BorderPane {
      * means a view closed mid-animation never runs a timeline against a
      * detached node.</p>
      *
+     * <p>{@link #focusOwnerListener} is the same shape of leak as the MCP
+     * panel: it is added to the app-lifetime Scene's {@code
+     * focusOwnerProperty}, so an un-removed one keeps this view reachable
+     * for the process's life AND re-renders its verdict bar on every focus
+     * change anywhere in the app, for every session's board ever closed.
+     * The {@link #sceneProperty()} listener already removes it on a genuine
+     * re-parent, but this Scene is never actually swapped in practice (one
+     * Scene for the whole app -- see {@code AppShell}), so this explicit
+     * removal is the one that actually runs.</p>
+     *
      * <p>Call before dropping the last reference to this view -- see {@code
      * OpenSessionTab.disposeNativeResources}.</p>
      */
     public void close() {
         mcpPanel.ifPresent(ReviewMcpActivityPanel::detach);
         intentRail.stopWidthAnimation();
+        if (getScene() != null) {
+            getScene().focusOwnerProperty().removeListener(focusOwnerListener);
+        }
     }
 
     // ---- diagnostics --------------------------------------------------------

@@ -29,8 +29,12 @@ class ReviewVerdictBarNavigationTest extends ApplicationTest {
     @Override
     public void start(Stage stage) {
         bar = new ReviewVerdictBar(new ReviewVerdictBar.Host() {
-            @Override public void approve(ReviewIntent intent) { calls.add("approve"); }
-            @Override public void requestChanges(ReviewIntent intent) { calls.add("changes"); }
+            @Override public void approve(ReviewIntent intent, SessionReviewView.SettleUnit unit) {
+                calls.add("approve");
+            }
+            @Override public void requestChanges(ReviewIntent intent, SessionReviewView.SettleUnit unit) {
+                calls.add("changes");
+            }
             @Override public void askAgentToFix(ReviewIntent intent) { calls.add("ask"); }
             @Override public void undo(ReviewIntent intent) { calls.add("undo"); }
             @Override public void confirmStillGood(ReviewIntent intent) { calls.add("confirm"); }
