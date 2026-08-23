@@ -81,6 +81,14 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
 
     @AfterEach
     void tearDown() {
+        // The stage outlives this class, so a test that narrowed it hands
+        // every later one a window its own scene was never laid out for --
+        // which reads as "the click missed", not as "the width leaked".
+        interact(() -> {
+            view.getScene().getWindow().setWidth(1400);
+            view.getScene().getWindow().setHeight(900);
+        });
+        WaitForAsyncUtils.waitForFxEvents();
         diffService.close();
         host.store.close();
     }
@@ -611,6 +619,39 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
         assertEquals("", askRefusal(), "moving to another intent must clear it");
     }
 
+    /**
+     * Round 3, item 3. The verdict-bar fit test measures a literal it holds
+     * itself, so it cannot see this string at all -- and this string is the
+     * one a reader gets. Driven through a real refused submit, at the code
+     * column's floor, so the two cannot drift: lengthen the production
+     * message and this fails, whatever the fit test's own copy says.
+     */
+    @Test
+    void theRealSubmitRefusalFitsAtTheCodeColumnFloor() {
+        seed();
+        // Narrowed here, restored in tearDown: TestFX's primary stage
+        // outlives the test AND the class, and a stage left at 560px makes
+        // every later test in this JVM click at coordinates its own scene
+        // never laid out. (It cost this file one failure before the restore
+        // went in.)
+        interact(() -> view.getScene().getWindow().setWidth(RailLayout.CODE_MIN_WIDTH));
+        WaitForAsyncUtils.waitForFxEvents();
+
+        type(KeyCode.ENTER);
+        interact(() -> view.getScene().getRoot().layout());
+        WaitForAsyncUtils.waitForFxEvents();
+
+        Node label = lookup(".review-verdict-submit-refusal").queryAll().stream()
+                .filter(Node::isVisible)
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("no submit refusal is showing"));
+        double got = label.getBoundsInLocal().getWidth();
+        double wanted = ((Label) label).prefWidth(-1);
+        assertTrue(got + 0.5 >= wanted, "'" + ((Label) label).getText() + "' got "
+                + Math.round(got) + " of " + Math.round(wanted) + "px at the "
+                + (int) RailLayout.CODE_MIN_WIDTH + "px floor");
+    }
+
     private void clickAskAgent() {
         interact(() -> lookup(".review-verdict-action").queryAll().stream()
                 .map(Button.class::cast)
@@ -660,6 +701,14 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
 
     /** Shows the board on one scope and seeds the store with {@code findings}. */
     private void seed(ReviewAnnotation... findings) {
+        // See tearDown: the stage is shared across classes, so start every
+        // board from a known width rather than from whatever the last one
+        // left.
+        interact(() -> {
+            view.getScene().getWindow().setWidth(1400);
+            view.getScene().getWindow().setHeight(900);
+        });
+        WaitForAsyncUtils.waitForFxEvents();
         ReviewScope minted = mintScope();
         for (ReviewAnnotation finding : findings) {
             host.store.upsert(finding);

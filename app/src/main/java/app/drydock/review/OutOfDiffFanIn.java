@@ -138,14 +138,21 @@ public final class OutOfDiffFanIn {
         try {
             patterns = Files.createTempFile("drydock-fanin-", ".patterns");
             Files.writeString(patterns, String.join("\n", symbols), StandardCharsets.UTF_8);
-            // -w is a PRE-FILTER, not the correctness mechanism: {@link
-            // #mentions} below is, and it subsumes this (a mutation dropping
-            // -w alone changes no result, which was checked rather than
-            // assumed). It earns its place by keeping git from streaming
-            // back -- and this class from allocating an Occurrence for --
-            // every line that merely contains a changed name as a substring,
-            // which for a short declaration like `id` is most of a
-            // repository. Do not read it as the reason the count is right.
+            // -w is a PRE-FILTER, not the correctness mechanism: mentions()
+            // below is, and it subsumes this. Not merely observed -- a
+            // mutation dropping -w changed no result, including against a
+            // repository of adversarial near-misses -- but provable: git's
+            // word characters are ASCII [A-Za-z0-9_], mentions() requires
+            // non-(isLetterOrDigit || '_') on both sides, and Java's set is a
+            // strict SUPERSET of git's, so a boundary mentions() accepts is
+            // one git also accepts. -w can therefore never drop a line
+            // mentions() would have kept: it can only spare work.
+            //
+            // The work it spares is real: without it git streams back -- and
+            // this class allocates an Occurrence for -- every line that
+            // merely CONTAINS a changed name, which for a short declaration
+            // like `id` is most of a repository. Do not read it as the reason
+            // the count is right.
             List<String> command = List.of("git", "grep", "-z", "-n", "-F", "-w", "-f",
                     patterns.toString(), "--end-of-options");
             ProcessResult result = ProcessRunner.run(command, worktree, TIMEOUT);

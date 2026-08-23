@@ -75,6 +75,15 @@ class ReviewFanInPopoverTest extends ApplicationTest {
     private static final String ALPHA = "src/Alpha.java";
 
     /**
+     * A third file, added mid-test only to displace {@link #ALPHA} as the
+     * path's entry point -- so it has to sort BEFORE it. That is the shape
+     * the defect needs: {@code togglePathMode} resets the cursor to 0 before
+     * the refresh, so a stale re-anchor looks up the remembered ENTRY POINT,
+     * and only notices if that hunk has moved.
+     */
+    private static final String AARDVARK = "src/Aardvark.java";
+
+    /**
      * {@link #ZETA}'s declarations, in the order the popover must list them:
      * the graph's own sorted order. Chosen so a {@code HashMap} iterates
      * them DIFFERENTLY ({@code Astrolabe, Sextant, Compass}) -- otherwise
@@ -123,6 +132,14 @@ class ReviewFanInPopoverTest extends ApplicationTest {
 
     @AfterEach
     void tearDown() {
+        // theFanInReasonWrapsInsteadOfBeingCutToOneLine narrows the stage,
+        // and the stage outlives this class: left narrow, every later test
+        // in this JVM lays out against a window it never asked for.
+        interact(() -> {
+            view.getScene().getWindow().setWidth(1400);
+            view.getScene().getWindow().setHeight(900);
+        });
+        WaitForAsyncUtils.waitForFxEvents();
         interact(view::close);
         diffService.close();
         host.store.close();
@@ -170,6 +187,51 @@ class ReviewFanInPopoverTest extends ApplicationTest {
         assertTrue(rows.get(view.selectedPathStepForTest()).contains(ALPHA),
                 "the reader was reading " + ALPHA + "; after the re-sort the cursor is on row "
                         + view.selectedPathStepForTest() + " of " + rows);
+    }
+
+    /**
+     * Fix round 3, item 1. The round-1 re-anchor introduced the very defect
+     * it was written to prevent, one gesture over: {@code lastPathSteps}
+     * survives LEAVING path mode (only {@code refreshReviewState}'s
+     * {@code pathMode} branch writes it), so a path that changed while the
+     * reader was away made {@code p}'s deliberate "start at the beginning"
+     * lose to a re-anchor onto wherever the remembered hunk had gone -- the
+     * cursor on row 3 with row 1 labelled START HERE.
+     *
+     * <p>Driven by a second DIFF rather than by a late scan, so nothing here
+     * is a race: {@code requestGraph} is kicked from diff resolution
+     * regardless of mode, which is the other way in, and this board's
+     * worktree is one git cannot grep so no fan-in ever arrives to reorder
+     * anything behind the test's back.</p>
+     */
+    @Test
+    void reEnteringPathModeStartsAtTheEntryPointEvenIfThePathMovedWhileAway() {
+        showRichBoard(notARepo);
+        assertTrue(railTexts().get(0).contains(ALPHA), "the entry point starts as " + ALPHA);
+
+        press(KeyCode.P).release(KeyCode.P);
+        WaitForAsyncUtils.waitForFxEvents();
+        assertEquals(ReviewIntentRail.Mode.INTENTS, view.railMode(), "the reader left PATH mode");
+
+        // A file that sorts FIRST lands while they are away, so the entry
+        // point is no longer the hunk the stale memory holds -- which is
+        // exactly what a re-anchor would chase, and where it would leave the
+        // cursor while row 1 said START HERE.
+        UnifiedDiff moved = new UnifiedDiff(List.of(
+                oneHunkFile(AARDVARK, List.of("class AardvarkOnly { }")),
+                oneHunkFile(ALPHA, List.of("class " + ALPHA_SYMBOL + " { }")),
+                oneHunkFile(ZETA, ZETA_SYMBOLS.stream().map(n -> "class " + n + " { }").toList())));
+        host.diff = moved;
+        interact(() -> view.diagShowDiff(scope, moved));
+        WaitForAsyncUtils.waitForFxEvents();
+
+        press(KeyCode.P).release(KeyCode.P);
+        await("the re-entered path to populate", () -> view.pathRowTextsForTest().size() == 3);
+
+        assertEquals(0, view.selectedPathStepForTest(),
+                "p means start at the beginning: " + railTexts());
+        assertTrue(railTexts().get(view.selectedPathStepForTest()).contains("START HERE"),
+                "the cursor must be on the row the rail calls START HERE: " + railTexts());
     }
 
     // ---- the popover --------------------------------------------------------
@@ -526,6 +588,16 @@ class ReviewFanInPopoverTest extends ApplicationTest {
      * count, live.
      */
     private void showBoard(Path worktree, UnifiedDiff diff) {
+        // Asserted, not assumed: TestFX's primary stage is shared by every
+        // class in this JVM, and a class that leaves it at the code column's
+        // floor (ReviewVerdictBarFitTest does, deliberately) collapses this
+        // rail before the first test here even runs -- the fan-in control is
+        // then present and invisible, which reads as a broken lookup.
+        interact(() -> {
+            view.getScene().getWindow().setWidth(1400);
+            view.getScene().getWindow().setHeight(900);
+        });
+        WaitForAsyncUtils.waitForFxEvents();
         scope = registry.mint(ReviewScopeRegistry.spec(ReviewScope.Kind.WORKING_TREE,
                 worktree, Optional.of(worktree), "main", "HEAD",
                 Optional.empty(), Optional.empty()));

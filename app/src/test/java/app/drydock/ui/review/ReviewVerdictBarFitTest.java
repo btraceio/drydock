@@ -8,6 +8,7 @@ import javafx.scene.control.Button;
 import javafx.scene.Node;
 import javafx.scene.control.Label;
 import javafx.stage.Stage;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.testfx.framework.junit5.ApplicationTest;
@@ -58,10 +59,17 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
         // width still comes up as wide as whatever ran before it left it --
         // under which every assertion here passes without measuring anything.
         this.stage = stage;
+        sharedStage = stage;
         atTheFloor();
     }
 
     private Stage stage;
+
+    /**
+     * The SHARED primary stage, so the class can hand it back at a normal
+     * size -- see {@link #unpoisonTheSharedStage}.
+     */
+    private static Stage sharedStage;
 
     /** Whether the stub host's hand-off succeeds; false drives the refusal. */
     private boolean askSucceeds = true;
@@ -70,6 +78,28 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
     void restoreTheFloor() {
         askSucceeds = true;
         atTheFloor();
+    }
+
+    /**
+     * Every test here deliberately leaves the stage at the code column's
+     * floor, and TestFX's primary stage outlives the CLASS -- so the next
+     * class in this JVM built its 1400x900 scene inside a 560x200 window,
+     * its diff column rendered no rows, and its clicks reported "no
+     * clickable gutter". Nothing in that failure names a width, which is why
+     * it reads as flakiness rather than as a leak.
+     *
+     * <p>Handing the stage back is this class's job, not the next class's:
+     * it is the one that took it.</p>
+     */
+    @AfterAll
+    static void unpoisonTheSharedStage() {
+        if (sharedStage == null) {
+            return;
+        }
+        WaitForAsyncUtils.waitForAsyncFx(5000, () -> {
+            sharedStage.setWidth(1400);
+            sharedStage.setHeight(900);
+        });
     }
 
     private void atTheFloor() {
@@ -117,12 +147,12 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
     @Test
     void theHintIsBackAsSoonAsThereIsRoomForIt() {
         show(intent(2, "drydock/review · 4 files"), Optional.empty());
-        assertFalse(hintShowing(), "at the floor the hint has to go");
+        assertFalse(navHintShowing(), "at the floor the nav hint has to go");
 
         interact(() -> bar.getScene().getWindow().setWidth(1400));
         WaitForAsyncUtils.waitForFxEvents();
 
-        assertTrue(hintShowing(), "a wide bar shows the hint again");
+        assertTrue(navHintShowing(), "a wide bar shows the nav hint again");
     }
 
     /**
@@ -190,12 +220,7 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
         askSucceeds = false;
         show(intent(2, "drydock/review · 4 files"), Optional.empty());
 
-        interact(() -> lookup(".button").queryAll().stream()
-                .map(Button.class::cast)
-                .filter(button -> "Ask the agent to fix it".equals(button.getText()))
-                .findFirst()
-                .orElseThrow(() -> new AssertionError("no Ask-the-agent button"))
-                .fire());
+        interact(() -> askButton().fire());
         WaitForAsyncUtils.waitForFxEvents();
         interact(() -> bar.getScene().getRoot().layout());
         WaitForAsyncUtils.waitForFxEvents();
@@ -203,6 +228,145 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
         assertTrue(lookup(".review-verdict-ask-refusal").queryAll().stream().anyMatch(Node::isVisible),
                 "the refusal must be showing, or this measures nothing");
         assertNothingTruncated();
+    }
+
+    /**
+     * Round 3, item 3. The blocking refusal is a STATE, not a click, so it
+     * sits in the action row -- which at the floor has about 25px of slack
+     * once the four actions have taken their widths. It asked for 146.
+     * Nothing rendered it in a fit test before, which is the only reason it
+     * survived the round that added the elision check.
+     */
+    @Test
+    void theBlockingRefusalFitsAtTheCodeColumnFloor() {
+        interact(() -> {
+            bar.update(intent(2, "drydock/review · 4 files"), Optional.empty(), true);
+            bar.showProgress(1, 7);
+        });
+        WaitForAsyncUtils.waitForFxEvents();
+        interact(() -> bar.getScene().getRoot().layout());
+        WaitForAsyncUtils.waitForFxEvents();
+
+        assertTrue(lookup(".review-verdict-refusal").queryAll().stream()
+                        .filter(node -> !node.getStyleClass().contains("review-verdict-ask-refusal"))
+                        .filter(node -> !node.getStyleClass().contains("review-verdict-submit-refusal"))
+                        .anyMatch(Node::isVisible),
+                "the blocking refusal must be showing, or this measures nothing");
+        assertNothingTruncated();
+        // AND the title still exists. "Nothing is truncated" is otherwise
+        // satisfiable by letting the refusal run to its full 146px and
+        // taking every one of them from the title: the title is allowed to
+        // YIELD (intentLabel.setMinWidth(0)) and at this floor it yields
+        // almost everything, but the row is not allowed to spend it down to
+        // nothing for a sentence whose glyph says as much. Measured: 14px
+        // with the short form, 0 with the long one.
+        double[] title = new double[1];
+        interact(() -> title[0] = lookup(".review-verdict-intent").query().getBoundsInLocal().getWidth());
+        assertTrue(title[0] > 0, "the intent title was squeezed out of existence; the refusal "
+                + "must shorten to its glyph before taking the last of it");
+    }
+
+    /**
+     * Round 3, item 2. {@code update()} clears both footer refusals, but
+     * nothing cleared one when the OTHER was raised -- and neither failure
+     * path calls {@code update()}. Submit refuses, the reader then asks the
+     * agent on that same intent, and both labels plus {@code Submit} shared
+     * one row three ways: the primary action read "Sub…".
+     */
+    @Test
+    void raisingOneFooterRefusalRetiresTheOther() {
+        show(intent(2, "drydock/review · 4 files"), Optional.empty());
+        interact(() -> bar.showSubmitRefused("an intent needs a verdict; jumped to it"));
+        WaitForAsyncUtils.waitForFxEvents();
+        assertTrue(refusalShowing("review-verdict-submit-refusal"));
+
+        askSucceeds = false;
+        interact(() -> askButton().fire());
+        WaitForAsyncUtils.waitForFxEvents();
+        interact(() -> bar.getScene().getRoot().layout());
+        WaitForAsyncUtils.waitForFxEvents();
+
+        assertTrue(refusalShowing("review-verdict-ask-refusal"), "the newer refusal is the one shown");
+        assertFalse(refusalShowing("review-verdict-submit-refusal"),
+                "two refusals in one footer squeeze Submit to an ellipsis");
+        assertNothingTruncated();
+    }
+
+    /**
+     * The other direction, which the test above cannot see and a mutation
+     * proved it could not: {@code showAskRefused} clearing the submit
+     * refusal and {@code showSubmitRefused} clearing the ask one are two
+     * separate lines, and either can be lost on its own. A reader reaches
+     * this one by asking the agent, being told there is nothing to send, and
+     * then pressing Submit.
+     */
+    @Test
+    void raisingTheSubmitRefusalRetiresTheAskRefusalToo() {
+        show(intent(2, "drydock/review · 4 files"), Optional.empty());
+        askSucceeds = false;
+        interact(() -> askButton().fire());
+        WaitForAsyncUtils.waitForFxEvents();
+        assertTrue(refusalShowing("review-verdict-ask-refusal"));
+
+        interact(() -> bar.showSubmitRefused("a verdict is missing; jumped to it"));
+        WaitForAsyncUtils.waitForFxEvents();
+        interact(() -> bar.getScene().getRoot().layout());
+        WaitForAsyncUtils.waitForFxEvents();
+
+        assertTrue(refusalShowing("review-verdict-submit-refusal"), "the newer refusal is the one shown");
+        assertFalse(refusalShowing("review-verdict-ask-refusal"),
+                "two refusals in one footer squeeze Submit to an ellipsis");
+        assertNothingTruncated();
+    }
+
+    /**
+     * Round 3, item 3. {@code fitFooter} traded the shortcuts hint away for
+     * a refusal at ANY width -- it never consulted the room it had, unlike
+     * {@code fitActionRow}. A 1400px bar hid it with hundreds of pixels to
+     * spare, and no test could see that: both hints carry
+     * {@code .review-verdict-hint} and the only assertion about "the hint"
+     * matched navHint's text.
+     */
+    @Test
+    void aWideBarKeepsTheShortcutHintWhileRefusing() {
+        show(intent(2, "drydock/review · 4 files"), Optional.empty());
+        interact(() -> bar.getScene().getWindow().setWidth(1400));
+        WaitForAsyncUtils.waitForFxEvents();
+
+        interact(() -> bar.showSubmitRefused("an intent needs a verdict; jumped to it"));
+        WaitForAsyncUtils.waitForFxEvents();
+
+        assertTrue(refusalShowing("review-verdict-submit-refusal"), "the refusal must be up");
+        assertTrue(shortcutHintShowing(),
+                "a 1400px bar has room for both; the hint is dropped for want of room, not on principle");
+    }
+
+    /** And at the floor it still yields, which is what made the trade worth making. */
+    @Test
+    void atTheFloorTheShortcutHintStillYieldsToARefusal() {
+        show(intent(2, "drydock/review · 4 files"), Optional.empty());
+        interact(() -> bar.showSubmitRefused("an intent needs a verdict; jumped to it"));
+        WaitForAsyncUtils.waitForFxEvents();
+        interact(() -> bar.getScene().getRoot().layout());
+        WaitForAsyncUtils.waitForFxEvents();
+
+        assertFalse(shortcutHintShowing(), "at the floor the refusal takes the hint's room");
+        assertNothingTruncated();
+    }
+
+    private boolean refusalShowing(String styleClass) {
+        boolean[] showing = new boolean[1];
+        interact(() -> showing[0] = lookup("." + styleClass).queryAll().stream()
+                .anyMatch(Node::isVisible));
+        return showing[0];
+    }
+
+    private Button askButton() {
+        return lookup(".button").queryAll().stream()
+                .map(Button.class::cast)
+                .filter(button -> "Ask the agent to fix it".equals(button.getText()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("no Ask-the-agent button"));
     }
 
     private static String unitWord(SessionReviewView.SettleUnit unit) {
@@ -227,11 +391,26 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
 
     // ---- helpers --------------------------------------------------------
 
-    private boolean hintShowing() {
+    /**
+     * {@code navHint} -- "3 left · n jumps to the next", the action row's own
+     * droppable hint. NOT the footer's "press ? for shortcuts": both carry
+     * {@code .review-verdict-hint}, and this method used to match on text to
+     * pick one, which meant every assertion about "the hint" was silently
+     * about the action row only.
+     */
+    private boolean navHintShowing() {
         boolean[] showing = new boolean[1];
         interact(() -> showing[0] = lookup(".review-verdict-hint").queryAll().stream()
                 .anyMatch(node -> node.isManaged()
                         && ((Label) node).getText().contains("jumps to the next")));
+        return showing[0];
+    }
+
+    /** The FOOTER's "press ? for shortcuts", found by its own class. */
+    private boolean shortcutHintShowing() {
+        boolean[] showing = new boolean[1];
+        interact(() -> showing[0] = lookup(".review-verdict-shortcut-hint").queryAll().stream()
+                .anyMatch(Node::isManaged));
         return showing[0];
     }
 
