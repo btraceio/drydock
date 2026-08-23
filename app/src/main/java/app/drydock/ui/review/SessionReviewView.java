@@ -2056,7 +2056,9 @@ public final class SessionReviewView extends BorderPane {
     private static ReviewIntent pathStepAsIntent(ReadingPath.Step step) {
         return new ReviewIntent("path:" + step.hunkId(), step.sectionNumber(), step.file(),
                 ReviewIntent.Kind.CHANGE, ReviewIntent.Risk.NONE, step.reason(),
-                List.of(step.hunkId()), Optional.empty(), false);
+                // No reads: a path step is drydock's own single-hunk view of a
+                // section it already ordered, not an intent an agent declared.
+                List.of(step.hunkId()), Optional.empty(), false, List.of());
     }
 
     /** The content digest of {@code step}'s one hunk in {@code diff}, if it still resolves. */

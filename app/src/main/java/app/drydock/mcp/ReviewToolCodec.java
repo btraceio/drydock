@@ -17,8 +17,10 @@ import app.drydock.state.json.JsonValue.JsonString;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * Encodes and decodes the Review MCP payloads (schema §§1-4), keeping the
@@ -272,9 +274,42 @@ final class ReviewToolCodec {
                             "intent.rationale"),
                     stringList(obj, "hunkIds"),
                     collapseFromJson(obj),
-                    obj.get("autoApprove") instanceof JsonBoolean auto && auto.value()));
+                    obj.get("autoApprove") instanceof JsonBoolean auto && auto.value(),
+                    stringList(obj, "reads")));
         }
+        checkReadsResolve(intents);
         return List.copyOf(intents);
+    }
+
+    /**
+     * Rejects the whole batch when a {@code reads} names an id no intent in
+     * the same call carries.
+     *
+     * <p>Checked HERE, at decode, and not where the order is actually built:
+     * {@link app.drydock.review.Graphs#topologicalOrder} does refuse an edge
+     * pointing outside its nodes -- deliberately, so absent and broken cannot
+     * look the same -- but it refuses with an {@link IllegalArgumentException}
+     * on whatever thread {@code IntentGrouping.set} was called from, where
+     * the agent that sent the payload never hears about it. An MCP error
+     * naming the id and the intent that declared it is the report the agent
+     * can act on.</p>
+     *
+     * <p>All-or-nothing, like the rest of the batch: half a grouping, with
+     * some intents' declared order silently dropped, is worse than none.</p>
+     */
+    private static void checkReadsResolve(List<ReviewIntent> intents) throws McpToolException {
+        Set<String> ids = new LinkedHashSet<>();
+        for (ReviewIntent intent : intents) {
+            ids.add(intent.id());
+        }
+        for (ReviewIntent intent : intents) {
+            for (String read : intent.reads()) {
+                if (!ids.contains(read)) {
+                    throw new McpToolException("intent '" + intent.id() + "' reads '" + read
+                            + "', which is not an intent in this call");
+                }
+            }
+        }
     }
 
     private static Optional<ReviewIntent.Collapse> collapseFromJson(JsonObject obj)

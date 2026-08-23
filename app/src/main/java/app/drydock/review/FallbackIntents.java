@@ -107,7 +107,9 @@ public final class FallbackIntents {
                 }
             }
             return new ReviewIntent(id(), number, title(), key.kind(), risk(churn),
-                    rationale(churn), hunkIds, java.util.Optional.empty(), false);
+                    // No reads: the fallback is what runs when no agent has,
+                    // so there is no declared dependency order to carry.
+                    rationale(churn), hunkIds, java.util.Optional.empty(), false, List.of());
         }
 
         private String id() {

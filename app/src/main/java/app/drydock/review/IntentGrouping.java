@@ -7,12 +7,16 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.SortedSet;
+import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Consumer;
@@ -68,18 +72,84 @@ public final class IntentGrouping {
      * Replaces {@code scopeId}'s grouping with what a reviewer supplied.
      * Numbering is assigned here rather than trusted from the caller, so the
      * rail's {@code 1..N} is always dense and in order.
+     *
+     * <p>The ORDER numbered is still the reviewer's own -- either the order
+     * it listed its intents in, or, when any of them declares {@link
+     * ReviewIntent#reads()}, that declared dependency order (see {@link
+     * #orderByReads}). Both are the agent's assertion about its own change;
+     * neither is drydock re-deciding what card is (1).</p>
      */
     public void set(String scopeId, List<ReviewIntent> intents) {
         Objects.requireNonNull(scopeId, "scopeId");
         List<ReviewIntent> numbered = new ArrayList<>();
         int number = 1;
-        for (ReviewIntent intent : intents) {
+        for (ReviewIntent intent : orderByReads(intents)) {
             numbered.add(new ReviewIntent(intent.id(), number++, intent.title(), intent.kind(),
                     intent.risk(), intent.rationale(), intent.hunkIds(), intent.collapse(),
-                    intent.autoApprove()));
+                    intent.autoApprove(), intent.reads()));
         }
         byScope.put(scopeId, List.copyOf(numbered));
         notifyChanged(scopeId);
+    }
+
+    /** The position stood in for a {@code reads} naming no intent in the batch. */
+    private static final int UNRESOLVED_READ = -1;
+
+    /**
+     * {@code intents} in the dependency order the agent declared through
+     * {@link ReviewIntent#reads()} -- foundation first -- or unchanged when
+     * none of them declares anything, which is every grouping sent before
+     * the field existed.
+     *
+     * <p>The graph's nodes are POSITIONS in {@code intents}, not intent ids.
+     * Nothing stops an agent sending the same id twice, and a set of ids
+     * would collapse those two into one node and lose a card outright; a set
+     * of positions cannot, whatever the ids say. It also makes the tie-break
+     * the agent's own array order, which is total by construction and is the
+     * right answer anyway: where {@code reads} says nothing, the order the
+     * agent listed them in is the only other thing it told us.</p>
+     *
+     * <p>{@link Graphs#topologicalOrder} returns a list OF units -- a cycle
+     * comes back as one unit with its members already in tie-break order,
+     * not as an error. An agent declaring {@code A reads B} and {@code B
+     * reads A} is describing genuinely entangled work, and refusing its whole
+     * batch over that would be worse than showing the two adjacent, so the
+     * units are simply flattened in order.</p>
+     */
+    private static List<ReviewIntent> orderByReads(List<ReviewIntent> intents) {
+        if (intents.stream().allMatch(intent -> intent.reads().isEmpty())) {
+            return intents;
+        }
+        Map<String, Integer> positionOf = new LinkedHashMap<>();
+        for (int position = 0; position < intents.size(); position++) {
+            positionOf.putIfAbsent(intents.get(position).id(), position);
+        }
+        SortedSet<Integer> nodes = new TreeSet<>();
+        Map<Integer, SortedSet<Integer>> readsOf = new TreeMap<>();
+        for (int position = 0; position < intents.size(); position++) {
+            nodes.add(position);
+            SortedSet<Integer> targets = new TreeSet<>();
+            for (String read : intents.get(position).reads()) {
+                // An id no intent in the batch carries is rejected at decode,
+                // in ReviewToolCodec.intentsFromJson, with an MCP error naming
+                // it -- a malformed agent payload must not first be noticed
+                // here, where the only report left is an exception on whatever
+                // thread happened to call set. UNRESOLVED_READ is outside nodes,
+                // so an id that reaches here anyway (from in-process code,
+                // which is a drydock bug and not an agent's) still makes
+                // Graphs refuse rather than silently drop the edge.
+                targets.add(positionOf.getOrDefault(read, UNRESOLVED_READ));
+            }
+            readsOf.put(position, targets);
+        }
+        List<ReviewIntent> ordered = new ArrayList<>();
+        for (List<Integer> unit : Graphs.topologicalOrder(nodes, readsOf::get,
+                Comparator.naturalOrder())) {
+            for (Integer position : unit) {
+                ordered.add(intents.get(position));
+            }
+        }
+        return ordered;
     }
 
     /** Drops a scope's grouping (the scope left the queue). */
@@ -115,10 +185,12 @@ public final class IntentGrouping {
      * <p>A reviewer's grouping is never re-sorted or re-drawn. It came from
      * something that read the change; recomputing over it would be drydock
      * overruling the reviewer -- so its {@code number}s stay exactly {@link
-     * #set}'s own dense 1..N over whatever order the reviewer supplied,
-     * unrelated to {@link ReadingPath}'s reading order. Only the COMPUTED
-     * path below is renumbered against it, because only there is drydock
-     * itself the one deciding what card is (1).</p>
+     * #set}'s own dense 1..N over whatever order the reviewer supplied --
+     * its array order, or the {@link ReviewIntent#reads()} order it declared,
+     * both of them the reviewer's own -- unrelated to {@link ReadingPath}'s
+     * reading order. Only the COMPUTED path below is renumbered against it,
+     * because only there is drydock itself the one deciding what card is
+     * (1).</p>
      *
      * <p>When the graph turns out to have nothing structural to add --
      * {@link Sections#of} takes the same (kind, directory) clustering itself
@@ -166,7 +238,10 @@ public final class IntentGrouping {
         for (Sections.Section section : ordered) {
             computed.add(new ReviewIntent(computedId(section), number,
                     section.title(), kindOf(section, fallbackByHunk), riskOf(section, fallbackByHunk),
-                    rationale(section), section.hunkIds(), Optional.empty(), false));
+                    // No reads: this is the COMPUTED path, where drydock
+                    // itself decided the order -- there is no agent assertion
+                    // to carry, and ReadingPath.of above already ordered it.
+                    rationale(section), section.hunkIds(), Optional.empty(), false, List.of()));
             number++;
         }
         return List.copyOf(computed);
