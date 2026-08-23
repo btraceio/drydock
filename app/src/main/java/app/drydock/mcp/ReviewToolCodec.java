@@ -399,13 +399,16 @@ final class ReviewToolCodec {
      * recheck would then sit in the store answering a question nobody asks --
      * absent and broken looking the same again.</p>
      *
-     * <p>Three things reject the whole batch, each naming the offending id:
-     * a {@code hunkId} that resolves to nothing in the current diff; a hunk
-     * that carries no verdict at all, which has no {@code fromBase} and
-     * therefore nothing to recheck; and a {@code why} that fails {@link
-     * PromptSafety}. All-or-nothing like the rest of this surface: a silently
-     * skipped entry is an agent's recheck that the human believes happened
-     * and did not.</p>
+     * <p>Five things reject the whole batch, each naming the offending id: a
+     * {@code hunkId} that resolves to nothing in the current diff; a hunk that
+     * carries no verdict at all, which has no {@code fromBase} and therefore
+     * nothing to recheck; a mark with no {@code why}, which is the reflexive
+     * signal this tool is asymmetric to avoid; a {@code why} that fails {@link
+     * PromptSafety}; and an {@code affected} or {@code why} of the wrong JSON
+     * type, which must not decode as "said nothing" (see {@link
+     * #affectedFromJson}). All-or-nothing like the rest of this surface: a
+     * silently skipped entry is an agent's recheck that the human believes
+     * happened and did not.</p>
      */
     static List<RecheckAssessment> assessmentsFromJson(String scopeId, JsonValue value, UnifiedDiff diff,
                                                        Map<String, ReviewVerdict> verdictsByDigest,
@@ -430,16 +433,62 @@ final class ReviewToolCodec {
                         + "no verdict; a recheck says whether a base move undermines a decision, "
                         + "and there is no decision on that hunk to undermine");
             }
-            // affected is the only field with an effect, and its absence is
-            // read as false -- the direction that changes nothing. A missing
-            // boolean must not be able to invent staleness nobody asserted.
-            boolean affected = obj.get("affected") instanceof JsonBoolean flag && flag.value();
-            String why = PromptSafety.checkInboundText(optionalString(obj, "why").orElse(""),
-                    "assessment.why");
+            boolean affected = affectedFromJson(obj, hunkId);
+            String why = PromptSafety.checkInboundText(whyFromJson(obj, hunkId), "assessment.why");
+            if (affected && why.isBlank()) {
+                throw new McpToolException("assessment marks hunkId '" + hunkId + "' affected with "
+                        + "no why; a staleness signal asserted with no reason is the reflexive "
+                        + "click this recheck is asymmetric to avoid, and a human will be shown "
+                        + "the reason as the whole justification for re-reading the hunk");
+            }
             assessments.add(new RecheckAssessment(scopeId, digest, verdict.baseCommit(), toBase,
                     affected, why, at));
         }
         return List.copyOf(assessments);
+    }
+
+    /**
+     * One assessment's {@code affected}, refusing anything that is not a
+     * boolean rather than quietly reading it as {@code false}.
+     *
+     * <p>The same rule {@link #readsFromJson} keeps, and for the same reason:
+     * absent and broken must not look the same. {@code "affected":"true"} from
+     * a stringifying client -- not hypothetical, {@code
+     * McpToolRouter.optionalIntArg} exists to accommodate one -- would
+     * otherwise decode as "the agent looked and found nothing", which is the
+     * one answer this tool must never manufacture. The direction is inert, so
+     * nothing unsafe follows; what follows is a recheck the human believes
+     * happened and did not, which is the failure this whole surface is drawn
+     * around.</p>
+     *
+     * <p>Absent, and an explicit {@code null}, stay ABSENT and decode as
+     * {@code false}: an assessment that says nothing about a hunk is a legal
+     * thing to send, and {@code null} is how several clients spell an omitted
+     * optional field.</p>
+     */
+    private static boolean affectedFromJson(JsonObject obj, String hunkId) throws McpToolException {
+        JsonValue raw = obj.get("affected");
+        if (raw == null || raw instanceof JsonValue.JsonNull) {
+            return false;
+        }
+        if (!(raw instanceof JsonBoolean flag)) {
+            throw new McpToolException("assessment for hunkId '" + hunkId + "' has an affected that "
+                    + "is not a boolean; it is true or false, not \"true\" or 1");
+        }
+        return flag.value();
+    }
+
+    /** One assessment's {@code why}, refusing a non-string for {@link #affectedFromJson}'s reason. */
+    private static String whyFromJson(JsonObject obj, String hunkId) throws McpToolException {
+        JsonValue raw = obj.get("why");
+        if (raw == null || raw instanceof JsonValue.JsonNull) {
+            return "";
+        }
+        if (!(raw instanceof JsonString why)) {
+            throw new McpToolException("assessment for hunkId '" + hunkId + "' has a why that is "
+                    + "not a string; it is the sentence a human reads as the reason");
+        }
+        return why.value();
     }
 
     /**
