@@ -276,7 +276,16 @@ public final class WorktreeService implements AutoCloseable {
             }
         }
 
-        if (force) {
+        if (targetEntry.isEmpty()) {
+            // The worktree is already gone from `git worktree list` -- it
+            // was removed outside the app (rm -rf plus `git worktree prune`,
+            // or a prior `git worktree remove`). `git worktree remove` would
+            // fail with "is not a working tree", which is not a failure the
+            // user can act on: the state they asked for (worktree gone) is
+            // already the state on disk. Treat it as success and fall through
+            // to the branch-delete step so the caller can refresh the UI to
+            // mirror reality instead of stranding a row that no longer exists.
+        } else if (force) {
             // User-confirmed destructive delete: double-force overrides both
             // uncommitted work and a lock -- a single --force discards the
             // former but git still refuses a locked worktree without the second.
@@ -750,10 +759,48 @@ public final class WorktreeService implements AutoCloseable {
     }
 
     private static boolean samePath(Path a, Path b) {
+        // Files.isSameFile returns false (rather than throwing) when neither
+        // path exists, so a prunable worktree whose directory was removed
+        // outside git would never reach a fallback. Compare canonical forms:
+        // toRealPath resolves symlinks where the path exists, and the
+        // existing-prefix walk in canonical(Path) handles where it does not,
+        // so macOS's /var -> /private/var temp-directory symlink still matches
+        // the /private/var/... form git records in `worktree list --porcelain`.
+        return canonical(a).equals(canonical(b));
+    }
+
+    /**
+     * The real (symlink-resolved) form of {@code p}, used by {@link #samePath}
+     * to match a worktree against {@code git worktree list --porcelain}. When
+     * the path exists, {@link Path#toRealPath} resolves symlinks directly; when
+     * it does not (a {@code prunable} worktree whose directory was removed
+     * outside git), {@code toRealPath} throws and the longest existing prefix
+     * is resolved instead, appending the rest verbatim. This matters on macOS,
+     * where the temp directory lives under {@code /var}, a symlink to
+     * {@code /private/var}, while git records the resolved
+     * {@code /private/var/...} form -- without it, a prunable worktree would
+     * not match its list entry, be mistaken for one that was already removed,
+     * and have its prune skipped, leaving the branch undeletable.
+     */
+    private static Path canonical(Path p) {
         try {
-            return Files.isSameFile(a, b);
+            return p.toRealPath();
         } catch (IOException e) {
-            return a.toAbsolutePath().normalize().equals(b.toAbsolutePath().normalize());
+            Path absolute = p.toAbsolutePath().normalize();
+            Path resolved = absolute.getRoot();
+            int count = absolute.getNameCount();
+            int i = 0;
+            for (; i < count; i++) {
+                try {
+                    resolved = resolved.resolve(absolute.getName(i)).toRealPath();
+                } catch (IOException nested) {
+                    break;
+                }
+            }
+            for (; i < count; i++) {
+                resolved = resolved.resolve(absolute.getName(i));
+            }
+            return resolved.normalize();
         }
     }
 
