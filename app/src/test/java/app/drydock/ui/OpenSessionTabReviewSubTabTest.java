@@ -527,6 +527,12 @@ class OpenSessionTabReviewSubTabTest extends ApplicationTest {
         }
 
         @Override
+        public boolean assessedAffected(ReviewScope scope, String hunkDigest,
+                                        String fromBase, String toBase) {
+            return false;
+        }
+
+        @Override
         public void setResolved(ReviewScope scope, ReviewAnnotation finding, boolean resolved) {
         }
 

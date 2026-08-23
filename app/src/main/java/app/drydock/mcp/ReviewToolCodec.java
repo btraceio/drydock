@@ -3,9 +3,12 @@ package app.drydock.mcp;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.Confidence;
+import app.drydock.review.HunkDigest;
+import app.drydock.review.RecheckAssessment;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
+import app.drydock.review.ReviewVerdict;
 import app.drydock.review.Sections;
 import app.drydock.review.Severity;
 import app.drydock.state.json.JsonValue;
@@ -19,6 +22,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
@@ -369,6 +373,93 @@ final class ReviewToolCodec {
                         "collapse.evidence"),
                 collapse.get("hunkCount") instanceof JsonNumber count ? count.asInt() : 0,
                 collapse.get("fileCount") instanceof JsonNumber count ? count.asInt() : 0));
+    }
+
+    // ---- review_recheck (agent -> drydock) ----------------------------------
+
+    /**
+     * Decodes {@code review_recheck}'s {@code assessments} array, translating
+     * each wire {@code hunkId} into the content digest a verdict is actually
+     * keyed by (spec §9.7).
+     *
+     * <p><strong>The two ids are different things.</strong> {@link
+     * ReviewIntent#hunkId} is POSITIONAL -- a file and an index into that
+     * file's hunks -- and is what an agent reads off {@code review_scope}.
+     * {@link HunkDigest#of} is CONTENT-ADDRESSED and deliberately excludes
+     * line numbers, so a hunk that merely moved keeps its digest. Storing the
+     * positional id would strand every assessment the moment the diff
+     * re-hunked; this walks the diff the same way {@code IntentHunks.digestsOf}
+     * does and stores the digest.</p>
+     *
+     * <p>The base PAIR is derived, never taken from the wire. {@code fromBase}
+     * is the base the hunk's own verdict was recorded against and {@code
+     * toBase} is the scope's current base commit, so the key this writes is
+     * by construction the key the board later reads with. An agent-supplied
+     * pair could name commits no verdict was ever judged against, and the
+     * recheck would then sit in the store answering a question nobody asks --
+     * absent and broken looking the same again.</p>
+     *
+     * <p>Three things reject the whole batch, each naming the offending id:
+     * a {@code hunkId} that resolves to nothing in the current diff; a hunk
+     * that carries no verdict at all, which has no {@code fromBase} and
+     * therefore nothing to recheck; and a {@code why} that fails {@link
+     * PromptSafety}. All-or-nothing like the rest of this surface: a silently
+     * skipped entry is an agent's recheck that the human believes happened
+     * and did not.</p>
+     */
+    static List<RecheckAssessment> assessmentsFromJson(String scopeId, JsonValue value, UnifiedDiff diff,
+                                                       Map<String, ReviewVerdict> verdictsByDigest,
+                                                       String toBase, Instant at)
+            throws McpToolException {
+        if (!(value instanceof JsonArray array)) {
+            throw new McpToolException("assessments must be an array");
+        }
+        List<RecheckAssessment> assessments = new ArrayList<>();
+        for (JsonValue element : array.elements()) {
+            if (!(element instanceof JsonObject obj)) {
+                throw new McpToolException("each assessment must be an object");
+            }
+            String hunkId = requireString(obj, "hunkId");
+            String digest = digestOfHunkId(diff, hunkId).orElseThrow(() -> new McpToolException(
+                    "assessment names hunkId '" + hunkId + "', which is not a hunk of this scope's "
+                            + "current diff; hunk ids are the ones review_scope reports and are "
+                            + "positional, so a re-diff can strand them"));
+            ReviewVerdict verdict = verdictsByDigest.get(digest);
+            if (verdict == null) {
+                throw new McpToolException("assessment names hunkId '" + hunkId + "', which carries "
+                        + "no verdict; a recheck says whether a base move undermines a decision, "
+                        + "and there is no decision on that hunk to undermine");
+            }
+            // affected is the only field with an effect, and its absence is
+            // read as false -- the direction that changes nothing. A missing
+            // boolean must not be able to invent staleness nobody asserted.
+            boolean affected = obj.get("affected") instanceof JsonBoolean flag && flag.value();
+            String why = PromptSafety.checkInboundText(optionalString(obj, "why").orElse(""),
+                    "assessment.why");
+            assessments.add(new RecheckAssessment(scopeId, digest, verdict.baseCommit(), toBase,
+                    affected, why, at));
+        }
+        return List.copyOf(assessments);
+    }
+
+    /**
+     * The content digest of the hunk {@code hunkId} names in {@code diff}, or
+     * empty when it names no hunk there -- an unknown file, or an index past
+     * that file's hunk count.
+     */
+    private static Optional<String> digestOfHunkId(UnifiedDiff diff, String hunkId) {
+        return ReviewIntent.parseHunkId(hunkId).flatMap(anchor -> {
+            for (UnifiedDiff.FileDiff file : diff.files()) {
+                if (!file.path().equals(anchor.file())) {
+                    continue;
+                }
+                List<UnifiedDiff.Hunk> hunks = file.hunks();
+                return anchor.hunkIndex() < hunks.size()
+                        ? Optional.of(HunkDigest.of(file.path(), hunks.get(anchor.hunkIndex())))
+                        : Optional.empty();
+            }
+            return Optional.empty();
+        });
     }
 
     // ---- review_finding (agent -> drydock) ----------------------------------

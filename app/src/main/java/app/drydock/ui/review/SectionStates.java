@@ -355,11 +355,28 @@ final class SectionStates {
      * {@code MOVED}: {@link BaseMove#couldMatter} answers true for it because
      * it is the safe direction for a DECISION, but it is not evidence of a
      * move and must not be rendered as one.
+     *
+     * <p>An agent's recheck ({@link SessionReviewView.Host#assessedAffected},
+     * spec §9.7) is asked SECOND, after the base is known to have moved and
+     * before the file-level filter gets to dismiss the move. That order is
+     * the asymmetry: the agent can only turn what the filter would have
+     * called {@code FRESH} -- or what it cannot resolve at all -- into {@code
+     * MOVED}, never the reverse. The filter is lexical and admits it cannot
+     * see a base change that alters behaviour without touching a file this
+     * scope names; this is the only thing that can. An agent's "unaffected"
+     * reaches nothing here, by construction rather than by a branch: it is
+     * indistinguishable from never having been asked.</p>
      */
     private Staleness stalenessOf(Board board, ReviewVerdict verdict, String base,
                                   Collection<String> files) {
         if (!verdict.staleAgainst(base)) {
+            // Not a move at all, so there is no move for a recheck to be
+            // about: a verdict recorded against the current base is fresh
+            // whatever any agent said about some earlier pair.
             return Staleness.FRESH;
+        }
+        if (host.assessedAffected(board.scope(), verdict.hunkDigest(), verdict.baseCommit(), base)) {
+            return Staleness.MOVED;
         }
         BaseMove.Delta delta = host.baseMove(board.scope(), verdict.baseCommit());
         if (delta.unresolvable()) {

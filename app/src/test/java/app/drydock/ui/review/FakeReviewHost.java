@@ -171,6 +171,13 @@ final class FakeReviewHost implements SessionReviewView.Host {
         return baseDelta;
     }
 
+    /** Reads the real store, so a test drives this through {@code putAssessment}. */
+    @Override
+    public boolean assessedAffected(ReviewScope scope, String hunkDigest,
+                                    String fromBase, String toBase) {
+        return store.assessedAffected(scope.id(), hunkDigest, fromBase, toBase);
+    }
+
     @Override
     public void setResolved(ReviewScope scope, ReviewAnnotation finding, boolean resolved) {
         store.mutate(finding.key(), current -> current.withStatus(
