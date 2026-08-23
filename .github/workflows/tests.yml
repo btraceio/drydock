@@ -208,3 +208,58 @@ jobs:
             '-Papp.drydock.diag.command=echo DRYDOCK_SESSION_OK' \
             -Papp.drydock.diag.autoExitSeconds=15 \
             -Papp.drydock.diag.stateFile=build/diag-state.json
+
+  windows-runtime-image:
+    name: windowsRuntimeImage (Windows)
+    # Builds the Windows runtime image at build/image-windows/ -- a
+    # self-contained JDK 26 + JavaFX + drydock.jar directory with a
+    # bin/drydock.bat launcher (no installer, no MSIX, no code signing;
+    # colleagues unzip anywhere and double-click the launcher).
+    #
+    # The build itself is the verification -- jlink must succeed
+    # against the host JDK 26 toolchain, the launcher must be a
+    # non-empty file, and bin/drydock.bat must run without aborting.
+    # We do NOT execute the launcher in CI: it would open a JavaFX
+    # window and need a desktop session plus the same diag-driven
+    # exit machinery the gradle-run-smoke job exercises, and that
+    # path is already covered end-to-end by gradleRunSmoke. This job
+    # is the build-side regression net: did jlink succeed, did the
+    # launcher land in the right place.
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          submodules: false
+
+      - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: 26
+          cache: gradle
+
+      - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Build the Windows runtime image
+        shell: bash
+        run: ./gradlew --no-daemon :app:windowsRuntimeImage
+
+      - name: Verify image layout
+        shell: bash
+        run: |
+          test -f build/image-windows/bin/drydock.bat
+          test -d build/image-windows/runtime/bin
+          test -f build/image-windows/runtime/bin/java.exe
+          test -d build/image-windows/app
+          test -n "$(ls -A build/image-windows/app)"
+          echo "image layout OK: $(du -sh build/image-windows | cut -f1)"
+
+      - name: Upload image as a CI artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: drydock-windows-image
+          path: build/image-windows
+          retention-days: 7
