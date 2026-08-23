@@ -177,14 +177,25 @@ tasks.test {
     // first commit (and every production-path `git merge --no-ff`, which
     // writes a merge commit) before the behaviour under test runs -- turning
     // a host signing problem into a misleading, intermittent failure. Git's
+    // Global hooks are equally host-specific: a commit-msg hook may contact
+    // company services or wait for credentials even though the fixture is a
+    // disposable local repository. Replace the user's global config with an
+    // empty task-local file. This still permits tests to install repository
+    // hooks under .git/hooks when hook behaviour is what they exercise.
+    //
     // GIT_CONFIG_* env injection overrides file config (global/local) but is
     // itself overridden by an explicit `-c`, so it cannot mask a test that
-    // deliberately sets `commit.gpgsign`; no test here does. Set for the
-    // whole JVM, as above, so every spawned git inherits it.
+    // deliberately enables signing. Set for the whole JVM, as above, so
+    // every spawned git inherits it.
+    val isolatedGlobalGitConfig = temporaryDir.resolve("global-gitconfig")
+    environment("GIT_CONFIG_GLOBAL", isolatedGlobalGitConfig.absolutePath)
     environment("GIT_CONFIG_COUNT", "1")
     environment("GIT_CONFIG_KEY_0", "commit.gpgsign")
     environment("GIT_CONFIG_VALUE_0", "false")
-
+    doFirst {
+        isolatedGlobalGitConfig.parentFile.mkdirs()
+        isolatedGlobalGitConfig.writeText("")
+    }
 
     // Inputs for RuntimeImageModuleListTest: the packaged app jar, its runtime
     // classpath, and the convention-plugin source that declares the jlink
