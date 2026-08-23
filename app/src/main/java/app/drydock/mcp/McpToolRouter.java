@@ -161,8 +161,10 @@ public final class McpToolRouter {
                                 + "groups by file.",
                         JsonObject.empty()
                                 .put("scopeId", schemaString("Review scope handle."))
-                                .put("intents", schemaString("Array of {id, title, kind, risk, rationale, "
-                                        + "hunkIds, collapse?, autoApprove?}.")),
+                                .put("intents", schemaString("Array of {id, title, kind, risk, "
+                                        + "rationale, hunkIds, reads?, collapse?, autoApprove?}. "
+                                        + "reads names the intents this one is built on; drydock "
+                                        + "orders the rail by it and does not verify it.")),
                         "scopeId", "intents"),
                 descriptor("review_finding",
                         "Records findings against a scope. Idempotent on finding id: a re-run upserts, so "
