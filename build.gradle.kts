@@ -45,6 +45,26 @@ tasks.register("runtimeImageAllArches") {
     dependsOn(":app:runtimeImageAllArches")
 }
 
+// Windows runtime image alias: `./gradlew windowsRuntimeImage`. The real
+// task lives at :app:windowsRuntimeImage and is registered (by the
+// drydock.packaging plugin) only on non-macOS hosts. The alias follows
+// the same gating: registered only on non-macOS hosts, so on Mac neither
+// the alias nor the underlying task exists (and `./gradlew tasks` simply
+// does not list it), and on Windows both are registered together. A
+// runtime call on the wrong OS would otherwise fail with a confusing
+// "Task with name 'windowsRuntimeImage' not found" -- gating the
+// alias's registration is clearer.
+val isMacOsHostRoot = System.getProperty("os.name", "").let {
+    it.startsWith("Mac OS X") || it.startsWith("macOS")
+}
+if (!isMacOsHostRoot) {
+    tasks.register("windowsRuntimeImage") {
+        group = "distribution"
+        description = "Alias for :app:windowsRuntimeImage (Windows jlink runtime image + drydock.bat launcher)."
+        dependsOn(":app:windowsRuntimeImage")
+    }
+}
+
 // Plan section 6.3 also lists appImage / macApp / dmg as required
 // top-level command aliases. appImage/macApp are real (Stage 3, plan
 // section 23.4): a self-contained ad-hoc-signed .app bundle assembled by
