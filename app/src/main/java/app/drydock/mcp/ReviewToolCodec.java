@@ -258,6 +258,10 @@ final class ReviewToolCodec {
             throw new McpToolException("intents must be an array");
         }
         List<ReviewIntent> intents = new ArrayList<>();
+        // Provisional only: IntentGrouping.set re-assigns a dense 1..N over
+        // the order `reads` produces and discards whatever arrives here, so
+        // this numbering never reaches a rail. It is kept because a
+        // ReviewIntent has to carry SOME number to be constructed at all.
         int number = 1;
         for (JsonValue element : array.elements()) {
             if (!(element instanceof JsonObject obj)) {
@@ -275,10 +279,52 @@ final class ReviewToolCodec {
                     stringList(obj, "hunkIds"),
                     collapseFromJson(obj),
                     obj.get("autoApprove") instanceof JsonBoolean auto && auto.value(),
-                    stringList(obj, "reads")));
+                    readsFromJson(obj, id)));
         }
         checkReadsResolve(intents);
         return List.copyOf(intents);
+    }
+
+    /**
+     * One intent's {@code reads}, rejecting a malformed one rather than
+     * quietly reading it as an empty list.
+     *
+     * <p>Decoded here and not through {@link #stringList}, which answers
+     * {@code List.of()} for any non-array and drops any non-string element.
+     * That lenience predates this task and is shared with {@code hunkIds},
+     * where a dropped entry costs at worst one hunk's membership in a group
+     * a human can see and fix. It costs far more here: {@code
+     * "reads":"the-guard"} -- one dependency written without the brackets,
+     * which is the likeliest way to get this wrong -- would decode as
+     * "declared nothing", and the rail would then render the exact REVERSE of
+     * the order the agent asserted. With no diagnostic on any surface, and
+     * {@code reads} echoed on no outbound wire, the agent could not discover
+     * it had happened. Absent and broken must not look the same -- the same
+     * rule {@link app.drydock.review.Graphs#topologicalOrder} keeps for an
+     * edge pointing outside its nodes, and the reason {@link
+     * #checkReadsResolve} exists at all.</p>
+     *
+     * <p>An explicit {@code null} is absent, not broken: it is how several
+     * clients spell an omitted optional field.</p>
+     */
+    private static List<String> readsFromJson(JsonObject obj, String id) throws McpToolException {
+        JsonValue raw = obj.get("reads");
+        if (raw == null || raw instanceof JsonValue.JsonNull) {
+            return List.of();
+        }
+        if (!(raw instanceof JsonArray array)) {
+            throw new McpToolException("intent '" + id + "' has a reads that is not an array; "
+                    + "one dependency is [\"other-id\"], not \"other-id\"");
+        }
+        List<String> reads = new ArrayList<>();
+        for (JsonValue element : array.elements()) {
+            if (!(element instanceof JsonString read)) {
+                throw new McpToolException("intent '" + id + "' has a reads entry that is not a "
+                        + "string; every entry names an intent id in this call");
+            }
+            reads.add(read.value());
+        }
+        return List.copyOf(reads);
     }
 
     /**

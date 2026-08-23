@@ -6,7 +6,10 @@ import app.drydock.review.ReviewIntent;
 import app.drydock.state.json.JsonParser;
 import app.drydock.state.json.JsonValue;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
@@ -157,6 +160,99 @@ class ReviewIntentReadsTest {
 
         assertEquals(List.of("b"), intents.get(0).reads());
         assertEquals(List.of(), intents.get(1).reads());
+    }
+
+    /**
+     * A reads that is not an array of strings is rejected, not read as an
+     * empty list. Every shape here would otherwise decode as "declared
+     * nothing" and put the rail in the exact reverse of the asserted order,
+     * with no diagnostic anywhere and nothing echoed back to notice it by --
+     * the bare string most of all, which is simply one dependency written
+     * without the brackets.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "\"the-guard\"",            // one dependency, no brackets
+            "{\"0\":\"the-guard\"}",    // an object rather than an array
+            "[7]",                      // an array of the wrong element type
+            "[\"the-guard\",5]",        // one good entry, one not
+            "[null]",                   // a null where an id belongs
+    })
+    void aMalformedReadsRejectsTheBatchRatherThanDecodingToNothing(String malformed) {
+        McpToolException thrown = assertThrows(McpToolException.class,
+                () -> ReviewToolCodec.intentsFromJson(parse("""
+                        [{"id":"uses-it","title":"A","hunkIds":[],"reads":%s},
+                         {"id":"the-guard","title":"B","hunkIds":[]}]
+                        """.formatted(malformed))));
+
+        assertTrue(thrown.getMessage().contains("'uses-it'"), thrown.getMessage());
+        assertTrue(thrown.getMessage().contains("reads"), thrown.getMessage());
+    }
+
+    /**
+     * An explicit null is absent, not broken -- it is how several clients
+     * spell an omitted optional field, and refusing a batch over it would
+     * reject a grouping that declared nothing wrong.
+     */
+    @Test
+    void anExplicitNullReadsIsTheSameAsNoReadsAtAll() throws Exception {
+        List<ReviewIntent> intents = ReviewToolCodec.intentsFromJson(parse("""
+                [{"id":"a","title":"A","hunkIds":[],"reads":null}]
+                """));
+
+        assertEquals(List.of(), intents.get(0).reads());
+    }
+
+    /**
+     * The same grouping ordered twice comes out identical -- the branch's
+     * determinism bar (SectionDeterminismTest), which nothing covered for the
+     * reads path.
+     *
+     * <p>Twenty intents, ids ANTI-correlated with array position: {@code i19}
+     * arrives first and {@code i00} last, while the declared chain makes the
+     * only correct order {@code i00..i19}. A fixture where array order and
+     * the right answer agree cannot tell a stable ordering from no ordering
+     * at all, and one small enough to come out right by accident cannot tell
+     * either.</p>
+     */
+    @Test
+    void theSameGroupingOrdersIdenticallyEveryTime() {
+        List<ReviewIntent> supplied = new ArrayList<>();
+        for (int n = CHAIN_LENGTH - 1; n >= 0; n--) {
+            supplied.add(intent(chainId(n), "Intent " + n,
+                    n == 0 ? List.of() : List.of(chainId(n - 1))));
+        }
+        List<String> foundationFirst = new ArrayList<>();
+        for (int n = 0; n < CHAIN_LENGTH; n++) {
+            foundationFirst.add(chainId(n));
+        }
+
+        IntentGrouping grouping = new IntentGrouping();
+        grouping.set("scope-1", supplied);
+        List<String> first = ids(grouping);
+        // Set AGAIN, on the same instance: a grouping is replaced in place far
+        // more often than a fresh one is built, and that is the path that
+        // could carry state from the previous ordering.
+        grouping.set("scope-1", supplied);
+        List<String> second = ids(grouping);
+        IntentGrouping fresh = new IntentGrouping();
+        fresh.set("scope-1", supplied);
+
+        assertEquals(foundationFirst, first);
+        assertEquals(first, second);
+        assertEquals(first, ids(fresh));
+    }
+
+    private static final int CHAIN_LENGTH = 20;
+
+    /** Fixed width, so id order and array order stay genuinely opposed. */
+    private static String chainId(int n) {
+        return "i%02d".formatted(n);
+    }
+
+    private static List<String> ids(IntentGrouping grouping) {
+        return grouping.intentsFor("scope-1", emptyDiff(), Optional.empty())
+                .stream().map(ReviewIntent::id).toList();
     }
 
     private static List<String> titles(IntentGrouping grouping) {
