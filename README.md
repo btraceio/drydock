@@ -1,11 +1,12 @@
 # Drydock
 
-Drydock is a macOS desktop application for managing local Git repositories and
+Drydock is a desktop application for managing local Git repositories and
 the [`claude`](https://docs.claude.com/en/docs/claude-code) CLI sessions you run
 against them. Each repository gets a sidebar entry with live branch and
 dirty-state indicators; each Claude session runs in an embedded terminal inside
-the app — a real [Ghostty](https://ghostty.org) terminal surface, not a
-reimplementation and with no external multiplexer (`tmux`, `screen`) involved.
+the app — a real [Ghostty](https://ghostty.org) terminal surface on macOS, or
+JediTermFX + ConPTY on Windows, with no external multiplexer (`tmux`, `screen`)
+involved.
 
 The goal is a single window where you can see every repo you work in, start or
 resume a `claude` session per repo in its own tab, and keep an eye on session
@@ -34,22 +35,15 @@ activity, Git status, and your changes without leaving the app.
   badges are unavailable. Requires `git` and `claude` on the host's
   non-interactive PATH, a POSIX login shell, and an already-accepted host key.
 
-Drydock is macOS-only and runs natively on both **Apple Silicon (`arm64`)** and
-**Intel (`x86_64`)**.
-
-### Windows
-
-Windows is not supported yet. The macOS terminal embeds the full `libghostty`
-(Metal renderer + terminal surface) as a native AppKit view — neither Metal nor
-AppKit exists on Windows, and upstream Ghostty's Windows support has no firm
-timeline. A cross-platform backend based on [JediTermFX](https://github.com/techsenger/jeditermfx)
-+ [pty4j](https://github.com/JetBrains/pty4j) (a pure-JavaFX terminal widget
-over a ConPTY-backed PTY) has been **spiked and verified on macOS**; the full
-integration into the app plus the `runtimeImageWindows` packaging task and
-these instructions are the follow-up. See
-[`docs/windows-terminal-spike.md`](docs/windows-terminal-spike.md) for the
-findings, the constraint, the integration plan, and how to run the spike
-(`./gradlew jeditermSpike`).
+Drydock runs natively on both **Apple Silicon (`arm64`)** and **Intel
+(`x86_64`)** macOS, and on **Windows (x86_64)** with the [JediTermFX +
+pty4j](https://github.com/techsenger/jeditermfx) terminal backend. The
+macOS build embeds the full `libghostty` (Metal renderer + terminal
+surface) and is the primary supported target; the Windows build uses
+JediTermFX + ConPTY and is functional for everyday work, with the
+limitations documented in
+[`docs/windows-terminal-spike.md`](docs/windows-terminal-spike.md).
+Install/run guide for Windows: [`docs/windows.md`](docs/windows.md).
 
 ## Requirements
 
