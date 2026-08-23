@@ -957,6 +957,7 @@ public final class SessionReviewView extends BorderPane {
         headerContext.setText(headerContextFor(scope));
         intentIndex = 0;
         pathIndex = 0;
+        forgetPathCursorHistory();
         // Fallback intent ids are NOT scope-namespaced ("auto:change:src" is
         // just (kind, directory)), so two different scopes with a similar
         // layout can mint the identical id -- leaving this set across a
@@ -1898,6 +1899,7 @@ public final class SessionReviewView extends BorderPane {
         pathMode = !pathMode;
         if (pathMode) {
             pathIndex = 0;
+            forgetPathCursorHistory();
             selectedScope().ifPresent(scope -> loadedDiff().ifPresent(diff ->
                     requestGraph(scope.id(), diff)));
         }
@@ -1995,6 +1997,33 @@ public final class SessionReviewView extends BorderPane {
                 return;
             }
         }
+    }
+
+    /**
+     * Drops what {@link #reanchorPathCursor} re-anchors against, wherever the
+     * cursor is being deliberately put back to the top.
+     *
+     * <p>Without this, the re-anchor fought the reset. {@link
+     * #refreshReviewState} writes {@link #lastPathSteps} only inside its
+     * {@code pathMode} branch, so a path that changed while the reader was
+     * OUT of PATH mode -- any re-diff does it, since {@link #requestGraph} is
+     * kicked from diff resolution regardless of mode, and so does a fan-in
+     * scan landing -- left that memory stale. Pressing {@code p} then set
+     * {@code pathIndex = 0} and the very next refresh moved it straight back
+     * to wherever the remembered hunk had gone, so the cursor sat on row 2
+     * while row 1 was labelled START HERE.
+     *
+     * <p><strong>This is the same defect the re-anchor exists to prevent,
+     * one gesture over</strong> -- a cursor whose position stops matching
+     * what the rail says. Which is the point: re-anchoring is right when the
+     * ground moves UNDER a reader who is standing still, and wrong when the
+     * reader has just asked to start again. The two cases are told apart by
+     * who moved, not by what changed, so every deliberate reset says so
+     * here rather than each one being remembered separately.</p>
+     */
+    private void forgetPathCursorHistory() {
+        lastPathSteps = List.of();
+        lastPathScopeId = null;
     }
 
     /**
@@ -2441,8 +2470,13 @@ public final class SessionReviewView extends BorderPane {
                 intentIndex = intents().indexOf(counted.get(i));
                 refreshReviewState();
                 revealCurrentIntent();
-                verdictBar.showSubmitRefused(
-                        "an intent still needs a verdict (approve or request changes); jumped to it");
+                // Short, with the rest on hover: at the code column's floor
+                // the footer has about 290px for a refusal, and the sentence
+                // this used to be asked for 338 -- so it was elided to
+                // "an intent still needs a verdict …" mid-word, which is
+                // the truncation ReviewVerdictBarFitTest exists to stop.
+                verdictBar.showSubmitRefused("a verdict is missing; jumped to it",
+                        "Approve it, or request changes on it, before submitting the review.");
                 return;
             }
             // A stale verdict does not count toward "everything settled"

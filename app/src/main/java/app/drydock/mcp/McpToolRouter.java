@@ -87,6 +87,13 @@ public final class McpToolRouter {
      * genuinely new grouping, and a repeated read of the same one does not
      * pay twice. Concurrent because MCP calls arrive on the server's threads,
      * not on one.</p>
+     *
+     * <p>Unbounded, and blind to the worktree changing under a diff it has
+     * already grouped -- deliberately, because both are true of the board's
+     * own graph and fan-in caches too, and one entry per live scope with a
+     * new diff instance on every re-read is not a leak worth a second
+     * eviction policy. If that ever stops holding it stops holding in both
+     * places at once, which is the point of matching them.</p>
      */
     private final Map<String, SectionsCacheEntry> sectionsByScope = new ConcurrentHashMap<>();
 

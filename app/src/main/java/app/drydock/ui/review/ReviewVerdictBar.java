@@ -101,6 +101,13 @@ final class ReviewVerdictBar extends VBox {
     private final Button askAgentButton = new Button("Ask the agent to fix it");
     private final Button undoButton = new Button("change");
     private final Label settledLabel = new Label();
+    /**
+     * Why approval is refused. Shortened to its glyph by {@link
+     * #fitActionRow} when the row cannot hold the sentence; the tooltip
+     * carries the whole thing either way.
+     */
+    private static final String BLOCKING_REFUSAL = "⚠ a blocking finding is still open";
+
     private final Label refusalLabel = new Label();
     /**
      * Why an "Ask the agent to fix it" click handed nothing over -- a THIRD
@@ -139,6 +146,9 @@ final class ReviewVerdictBar extends VBox {
     private final Label submitRefusalLabel = new Label();
     private final Button submitButton = new Button("Submit review ⏎");
     private final HBox actionRow = new HBox(10);
+    /** Fields, not locals: {@link #fitFooter} has to measure this row after construction. */
+    private final HBox footer = new HBox(10);
+    private final Region footerSpacer = new Region();
 
     private ReviewIntent intent;
     /**
@@ -263,6 +273,14 @@ final class ReviewVerdictBar extends VBox {
 
         settledLabel.getStyleClass().add("review-verdict-settled");
         refusalLabel.getStyleClass().add("review-verdict-refusal");
+        // Never squeezed: the intent TITLE is the one thing in this row
+        // allowed to give way (see intentLabel's own minWidth(0)), and
+        // without this the row took its last three pixels out of the
+        // refusal instead -- eliding even the bare glyph, which is the one
+        // character that cannot be spared.
+        refusalLabel.setMinWidth(Region.USE_PREF_SIZE);
+        refusalLabel.setTooltip(new Tooltip("An open finding of this intent blocks approval. "
+                + "Resolve it, or lower its severity, in the findings margin."));
         refusalLabel.setVisible(false);
         refusalLabel.setManaged(false);
 
@@ -277,7 +295,13 @@ final class ReviewVerdictBar extends VBox {
         progressTrack.setMinWidth(120);
         progressTrack.setMaxWidth(120);
 
-        hintLabel.getStyleClass().add("review-verdict-hint");
+        // Both classes, the same split submitRefusalLabel uses: the shared
+        // one for the visual treatment, its own so a test can find THIS
+        // label rather than navHint, which shares the first. A test that
+        // could not tell them apart is why fitFooter shipped ungated on
+        // width -- theHintIsBackAsSoonAsThereIsRoomForIt was matching
+        // navHint's text and never looked at this label at all.
+        hintLabel.getStyleClass().addAll("review-verdict-hint", "review-verdict-shortcut-hint");
         // Both classes: "review-verdict-refusal" for the shared visual
         // treatment, "review-verdict-submit-refusal" purely so a test can
         // find THIS label rather than the blocking-finding one that shares
@@ -289,9 +313,8 @@ final class ReviewVerdictBar extends VBox {
         submitButton.setTooltip(new Tooltip("Submit the review (⏎)"));
         submitButton.setOnAction(e -> host.submit());
 
-        Region footerSpacer = new Region();
         HBox.setHgrow(footerSpacer, Priority.ALWAYS);
-        HBox footer = new HBox(10, progressLabel, progressBar, hintLabel, askRefusalLabel,
+        footer.getChildren().setAll(progressLabel, progressBar, hintLabel, askRefusalLabel,
                 submitRefusalLabel, footerSpacer, submitButton);
         footer.setAlignment(Pos.CENTER_LEFT);
         footer.getStyleClass().add("review-verdict-footer");
@@ -411,10 +434,29 @@ final class ReviewVerdictBar extends VBox {
      * looking broken. Cleared by the next {@link #update}.
      */
     void showSubmitRefused(String reason) {
+        showSubmitRefused(reason, reason);
+    }
+
+    /**
+     * As above, with a longer explanation on hover -- the same split {@link
+     * #showAskRefused} makes, and for the same measured reason: the footer
+     * has about 290px for a refusal at the code column's floor, and a
+     * sentence longer than that is elided mid-word. {@code reason} is what
+     * has to fit; {@code detail} is what the ellipsis would have taken.
+     */
+    void showSubmitRefused(String reason, String detail) {
         submitRefusalLabel.setText("⚠ " + reason);
+        submitRefusalLabel.setTooltip(new Tooltip(detail));
         submitRefusalLabel.setVisible(true);
         submitRefusalLabel.setManaged(true);
         submitButton.pseudoClassStateChanged(javafx.css.PseudoClass.getPseudoClass("refused"), true);
+        // The two footer refusals are MUTUALLY EXCLUSIVE. Raised together --
+        // submit refuses, the reader then clicks "Ask the agent to fix it" on
+        // the same intent, and neither path calls update() -- they and the
+        // Submit button share one row's width three ways, and the primary
+        // action reads "Sub…". They also describe one sequence of clicks, so
+        // the newer one is the one the reader is owed.
+        clearAskRefused();
         fitFooter();
     }
 
@@ -448,6 +490,8 @@ final class ReviewVerdictBar extends VBox {
         askRefusalLabel.setManaged(true);
         askAgentButton.pseudoClassStateChanged(
                 javafx.css.PseudoClass.getPseudoClass("refused"), true);
+        // See showSubmitRefused: one refusal in this footer at a time.
+        clearSubmitRefused();
         fitFooter();
     }
 
@@ -461,7 +505,8 @@ final class ReviewVerdictBar extends VBox {
 
     /**
      * The footer's own version of {@link #fitActionRow}'s trade: while a
-     * refusal is showing, the standing hint gives up its room to it.
+     * refusal is showing AND the row is too tight to hold both, the standing
+     * hint gives up its room to it.
      *
      * <p>Measured, not assumed. At the {@code CODE_MIN_WIDTH} floor the
      * footer had 264px for a refusal that asked for 319 -- and taking it
@@ -469,11 +514,41 @@ final class ReviewVerdictBar extends VBox {
      * unreadable control for another. "press ? for shortcuts" is a standing
      * reminder; a refusal is about the click the reader just made, and it
      * outranks it for as long as it is up.</p>
+     *
+     * <p><strong>Gated on the WIDTH, not merely on the refusal</strong>, the
+     * same way {@link #fitActionRow} gates {@code navHint}. The first version
+     * dropped the hint whenever a refusal showed, at any width at all -- so a
+     * 1400px bar with hundreds of pixels to spare still hid it, which is a
+     * cost paid by a layout that was never short of room.</p>
      */
     private void fitFooter() {
+        double width = footer.getWidth();
         boolean refusing = askRefusalLabel.isManaged() || submitRefusalLabel.isManaged();
-        hintLabel.setVisible(!refusing);
-        hintLabel.setManaged(!refusing);
+        boolean room = !refusing || width <= 0 || width - footerWidthWithoutHint() >= hintLabel.prefWidth(-1);
+        hintLabel.setVisible(room);
+        hintLabel.setManaged(room);
+    }
+
+    /** What the footer needs with the hint dropped -- see {@link #fitFooter}. */
+    private double footerWidthWithoutHint() {
+        double needed = footer.getInsets().getLeft() + footer.getInsets().getRight();
+        int slots = 0;
+        for (javafx.scene.Node child : footer.getChildren()) {
+            if (child == hintLabel || (!child.isManaged() && child != hintLabel)) {
+                continue;
+            }
+            slots++;
+            if (child == footerSpacer) {
+                continue;
+            }
+            // The LARGER of pref and min. The progress bar's 120px floor is a
+            // CSS -fx-min-width, and its preferred width is the fill's ~17px
+            // -- so measuring pref alone under-counts this row by a hundred
+            // pixels and concludes there is room for a hint there is not.
+            needed += Math.max(child.prefWidth(-1), child.minWidth(-1));
+        }
+        // +1 slot for the hint itself, whose room is what this is deciding.
+        return needed + footer.getSpacing() * Math.max(0, slots);
     }
 
     private void clearSubmitRefused() {
@@ -539,7 +614,7 @@ final class ReviewVerdictBar extends VBox {
                 requestChangesButton.setTooltip(
                         new Tooltip("Request changes on this " + unit + " (r)"));
             }
-            refusalLabel.setText("⚠ a blocking finding is still open");
+            refusalLabel.setText(BLOCKING_REFUSAL);
             refusalLabel.setVisible(blocked);
             refusalLabel.setManaged(blocked);
             approveButton.pseudoClassStateChanged(
@@ -586,6 +661,12 @@ final class ReviewVerdictBar extends VBox {
         // layout pass is the earliest point the measurements are real, and
         // running here re-checks after a font or density change too.
         fitActionRow(actionRow.getWidth());
+        // The footer's own fit, for the identical reason and at the identical
+        // moment: showAskRefused/showSubmitRefused run outside a layout pass,
+        // where footer.getWidth() is whatever the LAST pass left (0 before
+        // the first), so the decision they make there is provisional. This is
+        // the one that sticks.
+        fitFooter();
         super.layoutChildren();
     }
 
@@ -593,6 +674,37 @@ final class ReviewVerdictBar extends VBox {
         if (width <= 0) {
             return;
         }
+        // The blocking refusal shortens to its glyph before the nav hint is
+        // dropped, because it cannot be dropped: unlike the hint it is the
+        // reason a control the reader is pressing refuses to work.
+        //
+        // Measured: at the CODE_MIN_WIDTH floor this row has about 25px left
+        // once its four actions have taken their widths, and the sentence
+        // asks for 146 -- so it was elided to "⚠ a bl…", which says nothing
+        // the ⚠ alone does not. The full text stays on hover either way, so
+        // the short form loses no information a reader cannot reach.
+        if (refusalLabel.isManaged()) {
+            refusalLabel.setText(BLOCKING_REFUSAL);
+            if (actionRowWidth(width, null) > width) {
+                refusalLabel.setText("⚠");
+            }
+        }
+        boolean room = width - actionRowWidth(width, navHint) >= navHint.prefWidth(-1);
+        navHint.setVisible(room);
+        navHint.setManaged(room);
+    }
+
+    /**
+     * What the action row needs at its current contents, counting {@code
+     * excluded} (when given) as taking no room of its own -- {@code navHint}
+     * for the decision about whether to keep it, nothing for the decision
+     * above it.
+     *
+     * <p>{@code navHint} is measured even while it is unmanaged so the
+     * decision does not oscillate: dropping it would otherwise free the room
+     * that immediately justifies bringing it back.</p>
+     */
+    private double actionRowWidth(double width, javafx.scene.Node excluded) {
         double needed = actionRow.getInsets().getLeft() + actionRow.getInsets().getRight()
                 + INTENT_LABEL_MIN;
         int slots = 0;
@@ -601,15 +713,16 @@ final class ReviewVerdictBar extends VBox {
                 continue;
             }
             slots++;
-            if (child == actionSpacer || child == navHint || child == intentLabel) {
+            if (child == actionSpacer || child == intentLabel || child == excluded
+                    || child == navHint) {
                 continue;
             }
-            needed += child.prefWidth(-1);
+            needed += Math.max(child.prefWidth(-1), child.minWidth(-1));
         }
-        needed += actionRow.getSpacing() * Math.max(0, slots - 1);
-        boolean room = width - needed >= navHint.prefWidth(-1);
-        navHint.setVisible(room);
-        navHint.setManaged(room);
+        if (excluded != navHint) {
+            needed += navHint.prefWidth(-1);
+        }
+        return needed + actionRow.getSpacing() * Math.max(0, slots - 1);
     }
 
     /** Test-only: whether approval is currently being refused. */
