@@ -251,6 +251,127 @@ class McpToolRouterRecheckTest extends McpRouterFixture {
         assertEquals(1, num(response, "markedStale"));
     }
 
+    // ---- a mark must carry its reason ---------------------------------------
+
+    /**
+     * A staleness signal asserted with no reason is the reflexive click the
+     * whole asymmetry exists to avoid -- and it is what a renderer could only
+     * draw as a blank warning. Refused whether the field is missing outright
+     * or present and empty: both leave the human with a hunk to re-read and
+     * nothing saying why.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "",                                             // no why at all
+            ",\"why\":\"\"",                                 // present and empty
+            ",\"why\":\"   \"",                              // present and blank
+    })
+    void anAffectedMarkWithNoReasonRejectsTheBatch(String why) {
+        approve(widgetDigest(), "base-1");
+
+        McpToolException thrown = assertThrows(McpToolException.class, () -> recheck("""
+                [{"hunkId":"%s","affected":true%s}]
+                """.formatted(WIDGET_HUNK, why)));
+
+        assertTrue(thrown.getMessage().contains(WIDGET_HUNK), thrown.getMessage());
+        assertTrue(context.assessments.isEmpty());
+    }
+
+    /**
+     * An {@code affected:false} may omit it. Saying "I looked and it does not
+     * matter" changes nothing a human has to act on, so there is nothing for a
+     * reason to justify.
+     */
+    @Test
+    void anUnaffectedAssessmentMayOmitItsWhy() throws Exception {
+        approve(widgetDigest(), "base-1");
+
+        recheck("""
+                [{"hunkId":"%s","affected":false}]
+                """.formatted(WIDGET_HUNK));
+
+        assertEquals("", context.assessments.get(0).why());
+    }
+
+    // ---- absent and broken must not look the same ---------------------------
+
+    /**
+     * The rule this whole surface is drawn around, enforced for {@code reads}
+     * one task ago and now here. Every shape below would otherwise decode as
+     * {@code false} -- "the agent looked and found nothing" -- which is the
+     * one answer this tool must never manufacture. {@code "true"} from a
+     * stringifying client is the likeliest of them, and this codebase already
+     * accommodates such a client in {@code optionalIntArg}.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "\"true\"",                 // a stringifying client
+            "1",                        // a truthy number
+            "\"yes\"",
+            "{\"value\":true}",
+            "[true]",
+    })
+    void aNonBooleanAffectedRejectsTheBatch(String malformed) {
+        approve(widgetDigest(), "base-1");
+
+        McpToolException thrown = assertThrows(McpToolException.class, () -> recheck("""
+                [{"hunkId":"%s","affected":%s,"why":"resolve() now returns nullptr"}]
+                """.formatted(WIDGET_HUNK, malformed)));
+
+        assertTrue(thrown.getMessage().contains(WIDGET_HUNK), thrown.getMessage());
+        // Named as a TYPE problem: with affected:true a lenient decode would
+        // land on the mark-needs-a-reason refusal instead, and a test asserting
+        // only "it threw" could not tell the two apart.
+        assertTrue(thrown.getMessage().contains("not a boolean"), thrown.getMessage());
+        assertTrue(context.assessments.isEmpty());
+    }
+
+    /**
+     * A why of the wrong type is broken too, not an empty reason.
+     *
+     * <p>Sent with {@code affected:false} deliberately. Under {@code
+     * affected:true} the mark-needs-a-reason refusal fires on the empty string
+     * a lenient decode produces, so the batch is rejected either way and the
+     * test cannot tell a type check from a blank check -- it would pass with
+     * the type check deleted. With {@code affected:false} nothing else
+     * refuses, so only the type check can.</p>
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "{\"text\":\"the base change is in an unrelated subsystem\"}",
+            "7",
+            "[\"the base change is in an unrelated subsystem\"]",
+    })
+    void aNonStringWhyRejectsTheBatch(String malformed) {
+        approve(widgetDigest(), "base-1");
+
+        McpToolException thrown = assertThrows(McpToolException.class, () -> recheck("""
+                [{"hunkId":"%s","affected":false,"why":%s}]
+                """.formatted(WIDGET_HUNK, malformed)));
+
+        assertTrue(thrown.getMessage().contains(WIDGET_HUNK), thrown.getMessage());
+        assertTrue(thrown.getMessage().contains("not a string"), thrown.getMessage());
+        assertTrue(context.assessments.isEmpty());
+    }
+
+    /**
+     * An explicit {@code null} stays ABSENT rather than broken -- it is how
+     * several clients spell an omitted optional field, and refusing over it
+     * would reject a recheck that declared nothing wrong.
+     */
+    @Test
+    void anExplicitNullAffectedAndWhyAreAbsentNotBroken() throws Exception {
+        approve(widgetDigest(), "base-1");
+
+        JsonValue response = recheck("""
+                [{"hunkId":"%s","affected":null,"why":null}]
+                """.formatted(WIDGET_HUNK));
+
+        assertEquals(0, num(response, "markedStale"));
+        assertFalse(context.assessments.get(0).affected());
+        assertEquals("", context.assessments.get(0).why());
+    }
+
     // ---- ruling 2: why is agent text that gets rendered ----------------------
 
     /**

@@ -1,5 +1,7 @@
 package app.drydock.review;
 
+import app.drydock.state.json.JsonParser;
+import app.drydock.state.json.JsonValue;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -132,6 +134,29 @@ class RecheckAsymmetryTest {
         assertEquals(1, reloaded.size());
         assertFalse(reloaded.get(0).affected());
         assertEquals("unrelated subsystem", reloaded.get(0).why());
+    }
+
+    /**
+     * The schema version the store WRITES is 5.
+     *
+     * <p>Pinned on the constant's actual effect, because the bump is the only
+     * thing that tells a v4 file from a v5 one: without an assertion the
+     * constant can be reverted and every other test on this branch still
+     * passes, which the reviewer demonstrated by doing exactly that.</p>
+     */
+    @Test
+    void theWrittenSchemaVersionIsFive() throws IOException {
+        Path file = Files.createTempDirectory("drydock-recheck").resolve("annotations.json");
+        AnnotationStore store = new AnnotationStore(file);
+        store.putAssessment(new RecheckAssessment("scope-1", "digest-1", "base-1", "base-2",
+                true, "why", Instant.EPOCH));
+        store.flushPendingSaves();
+
+        JsonValue root = JsonParser.parse(Files.readString(file, StandardCharsets.UTF_8));
+        assertEquals(5, ((JsonValue.JsonNumber) ((JsonValue.JsonObject) root).get("schemaVersion"))
+                        .asInt(),
+                "persisting a new assessments array is a schema change; without the bump a v4 "
+                        + "file and a v5 file are indistinguishable");
     }
 
     /**

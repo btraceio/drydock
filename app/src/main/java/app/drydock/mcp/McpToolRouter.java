@@ -195,16 +195,19 @@ public final class McpToolRouter {
                         JsonObject.empty().put("scopeId", schemaString("Review scope handle.")),
                         "scopeId"),
                 descriptor("review_recheck",
-                        "Assesses whether a base move still leaves approved hunks valid. "
+                        "Assesses whether a base move still leaves already-settled hunks valid. "
                                 + "affected=true marks them stale; affected=false is ADVICE and "
-                                + "never clears a human's approval. Drydock derives which base "
+                                + "never clears a human's verdict. Drydock derives which base "
                                 + "move each hunk is being asked about -- the base its own verdict "
                                 + "was recorded against, against the scope's base now -- so a hunk "
                                 + "with no verdict has nothing to recheck and is refused.",
                         JsonObject.empty()
                                 .put("scopeId", schemaString("Review scope handle."))
                                 .put("assessments", schemaString("Array of {hunkId, affected, why}. "
-                                        + "hunkId is a hunk id from review_scope.")),
+                                        + "hunkId is a hunk id from review_scope; affected is a "
+                                        + "real boolean, not \"true\"; why is REQUIRED whenever "
+                                        + "affected is true -- it is the reason a human is shown "
+                                        + "for re-reading the hunk.")),
                         "scopeId", "assessments"),
                 descriptor("worktree_create",
                         "Creates a worktree in the caller's repository: a new branch by default, or a "
