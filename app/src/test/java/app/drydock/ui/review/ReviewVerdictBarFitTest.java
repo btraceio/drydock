@@ -1,5 +1,6 @@
 package app.drydock.ui.review;
 
+import app.drydock.ui.TestStages;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewVerdict;
 
@@ -8,7 +9,6 @@ import javafx.scene.control.Button;
 import javafx.scene.Node;
 import javafx.scene.control.Label;
 import javafx.stage.Stage;
-import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.testfx.framework.junit5.ApplicationTest;
@@ -53,23 +53,15 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
         scene.getStylesheets().addAll(
                 getClass().getResource("/app/drydock/ui/app.css").toExternalForm(),
                 getClass().getResource("/app/drydock/ui/theme-dark.css").toExternalForm());
-        stage.setScene(scene);
-        stage.show();
+        TestStages.show(stage, scene);
         // The stage outlives the test class, so a scene built at the floor
         // width still comes up as wide as whatever ran before it left it --
         // under which every assertion here passes without measuring anything.
         this.stage = stage;
-        sharedStage = stage;
         atTheFloor();
     }
 
     private Stage stage;
-
-    /**
-     * The SHARED primary stage, so the class can hand it back at a normal
-     * size -- see {@link #unpoisonTheSharedStage}.
-     */
-    private static Stage sharedStage;
 
     /** Whether the stub host's hand-off succeeds; false drives the refusal. */
     private boolean askSucceeds = true;
@@ -81,27 +73,16 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
     }
 
     /**
-     * Every test here deliberately leaves the stage at the code column's
-     * floor, and TestFX's primary stage outlives the CLASS -- so the next
-     * class in this JVM built its 1400x900 scene inside a 560x200 window,
-     * its diff column rendered no rows, and its clicks reported "no
-     * clickable gutter". Nothing in that failure names a width, which is why
-     * it reads as flakiness rather than as a leak.
-     *
-     * <p>Handing the stage back is this class's job, not the next class's:
-     * it is the one that took it.</p>
+     * Leaves the SHARED primary stage at the floor, deliberately, and that is
+     * now safe: every class whose rendering can observe an inherited size
+     * takes its own through {@link app.drydock.ui.TestStages#show}. Round 3
+     * tried the opposite -- handing the stage back at 1400 in an
+     * {@code @AfterAll} -- which merely moved the leak:
+     * {@code ReviewDiffColumnWidthTest}'s wrap assertion holds at an
+     * inherited 560 and INVERTS at an inherited 1400, so the "fix" broke it.
+     * A leaked size is a hazard whatever its value; the value was never the
+     * thing to get right.
      */
-    @AfterAll
-    static void unpoisonTheSharedStage() {
-        if (sharedStage == null) {
-            return;
-        }
-        WaitForAsyncUtils.waitForAsyncFx(5000, () -> {
-            sharedStage.setWidth(1400);
-            sharedStage.setHeight(900);
-        });
-    }
-
     private void atTheFloor() {
         interact(() -> {
             stage.setWidth(RailLayout.CODE_MIN_WIDTH);
@@ -290,6 +271,29 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
         assertFalse(refusalShowing("review-verdict-submit-refusal"),
                 "two refusals in one footer squeeze Submit to an ellipsis");
         assertNothingTruncated();
+    }
+
+    /**
+     * Round 4, item 2. Every refusal {@code submitReview} can raise, looped
+     * over the REAL production strings rather than a copy this file holds --
+     * a test that covers one of four instances of a defect class is how the
+     * other three ship, and three of these four were elided at the floor
+     * ({@code 'the diff is still loading; try again in a moment'} took 206 of
+     * 211px and cost {@code Submit} its last character).
+     */
+    @Test
+    void everySubmitRefusalFitsAtTheCodeColumnFloor() {
+        for (SessionReviewView.SubmitRefusal refusal : SessionReviewView.SUBMIT_REFUSALS) {
+            show(intent(2, "drydock/review · 4 files"), Optional.empty());
+            interact(() -> bar.showSubmitRefused(refusal.reason(), refusal.detail()));
+            WaitForAsyncUtils.waitForFxEvents();
+            interact(() -> bar.getScene().getRoot().layout());
+            WaitForAsyncUtils.waitForFxEvents();
+
+            assertTrue(refusalShowing("review-verdict-submit-refusal"),
+                    "'" + refusal.reason() + "' must be showing, or this measures nothing");
+            assertNothingTruncated();
+        }
     }
 
     /**

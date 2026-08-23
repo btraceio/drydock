@@ -1,5 +1,6 @@
 package app.drydock.ui.review;
 
+import app.drydock.ui.TestStages;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.review.AnnotationStatus;
@@ -75,20 +76,11 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
         scene.getStylesheets().addAll(
                 getClass().getResource("/app/drydock/ui/app.css").toExternalForm(),
                 getClass().getResource("/app/drydock/ui/theme-dark.css").toExternalForm());
-        stage.setScene(scene);
-        stage.show();
+        TestStages.show(stage, scene);
     }
 
     @AfterEach
     void tearDown() {
-        // The stage outlives this class, so a test that narrowed it hands
-        // every later one a window its own scene was never laid out for --
-        // which reads as "the click missed", not as "the width leaked".
-        interact(() -> {
-            view.getScene().getWindow().setWidth(1400);
-            view.getScene().getWindow().setHeight(900);
-        });
-        WaitForAsyncUtils.waitForFxEvents();
         diffService.close();
         host.store.close();
     }
@@ -650,6 +642,9 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
         assertTrue(got + 0.5 >= wanted, "'" + ((Label) label).getText() + "' got "
                 + Math.round(got) + " of " + Math.round(wanted) + "px at the "
                 + (int) RailLayout.CODE_MIN_WIDTH + "px floor");
+        // And it is the PRODUCTION string, not one this file keeps in step by
+        // hand -- which is what lets ReviewVerdictBarFitTest loop all four.
+        assertEquals("⚠ " + SessionReviewView.NEEDS_VERDICT.reason(), ((Label) label).getText());
     }
 
     private void clickAskAgent() {

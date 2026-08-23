@@ -1,5 +1,6 @@
 package app.drydock.ui.explorer;
 
+import app.drydock.ui.TestStages;
 import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
@@ -62,8 +63,7 @@ class SkimViewTest extends ApplicationTest {
         scene.getStylesheets().addAll(
                 SkimView.class.getResource("/app/drydock/ui/theme-dark.css").toExternalForm(),
                 SkimView.class.getResource("/app/drydock/ui/app.css").toExternalForm());
-        stage.setScene(scene);
-        stage.show();
+        TestStages.show(stage, scene);
     }
 
     private void show(Set<Integer> changed, Map<Integer, String> findings) {
