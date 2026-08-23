@@ -1,5 +1,6 @@
 package app.drydock.ui.review;
 
+import app.drydock.ui.TestStages;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.process.ProcessRunner;
@@ -126,20 +127,11 @@ class ReviewFanInPopoverTest extends ApplicationTest {
         scene.getStylesheets().addAll(
                 getClass().getResource("/app/drydock/ui/app.css").toExternalForm(),
                 getClass().getResource("/app/drydock/ui/theme-dark.css").toExternalForm());
-        stage.setScene(scene);
-        stage.show();
+        TestStages.show(stage, scene);
     }
 
     @AfterEach
     void tearDown() {
-        // theFanInReasonWrapsInsteadOfBeingCutToOneLine narrows the stage,
-        // and the stage outlives this class: left narrow, every later test
-        // in this JVM lays out against a window it never asked for.
-        interact(() -> {
-            view.getScene().getWindow().setWidth(1400);
-            view.getScene().getWindow().setHeight(900);
-        });
-        WaitForAsyncUtils.waitForFxEvents();
         interact(view::close);
         diffService.close();
         host.store.close();

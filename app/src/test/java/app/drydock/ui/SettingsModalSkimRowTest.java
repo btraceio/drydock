@@ -80,8 +80,7 @@ class SettingsModalSkimRowTest extends ApplicationTest {
         scene.getStylesheets().addAll(
                 SettingsModal.class.getResource("/app/drydock/ui/theme-dark.css").toExternalForm(),
                 SettingsModal.class.getResource("/app/drydock/ui/app.css").toExternalForm());
-        stage.setScene(scene);
-        stage.show();
+        TestStages.show(stage, scene);
     }
 
     @Test

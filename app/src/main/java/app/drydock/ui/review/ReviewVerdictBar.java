@@ -640,6 +640,15 @@ final class ReviewVerdictBar extends VBox {
      * it is the one thing on the bar stated nowhere else only in part: the
      * count repeats in the progress line and in the Submit button, and the
      * key it names lives in the shortcuts overlay.
+     *
+     * <p><strong>A reservation, not a floor.</strong> It is what {@link
+     * #actionRowWidth} sets aside when deciding what else fits; the layout
+     * never enforces it, because {@code intentLabel.setMinWidth(0)}
+     * deliberately lets the title be the thing that yields. At {@code
+     * CODE_MIN_WIDTH} with the four actions present the title measures 14px
+     * against this 96 -- and that is the design working, not failing. Making
+     * it a real floor would mean dropping an action button at that width,
+     * which is a decision about the bar, not a bug in this constant.</p>
      */
     private static final double INTENT_LABEL_MIN = 96;
 

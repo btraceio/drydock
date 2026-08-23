@@ -59,8 +59,7 @@ class OpenSessionTabReviewSubTabTest extends ApplicationTest {
     @Override
     public void start(Stage stage) {
         this.stage = stage;
-        stage.setScene(new Scene(new StackPane(), 200, 200));
-        stage.show();
+        TestStages.show(stage, new Scene(new StackPane(), 200, 200));
     }
 
     @AfterEach

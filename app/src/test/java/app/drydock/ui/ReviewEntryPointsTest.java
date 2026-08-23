@@ -104,8 +104,7 @@ class ReviewEntryPointsTest extends ApplicationTest {
         // without a count the row has no badge to click.
         sidebar.setOpenFindingsAt(path -> Optional.of(3));
 
-        stage.setScene(new Scene(new StackPane(sidebar), 420, 640));
-        stage.show();
+        TestStages.show(stage, new Scene(new StackPane(sidebar), 420, 640));
 
         repository = repositoryManager.addRepository(repoRoot).get(20, TimeUnit.SECONDS);
         session = sessionOnWorktree(repository, PrLink.of(PrState.OPEN, Optional.of(PR_NUMBER)));

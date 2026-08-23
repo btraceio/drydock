@@ -38,8 +38,7 @@ class HandoffBannerTest extends ApplicationTest {
     @Override
     public void start(Stage stage) {
         banner = new HandoffBanner();
-        stage.setScene(new Scene(new StackPane(banner), 800, 100));
-        stage.show();
+        TestStages.show(stage, new Scene(new StackPane(banner), 800, 100));
     }
 
     private static Optional<HandoffBrief> brief() {
