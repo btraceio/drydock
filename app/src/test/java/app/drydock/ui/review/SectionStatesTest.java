@@ -275,6 +275,108 @@ class SectionStatesTest {
                 sections.stateOf(board, board.sections().get(0)).staleness());
     }
 
+    // ---- an agent may add staleness, never take it away (spec 9.7) ----------
+
+    /**
+     * The blind spot {@link BaseMove} names in its own class comment: the
+     * intersection is file-level and lexical, so a base commit that changes
+     * behaviour without touching a file this section names reads as FRESH.
+     * An agent's {@code affected} recheck is the only thing that can close
+     * it, and this is the case where it has to.
+     */
+    @Test
+    void anAgentsAffectedRecheckMarksAMoveTheFileFilterDismissed() {
+        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of("docs/README.md")));
+        SectionStates.Board board = overlapping();
+        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
+        assess(GUARDS_H, true, "0".repeat(40));
+
+        assertEquals(SectionStates.Staleness.MOVED,
+                sections.stateOf(board, board.sections().get(0)).staleness());
+        assertEquals(0, sections.settledHunkCount(board),
+                "a hunk the agent marked must not count as settled either");
+    }
+
+    /**
+     * <strong>The asymmetry.</strong> The filter already found this move, and
+     * an agent saying "unaffected" must not take that back: an agent wrong
+     * THAT way leaves a human's approval standing over code nobody re-read,
+     * which is the outcome the whole reviewed-state model refuses. False and
+     * "never asked" are one answer here, deliberately.
+     */
+    @Test
+    void anAgentsUnaffectedRecheckDoesNotClearAMoveTheFilterFound() {
+        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
+        SectionStates.Board board = overlapping();
+        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
+        assess(GUARDS_H, false, "0".repeat(40));
+
+        assertEquals(SectionStates.Staleness.MOVED,
+                sections.stateOf(board, board.sections().get(0)).staleness());
+        assertEquals(0, sections.settledHunkCount(board),
+                "an agent's advice must not re-settle a hunk the base moved under");
+    }
+
+    /** Nor may it clear the weaker "cannot tell" the same way. */
+    @Test
+    void anAgentsUnaffectedRecheckDoesNotClearAnUnresolvableDelta() {
+        host.baseDelta = new BaseMove.Delta(true, new TreeSet<>());
+        SectionStates.Board board = overlapping();
+        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
+        assess(GUARDS_H, false, "0".repeat(40));
+
+        assertEquals(SectionStates.Staleness.UNKNOWN,
+                sections.stateOf(board, board.sections().get(0)).staleness());
+    }
+
+    /** An affected recheck DOES outrank "cannot tell": it only ever adds reading. */
+    @Test
+    void anAgentsAffectedRecheckOutranksAnUnresolvableDelta() {
+        host.baseDelta = new BaseMove.Delta(true, new TreeSet<>());
+        SectionStates.Board board = overlapping();
+        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
+        assess(GUARDS_H, true, "0".repeat(40));
+
+        assertEquals(SectionStates.Staleness.MOVED,
+                sections.stateOf(board, board.sections().get(0)).staleness());
+    }
+
+    /**
+     * An assessment is about one base PAIR. A recheck of an older move is not
+     * an answer about this one, and carrying it forward would be the agent
+     * answering something it was never asked.
+     */
+    @Test
+    void anAgentsRecheckOfADifferentBasePairIsNotConsulted() {
+        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of("docs/README.md")));
+        SectionStates.Board board = overlapping();
+        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
+        // Marked affected -- but about a move FROM a base this verdict was
+        // never judged against.
+        host.store.putAssessment(new app.drydock.review.RecheckAssessment(scope.id(),
+                digestOf(GUARDS_H), "9".repeat(40), host.baseCommit, true, "why", Instant.EPOCH));
+
+        assertEquals(SectionStates.Staleness.FRESH,
+                sections.stateOf(board, board.sections().get(0)).staleness());
+    }
+
+    /**
+     * A recheck cannot invent staleness where the base never moved. The
+     * agent's answer is consulted only once the verdict is already stale
+     * against the current base -- it widens what counts as a move that
+     * matters, it does not decide that one happened.
+     */
+    @Test
+    void anAgentsAffectedRecheckCannotStaleAVerdictAgainstTheCurrentBase() {
+        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
+        SectionStates.Board board = overlapping();
+        approve(GUARDS_H);
+        assess(GUARDS_H, true, host.baseCommit);
+
+        assertEquals(SectionStates.Staleness.FRESH,
+                sections.stateOf(board, board.sections().get(0)).staleness());
+    }
+
     /** One hunk known to have moved is the strongest thing true of the section. */
     @Test
     void aKnownMoveOutranksAnUnknownOne() {
@@ -576,6 +678,17 @@ class SectionStatesTest {
 
     private void approve(String file) {
         record(file, ReviewVerdict.Decision.APPROVED, host.baseCommit);
+    }
+
+    /**
+     * An agent's recheck of the move from {@code fromBase} to the scope's
+     * current base, as {@code review_recheck} records one -- against the
+     * hunk's content DIGEST, which is the only thing the board ever looks a
+     * recheck up by.
+     */
+    private void assess(String file, boolean affected, String fromBase) {
+        host.store.putAssessment(new app.drydock.review.RecheckAssessment(scope.id(),
+                digestOf(file), fromBase, host.baseCommit, affected, "why", Instant.EPOCH));
     }
 
     private void record(String file, ReviewVerdict.Decision decision, String base) {

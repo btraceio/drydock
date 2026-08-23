@@ -2051,6 +2051,12 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         }
 
         @Override
+        public boolean assessedAffected(ReviewScope scope, String hunkDigest,
+                                        String fromBase, String toBase) {
+            return annotationStore.assessedAffected(scope.id(), hunkDigest, fromBase, toBase);
+        }
+
+        @Override
         public void setResolved(ReviewScope scope, ReviewAnnotation finding, boolean resolved) {
             annotationStore.mutate(finding.key(), current -> current.withStatus(
                     resolved ? AnnotationStatus.RESOLVED : AnnotationStatus.OPEN));

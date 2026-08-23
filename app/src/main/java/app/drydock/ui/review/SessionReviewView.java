@@ -210,6 +210,25 @@ public final class SessionReviewView extends BorderPane {
          */
         BaseMove.Delta baseMove(ReviewScope scope, String recordedBase);
 
+        /**
+         * Whether an agent said, through {@code review_recheck}, that the move
+         * from {@code fromBase} to {@code toBase} undermines the approval on
+         * {@code hunkDigest} (spec §9.7).
+         *
+         * <p>Consulted only to ADD staleness. {@link BaseMove}'s intersection
+         * is file-level and lexical and names its own blind spot -- a base
+         * change that alters behaviour without touching a file this scope
+         * references -- and this is how that blind spot closes. The other
+         * direction does not exist: an agent's "unaffected" is advice, and a
+         * board that let it clear a verdict would leave a human's approval
+         * standing over code nobody re-read. So false and "never asked" are
+         * one answer here, deliberately.</p>
+         *
+         * <p>Keyed by the base PAIR, so a later base move is a new question
+         * rather than an old answer carried forward.</p>
+         */
+        boolean assessedAffected(ReviewScope scope, String hunkDigest, String fromBase, String toBase);
+
         /** Resolve / Reopen one finding. */
         void setResolved(ReviewScope scope, ReviewAnnotation finding, boolean resolved);
 

@@ -168,6 +168,27 @@ final class FakeMcpSessionContext implements McpSessionContext {
         return verdicts.stream().filter(verdict -> verdict.scopeId().equals(scopeId)).toList();
     }
 
+    /**
+     * What {@code scope.base()} RESOLVES to; a commit, not the ref name.
+     * Empty models a base git cannot resolve, which {@code review_recheck}
+     * refuses on rather than recording an assessment about a move nobody can
+     * name.
+     */
+    Optional<String> currentReviewBase = Optional.of("base-2");
+
+    /** Every assessment {@link #putAssessments} received, in arrival order. */
+    final List<app.drydock.review.RecheckAssessment> assessments = new ArrayList<>();
+
+    @Override
+    public Optional<String> currentReviewBase(app.drydock.review.ReviewScope scope) {
+        return currentReviewBase;
+    }
+
+    @Override
+    public void putAssessments(List<app.drydock.review.RecheckAssessment> newAssessments) {
+        assessments.addAll(newAssessments);
+    }
+
     @Override
     public boolean reviewSubmitted(String scopeId) {
         return submitted.contains(scopeId);

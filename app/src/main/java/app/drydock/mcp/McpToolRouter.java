@@ -11,6 +11,7 @@ import app.drydock.review.ChangeGraph;
 import app.drydock.review.IntentHunks;
 import app.drydock.review.OutOfDiffFanIn;
 import app.drydock.review.ReadingPath;
+import app.drydock.review.RecheckAssessment;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
@@ -193,6 +194,18 @@ public final class McpToolRouter {
                                 + "this before a re-run so settled findings are not re-flagged.",
                         JsonObject.empty().put("scopeId", schemaString("Review scope handle.")),
                         "scopeId"),
+                descriptor("review_recheck",
+                        "Assesses whether a base move still leaves approved hunks valid. "
+                                + "affected=true marks them stale; affected=false is ADVICE and "
+                                + "never clears a human's approval. Drydock derives which base "
+                                + "move each hunk is being asked about -- the base its own verdict "
+                                + "was recorded against, against the scope's base now -- so a hunk "
+                                + "with no verdict has nothing to recheck and is refused.",
+                        JsonObject.empty()
+                                .put("scopeId", schemaString("Review scope handle."))
+                                .put("assessments", schemaString("Array of {hunkId, affected, why}. "
+                                        + "hunkId is a hunk id from review_scope.")),
+                        "scopeId", "assessments"),
                 descriptor("worktree_create",
                         "Creates a worktree in the caller's repository: a new branch by default, or a "
                                 + "checkout of a branch that already exists when 'existing' is true. An existing "
@@ -257,6 +270,7 @@ public final class McpToolRouter {
             case "review_finding" -> reviewFinding(caller, arguments);
             case "review_answer" -> reviewAnswer(caller, arguments);
             case "review_state" -> reviewState(caller, arguments);
+            case "review_recheck" -> reviewRecheck(caller, arguments);
             case "worktree_create" -> worktreeCreate(caller, arguments);
             case "session_start" -> sessionStart(caller, arguments);
             case "session_rename" -> sessionRename(caller, arguments);
@@ -467,6 +481,57 @@ public final class McpToolRouter {
         return JsonObject.empty()
                 .put("scopeId", new JsonString(scope.id()))
                 .put("findings", JsonNumber.of(decoded.size()));
+    }
+
+    /**
+     * {@code review_recheck}: the agent's answer to the one question neither
+     * a hunk digest nor {@link app.drydock.review.BaseMove}'s intersection
+     * can reach (spec §9.7).
+     *
+     * <p>The relevance filter is file-level and lexical and names its own
+     * blind spot: a base change that alters behaviour without touching a file
+     * this scope references is invisible to it. An agent has no such
+     * boundary, so it can close that gap -- but only in one direction.
+     * {@code affected == true} adds staleness, which costs at worst a wasted
+     * re-read. {@code affected == false} is advice and clears nothing,
+     * because an agent wrong THAT way would leave a human's approval standing
+     * over code nobody re-read. Nothing in this method or below it touches a
+     * verdict, which is what makes that true by construction rather than by
+     * every reader remembering it.</p>
+     *
+     * <p>Which base move is being assessed is drydock's to say, not the
+     * agent's: {@code fromBase} comes from each hunk's own verdict and {@code
+     * toBase} from the scope's current base, so the key written here is the
+     * key the board reads with. See {@link
+     * ReviewToolCodec#assessmentsFromJson}, which also owns the hunkId ->
+     * digest translation and the three refusals.</p>
+     */
+    private JsonValue reviewRecheck(ManagedSessionId caller, JsonValue arguments) throws McpToolException {
+        requireLiveSession(caller);
+        JsonObject args = asObject(arguments);
+        ReviewScope scope = requireScope(caller, args);
+
+        String toBase = context.currentReviewBase(scope).orElseThrow(() -> new McpToolException(
+                "The base of scope '" + scope.id() + "' does not resolve to a commit right now, so "
+                        + "there is no base move to assess. Nothing was recorded."));
+        Map<String, ReviewVerdict> verdictsByDigest = new LinkedHashMap<>();
+        for (ReviewVerdict verdict : context.verdictsOf(scope.id())) {
+            verdictsByDigest.put(verdict.hunkDigest(), verdict);
+        }
+        List<RecheckAssessment> decoded = ReviewToolCodec.assessmentsFromJson(scope.id(),
+                args.get("assessments"), context.reviewDiff(scope), verdictsByDigest, toBase,
+                Instant.now());
+        // Decoded in full before anything is stored, like review_finding: a
+        // batch with one bad entry writes nothing rather than half a recheck.
+        context.putAssessments(decoded);
+        return JsonObject.empty()
+                .put("scopeId", new JsonString(scope.id()))
+                .put("assessments", JsonNumber.of(decoded.size()))
+                // Echoed because it is the only half with an effect: an agent
+                // that sent ten and marked none has changed nothing, and
+                // saying so is cheaper than letting it believe otherwise.
+                .put("markedStale", JsonNumber.of(
+                        (int) decoded.stream().filter(RecheckAssessment::affected).count()));
     }
 
     /**

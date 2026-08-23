@@ -70,12 +70,16 @@ public final class AnnotationStore implements AutoCloseable {
      * 1 keyed findings by {@code (sessionId, DiffScope)}; 2 keys them by
      * scope handle; 3 adds the secret used to derive restart-stable scope
      * handles; 4 re-keys verdicts from {@code intentId} onto a hunk content
-     * digest, carrying {@code base}/{@code head}. A v1 file is migrated on
-     * read rather than dropped -- see {@link #legacyScopeId}. A v3 verdict
-     * entry has no digest to migrate to (none were recorded in the wild) and
-     * is skipped by the existing lenient decode.
+     * digest, carrying {@code base}/{@code head}; 5 adds the agent recheck
+     * assessments of spec §9.7. A v1 file is migrated on read rather than
+     * dropped -- see {@link #legacyScopeId}. A v3 verdict entry has no digest
+     * to migrate to (none were recorded in the wild) and is skipped by the
+     * existing lenient decode. A v4 file needs no migration at all: {@link
+     * #loadFromDisk} reads each named array independently, so one simply has
+     * no {@code assessments} key and loads with none -- which {@code
+     * AnnotationStoreTest} pins rather than assumes.
      */
-    private static final int SCHEMA_VERSION = 4;
+    private static final int SCHEMA_VERSION = 5;
     private static final SecureRandom RANDOM = new SecureRandom();
 
     /**
@@ -100,6 +104,16 @@ public final class AnnotationStore implements AutoCloseable {
     /** Verdicts by {@code (scopeId, hunkDigest)}. */
     private final Map<ReviewVerdict.Key, ReviewVerdict> verdicts = new LinkedHashMap<>();
 
+    /**
+     * Agent rechecks by {@code (scopeId, hunkDigest, fromBase, toBase)}
+     * (spec §9.7), in insertion order.
+     *
+     * <p>Keyed by the base PAIR, not by the hunk: a later base move is a new
+     * question, and an old answer carried forward would be the agent
+     * answering something it was never asked.</p>
+     */
+    private final Map<RecheckAssessment.Key, RecheckAssessment> assessments = new LinkedHashMap<>();
+
     /** Scopes whose review has been submitted. */
     private final List<String> submitted = new ArrayList<>();
 
@@ -121,7 +135,8 @@ public final class AnnotationStore implements AutoCloseable {
     private final List<Consumer<ReviewAnnotation.Key>> changeListeners = new CopyOnWriteArrayList<>();
 
     private record Snapshot(List<ReviewAnnotation> findings, List<ReviewVerdict> verdicts,
-                            List<String> submitted, String scopeIdSecret) {
+                            List<RecheckAssessment> assessments, List<String> submitted,
+                            String scopeIdSecret) {
     }
 
     public AnnotationStore(Path file) {
@@ -184,6 +199,26 @@ public final class AnnotationStore implements AutoCloseable {
 
     public synchronized List<ReviewVerdict> verdictsFor(String scopeId) {
         return verdicts.values().stream().filter(v -> v.scopeId().equals(scopeId)).toList();
+    }
+
+    /**
+     * Whether the agent said this base move affects this hunk (spec §9.7).
+     *
+     * <p>False for an assessment that said "unaffected" AND for no
+     * assessment at all, deliberately: the two are the same to every reader,
+     * because neither may clear anything. Only {@code true} is actionable,
+     * and it can only ever ADD staleness.</p>
+     */
+    public synchronized boolean assessedAffected(String scopeId, String hunkDigest,
+                                                 String fromBase, String toBase) {
+        RecheckAssessment found = assessments.get(
+                new RecheckAssessment.Key(scopeId, hunkDigest, fromBase, toBase));
+        return found != null && found.affected();
+    }
+
+    /** Every recheck recorded against one scope, in the order they arrived. */
+    public synchronized List<RecheckAssessment> assessmentsFor(String scopeId) {
+        return assessments.values().stream().filter(a -> a.scopeId().equals(scopeId)).toList();
     }
 
     public synchronized boolean isSubmitted(String scopeId) {
@@ -294,6 +329,7 @@ public final class AnnotationStore implements AutoCloseable {
     private synchronized boolean removeScopeInternal(String scopeId) {
         boolean changed = findings.keySet().removeIf(key -> key.scopeId().equals(scopeId));
         changed |= verdicts.keySet().removeIf(key -> key.scopeId().equals(scopeId));
+        changed |= assessments.keySet().removeIf(key -> key.scopeId().equals(scopeId));
         changed |= submitted.remove(scopeId);
         if (changed) {
             persistAsync();
@@ -325,6 +361,26 @@ public final class AnnotationStore implements AutoCloseable {
             return true;
         }
         return false;
+    }
+
+    /**
+     * Records an agent's recheck, replacing any it already made about the
+     * same hunk and the same base pair.
+     *
+     * <p>Only an affected one has any effect (spec §9.7). Nothing here
+     * touches {@link #verdicts}: an assessment is a second, weaker fact
+     * stored alongside a verdict, never an edit to it, which is what makes
+     * "an agent may never clear a human's approval" true by construction
+     * rather than by every reader remembering to.</p>
+     */
+    public void putAssessment(RecheckAssessment assessment) {
+        putAssessmentInternal(assessment);
+        fireChanged(null);
+    }
+
+    private synchronized void putAssessmentInternal(RecheckAssessment assessment) {
+        assessments.put(assessment.key(), assessment);
+        persistAsync();
     }
 
     /** Marks a scope's review as submitted. */
@@ -415,7 +471,8 @@ public final class AnnotationStore implements AutoCloseable {
 
     private void persistAsync() {
         Snapshot snapshot = new Snapshot(List.copyOf(findings.values()),
-                List.copyOf(verdicts.values()), List.copyOf(submitted), scopeIdSecret);
+                List.copyOf(verdicts.values()), List.copyOf(assessments.values()),
+                List.copyOf(submitted), scopeIdSecret);
         // Queue a writer task only when there is no snapshot already
         // pending; otherwise the queued task picks up this newer one.
         if (pendingSnapshot.getAndSet(snapshot) == null) {
@@ -433,7 +490,7 @@ public final class AnnotationStore implements AutoCloseable {
             Path directory = file.getParent();
             Files.createDirectories(directory);
             String text = JsonWriter.write(toJson(snapshot.findings(), snapshot.verdicts(),
-                    snapshot.submitted(), snapshot.scopeIdSecret()));
+                    snapshot.assessments(), snapshot.submitted(), snapshot.scopeIdSecret()));
             Path tempFile = Files.createTempFile(directory, file.getFileName().toString() + ".", ".tmp");
             try {
                 Files.writeString(tempFile, text, StandardCharsets.UTF_8);
@@ -460,6 +517,13 @@ public final class AnnotationStore implements AutoCloseable {
             for (ReviewVerdict verdict : verdictsFromJson(parsed)) {
                 verdicts.put(verdict.key(), verdict);
             }
+            // Read on its own terms, like every other named array: a file
+            // written before spec §9.7 simply has no "assessments" key and
+            // loads with none, which is why this schema bump needs no
+            // migration path.
+            for (RecheckAssessment assessment : assessmentsFromJson(parsed)) {
+                assessments.put(assessment.key(), assessment);
+            }
             submitted.addAll(submittedFromJson(parsed));
         } catch (IOException | RuntimeException e) {
             LOG.log(Level.WARNING, "Annotations file " + file + " is malformed; starting empty", e);
@@ -470,11 +534,12 @@ public final class AnnotationStore implements AutoCloseable {
 
     static JsonValue toJson(List<ReviewAnnotation> findings, List<ReviewVerdict> verdicts,
                             List<String> submitted) {
-        return toJson(findings, verdicts, submitted, newScopeIdSecret());
+        return toJson(findings, verdicts, List.of(), submitted, newScopeIdSecret());
     }
 
     private static JsonValue toJson(List<ReviewAnnotation> findings, List<ReviewVerdict> verdicts,
-                                    List<String> submitted, String scopeIdSecret) {
+                                    List<RecheckAssessment> assessments, List<String> submitted,
+                                    String scopeIdSecret) {
         JsonObject root = JsonObject.empty();
         root.put("schemaVersion", JsonNumber.of(SCHEMA_VERSION));
         root.put("scopeIdSecret", new JsonString(scopeIdSecret));
@@ -498,6 +563,20 @@ public final class AnnotationStore implements AutoCloseable {
             verdictEntries.add(obj);
         }
         root.put("verdicts", new JsonArray(verdictEntries));
+
+        List<JsonValue> assessmentEntries = new ArrayList<>();
+        for (RecheckAssessment assessment : assessments) {
+            JsonObject obj = JsonObject.empty();
+            obj.put("scopeId", new JsonString(assessment.scopeId()));
+            obj.put("hunkDigest", new JsonString(assessment.hunkDigest()));
+            obj.put("fromBase", new JsonString(assessment.fromBase()));
+            obj.put("toBase", new JsonString(assessment.toBase()));
+            obj.put("affected", new JsonBoolean(assessment.affected()));
+            obj.put("why", new JsonString(assessment.why()));
+            obj.put("at", new JsonString(assessment.at().toString()));
+            assessmentEntries.add(obj);
+        }
+        root.put("assessments", new JsonArray(assessmentEntries));
 
         List<JsonValue> submittedEntries = new ArrayList<>();
         for (String scopeId : submitted) {
@@ -762,6 +841,40 @@ public final class AnnotationStore implements AutoCloseable {
                         requireString(obj, "head")));
             } catch (IllegalArgumentException | DateTimeException e) {
                 LOG.log(Level.WARNING, "Skipping malformed verdict entry: " + e.getMessage());
+            }
+        }
+        return result;
+    }
+
+    /**
+     * The recorded rechecks, decoded as leniently as the verdicts above: one
+     * malformed entry is skipped, never the rest.
+     *
+     * <p>A missing {@code affected} decodes as {@code false}, which is the
+     * inert direction. Reading an unreadable entry as "affected" would let a
+     * corrupt file invent staleness nobody asserted; reading it as
+     * "unaffected" costs nothing, because unaffected clears nothing.</p>
+     */
+    static List<RecheckAssessment> assessmentsFromJson(JsonValue value) {
+        if (!(value instanceof JsonObject root) || !(root.get("assessments") instanceof JsonArray entries)) {
+            return List.of();
+        }
+        List<RecheckAssessment> result = new ArrayList<>();
+        for (JsonValue entryValue : entries.elements()) {
+            if (!(entryValue instanceof JsonObject obj)) {
+                continue;
+            }
+            try {
+                result.add(new RecheckAssessment(
+                        requireString(obj, "scopeId"),
+                        requireString(obj, "hunkDigest"),
+                        requireString(obj, "fromBase"),
+                        requireString(obj, "toBase"),
+                        obj.get("affected") instanceof JsonBoolean affected && affected.value(),
+                        optionalString(obj, "why").orElse(""),
+                        Instant.parse(requireString(obj, "at"))));
+            } catch (IllegalArgumentException | DateTimeException e) {
+                LOG.log(Level.WARNING, "Skipping malformed assessment entry: " + e.getMessage());
             }
         }
         return result;
