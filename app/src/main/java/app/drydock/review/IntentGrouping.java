@@ -143,7 +143,12 @@ public final class IntentGrouping {
             readsOf.put(position, targets);
         }
         List<ReviewIntent> ordered = new ArrayList<>();
-        for (List<Integer> unit : Graphs.topologicalOrder(nodes, readsOf::get,
+        // getOrDefault, not readsOf::get: every position was populated just
+        // above so an unmapped key cannot happen today, but a method reference
+        // that answers null on one would surface as an NPE inside Graphs'
+        // traversal rather than as anything a reader could trace back here.
+        for (List<Integer> unit : Graphs.topologicalOrder(nodes,
+                position -> readsOf.getOrDefault(position, Collections.emptySortedSet()),
                 Comparator.naturalOrder())) {
             for (Integer position : unit) {
                 ordered.add(intents.get(position));
