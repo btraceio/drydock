@@ -169,6 +169,22 @@ tasks.test {
     systemProperty("javafx.headless", "true")
     systemProperty("headless.geometry", "1920x1200-32")
 
+    // The suite's integration tests commit and merge in temporary git
+    // repositories via the real `git` executable -- both the fixtures' own
+    // ProcessBuilders and the production ProcessRunner (which inherits this
+    // JVM's environment). A host with `commit.gpgsign=true` globally and a
+    // refusing gpg/ssh signing agent would otherwise fail every fixture's
+    // first commit (and every production-path `git merge --no-ff`, which
+    // writes a merge commit) before the behaviour under test runs -- turning
+    // a host signing problem into a misleading, intermittent failure. Git's
+    // GIT_CONFIG_* env injection overrides file config (global/local) but is
+    // itself overridden by an explicit `-c`, so it cannot mask a test that
+    // deliberately sets `commit.gpgsign`; no test here does. Set for the
+    // whole JVM, as above, so every spawned git inherits it.
+    environment("GIT_CONFIG_COUNT", "1")
+    environment("GIT_CONFIG_KEY_0", "commit.gpgsign")
+    environment("GIT_CONFIG_VALUE_0", "false")
+
 
     // Inputs for RuntimeImageModuleListTest: the packaged app jar, its runtime
     // classpath, and the convention-plugin source that declares the jlink
