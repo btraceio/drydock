@@ -4,6 +4,7 @@ import app.drydock.ui.TestStages;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.review.AnnotationStatus;
+import app.drydock.review.BaseMove;
 import app.drydock.review.Confidence;
 import app.drydock.review.HunkDigest;
 import app.drydock.review.ReviewAnnotation;
@@ -37,6 +38,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.TreeSet;
 import java.util.OptionalInt;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -578,7 +580,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
         clickAskAgent();
 
         assertTrue(host.handedOffPrompts.isEmpty(), "nothing can be sent with no session");
-        assertEquals("⚠ nothing to send, or nowhere to send it", askRefusal(),
+        assertEquals("⚠ " + ReviewVerdictBar.NOTHING_TO_SEND, askRefusal(),
                 "a click that handed nothing over must say so");
     }
 
@@ -612,24 +614,98 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
     }
 
     /**
-     * Round 3, item 3. The verdict-bar fit test measures a literal it holds
-     * itself, so it cannot see this string at all -- and this string is the
-     * one a reader gets. Driven through a real refused submit, at the code
-     * column's floor, so the two cannot drift: lengthen the production
-     * message and this fails, whatever the fit test's own copy says.
+     * Round 3, item 3, widened in round 5 to all four paths.
+     *
+     * <p>Driven through the REAL view, because the bar-only fit fixture
+     * measures the bar at the window's full width and production does not
+     * give it that: at a 560px window the real bar is 525px, so a loop over
+     * the four strings there over-states the room by 35px -- about six
+     * characters, which is exactly the margin two of these strings live
+     * in. Each of the four is raised through the code path that actually
+     * raises it, so nothing here rests on substituting one message into
+     * another's layout.</p>
      */
     @Test
-    void theRealSubmitRefusalFitsAtTheCodeColumnFloor() {
+    void theNeedsVerdictRefusalFitsAtTheCodeColumnFloor() {
         seed();
-        // Narrowed here, restored in tearDown: TestFX's primary stage
-        // outlives the test AND the class, and a stage left at 560px makes
-        // every later test in this JVM click at coordinates its own scene
-        // never laid out. (It cost this file one failure before the restore
-        // went in.)
-        interact(() -> view.getScene().getWindow().setWidth(RailLayout.CODE_MIN_WIDTH));
-        WaitForAsyncUtils.waitForFxEvents();
+        atTheFloor();
 
         type(KeyCode.ENTER);
+
+        assertSubmitRefusalFits(SessionReviewView.NEEDS_VERDICT);
+    }
+
+    @Test
+    void theFailedDiffRefusalFitsAtTheCodeColumnFloor() {
+        seedWithNoDiffInTheColumn(mintPrScope(), new DiffOutcome.Failed("Could not diff /wt/feat"));
+        atTheFloor();
+
+        type(KeyCode.ENTER);
+
+        assertSubmitRefusalFits(SessionReviewView.DIFF_FAILED);
+    }
+
+    @Test
+    void theStillLoadingRefusalFitsAtTheCodeColumnFloor() {
+        seedWithNoDiffInTheColumn(mintPrScope(), new DiffOutcome.Diffing());
+        atTheFloor();
+
+        type(KeyCode.ENTER);
+
+        assertSubmitRefusalFits(SessionReviewView.DIFF_LOADING);
+    }
+
+    /** Everything settled, but against a base that has since moved. */
+    @Test
+    void theStaleBaseRefusalFitsAtTheCodeColumnFloor() {
+        seed();
+        type(KeyCode.A);
+        type(KeyCode.CLOSE_BRACKET);
+        type(KeyCode.A);
+        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of("src/Main.java")));
+        host.baseCommit = "9".repeat(40);
+        atTheFloor();
+
+        type(KeyCode.ENTER);
+
+        assertSubmitRefusalFits(SessionReviewView.STALE_BASE);
+    }
+
+    /**
+     * What keeps {@code ReviewVerdictBarFitTest}'s own fixture honest: it
+     * builds the bar at {@code BAR_WIDTH_AT_FLOOR}, a number taken FROM this
+     * measurement, and a bar-only fixture wider than production would let a
+     * string pass there and truncate here. If the view's chrome ever takes
+     * more room, this fails and that constant has to follow.
+     */
+    @Test
+    void theRealBarIsNoNarrowerThanTheFitFixtureAssumes() {
+        seed();
+        atTheFloor();
+
+        double[] barWidth = new double[1];
+        interact(() -> barWidth[0] = lookup(".review-verdict-bar").query().getBoundsInLocal().getWidth());
+        assertTrue(barWidth[0] >= ReviewVerdictBarFitTest.BAR_WIDTH_AT_FLOOR,
+                "the real bar is " + Math.round(barWidth[0]) + "px at a "
+                        + (int) RailLayout.CODE_MIN_WIDTH + "px window, but the bar-only fit "
+                        + "fixture assumes " + (int) ReviewVerdictBarFitTest.BAR_WIDTH_AT_FLOOR
+                        + "px -- every string it clears would truncate in production");
+    }
+
+    /**
+     * Narrows the window to the code column's floor -- the width at which
+     * every rail is collapsed and the bar is the only surface left. {@link
+     * #seed} puts it back for the next test; nothing outside this class
+     * depends on the width it is left at, since every rendering class now
+     * takes its own through {@code TestStages.show}.
+     */
+    private void atTheFloor() {
+        interact(() -> view.getScene().getWindow().setWidth(RailLayout.CODE_MIN_WIDTH));
+        WaitForAsyncUtils.waitForFxEvents();
+    }
+
+    /** The refusal on screen is {@code expected}, and it is not truncated. */
+    private void assertSubmitRefusalFits(SessionReviewView.SubmitRefusal expected) {
         interact(() -> view.getScene().getRoot().layout());
         WaitForAsyncUtils.waitForFxEvents();
 
@@ -637,14 +713,24 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
                 .filter(Node::isVisible)
                 .findFirst()
                 .orElseThrow(() -> new AssertionError("no submit refusal is showing"));
+        assertEquals("⚠ " + expected.reason(), ((Label) label).getText(),
+                "the rendered text must be the PRODUCTION constant, not a copy kept in step by hand");
         double got = label.getBoundsInLocal().getWidth();
         double wanted = ((Label) label).prefWidth(-1);
         assertTrue(got + 0.5 >= wanted, "'" + ((Label) label).getText() + "' got "
                 + Math.round(got) + " of " + Math.round(wanted) + "px at the "
                 + (int) RailLayout.CODE_MIN_WIDTH + "px floor");
-        // And it is the PRODUCTION string, not one this file keeps in step by
-        // hand -- which is what lets ReviewVerdictBarFitTest loop all four.
-        assertEquals("⚠ " + SessionReviewView.NEEDS_VERDICT.reason(), ((Label) label).getText());
+        // The primary action is charged the same rent: a refusal that fits by
+        // taking Submit's last character has not fitted.
+        Node submit = lookup(".review-verdict-action").queryAll().stream()
+                .map(Button.class::cast)
+                .filter(button -> button.getText().startsWith("Submit"))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("no Submit button"));
+        assertTrue(submit.getBoundsInLocal().getWidth() + 0.5 >= ((Button) submit).prefWidth(-1),
+                "'" + ((Button) submit).getText() + "' got "
+                        + Math.round(submit.getBoundsInLocal().getWidth()) + " of "
+                        + Math.round(((Button) submit).prefWidth(-1)) + "px beside that refusal");
     }
 
     private void clickAskAgent() {
@@ -696,9 +782,9 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
 
     /** Shows the board on one scope and seeds the store with {@code findings}. */
     private void seed(ReviewAnnotation... findings) {
-        // See tearDown: the stage is shared across classes, so start every
-        // board from a known width rather than from whatever the last one
-        // left.
+        // The stage is shared across classes and across tests, and tests
+        // here narrow it deliberately -- so start every board from a known
+        // width rather than from whatever the last one left.
         interact(() -> {
             view.getScene().getWindow().setWidth(1400);
             view.getScene().getWindow().setHeight(900);

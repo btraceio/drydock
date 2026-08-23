@@ -247,8 +247,12 @@ class ReviewHunkProgressTest extends ApplicationTest {
         WaitForAsyncUtils.waitForFxEvents();
 
         assertTrue(host.submittedScopes.isEmpty(), "a stale approval must not be posted silently");
+        // The PRODUCTION constant, not a phrase copied out of it: this
+        // assertion went stale the moment the message was shortened to fit
+        // the bar's real width, which is the drift SubmitRefusal exists to
+        // stop.
         assertTrue(labels(".review-verdict-submit-refusal").stream()
-                        .anyMatch(text -> text.contains("older base")),
+                        .anyMatch(text -> text.contains(SessionReviewView.STALE_BASE.reason())),
                 "the reader must be told why submit did nothing");
     }
 

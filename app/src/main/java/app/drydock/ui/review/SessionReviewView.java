@@ -2419,6 +2419,44 @@ public final class SessionReviewView extends BorderPane {
     }
 
     /**
+     * Why a Submit click did nothing, as a value rather than four literals
+     * scattered through {@link #submitReview}.
+     *
+     * <p>Split in two because the footer at the code column's floor has room
+     * for roughly forty characters: {@code reason} is what has to FIT there,
+     * {@code detail} is what the ellipsis would otherwise have taken and now
+     * lives on hover. Three of the four were over that budget, and the one
+     * test that measured it drove only the fourth -- which is how the other
+     * three shipped elided. {@link #SUBMIT_REFUSALS} exists so a test can
+     * loop the real strings instead of holding its own copies -- and the
+     * loop that matters runs in the REAL view, since the bar is 35px
+     * narrower there than the window it sits in.</p>
+     */
+    record SubmitRefusal(String reason, String detail) {
+    }
+
+    static final SubmitRefusal DIFF_FAILED = new SubmitRefusal(
+            "the diff failed to load",
+            "This scope's diff could not be read, so there is nothing to post comments against.");
+
+    static final SubmitRefusal DIFF_LOADING = new SubmitRefusal(
+            "the diff is still loading",
+            "Try again in a moment: this scope's diff has not landed yet.");
+
+    static final SubmitRefusal NEEDS_VERDICT = new SubmitRefusal(
+            "a verdict is missing; jumped to it",
+            "Approve it, or request changes on it, before submitting the review.");
+
+    static final SubmitRefusal STALE_BASE = new SubmitRefusal(
+            "some approvals are stale",
+            "Some approvals were given against a base that has since moved. Confirm they still "
+                    + "hold, or re-review them, before submitting.");
+
+    /** Every refusal {@link #submitReview} can raise -- see {@link SubmitRefusal}. */
+    static final List<SubmitRefusal> SUBMIT_REFUSALS =
+            List.of(DIFF_FAILED, DIFF_LOADING, NEEDS_VERDICT, STALE_BASE);
+
+    /**
      * Submit (spec §4.6): with anything unsettled this jumps to the first
      * such intent rather than posting a partial review; once everything is
      * settled it posts ONE review.
@@ -2448,42 +2486,6 @@ public final class SessionReviewView extends BorderPane {
      * diff must not leave IT stuck refusing for the rest of the session -- it
      * falls through and submits with nothing to post.</p>
      */
-    /**
-     * Why a Submit click did nothing, as a value rather than four literals
-     * scattered through {@link #submitReview}.
-     *
-     * <p>Split in two because the footer at the code column's floor has room
-     * for roughly forty characters: {@code reason} is what has to FIT there,
-     * {@code detail} is what the ellipsis would otherwise have taken and now
-     * lives on hover. Three of the four were over that budget, and the one
-     * test that measured it drove only the fourth -- which is how the other
-     * three shipped elided. {@link #SUBMIT_REFUSALS} exists so a test can
-     * loop the real strings instead of holding its own copies.</p>
-     */
-    record SubmitRefusal(String reason, String detail) {
-    }
-
-    static final SubmitRefusal DIFF_FAILED = new SubmitRefusal(
-            "the diff failed to load; nothing to submit",
-            "This scope's diff could not be read, so there is nothing to post comments against.");
-
-    static final SubmitRefusal DIFF_LOADING = new SubmitRefusal(
-            "the diff is still loading",
-            "Try again in a moment: this scope's diff has not landed yet.");
-
-    static final SubmitRefusal NEEDS_VERDICT = new SubmitRefusal(
-            "a verdict is missing; jumped to it",
-            "Approve it, or request changes on it, before submitting the review.");
-
-    static final SubmitRefusal STALE_BASE = new SubmitRefusal(
-            "approvals are against an older base",
-            "Some approvals were given against a base that has since moved. Confirm they still "
-                    + "hold, or re-review them, before submitting.");
-
-    /** Every refusal {@link #submitReview} can raise -- see {@link SubmitRefusal}. */
-    static final List<SubmitRefusal> SUBMIT_REFUSALS =
-            List.of(DIFF_FAILED, DIFF_LOADING, NEEDS_VERDICT, STALE_BASE);
-
     private void submitReview() {
         Optional<ReviewScope> scope = selectedScope();
         if (scope.isEmpty()) {
