@@ -8,6 +8,7 @@ import app.drydock.app.SessionManager;
 import app.drydock.app.SessionOpenResult;
 import app.drydock.agent.api.ConversationSource;
 import app.drydock.agent.api.ConversationSource.Conversation;
+import app.drydock.agent.api.ResumeCostEstimate;
 import app.drydock.activity.SessionActivityWatcher;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.app.SessionForkService;
@@ -371,6 +372,9 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
     /** Sessions whose self-exit has already been recorded, so the watcher fires once per exit. */
     private final Set<ManagedSessionId> exitRecorded = new HashSet<>();
+    private final Set<ManagedSessionId> resumeCostScansInFlight = new HashSet<>();
+    private final Map<ManagedSessionId, Long> resumeCostLastScanned = new HashMap<>();
+    private int resumeCostTick;
 
     /**
      * The workspace's one-second tick, driving two jobs.
@@ -388,6 +392,9 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             new KeyFrame(Duration.seconds(1), e -> {
                 pollForExitedProcesses();
                 pollSessionActivity();
+                if (++resumeCostTick % 10 == 0) {
+                    refreshResumeCostEstimates();
+                }
             }));
 
     /**
@@ -545,6 +552,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         exitWatcher.play();
 
         refreshExplorerPreferences();
+        refreshResumeCostEstimates();
     }
 
     /** Re-reads the Explorer's user preferences after the settings modal closes. */
@@ -580,11 +588,55 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     /** Pushes the manager's current session snapshot into the view model (FX thread; no-op if unchanged). */
     private void publishSessions() {
         viewModel.setSessions(sessionManager.sessions());
+        refreshResumeCostEstimates();
         // Only open tabs: staleness shells out to git, and a workspace-wide
         // republish must not fan out one git call per session the human
         // cannot even see.
         for (ManagedSessionId open : List.copyOf(openTabs.keySet())) {
             refreshHandoffBanner(open);
+        }
+    }
+
+    /**
+     * Reads provider transcripts on virtual threads and publishes only their
+     * small immutable estimates back on FX. Repeated calls are coalesced per
+     * session; the ten-second tick notices /compact and harness-side resets.
+     */
+    private void refreshResumeCostEstimates() {
+        long now = System.nanoTime();
+        Set<ManagedSessionId> liveIds = viewModel.sessions().stream()
+                .map(ManagedAgentSession::id)
+                .collect(Collectors.toSet());
+        resumeCostLastScanned.keySet().retainAll(liveIds);
+        for (ManagedAgentSession session : viewModel.sessions()) {
+            if (session.agentSessionId().isEmpty()
+                    || repositoryFor(session).map(Repository::isRemote).orElse(false)) {
+                viewModel.setResumeCostEstimate(session.id(), Optional.empty());
+                continue;
+            }
+            long last = resumeCostLastScanned.getOrDefault(session.id(), 0L);
+            if (now - last < 9_000_000_000L || !resumeCostScansInFlight.add(session.id())) {
+                continue;
+            }
+            resumeCostLastScanned.put(session.id(), now);
+            Thread.ofVirtual().name("resume-cost-" + session.id()).start(() -> {
+                Optional<ResumeCostEstimate> estimate;
+                try {
+                    estimate = agentRegistry.conversations(session.agentKind())
+                            .flatMap(source -> source.estimateResumeCost(
+                                    session.workingDirectory(), session.agentSessionId().orElseThrow()));
+                } catch (RuntimeException e) {
+                    LOG.log(Level.DEBUG, "Could not estimate resume cost for " + session.id(), e);
+                    estimate = Optional.empty();
+                }
+                Optional<ResumeCostEstimate> result = estimate;
+                Platform.runLater(() -> {
+                    resumeCostScansInFlight.remove(session.id());
+                    if (viewModel.sessionById(session.id()).isPresent()) {
+                        viewModel.setResumeCostEstimate(session.id(), result);
+                    }
+                });
+            });
         }
     }
 
@@ -599,6 +651,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             open.setStatus(session.status());
             open.setNeedsAttention(viewModel.activityOf(sessionId) == SessionActivity.NEEDS_ATTENTION);
             open.updatePrChip(session.prState(), session.prNumber());
+            open.setResumeCostEstimate(viewModel.resumeCostEstimate(sessionId));
         });
     }
 
@@ -2746,7 +2799,73 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         banner.refreshButton().setOnAction(event -> requestHandoffRefresh(sessionId));
         banner.editButton().setOnAction(event -> editHandoffBrief(sessionId));
         tab.forkButton().setOnShowing(event -> populateForkMenu(tab.forkButton(), sessionId));
+        tab.startFreshButton().setOnAction(event -> confirmStartFresh(sessionId, tab));
         refreshHandoffBanner(sessionId);
+    }
+
+    private void confirmStartFresh(ManagedSessionId sessionId, OpenSessionTab tab) {
+        Optional<ManagedAgentSession> current = viewModel.sessionById(sessionId);
+        if (current.isEmpty()) {
+            return;
+        }
+        ManagedAgentSession session = current.get();
+        Alert confirm = new Alert(AlertType.CONFIRMATION);
+        if (getScene() != null && getScene().getWindow() != null) {
+            confirm.initOwner(getScene().getWindow());
+        }
+        confirm.setTitle("Start fresh conversation");
+        confirm.setHeaderText("Start fresh in \"" + session.displayName() + "\"?");
+        confirm.setContentText("The current conversation will remain on disk, but this Drydock session "
+                + "will switch to a new conversation in the same working directory.\n\n"
+                + session.workingDirectory());
+        ButtonType start = new ButtonType("Start fresh");
+        confirm.getButtonTypes().setAll(start, ButtonType.CANCEL);
+        if (confirm.showAndWait().filter(start::equals).isEmpty()) {
+            return;
+        }
+
+        int tabIndex = tabPane.getTabs().indexOf(tab.tab);
+        tab.showStartingFreshState();
+        viewModel.setResumeCostEstimate(sessionId, Optional.empty());
+        resumeCostLastScanned.remove(sessionId);
+        sessionManager.closeSession(sessionId)
+                .thenComposeAsync(unused -> {
+                    forgetActivity(sessionId);
+                    return removeTab(tab);
+                }, Platform::runLater)
+                .thenRunAsync(() -> launchFreshConversation(session, tabIndex), Platform::runLater)
+                .exceptionally(ex -> {
+                    Platform.runLater(() -> {
+                        if (openTabs.get(sessionId) == tab || pendingTabs.get(sessionId) == tab) {
+                            tab.restoreStartFreshButton();
+                        }
+                        publishSessions();
+                        UiErrors.show("Could not start a fresh conversation", ex);
+                    });
+                    return null;
+                });
+    }
+
+    private void launchFreshConversation(ManagedAgentSession previous, int tabIndex) {
+        ManagedAgentSession current = sessionManager.sessions().stream()
+                .filter(session -> session.id().equals(previous.id()))
+                .findFirst()
+                .orElse(previous);
+        OpenSessionTab placeholder = showPendingTab(current.id(), current.displayName(),
+                AgentLabels.displayName(agentRegistry, current), current.agentKind(),
+                current.status() == SessionStatus.UNSUPPORTED_AGENT,
+                repositoryFor(current), current.workingDirectory());
+        if (tabIndex >= 0 && tabIndex < tabPane.getTabs().size() - 1) {
+            tabPane.getTabs().remove(placeholder.tab);
+            tabPane.getTabs().add(tabIndex, placeholder.tab);
+            tabPane.getSelectionModel().select(placeholder.tab);
+        }
+        double scale = stage.getOutputScaleX();
+        sessionManager.startFreshConversation(current.id(), placeholder.app(), placeholder.host(), scale)
+                .whenComplete((result, ex) -> Platform.runLater(() -> {
+                    handleOpenResult(placeholder, result, ex);
+                    publishSessions();
+                }));
     }
 
     private SessionForkService forkService() {

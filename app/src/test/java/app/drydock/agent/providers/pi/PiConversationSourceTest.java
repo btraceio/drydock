@@ -1,6 +1,7 @@
 package app.drydock.agent.providers.pi;
 
 import app.drydock.agent.api.ConversationSource;
+import app.drydock.agent.api.ResumeCostEstimate;
 import app.drydock.agent.providers.pi.internal.PiSessionStore;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -72,5 +73,23 @@ class PiConversationSourceTest {
         assertEquals(id, conv.title());
         assertEquals(0, conv.messageCount());
         assertEquals(timestamp, conv.lastModified());
+    }
+
+    @Test
+    void compactionSummaryReplacesPreviousUsage(@TempDir Path tmp) throws IOException {
+        Path cwd = tmp.resolve("proj");
+        Files.createDirectories(cwd);
+        String id = "cccc3333-0000-0000-0000-000000000003";
+        Path transcript = writeSession(tmp, cwd, id, "2026-07-23T12:00:00.000Z");
+        Files.writeString(transcript, """
+                {"type":"message","message":{"role":"assistant","model":"claude-sonnet-5","usage":{"input":10,"cacheRead":490000,"cacheWrite":10000}}}
+                {"type":"compaction","summary":"short retained summary"}
+                """, java.nio.file.StandardOpenOption.APPEND);
+
+        ResumeCostEstimate estimate = new PiConversationSource(new PiSessionStore(tmp))
+                .estimateResumeCost(cwd, id).orElseThrow();
+
+        assertTrue(estimate.contextTokens() < 3_000);
+        assertTrue(estimate.maximumInputCostUsd() < 0.01);
     }
 }

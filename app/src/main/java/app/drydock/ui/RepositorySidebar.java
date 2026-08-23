@@ -2596,6 +2596,19 @@ public final class RepositorySidebar extends VBox {
                 evalChip.getStyleClass().add("eval-badge");
                 row.getChildren().add(evalChip);
             }
+            viewModel.resumeCostEstimate(session.id())
+                    .filter(estimate -> estimate.maximumInputCostUsd() > 1.0)
+                    .ifPresent(estimate -> {
+                        Label cost = new Label(UiFormats.maximumUsd(estimate.maximumInputCostUsd()));
+                        cost.getStyleClass().add("resume-cost-badge");
+                        Tooltip.install(cost, new Tooltip("Up to "
+                                + UiFormats.maximumUsd(estimate.maximumInputCostUsd()).substring(1)
+                                + " input cost on the next turn\n"
+                                + UiFormats.tokenCount(estimate.contextTokens()) + " context tokens · "
+                                + estimate.model()
+                                + "\nCold-cache estimate; generated output is not included."));
+                        row.getChildren().add(cost);
+                    });
             row.getChildren().add(branchTag);
             branchTag.maxWidthProperty().bind(
                     row.widthProperty().map(w -> SidebarRowMetrics.branchTagMaxWidth(w.doubleValue())));

@@ -128,15 +128,24 @@ public final class CodexRolloutStore implements CandidateSource {
 
     /** Whether a rollout file whose name contains {@code id} exists. */
     public boolean existsForId(String id) {
+        return fileForId(id).isPresent();
+    }
+
+    /** The rollout whose filename carries {@code id}, for transcript readers. */
+    public Optional<Path> fileForId(String id) {
+        if (id == null || id.isBlank()) {
+            return Optional.empty();
+        }
         if (!Files.isDirectory(sessionsRoot)) {
-            return false;
+            return Optional.empty();
         }
         try (Stream<Path> files = Files.walk(sessionsRoot)) {
-            return files.anyMatch(path -> matchesRolloutName(path)
-                    && path.getFileName().toString().contains(id));
+            return files.filter(path -> matchesRolloutName(path)
+                            && path.getFileName().toString().contains(id))
+                    .findFirst();
         } catch (IOException e) {
             LOG.log(Level.DEBUG, () -> "Failed to walk " + sessionsRoot + " while checking for id " + id, e);
-            return false;
+            return Optional.empty();
         }
     }
 

@@ -751,13 +751,12 @@ public final class SessionManager implements AutoCloseable {
      */
     public CompletableFuture<SessionOpenResult> startFreshConversation(ManagedSessionId sessionId, TerminalRuntime app,
                                                                         TerminalHostView host, double scaleFactor) {
-        // The stale-id clear persists to disk; keep it off the (FX) caller thread.
-        return CompletableFuture.supplyAsync(() -> {
-                    ManagedAgentSession cleared = requireSession(sessionId).withAgentSessionId(Optional.empty());
-                    persistUpdatedSession(cleared);
-                    return cleared;
-                }, backgroundExecutor)
-                .thenCompose(cleared -> {
+        // Keep the previous binding authoritative until the replacement
+        // surface exists. A failed fresh launch must remain resumable rather
+        // than strand the managed row with neither its old nor a new id.
+        return CompletableFuture.supplyAsync(() -> requireSession(sessionId), backgroundExecutor)
+                .thenCompose(original -> {
+                    ManagedAgentSession cleared = original.withAgentSessionId(Optional.empty());
                     AgentKind kind = cleared.agentKind();
                     AgentProvider provider = registry.provider(kind)
                             .orElseThrow(() -> new IllegalStateException("No provider for " + kind));
@@ -773,8 +772,16 @@ public final class SessionManager implements AutoCloseable {
                     return buildAndLaunchCreate(provider, cleared.displayName(), freshSessionId,
                             cleared.workingDirectory(), remote, app, host, scaleFactor, workingDir,
                             cleared.id(), Spawn.ALLOWED, cleared.evalMode())
-                            .handleAsync((launch, ex) -> finalizeCreate(cleared, freshSessionId, launch, ex),
-                                    backgroundExecutor);
+                            .handleAsync((launch, ex) -> {
+                                try {
+                                    return finalizeCreate(cleared, freshSessionId, launch, ex);
+                                } catch (RuntimeException failure) {
+                                    // finalizeCreate records FAILED and releases launch resources;
+                                    // restore only the old binding that its generic failure path cleared.
+                                    persistUpdatedSession(original.withStatus(SessionStatus.FAILED));
+                                    throw failure;
+                                }
+                            }, backgroundExecutor);
                 });
     }
 

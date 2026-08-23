@@ -4,6 +4,7 @@ import app.drydock.domain.SessionWorkspace;
 import app.drydock.domain.PrLink;
 import app.drydock.domain.AgentBinding;
 import app.drydock.agent.api.AgentKind;
+import app.drydock.agent.api.ResumeCostEstimate;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.PrState;
@@ -172,6 +173,22 @@ class WorkspaceViewModelTest {
 
         assertEquals(SessionStatus.RUNNING, model.sessionById(id).orElseThrow().status());
         assertTrue(model.sessionById(ManagedSessionId.newId()).isEmpty());
+    }
+
+    @Test
+    void resumeCostChangesOnlyItsSessionRowAndIsPrunedWithTheSession() {
+        ManagedSessionId id = ManagedSessionId.newId();
+        ManagedAgentSession session = session(id, repoA, "One");
+        model.setSessions(List.of(session));
+        listener.events.clear();
+
+        ResumeCostEstimate estimate = new ResumeCostEstimate(400_000, 2.5, "gpt-5.6-sol");
+        model.setResumeCostEstimate(id, Optional.of(estimate));
+
+        assertEquals(List.of("session:" + id.value()), listener.events);
+        assertEquals(estimate, model.resumeCostEstimate(id).orElseThrow());
+        model.setSessions(List.of());
+        assertTrue(model.resumeCostEstimate(id).isEmpty());
     }
 
     // ---- Repo status --------------------------------------------------------

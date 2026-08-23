@@ -56,12 +56,13 @@ class SessionHeaderLayoutTest extends ApplicationTest {
         titleBlock = new VBox(1, title, contextLine);
         chips = new HBox(6, new Label("uncommitted"));
         fork = new MenuButton("Fork to…");
+        Region startFresh = new Button("Start fresh…");
         finishBox = new StackPane(new Button("Finish ▸"));
         statusPill = new HBox(6, new Label("running"));
         rename = new Button("✎");
 
         header = OpenSessionTab.layOutSessionHeader(back, titleBlock, chips, fork,
-                finishBox, statusPill, rename);
+                startFresh, finishBox, statusPill, rename);
         // A StackPane, not a Pane: Pane lays children out at their PREFERRED
         // width, so the header was never short of space and the whole test
         // measured an unstressed row.

@@ -58,6 +58,16 @@ public final class UiFormats {
         };
     }
 
+    /** Compact upper-bound currency used by resume-cost badges. */
+    public static String maximumUsd(double usd) {
+        return usd >= 10 ? "≤$%.0f".formatted(usd) : "≤$%.2f".formatted(usd);
+    }
+
+    /** Human-readable token count for resume-cost tooltips. */
+    public static String tokenCount(long tokens) {
+        return tokens >= 1_000 ? "%,d".formatted(tokens) : Long.toString(tokens);
+    }
+
     /**
      * The path-segment nodes of a breadcrumb ({@code seg › seg › …}), for
      * the Review diff header and the Explorer file viewer. Callers add any

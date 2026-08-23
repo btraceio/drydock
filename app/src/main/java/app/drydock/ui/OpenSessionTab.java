@@ -1,6 +1,7 @@
 package app.drydock.ui;
 
 import app.drydock.agent.api.AgentKind;
+import app.drydock.agent.api.ResumeCostEstimate;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.PrState;
 import app.drydock.domain.Repository;
@@ -199,12 +200,14 @@ final class OpenSessionTab {
     private final Label tabAttentionDot = new Label("waiting");
     private final Label tabRepoLabel = new Label();
     private final Label tabTitleLabel = new Label();
+    private final Label tabCostBadge = new Label();
     private final Button tabCloseButton = new Button("×");
     private final TextField renameField = new TextField();
     private final VBox tabLabels = new VBox(0);
 
     // -- Session-view header (handoff 5) ------------------------------------
     private final Label headerTitle = new Label();
+    private final Label headerCostBadge = new Label();
     private final Label headerMeta = new Label();
     private final VBox headerTitles = new VBox(1);
     private final HBox statusPill = new HBox(6);
@@ -219,6 +222,7 @@ final class OpenSessionTab {
     private final HBox worktreeChips = new HBox(6);
     private final Button finishButton = new Button("Finish ▸");
     private final MenuButton forkButton = new MenuButton("Fork to…");
+    private final Button startFreshButton = new Button("Start fresh…");
     private final Label handoffLabel = new Label();
     private final ProgressIndicator handoffSpinner = new ProgressIndicator();
     private final HBox handoffPill = new HBox(6);
@@ -1011,7 +1015,8 @@ final class OpenSessionTab {
         tabAttentionDot.getStyleClass().add("attention-badge");
         tabAttentionDot.setVisible(false);
         tabAttentionDot.setManaged(false);
-        HBox graphic = new HBox(8, tabDot, tabLabels, tabAttentionDot, tabCloseButton);
+        configureCostBadge(tabCostBadge);
+        HBox graphic = new HBox(8, tabDot, tabLabels, tabCostBadge, tabAttentionDot, tabCloseButton);
         graphic.setAlignment(Pos.CENTER_LEFT);
 
         // Double-click the tab -> inline rename (Enter/blur commits, Esc cancels).
@@ -1058,7 +1063,12 @@ final class OpenSessionTab {
         headerTitle.setTextOverrun(OverrunStyle.ELLIPSIS);
         headerTitle.setTooltip(new Tooltip());
         headerMeta.getStyleClass().add("session-meta-line");
-        headerTitles.getChildren().setAll(headerTitle, headerMeta);
+        configureCostBadge(headerCostBadge);
+        HBox titleLine = new HBox(6, headerTitle, headerCostBadge);
+        titleLine.setAlignment(Pos.CENTER_LEFT);
+        titleLine.setMinWidth(0);
+        HBox.setHgrow(headerTitle, Priority.ALWAYS);
+        headerTitles.getChildren().setAll(titleLine, headerMeta);
 
         statusPill.getStyleClass().add("status-pill");
         statusPill.setAlignment(Pos.CENTER);
@@ -1089,6 +1099,8 @@ final class OpenSessionTab {
         forkButton.setFocusTraversable(false);
         forkButton.setTooltip(new Tooltip("Fork this session into a sibling worktree, "
                 + "seeded from its handoff brief."));
+        startFreshButton.getStyleClass().add("header-fork-button");
+        startFreshButton.setTooltip(new Tooltip("Start a new conversation in this working directory"));
         finishButton.getStyleClass().add("finish-button");
         finishButton.setFocusTraversable(false);
         handoffSpinner.setPrefSize(12, 12);
@@ -1108,7 +1120,7 @@ final class OpenSessionTab {
         rename.setFocusTraversable(false);
         rename.setOnAction(e -> startInlineRename());
 
-        return layOutSessionHeader(back, headerTitles, worktreeChips, forkButton,
+        return layOutSessionHeader(back, headerTitles, worktreeChips, forkButton, startFreshButton,
                 finishBox, statusPill, rename);
     }
 
@@ -1131,11 +1143,12 @@ final class OpenSessionTab {
      * part worth pinning down.</p>
      */
     static HBox layOutSessionHeader(Region back, Region titleBlock, Region chips,
-                                    Region fork, Region finishBox, Region statusPill, Region rename) {
-        HBox header = new HBox(12, back, titleBlock, chips, fork, finishBox, statusPill, rename);
+                                    Region fork, Region startFresh, Region finishBox,
+                                    Region statusPill, Region rename) {
+        HBox header = new HBox(12, back, titleBlock, chips, fork, startFresh, finishBox, statusPill, rename);
         header.getStyleClass().add("session-header");
         HBox.setHgrow(titleBlock, Priority.ALWAYS);
-        for (Region pinned : List.of(back, chips, fork, finishBox, statusPill, rename)) {
+        for (Region pinned : List.of(back, chips, fork, startFresh, finishBox, statusPill, rename)) {
             pinned.setMinWidth(Region.USE_PREF_SIZE);
         }
         // The pinning only works if the title block will actually shrink; it
@@ -1421,6 +1434,32 @@ final class OpenSessionTab {
         }
     }
 
+    void setResumeCostEstimate(Optional<ResumeCostEstimate> estimate) {
+        Optional<ResumeCostEstimate> expensive = estimate
+                .filter(value -> value.maximumInputCostUsd() > 1.0);
+        for (Label badge : List.of(tabCostBadge, headerCostBadge)) {
+            boolean visible = expensive.isPresent();
+            badge.setVisible(visible);
+            badge.setManaged(visible);
+            if (visible) {
+                ResumeCostEstimate value = expensive.orElseThrow();
+                badge.setText(UiFormats.maximumUsd(value.maximumInputCostUsd()));
+                badge.getTooltip().setText("Up to "
+                        + UiFormats.maximumUsd(value.maximumInputCostUsd()).substring(1)
+                        + " input cost on the next turn\n"
+                        + UiFormats.tokenCount(value.contextTokens()) + " context tokens · " + value.model()
+                        + "\nCold-cache estimate; generated output is not included.");
+            }
+        }
+    }
+
+    private static void configureCostBadge(Label badge) {
+        badge.getStyleClass().add("resume-cost-badge");
+        badge.setTooltip(new Tooltip());
+        badge.setVisible(false);
+        badge.setManaged(false);
+    }
+
     /** Display name of the agent this session runs; names it in this tab's own copy. */
     String agentName() {
         return agentName;
@@ -1648,6 +1687,22 @@ final class OpenSessionTab {
      */
     MenuButton forkButton() {
         return forkButton;
+    }
+
+    Button startFreshButton() {
+        return startFreshButton;
+    }
+
+    void showStartingFreshState() {
+        startFreshButton.setText("Starting…");
+        startFreshButton.setDisable(true);
+        tabTitleLabel.setText("Starting fresh…");
+    }
+
+    void restoreStartFreshButton() {
+        startFreshButton.setText("Start fresh…");
+        startFreshButton.setDisable(false);
+        tabTitleLabel.setText(displayName);
     }
 
 }
