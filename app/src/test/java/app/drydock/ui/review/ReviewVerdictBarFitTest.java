@@ -7,7 +7,10 @@ import app.drydock.review.ReviewVerdict;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
 import javafx.scene.Node;
+import javafx.scene.Parent;
 import javafx.scene.control.Label;
+import javafx.scene.control.Labeled;
+import javafx.scene.layout.Region;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -18,6 +21,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -34,6 +38,17 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class ReviewVerdictBarFitTest extends ApplicationTest {
 
+    /**
+     * The width the bar ACTUALLY gets at the code column's floor -- not the
+     * window's 560, which is what this fixture used to hand it. The view's
+     * own chrome takes 35px, so a bar-only fixture at 560 over-states the
+     * room by about six characters, and two production strings live inside
+     * that margin. Measured from the real view and pinned there by
+     * {@code ReviewFindingsAndVerdictsTest.theRealBarIsNoNarrowerThanTheFitFixtureAssumes},
+     * so this number cannot quietly become a fiction again.
+     */
+    static final double BAR_WIDTH_AT_FLOOR = 525;
+
     private ReviewVerdictBar bar;
 
     @Override
@@ -49,14 +64,15 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
             @Override public void previousIntent() { }
             @Override public void nextIntent() { }
         });
-        Scene scene = new Scene(bar, RailLayout.CODE_MIN_WIDTH, 200);
+        Scene scene = new Scene(bar, BAR_WIDTH_AT_FLOOR, 200);
         scene.getStylesheets().addAll(
                 getClass().getResource("/app/drydock/ui/app.css").toExternalForm(),
                 getClass().getResource("/app/drydock/ui/theme-dark.css").toExternalForm());
         TestStages.show(stage, scene);
-        // The stage outlives the test class, so a scene built at the floor
-        // width still comes up as wide as whatever ran before it left it --
-        // under which every assertion here passes without measuring anything.
+        // Sized through TestStages, like every rendering class: without it a
+        // scene built at the floor width still came up as wide as whatever
+        // ran before it, under which every assertion here passes without
+        // measuring anything.
         this.stage = stage;
         atTheFloor();
     }
@@ -85,7 +101,7 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
      */
     private void atTheFloor() {
         interact(() -> {
-            stage.setWidth(RailLayout.CODE_MIN_WIDTH);
+            stage.setWidth(BAR_WIDTH_AT_FLOOR);
             stage.setHeight(200);
         });
         WaitForAsyncUtils.waitForFxEvents();
@@ -234,17 +250,51 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
                         .anyMatch(Node::isVisible),
                 "the blocking refusal must be showing, or this measures nothing");
         assertNothingTruncated();
-        // AND the title still exists. "Nothing is truncated" is otherwise
-        // satisfiable by letting the refusal run to its full 146px and
-        // taking every one of them from the title: the title is allowed to
-        // YIELD (intentLabel.setMinWidth(0)) and at this floor it yields
-        // almost everything, but the row is not allowed to spend it down to
-        // nothing for a sentence whose glyph says as much. Measured: 14px
-        // with the short form, 0 with the long one.
-        double[] title = new double[1];
-        interact(() -> title[0] = lookup(".review-verdict-intent").query().getBoundsInLocal().getWidth());
-        assertTrue(title[0] > 0, "the intent title was squeezed out of existence; the refusal "
-                + "must shorten to its glyph before taking the last of it");
+        // What the shortening buys, stated as the reader sees it: the row
+        // cannot hold the sentence at this width, so the refusal is its
+        // glyph. Asserted rather than inferred from a width measurement --
+        // at the bar's REAL floor the intent title is squeezed to nothing
+        // either way, so the geometry no longer discriminates and a test
+        // resting on it (as this one did at a 560px bar) silently stops
+        // pinning anything.
+        assertEquals("⚠", blockingRefusalText(),
+                "at this width the row cannot hold the sentence; the refusal must be its glyph");
+        // The title assertion this used to carry ("still > 0px") was
+        // calibrated against a 560px bar. At the bar's REAL width the title
+        // is gone either way, so it no longer discriminates -- what does is
+        // assertNothingTruncated above: the full 146px sentence cannot be
+        // paid for out of a row this tight without squeezing the BUTTONS,
+        // which it checks. Verified by re-running the mutation that removes
+        // the shortening; it still dies, on the buttons instead.
+    }
+
+    /** And the sentence comes back the moment there is room for it. */
+    @Test
+    void theBlockingRefusalKeepsItsSentenceWhenTheRowCanHoldIt() {
+        interact(() -> {
+            bar.update(intent(2, "drydock/review · 4 files"), Optional.empty(), true);
+            bar.showProgress(1, 7);
+            bar.getScene().getWindow().setWidth(1400);
+        });
+        WaitForAsyncUtils.waitForFxEvents();
+        interact(() -> bar.getScene().getRoot().layout());
+        WaitForAsyncUtils.waitForFxEvents();
+
+        assertEquals("⚠ a blocking finding is still open", blockingRefusalText(),
+                "a wide bar has room for the reason; shortening it there would be a loss");
+    }
+
+    /** The blocking refusal's text -- the one that is neither ask nor submit. */
+    private String blockingRefusalText() {
+        String[] text = new String[1];
+        interact(() -> text[0] = lookup(".review-verdict-refusal").queryAll().stream()
+                .filter(node -> !node.getStyleClass().contains("review-verdict-ask-refusal"))
+                .filter(node -> !node.getStyleClass().contains("review-verdict-submit-refusal"))
+                .filter(Node::isVisible)
+                .map(node -> ((Label) node).getText())
+                .findFirst()
+                .orElse("<no blocking refusal showing>"));
+        return text[0];
     }
 
     /**
@@ -257,7 +307,8 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
     @Test
     void raisingOneFooterRefusalRetiresTheOther() {
         show(intent(2, "drydock/review · 4 files"), Optional.empty());
-        interact(() -> bar.showSubmitRefused("an intent needs a verdict; jumped to it"));
+        interact(() -> bar.showSubmitRefused(SessionReviewView.NEEDS_VERDICT.reason(),
+                SessionReviewView.NEEDS_VERDICT.detail()));
         WaitForAsyncUtils.waitForFxEvents();
         assertTrue(refusalShowing("review-verdict-submit-refusal"));
 
@@ -312,7 +363,8 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
         WaitForAsyncUtils.waitForFxEvents();
         assertTrue(refusalShowing("review-verdict-ask-refusal"));
 
-        interact(() -> bar.showSubmitRefused("a verdict is missing; jumped to it"));
+        interact(() -> bar.showSubmitRefused(SessionReviewView.NEEDS_VERDICT.reason(),
+                SessionReviewView.NEEDS_VERDICT.detail()));
         WaitForAsyncUtils.waitForFxEvents();
         interact(() -> bar.getScene().getRoot().layout());
         WaitForAsyncUtils.waitForFxEvents();
@@ -337,7 +389,8 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
         interact(() -> bar.getScene().getWindow().setWidth(1400));
         WaitForAsyncUtils.waitForFxEvents();
 
-        interact(() -> bar.showSubmitRefused("an intent needs a verdict; jumped to it"));
+        interact(() -> bar.showSubmitRefused(SessionReviewView.NEEDS_VERDICT.reason(),
+                SessionReviewView.NEEDS_VERDICT.detail()));
         WaitForAsyncUtils.waitForFxEvents();
 
         assertTrue(refusalShowing("review-verdict-submit-refusal"), "the refusal must be up");
@@ -349,7 +402,8 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
     @Test
     void atTheFloorTheShortcutHintStillYieldsToARefusal() {
         show(intent(2, "drydock/review · 4 files"), Optional.empty());
-        interact(() -> bar.showSubmitRefused("an intent needs a verdict; jumped to it"));
+        interact(() -> bar.showSubmitRefused(SessionReviewView.NEEDS_VERDICT.reason(),
+                SessionReviewView.NEEDS_VERDICT.detail()));
         WaitForAsyncUtils.waitForFxEvents();
         interact(() -> bar.getScene().getRoot().layout());
         WaitForAsyncUtils.waitForFxEvents();
@@ -456,14 +510,14 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
             // therefore always read 200 and this assertion would pass
             // without measuring anything, the same trap the width check
             // above already guards against.
-            barPrefHeight[0] = bar.prefHeight(RailLayout.CODE_MIN_WIDTH);
+            barPrefHeight[0] = bar.prefHeight(BAR_WIDTH_AT_FLOOR);
         });
-        assertTrue(width[0] <= RailLayout.CODE_MIN_WIDTH + 1,
+        assertTrue(width[0] <= BAR_WIDTH_AT_FLOOR + 1,
                 "the bar is " + Math.round(width[0]) + "px, not at the floor -- this assertion "
                         + "would pass without measuring anything");
         assertTrue(barPrefHeight[0] > 0 && barPrefHeight[0] < SANE_BAR_HEIGHT,
                 "the bar wants " + Math.round(barPrefHeight[0]) + "px tall at the "
-                        + (int) RailLayout.CODE_MIN_WIDTH + "px floor; a wrapped label collapsed to "
+                        + (int) BAR_WIDTH_AT_FLOOR + "px floor; a wrapped label collapsed to "
                         + "a column of single characters looks exactly like this");
 
         List<String> squeezed = new ArrayList<>();
@@ -508,8 +562,35 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
                                 + Math.round(label.getWidth()) + " of " + Math.round(wanted));
                     }
                 }));
-        assertTrue(squeezed.isEmpty(), "at " + (int) RailLayout.CODE_MIN_WIDTH
+        // Nothing may run off the END of a row either. A control with
+        // minWidth(USE_PREF_SIZE) cannot be squeezed, so an over-full row
+        // does not elide anything -- it simply lays a child out past its own
+        // right edge, where it is clipped and invisible. Every check above
+        // compares a child against what it ASKED for and sees nothing wrong.
+        for (String selector : List.of(".review-verdict-actions", ".review-verdict-footer")) {
+            interact(() -> lookup(selector).queryAll().stream()
+                    .map(Parent.class::cast)
+                    .forEach(row -> {
+                        double edge = ((Region) row).getWidth();
+                        row.getChildrenUnmodifiable().stream()
+                                .filter(Node::isManaged)
+                                .filter(child -> child.getBoundsInParent().getMaxX() > edge + 0.5)
+                                .forEach(child -> squeezed.add(describe(child) + " runs "
+                                        + Math.round(child.getBoundsInParent().getMaxX() - edge)
+                                        + "px past the end of " + selector));
+                    }));
+        }
+        assertTrue(squeezed.isEmpty(), "at " + (int) BAR_WIDTH_AT_FLOOR
                 + "px these controls were truncated or mis-wrapped: " + squeezed);
+    }
+
+    /** A node named the way a reader would recognise it in a failure. */
+    private static String describe(Node node) {
+        if (node instanceof Labeled labeled && labeled.getText() != null
+                && !labeled.getText().isBlank()) {
+            return "'" + labeled.getText() + "'";
+        }
+        return node.getStyleClass().isEmpty() ? node.toString() : "." + node.getStyleClass().get(0);
     }
 
     private static ReviewIntent intent(int number, String title) {

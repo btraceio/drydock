@@ -39,8 +39,19 @@ public final class TestStages {
      */
     public static void show(Stage stage, Scene scene) {
         stage.setScene(scene);
-        stage.setWidth(scene.getWidth());
-        stage.setHeight(scene.getHeight());
+        if (scene.getWidth() > 0 && scene.getHeight() > 0) {
+            stage.setWidth(scene.getWidth());
+            stage.setHeight(scene.getHeight());
+        } else {
+            // A scene built without dimensions -- new Scene(root) -- has none
+            // to copy, and setting them anyway pins the stage at 0x0: every
+            // node lays out at nothing and the class fails naming no width,
+            // which is the exact signature this helper exists to eliminate.
+            // sizeToScene is what the plain stage.show() this replaced would
+            // have done, so an unsized scene keeps its old behaviour AND
+            // stops inheriting whatever the last class left.
+            stage.sizeToScene();
+        }
         stage.show();
     }
 }

@@ -108,6 +108,20 @@ final class ReviewVerdictBar extends VBox {
      */
     private static final String BLOCKING_REFUSAL = "⚠ a blocking finding is still open";
 
+    /**
+     * Why "Ask the agent to fix it" handed nothing over. Both causes, because
+     * the boolean it acts on cannot tell them apart and naming the wrong one
+     * is worse than naming the pair; short, because the footer at the bar's
+     * real width has room for about forty characters. A constant so a test
+     * cannot hold a copy that drifts -- which is exactly how three submit
+     * refusals came to be measured at a width production never gives them.
+     */
+    static final String NOTHING_TO_SEND = "no open findings, or no session";
+
+    static final String NOTHING_TO_SEND_DETAIL =
+            "This intent has no open finding to hand over, or this scope has no bound session to "
+                    + "hand it to. Open the scope's session first.";
+
     private final Label refusalLabel = new Label();
     /**
      * Why an "Ask the agent to fix it" click handed nothing over -- a THIRD
@@ -240,9 +254,7 @@ final class ReviewVerdictBar extends VBox {
             // code column's floor has room for about forty characters and
             // not one more -- see showAskRefused -- so the sentence lives in
             // the tooltip, the way intentLabel's does.
-            showAskRefused("nothing to send, or nowhere to send it",
-                    "This intent has no open finding to hand over, or this scope has no bound "
-                            + "session to hand it to. Open the scope's session first.");
+            showAskRefused(NOTHING_TO_SEND, NOTHING_TO_SEND_DETAIL);
         }));
         // Both classes, exactly as submitRefusalLabel does: the shared one
         // for the visual treatment, its own so a test can find THIS label
