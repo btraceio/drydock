@@ -5,6 +5,7 @@ import app.drydock.review.BaseMove;
 import app.drydock.review.ChangeGraph;
 import app.drydock.review.HunkDigest;
 import app.drydock.review.IntentHunks;
+import app.drydock.review.RecheckDispatch;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewVerdict;
@@ -347,6 +348,50 @@ final class SectionStates {
         }
         return new SectionState(VerdictMerge.derive(perHunk), settled, recorded, digests.size(),
                 staleness, List.copyOf(elsewhere), false);
+    }
+
+    /**
+     * Asks the agent which approvals a base move disturbed, at most once per
+     * move (spec §9.7).
+     *
+     * <p>Driven from the render pass rather than from the moment the move is
+     * detected, because that is where staleness is already known: a section
+     * whose {@link SectionState#staleness()} is not {@code FRESH} is exactly
+     * one the move survived {@link BaseMove#couldMatter}'s file filter for.
+     * Gating on that reuses the relevance test instead of repeating it, and a
+     * move touching nothing this scope reads spends no subagent.</p>
+     *
+     * <p>The render pass runs many times per move, so the guard cannot be the
+     * annotation store: {@link AnnotationStore#assessedAffected} reads the
+     * same for "assessed unaffected" and for "never asked", and therefore
+     * cannot see a dispatch still in flight. {@link RecheckDispatch} is that
+     * memory. A hand-off that returned false is released again, since it
+     * reached no terminal and no human is present to notice.</p>
+     */
+    void requestRechecks(Board board, RecheckDispatch dispatch) {
+        String base = host.currentBase(board.scope());
+        if (SessionReviewView.UNRESOLVED_BASE.equals(base)) {
+            // Not a revision, so there is no base PAIR to ask about. The
+            // reader already sees these as stale-until-confirmed.
+            return;
+        }
+        Set<String> recordedBases = new LinkedHashSet<>();
+        for (ReviewIntent intent : board.sections()) {
+            if (stateOf(board, intent).staleness() == Staleness.FRESH) {
+                continue;
+            }
+            for (String digest : digestsOf(board, intent)) {
+                host.verdict(board.scope(), digest)
+                        .filter(verdict -> verdict.staleAgainst(base))
+                        .ifPresent(verdict -> recordedBases.add(verdict.baseCommit()));
+            }
+        }
+        for (String from : recordedBases) {
+            if (dispatch.claim(board.scope().id(), from, base)
+                    && !host.dispatchRecheck(board.scope(), from, base)) {
+                dispatch.release(board.scope().id(), from, base);
+            }
+        }
     }
 
     /**

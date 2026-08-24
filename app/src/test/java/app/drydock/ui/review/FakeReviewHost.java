@@ -36,6 +36,12 @@ final class FakeReviewHost implements SessionReviewView.Host {
     final IntentGrouping intents = new IntentGrouping();
 
     final List<String> handedOffPrompts = new ArrayList<>();
+
+    /** Every automatic recheck asked for, as {@code fromBase->toBase}. */
+    final List<String> recheckDispatches = new ArrayList<>();
+
+    /** Whether the recheck hand-off reaches a terminal; false stands in for a closed tab. */
+    boolean recheckHandOffSucceeds = true;
     final List<String> submittedScopes = new ArrayList<>();
     final List<Path> explorerJumps = new ArrayList<>();
 
@@ -176,6 +182,12 @@ final class FakeReviewHost implements SessionReviewView.Host {
     public boolean assessedAffected(ReviewScope scope, String hunkDigest,
                                     String fromBase, String toBase) {
         return store.assessedAffected(scope.id(), hunkDigest, fromBase, toBase);
+    }
+
+    @Override
+    public boolean dispatchRecheck(ReviewScope scope, String fromBase, String toBase) {
+        recheckDispatches.add(fromBase + "->" + toBase);
+        return recheckHandOffSucceeds;
     }
 
     @Override
