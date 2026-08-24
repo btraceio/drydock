@@ -1,5 +1,6 @@
 package app.drydock.ui.model;
 
+import app.drydock.agent.api.ResumeCostEstimate;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.RepositoryId;
@@ -72,6 +73,7 @@ public final class WorkspaceViewModel {
     private final Map<RepositoryId, RepositoryPullRequests.Outcome> pullRequests = new HashMap<>();
     private Optional<ManagedSessionId> activeSession = Optional.empty();
     private Map<ManagedSessionId, SessionActivity> activities = Map.of();
+    private final Map<ManagedSessionId, ResumeCostEstimate> resumeCostEstimates = new HashMap<>();
 
     public void addListener(Listener listener) {
         listeners.add(Objects.requireNonNull(listener));
@@ -109,6 +111,7 @@ public final class WorkspaceViewModel {
             return;
         }
         sessions = updated;
+        resumeCostEstimates.keySet().retainAll(updated.stream().map(ManagedAgentSession::id).toList());
         if (isRowLevelChange(previous, updated)) {
             Set<RepositoryId> affectedRepos = new LinkedHashSet<>();
             List<ManagedSessionId> changedIds = new ArrayList<>();
@@ -126,6 +129,22 @@ public final class WorkspaceViewModel {
             }
         } else {
             notify(Listener::structureChanged);
+        }
+    }
+
+    /** Current transcript-derived estimate for one managed session. */
+    public Optional<ResumeCostEstimate> resumeCostEstimate(ManagedSessionId sessionId) {
+        return Optional.ofNullable(resumeCostEstimates.get(sessionId));
+    }
+
+    /** Stores or clears one estimate and refreshes exactly that session's renderers. */
+    public void setResumeCostEstimate(ManagedSessionId sessionId, Optional<ResumeCostEstimate> estimate) {
+        ResumeCostEstimate next = estimate.orElse(null);
+        ResumeCostEstimate previous = next == null
+                ? resumeCostEstimates.remove(sessionId)
+                : resumeCostEstimates.put(sessionId, next);
+        if (!Objects.equals(previous, next)) {
+            notify(listener -> listener.sessionRowChanged(sessionId));
         }
     }
 

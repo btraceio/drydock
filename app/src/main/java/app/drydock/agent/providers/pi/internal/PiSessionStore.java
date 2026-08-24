@@ -154,15 +154,20 @@ public final class PiSessionStore implements CandidateSource {
 
     /** Whether a session file whose name contains {@code id} exists in {@code cwd}'s directory. */
     public boolean existsForId(Path cwd, String id) {
+        return fileForId(cwd, id).isPresent();
+    }
+
+    /** The session file whose filename carries {@code id}, for transcript readers. */
+    public Optional<Path> fileForId(Path cwd, String id) {
         if (id == null || id.isBlank()) {
-            return false;
+            return Optional.empty();
         }
         for (Path file : sessionFiles(cwd)) {
             if (file.getFileName().toString().contains(id)) {
-                return true;
+                return Optional.of(file);
             }
         }
-        return false;
+        return Optional.empty();
     }
 
     private List<Path> sessionFiles(Path cwd) {

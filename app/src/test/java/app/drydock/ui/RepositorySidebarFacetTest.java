@@ -47,21 +47,21 @@ class RepositorySidebarFacetTest {
     private static SidebarNode unopenedNode() {
         return new SidebarNode.UnopenedWorktreeNode(
                 new Worktree(Path.of("/wt/a"), Optional.of("a"), false, false, false, false,
-                        Optional.empty()),
+                        Optional.empty(), false),
                 REPO);
     }
 
     private static SidebarNode staleNode() {
         return new SidebarNode.StaleWorktreesNode(
                 List.of(new Worktree(Path.of("/wt/stale"), Optional.of("stale"), false, false, true,
-                        false, Optional.empty())),
+                        false, Optional.empty(), false)),
                 REPO);
     }
 
     private static SidebarNode lockedNode() {
         return new SidebarNode.LockedWorktreesNode(
                 List.of(new Worktree(Path.of("/wt/locked"), Optional.of("locked"), false, false, false,
-                        true, Optional.empty())),
+                        true, Optional.empty(), false)),
                 REPO);
     }
 

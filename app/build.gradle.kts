@@ -58,16 +58,24 @@ application {
     // until then. Kept here now so the JVM argument list is version
     // controlled from the start, per plan section 22 ("Keep JVM arguments
     // in version-controlled build configuration").
-    applicationDefaultJvmArgs = listOf(
-        "-Dfile.encoding=UTF-8",
-        "-Djava.awt.headless=false",
-        // macOS: label the dock tile "Drydock" (matches app/packaging/launcher.sh
-        // and the jbang catalog). The menu-bar/Cmd-Tab app name is set separately
-        // by Main's early AWT init; -Xdock:name only covers the dock tile.
-        "-Xdock:name=Drydock",
+    // -Xdock:name=Drydock is a macOS-only dock-tile label (the menu-bar /
+    // Cmd-Tab app name is set separately by Main's early AWT init). The
+    // HotSpot JVM rejects it on Windows with "Unrecognized option:
+    // -Xdock:name=Drydock" at startup, which makes ./gradlew run and the
+    // generated bin/drydock script abort before Application.launch. The
+    // dock tile has no analog on Windows, so the arg is omitted there.
+    val isMacOsHost = System.getProperty("os.name", "").let {
+        it.startsWith("Mac OS X") || it.startsWith("macOS")
+    }
+    applicationDefaultJvmArgs = buildList {
+        add("-Dfile.encoding=UTF-8")
+        add("-Djava.awt.headless=false")
+        if (isMacOsHost) {
+            add("-Xdock:name=Drydock")
+        }
         // Required now that DrydockApplication (Milestone 5's terminal-tabs UI)
         // loads libghostty/the native host shim via FFM.
-        "--enable-native-access=ALL-UNNAMED",
+        add("--enable-native-access=ALL-UNNAMED")
         // Unlike the gateNSpike tasks (drydock.spikes plugin; they force
         // classpath-mode JavaFX via the spike source set's runtimeClasspath,
         // avoiding JPMS enforcement entirely), the `application`/`javafx`
@@ -83,9 +91,10 @@ application {
         // time a terminal tab is opened (this was missed when Milestone 5
         // wired the terminal-tabs UI into the real app, since the `run`
         // task's module-path-vs-classpath distinction from the spike tasks
-        // was overlooked).
-        "--add-exports=javafx.graphics/com.sun.glass.ui=ALL-UNNAMED"
-    )
+        // was overlooked). Harmless on Windows -- the module still exists
+        // in the JDK 26 jmods set even when nothing reaches into it.
+        add("--add-exports=javafx.graphics/com.sun.glass.ui=ALL-UNNAMED")
+    }
 }
 
 repositories {
@@ -160,6 +169,33 @@ tasks.test {
     systemProperty("javafx.headless", "true")
     systemProperty("headless.geometry", "1920x1200-32")
 
+    // The suite's integration tests commit and merge in temporary git
+    // repositories via the real `git` executable -- both the fixtures' own
+    // ProcessBuilders and the production ProcessRunner (which inherits this
+    // JVM's environment). A host with `commit.gpgsign=true` globally and a
+    // refusing gpg/ssh signing agent would otherwise fail every fixture's
+    // first commit (and every production-path `git merge --no-ff`, which
+    // writes a merge commit) before the behaviour under test runs -- turning
+    // a host signing problem into a misleading, intermittent failure. Git's
+    // Global hooks are equally host-specific: a commit-msg hook may contact
+    // company services or wait for credentials even though the fixture is a
+    // disposable local repository. Replace the user's global config with an
+    // empty task-local file. This still permits tests to install repository
+    // hooks under .git/hooks when hook behaviour is what they exercise.
+    //
+    // GIT_CONFIG_* env injection overrides file config (global/local) but is
+    // itself overridden by an explicit `-c`, so it cannot mask a test that
+    // deliberately enables signing. Set for the whole JVM, as above, so
+    // every spawned git inherits it.
+    val isolatedGlobalGitConfig = temporaryDir.resolve("global-gitconfig")
+    environment("GIT_CONFIG_GLOBAL", isolatedGlobalGitConfig.absolutePath)
+    environment("GIT_CONFIG_COUNT", "1")
+    environment("GIT_CONFIG_KEY_0", "commit.gpgsign")
+    environment("GIT_CONFIG_VALUE_0", "false")
+    doFirst {
+        isolatedGlobalGitConfig.parentFile.mkdirs()
+        isolatedGlobalGitConfig.writeText("")
+    }
 
     // Inputs for RuntimeImageModuleListTest: the packaged app jar, its runtime
     // classpath, and the convention-plugin source that declares the jlink
@@ -225,25 +261,37 @@ tasks.register<Jar>("jbangJar") {
 }
 
 tasks.named<JavaExec>("run") {
-    // The real application now embeds Ghostty terminal surfaces (Milestone
-    // 5's terminal-tabs UI), so `run` needs both native libraries built
-    // first, same as every gateNSpike task (drydock.spikes plugin).
-    dependsOn(rootProject.tasks.named("buildGhosttyNative"))
-    dependsOn(rootProject.tasks.named("buildNativeHost"))
+    // The macOS production app embeds Ghostty terminal surfaces (Milestone
+    // 5's terminal-tabs UI), so on Mac `run` needs libghostty + the AppKit
+    // host shim built first. Neither can be built on Windows -- Zig + Xcode
+    // only -- and on Windows the JediTermFX/pty4j backend is the only path
+    // that runs, so the native deps are skipped there. The dep is gated at
+    // configuration time on os.name (matching the -Xdock:name gating in
+    // applicationDefaultJvmArgs above), so a Windows `gradle :app:run`
+    // proceeds straight to launching the app rather than failing the
+    // ghostty build.
+    val isMacOsHost = System.getProperty("os.name", "").let {
+        it.startsWith("Mac OS X") || it.startsWith("macOS")
+    }
+    if (isMacOsHost) {
+        dependsOn(rootProject.tasks.named("buildGhosttyNative"))
+        dependsOn(rootProject.tasks.named("buildNativeHost"))
+    }
     javaLauncher.set(javaToolchains.launcherFor(java.toolchain))
     workingDir = rootProject.projectDir
 
-    // Diagnostic support: forward -Papp.drydock.diag.* project properties to
-    // the run task's application JVM as system properties (the Gradle
-    // client's own -D flags never reach the forked app JVM; same pattern
-    // as gate0eSpike's property forwarding in the drydock.spikes plugin). Used by
-    // automated visual verification: app.drydock.diag.stateFile isolates
-    // persisted state to a throwaway file, and
-    // app.drydock.diag.autoCreateSession=true plus app.drydock.diag.repo=<path>
-    // auto-registers a repository and opens a session in it on startup
-    // (see DrydockApplication.start).
+    // Diagnostic support: forward -Papp.drydock.diag.* and
+    // -Papp.drydock.terminal.backend project properties to the run task's
+    // application JVM as system properties (the Gradle client's own -D flags
+    // never reach the forked app JVM; same pattern as bootSpike's property
+    // forwarding in the drydock.spikes plugin). Used by automated visual
+    // verification: app.drydock.diag.stateFile isolates persisted state to a
+    // throwaway file, and app.drydock.diag.autoCreateSession=true plus
+    // app.drydock.diag.repo=<path> auto-registers a repository and opens a
+    // session in it on startup (see DrydockApplication.start).
     project.properties.forEach { (key, value) ->
-        if (key.startsWith("app.drydock.diag.") && value != null) {
+        if (value == null) return@forEach
+        if (key.startsWith("app.drydock.diag.") || key == "app.drydock.terminal.backend") {
             systemProperty(key, value.toString())
         }
     }

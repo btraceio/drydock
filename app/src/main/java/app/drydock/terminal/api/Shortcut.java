@@ -10,6 +10,12 @@ public enum Shortcut {
     EXPLORER_SUB_TAB,
     /** ⌘4 -- switch to the Review sub-tab. */
     REVIEW_SUB_TAB,
+    /** ⌘T -- spawn a new terminal in the Terminal sub-tab. */
+    NEW_TERMINAL,
+    /** ⌥⌘] -- cycle to the next terminal within the Terminal sub-tab. */
+    NEXT_TERMINAL,
+    /** ⌥⌘[ -- cycle to the previous terminal within the Terminal sub-tab. */
+    PREVIOUS_TERMINAL,
     /** ⌘⇧[ -- select the previous session tab. */
     PREVIOUS_SESSION_TAB,
     /** ⌘⇧] -- select the next session tab. */

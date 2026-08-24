@@ -125,8 +125,9 @@ record SidebarChildren(
      * locks its {@code .sphinx/worktrees/*} while initializing) -- and folds
      * into its own collapsed group rather than cluttering the open rows or
      * being offered up for an unconfirmed {@code Clean}; the main checkout and
-     * an ordinary named worktree stay open; a prunable or detached one is
-     * stale.
+     * an ordinary named worktree stay open; a prunable, detached, or
+     * merged-branch one is stale -- its branch's work is already in the base, so
+     * it is safe to offer up for the Clean action.
      */
     private static void bucket(Worktree worktree,
             List<Worktree> open, List<Worktree> stale, List<Worktree> locked) {
@@ -134,7 +135,7 @@ record SidebarChildren(
             open.add(worktree);
         } else if (worktree.locked()) {
             locked.add(worktree);
-        } else if (worktree.prunable() || worktree.detached()) {
+        } else if (worktree.prunable() || worktree.detached() || worktree.merged()) {
             stale.add(worktree);
         } else {
             open.add(worktree);

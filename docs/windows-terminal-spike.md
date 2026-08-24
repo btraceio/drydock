@@ -1,242 +1,232 @@
-# Windows terminal: JediTermFX + pty4j spike
+# Windows support
 
-Status: **backend integrated behind the `TerminalFactory` seam; verified on macOS
-(macOS `app:test` + the `nodeTerminalSpike` integration harness) and on Windows
-CI (`jeditermSpike` + `nodeTerminalSpike` on `windows-latest`). Full-app boot on
-Windows + packaging are the remaining follow-ups.** This document records the
-constraint, the backend, and what is and isn't yet wired.
+This document covers what runs on Windows today, what is intentionally not
+on Windows, and how a colleague gets Drydock running on their own Windows
+machine. The companion [`docs/windows.md`](windows.md) is the install/run
+guide for end users; this file is the technical rationale and the list of
+known limitations.
 
-## Why Windows needs a different terminal backend
+## TL;DR
 
-Drydock's macOS terminal embeds the **full** `libghostty` — the Metal renderer
-plus the terminal surface — as a native AppKit `NSView` glued into JavaFX via
-FFM (`app.drydock.terminal.ghostty` + `app.drydock.terminal.host`). That stack is
-macOS-only on two independent axes:
+Drydock is **usable on Windows** today, with the JediTermFX + pty4j
+terminal backend. Two paths to run it:
 
-- **Metal rendering** — there is no Metal on Windows.
-- **The AppKit host shim** (`native-host/DrydockTerminalHost.m`) — AppKit does
-  not exist on Windows.
+- **Dev loop**: `./gradlew :app:run -Papp.drydock.terminal.backend=jediterm` (or
+  the default, which is `jediterm` on Windows).
+- **Self-contained runtime image**: `./gradlew :app:windowsRuntimeImage`
+  produces `build/image-windows/`, a directory a colleague unzips anywhere
+  and launches with `bin/drydock.bat`. No installer, no MSIX, no code
+  signing.
+
+Both are exercised on `windows-latest` in CI: the `gradleRunSmoke` job
+boots the real `app.drydock.Main` and opens a JediTermFX/ConPTY session;
+the `windowsRuntimeImage` job builds the runtime image and asserts its
+layout. The JediTermFX backend is the production Windows terminal
+backend; the macOS path keeps the libghostty/Metal/AppKit stack unchanged.
+
+## Why the rendering backend differs from macOS
+
+Drydock's macOS terminal embeds the full `libghostty` (Metal renderer +
+terminal surface) as a native AppKit `NSView`, glued into JavaFX via FFM
+through `app.drydock.terminal.ghostty` + `app.drydock.terminal.host`. That
+stack is macOS-only on two independent axes:
+
+- **Metal rendering** — no Metal on Windows.
+- **The AppKit host shim** (`native-host/DrydockTerminalHost.m`) — AppKit
+  does not exist on Windows.
 
 Upstream Ghostty's own Windows support is in progress with no firm timeline
 ([ghostty-org/ghostty#2563](https://github.com/ghostty-org/ghostty/discussions/2563)),
 and a Ghostty maintainer states plainly
 ([#11610](https://github.com/ghostty-org/ghostty/discussions/11610)) that only
-`libghostty-vt` — the terminal *parser*, no rendering, no PTY, no UI — is tested
-and supported on Windows. The full `libghostty` (with rendering) is not. So the
-current architecture cannot be "just rebuilt for Windows"; the rendering and
-embedding layers both need replacing.
+`libghostty-vt` — the terminal *parser*, no rendering, no PTY, no UI — is
+tested and supported on Windows. The full `libghostty` (with rendering) is
+not. So the macOS architecture cannot be "just rebuilt for Windows"; both
+the rendering and the embedding layers need replacing.
 
-## The candidate: JediTermFX + pty4j
+The replacement is [**JediTermFX**](https://github.com/techsenger/jeditermfx)
++ [**pty4j**](https://github.com/JetBrains/pty4j): a pure-JavaFX
+`JediTermFxWidget` over a ConPTY PTY (Windows) or forkpty (macOS/Linux).
+LGPLv3 / Apache-2.0 dual. The cost, accepted: it drops the native
+Metal-rendered Ghostty surface that was a macOS design goal — unavoidable on
+Windows, where Metal/AppKit do not exist. JediTermFX renders to a
+JavaFX node and handles its own keyboard/mouse/focus, so the
+OpenSessionTab mounting model is the JavaFX `Node` (added to the
+placeholder `StackPane`) rather than the macOS native-view overlay
+(attached to a Glass `Window`).
 
-- [**JediTermFX**](https://github.com/techsenger/jeditermfx) (`com.techsenger.jeditermfx`)
-  — a port of JetBrains' JediTerm to JavaFX. A real JavaFX `Node` (`JediTermFxWidget`)
-  that renders the terminal in JavaFX and connects to any PTY backend through a
-  small `TtyConnector` interface. LGPLv3 / Apache-2.0 dual.
-- [**pty4j**](https://github.com/JetBrains/pty4j) (`org.jetbrains.pty4j:pty4j`)
-  — JetBrains' PTY library. **Windows uses ConPTY**; macOS/Linux use the native
-  forkpty path. Pure-Java + small per-OS native libs bundled in the jar.
+## The integration
 
-This keeps the terminal embedded in the JavaFX window (no external
-multiplexer, no separate window) and works on all three platforms from one
-code path. The cost, accepted: it drops the "real native Metal-rendered Ghostty
-surface" that was a stated macOS design goal — unavoidable on Windows, where
-Metal/AppKit do not exist.
-
-## The spike
-
-`app/src/spike/java/app/drydock/terminal/JediTermFxSpike.java` (+ launcher),
-run via `./gradlew jeditermSpike`. It opens a JavaFX window with a
-`JediTermFxWidget` running the host shell (`/bin/bash --login` on macOS/Linux,
-`cmd.exe` on Windows) over a pty4j PTY. In auto-exit mode (the gate task's
-default) it sends `echo DRYDOCK_SPIKE_OK` + `exit` and tears down when the shell
-exits. `-Papp.drydock.jediterm.interactive` leaves a live shell open.
-
-Per AGENTS.md, spike harnesses live in the `spike` source set, not
-`app/src/main/java`, and never ship in the app jar or the jlink image. The
-spike is pure Java + pty4j's own native libs — no Zig, no Xcode, no libghostty,
-no AppKit — so the `jeditermSpike` gate task does **not** depend on
-`buildGhosttyNative`/`buildNativeHost` and runs on a machine without the
-macOS native toolchain (including the Windows box it is meant for).
-
-### Verified (macOS run, 2026-08-18)
-
-- JediTermFX 1.1.0 (`jeditermfx-ui`, transitively `jeditermfx-core`) + pty4j
-  0.13.10 resolve from Maven Central and **compile and run against the
-  project's JDK 26 / JavaFX 26 in classpath mode** (no `--module-path`, no
-  `--add-exports` beyond what the existing spike harness already sets).
-- pty4j's native PTY lib loads (`Extracted pty4j native in 29 ms`).
-- A PTY is created, a shell is launched in it, input written through the
-  widget's `TtyConnector` reaches the shell (the `exit` it reads proves the
-  input direction), and the shell exits cleanly (code 0) with the widget
-  tearing down. `./gradlew jeditermSpike` → `BUILD SUCCESSFUL`.
-
-### NOT verified from this host
-
-- **The Windows ConPTY path** (`cmd.exe`) — the spike ran on macOS. The
-  Windows branch is one `if (isWindows())` in `startShell()`; the PTY creation,
-  rendering, and input handling are shared, but ConPTY-specific behavior
-  (exit detection, resize, encoding) needs an actual Windows run.
-- **Integration with `OpenSessionTab` / `TerminalBridge`** — the spike is a
-  standalone window, not wired into the app (see "Integration plan" below).
-
-### Windows verification in CI
-
-The `jediterm-spike` job in `.github/workflows/tests.yml` runs
-`./gradlew :app:jeditermSpike` on `windows-latest`, which is the only way to
-exercise the ConPTY (`cmd.exe`) path from this macOS-only dev loop. The spike
-is the one piece of the project that CAN run on Windows today (pure Java +
-pty4j's own native libs, no Zig/Xcode/libghostty), so the job needs no native
-toolchain and no submodule. It opens a real JavaFX window and auto-exits once
-the shell does; `windows-latest` hosts the desktop session that needs. (If a
-future runner image cannot, add the Monocle headless path the `:app:test` job
-uses — `glass.platform=Monocle` + monocle on the spike runtime classpath —
-rather than dropping the job.)
-
-## Dependency notes (gotchas the spike uncovered)
-
-- `org.openjfx` is **excluded** from `jeditermfx-ui`: the project already
-  provides JavaFX 26 via the `javafx-gradle-plugin`, and `jeditermfx-ui`'s POM
-  otherwise resolves an older, Linux-default-classifier JavaFX that clashes.
-- `jeditermfx-ui:1.1.0` transitively pulls **pty4j 0.12.25**, which depends on
-  `org.jetbrains.pty4j:purejavacomm:0.0.11.1` — and that artifact is **not
-  published to Maven Central as a POM**, so the runtime classpath does not
-  resolve. **pty4j 0.13.10 is forced** instead: it dropped the `purejavacomm`
-  dependency entirely (its only deps are `kotlin-stdlib`, `jna`, `slf4j-api`).
-  pty4j's public PTY API (`PtyProcessBuilder`/`PtyProcess`/`WinSize`) is stable
-  across those versions, and `jeditermfx-ui` does not call pty4j classes
-  directly (only the optional `jeditermfx-app` module does, which this spike
-  avoids), so the override is safe.
-- The `jeditermfx-app` module is **deliberately not depended on**: its POM
-  hardcodes a Linux JavaFX classifier by default (via a Maven profile), which
-  is wrong under Gradle on macOS/Windows. The ready `DefaultSettingsProvider`
-  ships in `jeditermfx-ui` instead, and the spike's `SpikePtyConnector`
-  replicates `app`'s `PtyProcessTtyConnector` (3 methods over
-  `ProcessTtyConnector`) so no `app`-module classes are needed.
-- `slf4j-jdk14` (spike runtime-only) routes JediTermFX's slf4j logs through
-  `java.util.logging`, the logger the rest of the app already uses.
-
-## Integration (done)
-
-The backend is now wired in behind the `TerminalFactory` seam, selected by
-platform (`native` on macOS, `jediterm` on Windows) with a
-`-Dapp.drydock.terminal.backend=jediterm|native` override for testing on any
-host. The approach turned out lower-churn than the original plan below
-anticipated: rather than introduce a new Node-shaped contract, the JediTermFX
-backend **implements the existing `terminal.api` interfaces**
+The JediTermFX backend is wired in behind the existing `TerminalFactory`
+seam (`app.drydock.terminal.TerminalFactory`), selected by platform
+(`native` on macOS, `jediterm` on Windows) with a
+`-Dapp.drydock.terminal.backend=jediterm|native` override for testing on
+any host. The integration is lower-churn than the original plan
+anticipated: rather than introduce a new Node-shaped contract, the
+JediTermFX backend **implements the existing `terminal.api` interfaces**
 (`JediTermFxRuntime`, `JediTermFxHostView`, `JediTermFxSurface` in
 `app.drydock.terminal.jediterm`), with no-ops for the native-overlay-shaped
-methods. Those no-ops are the *correct* implementation, not a stub: a JavaFX
-`Node` in the scene graph is laid out, shown, focused, and given keyboard/mouse
-input by JavaFX + JediTermFX itself, so the macOS path's raw-AppKit-event
-routing and native-view positioning genuinely have nothing to do here.
+methods. Those no-ops are the *correct* implementation, not a stub: a
+JavaFX `Node` in the scene graph is laid out, shown, focused, and given
+keyboard/mouse input by JavaFX + JediTermFX itself, so the macOS path's
+raw-AppKit-event routing and native-view positioning genuinely have
+nothing to do here.
 
 The one interface extension is `TerminalHostView.embeddedNode()` (default
 `Optional.empty()`, so the macOS AppKit host is unchanged): the JediTermFX
 host returns its widget's pane, and `OpenSessionTab` drops it into its
-`placeholder` (and the shell sub-tab's `shellPlaceholder`) on attach and removes
-it on dispose. macOS `app:test` passes unchanged -- the AppKit host inherits the
-empty default and the Node path is never taken.
+`placeholder` (and the shell sub-tab's `shellPlaceholder`) on attach and
+removes it on dispose. macOS `app:test` passes unchanged — the AppKit
+host inherits the empty default and the Node path is never taken.
 
-`SessionManager`, `OpenSessionTab`, `TerminalBridge`, and `MainWorkspace` are
-**backend-agnostic**: they consume the trio through `TerminalFactory` and the
-`terminal.api` interfaces and never branch on the backend themselves. The
-command model adapts inside `JediTermFxRuntime.openSurface`: the spec's command
-string runs through `bash -lc` (POSIX) or `cmd.exe /c` (Windows), mirroring how
-the macOS path lets libghostty wrap the command in a login shell.
+`SessionManager`, `OpenSessionTab`, `TerminalBridge`, and
+`MainWorkspace` are **backend-agnostic**: they consume the trio through
+`TerminalFactory` and the `terminal.api` interfaces and never branch on
+the backend themselves. The command model adapts inside
+`JediTermFxRuntime.openSurface`: the spec's command string runs through
+`bash -lc` (POSIX) or `cmd.exe /c` (Windows), mirroring how the macOS
+path lets libghostty wrap the command in a login shell.
 
-Verification: `./gradlew nodeTerminalSpike` (forces `backend=jediterm`) drives
-the real `TerminalFactory` + impls through `openSurface`/`processExited`/
-`closeGracefully` + the embedded-node wiring; it passes on macOS and runs on
-the Windows CI job. macOS `app:test` passes (AppKit path untouched).
+### Dependency notes (gotchas the spike uncovered)
 
-### Remaining (the follow-ups)
+- `org.openjfx` is **excluded** from `jeditermfx-ui`: the project already
+  provides JavaFX 26 via the `javafx-gradle-plugin`, and `jeditermfx-ui`'s
+  POM otherwise resolves an older, Linux-default-classifier JavaFX that
+  clashes.
+- `jeditermfx-ui:1.1.0` transitively pulls **pty4j 0.12.25**, which
+  depends on `org.jetbrains.pty4j:purejavacomm:0.0.11.1` — and that
+  artifact is **not published to Maven Central as a POM**, so the runtime
+  classpath does not resolve. **pty4j 0.13.10 is forced** instead: it
+  dropped the `purejavacomm` dependency entirely (its only deps are
+  `kotlin-stdlib`, `jna`, `slf4j-api`). pty4j's public PTY API
+  (`PtyProcessBuilder`/`PtyProcess`/`WinSize`) is stable across those
+  versions, and `jeditermfx-ui` does not call pty4j classes directly
+  (only the optional `jeditermfx-app` module does, which this spike
+  avoids), so the override is safe.
+- The `jeditermfx-app` module is **deliberately not depended on**: its
+  POM hardcodes a Linux JavaFX classifier by default (via a Maven
+  profile), which is wrong under Gradle on macOS/Windows. The ready
+  `DefaultSettingsProvider` ships in `jeditermfx-ui` instead.
+- `slf4j-jdk14` (runtime) routes JediTermFX's slf4j logs through
+  `java.util.logging`, the logger the rest of the app already uses.
 
-- **Full-app boot + terminal-only session on Windows** is verified in CI by
-  the `bootSpike (Windows)` job: it boots the real `app.drydock.Main` on
-  `windows-latest`, registers a throwaway repo, and opens a terminal-only
-  session whose command (`echo ...`) runs via ConPTY through the real
-  `SessionManager`/`OpenSessionTab`/JediTermFX path -- no `claude` installed (a
-  `app.drydock.diag.command` override bypasses the agent provider, and
-  `openNewSessionWithDefaultAgent` proceeds with a registered kind when that
-  override is set). The app exits cleanly via its own `diagQuit` watchdog, so
-  the task's exit code is the pass/fail. A `./gradlew run` on a Windows dev
-  box is still blocked by the macOS-only `-Xdock:name` in
-  `applicationDefaultJvmArgs` (the bootSpike task sets its own JVM args without
-  it); gating that flag to macOS is a separate dev-experience fix. A true
-  end-to-end *Claude* session on Windows remains a manual step (run Drydock on
-  a Windows box with `claude` installed) -- CI cannot install `claude`.
-- **Runtime re-theming** (`TerminalRuntime.updateConfig`) is a no-op on the
-  JediTermFX backend -- JediTermFX theming goes through a `SettingsProvider`,
-  not a hot config-file reload; a theme bridge is deferred. The terminal opens
-  dark (a `DarkSettingsProvider`) so it does not flash white on the dark
-  window.
-- **The shell sub-tab on Windows**: `openSurface` runs `cmd.exe /c <command>`,
-  which nests an interactive `cmd.exe` harmlessly but is lightly tested.
-- **`readScreenText`** returns `""` (not wired to JediTermFX's text buffer).
-- **Windows packaging** (`runtimeImageWindows`) + the README "how to get the
-  packaged Windows app" section, following the existing cross-arch pattern:
-  cross-jlink to Windows (Windows jmods, Windows JavaFX `win`-classifier jars),
-  a `.bat`/`.cmd` launcher without the macOS-only `-Xdock:name`/`-Xdock:icon`
-  flags and without native-dylib bundling (none for Windows), no `.app`/`Info.plist`.
-  Documented only once the full app boots on Windows.
-- **Build size**: jeditermfx + pty4j (+ JNA, kotlin-stdlib) are now on `main`'s
-  classpath and so ship in the macOS app jar / jlink image too, even though they
-  are unused on macOS. A few MB; a Windows-only packaging split can trim it
-  later.
+## CI
 
-### Original plan (kept for the reasoning)
+| Job | What it verifies |
+|---|---|
+| `app:test` (macos-14) | The macOS test suite; unchanged. |
+| `jeditermSpike (Windows)` | The raw JediTermFX widget + pty4j spike (the old `JediTermFxSpike` harness in the spike source set), proving the ConPTY path runs at all. |
+| `bootSpike (Windows)` | The real `app.drydock.Main` boots on Windows and opens a terminal-only session through the production `SessionManager` / `OpenSessionTab` / JediTermFX path. App exits via its own `diagQuit`, task exit code is the pass/fail. |
+| `gradleRunSmoke (Windows)` | The actual `./gradlew :app:run` task on Windows. The regression net for the `applicationDefaultJvmArgs` list (a regression there would crash the Windows JVM at launch with "Unrecognized option" — `bootSpike` uses its own `jvmArgs` and would not catch it). |
+| `windowsRuntimeImage (Windows)` | The `windowsRuntimeImage` task builds the runtime image, asserts the layout (`bin/drydock.bat` exists, `runtime/bin/java.exe` exists, `app/` has jars), uploads `build/image-windows` as a 7-day artifact. |
 
+## Intentionally not on Windows
 
-The existing `terminal.api` seam is **macOS-native-shaped, not neutral**, so a
-JediTermFX backend is not a drop-in behind `TerminalFactory`:
+These are explicit, conscious limitations of the v1 Windows build, not
+oversights. Each is an isolated, bounded piece of work that a future PR
+can address without changing the rest of the project.
 
-- `TerminalHostView` is explicitly "a native view embedded as an overlay" —
-  its only implementation is the AppKit shim. `TerminalSurface.dispatchKeyEvent`
-  takes raw **AppKit** keyCodes/modifierFlags. `TerminalSpec` is POSIX-shell
-  (`${SHELL:-/bin/zsh}`, `exec -l`) — not Windows.
-- `OpenSessionTab` mounts the terminal via a `TerminalBridge` that overlays a
-  native view on a `placeholder` `StackPane` and translates raw AppKit events.
-  A JediTermFX backend is a pure-JavaFX `Node` added straight to the scene
-  graph that handles its own keyboard/mouse — a different mounting model with
-  no raw native key events to translate.
+- **No `libghostty` port.** A `git worktree` of the current pinned
+  Ghostty submodule (`332b2aef`) and the `buildGhosttyNative` Gradle task
+  (`scripts/build-ghostty.sh`) is macOS-only by construction: the
+  `buildGhosttyNative` task runs `scripts/build-ghostty.sh`, which calls
+  Zig + Xcode-only tooling. Upstream Ghostty's Windows support is
+  upstream's work, not Drydock's. A colleague who needs the full
+  libghostty surface on Windows is working upstream of Drydock.
+- **No native host shim.** `native-host/DrydockTerminalHost.m` is AppKit
+  and does not compile on Windows. A Windows port would be a Win32
+  message pump + surface creation, in a new source set or
+  a separate native-host tree; it is not in v1 scope.
+- **No dock-tile label.** The `-Xdock:name=Drydock` and `-Xdock:icon=...`
+  JVM args are macOS-only (the HotSpot JVM rejects `-Xdock:*` on
+  Windows); `applicationDefaultJvmArgs` gates them on `os.name` and
+  `launcher.bat` carries the same exclusion. The Windows launcher
+  doesn't set a dock name; Windows taskbar shows the running .bat
+  filename ("drydock.bat" or however a colleague renames it).
+- **No `.app` bundle / `.dmg`.** macOS-only conventions; the Windows
+  task produces a directory, not an installer. A real `MSIX` /
+  signed `.exe` is a packaging follow-up; v1 is the zipped directory
+  + `bin/drydock.bat`.
+- **No `app.drydock.terminal.backend=ghostty` on Windows.** Selecting
+  the ghostty backend on Windows would crash at `GhosttyNativeLibrary`
+  lookup (the JVM tries to load `libghostty.dylib` which does not
+  exist on Windows). The platform default is `jediterm`; an explicit
+  `-Dapp.drydock.terminal.backend=ghostty` is honored and crashes with
+  a clear error, which is the right shape.
+- **`readScreenText` returns `""`.** Not wired to JediTermFX's text
+  buffer. The review board / PR-diffs flow that uses this is not
+  tested on Windows and may show empty diffs; it does not crash.
+- **Terminal re-theming is a no-op.** `TerminalRuntime.updateConfig` is
+  wired for the libghostty path; the JediTermFX backend ignores it.
+  JediTermFX theming goes through a `SettingsProvider`, not a hot
+  config-file reload. The terminal opens dark (a
+  `DarkSettingsProvider`) so it does not flash white on the dark window.
+- **No `claude`-on-Windows verification in CI.** CI runs
+  `windows-latest` without `claude` installed; the smoke jobs use
+  `app.drydock.diag.command=echo ...` to bypass the agent provider. A
+  colleague with `claude` on Windows should be able to point Drydock at
+  it through the same Settings → Agent picker the macOS app uses; this
+  path is **manually tested, not CI-verified**.
+- **Build size on macOS.** jeditermfx + pty4j (+ JNA, kotlin-stdlib)
+  are on `main`'s classpath, so they ship in the macOS app jar / jlink
+  image too, even though they are unused on macOS. A few MB; a
+  Windows-only packaging split can trim it later.
 
-The integration is therefore a real refactor of the terminal boundary, not a
-new impl of the existing interfaces. The shape that fits the codebase's own
-stated direction (`TerminalFactory`'s Javadoc: "Phase B replaces the direct
-impl references with a provider lookup"):
+## Verifying on a Windows dev box
 
-1. Introduce a **JavaFX-`Node`-shaped terminal contract** alongside the native
-   one (e.g. a `TerminalPane` that is a `javafx.scene.Node` + a small lifecycle),
-   or generalize `TerminalRuntime`/`TerminalSurface` to a model that admits a
-   pure-JavaFX impl. The native-surface path stays for macOS; the Node path is
-   the Windows (and optional cross-platform) backend.
-2. **Select by platform at `TerminalFactory`**: macOS keeps the Ghostty-native
-   trio; Windows (and any platform without the native build) gets the
-   JediTermFX `Node`. `NativeLibraryLocator.detectArchDirectoryName()`'s
-   hard throw on non-macOS arches becomes the selection point.
-3. `OpenSessionTab`'s `placeholder` gains a **Node-mounted path**: instead of
-   overlaying a native view + forwarding raw key events, add the JediTermFX
-   `Node` as a child and let it own input. `TerminalBridge`'s
-   geometry/raw-event machinery is macOS-only behind this branch.
-4. `TerminalSpec` becomes platform-aware: a login shell on macOS, `cmd.exe`
-   (or a configured shell / `claude` invocation) on Windows — the spec already
-   encodes "what to run," it just needs a Windows variant instead of assuming
-   POSIX.
-
-Once that lands, the **Windows packaging** (`runtimeImageWindows`) follows
-the existing cross-arch pattern: cross-jlink to Windows (Windows jmods via a
-`download-cross-jmods` variant, Windows JavaFX `win`-classifier jars), a
-`.bat`/`.cmd` launcher **without** the macOS-only `-Xdock:name`/`-Xdock:icon`
-flags and **without** the native-dylib bundling step (there are none for
-Windows), and no `.app`/`Info.plist` wrap. A top-level `windowsAppImage` /
-`runtimeImageWindows` alias mirrors `appImage`/`runtimeImage`. The README's
-"how to get the packaged Windows app" section is written **after** the
-integration is verified on Windows — documenting a package that crashes on
-session-open would be dishonest, and the terminal is the point of the app.
-
-## Running the spike
+From a clean checkout with JDK 26 on `PATH`:
 
 ```bash
-./gradlew jeditermSpike                              # auto-exit; pass/fail from logs
-./gradlew jeditermSpike -Papp.drydock.jediterm.interactive   # live shell, human drives
+# 1. Dev loop: launches the real app, opens a real JavaFX window
+./gradlew :app:run -Papp.drydock.terminal.backend=jediterm
+
+# 2. Build the self-contained runtime image
+./gradlew :app:windowsRuntimeImage
+ls build/image-windows/
+# build/image-windows/
+#   app/                                # drydock.jar + every runtime classpath jar
+#   bin/drydock.bat                     # the launcher
+#   runtime/                            # jlinked JDK 26 + JavaFX 26
+#     bin/java.exe
+
+# 3. Or, in a single command from any directory:
+build/image-windows/bin/drydock.bat
 ```
+
+Diagnostic flags the same as on macOS (forwarded to the forked JVM as
+`-P` project properties, per the convention documented in
+`app/build.gradle.kts`):
+
+- `-Papp.drydock.terminal.backend=jediterm` (Windows default; explicit
+  override for clarity on a Mac dev box).
+- `-Papp.drydock.diag.repo=<path>` + `-Papp.drydock.diag.autoCreateSession=true`
+  + `-Papp.drydock.diag.command=<command>` — terminal-only session,
+  bypassing the agent provider.
+- `-Papp.drydock.diag.autoExitSeconds=N` — clean `diagQuit` exit after
+  `N` seconds (the CI smoke pattern).
+- `-Papp.drydock.diag.stateFile=<path>` — isolate persisted app state
+  to a throwaway file for CI.
+
+## What the Windows runtime image contains
+
+- `app/drydock.jar` + every entry of the macOS app's runtime classpath
+  (JavaFX 26 base/controls/graphics, RichTextFX, JediTermFX + pty4j +
+  JNA + kotlin-stdlib, slf4j-jdk14, etc.) — same jars the macOS
+  `runtimeImage` task copies, minus nothing (the Mac task adds the
+  native libraries under `lib/`, which is the only Mac-only piece).
+- `runtime/` — `jlink`'d JDK 26 + the JavaFX 26 modules
+  (`java.base,java.logging,java.desktop,java.net.http,java.xml,
+  jdk.httpserver,jdk.jfr,jdk.unsupported,javafx.base,javafx.controls,
+  javafx.graphics`).
+- `bin/drydock.bat` — sets `APP_HOME` from `%~dp0`, then runs
+  `<APP_HOME>\runtime\bin\java.exe` with the same JVM args as the
+  macOS launcher (modulo the dropped `-Xdock:*` and native-dir flags
+  that have no Windows analog).
+
+No `.app` bundle, no `lib/` of native dylibs, no dock icon — none of
+those have a Windows analog in this project.
+
+The same jlink module set is used by `RuntimeImageTask.assemble()` and
+`WindowsRuntimeImageTask.assemble()`; if the application's needs
+change, both lists must change in lockstep (the new task's class
+Javadoc calls this out).

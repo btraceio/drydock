@@ -1,6 +1,7 @@
 package app.drydock.ui;
 
 import app.drydock.agent.api.AgentKind;
+import app.drydock.agent.api.ResumeCostEstimate;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.PrState;
 import app.drydock.domain.Repository;
@@ -42,8 +43,10 @@ import javafx.util.Duration;
 
 import java.lang.System.Logger;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -103,6 +106,23 @@ final class OpenSessionTab {
     record ShellTerminal(TerminalRuntime runtime, TerminalHostView host) { }
 
     /**
+     * One ephemeral terminal in the Terminal sub-tab: its own native trio
+     * (bridge + surface + layout anchor) and its own stripe tab (a selector
+     * toggle + a close ×). {@code bridge} is set once the provider returns a
+     * runtime/host pair (see {@link #createAndStartPane}); {@code surface} is
+     * set once that pair's surface is opened. Several terminals may be open
+     * at once; only the {@link OpenSessionTab#activeTerminal} one is visible.
+     */
+    private static final class TerminalPane {
+        final StackPane placeholder = new StackPane();
+        final ToggleButton button = new ToggleButton();
+        final Button closeButton = new Button("×");
+        final HBox tab = new HBox(2, button, closeButton);
+        TerminalBridge bridge;   // null until the provider returns
+        TerminalSurface surface;  // null until openSurface
+    }
+
+    /**
      * The managed session this tab hosts. Not final only as a safety net:
      * placeholders are keyed under the real session id up front (see
      * {@code SessionManager.prepareSession}), and {@code
@@ -114,8 +134,6 @@ final class OpenSessionTab {
     private final TerminalBridge bridge;
     private final Stage stage;
     private final StackPane placeholder = new StackPane();
-    /** Layout anchor for the shell sub-tab's own native view (mirrors {@link #placeholder}). */
-    private final StackPane shellPlaceholder = new StackPane();
     private final Label statusLabel = new Label("Starting session...");
     private final BorderPane content = new BorderPane();
     private final HandoffBanner handoffBanner = new HandoffBanner();
@@ -144,21 +162,34 @@ final class OpenSessionTab {
     private SessionReviewScopes.Choice pendingReviewChoice;
     private Consumer<Optional<SessionReviewScopes.Choice>> onReviewShown = requested -> { };
 
-    // -- Ephemeral shell Terminal sub-tab (never persisted; created on first switch) --
-    /** Supplies a fresh shell runtime+host whose wakeup drives the argument (the shell bridge's tickAndDraw). */
+    // -- Ephemeral Terminal sub-tab terminals (never persisted; created on demand) --
+    /** Supplies a fresh shell runtime+host whose wakeup drives the argument (that terminal's tickAndDraw). */
     private Function<Runnable, ShellTerminal> shellTerminalProvider = onWakeup -> null;
     private String shellWorkingDirectory = System.getProperty("user.home");
     /** Full shell command for the shell sub-tab; empty = default local login shell in {@link #shellWorkingDirectory}. */
     private Optional<String> shellCommand = Optional.empty();
-    private TerminalBridge shellBridge;   // null until first shown
-    private TerminalSurface shellSurface; // null until first shown; closed by disposeNativeResources
-    private boolean shellStarted;
     /**
-     * MainWorkspace's last {@link #setVisible} verdict, kept so a shell
-     * bridge created lazily AFTER that call can be seeded with it -- the
-     * bridge's own workspace-visible flag starts false, and without the
-     * seed the freshly opened Terminal sub-tab stayed an invisible (empty)
-     * native view until the next tab switch.
+     * The Terminal sub-tab's terminals, in stripe order. The first is created
+     * lazily on the first switch to the Terminal sub-tab (mirroring the old
+     * single-shell laziness); further terminals are spawned by ⌘T / the stripe
+     * {@code +} button. Each entry owns its own native trio (runtime + host +
+     * surface) and its own layout anchor; only the {@link #activeTerminal}'s
+     * native view is visible at a time.
+     */
+    private final List<TerminalPane> terminals = new ArrayList<>();
+    /** Index into {@link #terminals}; {@code -1} when there are none. */
+    private int activeTerminal = -1;
+    /** Holds the active terminal's placeholder (center) and the terminal stripe (bottom); shown when TERMINAL is active. */
+    private final BorderPane terminalContainer = new BorderPane();
+    private final HBox terminalStripe = new HBox(4);
+    private final Button terminalPlusButton = new Button("+");
+    private final Label terminalCycleHint = new Label("⌥⌘[ / ⌥⌘]");
+    /**
+     * MainWorkspace's last {@link #setVisible} verdict, kept so a terminal
+     * created lazily AFTER that call can be seeded with it -- the bridge's
+     * own workspace-visible flag starts false, and without the seed a freshly
+     * spawned terminal stays an invisible (empty) native view until the next
+     * tab switch.
      */
     private boolean workspaceVisible;
 
@@ -169,12 +200,14 @@ final class OpenSessionTab {
     private final Label tabAttentionDot = new Label("waiting");
     private final Label tabRepoLabel = new Label();
     private final Label tabTitleLabel = new Label();
+    private final Label tabCostBadge = new Label();
     private final Button tabCloseButton = new Button("×");
     private final TextField renameField = new TextField();
     private final VBox tabLabels = new VBox(0);
 
     // -- Session-view header (handoff 5) ------------------------------------
     private final Label headerTitle = new Label();
+    private final Label headerCostBadge = new Label();
     private final Label headerMeta = new Label();
     private final VBox headerTitles = new VBox(1);
     private final HBox statusPill = new HBox(6);
@@ -189,6 +222,7 @@ final class OpenSessionTab {
     private final HBox worktreeChips = new HBox(6);
     private final Button finishButton = new Button("Finish ▸");
     private final MenuButton handoffButton = new MenuButton("Hand off to…");
+    private final Button startFreshButton = new Button("Start fresh…");
     private final Label handoffLabel = new Label();
     private final ProgressIndicator handoffSpinner = new ProgressIndicator();
     private final HBox handoffPill = new HBox(6);
@@ -256,19 +290,17 @@ final class OpenSessionTab {
         placeholder.focusedProperty().addListener((obs, was, is) ->
                 claudeSubTabButton.pseudoClassStateChanged(KEYS, is));
 
-        shellPlaceholder.getStyleClass().add("terminal-region");
-        shellPlaceholder.focusedProperty().addListener((obs, was, is) ->
-                terminalSubTabButton.pseudoClassStateChanged(KEYS, is));
-        shellPlaceholder.boundsInLocalProperty().addListener((obs, oldV, newV) -> {
-            if (shellBridge != null) {
-                shellBridge.updateGeometry();
-            }
-        });
-        shellPlaceholder.localToSceneTransformProperty().addListener((obs, oldV, newV) -> {
-            if (shellBridge != null) {
-                shellBridge.updateGeometry();
-            }
-        });
+        // The Terminal sub-tab's own chrome: a stripe of terminal tabs + a
+        // `+` button, living in terminalContainer's bottom (above the main
+        // Agent|Terminal|Explorer|Review bar). Built once; its buttons are
+        // repopulated by rebuildTerminalStripe() as terminals come and go.
+        terminalStripe.getStyleClass().add("terminal-stripe");
+        terminalPlusButton.getStyleClass().add("terminal-stripe-new");
+        terminalPlusButton.setFocusTraversable(false);
+        terminalPlusButton.setTooltip(new Tooltip("New terminal (⌘T)"));
+        terminalPlusButton.setOnAction(e -> spawnTerminal());
+        terminalCycleHint.getStyleClass().add("terminal-stripe-hint");
+        terminalCycleHint.setTooltip(new Tooltip("Cycle terminals"));
 
         this.tab = new Tab();
         tab.setClosable(false); // the graphic carries its own close button (17px ×, handoff 4)
@@ -571,8 +603,8 @@ final class OpenSessionTab {
             activeSubTab = subTab;
             content.setCenter(view);
             bridge.setTerminalSubTabActive(false);
-            if (shellBridge != null) {
-                shellBridge.setTerminalSubTabActive(false);
+            for (TerminalPane p : terminals) {
+                p.bridge.setTerminalSubTabActive(false);
             }
             return;
         }
@@ -589,8 +621,8 @@ final class OpenSessionTab {
             activeSubTab = subTab;
             content.setCenter(view);
             bridge.setTerminalSubTabActive(false);
-            if (shellBridge != null) {
-                shellBridge.setTerminalSubTabActive(false);
+            for (TerminalPane p : terminals) {
+                p.bridge.setTerminalSubTabActive(false);
             }
             // Mirrors MainWorkspace's own onShown() call for the global
             // destination: the board's whole single-letter keyboard table
@@ -602,24 +634,29 @@ final class OpenSessionTab {
             return;
         }
         // CLAUDE or TERMINAL: show the corresponding native surface, hide the other.
-        boolean shellActive = subTab == SubTab.TERMINAL;
-        if (shellActive && !ensureShellStarted()) {
-            // Shell creation unavailable/failed: undo the button selection, stay put.
-            selectSubTabButton(activeSubTab);
+        if (subTab == SubTab.TERMINAL) {
+            if (terminals.isEmpty() && !spawnTerminal()) {
+                // Terminal creation unavailable/failed: undo the button selection, stay put.
+                selectSubTabButton(activeSubTab);
+                return;
+            }
+            // spawnTerminal (when it created the first) already switched to
+            // the Terminal sub-tab; otherwise activate the current terminal.
+            if (activeSubTab != SubTab.TERMINAL) {
+                showTerminalSubTabInternal();
+            }
             return;
         }
+        // CLAUDE
         activeSubTab = subTab;
-        content.setCenter(shellActive ? shellPlaceholder : placeholder);
-        bridge.setTerminalSubTabActive(!shellActive);
-        if (shellBridge != null) {
-            shellBridge.setTerminalSubTabActive(shellActive);
+        content.setCenter(placeholder);
+        bridge.setTerminalSubTabActive(true);
+        for (TerminalPane p : terminals) {
+            p.bridge.setTerminalSubTabActive(false);
         }
         // The center swap invalidates the placeholder's bounds only on the
         // next layout pass; recompute the active native frame after it.
-        TerminalBridge active = shellActive ? shellBridge : bridge;
-        if (active != null) {
-            Platform.runLater(active::updateGeometry);
-        }
+        Platform.runLater(bridge::updateGeometry);
     }
 
     /**
@@ -629,7 +666,8 @@ final class OpenSessionTab {
      * the native frame would otherwise keep tracking stale bounds.
      */
     void updateGeometryNow() {
-        TerminalBridge active = activeSubTab == SubTab.TERMINAL ? shellBridge : bridge;
+        TerminalBridge active = (activeSubTab == SubTab.TERMINAL)
+                ? (activePane() != null ? activePane().bridge : null) : bridge;
         if (active != null) {
             active.updateGeometry();
         }
@@ -672,8 +710,11 @@ final class OpenSessionTab {
     private void focusActiveNativeSubTab() {
         if (activeSubTab == SubTab.CLAUDE) {
             bridge.focus();
-        } else if (activeSubTab == SubTab.TERMINAL && shellBridge != null) {
-            shellBridge.focus();
+        } else if (activeSubTab == SubTab.TERMINAL) {
+            TerminalPane p = activePane();
+            if (p != null) {
+                p.bridge.focus();
+            }
         }
     }
 
@@ -684,52 +725,241 @@ final class OpenSessionTab {
         reviewSubTabButton.setSelected(subTab == SubTab.REVIEW);
     }
 
+    /** The Terminal sub-tab's currently active terminal, or {@code null} when there are none. */
+    private TerminalPane activePane() {
+        return (activeTerminal >= 0 && activeTerminal < terminals.size()) ? terminals.get(activeTerminal) : null;
+    }
+
     /**
-     * Builds the shell sub-tab's runtime/host/surface on first use
-     * (ephemeral: never persisted or resumed). Returns whether the shell is
-     * available; a failed attempt resets {@link #shellStarted} so the next
-     * switch retries instead of wedging the sub-tab forever.
+     * Switches to the Terminal sub-tab and activates the current terminal.
+     * Assumes {@link #terminals} is non-empty; the caller (showSubTab or
+     * spawnTerminal) ensures that. Split from {@link #showSubTab} so
+     * {@link #spawnTerminal} can build a terminal and land on it in one step
+     * without re-entering showSubTab (which would recurse through the
+     * "empty → spawn" branch).
      */
-    private boolean ensureShellStarted() {
-        if (shellStarted) {
-            return shellBridge != null;
+    private void showTerminalSubTabInternal() {
+        activeSubTab = SubTab.TERMINAL;
+        selectSubTabButton(SubTab.TERMINAL);
+        content.setCenter(terminalContainer);
+        bridge.setTerminalSubTabActive(false);
+        activateTerminal(activePane());
+    }
+
+    /**
+     * Makes {@code pane} the visible terminal: swaps it into the container's
+     * center, shows the stripe iff there is more than one terminal, gives it
+     * the sub-tab-active flag (and takes it from every other terminal), and
+     * re-runs geometry after the layout pass. Assumes the Terminal sub-tab is
+     * already (or is about to be) the active one.
+     */
+    private void activateTerminal(TerminalPane pane) {
+        if (pane == null) {
+            return;
         }
-        shellStarted = true;
+        activeTerminal = terminals.indexOf(pane);
+        terminalContainer.setCenter(pane.placeholder);
+        terminalContainer.setBottom(terminals.size() > 1 ? terminalStripe : null);
+        for (TerminalPane p : terminals) {
+            p.bridge.setTerminalSubTabActive(p == pane);
+        }
+        for (TerminalPane p : terminals) {
+            p.button.setSelected(p == pane);
+        }
+        pane.bridge.focus();
+        // The center swap invalidates the placeholder's bounds only on the
+        // next layout pass; recompute the native frame after it.
+        Platform.runLater(pane.bridge::updateGeometry);
+    }
+
+    /**
+     * Repopulates the terminal stripe: one tab per terminal (in order), then
+     * the {@code +} button, then the cycle hint when more than one terminal
+     * is open. Also re-syncs the container's bottom to show/hide the stripe.
+     */
+    private void rebuildTerminalStripe() {
+        terminalStripe.getChildren().clear();
+        for (int i = 0; i < terminals.size(); i++) {
+            TerminalPane p = terminals.get(i);
+            p.button.setText("❯_ " + (i + 1));
+            terminalStripe.getChildren().add(p.tab);
+        }
+        terminalStripe.getChildren().add(terminalPlusButton);
+        if (terminals.size() > 1) {
+            terminalStripe.getChildren().add(terminalCycleHint);
+        }
+        terminalContainer.setBottom(terminals.size() > 1 ? terminalStripe : null);
+    }
+
+    /**
+     * Creates, starts, and switches to a new terminal in the Terminal sub-tab.
+     * The new terminal becomes active and focused. Returns {@code false} if the
+     * shell provider is unavailable (e.g. a headless test); the caller then
+     * undoes whatever selection led here.
+     */
+    boolean spawnTerminal() {
+        TerminalPane pane = createAndStartPane();
+        if (pane == null) {
+            return false;
+        }
+        terminals.add(pane);
+        activeTerminal = terminals.size() - 1;
+        rebuildTerminalStripe();
+        showTerminalSubTabInternal();
+        return true;
+    }
+
+    /**
+     * Cycles the active terminal by {@code direction} ({@code +1}/{@code -1},
+     * wrapping). If the Terminal sub-tab is not active, the first press lands
+     * on it (showing the current terminal) so the gesture still does something
+     * visible; subsequent presses cycle. No-op when there are no terminals.
+     */
+    void cycleTerminal(int direction) {
+        if (terminals.isEmpty()) {
+            return;
+        }
+        if (activeSubTab != SubTab.TERMINAL) {
+            showSubTab(SubTab.TERMINAL);
+            return;
+        }
+        if (terminals.size() < 2) {
+            return;
+        }
+        activeTerminal = Math.floorMod(activeTerminal + direction, terminals.size());
+        activateTerminal(activePane());
+    }
+
+    /**
+     * Closes {@code pane}: hides its native view, removes it from the stripe,
+     * and frees its surface gracefully (the login shell is a live child -- a
+     * direct close is the documented uncatchable-JVM-abort scenario, so
+     * closeGracefully sends the exit request and polls before freeing). When
+     * the last terminal closes the Terminal sub-tab returns to the Agent
+     * (Claude) view, so the user is never left looking at an empty terminal.
+     */
+    /**
+     * Closes every Terminal sub-tab terminal whose child process has exited
+     * on its own (e.g. the user typed {@code exit}). Unlike the Claude
+     * surface -- whose dead tab stays so the user can resume -- an ephemeral
+     * terminal has nothing to resume, so its tab is reaped the moment its
+     * shell exits. Called from MainWorkspace's exit watcher (FX thread).
+     * {@link #closeTerminal} is reused so the already-exited surface is freed
+     * through the same path: closeGracefully sees processExited and fires its
+     * onDone (dispose) synchronously, so no poll is wasted on a dead child.
+     */
+    void pollExitedTerminals() {
+        List<TerminalPane> exited = new ArrayList<>();
+        for (TerminalPane p : terminals) {
+            if (p.bridge.isProcessExited()) {
+                exited.add(p);
+            }
+        }
+        for (TerminalPane p : exited) {
+            closeTerminal(p);
+        }
+    }
+
+    private void closeTerminal(TerminalPane pane) {
+        int idx = terminals.indexOf(pane);
+        if (idx < 0) {
+            return;
+        }
+        // Hide the native view first, then mark closing: applyVisibility early-
+        // returns once surfaceClosing is set, so the hide must happen before.
+        pane.bridge.setTerminalSubTabActive(false);
+        pane.bridge.setWorkspaceVisible(false);
+        pane.bridge.markSurfaceClosing();
+        pane.bridge.host().embeddedNode().ifPresent(pane.placeholder.getChildren()::remove);
+        terminals.remove(idx);
+        if (!terminals.isEmpty()) {
+            if (activeTerminal > idx) {
+                activeTerminal--;
+            } else if (activeTerminal == idx) {
+                activeTerminal = Math.min(idx, terminals.size() - 1);
+            }
+        } else {
+            activeTerminal = -1;
+        }
+        rebuildTerminalStripe();
+        if (terminals.isEmpty()) {
+            // Last terminal closed: back to the Agent view (never an empty pane).
+            // Clear the Terminal sub-tab's "keys" indicator explicitly: the
+            // closed pane's focus listener would normally clear it, but it
+            // gates the clear on `pane == activePane()` and activePane() is
+            // now null (activeTerminal was reset to -1 above), so without this
+            // the button keeps the highlight after Claude takes the keyboard.
+            terminalSubTabButton.pseudoClassStateChanged(KEYS, false);
+            showSubTab(SubTab.CLAUDE);
+        } else {
+            activateTerminal(activePane());
+        }
+        TerminalSurface s = pane.surface;
+        if (s != null) {
+            s.closeGracefully(SHELL_CLOSE_GRACE_MILLIS, SHELL_CLOSE_POLL_MILLIS, pane.bridge::disposeNativeResources);
+        } else {
+            pane.bridge.disposeNativeResources();
+        }
+    }
+
+    /**
+     * Builds one Terminal sub-tab terminal: asks the provider for a fresh
+     * runtime+host, wraps them in a {@link TerminalBridge} with a per-pane
+     * layout anchor, opens the surface, and wires the stripe tab + close
+     * button. Returns {@code null} if the provider is unavailable.
+     */
+    private TerminalPane createAndStartPane() {
+        TerminalPane pane = new TerminalPane();
         try {
-            // The wakeup callback closes over shellBridge (assigned just
-            // below); a wakeup arriving before that assignment is safely
-            // dropped.
+            // The wakeup closes over pane.bridge, which is assigned just below;
+            // a wakeup arriving before that assignment is safely dropped.
             ShellTerminal shell = shellTerminalProvider.apply(() -> {
-                if (shellBridge != null) {
-                    shellBridge.tickAndDraw();
+                if (pane.bridge != null) {
+                    pane.bridge.tickAndDraw();
                 }
             });
             if (shell == null) {
-                shellStarted = false; // provider unavailable (e.g. headless test)
-                return false;
+                return null; // provider unavailable (e.g. headless test)
             }
-            shellBridge = new TerminalBridge(shell.runtime(), shell.host(), shellPlaceholder,
+            pane.bridge = new TerminalBridge(shell.runtime(), shell.host(), pane.placeholder,
                     stage::getOutputScaleX, this::sessionId, this::runShortcut);
-            // Deactivated until showSubTab flips it below -- pairing with
-            // the workspace-visible seed here would otherwise briefly show
-            // the shell view before its placeholder has laid out.
-            shellBridge.setTerminalSubTabActive(false);
-            // Seed MainWorkspace's verdict (see workspaceVisible): the tab
-            // is already selected by the time the shell is first shown, so
-            // without this the shell's native view never becomes visible.
-            shellBridge.setWorkspaceVisible(workspaceVisible);
+            pane.placeholder.getStyleClass().add("terminal-region");
+            // Keyboard-ownership indicator: each terminal's placeholder focus
+            // lights its own stripe tab AND the main Terminal sub-tab button
+            // (only while it is the active terminal, so a background
+            // terminal's focus can't light the main button).
+            pane.placeholder.focusedProperty().addListener((obs, was, is) -> {
+                pane.button.pseudoClassStateChanged(KEYS, is);
+                if (pane == activePane()) {
+                    terminalSubTabButton.pseudoClassStateChanged(KEYS, is);
+                }
+            });
+            pane.placeholder.boundsInLocalProperty().addListener((obs, o, n) -> pane.bridge.updateGeometry());
+            pane.placeholder.localToSceneTransformProperty().addListener((obs, o, n) -> pane.bridge.updateGeometry());
+            // Deactivated until activateTerminal flips it -- pairing with the
+            // workspace-visible seed here would otherwise briefly show the
+            // view before its placeholder has laid out.
+            pane.bridge.setTerminalSubTabActive(false);
+            pane.bridge.setWorkspaceVisible(workspaceVisible);
             TerminalSpec spec = shellCommand
                     .map(command -> new TerminalSpec(command, System.getProperty("user.home")))
                     .orElseGet(() -> TerminalSpec.loginShell(shellWorkingDirectory));
-            shellSurface = shell.runtime().openSurface(shell.host(), stage.getOutputScaleX(), spec);
-            shellBridge.adoptSurface(shellSurface);
-            shell.host().embeddedNode().ifPresent(shellPlaceholder.getChildren()::add);
-            shellBridge.wireInputListeners();
-            return true;
+            pane.surface = shell.runtime().openSurface(shell.host(), stage.getOutputScaleX(), spec);
+            pane.bridge.adoptSurface(pane.surface);
+            shell.host().embeddedNode().ifPresent(pane.placeholder.getChildren()::add);
+            pane.bridge.wireInputListeners();
+            // Stripe tab: a selector toggle + a close ×.
+            pane.button.getStyleClass().add("session-subtab");
+            pane.button.setFocusTraversable(false);
+            pane.button.setOnAction(e -> activateTerminal(pane));
+            pane.closeButton.getStyleClass().add("terminal-stripe-close");
+            pane.closeButton.setFocusTraversable(false);
+            pane.closeButton.setOnAction(e -> closeTerminal(pane));
+            pane.tab.getStyleClass().add("terminal-stripe-tab");
+            return pane;
         } catch (RuntimeException e) {
-            LOG.log(Logger.Level.WARNING, "Could not start the shell terminal for session " + sessionId, e);
-            shellStarted = false;
-            return false;
+            LOG.log(Logger.Level.WARNING, "Could not start a terminal for session " + sessionId, e);
+            return null;
         }
     }
 
@@ -740,6 +970,9 @@ final class OpenSessionTab {
             case TERMINAL_SUB_TAB -> showSubTab(SubTab.TERMINAL);
             case EXPLORER_SUB_TAB -> showSubTab(SubTab.EXPLORER);
             case REVIEW_SUB_TAB -> showSubTab(SubTab.REVIEW);
+            case NEW_TERMINAL -> spawnTerminal();
+            case NEXT_TERMINAL -> cycleTerminal(1);
+            case PREVIOUS_TERMINAL -> cycleTerminal(-1);
             case PREVIOUS_SESSION_TAB -> onPreviousSessionTab.run();
             case NEXT_SESSION_TAB -> onNextSessionTab.run();
             case TOGGLE_SIDEBAR -> onToggleSidebar.run();
@@ -782,7 +1015,8 @@ final class OpenSessionTab {
         tabAttentionDot.getStyleClass().add("attention-badge");
         tabAttentionDot.setVisible(false);
         tabAttentionDot.setManaged(false);
-        HBox graphic = new HBox(8, tabDot, tabLabels, tabAttentionDot, tabCloseButton);
+        configureCostBadge(tabCostBadge);
+        HBox graphic = new HBox(8, tabDot, tabLabels, tabCostBadge, tabAttentionDot, tabCloseButton);
         graphic.setAlignment(Pos.CENTER_LEFT);
 
         // Double-click the tab -> inline rename (Enter/blur commits, Esc cancels).
@@ -829,7 +1063,12 @@ final class OpenSessionTab {
         headerTitle.setTextOverrun(OverrunStyle.ELLIPSIS);
         headerTitle.setTooltip(new Tooltip());
         headerMeta.getStyleClass().add("session-meta-line");
-        headerTitles.getChildren().setAll(headerTitle, headerMeta);
+        configureCostBadge(headerCostBadge);
+        HBox titleLine = new HBox(6, headerTitle, headerCostBadge);
+        titleLine.setAlignment(Pos.CENTER_LEFT);
+        titleLine.setMinWidth(0);
+        HBox.setHgrow(headerTitle, Priority.ALWAYS);
+        headerTitles.getChildren().setAll(titleLine, headerMeta);
 
         statusPill.getStyleClass().add("status-pill");
         statusPill.setAlignment(Pos.CENTER);
@@ -862,6 +1101,8 @@ final class OpenSessionTab {
                 + "The successor continues in this same worktree, on this branch, over these "
                 + "same uncommitted changes; this session and its tab leave drydock, but its "
                 + "conversation stays on disk wherever that agent keeps it."));
+        startFreshButton.getStyleClass().add("header-handoff-button");
+        startFreshButton.setTooltip(new Tooltip("Start a new conversation in this working directory"));
         finishButton.getStyleClass().add("finish-button");
         finishButton.setFocusTraversable(false);
         handoffSpinner.setPrefSize(12, 12);
@@ -881,7 +1122,7 @@ final class OpenSessionTab {
         rename.setFocusTraversable(false);
         rename.setOnAction(e -> startInlineRename());
 
-        return layOutSessionHeader(back, headerTitles, worktreeChips, handoffButton,
+        return layOutSessionHeader(back, headerTitles, worktreeChips, handoffButton, startFreshButton,
                 finishBox, statusPill, rename);
     }
 
@@ -904,11 +1145,12 @@ final class OpenSessionTab {
      * part worth pinning down.</p>
      */
     static HBox layOutSessionHeader(Region back, Region titleBlock, Region chips,
-                                    Region handoff, Region finishBox, Region statusPill, Region rename) {
-        HBox header = new HBox(12, back, titleBlock, chips, handoff, finishBox, statusPill, rename);
+                                    Region handoff, Region startFresh, Region finishBox,
+                                    Region statusPill, Region rename) {
+        HBox header = new HBox(12, back, titleBlock, chips, handoff, startFresh, finishBox, statusPill, rename);
         header.getStyleClass().add("session-header");
         HBox.setHgrow(titleBlock, Priority.ALWAYS);
-        for (Region pinned : List.of(back, chips, handoff, finishBox, statusPill, rename)) {
+        for (Region pinned : List.of(back, chips, handoff, startFresh, finishBox, statusPill, rename)) {
             pinned.setMinWidth(Region.USE_PREF_SIZE);
         }
         // The pinning only works if the title block will actually shrink; it
@@ -1099,7 +1341,7 @@ final class OpenSessionTab {
     String diagKeyboardState() {
         return "subtab=" + activeSubTab
                 + " agentSurface=" + bridge.nativeFocusRequested()
-                + " shellSurface=" + (shellBridge == null ? "absent" : shellBridge.nativeFocusRequested())
+                + " shellSurface=" + (activePane() == null ? "absent" : activePane().bridge.nativeFocusRequested())
                 + " renaming=" + tabLabels.getChildren().contains(renameField);
     }
 
@@ -1129,8 +1371,8 @@ final class OpenSessionTab {
      */
     void releaseTerminalFocus() {
         bridge.releaseFocus();
-        if (shellBridge != null) {
-            shellBridge.releaseFocus();
+        for (TerminalPane p : terminals) {
+            p.bridge.releaseFocus();
         }
     }
 
@@ -1139,8 +1381,8 @@ final class OpenSessionTab {
         // applyVisibility is a no-op for a bridge whose sub-tab isn't showing,
         // so this refocuses the active surface and only that one.
         bridge.applyVisibility();
-        if (shellBridge != null) {
-            shellBridge.applyVisibility();
+        for (TerminalPane p : terminals) {
+            p.bridge.applyVisibility();
         }
     }
 
@@ -1192,6 +1434,32 @@ final class OpenSessionTab {
         if (headerTitle.getTooltip() != null) {
             headerTitle.getTooltip().setText(displayName);
         }
+    }
+
+    void setResumeCostEstimate(Optional<ResumeCostEstimate> estimate) {
+        Optional<ResumeCostEstimate> expensive = estimate
+                .filter(value -> value.maximumInputCostUsd() > 1.0);
+        for (Label badge : List.of(tabCostBadge, headerCostBadge)) {
+            boolean visible = expensive.isPresent();
+            badge.setVisible(visible);
+            badge.setManaged(visible);
+            if (visible) {
+                ResumeCostEstimate value = expensive.orElseThrow();
+                badge.setText(UiFormats.maximumUsd(value.maximumInputCostUsd()));
+                badge.getTooltip().setText("Up to "
+                        + UiFormats.maximumUsd(value.maximumInputCostUsd()).substring(1)
+                        + " input cost on the next turn\n"
+                        + UiFormats.tokenCount(value.contextTokens()) + " context tokens · " + value.model()
+                        + "\nCold-cache estimate; generated output is not included.");
+            }
+        }
+    }
+
+    private static void configureCostBadge(Label badge) {
+        badge.getStyleClass().add("resume-cost-badge");
+        badge.setTooltip(new Tooltip());
+        badge.setVisible(false);
+        badge.setManaged(false);
     }
 
     /** Display name of the agent this session runs; names it in this tab's own copy. */
@@ -1246,8 +1514,8 @@ final class OpenSessionTab {
     /** Re-themes this tab's live terminal (app theme toggle); see {@link TerminalBridge#applyTerminalTheme}. */
     void applyTerminalTheme(Path configFile) {
         bridge.applyTerminalTheme(configFile);
-        if (shellBridge != null) {
-            shellBridge.applyTerminalTheme(configFile);
+        for (TerminalPane p : terminals) {
+            p.bridge.applyTerminalTheme(configFile);
         }
     }
 
@@ -1299,8 +1567,8 @@ final class OpenSessionTab {
     void setVisible(boolean visible) {
         workspaceVisible = visible;
         bridge.setWorkspaceVisible(visible);
-        if (shellBridge != null) {
-            shellBridge.setWorkspaceVisible(visible);
+        for (TerminalPane p : terminals) {
+            p.bridge.setWorkspaceVisible(visible);
         }
     }
 
@@ -1346,8 +1614,19 @@ final class OpenSessionTab {
      * Frees this tab's native resources. Must be called only after the
      * session's {@link TerminalSurface} is already confirmed closed; see
      * {@link TerminalBridge#disposeNativeResources}.
+     *
+     * <p>The Claude bridge and Review view are freed synchronously. The
+     * ephemeral terminals are closed via {@link TerminalSurface#closeGracefully},
+     * which polls on a {@link javafx.animation.PauseTransition} (FX-thread
+     * async); the returned future completes only once every terminal's
+     * surface is confirmed closed and its runtime/host freed. Callers on the
+     * shutdown path MUST await this future before letting the FX thread
+     * block in {@code stop()} -- otherwise the {@code PauseTransition} polls
+     * never fire (no FX pulses while {@code stop()} blocks), the terminals'
+     * live shell children keep their ptys open, and the JVM never exits.
+     * Returns an already-completed future when there are no terminals to close.
      */
-    void disposeNativeResources() {
+    CompletableFuture<Void> disposeNativeResources() {
         bridge.host().embeddedNode().ifPresent(placeholder.getChildren()::remove);
         bridge.disposeNativeResources();
         // The Review view's own close() detaches its MCP activity panel's
@@ -1361,28 +1640,40 @@ final class OpenSessionTab {
             reviewView.close();
             reviewView = null;
         }
-        if (shellBridge != null) {
-            // The ephemeral shell has no SessionManager-managed lifecycle,
-            // so it is reaped here -- but NEVER via a direct close(): a
-            // login shell sitting at its prompt is a live child, and
-            // freeing the surface under a live child is the documented
-            // uncatchable-JVM-abort scenario (see TerminalSurface#close /
-            // SessionManager.closeSession). closeGracefully sends the exit
-            // request, polls, and only then frees; the runtime/host are
-            // freed from its onDone callback.
-            TerminalBridge closingShellBridge = shellBridge;
-            TerminalSurface closingShellSurface = shellSurface;
-            shellBridge = null;
-            shellSurface = null;
-            closingShellBridge.markSurfaceClosing();
-            closingShellBridge.host().embeddedNode().ifPresent(shellPlaceholder.getChildren()::remove);
-            if (closingShellSurface != null) {
-                closingShellSurface.closeGracefully(SHELL_CLOSE_GRACE_MILLIS, SHELL_CLOSE_POLL_MILLIS,
-                        closingShellBridge::disposeNativeResources);
+        if (terminals.isEmpty()) {
+            return CompletableFuture.completedFuture(null);
+        }
+        // The ephemeral terminals have no SessionManager-managed lifecycle,
+        // so they are reaped here -- but NEVER via a direct close(): a
+        // login shell sitting at its prompt is a live child, and
+        // freeing the surface under a live child is the documented
+        // uncatchable-JVM-abort scenario (see TerminalSurface#close /
+        // SessionManager.closeSession). closeGracefully sends the exit
+        // request, polls, and only then frees; the runtime/host are
+        // freed from its onDone callback. Each terminal's close completes
+        // its own future, so the caller (closeTab, on the shutdown path)
+        // can await all of them before letting the FX thread block in stop().
+        List<TerminalPane> toClose = new ArrayList<>(terminals);
+        terminals.clear();
+        activeTerminal = -1;
+        CompletableFuture<?>[] futures = new CompletableFuture<?>[toClose.size()];
+        for (int i = 0; i < toClose.size(); i++) {
+            TerminalPane p = toClose.get(i);
+            CompletableFuture<Void> f = new CompletableFuture<>();
+            futures[i] = f;
+            p.bridge.markSurfaceClosing();
+            p.bridge.host().embeddedNode().ifPresent(p.placeholder.getChildren()::remove);
+            if (p.surface != null) {
+                p.surface.closeGracefully(SHELL_CLOSE_GRACE_MILLIS, SHELL_CLOSE_POLL_MILLIS, () -> {
+                    p.bridge.disposeNativeResources();
+                    f.complete(null);
+                });
             } else {
-                closingShellBridge.disposeNativeResources();
+                p.bridge.disposeNativeResources();
+                f.complete(null);
             }
         }
+        return CompletableFuture.allOf(futures);
     }
 
     /** The staleness banner for this session's handoff brief; the workspace drives it. */
@@ -1398,6 +1689,22 @@ final class OpenSessionTab {
      */
     MenuButton handoffButton() {
         return handoffButton;
+    }
+
+    Button startFreshButton() {
+        return startFreshButton;
+    }
+
+    void showStartingFreshState() {
+        startFreshButton.setText("Starting…");
+        startFreshButton.setDisable(true);
+        tabTitleLabel.setText("Starting fresh…");
+    }
+
+    void restoreStartFreshButton() {
+        startFreshButton.setText("Start fresh…");
+        startFreshButton.setDisable(false);
+        tabTitleLabel.setText(displayName);
     }
 
 }

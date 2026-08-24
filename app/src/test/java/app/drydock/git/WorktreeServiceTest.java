@@ -401,6 +401,53 @@ class WorktreeServiceTest {
         assertFalse(runGitCapture(repo, "branch", "--list", "feat/vanished").contains("feat/vanished"));
     }
 
+    /**
+     * The user's cleanup-action scenario: the worktree was already removed
+     * outside the app (a prior {@code git worktree remove} or a {@code prune}),
+     * so its administrative entry is gone from {@code git worktree list} too.
+     * A bare {@code git worktree remove} fails with "is not a working tree" --
+     * not a failure the user can act on, since the state they asked for is
+     * already on disk. The removal must succeed (so the UI can refresh to
+     * mirror reality) and still delete the branch, which outlives the worktree.
+     */
+    @Test
+    void removeSucceedsWhenTheWorktreeWasAlreadyRemovedAndPruned(
+            @TempDir Path repoDir, @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/already-gone").get();
+        // Remove it the way an outside tool would: drop the worktree and its
+        // administrative entry, but leave the branch behind.
+        runGit(repo, "worktree", "remove", "--force", worktree.toString());
+        assertEquals(1, service.list(repo).get().size(), "precondition: the worktree is gone from the list");
+        assertTrue(runGitCapture(repo, "branch", "--list", "feat/already-gone").contains("feat/already-gone"),
+                "precondition: the branch still exists");
+
+        service.remove(repo, worktree, Optional.of("feat/already-gone")).get();
+
+        assertEquals(1, service.list(repo).get().size());
+        assertFalse(runGitCapture(repo, "branch", "--list", "feat/already-gone").contains("feat/already-gone"));
+    }
+
+    /**
+     * The forced variant of the same scenario: the cleanup of locked worktrees
+     * calls {@code removeForced}, which would otherwise hit the same
+     * "is not a working tree" from {@code --force --force}.
+     */
+    @Test
+    void forcedRemoveSucceedsWhenTheWorktreeWasAlreadyRemovedAndPruned(
+            @TempDir Path repoDir, @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/already-gone-force").get();
+        runGit(repo, "worktree", "remove", "--force", worktree.toString());
+        assertEquals(1, service.list(repo).get().size(), "precondition: the worktree is gone from the list");
+
+        service.removeForced(repo, worktree, Optional.of("feat/already-gone-force")).get();
+
+        assertEquals(1, service.list(repo).get().size());
+        assertFalse(runGitCapture(repo, "branch", "--list", "feat/already-gone-force")
+                .contains("feat/already-gone-force"));
+    }
+
     @Test
     void mergeRecordsARealMergeCommitOfTheRecordedTip(@TempDir Path repoDir, @TempDir Path worktreeParent)
             throws Exception {

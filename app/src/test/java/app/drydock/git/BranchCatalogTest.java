@@ -19,7 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class BranchCatalogTest {
 
     private static Worktree worktree(String path, String branch) {
-        return new Worktree(Path.of(path), Optional.of(branch), false, false, false, false, Optional.empty());
+        return new Worktree(Path.of(path), Optional.of(branch), false, false, false, false, Optional.empty(), false);
     }
 
     @Test
@@ -40,8 +40,8 @@ class BranchCatalogTest {
         // SKIPS a locked one, so the two must not collapse into one flag.
         BranchCatalog catalog = BranchCatalog.merge(
                 new BranchListing(List.of(BranchRef.local("ghost"), BranchRef.local("held")), List.of()),
-                List.of(new Worktree(Path.of("/gone"), Optional.of("ghost"), false, false, true, false, Optional.empty()),
-                        new Worktree(Path.of("/held"), Optional.of("held"), false, false, false, true, Optional.empty())));
+                List.of(new Worktree(Path.of("/gone"), Optional.of("ghost"), false, false, true, false, Optional.empty(), false),
+                        new Worktree(Path.of("/held"), Optional.of("held"), false, false, false, true, Optional.empty(), false)));
 
         BranchRef ghost = catalog.lookup("ghost").orElseThrow();
         assertTrue(ghost.prunable());

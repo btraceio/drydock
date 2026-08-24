@@ -9,9 +9,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -68,7 +70,17 @@ public final class WorktreeService implements AutoCloseable {
      * {@code git worktree add} on that branch.
      */
     public record Worktree(Path path, Optional<String> branch, boolean mainCheckout, boolean detached,
-                           boolean prunable, boolean locked, Optional<String> lockReason) {
+                           boolean prunable, boolean locked, Optional<String> lockReason, boolean merged) {
+
+        /**
+         * Reconstructs this worktree with a different {@code merged} flag;
+         * every other field is carried unchanged. Used by {@code listBlocking}
+         * to stamp merge-ness (computed from the main checkout's branch)
+         * onto the pure {@code parse} result.
+         */
+        public Worktree withMerged(boolean newMerged) {
+            return new Worktree(path, branch, mainCheckout, detached, prunable, locked, lockReason, newMerged);
+        }
     }
 
     /**
@@ -142,7 +154,72 @@ public final class WorktreeService implements AutoCloseable {
             }
             throw new GitCommandFailedException(command, result.exitCode(), ProcessRunner.excerpt(result.stderr()));
         }
-        return parse(result.stdout());
+        return stampMerged(git, repositoryRoot, parse(result.stdout()));
+    }
+
+    /**
+     * Marks each non-main worktree whose branch is reachable from the main
+     * checkout's branch as {@link Worktree#merged() merged}, so the sidebar's
+     * stale bucket can offer them for the Clean action. A merged branch is one
+     * whose tip is an ancestor of the base; {@code git branch --merged <base>}
+     * lists exactly those. Best-effort: a detached main checkout (no base),
+     * an unknown base, or any git failure yields no merged marks -- the
+     * worktree simply stays in the open bucket rather than failing
+     * discovery.
+     */
+    private static List<Worktree> stampMerged(Path git, Path repositoryRoot, List<Worktree> parsed) {
+        if (parsed.isEmpty()) {
+            return parsed;
+        }
+        Optional<String> base = parsed.get(0).branch();
+        if (base.isEmpty() || base.get().isBlank()) {
+            return parsed;
+        }
+        Set<String> merged = mergedBranchesBlocking(git, repositoryRoot, base.get());
+        if (merged.isEmpty()) {
+            return parsed;
+        }
+        List<Worktree> stamped = new ArrayList<>();
+        for (Worktree worktree : parsed) {
+            boolean isMerged = !worktree.mainCheckout()
+                    && worktree.branch().isPresent()
+                    && merged.contains(worktree.branch().get());
+            stamped.add(isMerged ? worktree.withMerged(true) : worktree);
+        }
+        return List.copyOf(stamped);
+    }
+
+    /**
+     * Runs {@code git branch --merged <base>} and returns the branch names
+     * whose tips are reachable from {@code base}. Returns an empty set for
+     * any failure (unknown base, git unavailable, non-zero exit) so a bad
+     * call degrades to "nothing merged" rather than failing the whole
+     * worktree list.
+     */
+    private static Set<String> mergedBranchesBlocking(Path git, Path repositoryRoot, String base) {
+        List<String> command = List.of(
+                git.toString(), "-C", repositoryRoot.toString(),
+                "branch", "--merged", "--end-of-options", base);
+        ProcessResult result;
+        try {
+            result = run(command);
+        } catch (RuntimeException e) {
+            return Set.of();
+        }
+        if (result.exitCode() != 0) {
+            return Set.of();
+        }
+        Set<String> merged = new HashSet<>();
+        for (String line : result.stdout().split("\n", -1)) {
+            String name = line.strip();
+            if (name.startsWith("* ")) {
+                name = name.substring(2).strip();
+            }
+            if (!name.isEmpty() && !name.contains(" ")) {
+                merged.add(name);
+            }
+        }
+        return merged;
     }
 
     /**
@@ -199,7 +276,16 @@ public final class WorktreeService implements AutoCloseable {
             }
         }
 
-        if (force) {
+        if (targetEntry.isEmpty()) {
+            // The worktree is already gone from `git worktree list` -- it
+            // was removed outside the app (rm -rf plus `git worktree prune`,
+            // or a prior `git worktree remove`). `git worktree remove` would
+            // fail with "is not a working tree", which is not a failure the
+            // user can act on: the state they asked for (worktree gone) is
+            // already the state on disk. Treat it as success and fall through
+            // to the branch-delete step so the caller can refresh the UI to
+            // mirror reality instead of stranding a row that no longer exists.
+        } else if (force) {
             // User-confirmed destructive delete: double-force overrides both
             // uncommitted work and a lock -- a single --force discards the
             // former but git still refuses a locked worktree without the second.
@@ -673,10 +759,48 @@ public final class WorktreeService implements AutoCloseable {
     }
 
     private static boolean samePath(Path a, Path b) {
+        // Files.isSameFile returns false (rather than throwing) when neither
+        // path exists, so a prunable worktree whose directory was removed
+        // outside git would never reach a fallback. Compare canonical forms:
+        // toRealPath resolves symlinks where the path exists, and the
+        // existing-prefix walk in canonical(Path) handles where it does not,
+        // so macOS's /var -> /private/var temp-directory symlink still matches
+        // the /private/var/... form git records in `worktree list --porcelain`.
+        return canonical(a).equals(canonical(b));
+    }
+
+    /**
+     * The real (symlink-resolved) form of {@code p}, used by {@link #samePath}
+     * to match a worktree against {@code git worktree list --porcelain}. When
+     * the path exists, {@link Path#toRealPath} resolves symlinks directly; when
+     * it does not (a {@code prunable} worktree whose directory was removed
+     * outside git), {@code toRealPath} throws and the longest existing prefix
+     * is resolved instead, appending the rest verbatim. This matters on macOS,
+     * where the temp directory lives under {@code /var}, a symlink to
+     * {@code /private/var}, while git records the resolved
+     * {@code /private/var/...} form -- without it, a prunable worktree would
+     * not match its list entry, be mistaken for one that was already removed,
+     * and have its prune skipped, leaving the branch undeletable.
+     */
+    private static Path canonical(Path p) {
         try {
-            return Files.isSameFile(a, b);
+            return p.toRealPath();
         } catch (IOException e) {
-            return a.toAbsolutePath().normalize().equals(b.toAbsolutePath().normalize());
+            Path absolute = p.toAbsolutePath().normalize();
+            Path resolved = absolute.getRoot();
+            int count = absolute.getNameCount();
+            int i = 0;
+            for (; i < count; i++) {
+                try {
+                    resolved = resolved.resolve(absolute.getName(i)).toRealPath();
+                } catch (IOException nested) {
+                    break;
+                }
+            }
+            for (; i < count; i++) {
+                resolved = resolved.resolve(absolute.getName(i));
+            }
+            return resolved.normalize();
         }
     }
 
@@ -710,7 +834,7 @@ public final class WorktreeService implements AutoCloseable {
             String line = rawLine.strip();
             if (line.isEmpty()) {
                 if (path != null && !bare) {
-                    worktrees.add(new Worktree(path, branch, worktrees.isEmpty(), detached, prunable, locked, lockReason));
+                    worktrees.add(new Worktree(path, branch, worktrees.isEmpty(), detached, prunable, locked, lockReason, false));
                 }
                 path = null;
                 branch = Optional.empty();
@@ -738,7 +862,7 @@ public final class WorktreeService implements AutoCloseable {
             }
         }
         if (path != null && !bare) {
-            worktrees.add(new Worktree(path, branch, worktrees.isEmpty(), detached, prunable, locked, lockReason));
+            worktrees.add(new Worktree(path, branch, worktrees.isEmpty(), detached, prunable, locked, lockReason, false));
         }
         return List.copyOf(worktrees);
     }

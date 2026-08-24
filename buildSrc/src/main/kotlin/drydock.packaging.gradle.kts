@@ -1,17 +1,18 @@
-// Convention plugin: macOS packaging for the app project -- the jlink
-// runtime image (Gate 0F) and the self-contained .app bundle (Stage 3).
-// Applied by app/build.gradle.kts.
+// Convention plugin: packaging for the app project -- macOS (Gate 0F:
+// jlink runtime image + .app bundle + .dmg) and Windows (jlink runtime
+// image + .bat launcher). Applied by app/build.gradle.kts.
 //
 // The heavy lifting lives in the typed task classes
-// buildSrc/src/main/kotlin/drydock/tasks/{RuntimeImageTask,AppBundleTask}.kt
-// (injected ExecOperations/FileSystemOperations, precise inputs/outputs);
-// the launcher script, Info.plist, and the two .app trampolines are
-// verbatim template files under app/packaging/. Root-level alias tasks
-// (`runtimeImage`, `appImage`, `macApp`) stay in the root build file.
+// buildSrc/src/main/kotlin/drydock/tasks/{RuntimeImageTask,AppBundleTask,
+// WindowsRuntimeImageTask}.kt (injected ExecOperations/FileSystemOperations,
+// precise inputs/outputs); the launcher scripts, Info.plist, and the two
+// .app trampolines are verbatim template files under app/packaging/.
+// Root-level alias tasks (`runtimeImage`, `appImage`, `macApp`) stay in
+// the root build file.
 //
 // Both outputs live under the *root* build directory (build/image,
-// build/dist -- not app/build/...) so the plan's literal acceptance
-// command (section 7 "Gate 0F": `build/image/bin/drydock`,
+// build/dist, build/image-windows -- not app/build/...) so the plan's
+// literal acceptance command (section 7 "Gate 0F": `build/image/bin/drydock`,
 // run from the repo root) matches exactly, the same way build/native
 // (buildGhosttyNative/buildNativeHost, declared in the root build file)
 // already does.
@@ -20,6 +21,7 @@ import drydock.tasks.AppBundleTask
 import drydock.tasks.DmgTask
 import drydock.tasks.DownloadCrossJmodsTask
 import drydock.tasks.RuntimeImageTask
+import drydock.tasks.WindowsRuntimeImageTask
 import org.gradle.api.attributes.Category
 import org.gradle.api.attributes.LibraryElements
 import org.gradle.api.attributes.Usage
@@ -32,11 +34,26 @@ plugins {
 
 val packagingDir = layout.projectDirectory.dir("packaging")
 
-// Host architecture, used both by the host runtimeImage's own output-arch
-// check below and by the cross-arch tasks further down (which cross-link
-// whichever architecture this machine is NOT). Declared here rather than
-// beside the cross-arch block so the host task can reference it without
-// depending on lazy task-configuration ordering to outrun a later `val`.
+// Host platform detection, used to gate the macOS-only blocks below.
+// Computed once at configuration time from os.name / os.arch; the Mac
+// arch label is null on non-Mac hosts, which the macOS-only blocks
+// test before registering anything. The rest of the project gates the
+// same way at the build script level (see applicationDefaultJvmArgs in
+// app/build.gradle.kts).
+val hostOsName = System.getProperty("os.name", "")
+val isMacOsHost = hostOsName.startsWith("Mac OS X") || hostOsName.startsWith("macOS")
+val hostOsArch = System.getProperty("os.arch", "").lowercase()
+val hostArchLabel = when (hostOsArch) {
+    "x86_64", "amd64" -> "macos-x86_64"
+    "aarch64", "arm64" -> "macos-arm64"
+    else -> null
+}
+val machOArchToken = mapOf("macos-x86_64" to "x86_64", "macos-arm64" to "arm64")
+
+// Mac-only block: the runtime image task, the .app bundle, the .dmg,
+// and the cross-arch tasks all assume a Mac host. On non-Mac hosts (the
+// Windows CI runner, primarily) only the Windows runtime image task is
+// registered; everything else stays unregistered and never resolves.
 //
 // os.arch is the architecture of the Gradle *daemon* JVM (JDK 17 --
 // gradle/gradle-daemon-jvm.properties), deliberately a different JVM from
@@ -44,69 +61,84 @@ val packagingDir = layout.projectDirectory.dir("packaging")
 // point for the host check: an expectation derived from the jlinking JDK
 // itself would be a tautology, since jlink always emits that JDK's own
 // architecture.
-val hostOsArch = System.getProperty("os.arch", "").lowercase()
-val hostArchLabel = when (hostOsArch) {
-    "x86_64", "amd64" -> "macos-x86_64"
-    "aarch64", "arm64" -> "macos-arm64"
-    else -> throw org.gradle.api.GradleException(
-        "Unrecognized host os.arch '$hostOsArch' (expected x86_64/amd64 or aarch64/arm64)."
-    )
+if (isMacOsHost && hostArchLabel != null) {
+    tasks.register<RuntimeImageTask>("runtimeImage") {
+        group = "distribution"
+        description = "Gate 0F: builds a self-contained jlink runtime image at build/image."
+
+        dependsOn(":buildGhosttyNative")
+        dependsOn(":buildNativeHost")
+
+        // flatMap on the jar task's archiveFile carries the task dependency.
+        appJar.set(tasks.named<Jar>("jar").flatMap { it.archiveFile })
+        runtimeClasspath.from(configurations.named("runtimeClasspath"))
+        nativeDir.set(rootProject.layout.buildDirectory.dir("native"))
+        icon.from(rootProject.layout.projectDirectory.file("assets/app-icon.icns"))
+        launcherScript.set(packagingDir.file("launcher.sh"))
+        infoPlist.set(packagingDir.file("Info.plist"))
+        bundleTrampoline.set(packagingDir.file("bundle-trampoline.sh"))
+        // jlink is invoked from the JDK 26 toolchain's own bin/ (not whatever
+        // JVM is running Gradle -- Gradle 8.11.1 does not run on JDK 26), so
+        // the image's module set matches the JDK the application actually
+        // compiles/runs against.
+        javaHomePath.set(
+            javaToolchains.launcherFor(java.toolchain)
+                .map { it.metadata.installationPath.asFile.absolutePath }
+        )
+        imageDir.set(rootProject.layout.buildDirectory.dir("image"))
+        // Fail the build if jlink produced an image for an architecture other
+        // than this machine's, rather than shipping a silently wrong-arch
+        // bundle (see RuntimeImageTask.expectedMachOArch).
+        expectedMachOArch.set(machOArchToken.getValue(hostArchLabel))
+    }
+
+    tasks.register<AppBundleTask>("appImage") {
+        group = "distribution"
+        description = "Stage 3: self-contained macOS .app bundle at build/dist/Drydock.app."
+
+        // flatMap on runtimeImage's output carries the task dependency.
+        imageDir.set(tasks.named<RuntimeImageTask>("runtimeImage").flatMap { it.imageDir })
+        infoPlist.set(packagingDir.file("Info.plist"))
+        distTrampoline.set(packagingDir.file("dist-trampoline.sh"))
+        distDir.set(rootProject.layout.buildDirectory.dir("dist"))
+    }
+
+    tasks.register<DmgTask>("dmg") {
+        group = "distribution"
+        description = "Stage 4: distributable disk image at build/dist/Drydock.dmg (wraps the .app bundle)."
+
+        // flatMap on appImage's output carries the task dependency, so
+        // `./gradlew dmg` builds the .app first and wraps it in one step.
+        // Points at the bundle rather than the dist root it sits in -- the .dmg
+        // is written into that same root, and depending on the root would make
+        // this task dirty its own input (see DmgTask.appBundle).
+        appBundle.set(tasks.named<AppBundleTask>("appImage").flatMap { it.distDir.dir("Drydock.app") })
+        volumeName.set("Drydock")
+        dmgFile.set(rootProject.layout.buildDirectory.file("dist/Drydock.dmg"))
+    }
 }
-val machOArchToken = mapOf("macos-x86_64" to "x86_64", "macos-arm64" to "arm64")
 
-tasks.register<RuntimeImageTask>("runtimeImage") {
-    group = "distribution"
-    description = "Gate 0F: builds a self-contained jlink runtime image at build/image."
+// Windows-only block: a self-contained jlink runtime image with a .bat
+// launcher. Mirrors runtimeImage in shape (delete -> jlink -> copy jars
+// -> launcher) but skips libghostty / native-host copy, dock icon, and
+// the .app bundle wrap -- none of which have a Windows analog. The
+// output dir is build/image-windows/ to avoid colliding with the macOS
+// runtimeImage's build/image/. See WindowsRuntimeImageTask's class
+// Javadoc for the full rationale.
+if (!isMacOsHost) {
+    tasks.register<WindowsRuntimeImageTask>("windowsRuntimeImage") {
+        group = "distribution"
+        description = "Windows runtime image (jlink + drydock.bat launcher) at build/image-windows."
 
-    dependsOn(":buildGhosttyNative")
-    dependsOn(":buildNativeHost")
-
-    // flatMap on the jar task's archiveFile carries the task dependency.
-    appJar.set(tasks.named<Jar>("jar").flatMap { it.archiveFile })
-    runtimeClasspath.from(configurations.named("runtimeClasspath"))
-    nativeDir.set(rootProject.layout.buildDirectory.dir("native"))
-    icon.from(rootProject.layout.projectDirectory.file("assets/app-icon.icns"))
-    launcherScript.set(packagingDir.file("launcher.sh"))
-    infoPlist.set(packagingDir.file("Info.plist"))
-    bundleTrampoline.set(packagingDir.file("bundle-trampoline.sh"))
-    // jlink is invoked from the JDK 26 toolchain's own bin/ (not whatever
-    // JVM is running Gradle -- Gradle 8.11.1 does not run on JDK 26), so
-    // the image's module set matches the JDK the application actually
-    // compiles/runs against.
-    javaHomePath.set(
-        javaToolchains.launcherFor(java.toolchain)
-            .map { it.metadata.installationPath.asFile.absolutePath }
-    )
-    imageDir.set(rootProject.layout.buildDirectory.dir("image"))
-    // Fail the build if jlink produced an image for an architecture other
-    // than this machine's, rather than shipping a silently wrong-arch
-    // bundle (see RuntimeImageTask.expectedMachOArch).
-    expectedMachOArch.set(machOArchToken.getValue(hostArchLabel))
-}
-
-tasks.register<AppBundleTask>("appImage") {
-    group = "distribution"
-    description = "Stage 3: self-contained macOS .app bundle at build/dist/Drydock.app."
-
-    // flatMap on runtimeImage's output carries the task dependency.
-    imageDir.set(tasks.named<RuntimeImageTask>("runtimeImage").flatMap { it.imageDir })
-    infoPlist.set(packagingDir.file("Info.plist"))
-    distTrampoline.set(packagingDir.file("dist-trampoline.sh"))
-    distDir.set(rootProject.layout.buildDirectory.dir("dist"))
-}
-
-tasks.register<DmgTask>("dmg") {
-    group = "distribution"
-    description = "Stage 4: distributable disk image at build/dist/Drydock.dmg (wraps the .app bundle)."
-
-    // flatMap on appImage's output carries the task dependency, so
-    // `./gradlew dmg` builds the .app first and wraps it in one step.
-    // Points at the bundle rather than the dist root it sits in -- the .dmg
-    // is written into that same root, and depending on the root would make
-    // this task dirty its own input (see DmgTask.appBundle).
-    appBundle.set(tasks.named<AppBundleTask>("appImage").flatMap { it.distDir.dir("Drydock.app") })
-    volumeName.set("Drydock")
-    dmgFile.set(rootProject.layout.buildDirectory.file("dist/Drydock.dmg"))
+        appJar.set(tasks.named<Jar>("jar").flatMap { it.archiveFile })
+        runtimeClasspath.from(configurations.named("runtimeClasspath"))
+        launcherScript.set(packagingDir.file("launcher.bat"))
+        javaHomePath.set(
+            javaToolchains.launcherFor(java.toolchain)
+                .map { it.metadata.installationPath.asFile.absolutePath }
+        )
+        imageDir.set(rootProject.layout.buildDirectory.dir("image-windows"))
+    }
 }
 
 // Cross-arch jlink runtime images: see docs/superpowers/specs/
@@ -117,6 +149,11 @@ tasks.register<DmgTask>("dmg") {
 // scripts/download-cross-jmods.sh and resolving its JavaFX jars via an
 // explicit classifier (rather than the host-inferred one the javafx {}
 // block in app/build.gradle.kts uses).
+//
+// Mac-only: there is no cross-arch story for the Windows image yet (a
+// single Windows jlink output is enough for v1; the org.openjfx
+// classifier for windows is the one the host build resolves anyway).
+if (isMacOsHost && hostArchLabel != null) {
 
 /** Applies the inputs every RuntimeImageTask instance needs regardless of architecture. */
 fun RuntimeImageTask.configureCommonRuntimeImageInputs() {
@@ -209,4 +246,5 @@ tasks.register("runtimeImageAllArches") {
         "execute the foreign-architecture binary -- only its Mach-O architecture tag is " +
         "verified; real execution verification is CI's job."
     dependsOn(runtimeImageMacosX8664, runtimeImageMacosArm64)
+}
 }
