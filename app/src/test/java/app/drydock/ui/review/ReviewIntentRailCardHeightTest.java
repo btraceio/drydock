@@ -1,6 +1,7 @@
 package app.drydock.ui.review;
 
 import app.drydock.ui.TestStages;
+import app.drydock.review.Provenance;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewVerdict;
 
@@ -159,7 +160,8 @@ class ReviewIntentRailCardHeightTest extends ApplicationTest {
     // ---- helpers --------------------------------------------------------
 
     private void showIntents(List<ReviewIntent> intents) {
-        interact(() -> rail.setIntents(intents, intents.get(0).id(), ReviewIntentRail.Empty.NONE));
+        interact(() -> rail.setIntents(intents, intents.get(0).id(), ReviewIntentRail.Empty.NONE,
+                Provenance.MEASURED));
         WaitForAsyncUtils.waitForFxEvents();
         // Heights are only real once a layout pass has run over the shown scene.
         interact(() -> rail.getScene().getRoot().layout());

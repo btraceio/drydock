@@ -194,6 +194,29 @@ class ReadingPathTest {
         assertEquals(List.of("src/a.cpp", "src/b.cpp", "src/c.cpp"), filesOf(path));
     }
 
+    /**
+     * Spec §6.4: links and entry-point marks "are computed in both cases:
+     * they are facts about the diff, not a grouping". So everything
+     * ReadingPath produces is MEASURED -- it orders the computed grouping
+     * only, and never sees the agent's `reads`. The accessor exists because
+     * §6.3 has labels carry their provenance, and §14's checklist requires a
+     * scope with an agent grouping AND a computed link set to mark each
+     * correctly: a claimed rail beside measured links.
+     */
+    @Test
+    void everythingReadingPathComputesIsMeasured() {
+        ReadingPath.Path path = fullPathOf(new UnifiedDiff(List.of(
+                file("src/guards.cpp", "class JmpCtxScope { };"),
+                file("src/profiler.cpp", "void go() { new JmpCtxScope(); }"))), NO_FAN_IN);
+
+        assertTrue(path.steps().stream()
+                .allMatch(step -> step.provenance() == Provenance.MEASURED));
+        assertTrue(path.steps().stream().flatMap(step -> step.links().stream())
+                .allMatch(link -> link.provenance() == Provenance.MEASURED));
+        assertFalse(path.steps().stream().flatMap(step -> step.links().stream()).toList().isEmpty(),
+                "a vacuous pass if this diff produced no links at all");
+    }
+
     @Test
     void aStepLinksToWhatCallsIt() {
         List<ReadingPath.Step> path = pathOf(new UnifiedDiff(List.of(
