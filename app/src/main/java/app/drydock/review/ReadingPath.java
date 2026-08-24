@@ -97,11 +97,22 @@ public final class ReadingPath {
      * names files and symbols ({@code ③ SessionReviewScopes.java}) and never
      * a raw hunk id -- the id is what the surface acts on, not what it shows.
      */
-    public record Link(String kind, String targetHunkId, String label) {
+    public record Link(String kind, String targetHunkId, String label, Provenance provenance) {
         public Link {
             Objects.requireNonNull(kind, "kind");
             Objects.requireNonNull(targetHunkId, "targetHunkId");
             Objects.requireNonNull(label, "label");
+            Objects.requireNonNull(provenance, "provenance");
+        }
+
+        /**
+         * A link with no warrant named is MEASURED: everything this class
+         * builds is (spec §6.4 -- links are facts about the diff, computed
+         * whoever grouped it). Callers naming it explicitly are the ones that
+         * could ever differ.
+         */
+        public Link(String kind, String targetHunkId, String label) {
+            this(kind, targetHunkId, label, Provenance.MEASURED);
         }
     }
 
@@ -113,12 +124,19 @@ public final class ReadingPath {
      * other.
      */
     public record Step(String hunkId, String file, int sectionNumber, String reason,
-                       List<Link> links, boolean entryPoint) {
+                       List<Link> links, boolean entryPoint, Provenance provenance) {
         public Step {
             Objects.requireNonNull(hunkId, "hunkId");
             Objects.requireNonNull(file, "file");
             Objects.requireNonNull(reason, "reason");
+            Objects.requireNonNull(provenance, "provenance");
             links = List.copyOf(links);
+        }
+
+        /** See {@link Link#Link(String, String, String)} -- a step is measured too. */
+        public Step(String hunkId, String file, int sectionNumber, String reason,
+                    List<Link> links, boolean entryPoint) {
+            this(hunkId, file, sectionNumber, reason, links, entryPoint, Provenance.MEASURED);
         }
     }
 
@@ -200,7 +218,7 @@ public final class ReadingPath {
                 List<Link> links = linksFrom(new ChangeGraph.Hunk(file, index), graph,
                         byPath, sectionByHunk);
                 steps.add(new Step(hunkId, file, sectionByHunk.getOrDefault(hunkId, 0),
-                        reason, links, steps.isEmpty()));
+                        reason, links, steps.isEmpty(), Provenance.MEASURED));
             }
         }
         return new Path(steps, ordered);
@@ -404,7 +422,7 @@ public final class ReadingPath {
             String label = (marker.isEmpty() ? "" : marker + " ")
                     + FallbackIntents.fileName(to.file())
                     + relation + best(target.getValue(), graph);
-            links.add(new Link(kind, hunkId, label));
+            links.add(new Link(kind, hunkId, label, Provenance.MEASURED));
         }
     }
 

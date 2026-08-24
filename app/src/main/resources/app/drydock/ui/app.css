@@ -3215,6 +3215,14 @@
     -fx-alignment: center-left;
     -fx-cursor: hand;
 }
+/* A claimed ordering is the agent's assertion, not drydock's measurement
+ * (spec §6.5). Dashed rather than coloured: four risk encodings already
+ * compete for colour on this surface and a fifth would be unreadable. Only
+ * the claimed case is modified -- marking every row would say nothing. */
+.review-intent-card.provenance-claimed,
+.review-link-row.provenance-claimed {
+    -fx-border-style: segments(3, 3) line-cap round;
+}
 .review-intent-card.collapsed {
     -fx-padding: 7 0 7 0;
     -fx-alignment: center;

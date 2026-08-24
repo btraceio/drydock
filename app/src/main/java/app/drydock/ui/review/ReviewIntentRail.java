@@ -2,6 +2,7 @@ package app.drydock.ui.review;
 
 import app.drydock.review.ChangeGraph;
 import app.drydock.review.ReadingPath;
+import app.drydock.review.Provenance;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewVerdict;
 import app.drydock.ui.PanelHeader;
@@ -100,6 +101,15 @@ final class ReviewIntentRail extends VBox {
     enum Mode { INTENTS, PATH }
 
     private Mode mode = Mode.INTENTS;
+
+    /**
+     * Whether the order the rail is listing was measured here or claimed by
+     * the agent (spec §6.5). A property of the ORDER, so it belongs to the
+     * rail rather than to a card: §7.1's three sources are three sources for
+     * the whole sequence. PATH mode is measured by construction -- §6.4 has
+     * {@link app.drydock.review.ReadingPath} order the computed grouping only.
+     */
+    private Provenance provenance = Provenance.MEASURED;
 
     /**
      * {@code PATH} mode's rows, already in reading order and already
@@ -242,8 +252,10 @@ final class ReviewIntentRail extends VBox {
     private Empty emptyReason = Empty.NONE;
 
     /** Replaces the rail's contents and marks {@code selectedIntentId} as current. */
-    void setIntents(List<ReviewIntent> newIntents, String selectedIntentId, Empty reason) {
+    void setIntents(List<ReviewIntent> newIntents, String selectedIntentId, Empty reason,
+                    Provenance provenance) {
         this.mode = Mode.INTENTS;
+        this.provenance = provenance == null ? Provenance.MEASURED : provenance;
         this.intents = List.copyOf(newIntents);
         this.selectedId = selectedIntentId;
         this.emptyReason = reason == null ? Empty.NONE : reason;
@@ -488,6 +500,10 @@ final class ReviewIntentRail extends VBox {
      */
     private Button buildPathRow(ReadingPath.Step step, int indexInFile, int hunksInFile) {
         Button row = new Button();
+        // No provenance modifier, and not by omission: spec §6.4 has
+        // ReadingPath order the COMPUTED grouping only, so a PATH row is
+        // measured by construction and marking it would be the only place on
+        // this surface where the marker could lie.
         row.getStyleClass().add("review-intent-card");
         row.setMaxWidth(Double.MAX_VALUE);
         row.setAlignment(Pos.TOP_LEFT);
@@ -601,9 +617,15 @@ final class ReviewIntentRail extends VBox {
     private Button buildCard(ReviewIntent intent) {
         Button card = new Button();
         card.getStyleClass().add("review-intent-card");
+        // Only CLAIMED adds a modifier: decorating every row would make the
+        // distinction say nothing (spec §6.5).
+        if (!provenance.styleClass().isEmpty()) {
+            card.getStyleClass().add(provenance.styleClass());
+        }
         card.setMaxWidth(Double.MAX_VALUE);
         card.setTooltip(new Tooltip(intent.number() + " · " + intent.title()
-                + (intent.rationale().isBlank() ? "" : " — " + intent.rationale())));
+                + (intent.rationale().isBlank() ? "" : " — " + intent.rationale())
+                + " · " + provenance.label()));
         card.setOnAction(e -> onSelected.accept(intent));
 
         Label number = new Label(String.valueOf(intent.number()));

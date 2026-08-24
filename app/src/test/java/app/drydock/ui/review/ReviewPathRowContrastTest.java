@@ -2,6 +2,7 @@ package app.drydock.ui.review;
 
 import app.drydock.ui.TestStages;
 import app.drydock.review.ReadingPath;
+import app.drydock.review.Provenance;
 import app.drydock.review.ReviewIntent;
 
 import javafx.scene.Node;
@@ -105,7 +106,7 @@ class ReviewPathRowContrastTest extends ApplicationTest {
                         "", List.of(), Optional.empty(), false));
         // "a" is always selected; asking for the UNselected fill reads "b"'s
         // card instead, so both renders always have exactly one of each.
-        interact(() -> rail.setIntents(intents, "a", ReviewIntentRail.Empty.NONE));
+        interact(() -> rail.setIntents(intents, "a", ReviewIntentRail.Empty.NONE, Provenance.MEASURED));
         WaitForAsyncUtils.waitForFxEvents();
         interact(() -> rail.getScene().getRoot().layout());
         WaitForAsyncUtils.waitForFxEvents();

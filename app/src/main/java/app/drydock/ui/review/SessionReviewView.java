@@ -12,6 +12,7 @@ import app.drydock.review.IntentHunks;
 import app.drydock.review.OutOfDiffFanIn;
 import app.drydock.review.ReadingPath;
 import app.drydock.review.ReviewAnnotation;
+import app.drydock.review.Provenance;
 import app.drydock.review.RecheckDispatch;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
@@ -1144,7 +1145,8 @@ public final class SessionReviewView extends BorderPane {
             // No scope selected means no rail: leaving the previous scope's
             // cards up here is how the rail came to list a departed item's
             // files (see the whole-branch review this fixes).
-            intentRail.setIntents(List.of(), null, ReviewIntentRail.Empty.NONE);
+            intentRail.setIntents(List.of(), null, ReviewIntentRail.Empty.NONE,
+                    Provenance.MEASURED);
             intentRail.setGroupingPending(false);
             mcpPanel.ifPresent(panel -> panel.setScope(null));
             lastIntents = List.of();
@@ -1196,8 +1198,14 @@ public final class SessionReviewView extends BorderPane {
             String selectedHunkId = steps.isEmpty() ? null : steps.get(pathIndex).hunkId();
             intentRail.showPath(steps, selectedHunkId, emptyReason());
         } else {
+            // Spec §7.1: reads and the agent's array order are both the
+            // agent's claim; only a grouping drydock computed itself is
+            // measured. hasReviewerGrouping is exactly that distinction.
             intentRail.setIntents(currentIntents, currentIntent().map(ReviewIntent::id).orElse(null),
-                    emptyReason());
+                    emptyReason(),
+                    host.hasReviewerGrouping(scope.get())
+                            ? Provenance.CLAIMED
+                            : Provenance.MEASURED);
         }
         // The graph now builds unconditionally (Task 19, for the diff
         // column's link footers), but the rail's OWN "refining grouping…"
