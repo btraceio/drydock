@@ -2300,6 +2300,22 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             }
             return sendToBoundSession(scope, reviewInstruction(scope));
         }
+
+        /**
+         * Sends the recheck through the same one-line prompt path a review
+         * takes. Returns what the hand-off returned: an automatic dispatch has
+         * no human watching it, so a false swallowed here would cost the scope
+         * its recheck with nothing to show that it never happened.
+         */
+        @Override
+        public boolean dispatchRecheck(ReviewScope scope, String fromBase, String toBase) {
+            if (scope.sessionId().isEmpty()) {
+                return false;
+            }
+            return sendToBoundSession(scope,
+                    ReviewInstructions.forRecheck(scope.id(), fromBase, toBase,
+                            supportsSubagents(scope)));
+        }
     }
 
     /**
@@ -2316,13 +2332,21 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * inline form; there is no session to resolve an agent kind from.</p>
      */
     private String reviewInstruction(ReviewScope scope) {
-        boolean supportsSubagents = scope.sessionId()
+        return ReviewInstructions.forScope(scope.id(), supportsSubagents(scope));
+    }
+
+    /**
+     * Whether the scope's bound session's agent declares subagents. A scope
+     * with no bound session -- the PR-not-yet-checked-out case -- falls back
+     * to the inline form; there is no session to resolve an agent kind from.
+     */
+    private boolean supportsSubagents(ReviewScope scope) {
+        return scope.sessionId()
                 .flatMap(id -> sessionManager.sessions().stream()
                         .filter(candidate -> candidate.id().equals(id))
                         .findFirst())
                 .map(session -> agentRegistry.supportsSubagents(session.agentKind()))
                 .orElse(false);
-        return ReviewInstructions.forScope(scope.id(), supportsSubagents);
     }
 
     /**

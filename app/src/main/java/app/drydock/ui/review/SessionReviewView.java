@@ -12,6 +12,7 @@ import app.drydock.review.IntentHunks;
 import app.drydock.review.OutOfDiffFanIn;
 import app.drydock.review.ReadingPath;
 import app.drydock.review.ReviewAnnotation;
+import app.drydock.review.RecheckDispatch;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewVerdict;
@@ -229,6 +230,20 @@ public final class SessionReviewView extends BorderPane {
          */
         boolean assessedAffected(ReviewScope scope, String hunkDigest, String fromBase, String toBase);
 
+        /**
+         * Asks the scope's agent which approvals the move from {@code
+         * fromBase} to {@code toBase} actually disturbed, so the assessment is
+         * usually already there when the reviewer returns rather than arriving
+         * after a wait exactly when they wanted to move on (spec §9.7).
+         *
+         * <p>False when the hand-off did not happen -- no bound session, or
+         * its tab is not open -- exactly like {@link #runReview} and {@link
+         * #askAgentToFix}. The caller must not record a dispatch it did not
+         * make: nobody is watching an automatic recheck, so a failure swallowed
+         * here is a scope that silently never gets one.</p>
+         */
+        boolean dispatchRecheck(ReviewScope scope, String fromBase, String toBase);
+
         /** Resolve / Reopen one finding. */
         void setResolved(ReviewScope scope, ReviewAnnotation finding, boolean resolved);
 
@@ -343,6 +358,14 @@ public final class SessionReviewView extends BorderPane {
     private final ReviewIntentRail intentRail = new ReviewIntentRail();
     /** Everything a section says about itself, derived from its hunks. */
     private final SectionStates sections;
+
+    /**
+     * Which base moves have already had their automatic recheck sent (spec
+     * §9.7). Lives here, not in the store: a dispatch in flight is invisible
+     * to {@code assessedAffected}, and the render pass that sends it runs many
+     * times per move.
+     */
+    private final RecheckDispatch recheckDispatch = new RecheckDispatch();
     private final ReviewFindingsMargin margin;
     private final ReviewVerdictBar verdictBar;
 
@@ -1142,6 +1165,11 @@ public final class SessionReviewView extends BorderPane {
         }
         lastIntents = currentIntents;
         lastIntentsScopeId = scopeId;
+
+        // Asks the agent about approvals this scope's base move disturbed.
+        // Guarded per (scope, fromBase, toBase), so the many renders inside
+        // one move send one recheck (see SectionStates#requestRechecks).
+        board().ifPresent(current -> sections.requestRechecks(current, recheckDispatch));
 
         margin.invalidate(null);
         margin.setFindings(findingsForMargin(scope.get()));

@@ -569,5 +569,10 @@ class OpenSessionTabReviewSubTabTest extends ApplicationTest {
         public boolean runReview(ReviewScope scope) {
             return false;
         }
+
+        @Override
+        public boolean dispatchRecheck(ReviewScope scope, String fromBase, String toBase) {
+            return false;
+        }
     }
 }

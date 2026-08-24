@@ -4,6 +4,7 @@ import app.drydock.git.UnifiedDiff;
 import app.drydock.review.BaseMove;
 import app.drydock.review.ChangeGraph;
 import app.drydock.review.HunkDigest;
+import app.drydock.review.RecheckDispatch;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
@@ -645,6 +646,108 @@ class SectionStatesTest {
 
         assertEquals(List.of(digestOf(GUARDS_H)), sections.digestsForAction(
                 board, section1, SessionReviewView.SettleUnit.HUNK, true, Optional.empty()));
+    }
+
+    // ---- the automatic recheck a base move earns (spec §9.7) ----------------
+
+    /**
+     * A move that stales an approval asks the agent about it, naming the base
+     * PAIR the approval was recorded against and the base it now faces.
+     */
+    @Test
+    void aBaseMoveThatStalesAnApprovalAsksTheAgentOnce() {
+        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
+        SectionStates.Board board = overlapping();
+        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
+
+        sections.requestRechecks(board, new RecheckDispatch());
+
+        assertEquals(List.of("0".repeat(40) + "->" + host.baseCommit), host.recheckDispatches);
+    }
+
+    /**
+     * <strong>The window the store cannot see.</strong> Between the dispatch
+     * and the agent's first {@code review_recheck} there is no assessment, and
+     * {@code assessedAffected} reads exactly the same as never having asked.
+     * A board re-renders whenever a background git answer lands, so a guard
+     * built on the store alone would send a subagent per render.
+     */
+    @Test
+    void aSecondRenderInsideTheSameMoveDoesNotAskAgain() {
+        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
+        SectionStates.Board board = overlapping();
+        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
+        RecheckDispatch dispatch = new RecheckDispatch();
+
+        sections.requestRechecks(board, dispatch);
+        sections.requestRechecks(board, dispatch);
+
+        assertEquals(1, host.recheckDispatches.size(),
+                "no assessment has arrived yet, and that must not read as 'never asked'");
+    }
+
+    /**
+     * A hand-off that did not happen must not be remembered as done: the send
+     * reached no terminal, and no human is present to notice the silence.
+     */
+    @Test
+    void aRecheckWhoseHandOffFailedIsAskedAgainOnTheNextRender() {
+        host.recheckHandOffSucceeds = false;
+        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
+        SectionStates.Board board = overlapping();
+        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
+        RecheckDispatch dispatch = new RecheckDispatch();
+
+        sections.requestRechecks(board, dispatch);
+        sections.requestRechecks(board, dispatch);
+
+        assertEquals(2, host.recheckDispatches.size());
+    }
+
+    /**
+     * Relevance-gated: a move touching nothing this scope reads leaves every
+     * section FRESH, and a fresh section has no disturbed approval to ask
+     * about. Without this every base move spends a subagent.
+     */
+    @Test
+    void aMoveThatCouldNotMatterAsksNothing() {
+        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of("docs/README.md")));
+        SectionStates.Board board = overlapping();
+        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
+
+        sections.requestRechecks(board, new RecheckDispatch());
+
+        assertTrue(host.recheckDispatches.isEmpty());
+    }
+
+    /**
+     * Only the approvals the move actually staled are asked about. A section
+     * can hold one stale hunk and one approved against the CURRENT base;
+     * taking every verdict in a non-FRESH section would ask the agent to read
+     * what changed between a base and itself -- a subagent spent on an empty
+     * diff.
+     */
+    @Test
+    void aFreshApprovalSharingAStaleSectionIsNotAskedAbout() {
+        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H, GUARDS_CPP)));
+        SectionStates.Board board = overlapping();
+        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
+        record(GUARDS_CPP, ReviewVerdict.Decision.APPROVED, host.baseCommit);
+
+        sections.requestRechecks(board, new RecheckDispatch());
+
+        assertEquals(List.of("0".repeat(40) + "->" + host.baseCommit), host.recheckDispatches,
+                "a verdict already recorded against the current base has not moved");
+    }
+
+    /** No approval, nothing staled, nothing to ask. */
+    @Test
+    void aScopeWithNoRecordedApprovalAsksNothing() {
+        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
+
+        sections.requestRechecks(overlapping(), new RecheckDispatch());
+
+        assertTrue(host.recheckDispatches.isEmpty());
     }
 
     // ---- helpers -------------------------------------------------------------
