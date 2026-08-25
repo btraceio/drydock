@@ -2330,8 +2330,15 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             if (open == null || open.isProcessExited()) {
                 return false;
             }
-            return sendToBoundSession(scope,
+            boolean handedOff = sendToBoundSession(scope,
                     ReviewInstructions.forRecheck(scope.id(), fromBase, toBase));
+            // The one automatic dispatch on this surface, and the only one with
+            // no human watching it land. Review called out that it left no
+            // trace anywhere: a recheck that silently never happened looked
+            // exactly like one nobody needed.
+            LOG.log(Level.INFO, () -> (handedOff ? "Dispatched" : "Could not dispatch")
+                    + " a recheck for scope " + scope.id() + " (" + fromBase + " -> " + toBase + ")");
+            return handedOff;
         }
 
         /**
