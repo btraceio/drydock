@@ -386,13 +386,13 @@ final class SectionStates {
         }
         Set<String> recordedBases = new LinkedHashSet<>();
         for (ReviewIntent intent : counted(board)) {
-            // Cheap pre-filter ONLY. A section's staleness is the strongest
-            // thing true of any of its hunks, so a section with no MOVED hunk
-            // can hold no MOVED verdict either -- but the converse does not
-            // follow, which is why the real decision is per verdict below.
-            if (stateOf(board, intent).staleness() != Staleness.MOVED) {
-                continue;
-            }
+            // No section-level pre-filter. One was here and it was removed:
+            // stateOf does a strict SUPERSET of this loop's work -- the same
+            // stalenessOf per digest, plus collectSharingSections walking every
+            // other section, plus a VerdictMerge -- and there is no stateOf
+            // cache, so guarding with it could only ever ADD work per render.
+            // It was also behaviourally dead: deleting it changed no test,
+            // because "no hunk MOVED" already implies "no verdict MOVED".
             Collection<String> files = filesAffectingScope(board, intent);
             for (String digest : digestsOf(board, intent)) {
                 host.verdict(board.scope(), digest)
@@ -404,12 +404,18 @@ final class SectionStates {
                         // hand the sentinel to the host as a base to diff.
                         .filter(verdict -> !SessionReviewView.UNRESOLVED_BASE
                                 .equals(verdict.baseCommit()))
-                        // The instruction says "for each APPROVED hunk"; a
-                        // requested-changes verdict is not one, and asking
-                        // about it spends an agent looking for nothing.
-                        // AUTO_APPROVED is not listed because nothing stores
-                        // one -- VerdictMerge derives it for display only.
-                        .filter(verdict -> verdict.decision() == ReviewVerdict.Decision.APPROVED)
+                        // The instruction says "for each APPROVED hunk", and a
+                        // requested-changes verdict is not one. Written as "not
+                        // CHANGES" rather than as a list of the approving
+                        // decisions on purpose: nothing ENFORCES which values
+                        // can be stored -- putVerdict takes any Decision and
+                        // the load path accepts "auto-approved" off disk -- so
+                        // an enumeration would silently drop an approval the
+                        // day a new writer or a hand-edited file produces one.
+                        // This direction fails toward asking: an extra recheck
+                        // costs one agent run, a missed one leaves a human's
+                        // approval unexamined and says nothing.
+                        .filter(verdict -> verdict.decision() != ReviewVerdict.Decision.CHANGES)
                         // Knowingly forfeited here: a base move that is
                         // PERMANENTLY unresolvable -- the old base force-pushed
                         // away or deleted -- stays UNKNOWN and is never asked
