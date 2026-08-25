@@ -112,8 +112,25 @@ class ReviewIntentRailCardHeightTest extends ApplicationTest {
         narrow();
         rail.setSectionStateLookup(intent -> new SectionStates.SectionState(
                 Optional.empty(), 1, 1, 3, SectionStates.Staleness.FRESH,
-                List.of("①", "②", "③", "④", "⑤"), false));
+                List.of("①", "②", "③", "④", "⑤"), false, Provenance.MEASURED));
         showIntents(List.of(intent(1, "guards.h", ReviewIntent.Kind.CHANGE, "shared hunk")));
+
+        assertSaneHeight(cardHeights().get(0));
+    }
+
+    /**
+     * The agent-asserted banner is LONGER than the measured one ("⚠ agent:
+     * base moved — confirm"), and this rail has truncated before -- Task 18
+     * shipped an illegible one. A longer string on the narrowest card is
+     * exactly where that recurs.
+     */
+    @Test
+    void theClaimedStaleBannerFitsAtNarrowWidth() {
+        narrow();
+        rail.setSectionStateLookup(intent -> new SectionStates.SectionState(
+                Optional.of(ReviewVerdict.Decision.APPROVED), 2, 2, 2,
+                SectionStates.Staleness.MOVED, List.of(), false, Provenance.CLAIMED));
+        showIntents(List.of(intent(1, "guards.h", ReviewIntent.Kind.CHANGE, "")));
 
         assertSaneHeight(cardHeights().get(0));
     }
@@ -132,7 +149,7 @@ class ReviewIntentRailCardHeightTest extends ApplicationTest {
         narrow();
         rail.setSectionStateLookup(intent -> new SectionStates.SectionState(
                 Optional.of(ReviewVerdict.Decision.APPROVED), 2, 2, 2,
-                SectionStates.Staleness.MOVED, List.of(), false));
+                SectionStates.Staleness.MOVED, List.of(), false, Provenance.MEASURED));
         showIntents(List.of(intent(1, "guards.h", ReviewIntent.Kind.CHANGE, "")));
 
         assertSaneHeight(cardHeights().get(0));
