@@ -599,6 +599,10 @@ public final class DrydockApplication extends Application {
                             // over an hour.
                             case "quit" -> diagQuit(primaryStage);
                             case "shot" -> diagSnapshot(primaryStage, Path.of(arg));
+                            // Documented in this hook's comment since Task 18
+                            // and never implemented until now; it silently hit
+                            // the default branch below, which prints "mark".
+                            case "reviewkey" -> mainWorkspace.diagReviewKey(arg.strip());
                             // forcebanner:<commits>/<files>, or
                             // forcebanner:none for a session that never wrote
                             // a brief, or forcebanner:<c>/<f>/dead for one

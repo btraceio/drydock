@@ -4292,6 +4292,18 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * session on its shell terminal, which is the state in which the rename
      * and sidebar-filter paths used to lose every keystroke to the shell.
      */
+    /** Diagnostic-only: one key into the selected tab's Review view. */
+    public void diagReviewKey(String keyName) {
+        currentlySelected().ifPresentOrElse(
+                open -> open.reviewView().ifPresentOrElse(
+                        view -> {
+                            view.diagReviewKey(KeyCode.valueOf(keyName));
+                            System.out.println("[diag] reviewkey " + keyName + " delivered");
+                        },
+                        () -> System.out.println("[diag] reviewkey: Review sub-tab not open")),
+                () -> System.out.println("[diag] reviewkey: no selected tab"));
+    }
+
     public void diagShowSubTab(String name) {
         OpenSessionTab.SubTab subTab = switch (name.strip().toLowerCase(Locale.ROOT)) {
             case "terminal" -> OpenSessionTab.SubTab.TERMINAL;

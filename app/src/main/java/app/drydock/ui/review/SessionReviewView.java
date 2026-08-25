@@ -30,6 +30,7 @@ import javafx.scene.control.Button;
 import javafx.scene.control.Label;
 import javafx.scene.control.TextInputControl;
 import javafx.scene.control.Tooltip;
+import javafx.scene.input.KeyCode;
 import javafx.scene.input.KeyEvent;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
@@ -3206,6 +3207,20 @@ public final class SessionReviewView extends BorderPane {
      * selection path a click takes -- including the guard that makes pressing
      * the already-selected chip do nothing.
      */
+    /**
+     * Diagnostic-only: delivers one key through the SAME filter real presses
+     * take ({@link #onKeyPressed}), so a driver can settle a hunk without a
+     * pointer. {@code app.drydock.diag.explorerScript}'s {@code reviewkey}
+     * verb has documented this since Task 18 and never had an implementation
+     * -- the verb fell through to the script's default branch, which prints
+     * "mark", so a run that approved nothing looked exactly like one that
+     * worked.
+     */
+    public void diagReviewKey(KeyCode code) {
+        fireEvent(new KeyEvent(KeyEvent.KEY_PRESSED, "", "", code,
+                false, false, false, false));
+    }
+
     void diagSelectChoice(SessionReviewScopes.Choice choice) {
         ReviewDiagFxThread.<Void>call(() -> {
             switcher.diagSelectChoice(choice);
