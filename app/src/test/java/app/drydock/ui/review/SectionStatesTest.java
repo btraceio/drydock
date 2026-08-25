@@ -774,6 +774,44 @@ class SectionStatesTest {
     }
 
     /**
+     * <strong>Relevance is per approval, not per section.</strong> Two
+     * approvals in ONE section, recorded at different bases: one move is
+     * resolved and could matter, the other is still in flight. Gating on the
+     * section alone let the resolved one drag the unresolved one into the
+     * dispatch -- asking the agent about a move before git had said whether
+     * it mattered, with the claim permanent.
+     */
+    @Test
+    void aNeighbourWhoseMoveIsStillInFlightIsNotDraggedIn() {
+        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H, GUARDS_CPP)));
+        host.baseDeltaByRecordedBase.put("9".repeat(40), new BaseMove.Delta(true, new TreeSet<>()));
+        SectionStates.Board board = overlapping();
+        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
+        record(GUARDS_CPP, ReviewVerdict.Decision.APPROVED, "9".repeat(40));
+
+        sections.requestRechecks(board, new RecheckDispatch());
+
+        assertEquals(List.of("0".repeat(40) + "->" + host.baseCommit), host.recheckDispatches,
+                "only the move git has actually answered for earns a recheck");
+    }
+
+    /** The same, for a neighbour whose move is RESOLVED and provably irrelevant. */
+    @Test
+    void aNeighbourWhoseMoveCouldNotMatterIsNotDraggedIn() {
+        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H, GUARDS_CPP)));
+        host.baseDeltaByRecordedBase.put("9".repeat(40),
+                new BaseMove.Delta(false, new TreeSet<>(List.of("docs/README.md"))));
+        SectionStates.Board board = overlapping();
+        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
+        record(GUARDS_CPP, ReviewVerdict.Decision.APPROVED, "9".repeat(40));
+
+        sections.requestRechecks(board, new RecheckDispatch());
+
+        assertEquals(List.of("0".repeat(40) + "->" + host.baseCommit), host.recheckDispatches,
+                "a move touching only docs is exactly what the filter exists to drop");
+    }
+
+    /**
      * Two approvals recorded at two DIFFERENT older bases are two distinct
      * questions, and the loop has to emit both. Every other test here has at
      * most one stale base, so the loop was only ever exercised emitting one.

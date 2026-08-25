@@ -13,8 +13,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ReviewInstructionsRecheckTest {
 
     @Test
-    void theSubagentFormNamesBothBasesAndTheTool() {
-        String instruction = ReviewInstructions.forRecheck("scope-1", "a1b2c3", "d4e5f6", true);
+    void itNamesBothBasesAndTheTool() {
+        String instruction = ReviewInstructions.forRecheck("scope-1", "a1b2c3", "d4e5f6");
 
         assertTrue(instruction.contains("a1b2c3"));
         assertTrue(instruction.contains("d4e5f6"));
@@ -29,36 +29,20 @@ class ReviewInstructionsRecheckTest {
      * both are present either way.
      */
     @Test
-    void bothFormsReadTheDeltaFromTheOldBaseToTheNew() {
-        for (boolean subagents : new boolean[] {true, false}) {
-            assertTrue(ReviewInstructions.forRecheck("s", "a1b2c3", "d4e5f6", subagents)
-                    .contains("between a1b2c3 and d4e5f6"));
-        }
-    }
-
-    @Test
-    void theInlineFormDoesTheSameWorkWithoutASubagent() {
-        String instruction = ReviewInstructions.forRecheck("scope-1", "a1b2c3", "d4e5f6", false);
-
-        assertTrue(instruction.contains("review_recheck"));
-        assertFalse(instruction.contains("subagent"));
+    void itReadsTheDeltaFromTheOldBaseToTheNew() {
+        assertTrue(ReviewInstructions.forRecheck("s", "a1b2c3", "d4e5f6")
+                .contains("between a1b2c3 and d4e5f6"));
     }
 
     /** The agent must be told it cannot clear an approval, not left to infer it. */
     @Test
-    void bothFormsSayThatUnaffectedIsAdviceOnly() {
-        for (boolean subagents : new boolean[] {true, false}) {
-            assertTrue(ReviewInstructions.forRecheck("s", "a", "b", subagents)
-                    .contains("does not clear"));
-        }
+    void itSaysThatUnaffectedIsAdviceOnly() {
+        assertTrue(ReviewInstructions.forRecheck("s", "a", "b").contains("does not clear"));
     }
 
     @Test
-    void bothFormsNameTheScopeHandle() {
-        for (boolean subagents : new boolean[] {true, false}) {
-            assertTrue(ReviewInstructions.forRecheck("rs_abc123", "a", "b", subagents)
-                    .contains("rs_abc123"));
-        }
+    void itNamesTheScopeHandle() {
+        assertTrue(ReviewInstructions.forRecheck("rs_abc123", "a", "b").contains("rs_abc123"));
     }
 
     /**
@@ -66,9 +50,7 @@ class ReviewInstructionsRecheckTest {
      * a prompt: a newline would submit half an instruction.
      */
     @Test
-    void bothFormsAreASingleLine() {
-        for (boolean subagents : new boolean[] {true, false}) {
-            assertFalse(ReviewInstructions.forRecheck("s", "a", "b", subagents).contains("\n"));
-        }
+    void itIsASingleLine() {
+        assertFalse(ReviewInstructions.forRecheck("s", "a", "b").contains("\n"));
     }
 }

@@ -2331,8 +2331,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 return false;
             }
             return sendToBoundSession(scope,
-                    ReviewInstructions.forRecheck(scope.id(), fromBase, toBase,
-                            supportsSubagents(scope)));
+                    ReviewInstructions.forRecheck(scope.id(), fromBase, toBase));
         }
 
         /**

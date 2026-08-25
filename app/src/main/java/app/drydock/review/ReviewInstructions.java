@@ -38,9 +38,12 @@ public final class ReviewInstructions {
      * <p>Says outright that "unaffected" does not clear an approval. An agent
      * should be told the rule rather than left to infer it from what {@code
      * review_recheck} happens to refuse.</p>
+     *
+     * <p>Only the subagent form, unlike {@link #forScope}: spec §9.7 gives an
+     * automatic recheck only to a harness that has subagents, so an inline
+     * form here would be a branch nothing could reach.</p>
      */
-    public static String forRecheck(String scopeId, String fromBase, String toBase,
-                                    boolean supportsSubagents) {
+    public static String forRecheck(String scopeId, String fromBase, String toBase) {
         Objects.requireNonNull(scopeId, "scopeId");
         // Both bases too: they are concatenated, so a null would reach the
         // agent as the literal "null" in a line typed at its prompt.
@@ -51,9 +54,7 @@ public final class ReviewInstructions {
                 + "review_recheck with affected and a one-line why. Marking a hunk affected "
                 + "asks the human to read it again; marking one unaffected is advice and "
                 + "does not clear their approval";
-        return supportsSubagents
-                ? "Dispatch a subagent to recheck stale approvals: " + work
-                        + ". Report only its summary back here."
-                : "Recheck the stale approvals in this worktree: " + work + ".";
+        return "Dispatch a subagent to recheck stale approvals: " + work
+                + ". Report only its summary back here.";
     }
 }
