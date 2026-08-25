@@ -45,6 +45,9 @@ final class FakeReviewHost implements SessionReviewView.Host {
 
     /** Whether this scope's agent may be asked automatically (spec §9.7). */
     boolean supportsAutomaticRecheck = true;
+
+    /** Per-recorded-base deltas; {@link #baseDelta} answers for any base not listed. */
+    final java.util.Map<String, BaseMove.Delta> baseDeltaByRecordedBase = new java.util.HashMap<>();
     final List<String> submittedScopes = new ArrayList<>();
     final List<Path> explorerJumps = new ArrayList<>();
 
@@ -177,7 +180,13 @@ final class FakeReviewHost implements SessionReviewView.Host {
 
     @Override
     public BaseMove.Delta baseMove(ReviewScope scope, String recordedBase) {
-        return baseDelta;
+        // Per RECORDED base, like the real host, which memoizes one delta per
+        // (scope, oldBase, newBase). Returning one field for every base was a
+        // fiction that made a whole defect class untestable: two approvals
+        // recorded at different bases genuinely can resolve differently --
+        // one MOVED, one still in flight, one provably irrelevant -- and a
+        // fake that collapses them cannot express it.
+        return baseDeltaByRecordedBase.getOrDefault(recordedBase, baseDelta);
     }
 
     /** Reads the real store, so a test drives this through {@code putAssessment}. */

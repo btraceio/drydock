@@ -386,39 +386,68 @@ final class SectionStates {
         }
         Set<String> recordedBases = new LinkedHashSet<>();
         for (ReviewIntent intent : counted(board)) {
-            // MOVED, not merely "not FRESH". UNKNOWN is what the host returns
-            // on the FIRST render that sees a base pair -- it spawns the git
-            // off-thread and answers on a later pass -- so dispatching on it
-            // would ask the agent before couldMatter had said anything, and
-            // the claim is permanent. UNKNOWN means ask again next render,
-            // by which time git has spoken.
+            // Cheap pre-filter ONLY. A section's staleness is the strongest
+            // thing true of any of its hunks, so a section with no MOVED hunk
+            // can hold no MOVED verdict either -- but the converse does not
+            // follow, which is why the real decision is per verdict below.
             if (stateOf(board, intent).staleness() != Staleness.MOVED) {
                 continue;
             }
+            Collection<String> files = filesAffectingScope(board, intent);
             for (String digest : digestsOf(board, intent)) {
                 host.verdict(board.scope(), digest)
-                        .filter(verdict -> verdict.staleAgainst(base))
                         // "unresolved" is not a revision on either side of the
                         // pair. The current base is refused above; a RECORDED
                         // one carries the same sentinel whenever the baseline
                         // was unresolved when the human settled the hunk.
+                        // Checked BEFORE stalenessOf, which would otherwise
+                        // hand the sentinel to the host as a base to diff.
                         .filter(verdict -> !SessionReviewView.UNRESOLVED_BASE
                                 .equals(verdict.baseCommit()))
                         // The instruction says "for each APPROVED hunk"; a
                         // requested-changes verdict is not one, and asking
                         // about it spends an agent looking for nothing.
-                        .filter(verdict -> verdict.decision() == ReviewVerdict.Decision.APPROVED
-                                || verdict.decision() == ReviewVerdict.Decision.AUTO_APPROVED)
+                        // AUTO_APPROVED is not listed because nothing stores
+                        // one -- VerdictMerge derives it for display only.
+                        .filter(verdict -> verdict.decision() == ReviewVerdict.Decision.APPROVED)
+                        // Knowingly forfeited here: a base move that is
+                        // PERMANENTLY unresolvable -- the old base force-pushed
+                        // away or deleted -- stays UNKNOWN and is never asked
+                        // about. BaseMove.Delta cannot tell "in flight" from
+                        // "gone", and an agent handed a base git can no longer
+                        // resolve could not answer anyway. Telling the two
+                        // apart needs a third state on Delta, which is a
+                        // design change, not a condition to bolt on here.
+                        //
+                        // THE relevance test, per verdict and not per section.
+                        // Each approval carries its OWN recorded base, and the
+                        // host answers baseMove per base: one hunk's move can
+                        // be MOVED while its neighbour's is still UNKNOWN (the
+                        // git for that pair is in flight) or FRESH (that pair
+                        // provably touched nothing this scope reads). Gating
+                        // only on the section let a neighbour's MOVED drag
+                        // both bases into the dispatch -- asking before
+                        // couldMatter had answered, with the claim permanent.
+                        .filter(verdict -> stalenessOf(board, verdict, base, files)
+                                == Staleness.MOVED)
                         .ifPresent(verdict -> recordedBases.add(verdict.baseCommit()));
             }
         }
         for (String from : recordedBases) {
             if (host.assessedMove(board.scope(), from, base)) {
-                // Already answered, and that answer is on disk. The in-memory
-                // claim dies with the view; this is what stops a restart
-                // re-asking a question the store can already answer.
+                // SOME assessment for this pair is already on disk -- not
+                // necessarily about every approval recorded against it, since
+                // review_recheck is agent-initiated and may answer partially.
+                // Deliberate: the in-memory claim dies with the view, so
+                // without this a restart re-asks forever, and the human still
+                // sees the per-hunk stale mark either way.
                 continue;
             }
+            // A released claim is retried on the NEXT render, and every one
+            // after it, until the hand-off lands. Deliberately unbounded: the
+            // check short-circuits on a dead or absent tab before typing
+            // anything, and a recheck silently abandoned is the failure this
+            // whole path exists to avoid.
             if (dispatch.claim(board.scope().id(), from, base)
                     && !host.dispatchRecheck(board.scope(), from, base)) {
                 dispatch.release(board.scope().id(), from, base);
