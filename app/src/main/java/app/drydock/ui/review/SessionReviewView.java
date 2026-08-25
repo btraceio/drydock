@@ -245,6 +245,33 @@ public final class SessionReviewView extends BorderPane {
          */
         boolean dispatchRecheck(ReviewScope scope, String fromBase, String toBase);
 
+        /**
+         * Whether this scope's agent may be asked for a recheck WITHOUT a
+         * human having asked (spec §9.7: "inline harnesses simply do not get
+         * one").
+         *
+         * <p>An automatic dispatch types a prompt into a live terminal with
+         * nobody watching. A harness that can run it in a subagent absorbs
+         * that; an inline one would have it land in the middle of whatever it
+         * was doing. The two providers that lack subagents also report no
+         * activity at all, so there is no idle signal to wait for -- the
+         * choice is dispatch-regardless or do not dispatch, and the spec
+         * chose.</p>
+         */
+        boolean supportsAutomaticRecheck(ReviewScope scope);
+
+        /**
+         * Whether the agent has ALREADY answered about this exact base pair,
+         * whatever it said.
+         *
+         * <p>Not {@link #assessedAffected}, which folds "said unaffected" and
+         * "never asked" into one answer on purpose. Here the two must be told
+         * apart: this is the durable half of the dispatch guard, and it is
+         * what stops an app restart -- which empties the in-memory claim --
+         * from re-asking a question whose answer is already on disk.</p>
+         */
+        boolean assessedMove(ReviewScope scope, String fromBase, String toBase);
+
         /** Resolve / Reopen one finding. */
         void setResolved(ReviewScope scope, ReviewAnnotation finding, boolean resolved);
 

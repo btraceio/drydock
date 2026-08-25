@@ -23,20 +23,27 @@ import java.util.Set;
 public final class RecheckDispatch {
 
     /**
-     * NUL joins the three parts because it cannot occur in a commit and is
-     * not plausible in a scope handle: {@code ("s-a","b")} and
-     * {@code ("s","a-b")} must not collide on one key.
+     * The three parts as a value, not as a joined string. A separator has to
+     * be argued about -- some byte must be impossible in a scope handle -- and
+     * a record removes the argument: {@code ("s-a","b","c")} and
+     * {@code ("s","a-b","c")} are distinct by construction.
      */
-    private static final char SEPARATOR = '\0';
+    private record Move(String scopeId, String fromBase, String toBase) {
+        Move {
+            Objects.requireNonNull(scopeId, "scopeId");
+            Objects.requireNonNull(fromBase, "fromBase");
+            Objects.requireNonNull(toBase, "toBase");
+        }
+    }
 
-    private final Set<String> dispatched = new LinkedHashSet<>();
+    private final Set<Move> dispatched = new LinkedHashSet<>();
 
     /**
      * True exactly once per {@code (scopeId, fromBase, toBase)} -- the caller
      * that gets true owns sending this move's recheck.
      */
     public boolean claim(String scopeId, String fromBase, String toBase) {
-        return dispatched.add(key(scopeId, fromBase, toBase));
+        return dispatched.add(new Move(scopeId, fromBase, toBase));
     }
 
     /**
@@ -46,13 +53,6 @@ public final class RecheckDispatch {
      * entirely, with no human present to notice.
      */
     public void release(String scopeId, String fromBase, String toBase) {
-        dispatched.remove(key(scopeId, fromBase, toBase));
-    }
-
-    private static String key(String scopeId, String fromBase, String toBase) {
-        Objects.requireNonNull(scopeId, "scopeId");
-        Objects.requireNonNull(fromBase, "fromBase");
-        Objects.requireNonNull(toBase, "toBase");
-        return scopeId + SEPARATOR + fromBase + SEPARATOR + toBase;
+        dispatched.remove(new Move(scopeId, fromBase, toBase));
     }
 }

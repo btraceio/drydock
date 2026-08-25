@@ -42,6 +42,10 @@ public final class ReviewInstructions {
     public static String forRecheck(String scopeId, String fromBase, String toBase,
                                     boolean supportsSubagents) {
         Objects.requireNonNull(scopeId, "scopeId");
+        // Both bases too: they are concatenated, so a null would reach the
+        // agent as the literal "null" in a line typed at its prompt.
+        Objects.requireNonNull(fromBase, "fromBase");
+        Objects.requireNonNull(toBase, "toBase");
         String work = "for handle " + scopeId + ", read what changed between " + fromBase
                 + " and " + toBase + ", and for each approved hunk it could affect call "
                 + "review_recheck with affected and a one-line why. Marking a hunk affected "

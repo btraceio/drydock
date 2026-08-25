@@ -23,6 +23,7 @@ import java.util.OptionalInt;
 import java.util.TreeSet;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -721,6 +722,160 @@ class SectionStatesTest {
     }
 
     /**
+     * <strong>The relevance gate, for real.</strong> The production host
+     * returns an UNRESOLVABLE delta on the FIRST call for any base pair --
+     * it spawns the git off-thread and answers later -- and that renders as
+     * UNKNOWN, not FRESH. Gating on "not FRESH" therefore dispatched on the
+     * very render that discovers the move, before couldMatter had answered
+     * anything, and the claim is permanent. Only MOVED means "the move could
+     * matter"; UNKNOWN means "ask again once git has spoken".
+     */
+    @Test
+    void aMoveNobodyCanResolveYetAsksNothing() {
+        host.baseDelta = new BaseMove.Delta(true, new TreeSet<>());
+        SectionStates.Board board = overlapping();
+        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
+
+        sections.requestRechecks(board, new RecheckDispatch());
+
+        assertTrue(host.recheckDispatches.isEmpty(),
+                "an unanswered question is not a reason to spend an agent");
+    }
+
+    /**
+     * "unresolved" is not a revision. The guard exists for the CURRENT base
+     * forty lines from where the recorded one is read, and a verdict can
+     * carry it too -- baselineOf returns the sentinel while git is still
+     * answering and permanently when resolveRef fails.
+     */
+    @Test
+    void aVerdictRecordedAgainstAnUnresolvedBaseAsksNothing() {
+        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
+        SectionStates.Board board = overlapping();
+        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, SessionReviewView.UNRESOLVED_BASE);
+
+        sections.requestRechecks(board, new RecheckDispatch());
+
+        assertTrue(host.recheckDispatches.isEmpty(),
+                "no agent can read what changed between 'unresolved' and a commit");
+    }
+
+    /** The mirror: an unresolved CURRENT base names no pair either. */
+    @Test
+    void anUnresolvedCurrentBaseAsksNothing() {
+        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
+        SectionStates.Board board = overlapping();
+        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
+        host.baseCommit = SessionReviewView.UNRESOLVED_BASE;
+
+        sections.requestRechecks(board, new RecheckDispatch());
+
+        assertTrue(host.recheckDispatches.isEmpty());
+    }
+
+    /**
+     * Two approvals recorded at two DIFFERENT older bases are two distinct
+     * questions, and the loop has to emit both. Every other test here has at
+     * most one stale base, so the loop was only ever exercised emitting one.
+     */
+    @Test
+    void twoApprovalsAtDifferentOlderBasesEachEarnTheirOwnRecheck() {
+        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H, GUARDS_CPP)));
+        SectionStates.Board board = overlapping();
+        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
+        record(GUARDS_CPP, ReviewVerdict.Decision.APPROVED, "9".repeat(40));
+
+        sections.requestRechecks(board, new RecheckDispatch());
+
+        assertEquals(List.of("0".repeat(40) + "->" + host.baseCommit,
+                        "9".repeat(40) + "->" + host.baseCommit),
+                host.recheckDispatches);
+    }
+
+    /**
+     * Spec §9.7: "inline harnesses simply do not get one". Only a harness
+     * that can run the recheck in a subagent is asked automatically -- an
+     * inline agent would have an unrequested prompt typed into whatever it
+     * was doing, with no human present to have asked for it.
+     */
+    @Test
+    void aHarnessWithoutSubagentsIsNeverAskedAutomatically() {
+        host.supportsAutomaticRecheck = false;
+        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
+        SectionStates.Board board = overlapping();
+        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
+
+        sections.requestRechecks(board, new RecheckDispatch());
+
+        assertTrue(host.recheckDispatches.isEmpty());
+    }
+
+    /**
+     * The in-memory claim dies with the view; the stale mark outlives it. An
+     * answer already in the store is what stops a restart re-asking the same
+     * question forever.
+     */
+    @Test
+    void aMoveTheAgentHasAlreadyAnsweredIsNotAskedAgain() {
+        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
+        SectionStates.Board board = overlapping();
+        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
+        assess(GUARDS_H, false, "0".repeat(40));
+
+        sections.requestRechecks(board, new RecheckDispatch());
+
+        assertTrue(host.recheckDispatches.isEmpty(),
+                "the answer is already on disk; a fresh RecheckDispatch must not re-ask");
+    }
+
+    /** The instruction says "for each approved hunk"; a CHANGES verdict is not one. */
+    @Test
+    void aRequestedChangesVerdictEarnsNoRecheck() {
+        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
+        SectionStates.Board board = overlapping();
+        record(GUARDS_H, ReviewVerdict.Decision.CHANGES, "0".repeat(40));
+
+        sections.requestRechecks(board, new RecheckDispatch());
+
+        assertTrue(host.recheckDispatches.isEmpty());
+    }
+
+    /**
+     * One {@link RecheckDispatch} serves every scope the view shows -- it is a
+     * single field for the life of the view. A claim keyed by anything less
+     * than the scope would let one scope's move permanently silence another's
+     * identical one. {@code RecheckDispatchTest} proves the SET discriminates
+     * on scope; only this proves the CALLER supplies it.
+     */
+    @Test
+    void oneDispatchMemoryServesTwoScopesIndependently() {
+        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
+        RecheckDispatch shared = new RecheckDispatch();
+        SectionStates.Board first = overlapping();
+        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
+        sections.requestRechecks(first, shared);
+        assertEquals(1, host.recheckDispatches.size(), "precondition");
+
+        // A DIFFERENT identity, or ReviewScopeRegistry.mint hands back the
+        // same scope: it does computeIfAbsent on (kind, roots, refs), so a
+        // spec equal to an existing one is the same handle, not a new one.
+        ReviewScope other = registry.mint(ReviewScopeRegistry.spec(
+                ReviewScope.Kind.WORKING_TREE, Path.of("/tmp/elsewhere"),
+                Optional.of(Path.of("/tmp/elsewhere")), "main", "main",
+                Optional.empty(), Optional.empty()));
+        assertNotEquals(scope.id(), other.id(), "precondition: two distinct scopes");
+        host.store.putVerdict(new ReviewVerdict(other.id(), digestOf(GUARDS_H),
+                ReviewVerdict.Decision.APPROVED, Optional.empty(), Instant.EPOCH,
+                "0".repeat(40), host.headCommit));
+        SectionStates.Board second = new SectionStates.Board(other, diff, first.sections());
+
+        sections.requestRechecks(second, shared);
+
+        assertEquals(2, host.recheckDispatches.size(),
+                "a different scope's identical base move is its own question");
+    }
+
+    /**
      * Only the approvals the move actually staled are asked about. A section
      * can hold one stale hunk and one approved against the CURRENT base;
      * taking every verdict in a non-FRESH section would ask the agent to read
@@ -740,14 +895,24 @@ class SectionStatesTest {
                 "a verdict already recorded against the current base has not moved");
     }
 
-    /** No approval, nothing staled, nothing to ask. */
+    /**
+     * No approval, nothing staled, nothing to ask. Paired with a positive
+     * control: on its own this passes against an EMPTY method body, so it
+     * pins nothing until the same fixture is shown to dispatch once a verdict
+     * exists.
+     */
     @Test
     void aScopeWithNoRecordedApprovalAsksNothing() {
         host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
+        SectionStates.Board board = overlapping();
 
-        sections.requestRechecks(overlapping(), new RecheckDispatch());
-
+        sections.requestRechecks(board, new RecheckDispatch());
         assertTrue(host.recheckDispatches.isEmpty());
+
+        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
+        sections.requestRechecks(board, new RecheckDispatch());
+        assertEquals(1, host.recheckDispatches.size(),
+                "positive control: the same fixture DOES ask once an approval exists");
     }
 
     // ---- helpers -------------------------------------------------------------
