@@ -38,9 +38,12 @@ import java.util.TreeSet;
  * around it.</p>
  *
  * <p>Not thread-safe, and not required to be: it is called from the board's
- * render, which is the FX thread. Nothing here blocks -- the two questions
+ * render, which is the FX thread. Nothing here does I/O -- the two questions
  * that need git ({@link SessionReviewView.Host#currentBase} and {@link
- * SessionReviewView.Host#baseMove}) are answered from the host's own cache.</p>
+ * SessionReviewView.Host#baseMove}) are answered from the host's own cache.
+ * The one exception is {@link #requestRechecks}, which types a prompt into a
+ * terminal; it is bounded to once per base move and says why it cannot be
+ * deferred.</p>
  */
 final class SectionStates {
 
@@ -369,6 +372,12 @@ final class SectionStates {
      * reached no terminal and no human is present to notice.</p>
      */
     void requestRechecks(Board board, RecheckDispatch dispatch) {
+        if (!host.supportsAutomaticRecheck(board.scope())) {
+            // Spec §9.7: inline harnesses do not get one. Checked before
+            // anything is claimed, so nothing accumulates for a scope that
+            // can never be asked.
+            return;
+        }
         String base = host.currentBase(board.scope());
         if (SessionReviewView.UNRESOLVED_BASE.equals(base)) {
             // Not a revision, so there is no base PAIR to ask about. The
@@ -376,17 +385,40 @@ final class SectionStates {
             return;
         }
         Set<String> recordedBases = new LinkedHashSet<>();
-        for (ReviewIntent intent : board.sections()) {
-            if (stateOf(board, intent).staleness() == Staleness.FRESH) {
+        for (ReviewIntent intent : counted(board)) {
+            // MOVED, not merely "not FRESH". UNKNOWN is what the host returns
+            // on the FIRST render that sees a base pair -- it spawns the git
+            // off-thread and answers on a later pass -- so dispatching on it
+            // would ask the agent before couldMatter had said anything, and
+            // the claim is permanent. UNKNOWN means ask again next render,
+            // by which time git has spoken.
+            if (stateOf(board, intent).staleness() != Staleness.MOVED) {
                 continue;
             }
             for (String digest : digestsOf(board, intent)) {
                 host.verdict(board.scope(), digest)
                         .filter(verdict -> verdict.staleAgainst(base))
+                        // "unresolved" is not a revision on either side of the
+                        // pair. The current base is refused above; a RECORDED
+                        // one carries the same sentinel whenever the baseline
+                        // was unresolved when the human settled the hunk.
+                        .filter(verdict -> !SessionReviewView.UNRESOLVED_BASE
+                                .equals(verdict.baseCommit()))
+                        // The instruction says "for each APPROVED hunk"; a
+                        // requested-changes verdict is not one, and asking
+                        // about it spends an agent looking for nothing.
+                        .filter(verdict -> verdict.decision() == ReviewVerdict.Decision.APPROVED
+                                || verdict.decision() == ReviewVerdict.Decision.AUTO_APPROVED)
                         .ifPresent(verdict -> recordedBases.add(verdict.baseCommit()));
             }
         }
         for (String from : recordedBases) {
+            if (host.assessedMove(board.scope(), from, base)) {
+                // Already answered, and that answer is on disk. The in-memory
+                // claim dies with the view; this is what stops a restart
+                // re-asking a question the store can already answer.
+                continue;
+            }
             if (dispatch.claim(board.scope().id(), from, base)
                     && !host.dispatchRecheck(board.scope(), from, base)) {
                 dispatch.release(board.scope().id(), from, base);

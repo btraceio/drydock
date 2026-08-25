@@ -216,6 +216,22 @@ public final class AnnotationStore implements AutoCloseable {
         return found != null && found.affected();
     }
 
+    /**
+     * Whether any assessment at all was recorded for this base pair.
+     *
+     * <p>Distinct from {@link #assessedAffected}, which cannot tell "the
+     * agent said unaffected" from "the agent was never asked" -- that
+     * conflation is deliberate there, because only {@code true} may add
+     * staleness. Dispatch needs the other question, and only this method
+     * answers it.</p>
+     */
+    public synchronized boolean assessedMove(String scopeId, String fromBase, String toBase) {
+        return assessments.values().stream()
+                .anyMatch(a -> a.scopeId().equals(scopeId)
+                        && a.fromBase().equals(fromBase)
+                        && a.toBase().equals(toBase));
+    }
+
     /** Every recheck recorded against one scope, in the order they arrived. */
     public synchronized List<RecheckAssessment> assessmentsFor(String scopeId) {
         return assessments.values().stream().filter(a -> a.scopeId().equals(scopeId)).toList();

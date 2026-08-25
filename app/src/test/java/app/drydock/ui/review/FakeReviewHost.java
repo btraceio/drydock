@@ -42,6 +42,9 @@ final class FakeReviewHost implements SessionReviewView.Host {
 
     /** Whether the recheck hand-off reaches a terminal; false stands in for a closed tab. */
     boolean recheckHandOffSucceeds = true;
+
+    /** Whether this scope's agent may be asked automatically (spec §9.7). */
+    boolean supportsAutomaticRecheck = true;
     final List<String> submittedScopes = new ArrayList<>();
     final List<Path> explorerJumps = new ArrayList<>();
 
@@ -182,6 +185,17 @@ final class FakeReviewHost implements SessionReviewView.Host {
     public boolean assessedAffected(ReviewScope scope, String hunkDigest,
                                     String fromBase, String toBase) {
         return store.assessedAffected(scope.id(), hunkDigest, fromBase, toBase);
+    }
+
+    @Override
+    public boolean supportsAutomaticRecheck(ReviewScope scope) {
+        return supportsAutomaticRecheck;
+    }
+
+    /** Reads the real store, like {@link #assessedAffected}. */
+    @Override
+    public boolean assessedMove(ReviewScope scope, String fromBase, String toBase) {
+        return store.assessedMove(scope.id(), fromBase, toBase);
     }
 
     @Override

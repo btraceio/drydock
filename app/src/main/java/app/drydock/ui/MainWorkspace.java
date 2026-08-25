@@ -2306,15 +2306,51 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
          * takes. Returns what the hand-off returned: an automatic dispatch has
          * no human watching it, so a false swallowed here would cost the scope
          * its recheck with nothing to show that it never happened.
+         *
+         * <p>Refuses a tab whose agent process has exited, the way {@link
+         * #requestHandoffRefresh} and the Explorer bridge already do.
+         * {@code sendToBoundSession} answers "a tab object exists", not "the
+         * agent received it": typing into a dead terminal would return true,
+         * the claim would stand, and the recheck would be lost with nothing
+         * logged. The two senders a human drives get away without this check
+         * because a human sees the reply never come.</p>
+         *
+         * <p>The prompt is typed synchronously, on the render pass that
+         * decided to send it. Deferring it would make the returned boolean a
+         * lie -- the caller releases its claim on false, and a value returned
+         * before the send cannot report one -- and the cost is bounded to once
+         * per base move by that same claim.</p>
          */
         @Override
         public boolean dispatchRecheck(ReviewScope scope, String fromBase, String toBase) {
             if (scope.sessionId().isEmpty()) {
                 return false;
             }
+            OpenSessionTab open = scope.sessionId().map(openTabs::get).orElse(null);
+            if (open == null || open.isProcessExited()) {
+                return false;
+            }
             return sendToBoundSession(scope,
                     ReviewInstructions.forRecheck(scope.id(), fromBase, toBase,
                             supportsSubagents(scope)));
+        }
+
+        /**
+         * Spec §9.7 -- only a harness that can run the recheck in a subagent
+         * is asked without a human having asked. The alternative for the
+         * others is not "ask when idle": Codex and Pi both report no activity
+         * at all ({@code AgentProvider.activity()} is empty for both), so
+         * there is no idle signal to gate on, and Claude -- the only provider
+         * with subagents -- is the only one that has one.
+         */
+        @Override
+        public boolean supportsAutomaticRecheck(ReviewScope scope) {
+            return supportsSubagents(scope);
+        }
+
+        @Override
+        public boolean assessedMove(ReviewScope scope, String fromBase, String toBase) {
+            return annotationStore.assessedMove(scope.id(), fromBase, toBase);
         }
     }
 
