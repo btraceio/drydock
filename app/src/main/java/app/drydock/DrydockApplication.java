@@ -603,6 +603,10 @@ public final class DrydockApplication extends Application {
                             // and never implemented until now; it silently hit
                             // the default branch below, which prints "mark".
                             case "reviewkey" -> mainWorkspace.diagReviewKey(arg.strip());
+                            // Documented alongside reviewkey and unwired for
+                            // just as long; ReviewDiffColumn.diagOpenComposer
+                            // was already written and had no caller.
+                            case "comment" -> mainWorkspace.diagComment();
                             // forcebanner:<commits>/<files>, or
                             // forcebanner:none for a session that never wrote
                             // a brief, or forcebanner:<c>/<f>/dead for one
@@ -692,7 +696,19 @@ public final class DrydockApplication extends Application {
                             }
                             case "unwind" -> System.out.println("[diag] explorer unwind -> "
                                     + mainWorkspace.unwindExplorerOverlay());
-                            default -> System.out.println("[diag] mark " + arg);
+                            // mark is a real verb, not a fallthrough. It used to
+                            // BE the default, which is how an unwired verb --
+                            // reviewkey and comment were both documented from
+                            // Task 18 and never wired -- printed a plausible
+                            // beacon and did nothing. A driver could not tell a
+                            // synchronisation marker from a verb that does not
+                            // exist, so a run that did nothing looked like one
+                            // that worked.
+                            case "mark" -> System.out.println("[diag] mark " + arg);
+                            default -> System.out.println(
+                                    "[diag] UNKNOWN explorerScript verb '" + verb + "'"
+                                            + " -- nothing was done. Add a case in"
+                                            + " DrydockApplication or fix the script.");
                         }
                     });
                 }
@@ -1530,7 +1546,13 @@ public final class DrydockApplication extends Application {
                 // the code. Two rounds were lost to a plausible-but-wrong
                 // theory that the picture had already contradicted.
                 case "fadeinfo" -> diagFadeInfo(sidebar, arg);
-                default -> System.out.println("[diag] mark " + arg);
+                // See the explorerScript dispatcher: mark is a verb, and an
+                // unrecognised one has to say so rather than impersonate it.
+                case "mark" -> System.out.println("[diag] mark " + arg);
+                default -> System.out.println(
+                        "[diag] UNKNOWN tabScript verb '" + verb + "'"
+                                + " -- nothing was done. Add a case in"
+                                + " DrydockApplication or fix the script.");
             }
         } catch (RuntimeException e) {
             System.out.println("[diag] tab step '" + verb + "' failed: " + e);

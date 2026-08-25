@@ -4299,6 +4299,15 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * session on its shell terminal, which is the state in which the rename
      * and sidebar-filter paths used to lose every keystroke to the shell.
      */
+    /** Diagnostic-only: opens the gutter comment composer on the first change. */
+    public void diagComment() {
+        currentlySelected().ifPresentOrElse(
+                open -> open.reviewView().ifPresentOrElse(
+                        view -> System.out.println("[diag] comment -> " + view.diagOpenComposer()),
+                        () -> System.out.println("[diag] comment: Review sub-tab not open")),
+                () -> System.out.println("[diag] comment: no selected tab"));
+    }
+
     /** Diagnostic-only: one key into the selected tab's Review view. */
     public void diagReviewKey(String keyName) {
         currentlySelected().ifPresentOrElse(

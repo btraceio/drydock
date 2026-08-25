@@ -3216,6 +3216,22 @@ public final class SessionReviewView extends BorderPane {
      * "mark", so a run that approved nothing looked exactly like one that
      * worked.
      */
+    /**
+     * Diagnostic-only: opens the gutter comment composer on the first changed
+     * line. {@link ReviewDiffColumn#diagOpenComposer} has existed, complete
+     * and FX-thread-safe, with no caller at all -- the {@code comment} verb it
+     * was written for was documented in {@code DrydockApplication} and never
+     * wired, so a script asking for it hit the script's default branch and
+     * printed "mark". This is the missing hop.
+     *
+     * <p>It exists because the composer is opened by a click on a 34px label
+     * inside a virtualized cell, which the harness cannot aim at -- so without
+     * this there is no way to drive, or photograph, a gutter comment.</p>
+     */
+    public String diagOpenComposer() {
+        return diffColumn.diagOpenComposer();
+    }
+
     public void diagReviewKey(KeyCode code) {
         fireEvent(new KeyEvent(KeyEvent.KEY_PRESSED, "", "", code,
                 false, false, false, false));
