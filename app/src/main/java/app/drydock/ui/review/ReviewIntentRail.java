@@ -30,6 +30,7 @@ import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Objects;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -105,7 +106,7 @@ final class ReviewIntentRail extends VBox {
     /**
      * Whether the order the rail is listing was measured here or claimed by
      * the agent (spec §6.5). A property of the ORDER, so it belongs to the
-     * rail rather than to a card: §7.1's three sources are three sources for
+     * rail rather than to a card: §8's three sources are three sources for
      * the whole sequence. PATH mode is measured by construction -- §6.4 has
      * {@link app.drydock.review.ReadingPath} order the computed grouping only.
      */
@@ -255,7 +256,7 @@ final class ReviewIntentRail extends VBox {
     void setIntents(List<ReviewIntent> newIntents, String selectedIntentId, Empty reason,
                     Provenance provenance) {
         this.mode = Mode.INTENTS;
-        this.provenance = provenance == null ? Provenance.MEASURED : provenance;
+        this.provenance = Objects.requireNonNull(provenance, "provenance");
         this.intents = List.copyOf(newIntents);
         this.selectedId = selectedIntentId;
         this.emptyReason = reason == null ? Empty.NONE : reason;
@@ -618,7 +619,10 @@ final class ReviewIntentRail extends VBox {
         Button card = new Button();
         card.getStyleClass().add("review-intent-card");
         // Only CLAIMED adds a modifier: decorating every row would make the
-        // distinction say nothing (spec §6.5).
+        // distinction say nothing (spec §6.5). The TOOLTIP names the warrant
+        // either way, which is not the same thing -- a word that says
+        // "measured" carries information, whereas a border every row has
+        // carries none.
         if (!provenance.styleClass().isEmpty()) {
             card.getStyleClass().add(provenance.styleClass());
         }
@@ -747,8 +751,19 @@ final class ReviewIntentRail extends VBox {
         // UNKNOWN says nothing: the delta is still in flight, or the old base
         // cannot be diffed. Neither is evidence that the base moved.
         if (moved) {
-            Label stale = new Label("⚠ base moved — confirm");
+            // Spec §9.7: "Assessments render as claimed, not measured." A hunk
+            // the file-level filter caught and one an AGENT asserted was
+            // disturbed are the same words otherwise, and §6.5 exists because
+            // they fail differently: the filter can be checked by looking, the
+            // assertion only against the code the agent says it read.
+            boolean claimed = state.stalenessProvenance() == Provenance.CLAIMED;
+            Label stale = new Label(claimed
+                    ? "⚠ agent: base moved — confirm"
+                    : "⚠ base moved — confirm");
             stale.getStyleClass().add("review-intent-stale");
+            if (claimed) {
+                stale.getStyleClass().add(Provenance.CLAIMED.styleClass());
+            }
             stale.setWrapText(true);
             content.getChildren().add(stale);
         }

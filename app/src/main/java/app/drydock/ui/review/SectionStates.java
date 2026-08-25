@@ -5,6 +5,7 @@ import app.drydock.review.BaseMove;
 import app.drydock.review.ChangeGraph;
 import app.drydock.review.HunkDigest;
 import app.drydock.review.IntentHunks;
+import app.drydock.review.Provenance;
 import app.drydock.review.RecheckDispatch;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
@@ -98,13 +99,21 @@ final class SectionStates {
      * @param settledElsewhere the marks of the other sections sharing a
      *              settled hunk with this one, so a count that advanced
      *              without the reader touching this card is explained
+     * @param stalenessProvenance whose judgement the staleness is (spec §9.7:
+     *              "Assessments render as CLAIMED, not measured"). A base move
+     *              the file-level filter found is drydock's own measurement; a
+     *              hunk marked stale because an AGENT asserted the move
+     *              disturbed it is the agent's claim, and §6.5 exists so a
+     *              reviewer can tell whose judgement they are looking at --
+     *              the two fail differently and are checkable differently
      * @param hunksMissing whether this section names hunks and the diff has
      *              none of them -- a grouping that has drifted off the diff,
      *              which must not be mistaken for a section nobody has read
      */
     record SectionState(Optional<ReviewVerdict.Decision> decision, int settledHunks,
                         int recordedHunks, int totalHunks, Staleness staleness,
-                        List<String> settledElsewhere, boolean hunksMissing) {
+                        List<String> settledElsewhere, boolean hunksMissing,
+                        Provenance stalenessProvenance) {
 
         SectionState {
             settledElsewhere = List.copyOf(settledElsewhere);
@@ -117,7 +126,8 @@ final class SectionStates {
          * not the same claim.
          */
         static SectionState unknown() {
-            return new SectionState(Optional.empty(), 0, 0, 0, Staleness.UNKNOWN, List.of(), false);
+            return new SectionState(Optional.empty(), 0, 0, 0, Staleness.UNKNOWN, List.of(), false,
+                    Provenance.MEASURED);
         }
 
         /**
@@ -128,7 +138,8 @@ final class SectionStates {
          * and would otherwise refuse Submit forever with no visible reason.
          */
         static SectionState notInDiff() {
-            return new SectionState(Optional.empty(), 0, 0, 0, Staleness.FRESH, List.of(), true);
+            return new SectionState(Optional.empty(), 0, 0, 0, Staleness.FRESH, List.of(), true,
+                    Provenance.MEASURED);
         }
     }
 
@@ -318,6 +329,10 @@ final class SectionStates {
         List<Optional<ReviewVerdict>> perHunk = new ArrayList<>();
         Set<String> elsewhere = new LinkedHashSet<>();
         Staleness staleness = Staleness.FRESH;
+        // Whose judgement the staleness is (spec §9.7). Set only when an
+        // agent's assessment is what made a hunk MOVED -- the file filter
+        // finding the move itself is drydock measuring.
+        Provenance stalenessProvenance = Provenance.MEASURED;
         int settled = 0;
         int recorded = 0;
         for (String digest : digests) {
@@ -331,6 +346,10 @@ final class SectionStates {
                 if (hunk == Staleness.MOVED
                         || (hunk == Staleness.UNKNOWN && staleness == Staleness.FRESH)) {
                     staleness = hunk;
+                }
+                if (hunk == Staleness.MOVED && host.assessedAffected(board.scope(), digest,
+                        verdict.get().baseCommit(), base)) {
+                    stalenessProvenance = Provenance.CLAIMED;
                 }
                 // A stale verdict still merges into the section's DECISION
                 // (perHunk, below) -- the decision persists, only its
@@ -350,7 +369,7 @@ final class SectionStates {
             }
         }
         return new SectionState(VerdictMerge.derive(perHunk), settled, recorded, digests.size(),
-                staleness, List.copyOf(elsewhere), false);
+                staleness, List.copyOf(elsewhere), false, stalenessProvenance);
     }
 
     /**

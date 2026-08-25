@@ -3216,11 +3216,24 @@
     -fx-cursor: hand;
 }
 /* A claimed ordering is the agent's assertion, not drydock's measurement
- * (spec §6.5). Dashed rather than coloured: four risk encodings already
- * compete for colour on this surface and a fifth would be unreadable. Only
- * the claimed case is modified -- marking every row would say nothing. */
-.review-intent-card.provenance-claimed,
-.review-link-row.provenance-claimed {
+ * (spec §6.5). Only the claimed case is modified -- marking every row would
+ * say nothing.
+ *
+ * Dashed AND lifted off -drydock-border. Dashing alone was the first attempt
+ * and was not legible: -drydock-border is rgba(255,255,255,0.08), about
+ * 1.26:1 against this rail, so removing half of it is half the ink of a
+ * hairline nobody can see -- Task 18's 1.13:1 defect in a new place. The
+ * colour is -drydock-text-faint, which is NEUTRAL: the point of not using a
+ * hue is that four risk encodings already compete for colour here, and a
+ * neutral grey is not a fifth. */
+/* The stale chip when an AGENT asserted the move disturbed this hunk (spec
+ * §9.7). A Label, not a bordered card, so the card rule below cannot carry it
+ * -- and the word "agent:" in the text is the part that survives any theme. */
+.review-intent-stale.provenance-claimed {
+    -fx-font-style: italic;
+}
+.review-intent-card.provenance-claimed {
+    -fx-border-color: -drydock-text-faint;
     -fx-border-style: segments(3, 3) line-cap round;
 }
 .review-intent-card.collapsed {

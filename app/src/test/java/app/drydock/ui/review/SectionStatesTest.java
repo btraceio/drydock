@@ -4,6 +4,7 @@ import app.drydock.git.UnifiedDiff;
 import app.drydock.review.BaseMove;
 import app.drydock.review.ChangeGraph;
 import app.drydock.review.HunkDigest;
+import app.drydock.review.Provenance;
 import app.drydock.review.RecheckDispatch;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
@@ -647,6 +648,57 @@ class SectionStatesTest {
 
         assertEquals(List.of(digestOf(GUARDS_H)), sections.digestsForAction(
                 board, section1, SessionReviewView.SettleUnit.HUNK, true, Optional.empty()));
+    }
+
+    // ---- whose judgement the staleness is (spec §9.7 / §6.5) ----------------
+
+    /**
+     * Spec §9.7: "Assessments render as CLAIMED, not measured." A move the
+     * file-level filter found is drydock's own measurement.
+     */
+    @Test
+    void aMoveTheFilterFoundIsMeasured() {
+        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
+        SectionStates.Board board = overlapping();
+        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
+
+        SectionStates.SectionState state = sections.stateOf(board, board.sections().get(0));
+
+        assertEquals(SectionStates.Staleness.MOVED, state.staleness());
+        assertEquals(Provenance.MEASURED, state.stalenessProvenance());
+    }
+
+    /**
+     * The case §6.5 exists for: the filter dismissed this move, and only the
+     * AGENT's assertion makes it stale. Rendered identically to a measured
+     * move, a reviewer could not tell whose judgement they were trusting.
+     */
+    @Test
+    void aMoveOnlyTheAgentCallsAffectedIsClaimed() {
+        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of("docs/README.md")));
+        SectionStates.Board board = overlapping();
+        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
+        assess(GUARDS_H, true, "0".repeat(40));
+
+        SectionStates.SectionState state = sections.stateOf(board, board.sections().get(0));
+
+        assertEquals(SectionStates.Staleness.MOVED, state.staleness());
+        assertEquals(Provenance.CLAIMED, state.stalenessProvenance());
+    }
+
+    /** An "unaffected" assessment is advice and changes no warrant. */
+    @Test
+    void anUnaffectedAssessmentLeavesTheWarrantMeasured() {
+        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
+        SectionStates.Board board = overlapping();
+        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
+        assess(GUARDS_H, false, "0".repeat(40));
+
+        SectionStates.SectionState state = sections.stateOf(board, board.sections().get(0));
+
+        assertEquals(SectionStates.Staleness.MOVED, state.staleness());
+        assertEquals(Provenance.MEASURED, state.stalenessProvenance(),
+                "the filter found this move; the agent's advice did not");
     }
 
     // ---- the automatic recheck a base move earns (spec §9.7) ----------------

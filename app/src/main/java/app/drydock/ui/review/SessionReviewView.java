@@ -1226,7 +1226,7 @@ public final class SessionReviewView extends BorderPane {
             String selectedHunkId = steps.isEmpty() ? null : steps.get(pathIndex).hunkId();
             intentRail.showPath(steps, selectedHunkId, emptyReason());
         } else {
-            // Spec §7.1: reads and the agent's array order are both the
+            // Spec §8: reads and the agent's array order are both the
             // agent's claim; only a grouping drydock computed itself is
             // measured. hasReviewerGrouping is exactly that distinction.
             intentRail.setIntents(currentIntents, currentIntent().map(ReviewIntent::id).orElse(null),
