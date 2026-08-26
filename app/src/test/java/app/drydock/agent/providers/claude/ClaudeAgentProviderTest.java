@@ -3,13 +3,18 @@ package app.drydock.agent.providers.claude;
 import app.drydock.agent.api.AgentContext;
 import app.drydock.agent.api.AgentKind;
 import app.drydock.agent.api.CreateContext;
+import app.drydock.agent.api.EvalTokenResolver;
 import app.drydock.agent.api.LaunchPlan;
 import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdStrategy;
+import app.drydock.agent.providers.claude.internal.ClaudeEvalContainer;
+import app.drydock.agent.providers.claude.internal.ClaudeEvalContainer.EvalSetup;
 import app.drydock.agent.providers.claude.internal.ClaudeExecutableLocator;
 import org.junit.jupiter.api.Test;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.Optional;
 import java.util.concurrent.Executors;
 
@@ -76,5 +81,43 @@ class ClaudeAgentProviderTest {
     @Test
     void claudeSupportsRemote() {
         assertTrue(newProviderNoExecutable().probeCapabilities().supportsRemote());
+    }
+
+    @Test
+    void evalCreateWrapsInDockerWhenSetupExists() throws Exception {
+        Path stateDir = Files.createTempDirectory("drydock-eval-test");
+        EvalTokenResolver resolver = () -> Optional.of(
+                new EvalTokenResolver.ResolvedToken("tok", Optional.of(Instant.now().plusSeconds(3600))));
+        ClaudeEvalContainer container = new ClaudeEvalContainer(stateDir, resolver);
+        // mark() seeds the config dir and stashes the setup (resolves the token).
+        EvalSetup setup = container.mark("sess-eval").orElseThrow();
+        // Install the activity hook dirs the wrapper mounts + reads.
+        Files.createDirectories(stateDir.resolve("hooks"));
+        Files.createDirectories(stateDir.resolve("activity"));
+        Files.writeString(stateDir.resolve("hooks").resolve("settings.json"), "{}");
+        ClaudeAgentProvider provider = new ClaudeAgentProvider(
+                new ClaudeExecutableLocator(Path.of("/nonexistent/claude")), container);
+        provider.init(new AgentContext(stateDir, stateDir.resolve("activity"),
+                Executors.newVirtualThreadPerTaskExecutor()));
+        provider.activity().orElseThrow().install();   // writes hooks/settings.json
+        LaunchPlan plan = provider.buildCreateCommand(new CreateContext("S", "sess-eval", Path.of("/tmp"),
+                Optional.empty(), Optional.empty(), true));
+        String cmd = plan.command();
+        assertTrue(cmd.startsWith("docker run "), () -> "eval create wraps in docker: " + cmd);
+        assertTrue(cmd.contains("drydock-claude-eval:latest"));
+        // No double "sh": the image ENTRYPOINT is sh, so the command ends
+        // with the image tag then the entrypoint script path -- not "sh <path>".
+        String afterImage = cmd.substring(cmd.indexOf("drydock-claude-eval:latest"));
+        assertFalse(afterImage.contains(" sh "), "no extra sh after image: " + afterImage);
+        // The token must not leak into the command string.
+        assertFalse(cmd.contains("tok"), "token must not be on the argv: " + cmd);
+    }
+
+    @Test
+    void evalCreateThrowsWhenSetupMissing() {
+        ClaudeAgentProvider provider = newProviderNoExecutable();
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class, () ->
+                provider.buildCreateCommand(new CreateContext("S", "no-such-sess", Path.of("/tmp"),
+                        Optional.empty(), Optional.empty(), true)));
     }
 }

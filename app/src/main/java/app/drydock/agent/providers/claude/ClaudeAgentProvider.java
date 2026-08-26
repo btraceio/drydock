@@ -16,13 +16,16 @@ import app.drydock.agent.providers.AgentCommands;
 import app.drydock.agent.spi.AgentProvider;
 import app.drydock.agent.providers.claude.internal.ClaudeCapabilities;
 import app.drydock.agent.providers.claude.internal.ClaudeCapabilityService;
-import app.drydock.agent.providers.claude.internal.ClaudeEvalProxy;
+import app.drydock.agent.providers.claude.internal.ClaudeEvalContainer;
+import app.drydock.agent.providers.claude.internal.ClaudeEvalContainer.EvalSetup;
 import app.drydock.agent.providers.claude.internal.ClaudeExecutableLocator;
 import app.drydock.agent.providers.claude.internal.ClaudeHookInstaller;
 import app.drydock.agent.providers.claude.internal.ConversationCatalog;
 import app.drydock.process.SshCommandBuilder;
 
+import java.io.IOException;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.Optional;
 
 /**
@@ -40,18 +43,27 @@ public final class ClaudeAgentProvider implements AgentProvider {
     private ClaudeCapabilityService capabilityService;
     private ClaudeConversationSource conversationSource;
     private ClaudeActivityReporter activityReporter;
-    private final ClaudeEvalProxy evalProxy = new ClaudeEvalProxy();
+    /** The eval container; a test stub from the constructor, or the real one built at {@link #init}. */
+    private ClaudeEvalContainer evalContainer;
+    /** The activity state-word dir, needed to mount it into the eval container. Set at {@link #init}. */
+    private Path activityDirectory;
     /** Set once by the background probe at {@link #init}; read by {@link #evalAvailable()} on the FX thread. */
     private volatile boolean evalAvailable;
 
     /** Public no-arg constructor required by {@link java.util.ServiceLoader}. */
     public ClaudeAgentProvider() {
-        this(new ClaudeExecutableLocator());
+        this(new ClaudeExecutableLocator(), null);
     }
 
     /** For tests: inject a locator (e.g. a nonexistent path to force conservative caps). */
     public ClaudeAgentProvider(ClaudeExecutableLocator locator) {
+        this(locator, null);
+    }
+
+    /** For tests: inject the eval container (e.g. a stub that reports unavailable). */
+    public ClaudeAgentProvider(ClaudeExecutableLocator locator, ClaudeEvalContainer evalContainer) {
         this.locator = locator;
+        this.evalContainer = evalContainer;
     }
 
     @Override
@@ -69,11 +81,11 @@ public final class ClaudeAgentProvider implements AgentProvider {
         this.capabilityService = new ClaudeCapabilityService(locator, ctx.backgroundExecutor());
         this.conversationSource = new ClaudeConversationSource(new ConversationCatalog());
         this.activityReporter = new ClaudeActivityReporter(new ClaudeHookInstaller(ctx.stateDirectory()));
-        // Probe omlx_proxy off the FX thread; the result is cached so the
-        // UI's evalAvailable() read never blocks. omlx_proxy may start later
-        // than drydock -- re-probe on the next launch via markEvalSession's
-        // own probe is not done; restart drydock if the proxy comes up after.
-        ctx.backgroundExecutor().execute(() -> evalAvailable = evalProxy.probe());
+        this.activityDirectory = ctx.activityDirectory();
+        if (evalContainer == null) {
+            evalContainer = new ClaudeEvalContainer(ctx.stateDirectory());
+        }
+        ctx.backgroundExecutor().execute(() -> evalAvailable = evalContainer.probe());
     }
 
     @Override
@@ -125,6 +137,12 @@ public final class ClaudeAgentProvider implements AgentProvider {
         }
         command.append(activitySettingsFlag(caps));
         command.append(mcpConfigFlag(caps, c.mcp().flatMap(McpAccess::credentialFile)));
+        if (c.evalMode()) {
+            return LaunchPlan.of(
+                    wrapEval(command.toString(), c.sessionId(), c.workingDirectory(),
+                            c.mcp().flatMap(McpAccess::credentialFile)),
+                    sessionIdUsed);
+        }
         return LaunchPlan.of(command.toString(), sessionIdUsed);
     }
 
@@ -141,13 +159,24 @@ public final class ClaudeAgentProvider implements AgentProvider {
         }
         ClaudeCapabilities caps = detectCaps();
         String suffix = activitySettingsFlag(caps) + mcpConfigFlag(caps, r.mcp().flatMap(McpAccess::credentialFile));
+        String inner;
         if (r.agentSessionId().isPresent()) {
-            return LaunchPlan.of(ENV_CLEANUP_PREFIX + "claude --resume " + AgentCommands.shellQuote(r.agentSessionId().get()) + suffix, false);
+            inner = ENV_CLEANUP_PREFIX + "claude --resume " + AgentCommands.shellQuote(r.agentSessionId().get()) + suffix;
+        } else if (r.agentSessionName().isPresent()) {
+            inner = ENV_CLEANUP_PREFIX + "claude --resume " + AgentCommands.shellQuote(r.agentSessionName().get()) + suffix;
+        } else {
+            inner = ENV_CLEANUP_PREFIX + "claude --resume" + suffix;
         }
-        if (r.agentSessionName().isPresent()) {
-            return LaunchPlan.of(ENV_CLEANUP_PREFIX + "claude --resume " + AgentCommands.shellQuote(r.agentSessionName().get()) + suffix, false);
+        if (r.evalMode()) {
+            // Resume key is the agent session id; for PRESET it equals the
+            // --session-id drydock minted at create, so the seeded config
+            // dir (keyed by it) persists across resumes and mark() refreshes
+            // the token.
+            String key = r.agentSessionId().orElse("");
+            return LaunchPlan.of(wrapEval(inner, key, r.workingDirectory(),
+                    r.mcp().flatMap(McpAccess::credentialFile)), false);
         }
-        return LaunchPlan.of(ENV_CLEANUP_PREFIX + "claude --resume" + suffix, false);
+        return LaunchPlan.of(inner, false);
     }
 
     @Override
@@ -177,12 +206,17 @@ public final class ClaudeAgentProvider implements AgentProvider {
 
     @Override
     public void markEvalSession(String sessionKey) {
-        evalProxy.mark(sessionKey);
+        evalContainer.mark(sessionKey);
     }
 
     @Override
     public void unmarkEvalSession(String sessionKey) {
-        evalProxy.unmark(sessionKey);
+        evalContainer.unmark(sessionKey);
+    }
+
+    @Override
+    public Optional<Instant> evalTokenExpiry(String sessionKey) {
+        return evalContainer.setupFor(sessionKey).map(EvalSetup::tokenExpiry);
     }
 
     /** Uncached, like the pre-seam code: every launch/resume re-probes. Runs on the caller's (background) thread. */
@@ -192,6 +226,28 @@ public final class ClaudeAgentProvider implements AgentProvider {
         } catch (RuntimeException e) {
             // Fail conservatively: no name/session-id/settings support (matches NO_CAPABILITIES semantics).
             return new ClaudeCapabilities(false, true, false, false, false, false, "unknown");
+        }
+    }
+
+    /**
+     * Wraps the bare {@code claude ...} command in a {@code docker run} that
+     * runs it inside the eval container. Throws if the container setup is
+     * missing (ddtool or docker unavailable): an eval session that cannot
+     * be containerized fails loudly rather than silently shipping an
+     * unauthenticated host launch.
+     */
+    private String wrapEval(String innerCommand, String sessionKey, Path worktree, Optional<Path> mcpConfig) {
+        EvalSetup setup = evalContainer.setupFor(sessionKey).orElseThrow(() -> new IllegalStateException(
+                "Eval session " + sessionKey + " has no container setup; ddtool or docker unavailable"));
+        Optional<Path> settingsFile = activityReporter.settingsFile();
+        if (settingsFile.isEmpty() || activityDirectory == null) {
+            throw new IllegalStateException("Eval container needs the activity hook dirs, which are not installed");
+        }
+        try {
+            return evalContainer.wrap(setup, innerCommand, worktree, mcpConfig,
+                    settingsFile.get().getParent(), activityDirectory);
+        } catch (IOException e) {
+            throw new IllegalStateException("Could not write eval entrypoint: " + e.getMessage(), e);
         }
     }
 

@@ -37,6 +37,26 @@ public final class UiFormats {
         return (seconds / 86400) + "d ago";
     }
 
+    /** Wall-clock time of day, e.g. {@code 16:40}, in the local time zone. */
+    public static String timeOfDay(Instant instant) {
+        return java.time.LocalTime.ofInstant(instant, java.time.ZoneId.systemDefault())
+                .format(java.time.format.DateTimeFormatter.ofPattern("HH:mm"));
+    }
+
+    /** Rough remaining time until a future instant, e.g. {@code ~5h 0m}; {@code expired} if past. */
+    public static String timeUntil(Instant instant) {
+        long seconds = java.time.Duration.between(Instant.now(), instant).getSeconds();
+        if (seconds <= 0) {
+            return "expired";
+        }
+        if (seconds < 60) {
+            return "<1m";
+        }
+        long hours = seconds / 3600;
+        long minutes = (seconds % 3600) / 60;
+        return "~" + (hours > 0 ? hours + "h " : "") + minutes + "m";
+    }
+
     /** Display text for a checkout's branch state: the branch name, or {@code detached@<short-oid>}. */
     public static String branchText(GitStatus status) {
         if (status.branch() instanceof GitBranchState.OnBranch onBranch) {
