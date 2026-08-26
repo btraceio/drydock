@@ -407,6 +407,109 @@ class SessionManagerTest {
         assertEquals(RenameKind.COLLIDED, manager.applyAgentRename(second.id(), "Fix the login flow").kind());
     }
 
+    // ---- /new rebind: applyAgentReclaim -----------------------------------
+
+    private static ManagedAgentSession sessionTracking(Repository repository, String displayName,
+                                                        String agentSessionId) {
+        return sessionIn(repository, displayName).withAgentSessionId(Optional.of(agentSessionId));
+    }
+
+    @Test
+    void reclaimRebindsTheTrackedConversationId() {
+        Repository repository = someRepository();
+        ManagedAgentSession session = sessionTracking(repository, "Session 1", "old-conv");
+        SessionManager manager = newManager(new InMemoryStateRepository(List.of(session)));
+
+        manager.applyAgentReclaim(session.id(), "new-conv");
+
+        ManagedAgentSession rebound = currentSession(manager, session.id()).orElseThrow();
+        assertEquals(Optional.of("new-conv"), rebound.agentSessionId());
+        // The new conversation is claimed, so a concurrent same-cwd launch
+        // cannot discover it out from under this tab; the old one is released.
+        assertTrue(manager.isClaimedAgentSessionId("new-conv"));
+        assertFalse(manager.isClaimedAgentSessionId("old-conv"));
+        assertEquals(Optional.of(session.id()), manager.activeSessionFor("new-conv"));
+        assertTrue(manager.activeSessionFor("old-conv").isEmpty());
+    }
+
+    @Test
+    void reclaimToTheIdAlreadyTrackedIsANoOpSuccess() {
+        Repository repository = someRepository();
+        ManagedAgentSession session = sessionTracking(repository, "Session 1", "same-conv");
+        SessionManager manager = newManager(new InMemoryStateRepository(List.of(session)));
+
+        manager.applyAgentReclaim(session.id(), "same-conv");
+
+        // Nothing moved: the id is still tracked and still claimed. The
+        // active registry is untouched on a no-op -- a surface that was
+        // active stays active, and one that was not (this test has none)
+        // stays inactive -- so a defensive reclaim never invents activity.
+        assertEquals(Optional.of("same-conv"),
+                currentSession(manager, session.id()).orElseThrow().agentSessionId());
+        assertTrue(manager.isClaimedAgentSessionId("same-conv"));
+        assertTrue(manager.activeSessionFor("same-conv").isEmpty());
+    }
+
+    @Test
+    void reclaimPersistsTheRebind() {
+        Repository repository = someRepository();
+        ManagedAgentSession session = sessionTracking(repository, "Session 1", "old-conv");
+        InMemoryStateRepository stateRepository = new InMemoryStateRepository(List.of(session));
+        SessionManager manager = newManager(stateRepository);
+
+        manager.applyAgentReclaim(session.id(), "new-conv");
+        flushState(stateRepository);
+
+        assertEquals(Optional.of("new-conv"),
+                stateRepository.savedState().sessions().get(0).agentSessionId());
+    }
+
+    @Test
+    void reclaimRefusesWhenAnotherSessionTracksTheNewId() {
+        Repository repository = someRepository();
+        ManagedAgentSession first = sessionTracking(repository, "Session 1", "old-conv");
+        ManagedAgentSession second = sessionTracking(repository, "Session 2", "claimed-conv");
+        SessionManager manager = newManager(new InMemoryStateRepository(List.of(first, second)));
+
+        IllegalStateException refused = assertThrows(IllegalStateException.class,
+                () -> manager.applyAgentReclaim(first.id(), "claimed-conv"));
+
+        assertTrue(refused.getMessage().contains("claimed-conv"), refused.getMessage());
+        // The first session is untouched: the persisted clash check ran inside
+        // the state lock, so a refused rebind left the old id in place.
+        assertEquals(Optional.of("old-conv"),
+                currentSession(manager, first.id()).orElseThrow().agentSessionId());
+    }
+
+    @Test
+    void reclaimRefusesWhenAnotherSessionHoldsTheNewIdOpen() {
+        // The persisted check alone is not enough: a surface that lingers past
+        // its persisted binding would let a second tab open the same
+        // conversation. The active-registry pre-check catches that before the
+        // state write, so a refused rebind never mutates persistence.
+        Repository repository = someRepository();
+        ManagedAgentSession first = sessionTracking(repository, "Session 1", "old-conv");
+        ManagedAgentSession second = sessionTracking(repository, "Session 2", "other-old");
+        SessionManager manager = newManager(new InMemoryStateRepository(List.of(first, second)));
+        // Put `new-conv` in the active registry for `second` the legitimate way
+        // (a reclaim), then try to reclaim the same id for `first`.
+        manager.applyAgentReclaim(second.id(), "new-conv");
+
+        IllegalStateException refused = assertThrows(IllegalStateException.class,
+                () -> manager.applyAgentReclaim(first.id(), "new-conv"));
+
+        assertTrue(refused.getMessage().contains("already open"), refused.getMessage());
+        assertEquals(Optional.of("old-conv"),
+                currentSession(manager, first.id()).orElseThrow().agentSessionId());
+    }
+
+    @Test
+    void reclaimForAnUnknownSessionThrows() {
+        SessionManager manager = newManager(new InMemoryStateRepository(List.of()));
+        assertThrows(UnknownSessionException.class,
+                () -> manager.applyAgentReclaim(ManagedSessionId.newId(), "new-conv"));
+    }
+
     @Test
     void updatePrStateUpdatesAndPersistsStateAndNumber(@TempDir Path tempDir) {
         ManagedAgentSession session = sessionWith(tempDir, Optional.empty(), Optional.empty());

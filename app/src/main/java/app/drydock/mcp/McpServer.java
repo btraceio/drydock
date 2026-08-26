@@ -350,13 +350,20 @@ public final class McpServer implements AutoCloseable {
 
             try {
                 JsonValue toolResult = router.call(caller, name, arguments);
-                logActivity(name, arguments, toolResult, false);
+                // session_reclaim is bridge housekeeping, not agent-authored
+                // work: logging it as a row in the Review activity panel would
+                // be noise about something the model never asked for.
+                if (!"session_reclaim".equals(name)) {
+                    logActivity(name, arguments, toolResult, false);
+                }
                 return successResponse(id, toolCallResult(toolResult, false));
             } catch (McpToolException e) {
                 // A tool failure is not a transport failure: it comes back as a
                 // 200 JSON-RPC result with isError: true, so the agent can read
                 // and act on the message rather than the transport swallowing it.
-                logActivity(name, arguments, new JsonString(e.getMessage()), true);
+                if (!"session_reclaim".equals(name)) {
+                    logActivity(name, arguments, new JsonString(e.getMessage()), true);
+                }
                 return successResponse(id, toolCallResult(new JsonString(e.getMessage()), true));
             }
         }

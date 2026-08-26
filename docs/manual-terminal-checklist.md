@@ -344,10 +344,20 @@ by `scripts/pi-bridge-smoke.sh`.
       that it parses. If you want this covered, it needs a drydock-side content
       check, not an extension change. Left unticked as a known limitation rather
       than a passing check.
-- [x] `/new` inside a Pi tab: the drydock tools stop working in the new
-      conversation, the old tab's title is not touched by it, and a warning
-      notification appears saying this pi conversation was replaced and
-      drydock's tools are not available in it.
+- [x] `/new` inside a Pi tab: the bridge rebinds drydock's tracked
+      conversation id to the one pi just minted (via the unadvertised
+      `session_reclaim` MCP method) and re-registers, so the new conversation
+      KEEPS drydock's tools. The old tab's title is not touched by it. Verify:
+      after `/new`, `session_rename` still lands and the tab's resume target is
+      the NEW conversation (resume the tab and confirm pi opens the post-`/new`
+      conversation, not the abandoned one). A reclaim that fails (busy server,
+      cross-tab clash) falls back to the stand-down -- tools stop and the
+      "could not rebind this conversation after /new" warning appears.
+- [ ] `/new` with the reclaim path unreachable: force the rebind to fail (e.g.
+      point `DRYDOCK_MCP_CONFIG` at a dead endpoint so the bridge has no `wire`,
+      then `/new`) and confirm the stand-down warning fires and no tools are
+      registered into the new conversation. Left unticked until run against a
+      real tab.
 - [x] `/fork` before the first assistant response (pi refuses it): expect
       drydock tool calls made in that SAME turn to still be refused with
       "being handed over" — the gate stays armed for the rest of the turn,

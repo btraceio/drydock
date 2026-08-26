@@ -223,6 +223,36 @@ class McpServerTest {
                 "session_start", "repos_list", "sessions_list"}) {
             assertTrue(response.body().contains(tool), "missing " + tool + " in: " + response.body());
         }
+        // session_reclaim is bridge housekeeping, not a model-facing tool: it
+        // must be callable on the wire but absent from tools/list, or the
+        // model would learn it can rebind its own conversation id.
+        assertFalse(response.body().contains("session_reclaim"),
+                "session_reclaim must not be advertised: " + response.body());
+    }
+
+    @Test
+    void sessionReclaimIsCallableButNotAdvertised() throws Exception {
+        HttpResponse<String> response = post("""
+                {"jsonrpc":"2.0","id":30,"method":"tools/call",
+                 "params":{"name":"session_reclaim","arguments":{"agentSessionId":"new-conv"}}}""");
+
+        assertEquals(200, response.statusCode());
+        assertTrue(response.body().contains("reclaimed"), response.body());
+        assertTrue(response.body().contains("new-conv"), response.body());
+        assertEquals("new-conv", context.reclaimedTo());
+    }
+
+    @Test
+    void aRefusedReclaimIsAnIsErrorResult() throws Exception {
+        context.failReclaimWith(new McpToolException("Conversation new-conv is already open in another session."));
+
+        HttpResponse<String> response = post("""
+                {"jsonrpc":"2.0","id":31,"method":"tools/call",
+                 "params":{"name":"session_reclaim","arguments":{"agentSessionId":"new-conv"}}}""");
+
+        assertEquals(200, response.statusCode());
+        assertTrue(response.body().contains("\"isError\": true"), response.body());
+        assertTrue(response.body().contains("already open"), response.body());
     }
 
     @Test

@@ -245,4 +245,19 @@ public interface McpSessionContext {
      * session that vanished mid-call throws.</p>
      */
     RenameOutcome renameSession(ManagedSessionId caller, String title) throws McpToolException;
+
+    /**
+     * Rebinds the caller's tracked agent conversation id to {@code
+     * newAgentSessionId}. Called only by the pi bridge, when the user runs
+     * {@code /new} inside the tab and pi mints a fresh conversation: drydock's
+     * tab keeps running, but the conversation id it records -- for resume,
+     * the activity watcher and handoff attribution -- must follow the one pi
+     * is now running.
+     *
+     * <p>Refusal is an exception, not an outcome: the only failure is another
+     * session already tracking or holding open the new id (cross-tab
+     * confusion the bridge cannot resolve), or a timeout. A rebind to the id
+     * the session already tracks is a silent no-op success.</p>
+     */
+    void reclaimConversation(ManagedSessionId caller, String newAgentSessionId) throws McpToolException;
 }

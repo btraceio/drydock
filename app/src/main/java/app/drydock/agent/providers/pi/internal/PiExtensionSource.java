@@ -26,6 +26,10 @@ public final class PiExtensionSource {
             const TOKEN_HEADER = "X-Drydock-Session-Token";
             const HANDSHAKE_MS = 2000;
             const CALL_MS = 45000;
+            // One localhost round trip plus one FX-thread hop. The rebind itself
+            // is a single state transform, so this is generous for a busy app
+            // without holding pi's session_start open long enough to notice.
+            const RECLAIM_MS = 3000;
             const EVAL_HEADER_NAME = "x-target-account";
             const EVAL_HEADER_VALUE = "eval";
 
@@ -56,19 +60,62 @@ public final class PiExtensionSource {
               // extension object -- handlers included -- and take the tab with it.
               pi.on("session_start", async (event: any, ctx: any) => {
                 if (event?.previousSessionFile) {
-                  // An in-session switch (/new, /resume, /fork) reloaded us into a
-                  // conversation drydock did not claim. Standing down here means
-                  // returning before registering: nothing of ours is in the active
-                  // set yet, so there is nothing to remove. Dropping the
-                  // instructions matters too, or the model keeps being told to call
-                  // session_rename for the rest of the session.
-                  instructions = "";
-                  registered = true;
-                  ctx?.ui?.notify?.(
-                    "drydock: this pi conversation was replaced and drydock's tools are not available in it",
-                    "warning",
-                  );
-                  return;
+                  // An in-session switch reloaded us into a conversation drydock
+                  // did not claim. /new is the one switch that CAN be reclaimed:
+                  // it mints a fresh conversation in the SAME tab drydock opened,
+                  // so the bridge rebinds drydock's tracked conversation id to
+                  // the new one and re-registers. /resume (to a different
+                  // conversation) and /fork cannot: their new conversation is not
+                  // the one this tab is running, and rebinding would point resume
+                  // and handoff attribution at a conversation the human did not
+                  // continue here.
+                  if (event?.reason === "new") {
+                    const newId = typeof ctx?.sessionManager?.getSessionId === "function"
+                      ? ctx.sessionManager.getSessionId()
+                      : undefined;
+                    if (newId && wire) {
+                      try {
+                        await reclaim(wire, newId, AbortSignal.timeout(RECLAIM_MS));
+                        // Reclaim landed: fall through to normal registration
+                        // below. Do NOT set `registered` or return here -- the
+                        // registration path owns that, and a fresh switch
+                        // instance has nothing of ours in the active set yet.
+                      } catch (e: any) {
+                        ctx?.ui?.notify?.(
+                          "drydock: could not rebind this conversation after /new; drydock's tools are not available in it",
+                          "warning",
+                        );
+                        instructions = "";
+                        registered = true;
+                        return;
+                      }
+                    } else {
+                      // No wire (the handshake failed at load) or no session id
+                      // from this pi build: cannot rebind. Surface the load
+                      // error if there is one -- it is more informative than
+                      // the generic stand-down -- then stand down.
+                      instructions = "";
+                      registered = true;
+                      ctx?.ui?.notify?.(
+                        loadError ?? "drydock: this pi conversation was replaced and drydock's tools are not available in it",
+                        "warning",
+                      );
+                      return;
+                    }
+                  } else {
+                    // /resume to a different conversation, or /fork: stand down.
+                    // Returning before registering means nothing of ours is in
+                    // the active set yet, so there is nothing to remove. Dropping
+                    // the instructions matters too, or the model keeps being told
+                    // to call session_rename for the rest of the session.
+                    instructions = "";
+                    registered = true;
+                    ctx?.ui?.notify?.(
+                      "drydock: this pi conversation was replaced and drydock's tools are not available in it",
+                      "warning",
+                    );
+                    return;
+                  }
                 }
                 if (registered) {
                   // A second session_start on one live instance. Registering again
@@ -217,6 +264,38 @@ public final class PiExtensionSource {
                 const body = await res.json();
                 if (body?.error) throw new Error(`${name}: ${body.error.message ?? "error"}`);
                 return body?.result;
+              }
+
+              /**
+               * The bridge's private hand-back on /new: rebind drydock's tracked
+               * conversation id to the one pi just minted. Unlike a model-driven
+               * tools/call, a refusal comes back as isError:true (a tool
+               * exception), NOT as a JSON-RPC error, so this checks both -- a
+               * reclaim that "succeeded" while drydock refused the rebind would
+               * re-register tools into a conversation drydock is not tracking,
+               * which is exactly the cross-conversation write the stand-down
+               * exists to prevent.
+               */
+              async function reclaim(wire: Wire, newId: string, signal: AbortSignal): Promise<void> {
+                const res = await fetch(wire.url, {
+                  method: "POST",
+                  headers: { "content-type": "application/json", [TOKEN_HEADER]: wire.token },
+                  body: JSON.stringify({
+                    jsonrpc: "2.0", id: Date.now(), method: "tools/call",
+                    params: { name: "session_reclaim", arguments: { agentSessionId: newId } },
+                  }),
+                  signal,
+                });
+                if (!res.ok) {
+                  if (res.status === 401) throw new Error("session_reclaim: this drydock session has ended");
+                  throw new Error(`session_reclaim: HTTP ${res.status}`);
+                }
+                const body = await res.json();
+                if (body?.error) throw new Error(`session_reclaim: ${body.error.message ?? "error"}`);
+                if (body?.result?.isError) {
+                  const text = String(body?.result?.content?.[0]?.text ?? "refused");
+                  throw new Error(`session_reclaim: ${text}`);
+                }
               }
 
               /**

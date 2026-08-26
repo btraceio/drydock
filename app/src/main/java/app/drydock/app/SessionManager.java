@@ -926,6 +926,89 @@ public final class SessionManager implements AutoCloseable {
         return result[0];
     }
 
+    /**
+     * Rebinds this tab's tracked agent conversation id to {@code
+     * newAgentSessionId}, as the pi bridge requests when the user runs
+     * {@code /new} inside the tab: pi tears down the old conversation and
+     * mints a fresh one, and drydock's {@code agentSessionId} -- which resume,
+     * the activity watcher and handoff attribution all key off -- must follow
+     * it or point at a conversation the tab no longer runs.
+     *
+     * <p>Three maps move together, on the FX thread (the only thread that
+     * ever mutates them): the persisted {@code agentSessionId} under the state
+     * lock, the discovery claim set ({@link #claimedAgentSessionIds}, so a
+     * concurrent same-cwd launch cannot claim the new conversation out from
+     * under this tab), and the duplicate-open registry ({@link
+     * #activeRegistry}, so its old-id entry is released and the new id is
+     * marked active for this tab). The old id is dropped from both in-memory
+     * maps: the old conversation is abandoned, and leaving its claim in place
+     * would only block a legitimate later {@code pi --resume} into it.
+     *
+     * <p>Refused rather than guessed when another session already tracks the
+     * new id (persisted) or already holds it open (active registry): both are
+     * cross-tab confusion a rebind must not paper over. A reclaim to the id
+     * the session already tracks is a no-op success, so a bridge that cannot
+     * tell whether the switch landed (e.g. a reload masquerading as a switch)
+     * may call it unconditionally.
+     */
+    public void applyAgentReclaim(ManagedSessionId sessionId, String newAgentSessionId) {
+        // Pre-check the active registry BEFORE the persisted write: a second
+        // tab holding the new conversation open is cross-tab confusion, and
+        // discovering it after the state store was already mutated would mean
+        // rolling the write back. The persisted-clash check below covers a
+        // session that tracks the id without a live surface; this one covers a
+        // surface that lingers past its persisted binding.
+        Optional<ManagedSessionId> activeHolder = activeRegistry.activeSessionId(newAgentSessionId);
+        if (activeHolder.isPresent() && !activeHolder.get().equals(sessionId)) {
+            throw new IllegalStateException("Conversation " + newAgentSessionId
+                    + " is already open in another session.");
+        }
+
+        String[] oldIdRef = new String[1];
+        boolean[] noChange = new boolean[1];
+        stateStore.update(state -> {
+            ManagedAgentSession session = state.sessions().stream()
+                    .filter(existing -> existing.id().equals(sessionId))
+                    .findFirst()
+                    .orElseThrow(() -> new UnknownSessionException(sessionId));
+            String oldId = session.agentSessionId().orElse(null);
+            oldIdRef[0] = oldId;
+            if (newAgentSessionId.equals(oldId)) {
+                noChange[0] = true;
+                return state;
+            }
+            boolean clash = state.sessions().stream()
+                    .filter(other -> !other.id().equals(sessionId))
+                    .anyMatch(other -> other.agentSessionId().map(newAgentSessionId::equals).orElse(false));
+            if (clash) {
+                throw new IllegalStateException("Another session already tracks conversation "
+                        + newAgentSessionId);
+            }
+            ManagedAgentSession rebound = session.withAgentSessionId(Optional.of(newAgentSessionId));
+            return withReplacedSession(state, rebound);
+        });
+        if (noChange[0]) {
+            return;
+        }
+        String oldId = oldIdRef[0];
+        if (oldId != null) {
+            activeRegistry.release(oldId);
+            claimedAgentSessionIds.remove(oldId);
+        }
+        claimedAgentSessionIds.add(newAgentSessionId);
+        activeRegistry.tryMarkActive(newAgentSessionId, sessionId);
+    }
+
+    /** Package-private for tests: the tab currently holding {@code agentSessionId} open, if any. */
+    Optional<ManagedSessionId> activeSessionFor(String agentSessionId) {
+        return activeRegistry.activeSessionId(agentSessionId);
+    }
+
+    /** Package-private for tests: whether {@code agentSessionId} is claimed by any session. */
+    boolean isClaimedAgentSessionId(String agentSessionId) {
+        return claimedAgentSessionIds.contains(agentSessionId);
+    }
+
     /** Records the observed PR lifecycle state of a worktree session's branch (Finish-panel reconciliation). */
     public ManagedAgentSession updatePrState(ManagedSessionId sessionId, PrState prState,
                                               Optional<Integer> prNumber) {

@@ -200,6 +200,7 @@ public final class McpToolRouter {
             case "worktree_create" -> worktreeCreate(caller, arguments);
             case "session_start" -> sessionStart(caller, arguments);
             case "session_rename" -> sessionRename(caller, arguments);
+            case "session_reclaim" -> sessionReclaim(caller, arguments);
             case "session_handoff" -> sessionHandoff(caller, arguments);
             case "repos_list" -> reposList(caller);
             case "sessions_list" -> sessionsList(caller);
@@ -783,6 +784,31 @@ public final class McpToolRouter {
         return JsonObject.empty()
                 .put("outcome", new JsonString(outcome))
                 .put("title", new JsonString(title));
+    }
+
+    // ---- session_reclaim ----------------------------------------------------
+
+    /**
+     * The pi bridge's private hand-back: rebind this tab's tracked agent
+     * conversation id to the one pi just minted with {@code /new}. Not
+     * advertised in {@link #toolDescriptors()} -- the model never calls this,
+     * only the bridge does, directly through {@code tools/call} -- so it is
+     * reachable on the wire but invisible to {@code tools/list}.
+     *
+     * <p>Not charged against any MCP budget: it is housekeeping, not agent
+     * spend, and a {@code /new} that the bridge could not rebind is already
+     * punished by the stand-down that follows. Refused with a message the
+     * bridge turns into a warning when another session already tracks or holds
+     * open the new id; a rebind to the id already tracked is a silent success.
+     */
+    private JsonValue sessionReclaim(ManagedSessionId caller, JsonValue arguments) throws McpToolException {
+        requireLiveSession(caller);
+        JsonObject args = asObject(arguments);
+        String newAgentSessionId = requiredStringArg(args, "agentSessionId");
+        context.reclaimConversation(caller, newAgentSessionId);
+        return JsonObject.empty()
+                .put("outcome", new JsonString("reclaimed"))
+                .put("agentSessionId", new JsonString(newAgentSessionId));
     }
 
     // ---- repos_list -------------------------------------------------------

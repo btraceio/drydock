@@ -60,6 +60,14 @@ class WorkspaceMcpSessionContextTest {
     private final WorktreeService worktreeService = new WorktreeService();
     private AnnotationStore annotationStore;
 
+    /**
+     * The reclaim hand-back bound into the context. Defaults to success; a
+     * test that wants to exercise the failure path sets this before calling
+     * {@link #contextWith}.
+     */
+    private java.util.function.BiFunction<ManagedSessionId, String, CompletableFuture<Void>> reclaimer =
+            (id, newId) -> CompletableFuture.completedFuture(null);
+
     @AfterEach
     void tearDown() {
         gitStatusService.close();
@@ -512,6 +520,36 @@ class WorkspaceMcpSessionContextTest {
                 failure.getMessage());
     }
 
+    // ---- reclaimConversation ------------------------------------------------
+
+    @Test
+    void reclaimJoinsTheReclaimerAndReturns(@TempDir Path repoDir) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        java.util.concurrent.atomic.AtomicReference<String> rebound = new java.util.concurrent.atomic.AtomicReference<>();
+        reclaimer = (id, newId) -> {
+            rebound.set(newId);
+            return CompletableFuture.completedFuture(null);
+        };
+        WorkspaceMcpSessionContext context = contextFor(repo);
+
+        context.reclaimConversation(caller(repo), "new-conv");
+
+        assertEquals("new-conv", rebound.get());
+    }
+
+    @Test
+    void reclaimSurfacesTheReclaimersFailure(@TempDir Path repoDir) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        reclaimer = (id, newId) -> CompletableFuture.failedFuture(
+                new IllegalStateException("Conversation " + newId + " is already open in another session."));
+        WorkspaceMcpSessionContext context = contextFor(repo);
+
+        McpToolException failure = assertThrows(McpToolException.class,
+                () -> context.reclaimConversation(caller(repo), "new-conv"));
+
+        assertTrue(failure.getMessage().contains("already open"), failure.getMessage());
+    }
+
     // ---- fixtures -----------------------------------------------------------
 
     private Repository repository;
@@ -581,6 +619,7 @@ class WorkspaceMcpSessionContextTest {
                 (worktree, prompt) -> CompletableFuture.failedFuture(
                         new UnsupportedOperationException("no window in this test")),
                 (id, title) -> CompletableFuture.completedFuture(new RenameOutcome(RenameKind.RENAMED, title)),
+                reclaimer,
                 (id, draft) -> CompletableFuture.failedFuture(
                         new UnsupportedOperationException("no workspace in this test")));
     }

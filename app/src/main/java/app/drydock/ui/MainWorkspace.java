@@ -192,6 +192,17 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             WorkspaceMcpSessionContext.RENAME_TIMEOUT_SECONDS / 2;
 
     /**
+     * Whole budget for an agent-driven reclaim, and SMALLER than {@link
+     * WorkspaceMcpSessionContext#RECLAIM_TIMEOUT_SECONDS} for the same reason
+     * the rename budget is smaller than its own: the reclaim is not charged
+     * against any MCP budget, but a hop that lands after the context's join
+     * has expired still mutates state the bridge believes was refused, so the
+     * inner bound must fire first.
+     */
+    private static final long AGENT_RECLAIM_BUDGET_SECONDS =
+            WorkspaceMcpSessionContext.RECLAIM_TIMEOUT_SECONDS / 2;
+
+    /**
      * How long {@link #runReviewWhenSessionReady} keeps waiting for a
      * just-launched session's terminal. Generous: the launch it follows does
      * a network checkout first, and giving up early would silently drop the
@@ -2775,6 +2786,59 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             }
         });
         return renamed;
+    }
+
+    /**
+     * Rebinds a tab's tracked agent conversation id to the one pi is now
+     * running, after the user ran {@code /new} inside the tab. The pi bridge
+     * calls this (via the {@code session_reclaim} MCP method) before it
+     * re-registers drydock's tools into the new conversation, so resume, the
+     * activity watcher and handoff attribution all follow the conversation
+     * the tab actually runs.
+     *
+     * <p>One FX hop, like a rename: the persisted rebind, the discovery-claim
+     * swap and the duplicate-open registry swap all happen inside {@link
+     * SessionManager#applyAgentReclaim}. The old conversation's activity
+     * state is forgotten here, on the same thread, so a stale badge cannot
+     * outlive the conversation it described. No republish: a rebind changes
+     * no visible name, only an internal id, so the sidebar need not rebuild.
+     */
+    public CompletableFuture<Void> reclaimConversationFromAgent(ManagedSessionId id, String newAgentSessionId) {
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(AGENT_RECLAIM_BUDGET_SECONDS);
+        CompletableFuture<Void> reclaimed = new CompletableFuture<>();
+        Platform.runLater(() -> {
+            if (expired(deadlineNanos)) {
+                reclaimed.completeExceptionally(new IllegalStateException(
+                        "Drydock was too busy to rebind the session in time."));
+                return;
+            }
+            try {
+                String oldAgentSessionId = sessionManager.sessions().stream()
+                        .filter(session -> session.id().equals(id))
+                        .findFirst()
+                        .flatMap(ManagedAgentSession::agentSessionId)
+                        .orElse(null);
+                sessionManager.applyAgentReclaim(id, newAgentSessionId);
+                // Forget the abandoned conversation's activity state. The new
+                // conversation's state is picked up by the next activity poll
+                // from the rebound agentSessionId, so nothing has to be primed.
+                if (oldAgentSessionId != null && !oldAgentSessionId.equals(newAgentSessionId)) {
+                    SessionActivityWatcher watcher = activityWatcher;
+                    if (watcher != null) {
+                        watcher.forget(oldAgentSessionId);
+                    }
+                    knownClaudeIds.remove(id);
+                }
+                reclaimed.complete(null);
+            } catch (RuntimeException e) {
+                // As for a rename: the session can vanish between the router's
+                // liveness check and this hop, and a cross-tab clash throws
+                // here. Either way the future must complete or the HTTP
+                // handler blocks for the whole join.
+                reclaimed.completeExceptionally(e);
+            }
+        });
+        return reclaimed;
     }
 
     /**
