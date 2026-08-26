@@ -4,6 +4,7 @@ import app.drydock.agent.spi.AgentProvider;
 
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.List;
@@ -139,6 +140,15 @@ public final class AgentRegistry {
      */
     public boolean evalAvailable(AgentKind kind) {
         return provider(kind).map(AgentProvider::evalAvailable).orElse(false);
+    }
+
+    /**
+     * When the eval session's auth token expires, for display only. Delegates
+     * to the provider; safe to read on the FX thread (it reads an in-memory
+     * snapshot, no I/O).
+     */
+    public Optional<Instant> evalTokenExpiry(AgentKind kind, String sessionKey) {
+        return provider(kind).flatMap(p -> p.evalTokenExpiry(sessionKey));
     }
 
     /**

@@ -13,6 +13,7 @@ import app.drydock.agent.api.SessionIdDiscovery;
 import app.drydock.agent.api.SessionIdStrategy;
 
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.Optional;
 
 /**
@@ -126,4 +127,16 @@ public interface AgentProvider {
      * {@code markEvalSession} never ran for {@code sessionKey}.
      */
     default void unmarkEvalSession(String sessionKey) { }
+
+    /**
+     * When the eval session's auth token expires, for display only. Empty
+     * for a provider that does not resolve a token with a knowable expiry
+     * (or before {@link #markEvalSession} has run). The value is a snapshot
+     * from the token resolved at launch; it is not refreshed live, so a
+     * long-running session may outlive it -- the UI shows it as a hint, not
+     * a hard deadline.
+     */
+    default Optional<Instant> evalTokenExpiry(String sessionKey) {
+        return Optional.empty();
+    }
 }

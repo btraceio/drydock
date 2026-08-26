@@ -2490,13 +2490,29 @@ public final class RepositorySidebar extends VBox {
             });
         }
 
-        /** The eval-mode tooltip line, honest per provider: Pi reroutes, Claude and Codex are marked but not rerouted. */
-        private static String evalTooltipLine(ManagedAgentSession session) {
+        /**
+         * The eval-mode tooltip line, honest per provider. Claude now runs in a
+         * container with a seeded settings file (the header rides the request
+         * directly, no omlx_proxy marking); Pi reroutes via its bridge
+         * extension; Codex is not rerouted. For Claude the resolved token's
+         * JWT expiry is shown as a hint -- it is a snapshot from launch, not
+         * refreshed live, so a long session may outlive it.
+         */
+        private String evalTooltipLine(ManagedAgentSession session) {
             return switch (session.agentKind()) {
                 case PI -> "Eval mode: on (x-target-account: eval via the Pi bridge extension)";
-                case CLAUDE -> "Eval mode: on (x-target-account: eval via omlx_proxy)";
+                case CLAUDE -> "Eval mode: on (x-target-account: eval via the eval container)"
+                        + claudeEvalTokenLine(session);
                 case CODEX -> "Eval mode: on (not supported for Codex; requests are NOT rerouted)";
             };
+        }
+
+        private String claudeEvalTokenLine(ManagedAgentSession session) {
+            return session.agentSessionId()
+                    .flatMap(id -> agentRegistry.evalTokenExpiry(session.agentKind(), id))
+                    .map(expiry -> "\nEval token expires: " + UiFormats.timeOfDay(expiry)
+                            + " (" + UiFormats.timeUntil(expiry) + ")")
+                    .orElse("");
         }
 
         private StackPane buildSessionRow(ManagedAgentSession session, Repository repository) {

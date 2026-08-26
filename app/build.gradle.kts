@@ -372,6 +372,18 @@ tasks.named<Javadoc>("javadoc") {
     (options as StandardJavadocDocletOptions).addStringOption("Xdoclint:none", "-quiet")
 }
 
+// The container image used for Claude eval sessions (see
+// ClaudeEvalContainer). Built on demand -- `./gradlew claudeEvalImage` --
+// against whatever `docker` context is active (Colima on macOS, a local or
+// remote daemon on Linux). Not wired into the regular build: it is a host
+// setup step, not a per-checkout artifact, and it needs a running daemon.
+tasks.register<Exec>("claudeEvalImage") {
+    group = "build"
+    description = "Builds the drydock-claude-eval Docker image for Claude eval sessions."
+    workingDir = file("src/main/docker/claude-eval")
+    commandLine("docker", "build", "-t", "drydock-claude-eval:latest", ".")
+}
+
 // Central Portal Publisher API transport + signing for the custom `drydock`
 // publication created above. Credentials come from Gradle properties / env
 // (ORG_GRADLE_PROJECT_mavenCentralUsername/Password) and the in-memory GPG key
