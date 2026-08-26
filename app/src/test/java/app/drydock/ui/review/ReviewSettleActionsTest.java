@@ -30,10 +30,13 @@ class ReviewSettleActionsTest extends ReviewViewFixture {
     @Test
     void withTheDiffColumnFocusedApproveSettlesOneHunk() {
         focusDiffColumn();
+        String afterFocus = view.diagFocusSnapshot();
         press(KeyCode.A).release(KeyCode.A);
         WaitForAsyncUtils.waitForFxEvents();
+        String afterPress = view.diagFocusSnapshot();
 
-        assertEquals(1, view.diagSectionState(0).settledHunks());
+        assertEquals(1, view.diagSectionState(0).settledHunks(),
+                () -> "after focusDiffColumn(): " + afterFocus + " | after a-press: " + afterPress);
     }
 
     @Test
