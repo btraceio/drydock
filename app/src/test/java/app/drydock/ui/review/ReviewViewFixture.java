@@ -137,10 +137,24 @@ abstract class ReviewViewFixture extends ApplicationTest {
         WaitForAsyncUtils.waitForFxEvents();
     }
 
-    /** A plain click into the diff column -- see {@link #focusRail}. */
-    final void focusDiffColumn() {
+    /**
+     * A plain click into the diff column -- see {@link #focusRail}.
+     *
+     * <p>Polls {@link SessionReviewView#diagFocusInDiffColumn()} after the
+     * click rather than trusting one {@code waitForFxEvents()}: {@code
+     * clickOn} is a real TestFX robot press, and Monocle turns it into an FX
+     * {@code MouseEvent} on its own schedule, off this thread -- a single
+     * drain only waits for whatever was ALREADY queued when it is called,
+     * not for a click event that has not landed in the queue yet. That gap
+     * is what let this method silently return with focus still outside the
+     * diff column on CI, every run, while never once reproducing locally
+     * (see the CI-only failure {@code diagFocusSnapshot} was added to
+     * diagnose).</p>
+     */
+    final void focusDiffColumn() throws TimeoutException {
         clickOn(".review-diff-cell");
         WaitForAsyncUtils.waitForFxEvents();
+        WaitForAsyncUtils.waitFor(5, TimeUnit.SECONDS, view::diagFocusInDiffColumn);
     }
 
     /** How many hunks {@link #FILE_A} has -- what {@code ⇧A}/{@code ⇧R} settle. */

@@ -6,6 +6,8 @@ import javafx.scene.input.MouseButton;
 import org.junit.jupiter.api.Test;
 import org.testfx.util.WaitForAsyncUtils;
 
+import java.util.concurrent.TimeoutException;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -28,7 +30,7 @@ class ReviewSettleActionsTest extends ReviewViewFixture {
     }
 
     @Test
-    void withTheDiffColumnFocusedApproveSettlesOneHunk() {
+    void withTheDiffColumnFocusedApproveSettlesOneHunk() throws TimeoutException {
         focusDiffColumn();
         String afterFocus = view.diagFocusSnapshot();
         press(KeyCode.A).release(KeyCode.A);
@@ -40,7 +42,7 @@ class ReviewSettleActionsTest extends ReviewViewFixture {
     }
 
     @Test
-    void shiftApproveSettlesEveryHunkOfTheCurrentFile() {
+    void shiftApproveSettlesEveryHunkOfTheCurrentFile() throws TimeoutException {
         focusDiffColumn();
         press(KeyCode.SHIFT).press(KeyCode.A).release(KeyCode.A).release(KeyCode.SHIFT);
         WaitForAsyncUtils.waitForFxEvents();
@@ -111,7 +113,7 @@ class ReviewSettleActionsTest extends ReviewViewFixture {
      * was written for is worse than no test.
      */
     @Test
-    void theBarNamesTheUnitAnActionWillHit() {
+    void theBarNamesTheUnitAnActionWillHit() throws TimeoutException {
         focusRail();
         assertEquals("Approve (section)", approveButtonText());
 
@@ -134,7 +136,7 @@ class ReviewSettleActionsTest extends ReviewViewFixture {
      * moves focus and could not have caught the bug.
      */
     @Test
-    void aRealMousePressCapturesTheUnitBeforeTheFocusChangeItCauses() {
+    void aRealMousePressCapturesTheUnitBeforeTheFocusChangeItCauses() throws TimeoutException {
         focusDiffColumn();
         assertEquals("Approve (next unread hunk)", approveButtonText());
 
