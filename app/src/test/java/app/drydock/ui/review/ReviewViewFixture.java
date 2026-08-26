@@ -26,6 +26,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * Shared board for the settle-unit tests (spec §9.6): two overlapping
@@ -80,7 +82,7 @@ abstract class ReviewViewFixture extends ApplicationTest {
      * standard TestFX lifecycle -- {@link #start} runs once, not per test).
      */
     @BeforeEach
-    void showBoard() {
+    void showBoard() throws TimeoutException {
         scope = registry.mint(ReviewScopeRegistry.spec(ReviewScope.Kind.WORKING_TREE,
                 Path.of("/tmp/nowhere"), Optional.of(Path.of("/tmp/nowhere")), "main", "main",
                 Optional.empty(), Optional.empty()));
@@ -99,6 +101,18 @@ abstract class ReviewViewFixture extends ApplicationTest {
         interact(() -> view.showScopes(new SessionReviewScopes.Scopes(scope, Optional.empty()),
                 SessionReviewScopes.Choice.LOCAL));
         interact(() -> view.diagShowDiff(scope, host.diff));
+        WaitForAsyncUtils.waitForFxEvents();
+        // diagShowDiff kicks off a ChangeGraph build on a background
+        // executor (SessionReviewView#requestGraph); its completion
+        // refreshes the rail and diff column from the FX thread whenever it
+        // happens to land. A test that starts clicking before it settles
+        // races that refresh -- which can rebuild the very node the click
+        // just focused and hand focus somewhere else (see
+        // SessionReviewView#diagFocusSnapshot's javadoc, and the CI-only
+        // failure it was added to diagnose). Waiting here, once, closes the
+        // race for every test built on this fixture instead of leaving each
+        // one to hit it by chance.
+        WaitForAsyncUtils.waitFor(10, TimeUnit.SECONDS, () -> !view.diagGraphBuildPending(scope.id()));
         WaitForAsyncUtils.waitForFxEvents();
     }
 
