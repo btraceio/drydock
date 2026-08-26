@@ -3328,9 +3328,40 @@ public final class SessionReviewView extends BorderPane {
         return ReviewDiagFxThread.call(() -> {
             Node owner = getScene() == null ? null : getScene().getFocusOwner();
             return "settleUnit=" + settleUnit()
-                    + " focusOwner=" + (owner == null ? "none" : owner.getClass().getSimpleName())
-                    + " inDiffColumn=" + isDescendantOf(owner, diffColumn);
+                    + " focusOwner=" + diagDescribe(owner)
+                    + " inDiffColumn=" + isDescendantOf(owner, diffColumn)
+                    + " chain=" + diagAncestorChain(owner);
         });
+    }
+
+    /**
+     * Diagnostic-only: one node described as {@code
+     * SimpleClassName[id][.styleClass...]("text if Labeled")} -- {@code
+     * getClass().getSimpleName()} alone (what {@code diagFocusSnapshot} used
+     * to report) says only "a Button", not which one.
+     */
+    private static String diagDescribe(Node node) {
+        if (node == null) {
+            return "none";
+        }
+        StringBuilder sb = new StringBuilder(node.getClass().getSimpleName());
+        if (node.getId() != null) {
+            sb.append('#').append(node.getId());
+        }
+        node.getStyleClass().forEach(c -> sb.append('.').append(c));
+        if (node instanceof javafx.scene.control.Labeled labeled) {
+            sb.append("(\"").append(labeled.getText()).append("\")");
+        }
+        return sb.toString();
+    }
+
+    /** Diagnostic-only: {@code node}'s ancestor chain, described via {@link #diagDescribe}. */
+    private static String diagAncestorChain(Node node) {
+        StringBuilder sb = new StringBuilder();
+        for (Node n = node == null ? null : node.getParent(); n != null; n = n.getParent()) {
+            sb.append(" < ").append(diagDescribe(n));
+        }
+        return sb.toString();
     }
 
     /** Diagnostic-only: the current rail's intent ids, in rendered order. */
