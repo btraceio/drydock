@@ -81,9 +81,12 @@ public class ClaudeEvalContainer {
     private static final String IMAGE = System.getProperty(
             "app.drydock.eval.claude.image", "drydock-claude-eval:latest");
 
-    /** Managed-settings locations, in precedence order (macOS first, then Linux). */
-    private static final List<Path> MANAGED_SETTINGS_PATHS = managedSettingsPaths();
-
+    /**
+     * Managed-settings locations, in precedence order (macOS first, then Linux).
+     * Resolved per call (not cached at class-load) so a test can point the
+     * {@code app.drydock.eval.claude.managedSettings} system property at a
+     * fixture before calling {@link #seedSettings}.
+     */
     private static List<Path> managedSettingsPaths() {
         String override = System.getProperty("app.drydock.eval.claude.managedSettings");
         if (override != null && !override.isBlank()) {
@@ -340,7 +343,7 @@ public class ClaudeEvalContainer {
     }
 
     private Optional<JsonObject> readManagedSettings() {
-        for (Path p : MANAGED_SETTINGS_PATHS) {
+        for (Path p : managedSettingsPaths()) {
             try {
                 if (Files.isReadable(p)) {
                     String content = Files.readString(p, StandardCharsets.UTF_8);
