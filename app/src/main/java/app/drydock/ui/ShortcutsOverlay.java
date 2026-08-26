@@ -40,7 +40,7 @@ final class ShortcutsOverlay {
                     {"  (in the Explorer: back / forward along the trail)", ""},
                     {"Previous / next live session", "⌘↑ / ⌘↓"},
                     {"Toggle sidebar", "⌘0"},
-                    {"Filter repositories", "⌘F"},
+                    {"Session search", "⌘K"},
                     {"Toggle theme", "⌘⇧L"},
                     {"Settings", "⌘,"},
                     {"Cancel / close", "Esc"},

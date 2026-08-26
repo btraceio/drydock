@@ -1018,7 +1018,7 @@ public final class DrydockApplication extends Application {
             } else if (cmd && event.getCode() == KeyCode.DIGIT0) {
                 appShell.toggleSidebar();
                 event.consume();
-            } else if (cmd && event.getCode() == KeyCode.F) {
+            } else if (cmd && event.getCode() == KeyCode.K) {
                 sidebar.focusFilter();
                 event.consume();
             } else if (cmd && event.getCode() == KeyCode.N) {

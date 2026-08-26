@@ -48,6 +48,8 @@ import javafx.scene.control.MenuItem;
 import javafx.scene.control.OverrunStyle;
 import javafx.scene.control.SeparatorMenuItem;
 import javafx.scene.control.TextField;
+import javafx.scene.control.ToggleButton;
+import javafx.scene.control.ToggleGroup;
 import javafx.scene.control.Tooltip;
 import javafx.scene.control.TreeCell;
 import javafx.scene.control.TreeItem;
@@ -55,6 +57,7 @@ import javafx.scene.control.TreeView;
 import javafx.scene.input.KeyCode;
 import javafx.scene.input.MouseButton;
 import javafx.scene.input.MouseEvent;
+import javafx.scene.layout.FlowPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
@@ -91,15 +94,19 @@ import java.util.function.Predicate;
 /**
  * The repository sidebar, rebuilt to the design handoff (README section 2)
  * and remodeled WORKTREE-FIRST for the worktree lifecycle handoff (section
- * B "Discovering worktrees"): expanding a repository lists every worktree
- * {@code git worktree list} finds on disk -- including worktrees created
- * outside this app -- reconciled against the managed sessions by
- * {@code worktreeRoot}. Worktrees WITH a session render as session rows
- * (status dot, branch tag, dirty dot, PR chip, idle Resume pill);
- * worktrees WITHOUT one render UNOPENED (branch + short path + an accent
- * "Start ▸" pill + a one-click 🗑 delete, guarded off the main checkout).
- * Each repo header gains a ⟳ rescan that re-runs discovery; newly-found
- * rows get a one-shot highlight.
+ * B "Discovering worktrees"): a wrapping subtab strip selects one
+ * repository at a time, and the tree below it lists every worktree
+ * {@code git worktree list} finds on disk for THAT repo -- including
+ * worktrees created outside this app -- reconciled against the managed
+ * sessions by {@code worktreeRoot}. Worktrees WITH a session render as
+ * session rows (status dot, branch tag, dirty dot, PR chip, idle Resume
+ * pill); worktrees WITHOUT one render UNOPENED (branch + short path + an
+ * accent "Start ▸" pill + a one-click 🗑 delete, guarded off the main
+ * checkout). The selected repo's header row carries a ⟳ rescan that
+ * re-runs discovery; newly-found rows get a one-shot highlight. A subtab
+ * is shown iff the repo name matches the text filter OR any of its
+ * session/worktree rows do -- the same filter the old flat treeview used,
+ * now deciding subtab visibility instead of expand-and-keep.
  *
  * <p>All session/status data renders from the shared {@link
  * WorkspaceViewModel}: this sidebar's async git-status/worktree fetches
@@ -132,6 +139,29 @@ public final class RepositorySidebar extends VBox {
     private SessionFilter filter = SessionFilter.none();
     private final SessionFilterBar filterBar;
 
+    /**
+     * The compiled text filter, refreshed whenever the filter field or chips
+     * change and at the top of every {@link #rebuildTree()}. Centralising
+     * the compile here (rather than passing a lowercased substring around)
+     * is what lets the matcher offer glob/regex shapes -- see {@link SidebarQuery}.
+     */
+    private SidebarQuery queryMatcher = SidebarQuery.matchAll();
+
+    /**
+     * The repository whose subtree the tree currently shows. The sidebar is
+     * one-repo-at-a-time now (a subtab strip selects it); {@code null} means
+     * no subtab is selected -- an explicit deselect (test hook) or the very
+     * first build before the constructor nudges one open.
+     */
+    private final ObjectProperty<RepositoryId> selectedRepoId = new SimpleObjectProperty<>();
+
+    /** The wrapping strip of per-repository subtabs above the tree. */
+    private final FlowPane repoTabStrip = new FlowPane();
+    /** Radio-style: exactly one subtab is selected at a time (or none, before the first pick). */
+    private final ToggleGroup repoTabGroup = new ToggleGroup();
+    /** Shown in the tree's place when a filter leaves survivors but none is selected. */
+    private final Label selectRepoPlaceholder = new Label("Select a repository");
+
     /** Open findings for a worktree checkout, if any -- the per-row ◨n badge. */
     private Function<Path, Optional<Integer>> openFindingsAt = path -> Optional.empty();
 
@@ -157,21 +187,6 @@ public final class RepositorySidebar extends VBox {
     private final Label footerLabel = new Label();
     private final Region footerDot = new Region();
 
-    /** Which repository subtrees are expanded; new repositories start expanded. */
-    private final Set<RepositoryId> collapsed = new HashSet<>();
-
-    /** The user's collapse set, stashed while a filter forces every repo open. */
-    private Set<RepositoryId> collapsedBeforeFilter;
-
-    /**
-     * Set in the two places a filter can change (the {@link SessionFilterBar}
-     * callback and the {@link #filterDebounce} handler) and consumed at the
-     * top of {@link #rebuildTree()}. Force-expansion must fire only on an
-     * actual filter change, not on every rebuild, or the disclosure triangle
-     * is a dead control for as long as a filter is on.
-     */
-    private boolean filterChangedSinceLastRebuild;
-
     /**
      * Diagnostic-only ({@code app.drydock.diag.tabScript} "forcehover"
      * verb): the row Node, if any, whose actions strip should render
@@ -182,7 +197,7 @@ public final class RepositorySidebar extends VBox {
      */
     private final ObjectProperty<Node> diagForcedHoverRow = new SimpleObjectProperty<>();
 
-    /** Repos whose stale bucket is expanded. Distinct from {@code collapsed} (repo-level). */
+    /** Repos whose stale bucket is expanded. */
     private final Set<RepositoryId> staleBucketExpanded = new HashSet<>();
 
     /** Repos whose locked-worktree bucket is expanded. */
@@ -191,7 +206,7 @@ public final class RepositorySidebar extends VBox {
     /** Repositories with a rescan in flight (spins the ⟳ button, prevents double-scans). */
     private final Set<RepositoryId> scanning = ConcurrentHashMap.newKeySet();
 
-    /** Repos whose pull-request group is expanded. Distinct from {@code collapsed} (repo-level). */
+    /** Repos whose pull-request group is expanded. */
     private final Set<RepositoryId> pullRequestsExpanded = new HashSet<>();
     /** Repositories with a pull-request scan in flight (also spins the ⟳ button, prevents double-scans). */
     private final Set<RepositoryId> scanningPullRequests = ConcurrentHashMap.newKeySet();
@@ -199,7 +214,7 @@ public final class RepositorySidebar extends VBox {
     private final Set<RepositoryId> pendingPullRequestRescan = ConcurrentHashMap.newKeySet();
     /** The worktree list the in-flight PR scan for a repo started with (see refreshPullRequests / shouldQueuePullRequestRescan). */
     private final Map<RepositoryId, List<WorktreeService.Worktree>> pullRequestScanWorktrees = new ConcurrentHashMap<>();
-    /** Repos whose worktree list changed while collapsed, so their PR outcome is known stale; rescanned on next expand. */
+    /** Repos whose worktree list changed while their subtab was not selected, so their PR outcome is known stale; rescanned on next subtab select. */
     private final Set<RepositoryId> pullRequestsStale = ConcurrentHashMap.newKeySet();
     /** Worktree paths discovered by the latest rescan, highlighted one-shot until the timer clears them. */
     private final Set<Path> recentlyDiscovered = new HashSet<>();
@@ -303,7 +318,7 @@ public final class RepositorySidebar extends VBox {
         filterField.getStyleClass().add("filter-field");
         filterField.setPromptText("⌕  Filter repos & sessions…");
         filterDebounce.setOnFinished(e -> {
-            filterChangedSinceLastRebuild = true;
+            refreshQueryMatcher();
             rebuildTree();
         });
         filterField.textProperty().addListener((obs, oldText, newText) -> filterDebounce.playFromStart());
@@ -364,12 +379,21 @@ public final class RepositorySidebar extends VBox {
         emptyBanner.setVisible(false);
         emptyBanner.setManaged(false);
 
+        // -- Subtab strip (one button per repository) ----------------------
+        repoTabStrip.getStyleClass().add("repo-tab-strip");
+        repoTabStrip.setHgap(4);
+        repoTabStrip.setVgap(4);
+
+        selectRepoPlaceholder.getStyleClass().add("sidebar-empty-message");
+        selectRepoPlaceholder.setMaxWidth(Double.MAX_VALUE);
+        selectRepoPlaceholder.setAlignment(Pos.CENTER);
+
         // -- Footer ---------------------------------------------------------
         footerDot.getStyleClass().addAll("status-dot", "dot-5");
         HBox footer = new HBox(footerDot, footerLabel);
         footer.getStyleClass().add("sidebar-footer");
 
-        getChildren().addAll(collapseHeader.node(), header, emptyBanner, tree, footer);
+        getChildren().addAll(collapseHeader.node(), header, emptyBanner, repoTabStrip, tree, footer);
 
         // Keep the displayed list in sync with EVERY repository mutation,
         // not just the ones initiated by this sidebar's own handlers. The
@@ -413,6 +437,16 @@ public final class RepositorySidebar extends VBox {
                                              Optional<ManagedSessionId> current) {
                 if (filter.isActive() && (membershipChanged(previous.orElse(null))
                         || membershipChanged(current.orElse(null)))) {
+                    requestRebuild();
+                    return;
+                }
+                // Switching the active session may move to another repository:
+                // make that repo's subtab the selected one so its subtree is
+                // the one showing when syncActiveSelection selects the row.
+                if (current.flatMap(viewModel::sessionById)
+                        .map(ManagedAgentSession::repositoryId)
+                        .filter(repoId -> !repoId.equals(selectedRepoId.get()))
+                        .isPresent()) {
                     requestRebuild();
                     return;
                 }
@@ -479,7 +513,7 @@ public final class RepositorySidebar extends VBox {
      */
     private void activateNode(TreeItem<SidebarNode> item) {
         switch (item.getValue()) {
-            case SidebarNode.RepoNode repoNode -> item.setExpanded(!item.isExpanded());
+            case SidebarNode.RepoNode repoNode -> { /* pane header: no toggle, the subtab selects it */ }
             case SidebarNode.SessionNode sessionNode ->
                     viewModel.sessionById(sessionNode.session().id()).ifPresent(navigator::resumeSession);
             case SidebarNode.UnopenedWorktreeNode worktreeNode ->
@@ -559,7 +593,7 @@ public final class RepositorySidebar extends VBox {
         refreshWorktrees(repository, false);
     }
 
-    /** Focuses the filter field (⌘F). */
+    /** Focuses the filter field (⌘K). */
     public void focusFilter() {
         filterField.requestFocus();
         filterField.selectAll();
@@ -618,27 +652,18 @@ public final class RepositorySidebar extends VBox {
     }
 
     /**
-     * Diagnostic-only: sets a repository row's expansion to {@code expanded}
-     * through the same {@code TreeItem.setExpanded} call the repo row's own
-     * mouse-click handler uses (see {@code buildRepoRow}), so the
-     * {@code expandedProperty} listener installed in {@link #rebuildTree}
-     * fires the real expand path -- including the B1 rescan a repo whose PR
-     * outcome went stale while collapsed self-heals on. Exists so a headless
-     * test can drive the expand trigger without a TestFX robot click, which
-     * intermittently fails to toggle a TreeView row under monocle/load (the
-     * click reports success without the {@code expandedProperty} listener
-     * ever firing, leaving the rescan the test exists to prove never
-     * started). No-op (no listener fire) when the row is already in that
-     * state, matching {@code setExpanded}'s own contract. Not reachable
-     * outside tests.
+     * Diagnostic-only: selects ({@code expanded = true}) or deselects
+     * ({@code expanded = false}) a repository's subtab through the same
+     * {@link #selectRepo} path a real subtab click uses, so a headless test
+     * can drive the selection trigger -- including the B1 rescan a repo
+     * whose PR outcome went stale while NOT selected self-heals on when its
+     * subtab is picked again. Replaces the old repo-row expand/collapse
+     * hook: the sidebar is one-repo-at-a-time now, so "not looking at a
+     * repo" is "its subtab is not selected", not "its row is collapsed".
+     * Not reachable outside tests.
      */
     public void diagSetRepoExpanded(RepositoryId repoId, boolean expanded) {
-        for (TreeItem<SidebarNode> item : treeRoot.getChildren()) {
-            if (item.getValue() instanceof SidebarNode.RepoNode repo && repo.repository().id().equals(repoId)) {
-                item.setExpanded(expanded);
-                return;
-            }
-        }
+        selectRepo(expanded ? repoId : null);
     }
 
     /**
@@ -811,10 +836,10 @@ public final class RepositorySidebar extends VBox {
      * already has an outcome -- of any kind, {@code Absent} included --
      * from being rescanned on every rebuild. NOT the whole story where
      * staleness is concerned, though: a repo can hold a correct-when-taken
-     * outcome that a LATER worktree change invalidated while the repo was
-     * collapsed (deliberately not auto-rescanned then -- see {@code
-     * refreshWorktrees}'s completion); every caller of this method also
-     * consults {@link #pullRequestsStale} alongside it, since {@code
+     * outcome that a LATER worktree change invalidated while the repo's
+     * subtab was not selected (deliberately not auto-rescanned then -- see
+     * {@code refreshWorktrees}'s completion); every caller of this method
+     * also consults {@link #pullRequestsStale} alongside it, since {@code
      * pullRequestsScanned} alone cannot tell "scanned" from "scanned, but
      * no longer accurate" apart.
      *
@@ -1012,12 +1037,28 @@ public final class RepositorySidebar extends VBox {
     /** Chip callback: re-reads {@link #filterBar} and coalesces into one rebuild. */
     private void onFilterChipsChanged() {
         filter = filterBar.filter();
-        filterChangedSinceLastRebuild = true;
         requestRebuild();
     }
 
+    /** The raw (non-lowercased) filter text; {@link SidebarQuery} handles case. */
+    private String rawQueryText() {
+        return filterField.getText() == null ? "" : filterField.getText().strip();
+    }
+
+    /** Recompile {@link #queryMatcher} from the current filter field text. */
+    private void refreshQueryMatcher() {
+        queryMatcher = SidebarQuery.of(rawQueryText());
+    }
+
+    /**
+     * Kept for the diag driver and {@link #pullRequestNarrowQuery}: the
+     * lowercased substring view of the filter. With glob/regex active this is
+     * a lossy approximation, but those callers only use it to decide whether
+     * ANY narrowing applies, and {@link #queryMatcher} is the authority for
+     * the actual match.
+     */
     private String currentQuery() {
-        return filterField.getText() == null ? "" : filterField.getText().strip().toLowerCase(Locale.ROOT);
+        return rawQueryText().toLowerCase(Locale.ROOT);
     }
 
     /** The frontmost session is always rendered -- see {@link #applyFacets}. */
@@ -1026,29 +1067,18 @@ public final class RepositorySidebar extends VBox {
     }
 
     private void rebuildTree() {
-        // A filter is a global question ("where are my errors?"); repo
-        // expansion is a local reading preference. Re-assert the expansion on
-        // every change to the filter -- not only on entry, or switching from
-        // `running` to `error` would leave the sole matching session inside a
-        // repo the user collapsed earlier.
-        if (filtering()) {
-            if (collapsedBeforeFilter == null) {
-                collapsedBeforeFilter = new HashSet<>(collapsed);
-            }
-            if (filterChangedSinceLastRebuild) {
-                collapsed.clear();
-            }
-        } else if (collapsedBeforeFilter != null) {
-            collapsed.clear();
-            collapsed.addAll(collapsedBeforeFilter);
-            collapsedBeforeFilter = null;
-        }
-        filterChangedSinceLastRebuild = false;
-
-        String query = currentQuery();
+        refreshQueryMatcher();
+        boolean textFiltering = !queryMatcher.isTrivial();
 
         List<Repository> repositories = sorted(repositoryManager.repositories());
-        List<TreeItem<SidebarNode>> repoItems = new ArrayList<>();
+        // One TreeItem per surviving repository, kept in a map so the
+        // subtab strip and the single visible subtree are built from the
+        // SAME computation -- a survivor is a repo whose name/branch
+        // matches OR any of its session/worktree rows match, exactly the
+        // old treeview rule, now deciding subtab visibility instead of
+        // expand-and-keep.
+        List<Repository> survivorRepos = new ArrayList<>();
+        Map<RepositoryId, TreeItem<SidebarNode>> survivorItems = new LinkedHashMap<>();
         // Surviving rows of ANY kind (session, unopened worktree, stale/
         // locked bucket), except a session row that is present only because
         // {@code isExempt} accepted it despite failing the filter -- the
@@ -1067,9 +1097,9 @@ public final class RepositorySidebar extends VBox {
             // The filter matches the repo itself (name/branch) OR any of
             // its worktree/session rows; a repo matched only through its
             // children narrows to exactly the matching rows.
-            boolean repoMatchedByName = !query.isEmpty() && matchesRepo(repository, query);
-            if (!query.isEmpty() && !repoMatchedByName) {
-                children = children.stream().filter(child -> matchesNode(child, query)).toList();
+            boolean repoMatchedByName = textFiltering && matchesRepo(repository);
+            if (textFiltering && !repoMatchedByName) {
+                children = children.stream().filter(this::matchesNode).toList();
             }
             // Only drop a childless repo while filtering: with no filter at
             // all, a freshly added repository with no worktrees and no
@@ -1091,63 +1121,183 @@ public final class RepositorySidebar extends VBox {
                     matchCount++;
                 }
             }
-            TreeItem<SidebarNode> repoItem = new TreeItem<>(new SidebarNode.RepoNode(repository));
-            for (SidebarNode child : children) {
-                repoItem.getChildren().add(
-                        pullRequestGroupItem(child, repository).orElseGet(() -> new TreeItem<>(child)));
-            }
-            repoItem.setExpanded(!collapsed.contains(repository.id()));
-            repoItem.expandedProperty().addListener((obs, was, is) -> {
-                if (is) {
-                    collapsed.remove(repository.id());
-                    // A repo row expanding is one of refreshPullRequests's
-                    // four triggers (see its javadoc) -- and the one that
-                    // actually fires the FIRST scan for a repo that starts
-                    // collapsed, or recovers one whose outcome went stale
-                    // while collapsed: refreshWorktrees's completion
-                    // deliberately does not scan a collapsed repo (see the
-                    // comment there), marking it stale instead, and
-                    // pullRequestScanDue is what notices that mark here.
-                    if (pullRequestScanDue(repository)) {
-                        refreshPullRequests(repository);
-                    }
-                } else {
-                    collapsed.add(repository.id());
-                }
-                // Re-render the header so the ▶ caret tracks EVERY expansion
-                // change -- keyboard toggles (Enter, ←/→) included, not just
-                // the row's own mouse handler.
-                updateRepoRow(repository.id());
-            });
-            if (repoItem.isExpanded() && pullRequestScanDue(repository)) {
-                refreshPullRequests(repository);
-            }
-            repoItems.add(repoItem);
+            survivorRepos.add(repository);
+            survivorItems.put(repository.id(), buildRepoTreeItem(repository, children));
         }
 
-        treeRoot.getChildren().setAll(repoItems);
+        rebuildRepoTabStrip(survivorRepos);
+        RepositoryId selected = resolveSelectedRepo(survivorRepos);
+        selectedRepoId.set(selected);
+
+        if (selected != null) {
+            treeRoot.getChildren().setAll(survivorItems.get(selected));
+            // The subtab's selection is the old "repo-row expand" trigger:
+            // the one moment a repo the user is now looking at self-heals a
+            // PR outcome that went stale while its subtab was NOT selected
+            // (see refreshWorktrees's collapsed-skip, now a not-selected-skip).
+            Repository repo = repoForId(selected, repositories);
+            if (repo != null && pullRequestScanDue(repo)) {
+                refreshPullRequests(repo);
+            }
+        } else {
+            treeRoot.getChildren().clear();
+        }
 
         // Two forms, because an exempt row can leave the tree non-empty while
         // nothing actually matched. Swap only when there is nothing to show
         // at all; otherwise the exempt row would be deleted from the screen,
         // re-creating the failure the exemption exists to prevent.
         boolean nothingMatched = filtering() && matchCount == 0;
-        boolean treeIsEmpty = treeRoot.getChildren().isEmpty();
         boolean noRepositoriesAtAll = repositoryManager.repositories().isEmpty();
-        showEmptyState(nothingMatched && !noRepositoriesAtAll, treeIsEmpty);
+        boolean treeIsEmpty = selected == null;
+        boolean survivorsExist = !survivorRepos.isEmpty();
+        showEmptyState(nothingMatched && !noRepositoriesAtAll, treeIsEmpty, survivorsExist);
 
         updateFooter();
         syncActiveSelection();
     }
 
     /**
-     * Whether {@code repository} is due for a PR scan right now, at either
-     * of the two places {@code rebuildTree} asks: on repository add (a
-     * newly built, expanded {@code TreeItem}) and on repo-row expand. True
-     * for either half of {@link #needsPullRequestScan}'s reason (discovery
-     * has landed, nothing scanned yet) OR {@link #pullRequestsStale} (an
-     * outcome exists, but a worktree change invalidated it while the repo
-     * was collapsed) -- {@code needsPullRequestScan} alone cannot tell
+     * Builds the always-expanded TreeItem for one repository's subtree --
+     * sessions, unopened worktrees, the stale/locked buckets, and the
+     * pull-request group. The repo row is a pane header now (the subtab
+     * selects it), so it never collapses; a force-re-expand guard defeats
+     * the keyboard ← that would otherwise fold a TreeView row.
+     */
+    private TreeItem<SidebarNode> buildRepoTreeItem(Repository repository, List<SidebarNode> children) {
+        TreeItem<SidebarNode> repoItem = new TreeItem<>(new SidebarNode.RepoNode(repository));
+        for (SidebarNode child : children) {
+            repoItem.getChildren().add(
+                    pullRequestGroupItem(child, repository).orElseGet(() -> new TreeItem<>(child)));
+        }
+        repoItem.setExpanded(true);
+        repoItem.expandedProperty().addListener((obs, was, is) -> {
+            if (!is) {
+                // The repo pane is never collapsible; a keyboard ← (or any
+                // other path) that folded it is undone here, in the same
+                // listener that used to track the collapse set.
+                repoItem.setExpanded(true);
+            }
+            updateRepoRow(repository.id());
+        });
+        return repoItem;
+    }
+
+    /**
+     * Rebuilds the subtab strip from the surviving repositories. Each subtab
+     * is a {@link ToggleButton} whose label wraps (so a long repo name takes
+     * as many rows as it needs) inside a bounded width; the {@link FlowPane}
+     * wraps the buttons themselves across rows as the sidebar narrows.
+     */
+    private void rebuildRepoTabStrip(List<Repository> survivors) {
+        repoTabGroup.getToggles().clear();
+        repoTabStrip.getChildren().clear();
+        RepositoryId selected = selectedRepoId.get();
+        for (Repository repository : survivors) {
+            ToggleButton tab = new ToggleButton();
+            tab.getStyleClass().add("repo-tab");
+            tab.setToggleGroup(repoTabGroup);
+            tab.setMaxWidth(160);
+            tab.setMinWidth(0);
+            tab.setFocusTraversable(false);
+            Label name = new Label(repository.displayName());
+            name.setWrapText(true);
+            name.setMaxWidth(Double.MAX_VALUE);
+            tab.setGraphic(name);
+            tab.setTooltip(new Tooltip(repository.displayName()));
+            if (repository.id().equals(selected)) {
+                tab.setSelected(true);
+            }
+            tab.setOnAction(e -> selectRepo(repository.id()));
+            repoTabStrip.getChildren().add(tab);
+        }
+    }
+
+    /**
+     * Resolves which repository's subtree the tree should show. Keeps a
+     * surviving selection; otherwise follows the active session; otherwise
+     * keeps an explicit deselect (a prior selection that the user -- or a
+     * test hook -- cleared) as deselect; otherwise picks the first survivor
+     * on the very first build only, so an initial launch with no active
+     * session still opens something rather than an empty pane.
+     */
+    private RepositoryId resolveSelectedRepo(List<Repository> survivors) {
+        if (survivors.isEmpty()) {
+            return null;
+        }
+        RepositoryId current = selectedRepoId.get();
+        if (current != null && survivorIds(survivors).contains(current)) {
+            return current;
+        }
+        RepositoryId activeRepo = viewModel.activeSession()
+                .flatMap(active -> viewModel.sessionById(active))
+                .map(ManagedAgentSession::repositoryId)
+                .filter(id -> survivorIds(survivors).contains(id))
+                .orElse(null);
+        if (activeRepo != null) {
+            return activeRepo;
+        }
+        if (current != null) {
+            // A previously selected repo dropped out (filtered/removed):
+            // fall through to the first survivor rather than stranding the
+            // tree on a deselected repo that no longer exists.
+            return survivors.get(0).id();
+        }
+        // Initial build (no selection ever made): open the first survivor so
+        // the pane is not empty on launch. A later explicit deselect sets
+        // {@code current} to null via the test hook and re-enters here, but
+        // then {@code current == null} AND there is no active session, so it
+        // stays deselected -- the deselect sticks.
+        if (!initialAutoSelectDone) {
+            initialAutoSelectDone = true;
+            return survivors.get(0).id();
+        }
+        return null;
+    }
+
+    private boolean initialAutoSelectDone;
+
+    private static Set<RepositoryId> survivorIds(List<Repository> survivors) {
+        Set<RepositoryId> ids = new HashSet<>();
+        for (Repository repository : survivors) {
+            ids.add(repository.id());
+        }
+        return ids;
+    }
+
+    private static Repository repoForId(RepositoryId id, List<Repository> repositories) {
+        for (Repository repository : repositories) {
+            if (repository.id().equals(id)) {
+                return repository;
+            }
+        }
+        return null;
+    }
+
+    /** Whether {@code repository} is the currently selected subtab. */
+    private boolean isSelectedRepo(RepositoryId repositoryId) {
+        return repositoryId != null && repositoryId.equals(selectedRepoId.get());
+    }
+
+    /**
+     * Selects a repository's subtab and rebuilds so its subtree shows. The
+     * public entry point for a subtab click; also the test hook's path. A
+     * {@code null} id deselects (no subtree) -- used by the diag hook to
+     * model "not looking at this repo".
+     */
+    private void selectRepo(RepositoryId repositoryId) {
+        selectedRepoId.set(repositoryId);
+        requestRebuild();
+    }
+
+    /**
+     * Whether {@code repository} is due for a PR scan right now, at the
+     * two places {@code rebuildTree} asks: on repository add (a newly built
+     * subtab's subtree) and on subtab selection. True for either half of
+     * {@link #needsPullRequestScan}'s reason (discovery has landed,
+     * nothing scanned yet) OR {@link #pullRequestsStale} (an outcome
+     * exists, but a worktree change invalidated it while the repo's subtab
+     * was not selected) -- {@code needsPullRequestScan} alone cannot tell
      * "scanned" from "scanned, but no longer accurate" apart.
      */
     private boolean pullRequestScanDue(Repository repository) {
@@ -1162,9 +1312,9 @@ public final class RepositorySidebar extends VBox {
      * request in a landed {@code Rows} outcome, none for {@code
      * Unavailable} -- rather than being a leaf, so the TreeView's own
      * expand/collapse drives it. Starts collapsed; its expand state
-     * survives rebuilds in {@link #pullRequestsExpanded}, the same way a
-     * repository row's does in {@link #collapsed}. Empty for every other
-     * {@code SidebarNode}, so the caller falls back to a plain leaf item.
+     * survives rebuilds in {@link #pullRequestsExpanded}. Empty for every
+     * other {@code SidebarNode}, so the caller falls back to a plain leaf
+     * item.
      */
     private Optional<TreeItem<SidebarNode>> pullRequestGroupItem(SidebarNode child, Repository repository) {
         if (!(child instanceof SidebarNode.PullRequestGroupNode groupNode)) {
@@ -1172,7 +1322,7 @@ public final class RepositorySidebar extends VBox {
         }
         TreeItem<SidebarNode> groupItem = new TreeItem<>(groupNode);
         groupItem.getChildren().setAll(
-                pullRequestChildItems(groupNode.outcome(), repository, pullRequestNarrowQuery(repository)));
+                pullRequestChildItems(groupNode.outcome(), repository, pullRequestShouldNarrow(repository)));
         groupItem.setExpanded(pullRequestsExpanded.contains(repository.id()));
         groupItem.expandedProperty().addListener((obs, was, is) -> {
             if (is) {
@@ -1190,19 +1340,14 @@ public final class RepositorySidebar extends VBox {
     }
 
     /**
-     * The query {@link #pullRequestGroupItem} and {@link
-     * #updatePullRequestGroupRow} narrow a group's PR rows by -- empty
-     * unless a text filter is active AND the repo did not already match by
-     * its own name/branch, mirroring {@code rebuildTree}'s own top-level
-     * children filter exactly (a repo matched by name shows everything
-     * under it, unnarrowed).
+     * Whether a group's PR rows should be narrowed by the text filter --
+     * true only when a text filter is active AND the repo did not already
+     * match by its own name/branch, mirroring {@code rebuildTree}'s own
+     * top-level children filter exactly (a repo matched by name shows
+     * everything under it, unnarrowed).
      */
-    private String pullRequestNarrowQuery(Repository repository) {
-        String query = currentQuery();
-        if (query.isEmpty() || matchesRepo(repository, query)) {
-            return "";
-        }
-        return query;
+    private boolean pullRequestShouldNarrow(Repository repository) {
+        return !queryMatcher.isTrivial() && !matchesRepo(repository);
     }
 
     /**
@@ -1218,7 +1363,7 @@ public final class RepositorySidebar extends VBox {
      * filter active at all.
      */
     private List<TreeItem<SidebarNode>> pullRequestChildItems(RepositoryPullRequests.Outcome outcome,
-                                                               Repository repository, String narrowQuery) {
+                                                               Repository repository, boolean narrow) {
         List<TreeItem<SidebarNode>> items = new ArrayList<>();
         if (!(outcome instanceof RepositoryPullRequests.Outcome.Rows rows)) {
             return items;
@@ -1228,7 +1373,7 @@ public final class RepositorySidebar extends VBox {
             // Routed through matchesNode's own PullRequestNode case
             // (rather than a private duplicate of the same check) so that
             // case is the one place this decision is made.
-            if (!narrowQuery.isEmpty() && !matchesNode(prNode, narrowQuery)) {
+            if (narrow && !matchesNode(prNode)) {
                 continue;
             }
             items.add(new TreeItem<>(prNode));
@@ -1276,7 +1421,7 @@ public final class RepositorySidebar extends VBox {
                     pullRequestGroupNodeFor(repository).ifPresent(fresh -> {
                         if (fresh instanceof SidebarNode.PullRequestGroupNode freshGroup) {
                             List<TreeItem<SidebarNode>> freshChildren = pullRequestChildItems(
-                                    freshGroup.outcome(), repository, pullRequestNarrowQuery(repository));
+                                    freshGroup.outcome(), repository, pullRequestShouldNarrow(repository));
                             // Most calls here repaint content that did not
                             // change at all -- a completion whose outcome
                             // matched what was stored, and the group's own
@@ -1315,9 +1460,14 @@ public final class RepositorySidebar extends VBox {
      * turning Space into "Clear filters". The banner form moves no focus at
      * all, because nothing leaves the scene.
      */
-    private void showEmptyState(boolean nothingMatched, boolean treeIsEmpty) {
+    private void showEmptyState(boolean nothingMatched, boolean treeIsEmpty, boolean survivorsExist) {
         boolean swap = nothingMatched && treeIsEmpty;
         boolean banner = nothingMatched && !treeIsEmpty;
+        // Survivors exist but none is selected (an explicit deselect, or the
+        // initial build before the first pick): show a placeholder in the
+        // tree's place instead of the "nothing matched" banner -- the
+        // subtab strip above is what the user picks from.
+        boolean placeholder = !nothingMatched && treeIsEmpty && survivorsExist;
 
         Node focusOwner = getScene() == null ? null : getScene().getFocusOwner();
 
@@ -1328,13 +1478,19 @@ public final class RepositorySidebar extends VBox {
             if (treeHadFocus) {
                 emptyState.getChildren().get(1).requestFocus();
             }
-        } else if (!swap && getChildren().contains(emptyState)) {
+        } else if (placeholder && !getChildren().contains(selectRepoPlaceholder)) {
+            getChildren().set(getChildren().indexOf(tree), selectRepoPlaceholder);
+            VBox.setVgrow(selectRepoPlaceholder, Priority.ALWAYS);
+        } else if (!swap && !placeholder && getChildren().contains(emptyState)) {
             boolean buttonHadFocus = isDescendantOf(focusOwner, emptyState);
             getChildren().set(getChildren().indexOf(emptyState), tree);
             VBox.setVgrow(tree, Priority.ALWAYS);
             if (buttonHadFocus) {
                 filterField.requestFocus();
             }
+        } else if (!swap && !placeholder && getChildren().contains(selectRepoPlaceholder)) {
+            getChildren().set(getChildren().indexOf(selectRepoPlaceholder), tree);
+            VBox.setVgrow(tree, Priority.ALWAYS);
         }
         emptyBanner.setVisible(banner);
         emptyBanner.setManaged(banner);
@@ -1462,10 +1618,6 @@ public final class RepositorySidebar extends VBox {
         newSessionMenus.keySet().retainAll(repoIds);
         unopenedTooltips.keySet().retainAll(worktreePaths);
         unopenedMenus.keySet().retainAll(worktreePaths);
-        collapsed.retainAll(repoIds);
-        if (collapsedBeforeFilter != null) {
-            collapsedBeforeFilter.retainAll(repoIds);
-        }
         staleBucketExpanded.retainAll(repoIds);
         lockedBucketExpanded.retainAll(repoIds);
         pullRequestsExpanded.retainAll(repoIds);
@@ -1548,8 +1700,8 @@ public final class RepositorySidebar extends VBox {
     /**
      * Mirrors the currently selected session tab into the tree: selects the
      * matching row and -- only while the sidebar is actually attached to
-     * the scene, so a collapsed sidebar (⌘0) is never disturbed -- expands
-     * its repository node and scrolls the row into view. The scroll fires
+     * the scene, so a collapsed sidebar (⌘0) is never disturbed -- scrolls
+     * the row into view. The scroll fires
      * once per active-session change, not on every status-refresh rebuild.
      */
     private void syncActiveSelection() {
@@ -1578,16 +1730,16 @@ public final class RepositorySidebar extends VBox {
         }
         boolean sidebarShowing = getScene() != null;
         boolean activeChanged = !active.equals(lastRevealedSession);
-        if (sidebarShowing && activeChanged) {
-            match.getParent().setExpanded(true);
-        }
+        // The repo pane is always expanded (a subtab selects it; it never
+        // collapses), so the row is always visible once its repo is the
+        // selected subtab. Select it and scroll it into view on an
+        // active-session change.
         // Select only while the row is actually visible: TreeView's
         // selection model force-expands collapsed ancestors of a hidden
-        // selection target, which would re-open a repository the user just
-        // collapsed on every subsequent rebuild. Visibility is checked via
-        // the parent's expanded state, NOT getRow() -- getRow() reports an
-        // index for rows under a collapsed parent too (it counts as if
-        // everything were expanded), so it cannot serve as this guard.
+        // selection target. Visibility is checked via the parent's expanded
+        // state, NOT getRow() -- getRow() reports an index for rows under a
+        // collapsed parent too (it counts as if everything were expanded),
+        // so it cannot serve as this guard.
         if (match.getParent().isExpanded()) {
             if (tree.getSelectionModel().getSelectedItem() != match) {
                 tree.getSelectionModel().select(match);
@@ -1662,16 +1814,16 @@ public final class RepositorySidebar extends VBox {
         return SidebarChildren.classify(worktrees, sessionsFor(repository), viewModel::activityOf);
     }
 
-    private boolean matchesRepo(Repository repository, String query) {
-        if (repository.displayName().toLowerCase(Locale.ROOT).contains(query)) {
+    private boolean matchesRepo(Repository repository) {
+        if (queryMatcher.matches(repository.displayName())) {
             return true;
         }
         GitStatus status = viewModel.repoStatus(repository.id()).orElse(null);
-        return status != null && UiFormats.branchText(status).toLowerCase(Locale.ROOT).contains(query);
+        return status != null && queryMatcher.matches(UiFormats.branchText(status));
     }
 
     /** Whether one worktree/session row matches the filter: session name, branch, or worktree path. */
-    private boolean matchesNode(SidebarNode node, String query) {
+    private boolean matchesNode(SidebarNode node) {
         return switch (node) {
             case SidebarNode.RepoNode repoNode -> false;
             case SidebarNode.SessionNode sessionNode -> {
@@ -1683,32 +1835,32 @@ public final class RepositorySidebar extends VBox {
                         text.append(' ').append(UiFormats.branchText(status));
                     }
                 });
-                yield text.toString().toLowerCase(Locale.ROOT).contains(query);
+                yield queryMatcher.matches(text.toString());
             }
             case SidebarNode.UnopenedWorktreeNode worktreeNode -> {
                 String text = worktreeNode.worktree().branch().orElse("")
                         + " " + worktreeNode.worktree().path();
-                yield text.toLowerCase(Locale.ROOT).contains(query);
+                yield queryMatcher.matches(text);
             }
             case SidebarNode.StaleWorktreesNode staleNode -> staleNode.worktrees().stream().anyMatch(worktree -> {
                 String text = worktree.branch().orElse("") + " " + worktree.path();
-                return text.toLowerCase(Locale.ROOT).contains(query);
+                return queryMatcher.matches(text);
             });
             case SidebarNode.LockedWorktreesNode lockedNode -> lockedNode.worktrees().stream().anyMatch(worktree -> {
                 String text = worktree.branch().orElse("") + " " + worktree.path();
-                return text.toLowerCase(Locale.ROOT).contains(query);
+                return queryMatcher.matches(text);
             });
-            case SidebarNode.PullRequestNode pullRequestNode -> matchesPullRequest(pullRequestNode.pullRequest(), query);
+            case SidebarNode.PullRequestNode pullRequestNode -> matchesPullRequest(pullRequestNode.pullRequest());
             case SidebarNode.PullRequestGroupNode groupNode ->
                     groupNode.outcome() instanceof RepositoryPullRequests.Outcome.Rows rows
-                            && rows.pullRequests().stream().anyMatch(pullRequest -> matchesPullRequest(pullRequest, query));
+                            && rows.pullRequests().stream().anyMatch(this::matchesPullRequest);
         };
     }
 
     /** A pull request matches on its number, title or head branch -- the same fields the row renders. */
-    private static boolean matchesPullRequest(GhCliService.OpenPullRequest pullRequest, String query) {
+    private boolean matchesPullRequest(GhCliService.OpenPullRequest pullRequest) {
         String text = "#" + pullRequest.number() + " " + pullRequest.title() + " " + pullRequest.headRefName();
-        return text.toLowerCase(Locale.ROOT).contains(query);
+        return queryMatcher.matches(text);
     }
 
     /**
@@ -1814,17 +1966,17 @@ public final class RepositorySidebar extends VBox {
                     // the very first landing corrects any earlier scan that
                     // had to run before discovery had anything to dedup
                     // against (worktreeListChanged's `previous == null`
-                    // case). A collapsed repo's worktree discovery still
+                    // case). A deselected repo's worktree discovery still
                     // runs as it always has, but must not cascade into a
-                    // `gh pr list` spawn for a row nobody is looking at --
+                    // `gh pr list` spawn for a repo nobody is looking at --
                     // marked stale instead of rescanned, so ANY outcome it
                     // already holds is known to need a fresh scan without
                     // actually running one, and pullRequestScanDue (via
-                    // pullRequestsStale) picks it up the moment the repo is
-                    // next expanded. A repo NOT collapsed rescans right
-                    // away, same as before.
+                    // pullRequestsStale) picks it up the moment the repo's
+                    // subtab is next selected. The selected repo rescans
+                    // right away, same as before.
                     if (worktreeListChanged(previous, worktrees)) {
-                        if (collapsed.contains(repository.id())) {
+                        if (!isSelectedRepo(repository.id())) {
                             pullRequestsStale.add(repository.id());
                         } else {
                             refreshPullRequests(repository);
@@ -1846,12 +1998,13 @@ public final class RepositorySidebar extends VBox {
      * its (now orphaned) id, but {@code rebuildTree} only ever iterates
      * {@code repositoryManager.repositories()}, so it is simply never
      * rendered. Always a no-op for a remote repository, which has no local
-     * checkout to ask {@code gh} about. Four call sites: repository add and
-     * repo-row expansion (both via {@link #rebuildTree()}, gated by {@link
-     * #pullRequestScanDue}), the ⟳ rescan, and {@link #refreshWorktrees}'s
-     * completion re-running this whenever the worktree list actually
-     * changes AND the repo is expanded (a collapsed repo is marked {@link
-     * #pullRequestsStale} instead -- see that method).
+     * checkout to ask {@code gh} about. Three call sites: repository add
+     * and subtab selection (both via {@link #rebuildTree()}, gated by
+     * {@link #pullRequestScanDue}), the ⟳ rescan, and {@link
+     * #refreshWorktrees}'s completion re-running this whenever the worktree
+     * list actually changes AND the repo's subtab is selected (a deselected
+     * repo is marked {@link #pullRequestsStale} instead -- see that
+     * method).
      *
      * <p>A request arriving while a scan is already in flight is NOT
      * simply dropped: {@link #shouldQueuePullRequestRescan} compares the
@@ -2318,11 +2471,6 @@ public final class RepositorySidebar extends VBox {
         }
 
         private StackPane buildRepoRow(Repository repository) {
-            Label caret = new Label("▶");
-            caret.getStyleClass().add("repo-caret");
-            boolean expanded = getTreeItem() != null && getTreeItem().isExpanded();
-            caret.setRotate(expanded ? 90 : 0);
-
             Label name = new Label(repository.displayName());
             name.getStyleClass().add("repo-name");
             // Keep the truncation `name` had when it sat directly in the VBox:
@@ -2420,19 +2568,10 @@ public final class RepositorySidebar extends VBox {
             HBox actions = new HBox(2, rescan, newSession);
             actions.setAlignment(Pos.CENTER_RIGHT);
 
-            HBox row = new HBox(7, caret, text, count);
+            HBox row = new HBox(7, text, count);
             row.getStyleClass().add("repo-row");
             row.setAlignment(Pos.CENTER_LEFT);
-            row.setOnMouseClicked(event -> {
-                if (event.getButton() == MouseButton.PRIMARY && getTreeItem() != null) {
-                    boolean nowExpanded = !getTreeItem().isExpanded();
-                    getTreeItem().setExpanded(nowExpanded);
-                    RotateTransition rotate = new RotateTransition(Duration.seconds(0.12), caret);
-                    rotate.setToAngle(nowExpanded ? 90 : 0);
-                    rotate.play();
-                    event.consume();
-                }
-            });
+
             // Diag-only override folded into the same binding, not a
             // separate unbind path -- see diagForceHoverRow.
             actions.visibleProperty().bind(hoverProperty().or(
