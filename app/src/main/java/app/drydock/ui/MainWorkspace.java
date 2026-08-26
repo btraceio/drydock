@@ -841,6 +841,61 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         modalLayer.show(modal);
     }
 
+    /**
+     * Starts a fresh, parallel session in an existing session's own checkout
+     * -- the same worktree or main checkout, with no context transferred --
+     * so a second agent can investigate alongside a running or idle one. The
+     * Start-session modal is reused exactly as for an unopened worktree:
+     * the human picks an agent and an optional task, and the new session is
+     * launched from the same directory as {@code session}. Nothing about
+     * {@code session} itself changes; the two rows coexist independently.
+     *
+     * <p>There is no duplicate-open guard keyed on the working directory: the
+     * only duplicate protection in {@link SessionManager} is on the agent
+     * conversation id, which a brand-new session does not have yet, so a
+     * parallel session is allowed by construction. {@code branchCreatedHere}
+     * is copied from {@code session} so the parallel row's later delete offer
+     * matches the original's ownership of the branch.</p>
+     */
+    @Override
+    public void startParallelSession(ManagedAgentSession session) {
+        Optional<Repository> owner = repositoryFor(session);
+        if (owner.isEmpty()) {
+            return;
+        }
+        Repository repository = owner.get();
+        if (modalLayer == null) {
+            return;
+        }
+        boolean requireRemote = repository.isRemote();
+        Optional<AgentKind> defaultKind = agentRegistry.resolveDefault(repository.settings().lastUsedAgent(),
+                requireRemote);
+        if (defaultKind.isEmpty()) {
+            showNoAgentAvailable();
+            return;
+        }
+        Optional<Path> worktreeRoot = session.worktreeRoot();
+        Path checkoutPath = worktreeRoot.orElseGet(repository::root);
+        // Resolve the branch label the same way the session row does, so the
+        // modal's "◫ <branch> · <path>" chip matches what the sidebar already
+        // shows for this row.
+        GitStatus status = worktreeRoot
+                .map(root -> viewModel.worktreeStatus(root).orElse(null))
+                .orElseGet(() -> viewModel.repoStatus(repository.id()).orElse(null));
+        String branch = status != null ? UiFormats.branchText(status)
+                : (worktreeRoot.isPresent() ? session.displayName() : repository.displayName());
+        StartSessionModal modal = new StartSessionModal(branch, checkoutPath, agentRegistry, defaultKind.get(),
+                requireRemote, remoteOf(repository), modalLayer::close, (task, agent, eval) -> {
+            if (worktreeRoot.isPresent()) {
+                openNewWorktreeSession(repository, branch, worktreeRoot.get(), task,
+                        session.branchCreatedHere(), agent, eval);
+            } else {
+                openNewSession(repository, task, agent, eval);
+            }
+        });
+        modalLayer.show(modal);
+    }
+
     /** Wires where new terminals read the current theme from (design: terminal follows the app theme). */
     public void setThemeProvider(Supplier<UiTheme> provider) {
         this.themeProvider = provider == null ? () -> UiTheme.DARK : provider;

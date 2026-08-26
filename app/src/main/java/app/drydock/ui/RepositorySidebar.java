@@ -2988,6 +2988,9 @@ public final class RepositorySidebar extends VBox {
             MenuItem resume = new MenuItem("Resume");
             resume.setOnAction(e -> withLiveSession(id, navigator::resumeSession));
 
+            MenuItem parallel = new MenuItem("New session here");
+            parallel.setOnAction(e -> withLiveSession(id, navigator::startParallelSession));
+
             MenuItem rename = new MenuItem("Rename…");
             rename.setOnAction(e -> withLiveSession(id, navigator::promptRenameSession));
 
@@ -3009,7 +3012,7 @@ public final class RepositorySidebar extends VBox {
                     navigator.showReviewForSession(id, SessionReviewScopes.Choice.PULL_REQUEST));
 
             ContextMenu menu = new ContextMenu();
-            menu.getItems().addAll(resume, rename, stop, delete,
+            menu.getItems().addAll(resume, parallel, rename, stop, delete,
                     new SeparatorMenuItem(), reviewLocal, reviewPullRequest,
                     new SeparatorMenuItem(), reveal);
             // Relabelled on every showing, not once at build: this menu is
