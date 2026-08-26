@@ -202,56 +202,63 @@ class RepositorySidebarPullRequestDedupFxTest extends ApplicationTest {
     }
 
     /**
-     * B1, and the laziness N2 restored: a repo's worktree list changing
-     * while its row is collapsed must not spawn an automatic PR scan (that
-     * would be a {@code gh pr list} network spawn for a row nobody is
-     * looking at), but the resulting stale outcome must not be stranded
-     * either -- expanding the row has to notice and rescan. Without B1,
-     * {@code needsPullRequestScan} alone cannot tell "scanned" from
-     * "scanned, but a worktree appeared since" apart, so the mark from the
-     * collapsed skip is the only thing that can recover it.
+     * B1, and the laziness N2 restored: a repo whose subtab is NOT selected
+     * is a repo nobody is looking at, so its worktree list changing must not
+     * spawn an automatic PR scan (that would be a {@code gh pr list} network
+     * spawn for a repo nobody is looking at), but the resulting stale
+     * outcome must not be stranded either -- reselecting its subtab has to
+     * notice and rescan. Without B1, {@code needsPullRequestScan} alone
+     * cannot tell "scanned" from "scanned, but a worktree appeared since"
+     * apart, so the mark from the not-selected skip is the only thing that
+     * can recover it.
+     *
+     * <p>Driven through the workspace seam ({@link
+     * RepositorySidebar#refreshWorktreesFor}) rather than the ⟳ button: the
+     * rescan button lives on the repo row, which a deselected repo does not
+     * show, so there is no button to click while "not looking". The seam
+     * is exactly the path a real materialization takes to land a new
+     * worktree.
      */
     @Test
-    void aRepoThatChangesWorktreesWhileCollapsedSelfHealsOnExpand() throws Exception {
+    void aRepoThatChangesWorktreesWhileNotSelectedSelfHealsOnReselect() throws Exception {
         awaitCallCount(1, "the first PR scan");
         source.complete(0, listing(pr(7, "Fix login", "pr-7")));
         WaitForAsyncUtils.waitForFxEvents();
         assertTrue(groupRowPresent(), "PR #7 has no worktree yet: its group row must be present");
 
-        interact(() -> sidebar.diagSetRepoExpanded(repository.id(), false)); // collapse
+        // Deselect the repo's subtab: nobody is looking at it now.
+        interact(() -> sidebar.diagSetRepoExpanded(repository.id(), false));
 
         git(repoRoot, "branch", "pr-7");
-        Path worktreePath = newWorktreePath("pr-7-collapsed-worktree");
+        Path worktreePath = newWorktreePath("pr-7-deselected-worktree");
         git(repoRoot, "worktree", "add", worktreePath.toString(), "pr-7");
 
-        clickRescan();
-        awaitCallCount(2, "the rescan's own direct PR scan (fired by the click regardless of collapse)");
-        source.complete(1, listing(pr(7, "Fix login", "pr-7")));
-        WaitForAsyncUtils.waitForFxEvents();
+        // Drive the worktree rescan through the workspace seam -- the ⟳
+        // button lives on the repo row, which a deselected repo does not show.
+        interact(() -> sidebar.refreshWorktreesFor(repository));
 
         // N2: the worktree rescan's completion notices the list changed
-        // but must NOT spawn a third scan while the repo stays collapsed.
+        // but must NOT spawn a second scan while the repo stays deselected.
         // Wait on the observable rather than on the clock: once the view
         // model holds the new list, the runLater that wrote it -- and
-        // therefore the collapsed-vs-rescan decision it makes right
+        // therefore the selected-vs-stale decision it makes right
         // afterwards, in the same FX task -- has already run to completion
-        // (viewModelSeesPr7Worktree drains the FX queue). A fixed sleep
-        // instead passes vacuously on any machine where `git worktree list`
-        // outlasts it.
+        // (viewModelSeesPr7Worktree drains the FX queue).
         awaitCondition(this::viewModelSeesPr7Worktree,
-                "the collapsed repo's worktree rescan landing its new list");
-        assertEquals(2, source.callCount(),
-                "a collapsed repo's worktree change must not spawn an automatic PR scan on its own (N2)");
+                "the deselected repo's worktree rescan landing its new list");
+        assertEquals(1, source.callCount(),
+                "a deselected repo's worktree change must not spawn an automatic PR scan on its own (N2)");
 
-        interact(() -> sidebar.diagSetRepoExpanded(repository.id(), true)); // expand
+        // Reselect the subtab.
+        interact(() -> sidebar.diagSetRepoExpanded(repository.id(), true));
 
-        // B1: expanding must notice the outcome is stale (marked so by the
-        // collapsed skip above) and rescan -- otherwise PR #7 keeps a row
-        // despite now having a local worktree, forever.
-        awaitCallCount(3, "the rescan B1 fires on expand for a repo marked stale while collapsed");
-        assertTrue(hasPr7(worktreeListAt(2)),
-                "the expand-triggered rescan must use the worktree list that already includes pr-7");
-        source.complete(2, listing(pr(7, "Fix login", "pr-7")));
+        // B1: reselecting must notice the outcome is stale (marked so by
+        // the not-selected skip above) and rescan -- otherwise PR #7 keeps
+        // a row despite now having a local worktree, forever.
+        awaitCallCount(2, "the rescan B1 fires on reselect for a repo marked stale while not selected");
+        assertTrue(hasPr7(worktreeListAt(1)),
+                "the reselect-triggered rescan must use the worktree list that already includes pr-7");
+        source.complete(1, listing(pr(7, "Fix login", "pr-7")));
         WaitForAsyncUtils.waitForFxEvents();
 
         awaitCondition(() -> !groupRowPresent(), "the group row disappearing once the dedup sees the new worktree");
