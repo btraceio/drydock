@@ -372,7 +372,17 @@ final class ReviewDiffColumn extends BorderPane {
         // this column today. Node.requestFocus() does not require
         // focusTraversable -- that flag only gates the Tab engine -- so this
         // does not reopen Tab-key traversal into the list.
-        list.addEventFilter(MouseEvent.MOUSE_PRESSED, e -> list.requestFocus());
+        list.addEventFilter(MouseEvent.MOUSE_PRESSED, e -> {
+            // TEMPORARY: investigating a CI-only failure where a TestFX
+            // press never lands real focus here (see
+            // SessionReviewView#diagFocusInDiffColumn's javadoc, and
+            // ReviewViewFixture#focusDiffColumn). Confirms whether the press
+            // ever reaches this filter at all on CI, and what it actually
+            // hit -- remove once that investigation closes.
+            System.out.println("[diag] review-diff-list MOUSE_PRESSED target=" + e.getTarget()
+                    + " sceneXY=" + e.getSceneX() + "," + e.getSceneY());
+            list.requestFocus();
+        });
         list.setCellFactory(view -> new DiffCell());
         // Long lines wrap; the column never scrolls sideways. See
         // viewportWidth for what this replaces.
