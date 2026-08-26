@@ -12,6 +12,7 @@ import app.drydock.git.BranchNameRules;
 import app.drydock.git.BranchRef;
 import app.drydock.git.GitBranchState;
 import app.drydock.git.GitCommandFailedException;
+import app.drydock.git.GitException;
 import app.drydock.git.GitExecutableNotFoundException;
 import app.drydock.git.GitStatus;
 import app.drydock.git.GitStatusService;
@@ -22,6 +23,7 @@ import app.drydock.git.WorktreeNotCleanException;
 import app.drydock.git.WorktreeService;
 import app.drydock.git.WorktreeService.Worktree;
 import app.drydock.review.AnnotationStore;
+import app.drydock.review.RecheckAssessment;
 import app.drydock.git.DiffScope;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
@@ -53,6 +55,8 @@ import java.util.concurrent.TimeoutException;
 import java.util.function.BiFunction;
 import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * The production {@link McpSessionContext}: the running workspace's answer to
@@ -71,6 +75,8 @@ import java.util.function.UnaryOperator;
  * Both do their own FX-thread hop inside {@code MainWorkspace}, never here.</p>
  */
 public final class WorkspaceMcpSessionContext implements McpSessionContext {
+
+    private static final Logger LOG = Logger.getLogger(WorkspaceMcpSessionContext.class.getName());
 
     /**
      * Bound on every wait. Generous enough for a cold {@code git} spawn on a
@@ -325,6 +331,11 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
     }
 
     @Override
+    public List<ReviewIntent> intentsOf(String scopeId, UnifiedDiff diff) {
+        return intentGrouping.intentsFor(scopeId, diff);
+    }
+
+    @Override
     public void upsertFindings(List<ReviewAnnotation> findings) {
         findings.forEach(annotationStore::upsert);
         annotationStore.flushPendingSaves();
@@ -338,6 +349,29 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
     @Override
     public List<ReviewVerdict> verdictsOf(String scopeId) {
         return annotationStore.verdictsFor(scopeId);
+    }
+
+    /**
+     * Resolved inline on the request thread, unlike the board's cached
+     * baseline: this runs off the FX thread already, and handing {@code
+     * review_recheck} a first-call-always-unresolved answer -- which it would
+     * refuse on -- is worse than one {@code git rev-parse}.
+     */
+    @Override
+    public Optional<String> currentReviewBase(ReviewScope scope) {
+        try {
+            return gitStatusService.commitForRefBlocking(scope.diffRoot(), scope.base());
+        } catch (GitException e) {
+            LOG.log(Level.WARNING, "Could not resolve the base of review scope " + scope.id()
+                    + ": " + e.getMessage());
+            return Optional.empty();
+        }
+    }
+
+    @Override
+    public void putAssessments(List<RecheckAssessment> assessments) {
+        assessments.forEach(annotationStore::putAssessment);
+        annotationStore.flushPendingSaves();
     }
 
     @Override

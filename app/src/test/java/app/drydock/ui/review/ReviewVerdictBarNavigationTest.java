@@ -1,5 +1,6 @@
 package app.drydock.ui.review;
 
+import app.drydock.ui.TestStages;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewVerdict;
 import javafx.scene.Scene;
@@ -29,10 +30,15 @@ class ReviewVerdictBarNavigationTest extends ApplicationTest {
     @Override
     public void start(Stage stage) {
         bar = new ReviewVerdictBar(new ReviewVerdictBar.Host() {
-            @Override public void approve(ReviewIntent intent) { calls.add("approve"); }
-            @Override public void requestChanges(ReviewIntent intent) { calls.add("changes"); }
-            @Override public void askAgentToFix(ReviewIntent intent) { calls.add("ask"); }
+            @Override public void approve(ReviewIntent intent, SessionReviewView.SettleUnit unit) {
+                calls.add("approve");
+            }
+            @Override public void requestChanges(ReviewIntent intent, SessionReviewView.SettleUnit unit) {
+                calls.add("changes");
+            }
+            @Override public boolean askAgentToFix(ReviewIntent intent) { calls.add("ask"); return true; }
             @Override public void undo(ReviewIntent intent) { calls.add("undo"); }
+            @Override public void confirmStillGood(ReviewIntent intent) { calls.add("confirm"); }
             @Override public void nextUnsettled() { calls.add("nextUnsettled"); }
             @Override public void submit() { calls.add("submit"); }
             @Override public void previousIntent() { calls.add("previous"); }
@@ -42,13 +48,12 @@ class ReviewVerdictBarNavigationTest extends ApplicationTest {
         scene.getStylesheets().addAll(
                 getClass().getResource("/app/drydock/ui/app.css").toExternalForm(),
                 getClass().getResource("/app/drydock/ui/theme-dark.css").toExternalForm());
-        stage.setScene(scene);
-        stage.show();
+        TestStages.show(stage, scene);
     }
 
     @Test
     void theBarNamesTheIntentItIsSettling() {
-        interact(() -> bar.update(intent(2, "Rename the parser"), Optional.empty(), false, 1, 4));
+        interact(() -> bar.update(intent(2, "Rename the parser"), Optional.empty(), false));
 
         assertEquals("2 · Rename the parser",
                 ((Label) lookup(".review-verdict-intent").query()).getText());
@@ -56,7 +61,7 @@ class ReviewVerdictBarNavigationTest extends ApplicationTest {
 
     @Test
     void theNavigationControlsReachTheSameActionsAsTheKeys() {
-        interact(() -> bar.update(intent(2, "Rename the parser"), Optional.empty(), false, 1, 4));
+        interact(() -> bar.update(intent(2, "Rename the parser"), Optional.empty(), false));
 
         interact(() -> ((Button) lookup(".review-verdict-previous").query()).fire());
         interact(() -> ((Button) lookup(".review-verdict-next").query()).fire());
@@ -66,7 +71,7 @@ class ReviewVerdictBarNavigationTest extends ApplicationTest {
 
     @Test
     void withNoIntentTheBarSaysSoAndDisablesNavigation() {
-        interact(() -> bar.update(null, Optional.empty(), false, 0, 0));
+        interact(() -> bar.update(null, Optional.empty(), false));
 
         assertEquals("no intent", ((Label) lookup(".review-verdict-intent").query()).getText());
         assertTrue(((Button) lookup(".review-verdict-next").query()).isDisabled());

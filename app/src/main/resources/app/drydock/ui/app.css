@@ -2606,12 +2606,14 @@
     -fx-border-radius: 8px 8px 0 0;
 }
 .review-diff-cell.card-body > .review-code-row,
-.review-diff-cell.card-body > .review-collapsed-run {
+.review-diff-cell.card-body > .review-collapsed-run,
+.review-diff-cell.card-body > .review-link-row {
     -fx-border-color: transparent -drydock-border transparent -drydock-border;
     -fx-border-width: 0 1 0 1;
 }
 .review-diff-cell.card-bottom > .review-code-row,
-.review-diff-cell.card-bottom > .review-collapsed-run {
+.review-diff-cell.card-bottom > .review-collapsed-run,
+.review-diff-cell.card-bottom > .review-link-row {
     -fx-border-color: transparent -drydock-border -drydock-border -drydock-border;
     -fx-border-width: 0 1 1 1;
     -fx-background-radius: 0 0 8px 8px;
@@ -2781,6 +2783,31 @@
     -fx-border-width: 0 0 0 2;
 }
 
+/* A hunk's link footer (Task 19, spec §7.2): what it has to do with a hunk
+ * elsewhere in the diff. Built the same way .review-collapsed-run is --
+ * Button.setText with its OWN -fx-text-fill here -- rather than the
+ * .review-path-row fix (child Labels), because a footer is one line with no
+ * internal parts that need different emphasis. Left unfixed it would be
+ * Task 18's defect again: modena's light-button default text colour against
+ * this column's dark background, 1.13:1 measured there. */
+.review-link-row {
+    -fx-background-color: -drydock-code-bg;
+    -fx-background-radius: 0;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 10.5px;
+    -fx-alignment: center-left;
+    -fx-cursor: hand;
+}
+.review-link-row:hover {
+    -fx-text-fill: -drydock-text;
+    -fx-background-color: -drydock-hover;
+}
+.review-link-row:focused {
+    -fx-text-fill: -drydock-text;
+    -fx-border-color: -drydock-accent;
+    -fx-border-width: 0 0 0 2;
+}
+
 /* Density (spec 4.8) -- code font size and row height. The px literals are
    what UiFontScale scales, so density stays a relative choice on top of the
    user's absolute interface size.
@@ -2798,7 +2825,8 @@
     -fx-font-size: 12.5px;
 }
 .density-cozy .review-code-row,
-.density-cozy .review-collapsed-run {
+.density-cozy .review-collapsed-run,
+.density-cozy .review-link-row {
     -fx-min-height: 20px;
     -fx-padding: 0 10 0 10;
 }
@@ -2808,7 +2836,8 @@
     -fx-font-size: 11.5px;
 }
 .density-compact .review-code-row,
-.density-compact .review-collapsed-run {
+.density-compact .review-collapsed-run,
+.density-compact .review-link-row {
     -fx-min-height: 16px;
     -fx-padding: 0 10 0 10;
 }
@@ -2818,7 +2847,8 @@
     -fx-font-size: 11px;
 }
 .density-dense .review-code-row,
-.density-dense .review-collapsed-run {
+.density-dense .review-collapsed-run,
+.density-dense .review-link-row {
     -fx-min-height: 14px;
     -fx-padding: 0 10 0 10;
 }
@@ -3140,6 +3170,15 @@
     -fx-border-color: -drydock-blocking;
     -fx-text-fill: -drydock-text-faint;
 }
+/* The same, for a non-primary action that refused: "Ask the agent to fix it"
+   when there is no session to hand anything to. Its own rule rather than a
+   relaxed selector, so the primary's transparent-background treatment above
+   is not silently applied to every action button that ever gains the
+   pseudo-class. */
+.review-verdict-action:refused {
+    -fx-border-color: -drydock-blocking;
+    -fx-text-fill: -drydock-text-faint;
+}
 .review-verdict-refusal {
     -fx-text-fill: -drydock-blocking;
     -fx-font-size: 11px;
@@ -3193,6 +3232,14 @@
     -fx-padding: 0 6 8 6;
     -fx-spacing: 4;
 }
+/* The provisional-grouping banner: its own wrapped row, never sharing space
+ * with the header's N/M counter -- see ReviewIntentRail#pendingBanner. */
+.review-intent-pending {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 11px;
+    -fx-font-style: italic;
+    -fx-padding: 0 10 6 10;
+}
 .review-intent-card {
     -fx-background-color: transparent;
     -fx-background-radius: 6px;
@@ -3201,6 +3248,27 @@
     -fx-padding: 7 8 7 8;
     -fx-alignment: center-left;
     -fx-cursor: hand;
+}
+/* A claimed ordering is the agent's assertion, not drydock's measurement
+ * (spec §6.5). Only the claimed case is modified -- marking every row would
+ * say nothing.
+ *
+ * Dashed AND lifted off -drydock-border. Dashing alone was the first attempt
+ * and was not legible: -drydock-border is rgba(255,255,255,0.08), about
+ * 1.26:1 against this rail, so removing half of it is half the ink of a
+ * hairline nobody can see -- Task 18's 1.13:1 defect in a new place. The
+ * colour is -drydock-text-faint, which is NEUTRAL: the point of not using a
+ * hue is that four risk encodings already compete for colour here, and a
+ * neutral grey is not a fifth. */
+/* The stale chip when an AGENT asserted the move disturbed this hunk (spec
+ * §9.7). A Label, not a bordered card, so the card rule below cannot carry it
+ * -- and the word "agent:" in the text is the part that survives any theme. */
+.review-intent-stale.provenance-claimed {
+    -fx-font-style: italic;
+}
+.review-intent-card.provenance-claimed {
+    -fx-border-color: -drydock-text-faint;
+    -fx-border-style: segments(3, 3) line-cap round;
 }
 .review-intent-card.collapsed {
     -fx-padding: 7 0 7 0;
@@ -3215,6 +3283,14 @@
 /* Settled intents dim; the verdict below them says why. */
 .review-intent-card.settled { -fx-opacity: 0.5; }
 .review-intent-card.settled:selected { -fx-opacity: 1; }
+/* Stale: settled, but against a base that has since moved under it. It must
+ * not read as done, so it keeps a full-strength border and its own accent. */
+.review-intent-card.stale { -fx-border-color: -drydock-question; -fx-opacity: 1; }
+/* Adrift: the section's hunk ids name nothing in the current diff. Dimmed
+ * like a settled card, because there is nothing here to read either -- but
+ * it is not settled, so it keeps its own muted border rather than the
+ * verdict colours. */
+.review-intent-card.adrift { -fx-opacity: 0.55; -fx-border-color: -drydock-border; }
 
 .review-intent-number {
     -fx-text-fill: -drydock-text-faint;
@@ -3275,6 +3351,41 @@
     -fx-font-style: italic;
 }
 
+/* PATH mode's rows (ReviewIntentRail#buildPathRow, Task 18 follow-up):
+ * mirrors .review-intent-number/.review-intent-title exactly, fill for
+ * fill, unselected and selected both. A row built from Button.setText alone
+ * has no -fx-text-fill of its own here -- .review-intent-card sets border
+ * and background only -- so it fell back to modena's default BUTTON text
+ * colour (tuned for a light button face) against this rail's dark
+ * background: 1.13:1 contrast on the SELECTED row, measured on a real
+ * screenshot, worse than the 1.70:1 the unselected rows still failed at.
+ * Every part of a row lives on its own Label now, so every part gets its
+ * own explicit fill instead of inheriting one meant for something else. */
+.review-path-badge {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10.5px;
+    -fx-font-weight: 700;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.review-intent-card:selected .review-path-badge { -fx-text-fill: -drydock-accent; }
+.review-path-file {
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 12px;
+    -fx-font-weight: 600;
+}
+.review-intent-card:selected .review-path-file { -fx-text-fill: -drydock-text; }
+.review-path-reason {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10.5px;
+}
+.review-intent-card:selected .review-path-reason { -fx-text-fill: -drydock-text-dim; }
+.review-path-links {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 9.5px;
+    -fx-font-style: italic;
+}
+.review-intent-card:selected .review-path-links { -fx-text-fill: -drydock-text-dim; }
+
 /* The risk heat bar: one bar, keyed to the intent's own risk. */
 .review-intent-heat {
     -fx-min-height: 3px;
@@ -3293,6 +3404,26 @@
 .review-intent-settled.decision-approved,
 .review-intent-settled.decision-auto-approved { -fx-text-fill: -drydock-resolved; }
 .review-intent-settled.decision-changes { -fx-text-fill: -drydock-question; }
+
+/* Part-settled, settled by a section that shares the hunk, and stale: three
+ * states a card had no way to say before hunks became the unit of approval. */
+.review-intent-hunk-progress {
+    -fx-font-size: 9.5px;
+    -fx-text-fill: -drydock-text-faint;
+}
+.review-intent-settled-elsewhere {
+    -fx-font-size: 9.5px;
+    -fx-text-fill: -drydock-resolved;
+}
+.review-intent-stale {
+    -fx-font-size: 9.5px;
+    -fx-text-fill: -drydock-question;
+}
+.review-intent-adrift {
+    -fx-font-size: 9.5px;
+    -fx-font-style: italic;
+    -fx-text-fill: -drydock-text-faint;
+}
 
 /* Collapsed: a status dot, never a clipped label. */
 .review-intent-dot {
@@ -3498,6 +3629,50 @@
 }
 .review-lens-line:hover { -fx-background-color: -drydock-hover; }
 .review-lens-line:focused { -fx-border-color: -drydock-accent; }
+
+/* The out-of-diff fan-in popover: the lens's frame on a third source. */
+.review-fanin-symbol {
+    -fx-text-fill: -drydock-code-fn;
+    -fx-font-size: 11px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-padding: 4 0 0 0;
+}
+.review-fanin-ask {
+    -fx-background-color: transparent;
+    -fx-background-radius: 6px;
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 6px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 10.5px;
+    -fx-alignment: center-left;
+    -fx-cursor: hand;
+}
+.review-fanin-ask:hover { -fx-background-color: -drydock-hover; }
+.review-fanin-ask:focused { -fx-border-color: -drydock-accent; }
+.review-fanin-notice {
+    -fx-text-fill: -drydock-dirty;
+    -fx-font-size: 10px;
+}
+
+/*
+ * The rail's fan-in count, as a control. Transparent and borderless: it
+ * wraps the reason Label already inside a card and must not read as a
+ * second card. Its TEXT lives on that child Label (.review-path-reason,
+ * which carries its own -fx-text-fill selected and not) -- a plain
+ * Button.setText here is the 1.13:1 contrast defect ReviewIntentRail
+ * documents.
+ */
+.review-fanin-count {
+    -fx-background-color: transparent;
+    -fx-background-radius: 4px;
+    -fx-border-color: transparent;
+    -fx-border-radius: 4px;
+    -fx-padding: 1 3 1 3;
+    -fx-alignment: top-left;
+    -fx-cursor: hand;
+}
+.review-fanin-count:hover { -fx-background-color: -drydock-hover; }
+.review-fanin-count:focused { -fx-border-color: -drydock-accent; }
 
 .review-mcp-panel {
     -fx-background-color: -drydock-code-bg;

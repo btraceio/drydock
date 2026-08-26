@@ -599,6 +599,14 @@ public final class DrydockApplication extends Application {
                             // over an hour.
                             case "quit" -> diagQuit(primaryStage);
                             case "shot" -> diagSnapshot(primaryStage, Path.of(arg));
+                            // Documented in this hook's comment since Task 18
+                            // and never implemented until now; it silently hit
+                            // the default branch below, which prints "mark".
+                            case "reviewkey" -> mainWorkspace.diagReviewKey(arg.strip());
+                            // Documented alongside reviewkey and unwired for
+                            // just as long; ReviewDiffColumn.diagOpenComposer
+                            // was already written and had no caller.
+                            case "comment" -> mainWorkspace.diagComment();
                             // forcebanner:<commits>/<files>, or
                             // forcebanner:none for a session that never wrote
                             // a brief, or forcebanner:<c>/<f>/dead for one
@@ -688,7 +696,19 @@ public final class DrydockApplication extends Application {
                             }
                             case "unwind" -> System.out.println("[diag] explorer unwind -> "
                                     + mainWorkspace.unwindExplorerOverlay());
-                            default -> System.out.println("[diag] mark " + arg);
+                            // mark is a real verb, not a fallthrough. It used to
+                            // BE the default, which is how an unwired verb --
+                            // reviewkey and comment were both documented from
+                            // Task 18 and never wired -- printed a plausible
+                            // beacon and did nothing. A driver could not tell a
+                            // synchronisation marker from a verb that does not
+                            // exist, so a run that did nothing looked like one
+                            // that worked.
+                            case "mark" -> System.out.println("[diag] mark " + arg);
+                            default -> System.out.println(
+                                    "[diag] UNKNOWN explorerScript verb '" + verb + "'"
+                                            + " -- nothing was done. Add a case in"
+                                            + " DrydockApplication or fix the script.");
                         }
                     });
                 }
@@ -1455,6 +1475,28 @@ public final class DrydockApplication extends Application {
                 // See the explorerScript driver for why every script has this.
                 case "quit" -> diagQuit(stage);
                 case "shot" -> diagSnapshot(stage, Path.of(arg));
+                // The Review board's out-of-diff fan-in popover, and a
+                // snapshot OF it: a Popup is its own window, so `shot` above
+                // photographs the board behind it rather than the popover.
+                case "fanin" -> System.out.println("[diag] fanin -> "
+                        + mainWorkspace.diagOpenFanIn());
+                case "popupshot" -> diagPopupSnapshot(Path.of(arg));
+                // Opening AND photographing in one FX block, not two script
+                // steps: the popover sets autoHide, and a diag run's window
+                // is not the focused one, so it closes itself the moment the
+                // pulse that opened it ends. "no popup window is showing" is
+                // what a two-step script actually captures.
+                case "faninshot" -> {
+                    // Focused FIRST. A Popup with autoHide closes itself the
+                    // instant its owner window loses (or never had) focus,
+                    // and a diag run's window is not the one the user is
+                    // looking at -- so without this the popover is gone
+                    // before the snapshot in the very same pulse.
+                    stage.toFront();
+                    stage.requestFocus();
+                    System.out.println("[diag] fanin -> " + mainWorkspace.diagOpenFanIn());
+                    diagPopupSnapshot(Path.of(arg));
+                }
                 // DIAG-ONLY, added for the sidebar row-layout visual pass: the
                 // row-overlay's hover fade and pickOnBounds=false passthrough
                 // have no other observable hook (Node.hoverProperty is driven
@@ -1504,7 +1546,13 @@ public final class DrydockApplication extends Application {
                 // the code. Two rounds were lost to a plausible-but-wrong
                 // theory that the picture had already contradicted.
                 case "fadeinfo" -> diagFadeInfo(sidebar, arg);
-                default -> System.out.println("[diag] mark " + arg);
+                // See the explorerScript dispatcher: mark is a verb, and an
+                // unrecognised one has to say so rather than impersonate it.
+                case "mark" -> System.out.println("[diag] mark " + arg);
+                default -> System.out.println(
+                        "[diag] UNKNOWN tabScript verb '" + verb + "'"
+                                + " -- nothing was done. Add a case in"
+                                + " DrydockApplication or fix the script.");
             }
         } catch (RuntimeException e) {
             System.out.println("[diag] tab step '" + verb + "' failed: " + e);
@@ -1660,7 +1708,34 @@ public final class DrydockApplication extends Application {
     }
 
     private static void diagSnapshot(Stage stage, Path target) {
-        WritableImage image = stage.getScene().snapshot(null);
+        diagSnapshotScene(stage.getScene(), target);
+    }
+
+    /**
+     * Snapshots the topmost showing {@code Popup} instead of the primary
+     * stage. A popover is its own window: {@code Stage.getScene().snapshot}
+     * cannot see one at all, so without this a visual pass over the symbol
+     * lens or the out-of-diff fan-in popover would photograph the board
+     * BEHIND them and read as a clean result.
+     */
+    private static void diagPopupSnapshot(Path target) {
+        javafx.stage.Window popup = javafx.stage.Window.getWindows().stream()
+                .filter(window -> window instanceof javafx.stage.PopupWindow && window.isShowing())
+                .reduce((first, second) -> second)
+                .orElse(null);
+        if (popup == null || popup.getScene() == null) {
+            System.out.println("[diag] popupshot: no popup window is showing; windows="
+                    + javafx.stage.Window.getWindows().stream()
+                            .map(window -> window.getClass().getSimpleName() + "(showing="
+                                    + window.isShowing() + ",focused=" + window.isFocused() + ")")
+                            .toList());
+            return;
+        }
+        diagSnapshotScene(popup.getScene(), target);
+    }
+
+    private static void diagSnapshotScene(javafx.scene.Scene scene, Path target) {
+        WritableImage image = scene.snapshot(null);
         int width = (int) image.getWidth();
         int height = (int) image.getHeight();
         // The snapshot is a fresh, detached copy that nothing else references

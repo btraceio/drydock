@@ -1,5 +1,6 @@
 package app.drydock.ui.review;
 
+import app.drydock.ui.TestStages;
 import app.drydock.github.GitHubLineAnchor.Anchor;
 import app.drydock.github.GitHubLineAnchor.Side;
 import app.drydock.github.GitHubReviewRequest.Comment;
@@ -62,8 +63,7 @@ class ReviewSubmitSheetTest extends ApplicationTest {
         scene.getStylesheets().addAll(
                 getClass().getResource("/app/drydock/ui/app.css").toExternalForm(),
                 getClass().getResource("/app/drydock/ui/theme-dark.css").toExternalForm());
-        stage.setScene(scene);
-        stage.show();
+        TestStages.show(stage, scene);
     }
 
     /**

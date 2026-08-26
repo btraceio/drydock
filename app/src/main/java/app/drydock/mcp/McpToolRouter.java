@@ -7,10 +7,19 @@ import app.drydock.mcp.AnnotationLines.LineRef;
 import app.drydock.mcp.McpSessionContext.RenameOutcome;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.review.AnnotationStatus;
+import app.drydock.review.ChangeGraph;
+import app.drydock.review.IntentHunks;
+import app.drydock.review.OutOfDiffFanIn;
+import app.drydock.review.ReadingPath;
+import app.drydock.review.RecheckAssessment;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
+import app.drydock.review.ReviewVerdict;
+import app.drydock.review.Sections;
 import app.drydock.review.Severity;
+import app.drydock.review.SymbolScan;
+import app.drydock.review.VerdictMerge;
 import app.drydock.state.json.JsonValue;
 import app.drydock.state.json.JsonValue.JsonArray;
 import app.drydock.state.json.JsonValue.JsonBoolean;
@@ -24,8 +33,12 @@ import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.Optional;
+import java.util.function.Function;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.stream.Stream;
@@ -58,10 +71,53 @@ public final class McpToolRouter {
 
     private final McpSessionContext context;
     private final McpSessionRegistry registry;
+    private final Function<UnifiedDiff, ChangeGraph> graphBuilder;
+
+    /**
+     * One scope's computed grouping, keyed by the diff it was computed from.
+     *
+     * <p>Without it, every {@code review_scope} call that asks for {@code
+     * sections} rebuilds the whole {@link ChangeGraph} AND spawns a fresh
+     * full-worktree {@code git grep} -- so an agent polling during a review
+     * runs one 30s-bounded grep per poll, concurrently with the board's own.
+     * One duplicate scan across the UI/MCP boundary is the price of these
+     * two surfaces having no common owner; one per poll is not.</p>
+     *
+     * <p>Keyed on the diff INSTANCE, the same identity test the board's
+     * graph cache uses: a re-read that produced a genuinely new diff gets a
+     * genuinely new grouping, and a repeated read of the same one does not
+     * pay twice. Concurrent because MCP calls arrive on the server's threads,
+     * not on one.</p>
+     *
+     * <p>Unbounded, and blind to the worktree changing under a diff it has
+     * already grouped -- deliberately, because both are true of the board's
+     * own graph and fan-in caches too, and one entry per live scope with a
+     * new diff instance on every re-read is not a leak worth a second
+     * eviction policy. If that ever stops holding it stops holding in both
+     * places at once, which is the point of matching them.</p>
+     */
+    private final Map<String, SectionsCacheEntry> sectionsByScope = new ConcurrentHashMap<>();
+
+    /** One completed {@link #computeSections} result, keyed by what it was computed from. */
+    private record SectionsCacheEntry(UnifiedDiff diff, List<Sections.Section> sections) {
+    }
 
     public McpToolRouter(McpSessionContext context, McpSessionRegistry registry) {
+        this(context, registry, ChangeGraph::of);
+    }
+
+    /**
+     * Test seam: swaps how a scope's {@link ChangeGraph} is built (mirrors
+     * {@code GitStatusService}'s ssh-executable constructor). Package-private
+     * -- its only reason to exist is letting a test count builds, or fail
+     * them, without a mocking library; production callers always get the
+     * real, blocking {@link ChangeGraph#of}.
+     */
+    McpToolRouter(McpSessionContext context, McpSessionRegistry registry,
+                  Function<UnifiedDiff, ChangeGraph> graphBuilder) {
         this.context = context;
         this.registry = registry;
+        this.graphBuilder = graphBuilder;
     }
 
     public List<JsonValue> toolDescriptors() {
@@ -95,7 +151,10 @@ public final class McpToolRouter {
                                 .put("scopeId", schemaString("Review scope handle to read."))
                                 .put("cursor", schemaString("Resume token from a previous page. Omit to start."))
                                 .put("maxBytes", schemaString("Byte budget for this page; default "
-                                        + DEFAULT_SCOPE_BYTES + ".")),
+                                        + DEFAULT_SCOPE_BYTES + "."))
+                                .put("include", schemaString("Optional extras, comma-separated. "
+                                        + "\"sections\" returns drydock's computed grouping: "
+                                        + "accept and name it, or regroup deliberately.")),
                         "scopeId"),
                 descriptor("review_intents",
                         "Replaces a scope's intent grouping: what the change is trying to do, at what risk, "
@@ -103,8 +162,10 @@ public final class McpToolRouter {
                                 + "groups by file.",
                         JsonObject.empty()
                                 .put("scopeId", schemaString("Review scope handle."))
-                                .put("intents", schemaString("Array of {id, title, kind, risk, rationale, "
-                                        + "hunkIds, collapse?, autoApprove?}.")),
+                                .put("intents", schemaString("Array of {id, title, kind, risk, "
+                                        + "rationale, hunkIds, reads?, collapse?, autoApprove?}. "
+                                        + "reads names the intents this one is built on; drydock "
+                                        + "orders the rail by it and does not verify it.")),
                         "scopeId", "intents"),
                 descriptor("review_finding",
                         "Records findings against a scope. Idempotent on finding id: a re-run upserts, so "
@@ -133,6 +194,21 @@ public final class McpToolRouter {
                                 + "this before a re-run so settled findings are not re-flagged.",
                         JsonObject.empty().put("scopeId", schemaString("Review scope handle.")),
                         "scopeId"),
+                descriptor("review_recheck",
+                        "Assesses whether a base move still leaves already-settled hunks valid. "
+                                + "affected=true marks them stale; affected=false is ADVICE and "
+                                + "never clears a human's verdict. Drydock derives which base "
+                                + "move each hunk is being asked about -- the base its own verdict "
+                                + "was recorded against, against the scope's base now -- so a hunk "
+                                + "with no verdict has nothing to recheck and is refused.",
+                        JsonObject.empty()
+                                .put("scopeId", schemaString("Review scope handle."))
+                                .put("assessments", schemaString("Array of {hunkId, affected, why}. "
+                                        + "hunkId is a hunk id from review_scope; affected is a "
+                                        + "real boolean, not \"true\"; why is REQUIRED whenever "
+                                        + "affected is true -- it is the reason a human is shown "
+                                        + "for re-reading the hunk.")),
+                        "scopeId", "assessments"),
                 descriptor("worktree_create",
                         "Creates a worktree in the caller's repository: a new branch by default, or a "
                                 + "checkout of a branch that already exists when 'existing' is true. An existing "
@@ -197,6 +273,7 @@ public final class McpToolRouter {
             case "review_finding" -> reviewFinding(caller, arguments);
             case "review_answer" -> reviewAnswer(caller, arguments);
             case "review_state" -> reviewState(caller, arguments);
+            case "review_recheck" -> reviewRecheck(caller, arguments);
             case "worktree_create" -> worktreeCreate(caller, arguments);
             case "session_start" -> sessionStart(caller, arguments);
             case "session_rename" -> sessionRename(caller, arguments);
@@ -257,9 +334,26 @@ public final class McpToolRouter {
 
         int maxBytes = Math.clamp(optionalIntArg(args, "maxBytes", DEFAULT_SCOPE_BYTES),
                 1_000, MAX_SCOPE_BYTES);
+        Optional<String> cursor = optionalStringArg(args, "cursor");
         UnifiedDiff diff = context.reviewDiff(scope);
-        ReviewToolCodec.ScopePage page = ReviewToolCodec.pageHunks(diff,
-                optionalStringArg(args, "cursor"), maxBytes);
+
+        // Computed only on the FIRST page of a read (cursor absent), and only
+        // when asked: ChangeGraph.of parses every changed file and can trigger
+        // a first-time native grammar load, so it must never be a cost a plain
+        // review_scope call pays, and a multi-page read must not pay it again
+        // on every page for a payload that would not have changed anyway.
+        Optional<JsonValue> sectionsJson = cursor.isEmpty() && includesSections(args)
+                ? computeSections(scope, diff)
+                : Optional.empty();
+        // Charged against the SAME budget as hunks, not on top of it: sections
+        // overlap by design (a shared foundation file appears in every section
+        // that needs it), so their payload scales as sections x shared files,
+        // not by file count the way scope/files/priorThreads do -- an
+        // unaccounted addition here could dwarf a small maxBytes with no
+        // signal at all.
+        int sectionsBytes = sectionsJson.map(ReviewToolCodec::approximateBytes).orElse(0);
+        int hunkBudget = Math.max(0, maxBytes - sectionsBytes);
+        ReviewToolCodec.ScopePage page = ReviewToolCodec.pageHunks(diff, cursor, hunkBudget);
 
         JsonObject result = JsonObject.empty()
                 .put("scope", ReviewToolCodec.scopeToJson(scope))
@@ -276,7 +370,80 @@ public final class McpToolRouter {
         result.put("priorThreads", new JsonArray(context.findingsOf(scope.id()).stream()
                 .map(ReviewToolCodec::findingStateToJson)
                 .toList()));
+
+        if (sectionsJson.isPresent()) {
+            result.put("sections", sectionsJson.get());
+            // The grouping is never truncated mid-array -- that would hand an
+            // agent a lie it could act on -- so when it alone is bigger than
+            // the whole budget, the overage is reported rather than hidden:
+            // a caller that asked for this explicitly gets all of it, plus a
+            // signal that maxBytes was not honoured, instead of a silently
+            // blown budget.
+            if (sectionsBytes > maxBytes) {
+                result.put("sectionsOverBudget", new JsonBoolean(true));
+            }
+        }
         return result;
+    }
+
+    /**
+     * {@code sections}, or empty if none was requested or the graph could not
+     * be built. {@link ChangeGraph#of} (via {@link SymbolScan}) can throw
+     * unchecked on a parse edge case; that must cost this ONE optional extra,
+     * never the whole call -- a caller who merely opted into {@code sections}
+     * must still get {@code hunks}, {@code scope} and {@code files}.
+     *
+     * <p>A live surface (the Review board's rail) numbers its cards off the
+     * reading path's order, not {@link Sections#of}'s own grouping order --
+     * see {@link ReadingPath.Path#sections()}. An agent reading {@code
+     * sections} off the plain grouping would disagree with the human looking
+     * at the same review over which card is ①, so this reorders the SAME
+     * sections through {@link ReadingPath#of} before handing them out,
+     * exactly as the rail does -- fan-in scan included, so the two agree on
+     * the rank's first term as well as on the ordering.</p>
+     *
+     * <p>Scanned synchronously, unlike the board's own background scan:
+     * an MCP tool call already runs off the FX thread, {@link
+     * OutOfDiffFanIn#scan} bounds itself with a 30s timeout, and handing an
+     * agent a first-call-always-unavailable answer it will then act on is
+     * worse than making it wait.</p>
+     */
+    private Optional<JsonValue> computeSections(ReviewScope scope, UnifiedDiff diff) {
+        SectionsCacheEntry cached = sectionsByScope.get(scope.id());
+        if (cached != null && cached.diff() == diff) {
+            return Optional.of(ReviewToolCodec.sectionsToJson(cached.sections()));
+        }
+        try {
+            ChangeGraph graph = graphBuilder.apply(diff);
+            List<Sections.Section> sections = Sections.of(diff, graph);
+            ReadingPath.Path path = ReadingPath.of(diff, graph, sections,
+                    OutOfDiffFanIn.forScope(scope, graph, diff));
+            // Cached as the ordered sections rather than as the rendered
+            // JSON: the response is assembled per call (a later page adds
+            // its own keys to it), and handing every caller the same mutable
+            // object is a defect waiting for the first one that edits it.
+            // Only a SUCCESSFUL build is cached -- a parse edge case must
+            // stay retryable rather than being pinned as this scope's answer.
+            sectionsByScope.put(scope.id(), new SectionsCacheEntry(diff, path.sections()));
+            return Optional.of(ReviewToolCodec.sectionsToJson(path.sections()));
+        } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, "review_scope: could not compute sections for scope "
+                    + scope.id() + "; omitting: " + e.getMessage(), e);
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * Whether the comma-separated {@code include} argument names {@code
+     * sections}. An unknown token, or a missing/blank argument, is silently
+     * false -- this is an optional read, and a typo must not fail the call.
+     */
+    private static boolean includesSections(JsonObject args) throws McpToolException {
+        return optionalStringArg(args, "include")
+                .map(value -> Stream.of(value.split(","))
+                        .map(String::strip)
+                        .anyMatch("sections"::equals))
+                .orElse(false);
     }
 
     private JsonValue reviewIntents(ManagedSessionId caller, JsonValue arguments) throws McpToolException {
@@ -320,6 +487,57 @@ public final class McpToolRouter {
     }
 
     /**
+     * {@code review_recheck}: the agent's answer to the one question neither
+     * a hunk digest nor {@link app.drydock.review.BaseMove}'s intersection
+     * can reach (spec §9.7).
+     *
+     * <p>The relevance filter is file-level and lexical and names its own
+     * blind spot: a base change that alters behaviour without touching a file
+     * this scope references is invisible to it. An agent has no such
+     * boundary, so it can close that gap -- but only in one direction.
+     * {@code affected == true} adds staleness, which costs at worst a wasted
+     * re-read. {@code affected == false} is advice and clears nothing,
+     * because an agent wrong THAT way would leave a human's approval standing
+     * over code nobody re-read. Nothing in this method or below it touches a
+     * verdict, which is what makes that true by construction rather than by
+     * every reader remembering it.</p>
+     *
+     * <p>Which base move is being assessed is drydock's to say, not the
+     * agent's: {@code fromBase} comes from each hunk's own verdict and {@code
+     * toBase} from the scope's current base, so the key written here is the
+     * key the board reads with. See {@link
+     * ReviewToolCodec#assessmentsFromJson}, which also owns the hunkId ->
+     * digest translation and the three refusals.</p>
+     */
+    private JsonValue reviewRecheck(ManagedSessionId caller, JsonValue arguments) throws McpToolException {
+        requireLiveSession(caller);
+        JsonObject args = asObject(arguments);
+        ReviewScope scope = requireScope(caller, args);
+
+        String toBase = context.currentReviewBase(scope).orElseThrow(() -> new McpToolException(
+                "The base of scope '" + scope.id() + "' does not resolve to a commit right now, so "
+                        + "there is no base move to assess. Nothing was recorded."));
+        Map<String, ReviewVerdict> verdictsByDigest = new LinkedHashMap<>();
+        for (ReviewVerdict verdict : context.verdictsOf(scope.id())) {
+            verdictsByDigest.put(verdict.hunkDigest(), verdict);
+        }
+        List<RecheckAssessment> decoded = ReviewToolCodec.assessmentsFromJson(scope.id(),
+                args.get("assessments"), context.reviewDiff(scope), verdictsByDigest, toBase,
+                Instant.now());
+        // Decoded in full before anything is stored, like review_finding: a
+        // batch with one bad entry writes nothing rather than half a recheck.
+        context.putAssessments(decoded);
+        return JsonObject.empty()
+                .put("scopeId", new JsonString(scope.id()))
+                .put("assessments", JsonNumber.of(decoded.size()))
+                // Echoed because it is the only half with an effect: an agent
+                // that sent ten and marked none has changed nothing, and
+                // saying so is cheaper than letting it believe otherwise.
+                .put("markedStale", JsonNumber.of(
+                        (int) decoded.stream().filter(RecheckAssessment::affected).count()));
+    }
+
+    /**
      * {@code review_answer}: appends the agent's reply to a thread. The
      * {@code propose*} fields are suggestions -- they are recorded in the
      * thread text and never applied, because the store changes when the human
@@ -355,24 +573,76 @@ public final class McpToolRouter {
                 .put("messages", JsonNumber.of(updated.thread().size()));
     }
 
+    /**
+     * The wire {@code id} here is intent-keyed, not hunk-keyed: an agent
+     * correlates it against the ids it sent to {@code review_intents}, so
+     * this joins the scope's intents against their verdicts rather than
+     * reporting {@link ReviewVerdict#hunkDigest()} straight through -- a
+     * verdict's own storage key must not leak onto this wire, or the join
+     * silently breaks the moment that key stops being intent-shaped.
+     *
+     * <p>The join needs a diff (to know the scope's current intents), but
+     * findings and submission status do not -- so a scope whose diff cannot
+     * be produced (a PR with no local checkout, or a git failure) still
+     * reports those two. The {@code intents} key is omitted entirely rather
+     * than emitted empty in that case: an empty array reads as "nothing is
+     * settled", a false claim, whereas an absent key correctly says "cannot
+     * be known right now" (the same absent-vs-zero rule the sidebar's
+     * {@code ◨n} badge follows).</p>
+     *
+     * <p>The join is many-to-one: a verdict is keyed by a hunk's content
+     * digest, and an intent covers several hunks, so what is reported is what
+     * {@link VerdictMerge} makes of them -- never a single stored verdict.</p>
+     */
     private JsonValue reviewState(ManagedSessionId caller, JsonValue arguments) throws McpToolException {
         requireLiveSession(caller);
         JsonObject args = asObject(arguments);
         ReviewScope scope = requireScope(caller, args);
 
-        List<JsonValue> intents = context.verdictsOf(scope.id()).stream()
-                .map(verdict -> (JsonValue) JsonObject.empty()
-                        .put("id", new JsonString(verdict.intentId()))
-                        .put("verdict", new JsonString(verdict.decision().wireName()))
-                        .put("note", verdict.note()
-                                .<JsonValue>map(JsonString::new).orElse(JsonNull.INSTANCE)))
-                .toList();
-        return JsonObject.empty()
-                .put("intents", new JsonArray(intents))
-                .put("findings", new JsonArray(context.findingsOf(scope.id()).stream()
+        JsonObject result = JsonObject.empty();
+        try {
+            result.put("intents", new JsonArray(intentsStateToJson(scope)));
+        } catch (McpToolException e) {
+            LOG.log(Level.WARNING, "review_state: could not compute a diff for scope "
+                    + scope.id() + "; omitting intents: " + e.getMessage());
+        }
+        result.put("findings", new JsonArray(context.findingsOf(scope.id()).stream()
                         .map(ReviewToolCodec::findingStateToJson)
                         .toList()))
                 .put("submitted", new JsonBoolean(context.reviewSubmitted(scope.id())));
+        return result;
+    }
+
+    /** The scope's intents joined against their verdicts, as {@code review_state} reports them. */
+    private List<JsonValue> intentsStateToJson(ReviewScope scope) throws McpToolException {
+        Map<String, ReviewVerdict> verdictsByDigest = new LinkedHashMap<>();
+        for (ReviewVerdict verdict : context.verdictsOf(scope.id())) {
+            verdictsByDigest.put(verdict.hunkDigest(), verdict);
+        }
+        UnifiedDiff diff = context.reviewDiff(scope);
+        List<JsonValue> intents = new ArrayList<>();
+        for (ReviewIntent intent : context.intentsOf(scope.id(), diff)) {
+            List<Optional<ReviewVerdict>> perHunk = IntentHunks.digestsOf(intent, diff).stream()
+                    .map(digest -> Optional.ofNullable(verdictsByDigest.get(digest)))
+                    .toList();
+            Optional<ReviewVerdict.Decision> decision = VerdictMerge.derive(perHunk);
+            if (decision.isEmpty()) {
+                continue;
+            }
+            // The first note any of the section's hunks carries. A section has
+            // no note of its own -- notes are written against hunks -- and
+            // concatenating several would report text nobody wrote.
+            Optional<String> note = perHunk.stream()
+                    .flatMap(Optional::stream)
+                    .map(ReviewVerdict::note)
+                    .flatMap(Optional::stream)
+                    .findFirst();
+            intents.add(JsonObject.empty()
+                    .put("id", new JsonString(intent.id()))
+                    .put("verdict", new JsonString(decision.get().wireName()))
+                    .put("note", note.<JsonValue>map(JsonString::new).orElse(JsonNull.INSTANCE)));
+        }
+        return intents;
     }
 
     // ---- review_comments -----------------------------------------------

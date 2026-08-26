@@ -3,6 +3,7 @@ package app.drydock.mcp;
 import app.drydock.domain.HandoffBrief;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.git.UnifiedDiff;
+import app.drydock.review.RecheckAssessment;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
@@ -93,14 +94,50 @@ public interface McpSessionContext {
     /** Replaces a scope's intent grouping ({@code review_intents}). */
     void putIntents(String scopeId, List<ReviewIntent> intents);
 
+    /**
+     * {@code scopeId}'s intents over {@code diff}: the reviewer's grouping
+     * when {@link #putIntents} supplied one, otherwise the by-file fallback
+     * -- the same choice {@code SessionReviewView.Host#intents} makes for the
+     * UI. {@code review_state} joins this against {@link #verdictsOf} to
+     * report a verdict under the id an agent actually sent to {@code
+     * review_intents}, rather than whatever internal key a verdict happens
+     * to be stored under.
+     */
+    List<ReviewIntent> intentsOf(String scopeId, UnifiedDiff diff);
+
     /** Upserts findings on {@code finding.id}, so a re-run keeps existing threads. */
     void upsertFindings(List<ReviewAnnotation> findings);
 
     /** Every finding of one scope, whatever its state. */
     List<ReviewAnnotation> findingsOf(String scopeId);
 
-    /** The verdicts recorded on one scope's intents. */
+    /** The verdicts recorded on one scope's hunks (spec §9.2). */
     List<ReviewVerdict> verdictsOf(String scopeId);
+
+    /**
+     * The commit {@code scope}'s base REF resolves to right now, empty when
+     * git cannot say.
+     *
+     * <p>A commit, never the ref name, for {@link ReviewVerdict#staleAgainst}'s
+     * reason: a verdict recorded against {@code "main"} and compared against
+     * {@code "main"} could never be stale. This is the {@code toBase} half of
+     * a {@link RecheckAssessment}'s key, so it has to be the very same string
+     * the board will later ask {@code assessedAffected} with, or the recheck
+     * is stored under a key nobody reads.</p>
+     *
+     * <p>Empty rather than {@code SessionReviewView.UNRESOLVED_BASE}: the
+     * board needs a sentinel that reads as stale on a path it cannot fail,
+     * whereas {@code review_recheck} can simply refuse -- there is no base
+     * move to assess when the current base is not a commit.</p>
+     */
+    Optional<String> currentReviewBase(ReviewScope scope);
+
+    /**
+     * Records agent rechecks (spec §9.7). Decoded in full before anything is
+     * stored, like {@link #upsertFindings}: a batch with one bad entry writes
+     * nothing rather than half a recheck.
+     */
+    void putAssessments(List<RecheckAssessment> assessments);
 
     /** Whether the human has submitted this scope's review. */
     boolean reviewSubmitted(String scopeId);

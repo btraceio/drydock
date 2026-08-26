@@ -3,7 +3,10 @@ package app.drydock.ui.review;
 import app.drydock.git.DiffScope;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
+import app.drydock.review.OutOfDiffFanIn;
+import app.drydock.review.ReadingPath;
 import app.drydock.review.ReviewAnnotation;
+import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.Severity;
 import app.drydock.ui.UiErrors;
@@ -19,6 +22,7 @@ import javafx.scene.control.Label;
 import javafx.scene.control.ListCell;
 import javafx.scene.control.ListView;
 import javafx.scene.control.Tooltip;
+import javafx.scene.input.MouseEvent;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
@@ -36,8 +40,10 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.BooleanSupplier;
 
 /**
  * The Review diff column (spec §4.4): hunk cards over a virtualized row
@@ -226,6 +232,15 @@ final class ReviewDiffColumn extends BorderPane {
     private final Set<ReviewDiffRow.RunKey> expandedRuns = new HashSet<>();
 
     /**
+     * Each hunk's {@link ReadingPath.Link}s, keyed by {@link ReviewIntent#hunkId}
+     * -- see {@link #setLinks}. Empty until the host has a {@link
+     * app.drydock.review.ChangeGraph} to compute them from, which is fine: a
+     * hunk absent from this map simply gets no footer row (spec §7.2), not a
+     * wrong one.
+     */
+    private Map<String, List<ReadingPath.Link>> linksByHunk = Map.of();
+
+    /**
      * The intent the column is filtered to, or {@code null} for the whole
      * scope. Selecting an intent in the rail used only to scroll this column,
      * which left the rail looking like decoration on a 45-file diff: the
@@ -350,6 +365,24 @@ final class ReviewDiffColumn extends BorderPane {
 
         list.getStyleClass().add("review-diff-list");
         list.setFocusTraversable(false);
+        // Not Tab-traversable (above), but a click still has to plant real
+        // Scene focus here: SessionReviewView.settleUnit() (spec §9.6) reads
+        // the Scene's focus owner to tell a hunk-scoped a/r/u from a
+        // section-scoped one, and a click is the only way a reader lands in
+        // this column today. Node.requestFocus() does not require
+        // focusTraversable -- that flag only gates the Tab engine -- so this
+        // does not reopen Tab-key traversal into the list.
+        list.addEventFilter(MouseEvent.MOUSE_PRESSED, e -> {
+            // TEMPORARY: investigating a CI-only failure where a TestFX
+            // press never lands real focus here (see
+            // SessionReviewView#diagFocusInDiffColumn's javadoc, and
+            // ReviewViewFixture#focusDiffColumn). Confirms whether the press
+            // ever reaches this filter at all on CI, and what it actually
+            // hit -- remove once that investigation closes.
+            System.out.println("[diag] review-diff-list MOUSE_PRESSED target=" + e.getTarget()
+                    + " sceneXY=" + e.getSceneX() + "," + e.getSceneY());
+            list.requestFocus();
+        });
         list.setCellFactory(view -> new DiffCell());
         // Long lines wrap; the column never scrolls sideways. See
         // viewportWidth for what this replaces.
@@ -824,6 +857,21 @@ final class ReviewDiffColumn extends BorderPane {
     }
 
     /**
+     * One key of the gutter selection -- {@code "<file> <lineKey>"}, the
+     * same shape every key in this class already uses -- so {@link
+     * SessionReviewView} can resolve which hunk a/r/u act on in HUNK mode
+     * (spec §9.6). Any one key of the range answers this: {@link
+     * DiffLineSelection} clamps a selection to a single hunk, so every key
+     * in it names the same one. Empty while nothing is selected -- a
+     * selection lives only as long as its composer does (see {@link
+     * #closeComposer}), so this is naturally empty once the reader has
+     * moved on from a comment.
+     */
+    Optional<String> currentLineSelection() {
+        return selectedKeys.stream().findFirst();
+    }
+
+    /**
      * Diagnostic/test-only: the current selection anchor's row index, or
      * {@code -1} for none. Exists so a stale-index guard can be proven by
      * what it PREVENTS -- a stale gesture event overwriting a valid anchor
@@ -846,10 +894,21 @@ final class ReviewDiffColumn extends BorderPane {
     }
 
     /**
-     * Scrolls to the {@code hunkIndex}-th hunk card of {@code file} -- what
-     * selecting an intent brings into view. Falls back to the file's first
-     * card when it has fewer hunks than that (the diff was re-read and the
-     * grouping is one generation behind).
+     * Scrolls to {@code file}'s hunk whose REAL index (into its own
+     * {@code UnifiedDiff.FileDiff.hunks()}) is {@code hunkIndex} -- what
+     * selecting an intent, a PATH step, or a link footer brings into view.
+     * Falls back to the file's first rendered card when that exact hunk is
+     * not among them (the diff was re-read and the grouping is one
+     * generation behind, or the column is filtered to hunks that do not
+     * include it).
+     *
+     * <p>Matched by {@link ReviewDiffRow.HunkHeader#hunkIndex()} rather than
+     * by counting rendered headers in order: a filter that hides some of a
+     * file's hunks (an intent naming only some of them) used to make the
+     * Nth RENDERED header stand in for hunk N, landing on the wrong hunk
+     * while still reporting success -- a link footer for hunk 2 of a
+     * three-hunk file would land on whichever hunk happened to render
+     * first if hunk 2 itself were filtered out.</p>
      *
      * <p>Returns whether the file was reached. It can genuinely be absent:
      * the intent rail is built from the whole diff while these rows stop at
@@ -861,7 +920,6 @@ final class ReviewDiffColumn extends BorderPane {
      */
     boolean revealHunk(String file, int hunkIndex) {
         int firstCard = -1;
-        int seen = 0;
         for (int i = 0; i < rows.size(); i++) {
             if (!(rows.get(i) instanceof ReviewDiffRow.HunkHeader header)
                     || !header.file().equals(file)) {
@@ -870,7 +928,7 @@ final class ReviewDiffColumn extends BorderPane {
             if (firstCard < 0) {
                 firstCard = i;
             }
-            if (seen++ == hunkIndex) {
+            if (header.hunkIndex() == hunkIndex) {
                 list.scrollTo(i);
                 return true;
             }
@@ -1038,7 +1096,35 @@ final class ReviewDiffColumn extends BorderPane {
     }
 
     private ReviewDiffRows.Options buildOptions() {
-        return new ReviewDiffRows.Options(showContext, expandedRuns, MAX_RENDERED_ROWS, hunkFilter());
+        return new ReviewDiffRows.Options(showContext, expandedRuns, MAX_RENDERED_ROWS, hunkFilter(), linksByHunk);
+    }
+
+    /**
+     * What each hunk has to do with the rest of the diff (spec §7.2), keyed
+     * by {@link ReviewIntent#hunkId}. The host calls this whenever its
+     * {@link ReadingPath.Path} changes -- most often once its {@link
+     * app.drydock.review.ChangeGraph} finishes building, well after the diff
+     * itself rendered.
+     *
+     * <p>Deliberately not {@link #rebuild()}: that scrolls back to the top,
+     * and the host calls this on state changes that have nothing to do with
+     * where the reader is scrolled to (the same reason {@link #expandRun}
+     * avoids it). A no-op re-publish of the same map -- the common case,
+     * since most refreshes have nothing new to say about links -- skips the
+     * rebuild entirely rather than re-computing identical rows.</p>
+     */
+    void setLinks(Map<String, List<ReadingPath.Link>> byHunkId) {
+        Map<String, List<ReadingPath.Link>> copy = Map.copyOf(byHunkId);
+        if (copy.equals(linksByHunk)) {
+            return;
+        }
+        linksByHunk = copy;
+        rows.setAll(ReviewDiffRows.build(displayedDiff, buildOptions()));
+        // The graph this map is computed from lands asynchronously, well
+        // after a reader may have already opened the gutter composer -- a
+        // rebuild that dropped it here would lose an in-progress comment to
+        // a background refresh the reader never asked for.
+        insertComposerRow();
     }
 
     /**
@@ -1164,6 +1250,7 @@ final class ReviewDiffColumn extends BorderPane {
                 case ReviewDiffRow.Truncation truncation ->
                         message("… diff truncated at " + truncation.limit() + " rows");
                 case ReviewDiffRow.Message text -> message(text.text());
+                case ReviewDiffRow.LinkRow linkRow -> buildLinkRow(linkRow);
             };
             if (node instanceof Region region) {
                 // Width only, and to the VIEWPORT -- never to this cell. See
@@ -1480,6 +1567,156 @@ final class ReviewDiffColumn extends BorderPane {
         });
     }
 
+    /**
+     * The out-of-diff fan-in popover (spec §7.4): every place the symbols
+     * {@code file} declares are used OUTSIDE this change, with the file and
+     * line of each.
+     *
+     * <p>The symbol lens's popover on a third source, deliberately: same
+     * frame, same chips, same one-click occurrence rows, and the SAME {@code
+     * lensPopup} field -- so it is already part of Escape's unwind order
+     * ({@link #lensOpen}, {@link #hideLens}) and opening either one closes
+     * the other, with no second popover to keep in sync. Inventing a second
+     * interaction for the same gesture is how two popovers start
+     * disagreeing.</p>
+     *
+     * <p>The rows are NOT contorted into {@link SymbolIndex.Occurrence}:
+     * that record's {@code inDiff} flag drives the lens's in-diff /
+     * not-touched chip, and every occurrence here is out-of-diff by
+     * construction -- so the chip says exactly that instead of pretending to
+     * a distinction this source cannot make.</p>
+     *
+     * <p>{@code bySymbol} is rendered in its own iteration order; the caller
+     * owns determinism (see {@code SessionReviewView.fanInOccurrences}).</p>
+     */
+    void showFanIn(String file, Map<String, List<OutOfDiffFanIn.Occurrence>> bySymbol,
+                   Node anchor, BooleanSupplier askTheAgent) {
+        if (bySymbol.isEmpty()) {
+            return;
+        }
+        hideLens();
+        int total = bySymbol.values().stream().mapToInt(List::size).sum();
+
+        VBox content = new VBox(6);
+        content.getStyleClass().add("review-lens");
+
+        Label title = new Label(file);
+        title.getStyleClass().add("review-lens-title");
+        title.setWrapText(true);
+        // "usages", in those words: this list IS the usages view, so it says
+        // so rather than linking somewhere else for it.
+        Label summary = new Label(total + (total == 1 ? " usage" : " usages")
+                + " outside this change · " + bySymbol.size()
+                + (bySymbol.size() == 1 ? " changed symbol" : " changed symbols"));
+        summary.getStyleClass().add("review-lens-summary");
+        Label caveat = new Label("Lexical git grep of the worktree — occurrences, not resolved "
+                + "references. It cannot tell you whether a change here breaks any of them.");
+        caveat.getStyleClass().add("review-lens-caveat");
+        caveat.setWrapText(true);
+
+        // Where the design is honest about its ceiling: nothing mechanical
+        // and diff-scoped can say whether this change breaks these callers,
+        // so the popover puts the reader one click from the party that can.
+        // The label says what the button DOES, both halves of it: the
+        // question is filed as a review comment on this file whether or not
+        // a session is there to receive it, and a reviewer who is not told
+        // that finds a stray comment they did not knowingly write.
+        Button ask = new Button("Ask the agent — files a review comment");
+        ask.getStyleClass().add("review-fanin-ask");
+        ask.setMaxWidth(Double.MAX_VALUE);
+        ask.setWrapText(true);
+
+        // Reused by every row: the Explorer jump can fail (no session, or
+        // its tab is closed), and a row that silently does nothing is worse
+        // than one that says why.
+        Label notice = new Label();
+        notice.getStyleClass().add("review-fanin-notice");
+        notice.setWrapText(true);
+        notice.setVisible(false);
+        notice.setManaged(false);
+
+        // Wired AFTER `notice` exists, and it does NOT hide the popover
+        // first: a hand-off that could not happen has to have somewhere to
+        // say so, and hiding the only surface before running the action
+        // leaves nowhere. Exactly the ordering openOutsideFile uses.
+        ask.setOnAction(e -> {
+            if (askTheAgent.getAsBoolean()) {
+                hideLens();
+                return;
+            }
+            notice.setText("Filed as a review comment on " + file
+                    + ", but nothing was sent — open this scope's session first; "
+                    + "the agent is asked through it.");
+            notice.setVisible(true);
+            notice.setManaged(true);
+        });
+
+        content.getChildren().addAll(title, summary, caveat, ask, notice);
+
+        for (Map.Entry<String, List<OutOfDiffFanIn.Occurrence>> entry : bySymbol.entrySet()) {
+            Label symbol = new Label(entry.getKey());
+            symbol.getStyleClass().add("review-fanin-symbol");
+            content.getChildren().add(symbol);
+            for (OutOfDiffFanIn.Occurrence occurrence : entry.getValue()) {
+                Label chip = new Label("outside this change");
+                chip.getStyleClass().addAll("review-lens-chip", "not-touched");
+                Label where = new Label(occurrence.file() + ":" + occurrence.line());
+                where.getStyleClass().add("review-lens-where");
+                Button jump = new Button(occurrence.text().strip().length() > 60
+                        ? occurrence.text().strip().substring(0, 59) + "…"
+                        : occurrence.text().strip());
+                jump.getStyleClass().add("review-lens-line");
+                jump.setOnAction(e -> openOutsideFile(occurrence, notice));
+                HBox row = new HBox(6, chip, where);
+                row.setAlignment(Pos.CENTER_LEFT);
+                content.getChildren().addAll(row, jump);
+            }
+        }
+
+        ScrollPane scroll = new ScrollPane(content);
+        scroll.setFitToWidth(true);
+        scroll.setMaxHeight(320);
+        scroll.getStyleClass().add("review-lens-scroll");
+
+        lensPopup = new Popup();
+        lensPopup.setAutoHide(true);
+        lensPopup.getContent().add(scroll);
+        var bounds = anchor.localToScreen(anchor.getBoundsInLocal());
+        if (bounds != null) {
+            // Positioned by the anchor, OWNED by this column. A Popup hides
+            // itself the moment its owner node leaves the scene, and the
+            // anchor here is a rail row that every refresh replaces -- so
+            // owning it would close this popover on the next refresh,
+            // including the one its own "ask" button causes. This column
+            // outlives every such rebuild.
+            lensPopup.show(this, bounds.getMinX(), bounds.getMaxY() + 4);
+        }
+    }
+
+    /**
+     * Opens one out-of-diff occurrence in the Explorer. Unlike the lens's
+     * own rows, {@link #revealLine} is no use here: the file is OUTSIDE the
+     * diff, so this column has no row to reveal. A refused jump writes into
+     * {@code notice} rather than being swallowed -- {@link
+     * ExplorerBridge#openFileAtLine} returns false when there is nowhere to
+     * open it, and this branch has twice had to fix a control that reported
+     * nothing when it did nothing.
+     */
+    private void openOutsideFile(OutOfDiffFanIn.Occurrence occurrence, Label notice) {
+        if (displayedScope == null) {
+            return;
+        }
+        if (explorerBridge.openFileAtLine(displayedScope, Path.of(occurrence.file()),
+                occurrence.line())) {
+            hideLens();
+            return;
+        }
+        notice.setText("Could not open " + occurrence.file()
+                + " — open this scope's session first; the Explorer lives in it.");
+        notice.setVisible(true);
+        notice.setManaged(true);
+    }
+
     /** Closes the lens popover; part of Escape's unwind order. */
     void hideLens() {
         if (lensPopup != null) {
@@ -1506,6 +1743,73 @@ final class ReviewDiffColumn extends BorderPane {
         button.setTooltip(new Tooltip("Show these " + run.count() + " unchanged lines"));
         button.setOnAction(e -> expandRun(run));
         return button;
+    }
+
+    /**
+     * A hunk's footer row: what it has to do with a hunk in another file
+     * (spec §7.2). {@code link.label()} already names a file and a symbol --
+     * never {@link ReadingPath.Link#targetHunkId()} -- so the button's own
+     * text is exactly that label with a glyph naming the relationship in
+     * front of it.
+     *
+     * <p>{@code .review-link-row} carries its OWN {@code -fx-text-fill} in
+     * {@code app.css}, the same fix {@code .review-collapsed-run} already
+     * needed: a plain {@code Button.setText} has no fill of its own here --
+     * only {@code .review-intent-card}'s child {@code Label}s do -- so it
+     * falls back to modena's light-button default against this column's dark
+     * background (Task 18's 1.13:1 defect, on a different row).</p>
+     */
+    private Region buildLinkRow(ReviewDiffRow.LinkRow row) {
+        ReadingPath.Link link = row.link();
+        Button button = new Button(glyphFor(link.kind()) + "  " + link.label());
+        button.getStyleClass().add("review-link-row");
+        button.setMaxWidth(Double.MAX_VALUE);
+        button.setAlignment(Pos.CENTER_LEFT);
+        button.setTooltip(new Tooltip("Jump to " + link.label()));
+        button.setOnAction(e -> selectLinkTarget(link.targetHunkId()));
+        return button;
+    }
+
+    /** The arrow a link row opens with, naming the relationship {@link ReadingPath.Link#label()} does not. */
+    private static String glyphFor(String kind) {
+        if (ReadingPath.CALLS.equals(kind)) {
+            return "↳ calls";
+        }
+        if (ReadingPath.CALLED_BY.equals(kind)) {
+            return "↳ called by";
+        }
+        return "↔";
+    }
+
+    /**
+     * Resolves a raw hunk id -- exactly what a link's own label never shows
+     * -- back to the (file, index) {@link #revealHunk} already knows how to
+     * scroll to. The same scroll-into-view path an intent or a PATH step
+     * uses, so a link click and a rail click land the reader in the same
+     * place through the same code.
+     */
+    private void selectLinkTarget(String hunkId) {
+        ReviewIntent.parseHunkId(hunkId).ifPresent(anchor -> {
+            // A link crosses files by construction (spec §7.2: cross-file
+            // only), so its target is routinely a hunk the CURRENT filter
+            // does not show at all -- PATH mode narrows the column to a
+            // synthetic one-hunk intent, and an ordinary intent filter can
+            // just as easily name only some of a file's hunks. Widening
+            // FIRST is what makes the click land instead of silently
+            // scrolling nowhere on a column revealHunk cannot search.
+            if (!hunkFilter().includes(anchor.file(), anchor.hunkIndex())) {
+                showWholeScope = true;
+                rebuild();
+            }
+            boolean reached = revealHunk(anchor.file(), anchor.hunkIndex());
+            if (!reached) {
+                // Not swallowed: a link whose target could not be reached
+                // (past the row cap, most likely) must not look identical to
+                // one that worked -- the same display/action divergence this
+                // whole row exists to avoid.
+                LOG.log(Level.WARNING, "Link footer could not reach its target hunk: " + hunkId);
+            }
+        });
     }
 
     private static Region message(String text) {

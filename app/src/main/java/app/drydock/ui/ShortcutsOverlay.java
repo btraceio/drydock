@@ -22,7 +22,7 @@ import java.util.List;
  * Review keys that belong to features not yet built are added with those
  * features, never ahead of them.
  */
-final class ShortcutsOverlay {
+public final class ShortcutsOverlay {
 
     private record Section(String title, String[][] shortcuts) { }
 
@@ -49,11 +49,14 @@ final class ShortcutsOverlay {
                     {"Focus mode — collapse every rail", "f"},
                     {"Cycle density: cozy · compact · dense", "d"},
                     {"Show or hide unchanged lines", "c"},
-                    {"Previous / next intent", "[ / ]"},
-                    {"Next unsettled intent", "n"},
-                    {"Approve the current intent", "a"},
-                    {"Request changes", "r"},
-                    {"Undo this intent's verdict", "u"},
+                    {"Reading path / intents", "p"},
+                    {"Previous / next intent (or path row)", "[ / ]"},
+                    {"Next unsettled intent (or hunk)", "n"},
+                    {"Approve (section, or next unread hunk in the diff)", "a"},
+                    {"Request changes (section, or next unread hunk in the diff)", "r"},
+                    {"Undo (section, or next unread hunk in the diff)", "u"},
+                    {"Approve every hunk in this file", "⇧A"},
+                    {"Request changes on this file", "⇧R"},
                     {"Submit the review", "⏎"},
                     {"Collapse the intents", "i"},
                     {"Collapse the findings margin", "m"},
@@ -86,6 +89,17 @@ final class ShortcutsOverlay {
             }
         }
         return List.of();
+    }
+
+    /**
+     * The keys this overlay advertises for Review, so a test in {@code
+     * app.drydock.ui.review} -- a different package, so it cannot reach
+     * {@link #diagKeysFor}'s package-private access -- can hold the two in
+     * step: anything advertised here must be bound in {@code
+     * SessionReviewView.handleShortcut}, and vice versa.
+     */
+    public static List<String> reviewShortcutKeys() {
+        return diagKeysFor("IN REVIEW");
     }
 
     static Region create(Runnable onClose) {

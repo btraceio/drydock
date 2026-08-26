@@ -1,5 +1,6 @@
 package app.drydock.ui.explorer;
 
+import app.drydock.ui.TestStages;
 import app.drydock.search.SessionSearchService;
 import javafx.scene.Node;
 import javafx.scene.Scene;
@@ -117,8 +118,7 @@ class SearchRailViewTest extends ApplicationTest {
         scene.getStylesheets().addAll(
                 SearchRail.class.getResource("/app/drydock/ui/theme-dark.css").toExternalForm(),
                 SearchRail.class.getResource("/app/drydock/ui/app.css").toExternalForm());
-        stage.setScene(scene);
-        stage.show();
+        TestStages.show(stage, scene);
         WaitForAsyncUtils.waitForFxEvents();
     }
 

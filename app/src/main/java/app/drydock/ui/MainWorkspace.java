@@ -47,6 +47,8 @@ import app.drydock.config.UserConfig;
 import app.drydock.mcp.WorkspaceMcpSessionContext;
 import app.drydock.process.SshCommandBuilder;
 import app.drydock.review.AnnotationStore;
+import app.drydock.review.BaseMove;
+import app.drydock.review.ChangeGraph;
 import app.drydock.review.IntentGrouping;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewIntent;
@@ -122,9 +124,11 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -182,8 +186,18 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * on to land, and the budget would stop bounding anything.
      */
     /** Virtual threads for handoff git work; this class has no shared pool. */
-    private static final java.util.concurrent.Executor HANDOFF_EXECUTOR =
+    private static final Executor HANDOFF_EXECUTOR =
             runnable -> Thread.ofVirtual().name("drydock-handoff").start(runnable);
+
+    /**
+     * Virtual threads for the review board's git lookups -- resolving a
+     * scope's base and head refs to commits, and diffing a base move. Both
+     * are asked for from the FX thread while rendering, so neither may run on
+     * it; separate from {@link #HANDOFF_EXECUTOR} only so a stack trace says
+     * which of the two is stuck.
+     */
+    private static final Executor REVIEW_GIT_EXECUTOR =
+            runnable -> Thread.ofVirtual().name("drydock-review-git").start(runnable);
 
     /** Bound on diffing one scope to read its intents; the seed is not worth a hang. */
     private static final long INTENT_DIFF_TIMEOUT_SECONDS = 10;
@@ -1726,6 +1740,17 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * showing" means now that review is something a session HAS rather than
      * a place the app navigates to.
      */
+    /**
+     * Diagnostic-only: opens the Review board's out-of-diff fan-in popover
+     * (see {@code SessionReviewView#diagOpenFanIn}). Only the {@code
+     * diag.tabScript} driver calls this.
+     */
+    public String diagOpenFanIn() {
+        return showingReviewBoard()
+                .map(SessionReviewView::diagOpenFanIn)
+                .orElse("no review board showing");
+    }
+
     private Optional<SessionReviewView> showingReviewBoard() {
         return currentlySelected()
                 .filter(open -> open.activeSubTab() == OpenSessionTab.SubTab.REVIEW)
@@ -1913,6 +1938,12 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
         @Override
         public Optional<Region> bodyFor(ReviewScope scope) {
+            // The board is rendering this scope: the moment to re-read what
+            // its base ref points at. A base branch tip moves under a
+            // long-running session, and a baseline resolved once and kept for
+            // the life of the workspace would never notice -- which is the
+            // whole thing staleness exists to catch.
+            refreshBaseline(scope);
             // M2 returns the diff column here; until then the view renders
             // its own placeholder, which is what the empty Optional means.
             return Optional.empty();
@@ -1951,40 +1982,78 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         }
 
         @Override
-        public List<ReviewIntent> intents(ReviewScope scope, UnifiedDiff diff) {
-            List<ReviewIntent> grouped = intentGrouping.intentsFor(scope.id(), diff);
-            // Verdicts are keyed by intent id, and the fallback grouping's
-            // ids changed when it stopped emitting one intent per file --
-            // so an approval given before that would read as unsettled.
-            // Called here rather than once at startup because the grouping is
-            // only knowable after the scope's diff resolves; the store makes
-            // it idempotent and cheap once there is nothing left to carry.
-            annotationStore.migrateLegacyVerdicts(scope.id(), grouped);
-            return grouped;
+        public List<ReviewIntent> intents(ReviewScope scope, UnifiedDiff diff,
+                                          Optional<ChangeGraph> graph) {
+            return intentGrouping.intentsFor(scope.id(), diff, graph);
         }
 
         @Override
-        public Optional<ReviewVerdict> verdict(ReviewScope scope, ReviewIntent intent) {
-            return annotationStore.verdict(scope.id(), intent.id());
+        public long groupingVersion(ReviewScope scope) {
+            return intentGrouping.version(scope.id());
         }
 
         @Override
-        public void setVerdict(ReviewScope scope, ReviewIntent intent,
-                               Optional<ReviewVerdict.Decision> decision) {
+        public boolean hasReviewerGrouping(ReviewScope scope) {
+            return intentGrouping.hasReviewerGrouping(scope.id());
+        }
+
+        @Override
+        public Optional<ReviewVerdict> verdict(ReviewScope scope, String hunkDigest) {
+            return annotationStore.verdict(scope.id(), hunkDigest);
+        }
+
+        @Override
+        public void setVerdict(ReviewScope scope, ReviewIntent intent, List<String> hunkDigests,
+                               Optional<ReviewVerdict.Decision> decision, boolean blocked) {
             if (decision.isEmpty()) {
-                annotationStore.clearVerdict(scope.id(), intent.id());
+                for (String digest : hunkDigests) {
+                    annotationStore.clearVerdict(scope.id(), digest);
+                }
                 return;
             }
             // Approval is refused, not merely discouraged, while a blocking
-            // finding of this intent is open (spec §4.6). Checked here as well
-            // as in the bar so the keyboard path cannot slip past the button's
-            // refusal.
-            if (decision.get() == ReviewVerdict.Decision.APPROVED
-                    && blockingFindingOpen(scope, intent)) {
+            // finding of this intent is open (spec §4.6). blocked is the
+            // view's own computation (SessionReviewView#blockingFindingOpen),
+            // not recomputed here: a host free to derive its own answer from
+            // intent alone once disagreed with the verdict bar's rendered
+            // "blocked" for a finding naming a DIFFERENT, still-current
+            // intent that happened to share a file -- the bar showed clear,
+            // and this refused anyway, with no way for a keypress to tell.
+            if (decision.get() == ReviewVerdict.Decision.APPROVED && blocked) {
                 return;
             }
-            annotationStore.putVerdict(new ReviewVerdict(scope.id(), intent.id(), decision.get(),
-                    Optional.empty(), Instant.now()));
+            ReviewBaseline baseline = baselineOf(scope);
+            for (String digest : hunkDigests) {
+                annotationStore.putVerdict(new ReviewVerdict(scope.id(), digest, decision.get(),
+                        Optional.empty(), Instant.now(), baseline.base(), baseline.head()));
+            }
+        }
+
+        @Override
+        public void confirmStillGood(ReviewScope scope, List<String> hunkDigests) {
+            ReviewBaseline baseline = baselineOf(scope);
+            Instant now = Instant.now();
+            for (String digest : hunkDigests) {
+                annotationStore.verdict(scope.id(), digest).ifPresent(verdict ->
+                        annotationStore.putVerdict(
+                                verdict.confirmedAgainst(baseline.base(), baseline.head(), now)));
+            }
+        }
+
+        @Override
+        public String currentBase(ReviewScope scope) {
+            return baselineOf(scope).base();
+        }
+
+        @Override
+        public BaseMove.Delta baseMove(ReviewScope scope, String recordedBase) {
+            return reviewBaseMove(scope, recordedBase);
+        }
+
+        @Override
+        public boolean assessedAffected(ReviewScope scope, String hunkDigest,
+                                        String fromBase, String toBase) {
+            return annotationStore.assessedAffected(scope.id(), hunkDigest, fromBase, toBase);
         }
 
         @Override
@@ -2038,10 +2107,10 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         }
 
         @Override
-        public void askAgentToFix(ReviewScope scope, ReviewIntent intent,
-                                  List<ReviewAnnotation> findings) {
+        public boolean askAgentToFix(ReviewScope scope, ReviewIntent intent,
+                                     List<ReviewAnnotation> findings) {
             if (findings.isEmpty()) {
-                return;
+                return false;
             }
             StringBuilder prompt = new StringBuilder("Address these review findings on \"")
                     .append(intent.title()).append("\", then summarize what you changed: ");
@@ -2051,12 +2120,14 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                         .append(finding.startKey()).append(": ")
                         .append(finding.displayTitle().replaceAll("\\s+", " ")).append(". ");
             }
-            if (sendToBoundSession(scope, prompt.toString().strip())) {
-                for (ReviewAnnotation finding : findings) {
-                    annotationStore.mutate(finding.key(),
-                            current -> current.withStatus(AnnotationStatus.SENT));
-                }
+            if (!sendToBoundSession(scope, prompt.toString().strip())) {
+                return false;
             }
+            for (ReviewAnnotation finding : findings) {
+                annotationStore.mutate(finding.key(),
+                        current -> current.withStatus(AnnotationStatus.SENT));
+            }
+            return true;
         }
 
         @Override
@@ -2229,6 +2300,64 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             }
             return sendToBoundSession(scope, reviewInstruction(scope));
         }
+
+        /**
+         * Sends the recheck through the same one-line prompt path a review
+         * takes. Returns what the hand-off returned: an automatic dispatch has
+         * no human watching it, so a false swallowed here would cost the scope
+         * its recheck with nothing to show that it never happened.
+         *
+         * <p>Refuses a tab whose agent process has exited, the way {@link
+         * #requestHandoffRefresh} and the Explorer bridge already do.
+         * {@code sendToBoundSession} answers "a tab object exists", not "the
+         * agent received it": typing into a dead terminal would return true,
+         * the claim would stand, and the recheck would be lost with nothing
+         * logged. The two senders a human drives get away without this check
+         * because a human sees the reply never come.</p>
+         *
+         * <p>The prompt is typed synchronously, on the render pass that
+         * decided to send it. Deferring it would make the returned boolean a
+         * lie -- the caller releases its claim on false, and a value returned
+         * before the send cannot report one -- and the cost is bounded to once
+         * per base move by that same claim.</p>
+         */
+        @Override
+        public boolean dispatchRecheck(ReviewScope scope, String fromBase, String toBase) {
+            if (scope.sessionId().isEmpty()) {
+                return false;
+            }
+            OpenSessionTab open = scope.sessionId().map(openTabs::get).orElse(null);
+            if (open == null || open.isProcessExited()) {
+                return false;
+            }
+            boolean handedOff = sendToBoundSession(scope,
+                    ReviewInstructions.forRecheck(scope.id(), fromBase, toBase));
+            // The one automatic dispatch on this surface, and the only one with
+            // no human watching it land. Review called out that it left no
+            // trace anywhere: a recheck that silently never happened looked
+            // exactly like one nobody needed.
+            LOG.log(Level.INFO, () -> (handedOff ? "Dispatched" : "Could not dispatch")
+                    + " a recheck for scope " + scope.id() + " (" + fromBase + " -> " + toBase + ")");
+            return handedOff;
+        }
+
+        /**
+         * Spec §9.7 -- only a harness that can run the recheck in a subagent
+         * is asked without a human having asked. The alternative for the
+         * others is not "ask when idle": Codex and Pi both report no activity
+         * at all ({@code AgentProvider.activity()} is empty for both), so
+         * there is no idle signal to gate on, and Claude -- the only provider
+         * with subagents -- is the only one that has one.
+         */
+        @Override
+        public boolean supportsAutomaticRecheck(ReviewScope scope) {
+            return supportsSubagents(scope);
+        }
+
+        @Override
+        public boolean assessedMove(ReviewScope scope, String fromBase, String toBase) {
+            return annotationStore.assessedMove(scope.id(), fromBase, toBase);
+        }
     }
 
     /**
@@ -2245,20 +2374,160 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * inline form; there is no session to resolve an agent kind from.</p>
      */
     private String reviewInstruction(ReviewScope scope) {
-        boolean supportsSubagents = scope.sessionId()
+        return ReviewInstructions.forScope(scope.id(), supportsSubagents(scope));
+    }
+
+    /**
+     * Whether the scope's bound session's agent declares subagents. A scope
+     * with no bound session -- the PR-not-yet-checked-out case -- falls back
+     * to the inline form; there is no session to resolve an agent kind from.
+     */
+    private boolean supportsSubagents(ReviewScope scope) {
+        return scope.sessionId()
                 .flatMap(id -> sessionManager.sessions().stream()
                         .filter(candidate -> candidate.id().equals(id))
                         .findFirst())
                 .map(session -> agentRegistry.supportsSubagents(session.agentKind()))
                 .orElse(false);
-        return ReviewInstructions.forScope(scope.id(), supportsSubagents);
     }
 
-    private boolean blockingFindingOpen(ReviewScope scope, ReviewIntent intent) {
-        return annotationStore.forScope(scope.id()).stream()
-                .filter(finding -> finding.intentId()
-                        .map(id -> id.equals(intent.id())).orElse(true))
-                .anyMatch(ReviewAnnotation::blocksApproval);
+    /**
+     * The commits a scope's base and head REFS resolve to. Verdicts are
+     * stamped with these rather than with {@code scope.base()} /
+     * {@code scope.head()}, which are branch names: a verdict recorded
+     * against {@code "main"} and compared against {@code "main"} could never
+     * be stale, so staleness would be an inert no-op (spec §9.2).
+     */
+    private record ReviewBaseline(String base, String head) {
+    }
+
+    /** What a scope resolves to before git has answered, and when it cannot. */
+    private static final ReviewBaseline UNRESOLVED_BASELINE = new ReviewBaseline(
+            SessionReviewView.UNRESOLVED_BASE, SessionReviewView.UNRESOLVED_BASE);
+
+    /** Resolved baselines by scope id; FX thread only. */
+    private final Map<String, ReviewBaseline> baselineByScope = new LinkedHashMap<>();
+
+    /** Scope ids with a baseline resolution in flight, so a render storm spawns one git. */
+    private final Set<String> baselineInFlight = new LinkedHashSet<>();
+
+    /** Base-move deltas by {@code (scopeId, oldBase, newBase)}; FX thread only. */
+    private final Map<String, BaseMove.Delta> baseMoveByMove = new LinkedHashMap<>();
+
+    private final Set<String> baseMoveInFlight = new LinkedHashSet<>();
+
+    /**
+     * What {@code scope} resolves to right now. Never blocks: this is called
+     * from the board's render, on the FX thread. An unresolved answer is
+     * {@link #UNRESOLVED_BASELINE}, which reads as stale rather than as
+     * fresh -- absent must not look like zero.
+     */
+    private ReviewBaseline baselineOf(ReviewScope scope) {
+        ReviewBaseline known = baselineByScope.get(scope.id());
+        if (known != null) {
+            return known;
+        }
+        refreshBaseline(scope);
+        return UNRESOLVED_BASELINE;
+    }
+
+    /**
+     * Re-reads {@code scope}'s base and head refs off the FX thread. Whatever
+     * is cached stands until the new answer lands, so a re-read never
+     * flickers every card to "base moved" on its way to saying nothing moved.
+     */
+    private void refreshBaseline(ReviewScope scope) {
+        if (!baselineInFlight.add(scope.id())) {
+            return;
+        }
+        Path root = scope.diffRoot();
+        String baseRef = scope.base();
+        String headRef = scope.head();
+        CompletableFuture
+                .supplyAsync(() -> new ReviewBaseline(resolveRef(root, baseRef),
+                        resolveRef(root, headRef)), REVIEW_GIT_EXECUTOR)
+                .whenComplete((resolved, failure) -> Platform.runLater(() -> {
+                    baselineInFlight.remove(scope.id());
+                    if (failure != null || resolved == null) {
+                        // Recorded as unresolved rather than left absent: absent
+                        // means baselineOf spawns this again on the very next
+                        // render -- once per card, per rail rebuild, forever.
+                        // A later bodyFor for this scope re-reads it anyway.
+                        LOG.log(Level.WARNING, "Could not resolve the review base of scope "
+                                + scope.id() + "; its verdicts cannot be dated", failure);
+                        baselineByScope.put(scope.id(), UNRESOLVED_BASELINE);
+                        refreshReviewBoards();
+                        return;
+                    }
+                    baselineByScope.put(scope.id(), resolved);
+                    refreshReviewBoards();
+                }));
+    }
+
+    /** One ref, resolved to a commit; {@code "unresolved"} when git cannot say. */
+    private String resolveRef(Path root, String ref) {
+        try {
+            return gitStatusService.commitForRefBlocking(root, ref)
+                    .orElse(SessionReviewView.UNRESOLVED_BASE);
+        } catch (GitException e) {
+            LOG.log(Level.WARNING, () -> "Could not resolve review ref " + ref + " in " + root
+                    + ": " + e.getMessage());
+            return SessionReviewView.UNRESOLVED_BASE;
+        }
+    }
+
+    /**
+     * What moved between {@code recordedBase} and {@code scope}'s current
+     * base, memoized per move. Never blocks, for {@link #baselineOf}'s
+     * reason; an answer that has not arrived is {@link
+     * BaseMove.Delta#unresolvable}, which is "could matter" -- the safe
+     * direction, and the one a reader can act on.
+     */
+    private BaseMove.Delta reviewBaseMove(ReviewScope scope, String recordedBase) {
+        String currentBase = baselineOf(scope).base();
+        if (SessionReviewView.UNRESOLVED_BASE.equals(recordedBase)
+                || SessionReviewView.UNRESOLVED_BASE.equals(currentBase)) {
+            // "unresolved" is not a revision. Handing it to git diff spawns a
+            // command that always fails, logs a warning describing no real
+            // problem, and memoizes an answer that the very next baseline
+            // makes wrong. Unresolvable is the honest answer, and the view
+            // renders it as "cannot tell" rather than as "the base moved".
+            return new BaseMove.Delta(true, new TreeSet<>());
+        }
+        if (recordedBase.equals(currentBase)) {
+            // Not a move at all. Asking git would be a process spawn to be
+            // told what the two equal strings already said.
+            return new BaseMove.Delta(false, new TreeSet<>());
+        }
+        String move = scope.id() + '\0' + recordedBase + '\0' + currentBase;
+        BaseMove.Delta known = baseMoveByMove.get(move);
+        if (known != null) {
+            return known;
+        }
+        if (baseMoveInFlight.add(move)) {
+            Path worktree = scope.diffRoot();
+            CompletableFuture
+                    .supplyAsync(() -> BaseMove.between(worktree, recordedBase, currentBase),
+                            REVIEW_GIT_EXECUTOR)
+                    .whenComplete((delta, failure) -> Platform.runLater(() -> {
+                        baseMoveInFlight.remove(move);
+                        // A failed future is recorded as unresolvable rather
+                        // than left absent: absent would re-spawn the same
+                        // git on the very next render, forever.
+                        baseMoveByMove.put(move, failure == null && delta != null
+                                ? delta
+                                : new BaseMove.Delta(true, new TreeSet<>()));
+                        refreshReviewBoards();
+                    }));
+        }
+        return new BaseMove.Delta(true, new TreeSet<>());
+    }
+
+    /** Re-renders every open board, a background git answer having landed. */
+    private void refreshReviewBoards() {
+        for (OpenSessionTab open : openTabs.values()) {
+            open.reviewView().ifPresent(SessionReviewView::refreshReviewState);
+        }
     }
 
     /**
@@ -4030,6 +4299,27 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * session on its shell terminal, which is the state in which the rename
      * and sidebar-filter paths used to lose every keystroke to the shell.
      */
+    /** Diagnostic-only: opens the gutter comment composer on the first change. */
+    public void diagComment() {
+        currentlySelected().ifPresentOrElse(
+                open -> open.reviewView().ifPresentOrElse(
+                        view -> System.out.println("[diag] comment -> " + view.diagOpenComposer()),
+                        () -> System.out.println("[diag] comment: Review sub-tab not open")),
+                () -> System.out.println("[diag] comment: no selected tab"));
+    }
+
+    /** Diagnostic-only: one key into the selected tab's Review view. */
+    public void diagReviewKey(String keyName) {
+        currentlySelected().ifPresentOrElse(
+                open -> open.reviewView().ifPresentOrElse(
+                        view -> {
+                            view.diagReviewKey(KeyCode.valueOf(keyName));
+                            System.out.println("[diag] reviewkey " + keyName + " delivered");
+                        },
+                        () -> System.out.println("[diag] reviewkey: Review sub-tab not open")),
+                () -> System.out.println("[diag] reviewkey: no selected tab"));
+    }
+
     public void diagShowSubTab(String name) {
         OpenSessionTab.SubTab subTab = switch (name.strip().toLowerCase(Locale.ROOT)) {
             case "terminal" -> OpenSessionTab.SubTab.TERMINAL;
