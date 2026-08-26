@@ -12,6 +12,8 @@ import app.drydock.review.SessionReviewScopes;
 import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.Label;
+import javafx.scene.control.ListCell;
+import javafx.scene.input.MouseButton;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -140,21 +142,47 @@ abstract class ReviewViewFixture extends ApplicationTest {
     /**
      * A plain click into the diff column -- see {@link #focusRail}.
      *
-     * <p>Polls {@link SessionReviewView#diagFocusInDiffColumn()} after the
-     * click rather than trusting one {@code waitForFxEvents()}: {@code
-     * clickOn} is a real TestFX robot press, and Monocle turns it into an FX
-     * {@code MouseEvent} on its own schedule, off this thread -- a single
-     * drain only waits for whatever was ALREADY queued when it is called,
-     * not for a click event that has not landed in the queue yet. That gap
-     * is what let this method silently return with focus still outside the
-     * diff column on CI, every run, while never once reproducing locally
-     * (see the CI-only failure {@code diagFocusSnapshot} was added to
-     * diagnose).</p>
+     * <p>Uses {@code moveTo} + a separate {@code press}/{@code release}
+     * rather than the compound {@code clickOn(String)} that {@link
+     * #focusRail} uses for the rail: {@code
+     * withAGutterSelectionOpenApproveSettlesTheSelectedHunkNotTheAnchor} (the
+     * one test in this class using that same move-then-press shape, on the
+     * gutter) has never once failed on CI, while every test going through
+     * {@code clickOn(".review-diff-cell")} has -- see the CI-only failure
+     * {@code diagFocusSnapshot} was added to diagnose, still not fully
+     * understood, and TEMPORARY diagnostics below re-added to observe it.</p>
+     *
+     * <p>Also polls {@link SessionReviewView#diagFocusInDiffColumn()} after
+     * the click rather than trusting one {@code waitForFxEvents()}: a real
+     * robot press is delivered to the FX thread asynchronously, off this
+     * thread, and a single drain only waits for whatever was ALREADY queued
+     * when it is called.</p>
      */
     final void focusDiffColumn() throws TimeoutException {
-        clickOn(".review-diff-cell");
+        // TEMPORARY: logs every ".review-diff-cell" match's empty/visible/
+        // bounds state before the click, and (via ReviewDiffColumn's own
+        // filter) whether the press physically reaches production code at
+        // all. Remove once the CI-only failure this investigates is
+        // understood -- see the class javadoc above.
+        interact(() -> lookup(".review-diff-cell").<Node>queryAll().forEach(node -> {
+            String empty = node instanceof ListCell<?> cell ? String.valueOf(cell.isEmpty()) : "n/a";
+            System.out.println("[diag] .review-diff-cell candidate empty=" + empty
+                    + " visible=" + node.isVisible()
+                    + " boundsInLocal=" + node.getBoundsInLocal()
+                    + " boundsInScene=" + node.localToScene(node.getBoundsInLocal()));
+        }));
+        moveTo(".review-diff-cell");
+        press(MouseButton.PRIMARY);
+        release(MouseButton.PRIMARY);
         WaitForAsyncUtils.waitForFxEvents();
-        WaitForAsyncUtils.waitFor(5, TimeUnit.SECONDS, view::diagFocusInDiffColumn);
+        try {
+            WaitForAsyncUtils.waitFor(5, TimeUnit.SECONDS, view::diagFocusInDiffColumn);
+        } catch (TimeoutException e) {
+            // TEMPORARY: a bare TimeoutException says only "it never
+            // happened", not what focus actually settled on instead.
+            throw new TimeoutException(
+                    "focus never landed in the diff column within 5s; " + view.diagFocusSnapshot());
+        }
     }
 
     /** How many hunks {@link #FILE_A} has -- what {@code ⇧A}/{@code ⇧R} settle. */
