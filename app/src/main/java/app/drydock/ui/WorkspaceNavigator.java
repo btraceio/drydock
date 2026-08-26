@@ -37,6 +37,13 @@ public interface WorkspaceNavigator {
     /** Opens the Start-session modal for an existing worktree checkout. */
     void promptStartWorktreeSession(Repository repository, WorktreeService.Worktree worktree);
 
+    /**
+     * Starts a fresh, parallel session in {@code session}'s own checkout --
+     * the same worktree (or main checkout), no context transferred -- so a
+     * second agent can investigate alongside a running or idle one.
+     */
+    void startParallelSession(ManagedAgentSession session);
+
     /** Shows the main-pane empty state for a discovered worktree that has no session yet. */
     void showUnopenedWorktree(Repository repository, WorktreeService.Worktree worktree);
 

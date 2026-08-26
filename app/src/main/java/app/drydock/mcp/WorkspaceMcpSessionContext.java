@@ -102,6 +102,15 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
     public static final long RENAME_TIMEOUT_SECONDS = 25;
 
     /**
+     * Bound on {@link #reclaimConversation}: one FX-thread hop and one state
+     * transform, the same shape as a rename. Public for the same reason
+     * {@link #RENAME_TIMEOUT_SECONDS} is. Distinct from it so a reclaim that
+     * also forgets the old conversation's activity state can never be
+     * confused with a rename budget.
+     */
+    public static final long RECLAIM_TIMEOUT_SECONDS = 25;
+
+    /**
      * Bound on {@link #writeHandoff}: one FX-thread hop, one state transform,
      * and one {@code git rev-parse} off the FX thread to stamp the brief with
      * the commit it was written against. Slightly longer than a rename for
@@ -140,6 +149,7 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
     private final Supplier<UserConfig> userConfig;
     private final BiFunction<Path, Optional<String>, CompletableFuture<ManagedSessionId>> sessionStarter;
     private final BiFunction<ManagedSessionId, String, CompletableFuture<RenameOutcome>> sessionRenamer;
+    private final BiFunction<ManagedSessionId, String, CompletableFuture<Void>> sessionReclaimer;
     private final BiFunction<ManagedSessionId, HandoffDraft, CompletableFuture<HandoffBrief>> handoffWriter;
 
     /**
@@ -149,6 +159,7 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
      *                         reads a file, and the user may edit it while the app runs
      * @param sessionStarter   bound to {@code MainWorkspace.startAgentSession}
      * @param sessionRenamer   bound to {@code MainWorkspace.renameSessionFromAgent}
+     * @param sessionReclaimer bound to {@code MainWorkspace.reclaimConversationFromAgent}
      * @param handoffWriter    bound to {@code MainWorkspace.writeHandoffFromAgent}
      */
     public WorkspaceMcpSessionContext(Supplier<List<ManagedAgentSession>> sessionCatalog,
@@ -165,6 +176,8 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
                                               CompletableFuture<ManagedSessionId>> sessionStarter,
                                       BiFunction<ManagedSessionId, String,
                                               CompletableFuture<RenameOutcome>> sessionRenamer,
+                                      BiFunction<ManagedSessionId, String,
+                                              CompletableFuture<Void>> sessionReclaimer,
                                       BiFunction<ManagedSessionId, HandoffDraft,
                                               CompletableFuture<HandoffBrief>> handoffWriter) {
         this.sessionCatalog = Objects.requireNonNull(sessionCatalog, "sessionCatalog");
@@ -179,6 +192,7 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
         this.userConfig = Objects.requireNonNull(userConfig, "userConfig");
         this.sessionStarter = Objects.requireNonNull(sessionStarter, "sessionStarter");
         this.sessionRenamer = Objects.requireNonNull(sessionRenamer, "sessionRenamer");
+        this.sessionReclaimer = Objects.requireNonNull(sessionReclaimer, "sessionReclaimer");
         this.handoffWriter = Objects.requireNonNull(handoffWriter, "handoffWriter");
     }
 
@@ -636,6 +650,11 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
     @Override
     public RenameOutcome renameSession(ManagedSessionId caller, String title) throws McpToolException {
         return join(sessionRenamer.apply(caller, title), RENAME_TIMEOUT_SECONDS);
+    }
+
+    @Override
+    public void reclaimConversation(ManagedSessionId caller, String newAgentSessionId) throws McpToolException {
+        join(sessionReclaimer.apply(caller, newAgentSessionId), RECLAIM_TIMEOUT_SECONDS);
     }
 
     @Override

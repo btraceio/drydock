@@ -298,4 +298,25 @@ final class FakeMcpSessionContext implements McpSessionContext {
         renameCalls.add(title);
         return renameOutcome;
     }
+
+    /** The last conversation id reclaim was asked to rebind to, if any. */
+    private String reclaimedTo;
+    private McpToolException reclaimFailure;
+
+    String reclaimedTo() {
+        return reclaimedTo;
+    }
+
+    /** When set, {@link #reclaimConversation} throws this instead of recording. */
+    void failReclaimWith(McpToolException failure) {
+        this.reclaimFailure = failure;
+    }
+
+    @Override
+    public void reclaimConversation(ManagedSessionId caller, String newAgentSessionId) throws McpToolException {
+        if (reclaimFailure != null) {
+            throw reclaimFailure;
+        }
+        reclaimedTo = newAgentSessionId;
+    }
 }
