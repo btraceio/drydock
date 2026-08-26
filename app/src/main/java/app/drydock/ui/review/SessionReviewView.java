@@ -3297,6 +3297,23 @@ public final class SessionReviewView extends BorderPane {
     }
 
     /**
+     * Diagnostic-only: whether the Scene's real focus owner is inside {@link
+     * #diffColumn} right now -- what {@link #settleUnit()} bases {@code
+     * HUNK} on. A fixture's click-driven {@code clickOn} is a real TestFX
+     * robot press: Monocle turns it into an FX {@code MouseEvent} on its own
+     * schedule, off the calling thread, so a single {@code
+     * waitForFxEvents()} after the click can return before that event has
+     * even been posted -- it only waits for whatever was ALREADY queued.
+     * Polling this (see {@code ReviewViewFixture#focusDiffColumn}) waits for
+     * the actual postcondition instead of guessing how many drains cover the
+     * gap.
+     */
+    boolean diagFocusInDiffColumn() {
+        return ReviewDiagFxThread.call(
+                () -> isDescendantOf(getScene() == null ? null : getScene().getFocusOwner(), diffColumn));
+    }
+
+    /**
      * Diagnostic-only: what {@link #settleUnit()} would read right now, and
      * the Scene focus state it derives that from -- for a test to log when a
      * settle action lands on the wrong unit. Exists because {@code
