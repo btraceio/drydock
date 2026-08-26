@@ -3281,6 +3281,26 @@ public final class SessionReviewView extends BorderPane {
         });
     }
 
+    /**
+     * Diagnostic-only: what {@link #settleUnit()} would read right now, and
+     * the Scene focus state it derives that from -- for a test to log when a
+     * settle action lands on the wrong unit. Exists because {@code
+     * withTheDiffColumnFocusedApproveSettlesOneHunk} settles the whole
+     * section (as if {@link #settleUnit()} read {@code SECTION}) on CI
+     * runners but not in any local run, isolated or full-suite; this pins
+     * down whether the Scene's focus owner ever actually lands inside {@link
+     * #diffColumn} on a run where it happens, instead of guessing from the
+     * assertion failure alone.
+     */
+    String diagFocusSnapshot() {
+        return ReviewDiagFxThread.call(() -> {
+            Node owner = getScene() == null ? null : getScene().getFocusOwner();
+            return "settleUnit=" + settleUnit()
+                    + " focusOwner=" + (owner == null ? "none" : owner.getClass().getSimpleName())
+                    + " inDiffColumn=" + isDescendantOf(owner, diffColumn);
+        });
+    }
+
     /** Diagnostic-only: the current rail's intent ids, in rendered order. */
     List<String> diagIntentIds() {
         return ReviewDiagFxThread.call(() -> intents().stream().map(ReviewIntent::id).toList());
