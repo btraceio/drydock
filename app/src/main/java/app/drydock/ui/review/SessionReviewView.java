@@ -3282,6 +3282,21 @@ public final class SessionReviewView extends BorderPane {
     }
 
     /**
+     * Diagnostic-only: whether {@code scopeId} has a {@link ChangeGraph}
+     * build in flight on {@link #SECTION_GRAPH_EXECUTOR}. A fixture that
+     * shows a diff and moves straight into clicking the view races that
+     * background build's completion -- {@link #refreshReviewState()} runs
+     * from its {@code Platform.runLater} callback regardless of success or
+     * failure, rebuilds the rail's cards, and can hand focus somewhere the
+     * click never put it (see {@code diagFocusSnapshot}'s javadoc). Letting
+     * a fixture wait on this before a test method starts closes that race
+     * instead of leaving every test built on it to hit it by chance.
+     */
+    boolean diagGraphBuildPending(String scopeId) {
+        return ReviewDiagFxThread.call(() -> graphBuilding.contains(scopeId));
+    }
+
+    /**
      * Diagnostic-only: what {@link #settleUnit()} would read right now, and
      * the Scene focus state it derives that from -- for a test to log when a
      * settle action lands on the wrong unit. Exists because {@code
