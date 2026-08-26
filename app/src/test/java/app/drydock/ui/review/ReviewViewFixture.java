@@ -12,6 +12,7 @@ import app.drydock.review.SessionReviewScopes;
 import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.Label;
+import javafx.scene.control.ListCell;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -152,6 +153,19 @@ abstract class ReviewViewFixture extends ApplicationTest {
      * diagnose).</p>
      */
     final void focusDiffColumn() throws TimeoutException {
+        // TEMPORARY: investigating the same CI-only failure the class javadoc
+        // above describes -- logs every ".review-diff-cell" match's empty/
+        // visible/bounds state BEFORE the click, since clickOn(String) picks
+        // whichever match lookup() returns first, and a virtualized
+        // ListView's cell pool can hold empty or off-screen cells alongside
+        // populated ones. Remove once the investigation closes.
+        interact(() -> lookup(".review-diff-cell").<Node>queryAll().forEach(node -> {
+            String empty = node instanceof ListCell<?> cell ? String.valueOf(cell.isEmpty()) : "n/a";
+            System.out.println("[diag] .review-diff-cell candidate empty=" + empty
+                    + " visible=" + node.isVisible()
+                    + " boundsInLocal=" + node.getBoundsInLocal()
+                    + " boundsInScene=" + node.localToScene(node.getBoundsInLocal()));
+        }));
         clickOn(".review-diff-cell");
         WaitForAsyncUtils.waitForFxEvents();
         WaitForAsyncUtils.waitFor(5, TimeUnit.SECONDS, view::diagFocusInDiffColumn);
