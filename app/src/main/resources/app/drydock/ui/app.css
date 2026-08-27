@@ -622,6 +622,48 @@
     -fx-background-color: -drydock-main;
 }
 
+/* ---- Terminal search overlay ------------------------------------------- */
+
+.terminal-search-overlay {
+    -fx-background-color: -drydock-hover;
+    -fx-background-radius: 8px;
+    -fx-border-radius: 8px;
+    -fx-padding: 6 10 6 10;
+    -fx-spacing: 6;
+    -fx-alignment: center-left;
+    -fx-max-width: 420px;
+    -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.3), 8, 0, 0, 2);
+}
+.terminal-search-field {
+    -fx-background-color: -drydock-main;
+    -fx-background-radius: 4px;
+    -fx-border-radius: 4px;
+    -fx-border-color: -drydock-border;
+    -fx-border-width: 1px;
+    -fx-font-size: 12px;
+    -fx-text-fill: -drydock-text;
+    -fx-prompt-text-fill: -drydock-text-dim;
+}
+.terminal-search-field:focused {
+    -fx-border-color: -drydock-running;
+}
+.terminal-search-count {
+    -fx-font-size: 11px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-alignment: center;
+}
+.terminal-search-nav, .terminal-search-close {
+    -fx-background-color: transparent;
+    -fx-background-radius: 4px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 12px;
+    -fx-padding: 2 6 2 6;
+    -fx-cursor: hand;
+}
+.terminal-search-nav:hover, .terminal-search-close:hover {
+    -fx-background-color: -drydock-border;
+}
+
 /* ---- Resume picker (README section 6) ----------------------------------- */
 
 .resume-picker {
