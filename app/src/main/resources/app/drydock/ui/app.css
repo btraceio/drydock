@@ -592,14 +592,14 @@
 }
 
 .status-pill {
-    -fx-padding: 3 10 3 8;
+    -fx-padding: 1 7 1 6;
     -fx-background-radius: 100px;
     -fx-background-color: -drydock-hover;
-    -fx-spacing: 6;
+    -fx-spacing: 5;
     -fx-alignment: center;
 }
 .status-pill .label {
-    -fx-font-size: 11px;
+    -fx-font-size: 10px;
     -fx-text-fill: -drydock-text-dim;
 }
 .status-pill:running {
