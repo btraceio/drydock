@@ -446,14 +446,18 @@ class SessionHandoffServiceTest {
     void stalenessCountsCommitsAndFilesSinceTheBrief() throws Exception {
         String head = gitCapture(repositoryRoot, "rev-parse", "HEAD").strip();
         briefs.put(outgoing.id(), brief(outgoing.id(), "Goal", Optional.of(head)));
-        Files.writeString(repositoryRoot.resolve("b.txt"), "later\n");
-        git(repositoryRoot, "add", ".");
-        commit(repositoryRoot, "later work");
+        // The banner warns only once work has moved substantially (10+ commits
+        // or 20+ changed files), so cross the commit threshold.
+        for (int i = 0; i < 10; i++) {
+            Files.writeString(repositoryRoot.resolve("file" + i + ".txt"), "content " + i + "\n");
+            git(repositoryRoot, "add", ".");
+            commit(repositoryRoot, "later work " + i);
+        }
 
         HandoffStaleness staleness = service.stalenessBlocking(outgoing);
 
         assertTrue(staleness.shouldWarn());
-        assertEquals(1, staleness.commitsSince());
+        assertEquals(10, staleness.commitsSince());
     }
 
     @Test
@@ -466,8 +470,8 @@ class SessionHandoffServiceTest {
     }
 
     @Test
-    void aMissingBriefAlwaysWarns() {
-        assertTrue(service.stalenessBlocking(outgoing).shouldWarn());
+    void aMissingBriefDoesNotNag() {
+        assertFalse(service.stalenessBlocking(outgoing).shouldWarn());
     }
 
     // ---- fixtures -----------------------------------------------------------

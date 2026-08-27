@@ -14,10 +14,23 @@ import java.util.Optional;
  * warning -- only commits and changed files since {@link
  * HandoffBrief#writtenAtCommit()} can.</p>
  *
+ * <p>The warning fires only once the work has moved substantially: {@value
+ * #WARN_COMMITS}+ commits or {@value #WARN_FILES}+ changed files since the
+ * brief was written. A missing brief does not raise the warning on its own --
+ * a session that never had a brief is not helped by a persistent nag, and the
+ * counts against a non-existent brief are not a measurement (see {@link #of}).
+ * The banner appears when the brief is genuinely stale, not the moment one
+ * file changes.</p>
+ *
  * <p>Pure: the git counting is the caller's job (see {@code
  * SessionHandoffService}), so this is testable without a repository.</p>
  */
 public record HandoffStaleness(int commitsSince, int changedFiles, boolean briefMissing) {
+
+    /** Warn only once this many commits have landed since the brief was written. */
+    private static final int WARN_COMMITS = 10;
+    /** Warn only once this many files have changed since the brief was written. */
+    private static final int WARN_FILES = 20;
 
     /**
      * When {@code brief} is empty the counts are dropped rather than carried:
@@ -33,7 +46,7 @@ public record HandoffStaleness(int commitsSince, int changedFiles, boolean brief
     }
 
     public boolean shouldWarn() {
-        return briefMissing || commitsSince > 0 || changedFiles > 0;
+        return commitsSince >= WARN_COMMITS || changedFiles >= WARN_FILES;
     }
 
     /** One line for the banner; never blank, so the caller never has to guess at a fallback. */
@@ -41,7 +54,7 @@ public record HandoffStaleness(int commitsSince, int changedFiles, boolean brief
         if (briefMissing) {
             return "No handoff brief has been written for this session";
         }
-        if (!shouldWarn()) {
+        if (commitsSince == 0 && changedFiles == 0) {
             return "Brief is current";
         }
         String commits = commitsSince + (commitsSince == 1 ? " commit" : " commits");

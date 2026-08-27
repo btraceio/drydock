@@ -23,10 +23,12 @@ class HandoffStalenessTest {
     }
 
     @Test
-    void warnsWhenNoBriefWasEverWritten() {
+    void doesNotNagWhenNoBriefWasEverWritten() {
+        // A session that never had a brief is not helped by a persistent nag;
+        // the banner appears only when work has moved substantially.
         HandoffStaleness staleness = HandoffStaleness.of(Optional.empty(), 0, 0);
 
-        assertTrue(staleness.shouldWarn());
+        assertFalse(staleness.shouldWarn());
         assertTrue(staleness.describe().contains("No handoff brief"), staleness.describe());
     }
 
@@ -43,11 +45,23 @@ class HandoffStalenessTest {
     }
 
     @Test
-    void warnsAndCountsTheWorkDoneSince() {
-        HandoffStaleness staleness = HandoffStaleness.of(brief(), 9, 40);
+    void doesNotWarnBelowTheCommitThreshold() {
+        assertFalse(HandoffStaleness.of(brief(), 9, 0).shouldWarn());
+    }
 
-        assertTrue(staleness.shouldWarn());
-        assertEquals("Brief written 9 commits and 40 changed files ago", staleness.describe());
+    @Test
+    void doesNotWarnBelowTheFileThreshold() {
+        assertFalse(HandoffStaleness.of(brief(), 0, 19).shouldWarn());
+    }
+
+    @Test
+    void warnsAtTheCommitThreshold() {
+        assertTrue(HandoffStaleness.of(brief(), 10, 0).shouldWarn());
+    }
+
+    @Test
+    void warnsAtTheFileThreshold() {
+        assertTrue(HandoffStaleness.of(brief(), 0, 20).shouldWarn());
     }
 
     @Test

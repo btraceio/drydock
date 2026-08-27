@@ -62,7 +62,7 @@ class HandoffBannerTest extends ApplicationTest {
             banner.getScene().getStylesheets().setAll(
                     HandoffBannerTest.class.getResource("/app/drydock/ui/theme-dark.css").toExternalForm(),
                     HandoffBannerTest.class.getResource("/app/drydock/ui/app.css").toExternalForm());
-            banner.update(HandoffStaleness.of(brief(), 3, 3), true);
+            banner.update(HandoffStaleness.of(brief(), 0, 20), true);
             banner.applyCss();
             banner.layout();
         });
@@ -88,7 +88,7 @@ class HandoffBannerTest extends ApplicationTest {
             banner.getScene().getStylesheets().setAll(
                     HandoffBannerTest.class.getResource("/app/drydock/ui/theme-dark.css").toExternalForm(),
                     HandoffBannerTest.class.getResource("/app/drydock/ui/app.css").toExternalForm());
-            banner.update(HandoffStaleness.of(brief(), 3, 3), false);
+            banner.update(HandoffStaleness.of(brief(), 0, 20), false);
             banner.applyCss();
             banner.layout();
         });
@@ -137,17 +137,18 @@ class HandoffBannerTest extends ApplicationTest {
     }
 
     @Test
-    void aSessionThatNeverWroteABriefStillGetsBothVerbs() {
+    void aSessionThatNeverWroteABriefDoesNotNag() {
+        // A missing brief is not a persistent warning; the banner stays
+        // hidden until work has moved substantially.
         interact(() -> banner.update(HandoffStaleness.of(Optional.empty(), 0, 0), false));
 
-        assertTrue(banner.isVisible());
-        assertTrue(banner.messageText().contains("No handoff brief"), banner.messageText());
-        assertFalse(banner.editButton().isDisabled());
+        assertFalse(banner.isVisible());
+        assertFalse(banner.isManaged(), "a missing brief must cost no vertical space");
     }
 
     @Test
     void becomingCurrentAgainHidesTheBanner() {
-        interact(() -> banner.update(HandoffStaleness.of(brief(), 5, 5), true));
+        interact(() -> banner.update(HandoffStaleness.of(brief(), 15, 0), true));
         assertTrue(banner.isVisible());
 
         interact(() -> banner.update(HandoffStaleness.of(brief(), 0, 0), true));
