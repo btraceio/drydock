@@ -201,6 +201,8 @@ final class OpenSessionTab {
     private final Label tabRepoLabel = new Label();
     private final Label tabTitleLabel = new Label();
     private final Label tabCostBadge = new Label();
+    /** Marks a tab whose session runs on the eval account; mirrors the sidebar's eval chip. */
+    private final Label tabEvalBadge = new Label("eval");
     private final Button tabCloseButton = new Button("×");
     private final TextField renameField = new TextField();
     private final VBox tabLabels = new VBox(0);
@@ -1016,7 +1018,11 @@ final class OpenSessionTab {
         tabAttentionDot.setVisible(false);
         tabAttentionDot.setManaged(false);
         configureCostBadge(tabCostBadge);
-        HBox graphic = new HBox(8, tabDot, tabLabels, tabCostBadge, tabAttentionDot, tabCloseButton);
+        tabEvalBadge.getStyleClass().add("eval-badge");
+        tabEvalBadge.setTooltip(new Tooltip("Eval mode: this session's model traffic is routed to the eval account"));
+        tabEvalBadge.setVisible(false);
+        tabEvalBadge.setManaged(false);
+        HBox graphic = new HBox(8, tabDot, tabLabels, tabEvalBadge, tabCostBadge, tabAttentionDot, tabCloseButton);
         graphic.setAlignment(Pos.CENTER_LEFT);
 
         // Double-click the tab -> inline rename (Enter/blur commits, Esc cancels).
@@ -1509,6 +1515,16 @@ final class OpenSessionTab {
         boolean effective = needsAttention && !isRemote;
         tabAttentionDot.setVisible(effective);
         tabAttentionDot.setManaged(effective);
+    }
+
+    /**
+     * Shows or hides the eval badge on this tab. The sidebar row already
+     * carries an eval chip; the tab strip is the one surface always in view
+     * while the user is in another tab, so the badge must appear there too.
+     */
+    void setEvalMode(boolean evalMode) {
+        tabEvalBadge.setVisible(evalMode);
+        tabEvalBadge.setManaged(evalMode);
     }
 
     /** Re-themes this tab's live terminal (app theme toggle); see {@link TerminalBridge#applyTerminalTheme}. */

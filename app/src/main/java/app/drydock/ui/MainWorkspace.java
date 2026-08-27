@@ -683,6 +683,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             open.setDisplayName(session.displayName());
             open.setStatus(session.status());
             open.setNeedsAttention(viewModel.activityOf(sessionId) == SessionActivity.NEEDS_ATTENTION);
+            open.setEvalMode(session.evalMode());
             open.updatePrChip(session.prState(), session.prNumber());
             open.setResumeCostEstimate(viewModel.resumeCostEstimate(sessionId));
         });
