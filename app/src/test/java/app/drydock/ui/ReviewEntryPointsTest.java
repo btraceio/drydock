@@ -357,6 +357,7 @@ class ReviewEntryPointsTest extends ApplicationTest {
 
         @Override
         public void startParallelSession(ManagedAgentSession session) { }
+        public void startParallelWorktreeSession(ManagedAgentSession session) { }
 
         @Override
         public void showUnopenedWorktree(Repository repository, WorktreeService.Worktree worktree) { }

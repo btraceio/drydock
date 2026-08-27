@@ -42,6 +42,7 @@ import javafx.scene.control.Alert.AlertType;
 import javafx.scene.control.Button;
 import javafx.scene.control.ButtonType;
 import javafx.scene.control.ContextMenu;
+import javafx.scene.control.Menu;
 import javafx.scene.control.Label;
 import javafx.scene.control.MenuButton;
 import javafx.scene.control.MenuItem;
@@ -3167,8 +3168,14 @@ public final class RepositorySidebar extends VBox {
             MenuItem resume = new MenuItem("Resume");
             resume.setOnAction(e -> withLiveSession(id, navigator::resumeSession));
 
-            MenuItem parallel = new MenuItem("New session here");
+            MenuItem parallel = new MenuItem("Same worktree (this branch)");
             parallel.setOnAction(e -> withLiveSession(id, navigator::startParallelSession));
+
+            MenuItem parallelWorktree = new MenuItem("New worktree from this branch");
+ parallelWorktree.setOnAction(e -> withLiveSession(id, navigator::startParallelWorktreeSession));
+
+            Menu newSessionMenu = new Menu("New session");
+            newSessionMenu.getItems().addAll(parallel, parallelWorktree);
 
             MenuItem rename = new MenuItem("Rename…");
             rename.setOnAction(e -> withLiveSession(id, navigator::promptRenameSession));
@@ -3191,7 +3198,7 @@ public final class RepositorySidebar extends VBox {
                     navigator.showReviewForSession(id, SessionReviewScopes.Choice.PULL_REQUEST));
 
             ContextMenu menu = new ContextMenu();
-            menu.getItems().addAll(resume, parallel, rename, stop, delete,
+            menu.getItems().addAll(resume, newSessionMenu, rename, stop, delete,
                     new SeparatorMenuItem(), reviewLocal, reviewPullRequest,
                     new SeparatorMenuItem(), reveal);
             // Relabelled on every showing, not once at build: this menu is
