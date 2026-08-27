@@ -199,6 +199,8 @@ final class OpenSessionTab {
 
     // -- Tab header graphic (two-line label + dot + close; handoff 4) -------
     private final Region tabDot = SessionStatusStyles.createDot(7, SessionStatus.STARTING);
+    /** The per-agent glyph in the tab's leading gutter, mirroring the sidebar row. */
+    private final Label tabAgentMark = new Label();
 
     /** Shown only while this session's Claude is waiting on the user; see {@link #setNeedsAttention}. */
     private final Label tabAttentionDot = new Label("waiting");
@@ -1019,6 +1021,16 @@ final class OpenSessionTab {
         tabLabels.getChildren().setAll(tabRepoLabel, tabTitleLabel);
         tabLabels.setAlignment(Pos.CENTER_LEFT);
 
+        // Leading gutter: status dot, then the agent mark — two independent
+        // axes (is it running / what is it running), so two marks, exactly as
+        // the sidebar row composes them. The mark is fixed at construction:
+        // a session's agent kind never changes after it starts.
+        tabAgentMark.setText(AgentMarks.markText(agentKind, unsupportedAgent));
+        tabAgentMark.getStyleClass().addAll("agent-mark",
+                unsupportedAgent ? AgentMarks.unknownStyleClass() : AgentMarks.styleClass(agentKind));
+        HBox tabStatusCol = new HBox(3, tabDot, tabAgentMark);
+        tabStatusCol.getStyleClass().add("child-row-status");
+
         tabCloseButton.getStyleClass().add("session-tab-close");
         tabCloseButton.setFocusTraversable(false);
         tabCloseButton.setOnAction(e -> onCloseRequested.run());
@@ -1031,7 +1043,7 @@ final class OpenSessionTab {
         tabEvalBadge.setTooltip(new Tooltip("Eval mode: this session's model traffic is routed to the eval account"));
         tabEvalBadge.setVisible(false);
         tabEvalBadge.setManaged(false);
-        HBox graphic = new HBox(8, tabDot, tabLabels, tabEvalBadge, tabCostBadge, tabAttentionDot, tabCloseButton);
+        HBox graphic = new HBox(8, tabStatusCol, tabLabels, tabEvalBadge, tabCostBadge, tabAttentionDot, tabCloseButton);
         graphic.setAlignment(Pos.CENTER_LEFT);
 
         // Double-click the tab -> inline rename (Enter/blur commits, Esc cancels).
