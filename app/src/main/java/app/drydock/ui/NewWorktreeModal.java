@@ -134,6 +134,18 @@ final class NewWorktreeModal extends VBox {
     NewWorktreeModal(Repository repository, GitStatusService gitStatusService, WorktreeService worktreeService,
                      AgentRegistry agentRegistry, AgentKind preselected, boolean requireRemoteCapability,
                      Runnable onClose, CreateHandler onCreate) {
+        this(repository, gitStatusService, worktreeService, agentRegistry, preselected, requireRemoteCapability,
+                onClose, onCreate, null);
+    }
+
+    /**
+     * As above, but pre-seeds the modal in existing-branch mode with
+     * {@code preseedBranch} selected — used when starting a new worktree
+     * from an existing session's branch.
+     */
+    NewWorktreeModal(Repository repository, GitStatusService gitStatusService, WorktreeService worktreeService,
+                     AgentRegistry agentRegistry, AgentKind preselected, boolean requireRemoteCapability,
+                     Runnable onClose, CreateHandler onCreate, String preseedBranch) {
         getStyleClass().add("modal");
         setMaxWidth(520);
         setMaxHeight(Region.USE_PREF_SIZE);
@@ -365,11 +377,28 @@ final class NewWorktreeModal extends VBox {
 
         loadCatalog(repository, gitStatusService, worktreeService);
 
+        if (preseedBranch != null) {
+            // Start in existing-branch mode with the session's branch
+            // pre-filled. The catalog load above is async; applyCatalog
+            // preserves the editor text across the item replacement, so
+            // setting it here survives the catalog arriving.
+            branchField.getEditor().setText(preseedBranch);
+            setMode(Mode.EXISTING);
+        } else {
+            setMode(Mode.NEW);
+        }
         refreshState();
-        Platform.runLater(() -> {
-            newBranchField.requestFocus();
-            newBranchField.positionCaret(newBranchField.getText().length());
-        });
+        if (preseedBranch != null) {
+            Platform.runLater(() -> {
+                branchField.getEditor().requestFocus();
+                branchField.getEditor().positionCaret(preseedBranch.length());
+            });
+        } else {
+            Platform.runLater(() -> {
+                newBranchField.requestFocus();
+                newBranchField.positionCaret(newBranchField.getText().length());
+            });
+        }
     }
 
     /**
