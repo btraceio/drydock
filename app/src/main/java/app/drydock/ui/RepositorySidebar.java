@@ -803,6 +803,30 @@ public final class RepositorySidebar extends VBox {
     }
 
     /**
+     * Label text for a per-repo subtab: the repo's display name, suffixed
+     * with {@code [host]} when the repo lives on a remote host so the
+     * remotely mounted repos are distinguishable from local ones in the
+     * tab strip (the row body already carries the {@code ⇅ host} chip, but
+     * the subtab is the only thing visible when the repo is not selected).
+     */
+    static String repoTabLabelText(Repository repository) {
+        String name = repository.displayName();
+        if (!repository.isRemote()) {
+            return name;
+        }
+        return name + " [" + repository.remote().host() + "]";
+    }
+
+    /** Tooltip text for a per-repo subtab: the display name, with the remote host spelled out for a remote repo. */
+    static String repoTabTooltipText(Repository repository) {
+        String name = repository.displayName();
+        if (!repository.isRemote()) {
+            return name;
+        }
+        return name + " — remote host: " + repository.remote().host();
+    }
+
+    /**
      * Header text for the "PULL REQUESTS" bucket: a count for a landed scan,
      * or a retry affordance for one that could not run. Never called for
      * {@link RepositoryPullRequests.Outcome.Absent} -- {@code childNodesFor}
@@ -1200,11 +1224,11 @@ public final class RepositorySidebar extends VBox {
             tab.setMaxWidth(160);
             tab.setMinWidth(0);
             tab.setFocusTraversable(false);
-            Label name = new Label(repository.displayName());
+            Label name = new Label(repoTabLabelText(repository));
             name.setWrapText(true);
             name.setMaxWidth(Double.MAX_VALUE);
             tab.setGraphic(name);
-            tab.setTooltip(new Tooltip(repository.displayName()));
+            tab.setTooltip(new Tooltip(repoTabTooltipText(repository)));
             if (repository.id().equals(selected)) {
                 tab.setSelected(true);
             }
