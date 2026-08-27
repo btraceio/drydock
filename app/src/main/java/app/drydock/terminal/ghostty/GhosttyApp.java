@@ -11,8 +11,10 @@ import javafx.scene.input.Clipboard;
 import javafx.scene.input.ClipboardContent;
 
 import java.lang.foreign.Arena;
+import java.lang.foreign.MemorySegment;
 import java.lang.foreign.SymbolLookup;
 import java.lang.foreign.FunctionDescriptor;
+import java.lang.foreign.ValueLayout;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
@@ -313,15 +315,46 @@ public final class GhosttyApp implements TerminalRuntime, AutoCloseable {
     }
 
     /**
-     * {@code action_cb}: always returns {@code false} ("not handled by the
-     * app runtime") without reading the {@code ghostty_action_s} payload.
-     * Safe for the actions Gate 0C actually exercises (drawing, resizing,
-     * basic typing); very likely NOT complete for a real application (it
-     * will not open new windows/tabs, honor "quit", set the clipboard from
-     * an OSC 52 write, etc.) -- see docs/native-integration.md.
+     * Action tag constants for the search-related actions in {@code ghostty_action_tag_e}
+     * (ghostty.h). The enum is 0-based starting at {@code GHOSTTY_ACTION_QUIT}; these are
+     * the ordinals counted from that header, verified by reading the enum order.
+     */
+    static final int ACTION_START_SEARCH = 59;
+    static final int ACTION_END_SEARCH = 60;
+    static final int ACTION_SEARCH_TOTAL = 61;
+    static final int ACTION_SEARCH_SELECTED = 62;
+
+    /** {@code ghostty_target_tag_e}: APP = 0, SURFACE = 1. */
+    private static final int TARGET_SURFACE = 1;
+
+    /**
+     * {@code action_cb}: reads the action tag from {@code ghostty_action_s} and routes
+     * search actions ({@link #ACTION_START_SEARCH}, {@link #ACTION_END_SEARCH},
+     * {@link #ACTION_SEARCH_TOTAL}, {@link #ACTION_SEARCH_SELECTED}) to the
+     * {@link GhosttySurface} identified by the target's surface pointer. Returns
+     * {@code true} for handled search actions; {@code false} for everything else
+     * (the previous behavior -- see the old Javadoc below).
      */
     @SuppressWarnings("unused")
     private static boolean handleAction(MemorySegment app, MemorySegment target, MemorySegment action) {
+        int targetTag = target.get(ValueLayout.JAVA_INT, 0);
+        if (targetTag != TARGET_SURFACE) {
+            return false;
+        }
+        long surfaceAddress = target.get(ValueLayout.ADDRESS, 8).address();
+        GhosttySurface surface = GhosttySurface.bySurfaceAddress(surfaceAddress);
+        if (surface == null) {
+            return false;
+        }
+        int actionTag = action.get(ValueLayout.JAVA_INT, 0);
+        switch (actionTag) {
+            case ACTION_START_SEARCH, ACTION_END_SEARCH,
+             ACTION_SEARCH_TOTAL, ACTION_SEARCH_SELECTED -> {
+                surface.dispatchSearchAction(actionTag, action);
+                return true;
+            }
+            default -> { }
+        }
         return false;
     }
 

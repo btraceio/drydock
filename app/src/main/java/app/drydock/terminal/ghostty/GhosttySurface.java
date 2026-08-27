@@ -55,6 +55,16 @@ public final class GhosttySurface implements TerminalSurface, AutoCloseable {
     private static final Map<Long, GhosttySurface> CLIPBOARD_REGISTRY = new ConcurrentHashMap<>();
     private static final AtomicLong NEXT_CLIPBOARD_TOKEN = new AtomicLong(1);
 
+    /**
+     * Maps a native surface pointer back to its {@link GhosttySurface}, so the
+     * app-level {@code action_cb} (which receives a {@code ghostty_target_s}
+     * carrying the surface pointer) can route search actions to the right
+     * surface. Keyed by the raw address ({@link MemorySegment#address()}).
+     */
+    private static final Map<Long, GhosttySurface> SURFACE_REGISTRY = new ConcurrentHashMap<>();
+
+    private TerminalSurface.SearchListener searchListener;
+
     private final GhosttyAppBinding binding;
     private final long clipboardToken;
     private MemorySegment surface;
@@ -69,6 +79,11 @@ public final class GhosttySurface implements TerminalSurface, AutoCloseable {
     /** The surface registered under a clipboard-callback userdata token, or {@code null}. */
     static GhosttySurface byClipboardToken(long token) {
         return CLIPBOARD_REGISTRY.get(token);
+    }
+
+    /** The surface registered under a native surface pointer, or {@code null}. */
+    static GhosttySurface bySurfaceAddress(long address) {
+        return SURFACE_REGISTRY.get(address);
     }
 
     /**
@@ -130,6 +145,7 @@ public final class GhosttySurface implements TerminalSurface, AutoCloseable {
             }
             GhosttySurface created = new GhosttySurface(binding, surface, clipboardToken);
             CLIPBOARD_REGISTRY.put(clipboardToken, created);
+            SURFACE_REGISTRY.put(surface.address(), created);
             return created;
         } catch (Throwable t) {
             if (t instanceof RuntimeException re) {
@@ -505,6 +521,77 @@ public final class GhosttySurface implements TerminalSurface, AutoCloseable {
         }
     }
 
+    /**
+     * Dispatches a search-related action (identified by its tag) to this
+     * surface's {@link SearchListener}. Called by {@link GhosttyApp#handleAction}
+     * after it reads the action tag and routes the target to this surface.
+     * May be called on a non-FX thread (the search thread delivers
+     * {@code search_total}/{@code search_selected}), so the listener is
+     * always invoked via {@link Platform#runLater}.
+     */
+    void dispatchSearchAction(int actionTag, MemorySegment action) {
+        switch (actionTag) {
+            case GhosttyApp.ACTION_START_SEARCH -> {
+                MemorySegment needlePtr = action.get(ValueLayout.ADDRESS, 8);
+                String needle = needlePtr.equals(MemorySegment.NULL) ? ""
+                        : needlePtr.reinterpret(Integer.MAX_VALUE).getString(0);
+                runLater(() -> {
+                    if (searchListener != null) {
+                        searchListener.onStartSearch();
+                    }
+                });
+            }
+            case GhosttyApp.ACTION_END_SEARCH -> runLater(() -> {
+                if (searchListener != null) {
+                    searchListener.onEndSearch();
+                }
+            });
+            case GhosttyApp.ACTION_SEARCH_TOTAL -> {
+                long total = action.get(ValueLayout.JAVA_LONG, 8);
+                runLater(() -> {
+                    if (searchListener != null) {
+                        searchListener.onSearchTotal(total);
+                    }
+                });
+            }
+            case GhosttyApp.ACTION_SEARCH_SELECTED -> {
+                long selected = action.get(ValueLayout.JAVA_LONG, 8);
+                runLater(() -> {
+                    if (searchListener != null) {
+                        searchListener.onSearchSelected(selected);
+                    }
+                });
+            }
+            default -> { }
+        }
+    }
+
+    private static void runLater(Runnable r) {
+        if (Platform.isFxApplicationThread()) {
+            r.run();
+        } else {
+            Platform.runLater(r);
+        }
+    }
+
+    @Override
+    public void performBindingAction(String action) {
+        checkFxThread();
+        checkOpen();
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment cstring = GhosttyAppBinding.allocateCString(arena, action);
+            long len = cstring.byteSize() - 1;
+            binding.surfaceBindingAction.invoke(surface, cstring, len);
+        } catch (Throwable t) {
+            throw new GhosttyBinding.GhosttyNativeCallException("ghostty_surface_binding_action", t);
+        }
+    }
+
+    @Override
+    public void setSearchListener(TerminalSurface.SearchListener listener) {
+        this.searchListener = listener;
+    }
+
     @Override
     public boolean processExited() {
         checkFxThread();
@@ -555,6 +642,7 @@ public final class GhosttySurface implements TerminalSurface, AutoCloseable {
         }
         closed = true;
         CLIPBOARD_REGISTRY.remove(clipboardToken);
+        SURFACE_REGISTRY.remove(surface.address());
         try {
             binding.surfaceFree.invoke(surface);
         } catch (Throwable t) {

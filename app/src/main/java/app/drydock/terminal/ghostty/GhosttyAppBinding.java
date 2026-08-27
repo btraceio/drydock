@@ -59,11 +59,11 @@ final class GhosttyAppBinding {
     ).withName("ghostty_target_s");
 
     // ghostty_action_s { tag: i32; pad: i32; action: <union, largest member 24 bytes> }
-    // Verified: sizeof == 32, alignof == 8. Fields are intentionally left
-    // unnamed/opaque: this binding never reads action payloads (see
-    // GhosttyApp.actionCallback, which always returns false without
-    // inspecting the union) -- only the overall size/alignment matters for
-    // correct upcall argument marshalling.
+    // Verified: sizeof == 32, alignof == 8. The union is left opaque:
+    // handleAction reads the tag at offset 0 and the search payload (a
+    // pointer or ssize_t) at offset 8 via direct MemorySegment access
+    // rather than named var handles, so the overall size/alignment is
+    // all that matters for correct upcall argument marshalling.
     static final StructLayout ACTION_LAYOUT = MemoryLayout.structLayout(
         ValueLayout.JAVA_LONG,
         ValueLayout.JAVA_LONG,
@@ -186,6 +186,7 @@ final class GhosttyAppBinding {
     final MethodHandle surfaceReadText;
     final MethodHandle surfaceFreeText;
     final MethodHandle surfaceCompleteClipboardRequest;
+    final MethodHandle surfaceBindingAction;
 
     final MethodHandle appUpdateConfig;
     final MethodHandle surfaceUpdateConfig;
@@ -316,6 +317,12 @@ final class GhosttyAppBinding {
             find(lookup, "ghostty_surface_complete_clipboard_request"),
             FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
                 ValueLayout.JAVA_BOOLEAN)
+        );
+        // bool ghostty_surface_binding_action(ghostty_surface_t, const char*, uintptr_t);
+        this.surfaceBindingAction = linker.downcallHandle(
+            find(lookup, "ghostty_surface_binding_action"),
+            FunctionDescriptor.of(ValueLayout.JAVA_BOOLEAN, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                ValueLayout.JAVA_LONG)
         );
     }
 

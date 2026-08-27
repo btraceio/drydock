@@ -50,6 +50,32 @@ public interface TerminalSurface extends AutoCloseable {
     /** Gracefully closes the surface, killing the child after {@code gracePeriodMillis}. */
     void closeGracefully(long gracePeriodMillis, long pollIntervalMillis, Runnable onDone);
 
+    /**
+     * Sends a binding action string (e.g. {@code "search:needle"}, {@code "end_search"},
+     * {@code "navigate_search:next"}) to the terminal core. The string is parsed by
+     * the terminal's own binding action parser.
+     */
+    void performBindingAction(String action);
+
+    /**
+     * Sets the listener that receives search-related notifications from the terminal
+     * core (match counts, selection index, show/hide requests). Called on the JavaFX
+     * Application Thread.
+     */
+    void setSearchListener(SearchListener listener);
+
+    /** Notifications from the terminal core about search state. */
+    interface SearchListener {
+        /** The terminal core requests the search UI to be shown. */
+        void onStartSearch();
+        /** The terminal core requests the search UI to be hidden. */
+        void onEndSearch();
+        /** The total number of matches for the current needle; {@code -1} means unknown/in-progress. */
+        void onSearchTotal(long total);
+        /** The currently selected match index (0-based); {@code -1} means none. */
+        void onSearchSelected(long selected);
+    }
+
     @Override
     void close();
 }

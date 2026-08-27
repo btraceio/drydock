@@ -112,6 +112,16 @@ final class JediTermFxSurface implements TerminalSurface {
     }
 
     @Override
+    public void performBindingAction(String action) {
+        // No-op: JediTermFX does not expose a binding-action API.
+    }
+
+    @Override
+    public void setSearchListener(SearchListener listener) {
+        // No-op: JediTermFX does not deliver search notifications.
+    }
+
+    @Override
     public void closeGracefully(long gracePeriodMillis, long pollIntervalMillis, Runnable onDone) {
         if (closed) {
             onDone.run();
