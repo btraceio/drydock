@@ -50,7 +50,16 @@ public final class AgentMarks {
      * the one mark known to be wrong on the session that has no agent at all.
      */
     public static String markText(ManagedAgentSession session) {
-        return isUnknown(session) ? unknownGlyph() : glyph(session.agentKind());
+        return markText(session.agentKind(), isUnknown(session));
+    }
+
+    /**
+     * As {@link #markText(ManagedAgentSession)}, but from the kind and the
+     * unsupported flag directly — for call sites (e.g. a session tab) that
+     * capture these once at construction and have no live session.
+     */
+    public static String markText(AgentKind kind, boolean unsupported) {
+        return unsupported ? unknownGlyph() : glyph(kind);
     }
 
     /**
@@ -59,9 +68,17 @@ public final class AgentMarks {
      * poorer one exactly where the cursor lands on the row's left edge.
      */
     public static Label createMark(ManagedAgentSession session) {
-        Label mark = new Label(markText(session));
+        return createMark(session.agentKind(), isUnknown(session));
+    }
+
+    /**
+     * As {@link #createMark(ManagedAgentSession)}, but from the kind and the
+     * unsupported flag directly.
+     */
+    public static Label createMark(AgentKind kind, boolean unsupported) {
+        Label mark = new Label(markText(kind, unsupported));
         mark.getStyleClass().addAll("agent-mark",
-                isUnknown(session) ? unknownStyleClass() : styleClass(session.agentKind()));
+                unsupported ? unknownStyleClass() : styleClass(kind));
         return mark;
     }
 

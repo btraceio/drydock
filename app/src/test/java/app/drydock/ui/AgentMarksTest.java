@@ -66,4 +66,12 @@ class AgentMarksTest {
         assertEquals(AgentMarks.unknownGlyph(),
                 AgentMarks.markText(session(AgentKind.CLAUDE, SessionStatus.UNSUPPORTED_AGENT)));
     }
+
+    @Test
+    void markTextFromKindAndFlagMatchesSessionOverload() {
+        assertEquals(AgentMarks.glyph(AgentKind.PI),
+                AgentMarks.markText(AgentKind.PI, false));
+        assertEquals(AgentMarks.unknownGlyph(),
+                AgentMarks.markText(AgentKind.PI, true));
+    }
 }
