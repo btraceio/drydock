@@ -908,7 +908,62 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         modalLayer.show(modal);
     }
 
-    /** Wires where new terminals read the current theme from (design: terminal follows the app theme). */
+    /**
+     * Opens the create-worktree modal pre-seeded with {@code session}'s
+     * branch, so a second agent can work in a fresh worktree on the same
+     * branch rather than sharing the session's own checkout. Mirrors
+     * {@link #startParallelSession}'s repository/branch resolution, then
+     * hands off to {@link #promptNewWorktree} with a preseed branch.
+     */
+    @Override
+    public void startParallelWorktreeSession(ManagedAgentSession session) {
+        Optional<Repository> owner = repositoryFor(session);
+        if (owner.isEmpty()) {
+            return;
+        }
+        Repository repository = owner.get();
+        if (repository.isRemote()) {
+            // No local checkout to `git worktree add` against.
+            return;
+        }
+        if (modalLayer == null) {
+            return;
+        }
+        Optional<AgentKind> defaultKind = agentRegistry.resolveDefault(repository.settings().lastUsedAgent(), false);
+        if (defaultKind.isEmpty()) {
+            showNoAgentAvailable();
+            return;
+        }
+        Optional<Path> worktreeRoot = session.worktreeRoot();
+        GitStatus status = worktreeRoot
+                .map(root -> viewModel.worktreeStatus(root).orElse(null))
+                .orElseGet(() -> viewModel.repoStatus(repository.id()).orElse(null));
+        String branch = status != null ? UiFormats.branchText(status)
+                : (worktreeRoot.isPresent() ? session.displayName() : repository.displayName());
+        NewWorktreeModal[] holder = new NewWorktreeModal[1];
+        openWorktreeModal = null;
+        holder[0] = new NewWorktreeModal(repository, gitStatusService, worktreeService, agentRegistry,
+                defaultKind.get(), false, modalLayer::close,
+                (mode, outcome, branchName, base, directory, task, agent, eval) -> {
+                    holder[0].showCreating();
+                    CompletableFuture<Path> creation = mode == NewWorktreeState.Mode.EXISTING
+                            ? gitStatusService.addWorktreeForBranch(repository.root(), directory,
+                                    ((BranchCheckout.Outcome.Ready) outcome).ref(), branchName)
+                            : gitStatusService.createWorktree(
+                                    repository.root(), directory, branchName, Optional.of(base));
+                    creation.whenComplete((created, ex) -> Platform.runLater(() -> {
+                        if (ex != null) {
+                            holder[0].showError(String.valueOf(UiErrors.unwrap(ex).getMessage()));
+                            return;
+                        }
+                        modalLayer.close();
+                        openNewWorktreeSession(repository, branchName, created, task,
+                                mode == NewWorktreeState.Mode.NEW, agent, eval);
+                    }));
+                }, branch);
+        openWorktreeModal = holder[0];
+        modalLayer.show(holder[0]);
+    }
     public void setThemeProvider(Supplier<UiTheme> provider) {
         this.themeProvider = provider == null ? () -> UiTheme.DARK : provider;
     }

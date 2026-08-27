@@ -44,6 +44,13 @@ public interface WorkspaceNavigator {
      */
     void startParallelSession(ManagedAgentSession session);
 
+    /**
+     * Opens the create-worktree modal pre-seeded with {@code session}'s
+     * branch, so a second agent can work in a fresh worktree on the same
+     * branch rather than sharing the session's own checkout.
+     */
+    void startParallelWorktreeSession(ManagedAgentSession session);
+
     /** Shows the main-pane empty state for a discovered worktree that has no session yet. */
     void showUnopenedWorktree(Repository repository, WorktreeService.Worktree worktree);
 
