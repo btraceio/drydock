@@ -31,6 +31,7 @@ import javafx.scene.control.TextField;
 import javafx.scene.control.ToggleButton;
 import javafx.scene.control.Tooltip;
 import javafx.scene.input.KeyCode;
+import javafx.scene.input.KeyEvent;
 import javafx.scene.input.MouseButton;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
@@ -134,6 +135,9 @@ final class OpenSessionTab {
     private final TerminalBridge bridge;
     private final Stage stage;
     private final StackPane placeholder = new StackPane();
+
+    /** The terminal search overlay: a top-anchored bar shown while Cmd-F search is active. */
+    private final TerminalSearchOverlay searchOverlay = new TerminalSearchOverlay();
     private final Label statusLabel = new Label("Starting session...");
     private final BorderPane content = new BorderPane();
     private final HandoffBanner handoffBanner = new HandoffBanner();
@@ -281,6 +285,11 @@ final class OpenSessionTab {
 
         placeholder.getStyleClass().add("terminal-region");
         placeholder.getChildren().add(statusLabel);
+        // The search overlay sits on top of the terminal, anchored to the
+        // top of the placeholder StackPane. Invisible until Cmd-F.
+        StackPane.setAlignment(searchOverlay, Pos.TOP_CENTER);
+        searchOverlay.setVisible(false);
+        placeholder.getChildren().add(searchOverlay);
         statusLabel.getStyleClass().add("session-meta");
         placeholder.boundsInLocalProperty().addListener((obs, oldV, newV) -> bridge.updateGeometry());
         placeholder.localToSceneTransformProperty().addListener((obs, oldV, newV) -> bridge.updateGeometry());
@@ -1544,6 +1553,30 @@ final class OpenSessionTab {
      */
     void attachSurface(TerminalSurface surface) {
         bridge.adoptSurface(surface);
+        bridge.setSearchListener(new TerminalSurface.SearchListener() {
+            @Override
+            public void onStartSearch() {
+                bridge.releaseFocus();
+                searchOverlay.show();
+            }
+
+            @Override
+            public void onEndSearch() {
+                searchOverlay.hide();
+                bridge.focus();
+            }
+
+            @Override
+            public void onSearchTotal(long total) {
+                searchOverlay.setMatchCount(total);
+            }
+
+            @Override
+            public void onSearchSelected(long selected) {
+                searchOverlay.setSelectedIndex(selected);
+            }
+        });
+        searchOverlay.setBindingActionHandler(bridge::performBindingAction);
         placeholder.getChildren().remove(statusLabel);
         bridge.host().embeddedNode().ifPresent(placeholder.getChildren()::add);
         bridge.wireInputListeners();

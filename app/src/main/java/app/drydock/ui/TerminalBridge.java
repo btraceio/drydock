@@ -112,6 +112,33 @@ final class TerminalBridge {
         this.surface = surface;
     }
 
+    /**
+     * Sets the search listener on the adopted surface; the surface delivers
+     * search notifications (show/hide/match counts) from the terminal core
+     * to this listener on the JavaFX Application Thread.
+     */
+    void setSearchListener(TerminalSurface.SearchListener listener) {
+        if (surface != null) {
+            surface.setSearchListener(listener);
+        }
+    }
+
+    /**
+     * Sends a binding action string to the adopted surface (e.g.
+     * {@code "search:needle"}, {@code "end_search"}). No-op if no surface is
+     * adopted yet.
+     */
+    void performBindingAction(String action) {
+        if (disposed || surfaceClosing || surface == null) {
+            return;
+        }
+        try {
+            surface.performBindingAction(action);
+        } catch (IllegalStateException e) {
+            // Surface closed in the teardown gap.
+        }
+    }
+
     /** Starts forwarding keyboard/mouse input to the adopted surface (register-once per host slot). */
     void wireInputListeners() {
         host.setKeyEventListener(this::onKeyEvent);
