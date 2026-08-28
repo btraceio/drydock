@@ -2,6 +2,8 @@ package app.drydock.mcp;
 
 import app.drydock.domain.HandoffBrief;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.Workflow;
+import app.drydock.domain.WorkflowBrief;
 import app.drydock.git.DiffScope;
 import app.drydock.mcp.AnnotationLines.LineRef;
 import app.drydock.mcp.McpSessionContext.RenameOutcome;
@@ -168,7 +170,9 @@ public final class McpToolRouter {
                         "Records what this session would tell a successor, so the human can hand the work "
                                 + "to a different agent at any moment. Keep it current as you work -- you "
                                 + "are writing for whoever picks this up, not for the human. Every call "
-                                + "REPLACES the whole brief: an omitted optional slot is cleared, not kept.",
+                                + "REPLACES the whole brief: an omitted optional slot is cleared, not kept. "
+                                + "Pass \"workflow\": true to write the calling session's workflow brief "
+                                + "instead (requires the session to be a workflow member).",
                         JsonObject.empty()
                                 .put("goal", schemaString("What this session is trying to achieve."))
                                 .put("nextStep", schemaString("What the successor should do first."))
@@ -177,7 +181,9 @@ public final class McpToolRouter {
                                 .put("ruledOut", schemaString("What was tried or considered and rejected, "
                                         + "with the reason -- the part a successor cannot reconstruct "
                                         + "from the code."))
-                                .put("corrections", schemaString("What the human pushed back on.")),
+                                .put("corrections", schemaString("What the human pushed back on."))
+                                .put("workflow", schemaBoolean("When true, write the calling session's "
+                                        + "workflow brief instead of its per-session brief.")),
                         "goal", "nextStep"),
                 descriptor("repos_list",
                         "Lists every repository registered in Drydock, with git state for local repositories.",
@@ -674,6 +680,7 @@ public final class McpToolRouter {
     private JsonValue sessionHandoff(ManagedSessionId caller, JsonValue arguments) throws McpToolException {
         requireLiveSession(caller);
         JsonObject args = asObject(arguments);
+        boolean workflowTarget = args.get("workflow") instanceof JsonBoolean wb && wb.value();
 
         // Validate before charging: a malformed brief is the agent's mistake
         // to fix, not a spend (same rule as session_rename).
@@ -701,10 +708,25 @@ public final class McpToolRouter {
             throw new McpToolException(e.getMessage());
         }
 
-        HandoffBrief written;
+        McpSessionContext.HandoffDraft draft = new McpSessionContext.HandoffDraft(
+                goal, nextStep, approach, decisions, ruledOut, corrections);
+
         try {
-            written = context.writeHandoff(caller, new McpSessionContext.HandoffDraft(
-                    goal, nextStep, approach, decisions, ruledOut, corrections));
+            if (workflowTarget) {
+                Workflow written = context.writeWorkflowHandoff(caller, draft);
+                return JsonObject.empty()
+                        .put("outcome", new JsonString("written"))
+                        .put("target", new JsonString("workflow"))
+                        .put("workflowId", new JsonString(written.id().value().toString()))
+                        .put("writtenAt", new JsonString(written.brief()
+                                .map(WorkflowBrief::writtenAt)
+                                .map(Instant::toString)
+                                .orElse("")));
+            }
+            HandoffBrief written = context.writeHandoff(caller, draft);
+            return JsonObject.empty()
+                    .put("outcome", new JsonString("written"))
+                    .put("writtenAt", new JsonString(written.writtenAt().toString()));
         } catch (McpToolException | RuntimeException e) {
             // Only an outright failure is refunded -- but "outright" includes
             // an unchecked one. The context reaches git and the FX thread, and
@@ -713,10 +735,6 @@ public final class McpToolRouter {
             registry.refundHandoff(caller);
             throw e;
         }
-
-        return JsonObject.empty()
-                .put("outcome", new JsonString("written"))
-                .put("writtenAt", new JsonString(written.writtenAt().toString()));
     }
 
     /**

@@ -2,6 +2,7 @@ package app.drydock.mcp;
 
 import app.drydock.domain.HandoffBrief;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.Workflow;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewIntent;
@@ -235,6 +236,17 @@ public interface McpSessionContext {
      * mid-call, and those throw.</p>
      */
     HandoffBrief writeHandoff(ManagedSessionId caller, HandoffDraft draft) throws McpToolException;
+
+    /**
+     * Replaces the caller's <em>workflow</em> brief with {@code draft} and
+     * persists it, stamping {@code writtenAt} and {@code author = AGENT}. No
+     * {@code writtenAtCommit}: a workflow spans multiple repos and branches,
+     * so a single {@code HEAD} is meaningless.
+     *
+     * <p>Refuses if the caller is not a workflow member. Otherwise the same
+     * wholesale-replacement semantics as {@link #writeHandoff}.</p>
+     */
+    Workflow writeWorkflowHandoff(ManagedSessionId caller, HandoffDraft draft) throws McpToolException;
 
     /**
      * Renames the caller's own session to an already-validated title.

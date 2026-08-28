@@ -92,7 +92,8 @@ public record ManagedAgentSession(
         PrLink pr,
         boolean namePinned,
         Optional<ManagedSessionId> forkedFrom,
-        boolean evalMode
+        boolean evalMode,
+        Optional<WorkflowId> workflowId
 ) {
 
     public ManagedAgentSession {
@@ -107,6 +108,7 @@ public record ManagedAgentSession(
         Objects.requireNonNull(lastExitCode, "lastExitCode");
         Objects.requireNonNull(pr, "pr");
         Objects.requireNonNull(forkedFrom, "forkedFrom");
+        Objects.requireNonNull(workflowId, "workflowId");
 
         if (displayName.isBlank()) {
             throw new IllegalArgumentException("ManagedAgentSession displayName must not be blank");
@@ -114,15 +116,29 @@ public record ManagedAgentSession(
     }
 
     /**
-     * As the canonical constructor with {@code evalMode = false}; for callers
-     * (and tests) that do not participate in eval mode.
+     * As the canonical constructor with {@code evalMode = false} and
+     * {@code workflowId = Optional.empty()}; for callers (and tests) that
+     * do not participate in eval mode or workflow grouping.
      */
     public ManagedAgentSession(ManagedSessionId id, RepositoryId repositoryId, String displayName,
                                AgentBinding binding, SessionWorkspace workspace, SessionStatus status,
                                Instant createdAt, Instant lastOpenedAt, Optional<Integer> lastExitCode,
                                PrLink pr, boolean namePinned, Optional<ManagedSessionId> forkedFrom) {
         this(id, repositoryId, displayName, binding, workspace, status, createdAt, lastOpenedAt, lastExitCode,
-                pr, namePinned, forkedFrom, false);
+                pr, namePinned, forkedFrom, false, Optional.empty());
+    }
+
+    /**
+     * As the canonical constructor with {@code workflowId = Optional.empty()};
+     * for callers (and tests) that do not participate in workflow grouping.
+     */
+    public ManagedAgentSession(ManagedSessionId id, RepositoryId repositoryId, String displayName,
+                               AgentBinding binding, SessionWorkspace workspace, SessionStatus status,
+                               Instant createdAt, Instant lastOpenedAt, Optional<Integer> lastExitCode,
+                               PrLink pr, boolean namePinned, Optional<ManagedSessionId> forkedFrom,
+                               boolean evalMode) {
+        this(id, repositoryId, displayName, binding, workspace, status, createdAt, lastOpenedAt, lastExitCode,
+                pr, namePinned, forkedFrom, evalMode, Optional.empty());
     }
 
     // ---- leaf accessors, delegating into the groups --------------------------
@@ -220,6 +236,15 @@ public record ManagedAgentSession(
     }
 
     /**
+     * Sets which workflow this session belongs to. Not set-once: a session can
+     * be moved between workflows or unaffiliated. Moving it does not move its
+     * per-session brief -- that stays with the session.
+     */
+    public ManagedAgentSession withWorkflowId(Optional<WorkflowId> newWorkflowId) {
+        return toBuilder().workflowId(newWorkflowId).build();
+    }
+
+    /**
      * The single construction path. Adding a component touches this class in
      * one place instead of once per {@code with*} method, which is the whole
      * reason it exists.
@@ -239,6 +264,7 @@ public record ManagedAgentSession(
         private boolean namePinned;
         private Optional<ManagedSessionId> forkedFrom;
         private boolean evalMode;
+        private Optional<WorkflowId> workflowId;
 
         private Builder(ManagedAgentSession from) {
             this.id = from.id;
@@ -254,6 +280,7 @@ public record ManagedAgentSession(
             this.namePinned = from.namePinned;
             this.forkedFrom = from.forkedFrom;
             this.evalMode = from.evalMode;
+            this.workflowId = from.workflowId;
         }
 
         /**
@@ -277,6 +304,7 @@ public record ManagedAgentSession(
             this.namePinned = false;
             this.forkedFrom = Optional.empty();
             this.evalMode = false;
+            this.workflowId = Optional.empty();
         }
 
         public Builder id(ManagedSessionId value) {
@@ -344,9 +372,14 @@ public record ManagedAgentSession(
             return this;
         }
 
+        public Builder workflowId(Optional<WorkflowId> value) {
+            this.workflowId = value;
+            return this;
+        }
+
         public ManagedAgentSession build() {
             return new ManagedAgentSession(id, repositoryId, displayName, binding, workspace, status,
-                    createdAt, lastOpenedAt, lastExitCode, pr, namePinned, forkedFrom, evalMode);
+                    createdAt, lastOpenedAt, lastExitCode, pr, namePinned, forkedFrom, evalMode, workflowId);
         }
     }
 }

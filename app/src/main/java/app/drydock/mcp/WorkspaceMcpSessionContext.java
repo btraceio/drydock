@@ -6,6 +6,7 @@ import app.drydock.domain.HandoffBrief;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.Repository;
 import app.drydock.domain.SessionStatus;
+import app.drydock.domain.Workflow;
 import app.drydock.git.BranchCatalog;
 import app.drydock.git.BranchCheckout;
 import app.drydock.git.BranchNameRules;
@@ -151,6 +152,7 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
     private final BiFunction<ManagedSessionId, String, CompletableFuture<RenameOutcome>> sessionRenamer;
     private final BiFunction<ManagedSessionId, String, CompletableFuture<Void>> sessionReclaimer;
     private final BiFunction<ManagedSessionId, HandoffDraft, CompletableFuture<HandoffBrief>> handoffWriter;
+    private final BiFunction<ManagedSessionId, HandoffDraft, CompletableFuture<Workflow>> workflowHandoffWriter;
 
     /**
      * @param sessionCatalog   every managed session, e.g. {@code SessionManager::sessions}
@@ -161,6 +163,7 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
      * @param sessionRenamer   bound to {@code MainWorkspace.renameSessionFromAgent}
      * @param sessionReclaimer bound to {@code MainWorkspace.reclaimConversationFromAgent}
      * @param handoffWriter    bound to {@code MainWorkspace.writeHandoffFromAgent}
+     * @param workflowHandoffWriter bound to {@code MainWorkspace.writeWorkflowHandoffFromAgent}
      */
     public WorkspaceMcpSessionContext(Supplier<List<ManagedAgentSession>> sessionCatalog,
                                       Supplier<List<Repository>> repositoryCatalog,
@@ -179,7 +182,9 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
                                       BiFunction<ManagedSessionId, String,
                                               CompletableFuture<Void>> sessionReclaimer,
                                       BiFunction<ManagedSessionId, HandoffDraft,
-                                              CompletableFuture<HandoffBrief>> handoffWriter) {
+                                              CompletableFuture<HandoffBrief>> handoffWriter,
+                                      BiFunction<ManagedSessionId, HandoffDraft,
+                                              CompletableFuture<Workflow>> workflowHandoffWriter) {
         this.sessionCatalog = Objects.requireNonNull(sessionCatalog, "sessionCatalog");
         this.repositoryCatalog = Objects.requireNonNull(repositoryCatalog, "repositoryCatalog");
         this.annotationStore = Objects.requireNonNull(annotationStore, "annotationStore");
@@ -194,6 +199,7 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
         this.sessionRenamer = Objects.requireNonNull(sessionRenamer, "sessionRenamer");
         this.sessionReclaimer = Objects.requireNonNull(sessionReclaimer, "sessionReclaimer");
         this.handoffWriter = Objects.requireNonNull(handoffWriter, "handoffWriter");
+        this.workflowHandoffWriter = Objects.requireNonNull(workflowHandoffWriter, "workflowHandoffWriter");
     }
 
     // ---- caller lookup ------------------------------------------------------
@@ -660,6 +666,11 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
     @Override
     public HandoffBrief writeHandoff(ManagedSessionId caller, HandoffDraft draft) throws McpToolException {
         return join(handoffWriter.apply(caller, draft), HANDOFF_TIMEOUT_SECONDS);
+    }
+
+    @Override
+    public Workflow writeWorkflowHandoff(ManagedSessionId caller, HandoffDraft draft) throws McpToolException {
+        return join(workflowHandoffWriter.apply(caller, draft), HANDOFF_TIMEOUT_SECONDS);
     }
 
     // ---- shared helpers -----------------------------------------------------

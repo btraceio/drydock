@@ -22,6 +22,10 @@ import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionWorkspace;
 import app.drydock.domain.SshRemote;
+import app.drydock.domain.Workflow;
+import app.drydock.domain.WorkflowBrief;
+import app.drydock.domain.WorkflowId;
+import app.drydock.domain.WorkflowStatus;
 import app.drydock.mcp.McpConfigWriter;
 import app.drydock.mcp.McpSessionContext;
 import app.drydock.mcp.McpSessionContext.RenameKind;
@@ -392,7 +396,8 @@ public final class SessionManager implements AutoCloseable {
         return newSessionMetadata(repository, outgoing.displayName(), agentKind,
                         outgoing.worktreeRoot(), outgoing.branchCreatedHere())
                 .withNamePinned(outgoing.namePinned())
-                .withEvalMode(outgoing.evalMode());
+                .withEvalMode(outgoing.evalMode())
+                .withWorkflowId(outgoing.workflowId());
     }
 
     /**
@@ -1274,6 +1279,147 @@ public final class SessionManager implements AutoCloseable {
      */
     public boolean mayDeleteBranchOf(Path worktreeRoot) {
         return BranchOwnership.mayDeleteBranchOf(sessions(), worktreeRoot);
+    }
+
+    // ---- workflows -----------------------------------------------------------
+
+    /** Every persisted workflow, in persisted order. */
+    public List<Workflow> workflows() {
+        return stateStore.state().workflows();
+    }
+
+    /** The workflow with this id, if any. */
+    public Optional<Workflow> workflow(WorkflowId id) {
+        return stateStore.state().workflows().stream()
+                .filter(w -> w.id().equals(id))
+                .findFirst();
+    }
+
+    /**
+     * Creates a workflow. The human names the effort, like naming a session;
+     * there is no agent-driven creation path.
+     */
+    public Workflow createWorkflow(String title) {
+        if (title.isBlank()) {
+            throw new IllegalArgumentException("Workflow title must not be blank");
+        }
+        Workflow[] created = new Workflow[1];
+        stateStore.update(state -> {
+            Workflow workflow = Workflow.create(WorkflowId.newId(), title.strip(), Instant.now());
+            created[0] = workflow;
+            List<Workflow> updated = new ArrayList<>(state.workflows());
+            updated.add(workflow);
+            return state.withWorkflows(updated);
+        });
+        return created[0];
+    }
+
+    /** Renames a workflow. */
+    public Workflow renameWorkflow(WorkflowId id, String newTitle) {
+        if (newTitle.isBlank()) {
+            throw new IllegalArgumentException("Workflow title must not be blank");
+        }
+        Workflow[] result = new Workflow[1];
+        stateStore.update(state -> {
+            Workflow workflow = requireWorkflow(state, id);
+            result[0] = workflow.withTitle(newTitle.strip());
+            return state.withWorkflows(replaceWorkflow(state, result[0]));
+        });
+        return result[0];
+    }
+
+    /** Sets a workflow's status (OPEN or ARCHIVED). Archiving never touches member sessions. */
+    public Workflow setWorkflowStatus(WorkflowId id, WorkflowStatus status) {
+        Workflow[] result = new Workflow[1];
+        stateStore.update(state -> {
+            Workflow workflow = requireWorkflow(state, id);
+            result[0] = workflow.withStatus(status);
+            return state.withWorkflows(replaceWorkflow(state, result[0]));
+        });
+        return result[0];
+    }
+
+    /** Writes a workflow's brief (human-authored, from the Edit dialog). Replaced wholesale. */
+    public Workflow writeWorkflowBrief(WorkflowId id, WorkflowBrief brief) {
+        Workflow[] result = new Workflow[1];
+        stateStore.update(state -> {
+            Workflow workflow = requireWorkflow(state, id);
+            result[0] = workflow.withBrief(Optional.of(brief));
+            return state.withWorkflows(replaceWorkflow(state, result[0]));
+        });
+        return result[0];
+    }
+
+    /** Writes a workflow's brief (agent-authored, from {@code session_handoff --workflow}). */
+    public Workflow writeWorkflowBriefAgent(WorkflowId id, WorkflowBrief brief) {
+        return writeWorkflowBrief(id, brief);
+    }
+
+    /**
+     * Writes the workflow brief for the workflow the caller session belongs
+     * to. Throws if the session is not a workflow member.
+     */
+    public Workflow applyAgentWorkflowHandoff(ManagedSessionId sessionId, McpSessionContext.HandoffDraft draft) {
+        Workflow[] result = new Workflow[1];
+        stateStore.update(state -> {
+            ManagedAgentSession session = state.sessions().stream()
+                    .filter(existing -> existing.id().equals(sessionId))
+                    .findFirst()
+                    .orElseThrow(() -> new UnknownSessionException(sessionId));
+            WorkflowId workflowId = session.workflowId()
+                    .orElseThrow(() -> new IllegalStateException("Session " + sessionId
+                            + " is not part of a workflow; cannot write a workflow brief."));
+            Workflow workflow = requireWorkflow(state, workflowId);
+            WorkflowBrief brief = new WorkflowBrief(draft.goal(), draft.nextStep(), draft.approach(),
+                    draft.decisions(), draft.ruledOut(), draft.corrections(), Instant.now(),
+                    HandoffBrief.Author.AGENT);
+            result[0] = workflow.withBrief(Optional.of(brief));
+            return state.withWorkflows(replaceWorkflow(state, result[0]));
+        });
+        return result[0];
+    }
+
+    /**
+     * Deletes a workflow outright. Clears {@code workflowId} on all member
+     * sessions (they become unaffiliated); never deletes sessions.
+     */
+    public void deleteWorkflow(WorkflowId id) {
+        stateStore.update(state -> {
+            List<Workflow> remaining = state.workflows().stream()
+                    .filter(w -> !w.id().equals(id))
+                    .toList();
+            List<ManagedAgentSession> sessions = state.sessions().stream()
+                    .map(s -> s.workflowId().map(w -> s.withWorkflowId(Optional.empty())).orElse(s))
+                    .toList();
+            return state.withWorkflows(remaining).withSessions(sessions);
+        });
+    }
+
+    /** Affiliates a session with a workflow (sets its {@code workflowId}). */
+    public ManagedAgentSession setSessionWorkflow(ManagedSessionId sessionId, Optional<WorkflowId> workflowId) {
+        return updateSession(sessionId, session -> session.withWorkflowId(workflowId));
+    }
+
+    /** Bumps a workflow's {@code lastOpenedAt} when a member session is opened. */
+    public void touchWorkflow(WorkflowId id) {
+        stateStore.update(state -> {
+            Workflow workflow = requireWorkflow(state, id);
+            Workflow touched = workflow.withLastOpenedAt(Instant.now());
+            return state.withWorkflows(replaceWorkflow(state, touched));
+        });
+    }
+
+    private static Workflow requireWorkflow(ApplicationState state, WorkflowId id) {
+        return state.workflows().stream()
+                .filter(w -> w.id().equals(id))
+                .findFirst()
+                .orElseThrow(() -> new UnknownWorkflowException(id));
+    }
+
+    private static List<Workflow> replaceWorkflow(ApplicationState state, Workflow updated) {
+        return state.workflows().stream()
+                .map(w -> w.id().equals(updated.id()) ? updated : w)
+                .toList();
     }
 
     private void persistNewSession(ManagedAgentSession session) {

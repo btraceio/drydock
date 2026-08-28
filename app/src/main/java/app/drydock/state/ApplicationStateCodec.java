@@ -15,6 +15,10 @@ import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionWorkspace;
 import app.drydock.domain.SshRemote;
 import app.drydock.domain.UiTheme;
+import app.drydock.domain.Workflow;
+import app.drydock.domain.WorkflowBrief;
+import app.drydock.domain.WorkflowId;
+import app.drydock.domain.WorkflowStatus;
 import app.drydock.domain.WorkspaceUiState;
 import app.drydock.review.SessionReviewScopes;
 import app.drydock.state.json.JsonValue;
@@ -198,6 +202,12 @@ public final class ApplicationStateCodec {
 
         root.put("ui", uiToJson(state.ui()));
 
+        List<JsonValue> workflows = new ArrayList<>();
+        for (Workflow workflow : state.workflows()) {
+            workflows.add(workflowToJson(workflow));
+        }
+        root.put("workflows", new JsonArray(workflows));
+
         List<JsonValue> briefs = new ArrayList<>();
         for (HandoffBrief brief : state.handoffBriefs()) {
             briefs.add(handoffBriefToJson(brief));
@@ -254,6 +264,9 @@ public final class ApplicationStateCodec {
                 .<JsonValue>map(parent -> new JsonString(parent.value().toString()))
                 .orElse(JsonValue.JsonNull.INSTANCE));
         obj.put("evalMode", new JsonBoolean(session.evalMode()));
+        obj.put("workflowId", session.workflowId()
+                .<JsonValue>map(w -> new JsonString(w.value().toString()))
+                .orElse(JsonValue.JsonNull.INSTANCE));
         return obj;
     }
 
@@ -268,6 +281,32 @@ public final class ApplicationStateCodec {
         obj.put("corrections", optionalStringToJson(brief.corrections()));
         obj.put("writtenAt", new JsonString(brief.writtenAt().toString()));
         obj.put("writtenAtCommit", optionalStringToJson(brief.writtenAtCommit()));
+        obj.put("author", new JsonString(brief.author().name()));
+        return obj;
+    }
+
+    private static JsonValue workflowToJson(Workflow workflow) {
+        JsonObject obj = JsonObject.empty();
+        obj.put("id", new JsonString(workflow.id().value().toString()));
+        obj.put("title", new JsonString(workflow.title()));
+        obj.put("status", new JsonString(workflow.status().name()));
+        obj.put("createdAt", new JsonString(workflow.createdAt().toString()));
+        obj.put("lastOpenedAt", new JsonString(workflow.lastOpenedAt().toString()));
+        obj.put("brief", workflow.brief()
+                .<JsonValue>map(ApplicationStateCodec::workflowBriefToJson)
+                .orElse(JsonValue.JsonNull.INSTANCE));
+        return obj;
+    }
+
+    private static JsonValue workflowBriefToJson(WorkflowBrief brief) {
+        JsonObject obj = JsonObject.empty();
+        obj.put("goal", new JsonString(brief.goal()));
+        obj.put("nextStep", new JsonString(brief.nextStep()));
+        obj.put("approach", optionalStringToJson(brief.approach()));
+        obj.put("decisions", optionalStringToJson(brief.decisions()));
+        obj.put("ruledOut", optionalStringToJson(brief.ruledOut()));
+        obj.put("corrections", optionalStringToJson(brief.corrections()));
+        obj.put("writtenAt", new JsonString(brief.writtenAt().toString()));
         obj.put("author", new JsonString(brief.author().name()));
         return obj;
     }
@@ -338,7 +377,9 @@ public final class ApplicationStateCodec {
                 ? uiFromJson(asObject(root.get("ui"), "ui"))
                 : WorkspaceUiState.empty();
 
-        return new ApplicationState(repositories, sessions, ui, handoffBriefsFromJson(root));
+        List<Workflow> workflows = workflowsFromJson(root);
+
+        return new ApplicationState(repositories, sessions, workflows, ui, handoffBriefsFromJson(root));
     }
 
     /**
@@ -499,13 +540,18 @@ public final class ApplicationStateCodec {
             // existed was not an eval session, and a malformed value must not
             // silently put a session on the eval account.
             boolean evalMode = obj.get("evalMode") instanceof JsonBoolean em && em.value();
+            // Lenient like forkedFrom: a session persisted before this member
+            // existed was not part of a workflow, and an unparseable id must
+            // not discard the session.
+            Optional<WorkflowId> workflowId = optionalString(obj, "workflowId")
+                    .flatMap(ApplicationStateCodec::parseWorkflowId);
             // The persisted shape stays FLAT: grouping is a Java-side change,
             // and schemaVersion must not move for it.
             return new ManagedAgentSession(id, repositoryId, displayName,
                     new AgentBinding(agentKind, agentSessionId, agentSessionName),
                     new SessionWorkspace(workingDirectory, worktreeRoot, branchCreatedHere),
                     status, createdAt, lastOpenedAt, lastExitCode,
-                    PrLink.fromPersisted(prState, prNumber), namePinned, forkedFrom, evalMode);
+                    PrLink.fromPersisted(prState, prNumber), namePinned, forkedFrom, evalMode, workflowId);
         } catch (IllegalArgumentException | DateTimeException e) {
             throw new StateDecodeException("Malformed session entry: " + e.getMessage());
         }
@@ -515,6 +561,79 @@ public final class ApplicationStateCodec {
         try {
             return Optional.of(ManagedSessionId.of(value));
         } catch (IllegalArgumentException e) {
+            return Optional.empty();
+        }
+    }
+
+    private static Optional<WorkflowId> parseWorkflowId(String value) {
+        try {
+            return Optional.of(WorkflowId.of(value));
+        } catch (IllegalArgumentException e) {
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * Lenient, like {@link #handoffBriefsFromJson}: a missing or malformed
+     * {@code workflows} array yields an empty list rather than failing the
+     * whole state file. Absent member (state written before this feature)
+     * yields no workflows. No schema bump.
+     */
+    private static List<Workflow> workflowsFromJson(JsonObject root) {
+        if (!(root.get("workflows") instanceof JsonArray array)) {
+            return List.of();
+        }
+        List<Workflow> workflows = new ArrayList<>();
+        for (JsonValue element : array.elements()) {
+            workflowFromJson(element).ifPresent(workflows::add);
+        }
+        return List.copyOf(workflows);
+    }
+
+    private static Optional<Workflow> workflowFromJson(JsonValue element) {
+        if (!(element instanceof JsonObject obj)) {
+            return Optional.empty();
+        }
+        try {
+            WorkflowId id = WorkflowId.of(requireString(obj, "id"));
+            String title = requireString(obj, "title");
+            WorkflowStatus status = workflowStatusFromJson(obj);
+            Instant createdAt = Instant.parse(requireString(obj, "createdAt"));
+            Instant lastOpenedAt = Instant.parse(requireString(obj, "lastOpenedAt"));
+            Optional<WorkflowBrief> brief = workflowBriefFromJson(obj);
+            return Optional.of(new Workflow(id, title, status, createdAt, lastOpenedAt, brief));
+        } catch (IllegalArgumentException | DateTimeException | StateDecodeException e) {
+            return Optional.empty();   // a bad workflow costs a workflow, never the state
+        }
+    }
+
+    /** Absent or unrecognized decodes to {@link WorkflowStatus#OPEN}. */
+    private static WorkflowStatus workflowStatusFromJson(JsonObject obj) {
+        if (obj.get("status") instanceof JsonString s) {
+            for (WorkflowStatus status : WorkflowStatus.values()) {
+                if (status.name().equals(s.value())) {
+                    return status;
+                }
+            }
+        }
+        return WorkflowStatus.OPEN;
+    }
+
+    private static Optional<WorkflowBrief> workflowBriefFromJson(JsonObject obj) {
+        if (!(obj.get("brief") instanceof JsonObject briefObj)) {
+            return Optional.empty();
+        }
+        try {
+            return Optional.of(new WorkflowBrief(
+                    requireString(briefObj, "goal"),
+                    requireString(briefObj, "nextStep"),
+                    optionalString(briefObj, "approach"),
+                    optionalString(briefObj, "decisions"),
+                    optionalString(briefObj, "ruledOut"),
+                    optionalString(briefObj, "corrections"),
+                    Instant.parse(requireString(briefObj, "writtenAt")),
+                    handoffAuthorFromJson(briefObj)));
+        } catch (IllegalArgumentException | DateTimeException | StateDecodeException e) {
             return Optional.empty();
         }
     }

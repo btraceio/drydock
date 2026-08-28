@@ -66,7 +66,7 @@ class JsonApplicationStateRepositoryTest {
                 Optional.of(repo.id()), 321.0, Set.of(repo.id()), app.drydock.domain.UiTheme.LIGHT,
                 WorkspaceUiState.DEFAULT_UI_FONT_SIZE, WorkspaceUiState.DEFAULT_TERMINAL_FONT_SIZE,
                 List.of(), Optional.empty(), Map.of());
-        ApplicationState state = new ApplicationState(List.of(repo), List.of(), ui, List.of());
+        ApplicationState state = new ApplicationState(List.of(repo), List.of(), List.of(), ui, List.of());
 
         JsonApplicationStateRepository repository = new JsonApplicationStateRepository(stateFile());
         repository.save(state);
@@ -137,7 +137,7 @@ class JsonApplicationStateRepositoryTest {
                 new SessionWorkspace(workingDirectory, Optional.of(worktreeRoot), true),
                 SessionStatus.EXITED, Instant.parse("2026-01-03T00:00:00Z"), Instant.parse("2026-01-04T00:00:00Z"), Optional.of(1),
                 PrLink.of(PrState.OPEN, Optional.of(128)), false, Optional.empty());
-        ApplicationState state = new ApplicationState(List.of(repo), List.of(session), WorkspaceUiState.empty(), List.of());
+        ApplicationState state = new ApplicationState(List.of(repo), List.of(session), List.of(), WorkspaceUiState.empty(), List.of());
 
         JsonApplicationStateRepository repository = new JsonApplicationStateRepository(stateFile());
         repository.save(state);
@@ -158,7 +158,7 @@ class JsonApplicationStateRepositoryTest {
                 new SessionWorkspace(workingDirectory, Optional.empty(), true),
                 SessionStatus.INACTIVE, Instant.parse("2026-01-03T00:00:00Z"), Instant.parse("2026-01-04T00:00:00Z"), Optional.empty(),
                 PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty());
-        ApplicationState state = new ApplicationState(List.of(repo), List.of(session), WorkspaceUiState.empty(), List.of());
+        ApplicationState state = new ApplicationState(List.of(repo), List.of(session), List.of(), WorkspaceUiState.empty(), List.of());
 
         JsonApplicationStateRepository repository = new JsonApplicationStateRepository(stateFile());
         repository.save(state);
@@ -262,7 +262,7 @@ class JsonApplicationStateRepositoryTest {
         repository.save(ApplicationState.empty());
 
         Path repoRoot = Files.createDirectory(tempDir.resolve("second-root"));
-        ApplicationState secondState = new ApplicationState(List.of(sampleRepository(repoRoot)), List.of(), WorkspaceUiState.empty(), List.of());
+        ApplicationState secondState = new ApplicationState(List.of(sampleRepository(repoRoot)), List.of(), List.of(), WorkspaceUiState.empty(), List.of());
         repository.save(secondState);
 
         Path backup = stateFile().resolveSibling("state.json.bak");
