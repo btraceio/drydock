@@ -621,6 +621,8 @@ class WorkspaceMcpSessionContextTest {
                 (id, title) -> CompletableFuture.completedFuture(new RenameOutcome(RenameKind.RENAMED, title)),
                 reclaimer,
                 (id, draft) -> CompletableFuture.failedFuture(
+                        new UnsupportedOperationException("no workspace in this test")),
+                (id, draft) -> CompletableFuture.failedFuture(
                         new UnsupportedOperationException("no workspace in this test")));
     }
 

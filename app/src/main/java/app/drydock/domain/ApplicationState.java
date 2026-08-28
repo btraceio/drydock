@@ -22,6 +22,7 @@ import java.util.Objects;
 public record ApplicationState(
         List<Repository> repositories,
         List<ManagedAgentSession> sessions,
+        List<Workflow> workflows,
         WorkspaceUiState ui,
         List<HandoffBrief> handoffBriefs
 ) {
@@ -29,27 +30,32 @@ public record ApplicationState(
     public ApplicationState {
         repositories = List.copyOf(Objects.requireNonNull(repositories, "repositories"));
         sessions = List.copyOf(Objects.requireNonNull(sessions, "sessions"));
+        workflows = List.copyOf(Objects.requireNonNull(workflows, "workflows"));
         Objects.requireNonNull(ui, "ui");
         handoffBriefs = List.copyOf(Objects.requireNonNull(handoffBriefs, "handoffBriefs"));
     }
 
     public static ApplicationState empty() {
-        return new ApplicationState(List.of(), List.of(), WorkspaceUiState.empty(), List.of());
+        return new ApplicationState(List.of(), List.of(), List.of(), WorkspaceUiState.empty(), List.of());
     }
 
     public ApplicationState withRepositories(List<Repository> newRepositories) {
-        return new ApplicationState(newRepositories, sessions, ui, handoffBriefs);
+        return new ApplicationState(newRepositories, sessions, workflows, ui, handoffBriefs);
     }
 
     public ApplicationState withSessions(List<ManagedAgentSession> newSessions) {
-        return new ApplicationState(repositories, newSessions, ui, handoffBriefs);
+        return new ApplicationState(repositories, newSessions, workflows, ui, handoffBriefs);
+    }
+
+    public ApplicationState withWorkflows(List<Workflow> newWorkflows) {
+        return new ApplicationState(repositories, sessions, newWorkflows, ui, handoffBriefs);
     }
 
     public ApplicationState withUi(WorkspaceUiState newUi) {
-        return new ApplicationState(repositories, sessions, newUi, handoffBriefs);
+        return new ApplicationState(repositories, sessions, workflows, newUi, handoffBriefs);
     }
 
     public ApplicationState withHandoffBriefs(List<HandoffBrief> newHandoffBriefs) {
-        return new ApplicationState(repositories, sessions, ui, newHandoffBriefs);
+        return new ApplicationState(repositories, sessions, workflows, ui, newHandoffBriefs);
     }
 }

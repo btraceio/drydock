@@ -18,6 +18,7 @@ import app.drydock.handoff.HandoffStaleness;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.Repository;
 import app.drydock.domain.SessionActivity;
+import app.drydock.domain.Workflow;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SshRemote;
 import app.drydock.domain.UiTheme;
@@ -2953,6 +2954,31 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 // As for a rename: the session can vanish between the router's
                 // liveness check and this hop, and without this arm the future
                 // never completes and the HTTP handler blocks for the join.
+                written.completeExceptionally(e);
+            }
+        });
+        return written;
+    }
+
+    /**
+     * Writes the caller's <em>workflow</em> brief (no {@code writtenAtCommit}:
+     * a workflow spans multiple repos and branches). No git call, so the
+     * budget is the FX-hop budget alone.
+     */
+    public CompletableFuture<Workflow> writeWorkflowHandoffFromAgent(ManagedSessionId id, HandoffDraft draft) {
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(AGENT_HANDOFF_BUDGET_SECONDS);
+        CompletableFuture<Workflow> written = new CompletableFuture<>();
+        Platform.runLater(() -> {
+            if (expired(deadlineNanos)) {
+                written.completeExceptionally(new IllegalStateException(
+                        "Drydock was too busy to record the workflow brief in time."));
+                return;
+            }
+            try {
+                Workflow workflow = sessionManager.applyAgentWorkflowHandoff(id, draft);
+                publishSessions();
+                written.complete(workflow);
+            } catch (RuntimeException e) {
                 written.completeExceptionally(e);
             }
         });

@@ -2,6 +2,8 @@ package app.drydock.mcp;
 
 import app.drydock.domain.HandoffBrief;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.Workflow;
+import app.drydock.domain.WorkflowId;
 import app.drydock.mcp.McpSessionContext.RenameKind;
 import app.drydock.mcp.McpSessionContext.RenameOutcome;
 import app.drydock.review.ReviewAnnotation;
@@ -272,6 +274,27 @@ final class FakeMcpSessionContext implements McpSessionContext {
                 draft.decisions(), draft.ruledOut(), draft.corrections(),
                 Instant.parse("2026-08-12T10:15:30Z"), Optional.of("abc1234"), HandoffBrief.Author.AGENT);
         return lastHandoff;
+    }
+
+    /** The last workflow brief written through {@link #writeWorkflowHandoff}, if any. */
+    private Workflow lastWorkflowHandoff;
+
+    Optional<Workflow> lastWorkflowHandoff() {
+        return Optional.ofNullable(lastWorkflowHandoff);
+    }
+
+    @Override
+    public Workflow writeWorkflowHandoff(ManagedSessionId caller, HandoffDraft draft) throws McpToolException {
+        if (handoffFailure != null) {
+            throw handoffFailure;
+        }
+        lastWorkflowHandoff = new Workflow(WorkflowId.of("00000000-0000-0000-0000-000000000001"),
+                "test-workflow", app.drydock.domain.WorkflowStatus.OPEN,
+                Instant.parse("2026-08-12T10:00:00Z"), Instant.parse("2026-08-12T10:00:00Z"),
+                Optional.of(new app.drydock.domain.WorkflowBrief(draft.goal(), draft.nextStep(),
+                        draft.approach(), draft.decisions(), draft.ruledOut(), draft.corrections(),
+                        Instant.parse("2026-08-12T10:15:30Z"), HandoffBrief.Author.AGENT)));
+        return lastWorkflowHandoff;
     }
     private final List<String> renameCalls = new ArrayList<>();
     private McpToolException renameFailure;

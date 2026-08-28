@@ -2,6 +2,7 @@ package app.drydock.mcp;
 
 import app.drydock.domain.HandoffBrief;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.Workflow;
 import app.drydock.mcp.McpSessionRegistry.Spawn;
 import app.drydock.state.json.JsonValue;
 import app.drydock.state.json.JsonValue.JsonObject;
@@ -189,5 +190,23 @@ class McpToolRouterSessionHandoffTest {
         assertTrue(router.toolDescriptors().stream()
                         .anyMatch(descriptor -> JsonPeek.str(descriptor, "name").equals("session_handoff")),
                 "an agent only calls a tool it can see");
+    }
+
+    @Test
+    void workflowTargetWritesTheWorkflowBrief() throws Exception {
+        JsonValue result = handoff(minimal().put("workflow", new app.drydock.state.json.JsonValue.JsonBoolean(true)));
+
+        assertEquals("written", str(result, "outcome"));
+        assertEquals("workflow", str(result, "target"));
+        Workflow workflow = context.lastWorkflowHandoff().orElseThrow();
+        assertEquals("Ship the fork gesture", workflow.brief().orElseThrow().goal());
+    }
+
+    @Test
+    void perSessionBriefIsWrittenWhenWorkflowFlagIsAbsent() throws Exception {
+        handoff(minimal());
+
+        assertTrue(context.lastHandoff().isPresent());
+        assertTrue(context.lastWorkflowHandoff().isEmpty());
     }
 }

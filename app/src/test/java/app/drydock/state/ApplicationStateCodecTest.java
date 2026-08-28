@@ -14,6 +14,10 @@ import app.drydock.domain.RepositoryId;
 import app.drydock.domain.RepositorySettings;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SshRemote;
+import app.drydock.domain.Workflow;
+import app.drydock.domain.WorkflowBrief;
+import app.drydock.domain.WorkflowId;
+import app.drydock.domain.WorkflowStatus;
 import app.drydock.domain.WorkspaceUiState;
 import app.drydock.review.SessionReviewScopes;
 import app.drydock.state.json.JsonParser;
@@ -44,6 +48,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ApplicationStateCodecTest {
 
     private static final String REPO_ID = "11111111-2222-3333-4444-555555555555";
+    private static final String SESSION_ID = "22222222-3333-4444-5555-666666666666";
     private static final String OTHER_ID = "99999999-8888-7777-6666-555555555555";
 
     private static final String SESSION_WITHOUT_PROVENANCE = """
@@ -140,7 +145,7 @@ class ApplicationStateCodecTest {
         SshRemote remote = new SshRemote("user@h", "/srv/app");
         Repository repo = new Repository(RepositoryId.newId(), remote.placeholderRoot(), "app",
                 Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT, remote);
-        ApplicationState state = new ApplicationState(List.of(repo), List.of(), WorkspaceUiState.empty(), List.of());
+        ApplicationState state = new ApplicationState(List.of(repo), List.of(), List.of(), WorkspaceUiState.empty(), List.of());
 
         ApplicationState decoded = ApplicationStateCodec.fromJson(ApplicationStateCodec.toJson(state));
 
@@ -154,7 +159,7 @@ class ApplicationStateCodecTest {
     void repositoryWithoutRemoteMemberDecodesAsLocal() {
         Repository repo = new Repository(RepositoryId.newId(), Path.of("/tmp/x"), "x",
                 Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT);
-        ApplicationState state = new ApplicationState(List.of(repo), List.of(), WorkspaceUiState.empty(), List.of());
+        ApplicationState state = new ApplicationState(List.of(repo), List.of(), List.of(), WorkspaceUiState.empty(), List.of());
         JsonValue json = ApplicationStateCodec.toJson(state);
 
         // A local repo writes no "remote" member at all (older builds must
@@ -171,7 +176,7 @@ class ApplicationStateCodecTest {
         // user their whole state file.
         Repository repo = new Repository(RepositoryId.newId(), Path.of("/tmp/x"), "x",
                 Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT);
-        ApplicationState state = new ApplicationState(List.of(repo), List.of(), WorkspaceUiState.empty(), List.of());
+        ApplicationState state = new ApplicationState(List.of(repo), List.of(), List.of(), WorkspaceUiState.empty(), List.of());
         JsonObject json = (JsonObject) ApplicationStateCodec.toJson(state);
         JsonObject repoObj = (JsonObject) ((JsonArray) json.get("repositories")).elements().getFirst();
         JsonObject badRemote = JsonObject.empty();
@@ -238,7 +243,7 @@ class ApplicationStateCodecTest {
                 new SessionWorkspace(Path.of("/tmp/repo/wd"), Optional.empty(), false),
                 SessionStatus.INACTIVE, Instant.EPOCH, Instant.EPOCH, Optional.empty(),
                 PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty());
-        ApplicationState state = new ApplicationState(List.of(repo), List.of(session), WorkspaceUiState.empty(), List.of());
+        ApplicationState state = new ApplicationState(List.of(repo), List.of(session), List.of(), WorkspaceUiState.empty(), List.of());
 
         ApplicationState decoded = ApplicationStateCodec.fromJson(ApplicationStateCodec.toJson(state));
 
@@ -255,7 +260,7 @@ class ApplicationStateCodecTest {
                 new SessionWorkspace(Path.of("/tmp/repo/wd"), Optional.empty(), true),
                 SessionStatus.INACTIVE, Instant.EPOCH, Instant.EPOCH, Optional.empty(),
                 PrLink.of(PrState.NONE, Optional.empty()), true, Optional.empty());
-        ApplicationState state = new ApplicationState(List.of(repo), List.of(pinned), WorkspaceUiState.empty(), List.of());
+        ApplicationState state = new ApplicationState(List.of(repo), List.of(pinned), List.of(), WorkspaceUiState.empty(), List.of());
 
         ApplicationState decoded = ApplicationStateCodec.fromJson(ApplicationStateCodec.toJson(state));
 
@@ -296,7 +301,7 @@ class ApplicationStateCodecTest {
                 new SessionWorkspace(Path.of("/tmp/repo/wd"), Optional.empty(), true),
                 SessionStatus.INACTIVE, Instant.EPOCH, Instant.EPOCH, Optional.empty(),
                 PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty(), true);
-        ApplicationState state = new ApplicationState(List.of(repo), List.of(eval), WorkspaceUiState.empty(), List.of());
+        ApplicationState state = new ApplicationState(List.of(repo), List.of(eval), List.of(), WorkspaceUiState.empty(), List.of());
 
         ApplicationState decoded = ApplicationStateCodec.fromJson(ApplicationStateCodec.toJson(state));
 
@@ -429,7 +434,7 @@ class ApplicationStateCodecTest {
 
     @Test
     void fontSizesRoundTrip() {
-        ApplicationState state = new ApplicationState(List.of(), List.of(),
+        ApplicationState state = new ApplicationState(List.of(), List.of(), List.of(),
                 WorkspaceUiState.empty().withUiFontSize(15).withTerminalFontSize(11), List.of());
 
         ApplicationState decoded = ApplicationStateCodec.fromJson(
@@ -723,5 +728,97 @@ class ApplicationStateCodecTest {
         assertEquals(1, decoded.reviewScopeChoices().size());
         assertEquals(SessionReviewScopes.Choice.LOCAL,
                 decoded.reviewScopeChoices().get(ManagedSessionId.of(OTHER_ID)));
+    }
+
+    @Test
+    void aWorkflowRoundTripsThroughTheCodec() {
+        WorkflowId workflowId = WorkflowId.newId();
+        Instant created = Instant.parse("2026-08-28T10:00:00Z");
+        Instant opened = Instant.parse("2026-08-28T11:30:00Z");
+        WorkflowBrief brief = new WorkflowBrief("Ship the billing migration",
+                "Cut over the frontend to the new API",
+                java.util.Optional.of("Strangler-fig pattern"),
+                java.util.Optional.empty(),
+                java.util.Optional.of("Big-bang rewrite: too risky"),
+                java.util.Optional.empty(),
+                Instant.parse("2026-08-28T11:00:00Z"), HandoffBrief.Author.AGENT);
+        Workflow workflow = new Workflow(workflowId, "billing-migration",
+                WorkflowStatus.OPEN, created, opened, java.util.Optional.of(brief));
+
+        ApplicationState state = new ApplicationState(List.of(), List.of(), List.of(workflow),
+                WorkspaceUiState.empty(), List.of());
+        JsonValue json = ApplicationStateCodec.toJson(state);
+        ApplicationState decoded = ApplicationStateCodec.fromJson(json);
+
+        assertEquals(1, decoded.workflows().size());
+        Workflow restored = decoded.workflows().get(0);
+        assertEquals(workflowId, restored.id());
+        assertEquals("billing-migration", restored.title());
+        assertEquals(WorkflowStatus.OPEN, restored.status());
+        assertEquals(created, restored.createdAt());
+        assertEquals(opened, restored.lastOpenedAt());
+        assertTrue(restored.brief().isPresent());
+        WorkflowBrief restoredBrief = restored.brief().get();
+        assertEquals(brief.goal(), restoredBrief.goal());
+        assertEquals(brief.nextStep(), restoredBrief.nextStep());
+        assertEquals(brief.approach(), restoredBrief.approach());
+        assertEquals(brief.ruledOut(), restoredBrief.ruledOut());
+        assertEquals(brief.author(), restoredBrief.author());
+    }
+
+    @Test
+    void aSessionWithAWorkflowIdRoundTrips() {
+        WorkflowId workflowId = WorkflowId.newId();
+        ManagedAgentSession session = new ManagedAgentSession(ManagedSessionId.newId(),
+                RepositoryId.newId(), "test-session",
+                new AgentBinding(AgentKind.CLAUDE, java.util.Optional.empty(), java.util.Optional.empty()),
+                SessionWorkspace.inRepository(Path.of("/tmp/repo")),
+                SessionStatus.INACTIVE, Instant.parse("2026-08-28T10:00:00Z"),
+                Instant.parse("2026-08-28T10:00:00Z"), java.util.Optional.empty(),
+                PrLink.none(), false, java.util.Optional.empty(), false,
+                java.util.Optional.of(workflowId));
+
+        ApplicationState state = new ApplicationState(List.of(), List.of(session), List.of(),
+                WorkspaceUiState.empty(), List.of());
+        JsonValue json = ApplicationStateCodec.toJson(state);
+        ApplicationState decoded = ApplicationStateCodec.fromJson(json);
+
+        assertEquals(1, decoded.sessions().size());
+        assertEquals(java.util.Optional.of(workflowId), decoded.sessions().get(0).workflowId());
+    }
+
+    @Test
+    void aStateWithoutWorkflowsDecodesToAnEmptyList() {
+        // Old state written before workflows existed has no "workflows" member;
+        // it must decode to an empty list, not fail.
+        JsonValue json = JsonParser.parse("""
+                {"schemaVersion":2,"repositories":[],"sessions":[],
+                 "ui":{"selectedRepositoryId":null,"sidebarWidth":288.0,
+                        "expandedRepositoryIds":[],"theme":"DARK"}}
+                """);
+
+        ApplicationState decoded = ApplicationStateCodec.fromJson(json);
+        assertTrue(decoded.workflows().isEmpty());
+    }
+
+    @Test
+    void aSessionWithoutWorkflowIdDecodesAsUnaffiliated() {
+        // Old state written before workflowId existed; the session must
+        // decode with an empty workflowId, not fail.
+        JsonValue json = JsonParser.parse("""
+                {"schemaVersion":2,"repositories":[],
+                 "sessions":[{"id":"%s","repositoryId":"%s","displayName":"old-session",
+                  "agentKind":"claude","agentSessionId":null,"agentSessionName":null,
+                  "workingDirectory":"/tmp/repo","worktreeRoot":null,"status":"INACTIVE",
+                  "createdAt":"2026-01-01T00:00:00Z","lastOpenedAt":"2026-01-01T00:00:00Z",
+                  "lastExitCode":null,"prState":"NONE","prNumber":null,
+                  "branchCreatedHere":false,"namePinned":false,"forkedFrom":null,"evalMode":false}],
+                 "ui":{"selectedRepositoryId":null,"sidebarWidth":288.0,
+                        "expandedRepositoryIds":[],"theme":"DARK"}}
+                """.formatted(SESSION_ID, REPO_ID));
+
+        ApplicationState decoded = ApplicationStateCodec.fromJson(json);
+        assertEquals(1, decoded.sessions().size());
+        assertTrue(decoded.sessions().get(0).workflowId().isEmpty());
     }
 }
