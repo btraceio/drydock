@@ -124,16 +124,39 @@ layout persist across restarts under
 `~/Library/Application Support/`. Close the window (or `Cmd+Q`) to exit.
 
 To build a self-contained runtime image (JDK 26 + JavaFX 26 + the app + native
-libraries, for both macOS architectures) that runs without Gradle or a
-configured `JAVA_HOME`:
+libraries) that runs without Gradle or a configured `JAVA_HOME`:
+
+**macOS (host architecture)** — the everyday image, plus the `.app`/`.dmg`
+wrappers around it:
 
 ```bash
-./gradlew runtimeImage
-build/image/bin/drydock
+./gradlew runtimeImage        # build/image/bin/drydock
+./gradlew appImage            # build/dist/Drydock.app  (wraps runtimeImage)
+./gradlew dmg                 # build/dist/Drydock.dmg  (wraps appImage)
 ```
 
-`.app`/`.dmg` packaging is not implemented yet; build from source or use the
-runtime image.
+**macOS (both architectures, cross-linked in one pass)** — downloads the
+non-host architecture's jmods and produces an image per arch. Does not execute
+the foreign-architecture binary; only its Mach-O tag is verified, real
+execution verification is CI's job:
+
+```bash
+./gradlew runtimeImageAllArches   # build/image-macos-x86_64 and build/image-macos-arm64
+# or a single arch:
+./gradlew runtimeImageMacosX8664  # build/image-macos-x86_64
+./gradlew runtimeImageMacosArm64  # build/image-macos-arm64
+```
+
+**Windows** — a self-contained jlink image with a `drydock.bat` launcher.
+Registered only on a non-Mac host (the Windows CI runner). See
+[`docs/windows.md`](docs/windows.md) for the Windows-specific scope and caveats:
+
+```cmd
+.\gradlew.bat :app:windowsRuntimeImage   # build\image-windows\bin\drydock.bat
+```
+
+The runtime image layout and launcher details are documented in
+[`docs/runtime-image.md`](docs/runtime-image.md).
 
 ## Releasing
 
