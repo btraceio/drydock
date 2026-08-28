@@ -646,9 +646,10 @@ public final class SessionManager implements AutoCloseable {
                     // conservative fallback rather than sinking the resume
                     // (see ClaudeAgentProvider.detectCaps).
                     return CompletableFuture.supplyAsync(() -> {
+                                Optional<String> resolvedId = resolveAgentSessionIdIfNeeded(session, kind, remote);
                                 boolean eval = session.evalMode();
                                 if (eval) {
-                                    provider.markEvalSession(session.agentSessionId().orElse(""));
+                                    provider.markEvalSession(resolvedId.orElse(""));
                                 }
                                 // Spawn.ALLOWED: a resume is the human
                                 // reopening a session from the UI. A known
@@ -659,7 +660,7 @@ public final class SessionManager implements AutoCloseable {
                                 Optional<McpAccess> mcp = remote.isPresent()
                                         ? Optional.empty()
                                         : mcpAccessFor(provider, session.id(), Spawn.ALLOWED);
-                                ResumeContext ctx = new ResumeContext(session.agentSessionId(),
+                                ResumeContext ctx = new ResumeContext(resolvedId,
                                         session.agentSessionName(), session.workingDirectory(), remote, mcp, eval);
                                 return provider.buildResumeCommand(ctx).command();
                             }, backgroundExecutor)
@@ -668,6 +669,37 @@ public final class SessionManager implements AutoCloseable {
                                     .handleAsync((surface, ex) -> finalizeResume(session, surface, ex),
                                             backgroundExecutor));
                 });
+    }
+
+    /**
+     * Late binding for a DISCOVERED-id session whose create-time discovery
+     * failed (timed out or was ambiguous): resolve the agent session id from
+     * the persisted creation time, among unclaimed records in the agent's
+     * session store. Recovered ids are persisted and claimed so the next
+     * resume skips this step and a concurrent same-cwd launch cannot re-bind
+     * them. Returns the session's existing id when it is already known, and
+     * empty when resolution fails (resume then falls back to the picker).
+     */
+    private Optional<String> resolveAgentSessionIdIfNeeded(ManagedAgentSession session, AgentKind kind,
+                                                            Optional<SshRemote> remote) {
+        if (session.agentSessionId().isPresent() || remote.isPresent()) {
+            return session.agentSessionId();
+        }
+        Optional<SessionIdDiscovery> discovery = registry.idDiscovery(kind);
+        if (discovery.isEmpty()) {
+            return Optional.empty();
+        }
+        Optional<String> found = discovery.get().resolve(
+                session.workingDirectory(), session.createdAt(), claimedAgentSessionIds);
+        if (found.isEmpty()) {
+            return Optional.empty();
+        }
+        updateSession(session.id(), s -> s.withAgentSessionId(found));
+        claimedAgentSessionIds.add(found.get());
+        activeRegistry.tryMarkActive(found.get(), session.id());
+        LOG.log(Level.INFO, "Late-bound agent session id {0} for session {1}",
+                found.get(), session.id());
+        return found;
     }
 
     private SessionOpenResult finalizeResume(ManagedAgentSession session, TerminalSurface surface, Throwable ex) {

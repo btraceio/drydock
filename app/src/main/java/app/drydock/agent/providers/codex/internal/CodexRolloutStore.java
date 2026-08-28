@@ -126,6 +126,14 @@ public final class CodexRolloutStore implements CandidateSource {
                 .toList();
     }
 
+    /** {@link CandidateSource} view: {@link #forWorkingDirectory(Path)} mapped to id+timestamp. */
+    @Override
+    public List<SessionRecord> sessionsWithTimestamps(Path workingDirectory) {
+        return forWorkingDirectory(workingDirectory).stream()
+                .map(meta -> new SessionRecord(meta.id(), meta.timestamp()))
+                .toList();
+    }
+
     /** Whether a rollout file whose name contains {@code id} exists. */
     public boolean existsForId(String id) {
         return fileForId(id).isPresent();

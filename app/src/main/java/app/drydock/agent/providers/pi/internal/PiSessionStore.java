@@ -152,6 +152,14 @@ public final class PiSessionStore implements CandidateSource {
                 .toList();
     }
 
+    /** {@link CandidateSource} view: {@link #forWorkingDirectory(Path)} mapped to id+timestamp. */
+    @Override
+    public List<SessionRecord> sessionsWithTimestamps(Path workingDirectory) {
+        return forWorkingDirectory(workingDirectory).stream()
+                .map(meta -> new SessionRecord(meta.id(), meta.timestamp()))
+                .toList();
+    }
+
     /** Whether a session file whose name contains {@code id} exists in {@code cwd}'s directory. */
     public boolean existsForId(Path cwd, String id) {
         return fileForId(cwd, id).isPresent();
