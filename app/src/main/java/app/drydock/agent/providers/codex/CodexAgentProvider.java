@@ -160,19 +160,32 @@ public final class CodexAgentProvider implements AgentProvider {
      * credential. {@code SessionManager} always mints one when MCP is wired,
      * so this is a guard, not an expected path.</p>
      */
-    private static String codexCommand(Optional<McpAccess> access) {
+    private String codexCommand(Optional<McpAccess> access) {
         Optional<Path> tokenFile = access.flatMap(McpAccess::credentialFile);
         if (access.isEmpty() || tokenFile.isEmpty()) {
-            return AgentCommands.envPrefix(ENV_SCRUB) + "codex";
+            return AgentCommands.envPrefix(ENV_SCRUB) + codexBinary();
         }
         McpAccess mcp = access.get();
         return AgentCommands.envPrefixFromFiles(ENV_SCRUB, Map.of(TOKEN_ENV_VAR, tokenFile.get()))
-                + "codex"
+                + codexBinary()
                 + " -c " + AgentCommands.shellQuote(
                         "mcp_servers." + SERVER_NAME + ".url=" + tomlString(mcp.endpointUrl()))
                 + " -c " + AgentCommands.shellQuote(
                         "mcp_servers." + SERVER_NAME + ".env_http_headers={"
                                 + tomlString(TOKEN_HEADER) + "=" + tomlString(TOKEN_ENV_VAR) + "}");
+    }
+
+    /**
+     * The resolved {@code codex} binary, shell-quoted, or bare {@code "codex"} when
+     * the locator found nothing. Using the absolute path when it is known removes
+     * the launch's dependence on the login-shell PATH merge: a GUI/Finder launch
+     * inherits launchd's bare PATH, and the merge probe is best-effort and can
+     * time out.
+     */
+    private String codexBinary() {
+        return locator.locate()
+                .map(p -> AgentCommands.shellQuote(p.toString()))
+                .orElse("codex");
     }
 
     /**

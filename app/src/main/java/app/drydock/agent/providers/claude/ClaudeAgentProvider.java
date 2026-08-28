@@ -40,6 +40,20 @@ public final class ClaudeAgentProvider implements AgentProvider {
             + " -u CLAUDE_EFFORT ";
 
     private final ClaudeExecutableLocator locator;
+
+    /**
+     * The resolved {@code claude} binary, shell-quoted, or bare {@code "claude"} when
+     * the locator found nothing. Using the absolute path when it is known removes the
+     * launch's dependence on the login-shell PATH merge: a GUI/Finder launch inherits
+     * launchd's bare PATH, and the merge probe is best-effort and can time out.
+     * The remote path stays bare {@code "claude"} -- it runs on the remote host via
+     * SSH, whose PATH is the remote's, not this machine's.
+     */
+    private String claudeBinary() {
+        return locator.locate()
+                .map(p -> AgentCommands.shellQuote(p.toString()))
+                .orElse("claude");
+    }
     private ClaudeCapabilityService capabilityService;
     private ClaudeConversationSource conversationSource;
     private ClaudeActivityReporter activityReporter;
@@ -126,7 +140,7 @@ public final class ClaudeAgentProvider implements AgentProvider {
             return LaunchPlan.of(SshCommandBuilder.interactiveSessionCommand(c.remote().get(), "exec claude"), false);
         }
         ClaudeCapabilities caps = detectCaps();
-        StringBuilder command = new StringBuilder(ENV_CLEANUP_PREFIX).append("claude");
+        StringBuilder command = new StringBuilder(ENV_CLEANUP_PREFIX).append(claudeBinary());
         boolean sessionIdUsed = false;
         if (caps.supportsName()) {
             command.append(" -n ").append(AgentCommands.shellQuote(c.displayName()));
@@ -161,11 +175,11 @@ public final class ClaudeAgentProvider implements AgentProvider {
         String suffix = activitySettingsFlag(caps) + mcpConfigFlag(caps, r.mcp().flatMap(McpAccess::credentialFile));
         String inner;
         if (r.agentSessionId().isPresent()) {
-            inner = ENV_CLEANUP_PREFIX + "claude --resume " + AgentCommands.shellQuote(r.agentSessionId().get()) + suffix;
+            inner = ENV_CLEANUP_PREFIX + claudeBinary() + " --resume " + AgentCommands.shellQuote(r.agentSessionId().get()) + suffix;
         } else if (r.agentSessionName().isPresent()) {
-            inner = ENV_CLEANUP_PREFIX + "claude --resume " + AgentCommands.shellQuote(r.agentSessionName().get()) + suffix;
+            inner = ENV_CLEANUP_PREFIX + claudeBinary() + " --resume " + AgentCommands.shellQuote(r.agentSessionName().get()) + suffix;
         } else {
-            inner = ENV_CLEANUP_PREFIX + "claude --resume" + suffix;
+            inner = ENV_CLEANUP_PREFIX + claudeBinary() + " --resume" + suffix;
         }
         if (r.evalMode()) {
             // Resume key is the agent session id; for PRESET it equals the
