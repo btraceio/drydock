@@ -181,6 +181,24 @@ public final class PiAgentProvider implements AgentProvider {
      * literals in {@link AgentCommands#envPrefix} rather than going through
      * the credential-only {@code fromFiles} channel.</p>
      */
+    /**
+     * The resolved {@code pi} binary, shell-quoted, or bare {@code "pi"} when
+     * the locator found nothing (tests, or a PATH-less launch that also missed
+     * the fallback locations). Using the absolute path when it is known removes
+     * the launch's dependence on the login-shell PATH merge: a GUI/Finder launch
+     * inherits launchd's bare {@code /usr/bin:/bin}, and the merge probe that
+     * repairs it is best-effort and can time out (a slow {@code .zshrc} can
+     * exceed its 3 s window). The binary is resolved once and cached by
+     * {@link PiExecutableLocator#locate()}, which already probes PATH plus
+     * hardcoded fallbacks ({@code ~/.local/bin/pi}, {@code /usr/local/bin/pi},
+     * {@code /opt/homebrew/bin/pi}).
+     */
+    private String piBinary() {
+        return locator.locate()
+                .map(p -> AgentCommands.shellQuote(p.toString()))
+                .orElse("pi");
+    }
+
     private String piCommand(Optional<McpAccess> access, boolean eval) {
         Optional<Path> configFile = access.flatMap(McpAccess::credentialFile);
         // PI_SESSION_ID: the user's pi models.json sends `x-claude-code-session-id: $PI_SESSION_ID`
@@ -191,7 +209,7 @@ public final class PiAgentProvider implements AgentProvider {
         // so it rides the env argv like DRYDOCK_EVAL.
         String piSessionId = "PI_SESSION_ID=" + AgentCommands.shellQuote(java.util.UUID.randomUUID().toString()) + " ";
         if (configFile.isEmpty()) {
-            return evalEnvPrefix(eval) + piSessionId + "pi";
+            return evalEnvPrefix(eval) + piSessionId + piBinary();
         }
         // Start BOTH, then join both: the cost is max(probe, write), not the
         // sum. Sequencing them would put up to 35 s in front of the first Pi
@@ -219,10 +237,10 @@ public final class PiAgentProvider implements AgentProvider {
         if (!probed.supportsBridge() || bridgeExtension == null) {
             LOG.log(Level.INFO, "Pi bridge declined for this launch (drydock tools unavailable): "
                     + declineReason(probed, bridgeExtension));
-            return evalEnvPrefix(eval) + piSessionId + "pi";
+            return evalEnvPrefix(eval) + piSessionId + piBinary();
         }
         return AgentCommands.envPrefix(ENV_SCRUB, Map.of(CONFIG_ENV_VAR, configFile.get()), Map.of())
-                + evalEnvSuffix(eval) + piSessionId + "pi -e " + AgentCommands.shellQuote(bridgeExtension.toString());
+                + evalEnvSuffix(eval) + piSessionId + piBinary() + " -e " + AgentCommands.shellQuote(bridgeExtension.toString());
     }
 
     /**
