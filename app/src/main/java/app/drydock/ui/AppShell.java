@@ -44,6 +44,9 @@ public final class AppShell {
 
     private Runnable onShowSettings = () -> { };
 
+    /** Polls the display configuration and re-clamps the stage when it changes. */
+    private final ScreenBoundsGuard screenBoundsGuard;
+
     private final BorderPane shell = new BorderPane();
     /** Slim strip shown in the sidebar's place while collapsed: an expand button + the ⌘0 hint. */
     private final Region collapsedRail = buildCollapsedRail();
@@ -81,6 +84,7 @@ public final class AppShell {
         stage.setMinHeight(MIN_WINDOW_HEIGHT);
         stage.setScene(scene);
         StageResizer.install(stage, root, MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT);
+        screenBoundsGuard = ScreenBoundsGuard.start(stage, MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT);
 
         double clampedSidebar = Math.clamp(initialSidebarWidth, SIDEBAR_MIN, SIDEBAR_MAX);
         splitPane.setDividerPositions(clampedSidebar / sceneWidth);
@@ -158,5 +162,10 @@ public final class AppShell {
 
     public void showSettings() {
         onShowSettings.run();
+    }
+
+    /** Stops the display-configuration poller; called from {@code DrydockApplication.stop()}. */
+    public void close() {
+        screenBoundsGuard.close();
     }
 }

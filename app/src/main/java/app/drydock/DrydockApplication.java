@@ -1171,6 +1171,9 @@ public final class DrydockApplication extends Application {
                 closeQuietly("sidebar-width persistence", () -> repositoryManager.updateSidebarWidth(sidebarWidth));
             }
         }
+        if (appShell != null) {
+            closeQuietly("screen bounds guard", appShell::close);
+        }
         if (mainWorkspace != null) {
             closeQuietly("Review services", mainWorkspace::closeReviewServices);
         }
