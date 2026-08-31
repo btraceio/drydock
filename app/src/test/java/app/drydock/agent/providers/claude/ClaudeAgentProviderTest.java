@@ -24,6 +24,25 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ClaudeAgentProviderTest {
 
+    /**
+     * Eval sessions mirror the user's ~/.claude into their config dir; the
+     * eval tests below run mark()/wrap(), so point the home at an empty
+     * fixture to keep them hermetic (see ClaudeEvalContainerTest).
+     */
+    @org.junit.jupiter.api.io.TempDir
+    static Path fixtureHome;
+
+    @org.junit.jupiter.api.BeforeAll
+    static void isolateHome() throws Exception {
+        Files.createDirectories(fixtureHome.resolve(".claude"));
+        System.setProperty("app.drydock.eval.claude.home", fixtureHome.toString());
+    }
+
+    @org.junit.jupiter.api.AfterAll
+    static void restoreHome() {
+        System.clearProperty("app.drydock.eval.claude.home");
+    }
+
     private static final String ENV = "env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT"
             + " -u CLAUDE_CODE_EXECPATH -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION"
             + " -u CLAUDE_EFFORT ";

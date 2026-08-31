@@ -11,7 +11,10 @@ import java.nio.file.attribute.FileAttribute;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.nio.file.attribute.PosixFilePermission;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -44,14 +47,32 @@ import app.drydock.state.json.JsonWriter;
  * omlx_proxy and carry {@code ANTHROPIC_CUSTOM_HEADERS}; drydock cannot add
  * a header to them. But inside a container there is no managed-settings
  * file, so a settings file drydock seeds in {@code CLAUDE_CONFIG_DIR} is the
- * only source of truth. That seed is copied from the host's managed
- * settings (so auth, base URL, and telemetry stay the same) with two
- * edits: the base URL is rewritten to {@code host.docker.internal} so the
- * container can still reach the host's omlx_proxy, and
- * {@code x-target-account: eval} is appended to
- * {@code ANTHROPIC_CUSTOM_HEADERS}. The auth token is resolved on the host
+ * only source of truth. That seed is the host's managed settings (so auth,
+ * base URL, and telemetry stay the same) overlaid onto the user's personal
+ * settings (so permissions, model, theme, and enabledPlugins carry over),
+ * with the host-bound members stripped and two eval edits applied: the base
+ * URL is rewritten to {@code host.docker.internal} so the container can still
+ * reach the host's omlx_proxy, and {@code x-target-account: eval} is appended
+ * to {@code ANTHROPIC_CUSTOM_HEADERS}. The auth token is resolved on the host
  * (where {@code ddtool} lives) and passed in as {@code ANTHROPIC_API_KEY},
  * so {@code apiKeyHelper} is dropped from the seed.</p>
+ *
+ * <p><b>Mirroring the host setup.</b> A bare factory container would
+ * re-confirm everything (onboarding, trust dialogs, permission prompts)
+ * and lack the user's skills and plugins, which is not a session anyone
+ * wants. {@link #mirrorPersonalConfig} therefore seeds the config dir with
+ * a copy of {@code ~/.claude.json} (onboarding/trust/project state, so
+ * nothing asks again) and symlinks the personal content dirs
+ * ({@code skills}, {@code plugins}, {@code agents}, {@code commands},
+ * {@code CLAUDE.md}) into {@code ~/.claude}; {@link #wrap} bind-mounts
+ * {@code ~/.claude} read-only at its original host path so the symlinks
+ * and the plugin state's absolute install paths resolve unchanged.
+ * Directory-source marketplaces named in
+ * {@code ~/.claude/plugins/known_marketplaces.json} that live outside
+ * {@code ~/.claude} get their own read-only mounts, for the same reason.
+ * Members that reference host-only tooling (hooks calling {@code rtk},
+ * {@code ddtool}-backed MCP servers) are stripped, not mirrored: in the
+ * slim image they would fail on every tool call.</p>
  *
  * <p><b>Container runtime.</b> Targets the {@code docker} CLI against
  * whatever context is active -- Colima on macOS, a local or remote daemon
@@ -67,7 +88,9 @@ import app.drydock.state.json.JsonWriter;
  * script, the activity state directory, and the per-session MCP config
  * file are likewise mounted at their host paths, so the existing
  * {@code --settings}/{@code --mcp-config} flags resolve unchanged and the
- * host-side activity watcher keeps reading the same files.</p>
+ * host-side activity watcher keeps reading the same files. The personal
+ * config mounts are read-only (see above); everything else is writable
+ * because the session owns its state there.</p>
  *
  * <p>All methods are blocking and must be called off the JavaFX application
  * thread. {@link #probe} is run once at provider init (background) and its
@@ -97,6 +120,64 @@ public class ClaudeEvalContainer {
                 Path.of("/etc/claude-code/managed-settings.json"));
     }
 
+    /**
+     * The user's home, where {@code ~/.claude} (personal settings, skills,
+     * plugins, marketplaces) and {@code ~/.claude.json} (onboarding/trust
+     * state) live. Overridable via system property so tests can point at a
+     * fixture home; defaults to {@code user.home}, resolved per call.
+     */
+    private static Path home() {
+        String override = System.getProperty("app.drydock.eval.claude.home");
+        if (override != null && !override.isBlank()) {
+            return Path.of(override);
+        }
+        return Path.of(System.getProperty("user.home"));
+    }
+
+    private static Path userClaudeDir() {
+        return home().resolve(".claude");
+    }
+
+    /** Settings member holding the host's ddtool auth helper; dead weight in
+     * the container, where auth arrives as {@code ANTHROPIC_API_KEY} env. */
+    private static final String API_KEY_HELPER_KEY = "apiKeyHelper";
+
+    /**
+     * Personal config entries mirrored into the container via a symlink at
+     * the same name inside the config dir. {@code settings.json} is absent:
+     * it is the seed drydock writes (merged from the user's copy, with the
+     * eval edits). {@code .claude.json} likewise: copied, not symlinked,
+     * because the container session updates it (trust, history) and those
+     * updates must die with the session, not leak into the host copy.
+     */
+    private static final List<String> MIRRORED_ENTRIES = List.of(
+            "skills", "plugins", "agents", "commands", "CLAUDE.md");
+
+    /**
+     * User-scope settings members that cannot work inside the slim eval
+     * image and would only break sessions there:
+     * <ul>
+     * <li>{@code hooks} -- the user's hooks call host-only tools
+     * ({@code rtk}, python3 scripts); a failing PreToolUse hook fires on
+     * every tool call.
+     * <li>{@code mcpServers} / {@code disabledMcpServers} -- host binaries
+     * ({@code ddtool}, {@code npx}) are not in the image; every server
+     * would fail to start.
+     * <li>{@code apiKeyHelper} -- auth is passed as {@code ANTHROPIC_API_KEY}.
+     * </ul>
+     * Everything else the user has locally (permissions, model, theme,
+     * {@code enabledPlugins}, statusLine, ...) carries over so the session
+     * behaves like the host one.
+     */
+    private static final List<String> STRIPPED_SETTINGS_MEMBERS = List.of(
+            "hooks", "mcpServers", "disabledMcpServers", API_KEY_HELPER_KEY);
+
+    /** Members stripped from the copied {@code .claude.json} for the same
+     * reasons (the host binary / auth paths they reference are absent in
+     * the container). */
+    private static final List<String> STRIPPED_CLAUDE_JSON_MEMBERS = List.of(
+            "mcpServers", "disabledMcpServers", API_KEY_HELPER_KEY);
+
     /** The header that routes traffic to the eval account. */
     private static final String EVAL_HEADER = "x-target-account: eval";
 
@@ -107,7 +188,6 @@ public class ClaudeEvalContainer {
     private static final String CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR";
     private static final String CUSTOM_HEADERS_KEY = "ANTHROPIC_CUSTOM_HEADERS";
     private static final String BASE_URL_KEY = "ANTHROPIC_BASE_URL";
-    private static final String API_KEY_HELPER_KEY = "apiKeyHelper";
     private static final String HELPER_TTL_KEY = "CLAUDE_CODE_API_KEY_HELPER_TTL_MS";
 
     private static final FileAttribute<Set<PosixFilePermission>> OWNER_ONLY =
@@ -178,6 +258,7 @@ public class ClaudeEvalContainer {
         try {
             Files.createDirectories(configDir);
             seedSettings(configDir);
+            mirrorPersonalConfig(configDir);
         } catch (IOException e) {
             LOG.log(Level.WARNING, () -> "Could not seed eval config dir " + configDir + ": " + e.getMessage());
             return Optional.empty();
@@ -273,6 +354,26 @@ public class ClaudeEvalContainer {
                 .append(':').append(shellQuote(hooksDir.toString()));
         cmd.append(" -v ").append(shellQuote(activityDir.toString()))
                 .append(':').append(shellQuote(activityDir.toString()));
+        // The config-dir symlinks (mirrorPersonalConfig) resolve against the
+        // user's ~/.claude, so it must exist in the container at its original
+        // host path -- read-only, so a container session can never mutate the
+        // host's skills, plugins or marketplace clones (auto-updates run on
+        // the host, where they belong).
+        if (Files.isDirectory(userClaudeDir())) {
+            cmd.append(" -v ").append(shellQuote(userClaudeDir().toString()))
+                    .append(':').append(shellQuote(userClaudeDir().toString()))
+                    .append(":ro");
+        }
+        // Directory-source marketplaces live outside ~/.claude (e.g.
+        // ~/.trajectory/claude-marketplace, a plugin repo checkout) at their
+        // own host paths; known_marketplaces.json names those paths, and the
+        // container can only load them if they are mounted where the
+        // installed-plugins state expects to find them.
+        for (Path marketplace : extraMarketplacePaths()) {
+            cmd.append(" -v ").append(shellQuote(marketplace.toString()))
+                    .append(':').append(shellQuote(marketplace.toString()))
+                    .append(":ro");
+        }
         mcpConfigFile.ifPresent(f -> cmd.append(" -v ").append(shellQuote(f.toString()))
                 .append(':').append(shellQuote(f.toString())));
         cmd.append(" -w ").append(shellQuote(worktree.toString()));
@@ -282,18 +383,66 @@ public class ClaudeEvalContainer {
     }
 
     /**
-     * Reads the host's managed settings, applies the eval edits, and writes
-     * {@code <configDir>/settings.json}. If no managed-settings file is
-     * present, seeds from an empty object (the container then runs with only
-     * the eval header and the token drydock passes). Package-private for
-     * unit testing.
+     * Directory-source marketplace paths that need their own bind mount:
+     * {@code installLocation}s from {@code ~/.claude/plugins/known_marketplaces.json}
+     * that exist, are directories, and live outside {@code ~/.claude} (the
+     * ones inside are already covered by its mount). Best-effort: an
+     * unreadable or malformed file contributes nothing. Sorted, so the
+     * built command string is deterministic.
+     */
+    static List<Path> extraMarketplacePaths() {
+        Path known = userClaudeDir().resolve("plugins").resolve("known_marketplaces.json");
+        if (!Files.isReadable(known)) {
+            return List.of();
+        }
+        try {
+            JsonValue parsed = JsonParser.parse(Files.readString(known, StandardCharsets.UTF_8));
+            if (!(parsed instanceof JsonObject root)) {
+                return List.of();
+            }
+            LinkedHashSet<Path> paths = new LinkedHashSet<>();
+            for (JsonValue entry : root.members().values()) {
+                if (!(entry instanceof JsonObject market)) {
+                    continue;
+                }
+                if (!(market.members().get("installLocation") instanceof JsonString loc)) {
+                    continue;
+                }
+                Path p = Path.of(loc.value());
+                if (Files.isDirectory(p) && !p.startsWith(userClaudeDir())) {
+                    paths.add(p);
+                }
+            }
+            List<Path> sorted = new ArrayList<>(paths);
+            sorted.sort(Comparator.naturalOrder());
+            return List.copyOf(sorted);
+        } catch (IOException | JsonParseException e) {
+            LOG.log(Level.WARNING, () -> "Could not read known marketplaces " + known + ": " + e.getMessage());
+            return List.of();
+        }
+    }
+
+    /**
+     * Builds {@code <configDir>/settings.json} so the container session
+     * starts with the user's personal settings (permissions, model, theme,
+     * enabledPlugins, statusLine, ...) instead of a bare factory config:
+     * the base is the user's {@code ~/.claude/settings.json}, the managed
+     * settings are overlaid on top (managed wins -- it pins the base URL
+     * and telemetry), the host-bound members are stripped (see
+     * {@link #STRIPPED_SETTINGS_MEMBERS}), and the eval edits are applied
+     * last. If neither file is readable the seed is an empty object, as
+     * before. Package-private for unit testing.
      *
-     * <p>Mutates the parsed {@link JsonObject} in place: {@link #readManagedSettings}
-     * returns a fresh parse on every call, so the mutation is local. If that
-     * ever stops being true, this method would corrupt shared state.
+     * <p>Mutates freshly parsed {@link JsonObject}s in place; the records'
+     * compact constructors copy their member maps, so the mutation never
+     * reaches the sources.
      */
     void seedSettings(Path configDir) throws IOException {
-        JsonObject root = readManagedSettings().orElseGet(JsonObject::empty);
+        JsonObject root = readUserSettings().orElseGet(JsonObject::empty);
+        overlayManagedSettings(root);
+        for (String key : STRIPPED_SETTINGS_MEMBERS) {
+            root.members().remove(key);
+        }
         JsonObject env = root.members().containsKey("env")
                 ? asObject(root.members().get("env"))
                 : new JsonObject(new LinkedHashMap<>());
@@ -312,10 +461,108 @@ public class ClaudeEvalContainer {
         // The token is passed as ANTHROPIC_API_KEY env, so the helper is dead weight.
         env.members().remove(HELPER_TTL_KEY);
         putMember(root, "env", env);
-        root.members().remove(API_KEY_HELPER_KEY);
 
         Path target = configDir.resolve("settings.json");
         writeAtomically(target, JsonWriter.write(root));
+    }
+
+    /** The user's personal {@code ~/.claude/settings.json}, if readable. */
+    private Optional<JsonObject> readUserSettings() {
+        Path p = userClaudeDir().resolve("settings.json");
+        try {
+            if (Files.isReadable(p)) {
+                JsonValue parsed = JsonParser.parse(Files.readString(p, StandardCharsets.UTF_8));
+                return parsed instanceof JsonObject o ? Optional.of(o) : Optional.empty();
+            }
+        } catch (IOException | JsonParseException e) {
+            LOG.log(Level.WARNING, () -> "Could not read user settings " + p + ": " + e.getMessage());
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * Overlays the managed settings onto {@code root} (in place): managed
+     * wins per member; the two {@code env} maps merge per key, also with
+     * managed winning, because managed pins the base URL and auth
+     * plumbing that the eval edits then rewrite.
+     */
+    private void overlayManagedSettings(JsonObject root) throws IOException {
+        JsonObject managed = readManagedSettings().orElseGet(JsonObject::empty);
+        for (Map.Entry<String, JsonValue> e : managed.members().entrySet()) {
+            if ("env".equals(e.getKey())) {
+                JsonObject managedEnv = asObject(e.getValue());
+                JsonObject rootEnv = root.members().containsKey("env")
+                        ? asObject(root.members().get("env")) : new JsonObject(new LinkedHashMap<>());
+                rootEnv.members().putAll(managedEnv.members());
+                root.members().put("env", rootEnv);
+            } else {
+                root.members().put(e.getKey(), e.getValue());
+            }
+        }
+    }
+
+    /**
+     * Mirrors the user's personal Claude Code state into the config dir:
+     * <ul>
+     * <li>{@code .claude.json} -- copied (owner-only), with the host-bound
+     * members stripped, so the session starts with the host's onboarding,
+     * trust-dialog and project state instead of re-confirming everything.
+     * Copied, not symlinked: the session updates it, and those updates
+     * belong to the ephemeral session, not the host copy.
+     * <li>{@code skills}, {@code plugins}, {@code agents}, {@code commands},
+     * {@code CLAUDE.md} -- symlinked into the user's {@code ~/.claude}; the
+     * symlink targets resolve inside the container because
+     * {@link #wrap} bind-mounts {@code ~/.claude} at its original path.
+     * </ul>
+     * Best-effort per entry: a missing or unreadable source leaves the
+     * entry absent, never fails the launch.
+     */
+    void mirrorPersonalConfig(Path configDir) throws IOException {
+        mirrorClaudeJson(configDir);
+        for (String entry : MIRRORED_ENTRIES) {
+            Path source = userClaudeDir().resolve(entry);
+            if (!Files.exists(source)) {
+                continue;
+            }
+            Path link = configDir.resolve(entry);
+            try {
+                Files.deleteIfExists(link);
+                Files.createSymbolicLink(link, source);
+            } catch (IOException | UnsupportedOperationException e) {
+                // No symlink support (exotic FS): the entry is simply absent
+                // in the container; not worth failing the launch over.
+                LOG.log(Level.DEBUG, () -> "Could not symlink eval config entry "
+                        + entry + ": " + e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Copies {@code ~/.claude.json} into the config dir, owner-only, with the
+     * host-bound members stripped. Falls back to a raw copy if the file is
+     * unreadable or unparseable -- a stale-ish state file is still better
+     * than re-running every confirmation dialog.
+     */
+    private void mirrorClaudeJson(Path configDir) throws IOException {
+        Path source = home().resolve(".claude.json");
+        if (!Files.isReadable(source)) {
+            return;
+        }
+        Path target = configDir.resolve(".claude.json");
+        try {
+            JsonValue parsed = JsonParser.parse(Files.readString(source, StandardCharsets.UTF_8));
+            if (parsed instanceof JsonObject o) {
+                for (String key : STRIPPED_CLAUDE_JSON_MEMBERS) {
+                    o.members().remove(key);
+                }
+                writeOwnerOnly(target, JsonWriter.write(o));
+                return;
+            }
+        } catch (IOException | JsonParseException e) {
+            LOG.log(Level.WARNING, () -> "Could not parse " + source + " for the eval mirror "
+                    + "(copying verbatim): " + e.getMessage());
+        }
+        writeOwnerOnly(target, Files.readString(source, StandardCharsets.UTF_8));
     }
 
     /** True if {@code headers} already names the {@code name: value} header line. */

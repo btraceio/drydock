@@ -18,6 +18,27 @@ class ClaudeEvalContainerTest {
     @TempDir
     Path tmp;
 
+    @TempDir
+    Path fixtureHome;
+
+    /**
+     * The container reads the user's Claude Code state from the home dir
+     * (settings, skills, plugins, marketplaces). Point it at an empty
+     * fixture home so tests are hermetic: without this, mark()/wrap() on
+     * a machine with a real ~/.claude would create symlinks into it and
+     * put its mount in the built docker command.
+     */
+    @org.junit.jupiter.api.BeforeEach
+    void isolateHome() throws Exception {
+        Files.createDirectories(fixtureHome.resolve(".claude"));
+        System.setProperty("app.drydock.eval.claude.home", fixtureHome.toString());
+    }
+
+    @org.junit.jupiter.api.AfterEach
+    void restoreHome() {
+        System.clearProperty("app.drydock.eval.claude.home");
+    }
+
     /** A resolver that returns a fixed token with a known expiry. */
     private static EvalTokenResolver fixedToken(String token, Instant expiry) {
         return () -> Optional.of(new EvalTokenResolver.ResolvedToken(token, Optional.ofNullable(expiry)));
@@ -158,6 +179,117 @@ class ClaudeEvalContainerTest {
         String imageAndAfter = cmd.substring(cmd.indexOf("drydock-claude-eval:latest"));
         assertFalse(imageAndAfter.contains(" sh "), "no extra 'sh' after the image (entrypoint is already sh)");
         assertTrue(imageAndAfter.startsWith("drydock-claude-eval:latest '"));
+    }
+
+    @Test
+    void markMirrorsPersonalStateIntoConfigDir() throws Exception {
+        // .claude.json with host-bound members and onboarding/trust state.
+        Files.writeString(fixtureHome.resolve(".claude.json"), """
+                {
+                  "hasCompletedOnboarding": true,
+                  "apiKeyHelper": "ddtool ...",
+                  "mcpServers": {"datadog": {"command": "ddtool"}},
+                  "projects": {
+                    "/tmp/proj": {"hasTrustDialogAccepted": true}
+                  }
+                }
+                """);
+        // Personal content entries.
+        Files.createDirectories(fixtureHome.resolve(".claude/skills/someskill"));
+        Files.createDirectories(fixtureHome.resolve(".claude/plugins"));
+        Files.createDirectories(fixtureHome.resolve(".claude/agents"));
+        Files.createDirectories(fixtureHome.resolve(".claude/commands"));
+        Files.writeString(fixtureHome.resolve(".claude/CLAUDE.md"), "memory");
+
+        ClaudeEvalContainer c = new ClaudeEvalContainer(tmp, fixedToken("tok", Instant.now().plusSeconds(60)));
+        Path configDir = c.mark("sess").orElseThrow().configDir();
+
+        // .claude.json: copied with the host-bound members stripped.
+        String claudeJson = Files.readString(configDir.resolve(".claude.json"));
+        assertTrue(claudeJson.contains("hasCompletedOnboarding"), "onboarding state carried over");
+        assertTrue(claudeJson.contains("hasTrustDialogAccepted"), "project trust carried over");
+        assertFalse(claudeJson.contains("mcpServers"), "host MCP servers stripped");
+        assertFalse(claudeJson.contains("apiKeyHelper"), "host auth helper stripped");
+        // Content entries: symlinks resolving into the fixture home.
+        for (String entry : new String[] {"skills", "plugins", "agents", "commands", "CLAUDE.md"}) {
+            Path link = configDir.resolve(entry);
+            assertTrue(Files.isSymbolicLink(link), entry + " is a symlink");
+            assertEquals(fixtureHome.resolve(".claude").resolve(entry).toRealPath(),
+                    Files.readSymbolicLink(link).toRealPath(), entry + " points at ~/.claude");
+        }
+    }
+
+    @Test
+    void seedSettingsMergesUserSettingsUnderManagedAndStripsHostBound() throws Exception {
+        Path configDir = Files.createDirectories(tmp.resolve("eval3").resolve("s"));
+        Files.writeString(fixtureHome.resolve(".claude/settings.json"), """
+                {
+                  "model": "opus",
+                  "theme": "dark",
+                  "enabledPlugins": {"trajectory@trajectory": true},
+                  "permissions": {"allow": ["Bash(git log:*)"]},
+                  "statusLine": {"type": "command", "command": "git branch"},
+                  "hooks": {"PreToolUse": []},
+                  "mcpServers": {"datadog": {"command": "ddtool"}},
+                  "env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:4000"}
+                }
+                """);
+        Path managed = tmp.resolve("managed-settings.json");
+        Files.writeString(managed, """
+                {
+                  "model": "sonnet",
+                  "env": {
+                    "ANTHROPIC_BASE_URL": "http://127.0.0.1:4000",
+                    "ANTHROPIC_CUSTOM_HEADERS": "source: claude-code"
+                  }
+                }
+                """);
+        System.setProperty("app.drydock.eval.claude.managedSettings", managed.toString());
+        try {
+            new ClaudeEvalContainer(tmp, noToken()).seedSettings(configDir);
+        } finally {
+            System.clearProperty("app.drydock.eval.claude.managedSettings");
+        }
+
+        String seeded = Files.readString(configDir.resolve("settings.json"));
+        assertTrue(seeded.contains("\"sonnet\""), "managed model wins over the user's");
+        assertTrue(seeded.contains("enabledPlugins"), "enabledPlugins carried over (plugin activation)");
+        assertTrue(seeded.contains("Bash(git log:*)"), "permissions carried over");
+        assertTrue(seeded.contains("\"dark\""), "theme carried over");
+        assertTrue(seeded.contains("statusLine"), "statusLine carried over (degrades gracefully)");
+        assertTrue(seeded.contains("host.docker.internal:4000"), "base URL rewritten");
+        assertFalse(seeded.contains("\"hooks\""), "host hooks stripped");
+        assertFalse(seeded.contains("mcpServers"), "host MCP servers stripped");
+    }
+
+    @Test
+    void wrapMountsUserClaudeAndExternalMarketplaces() throws Exception {
+        // One marketplace inside ~/.claude (covered by its mount), one
+        // outside that exists, one outside that does not.
+        Files.createDirectories(fixtureHome.resolve(".claude/plugins/marketplaces/inner"));
+        Files.writeString(fixtureHome.resolve(".claude/plugins/known_marketplaces.json"), """
+                {
+                  "inner": {"installLocation": "%s/.claude/plugins/marketplaces/inner"},
+                  "outer": {"installLocation": "%s/outer-market"},
+                  "gone": {"installLocation": "%s/deleted-market"}
+                }
+                """.formatted(fixtureHome, fixtureHome, fixtureHome));
+        Files.createDirectories(fixtureHome.resolve("outer-market"));
+
+        ClaudeEvalContainer c = new ClaudeEvalContainer(tmp, fixedToken("tok", Instant.now().plusSeconds(60)));
+        ClaudeEvalContainer.EvalSetup setup = c.mark("sess").orElseThrow();
+        Path worktree = Files.createDirectories(tmp.resolve("wt"));
+        Path hooksDir = Files.createDirectories(tmp.resolve("hooks"));
+        Path activityDir = Files.createDirectories(tmp.resolve("activity"));
+
+        String cmd = c.wrap(setup, "claude", worktree, Optional.empty(), hooksDir, activityDir);
+
+        assertTrue(cmd.contains("-v '" + fixtureHome + "/.claude':'" + fixtureHome
+                + "/.claude':ro"), "~/.claude mounted read-only at its host path: " + cmd);
+        assertTrue(cmd.contains("-v '" + fixtureHome + "/outer-market':'" + fixtureHome
+                + "/outer-market':ro"), "existing external marketplace mounted");
+        assertFalse(cmd.contains("deleted-market"), "missing external marketplace not mounted");
+        assertFalse(cmd.contains("marketplaces/inner"), "in-~/.claude marketplace needs no own mount");
     }
 
     private static int countOccurrences(String haystack, String needle) {
