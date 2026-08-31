@@ -140,7 +140,11 @@ public final class ClaudeAgentProvider implements AgentProvider {
             return LaunchPlan.of(SshCommandBuilder.interactiveSessionCommand(c.remote().get(), "exec claude"), false);
         }
         ClaudeCapabilities caps = detectCaps();
-        StringBuilder command = new StringBuilder(ENV_CLEANUP_PREFIX).append(claudeBinary());
+        // Eval runs inside a container whose PATH has `claude` (installed by the
+        // claudeEvalImage Dockerfile at /root/.local/bin), not the host's absolute
+        // path -- which does not exist in the container's filesystem.
+        String binary = c.evalMode() ? "claude" : claudeBinary();
+        StringBuilder command = new StringBuilder(ENV_CLEANUP_PREFIX).append(binary);
         boolean sessionIdUsed = false;
         if (caps.supportsName()) {
             command.append(" -n ").append(AgentCommands.shellQuote(c.displayName()));
@@ -173,13 +177,15 @@ public final class ClaudeAgentProvider implements AgentProvider {
         }
         ClaudeCapabilities caps = detectCaps();
         String suffix = activitySettingsFlag(caps) + mcpConfigFlag(caps, r.mcp().flatMap(McpAccess::credentialFile));
+        // Eval runs inside a container whose PATH has `claude`, not the host path.
+        String binary = r.evalMode() ? "claude" : claudeBinary();
         String inner;
         if (r.agentSessionId().isPresent()) {
-            inner = ENV_CLEANUP_PREFIX + claudeBinary() + " --resume " + AgentCommands.shellQuote(r.agentSessionId().get()) + suffix;
+            inner = ENV_CLEANUP_PREFIX + binary + " --resume " + AgentCommands.shellQuote(r.agentSessionId().get()) + suffix;
         } else if (r.agentSessionName().isPresent()) {
-            inner = ENV_CLEANUP_PREFIX + claudeBinary() + " --resume " + AgentCommands.shellQuote(r.agentSessionName().get()) + suffix;
+            inner = ENV_CLEANUP_PREFIX + binary + " --resume " + AgentCommands.shellQuote(r.agentSessionName().get()) + suffix;
         } else {
-            inner = ENV_CLEANUP_PREFIX + claudeBinary() + " --resume" + suffix;
+            inner = ENV_CLEANUP_PREFIX + binary + " --resume" + suffix;
         }
         if (r.evalMode()) {
             // Resume key is the agent session id; for PRESET it equals the
