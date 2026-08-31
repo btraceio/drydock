@@ -63,13 +63,23 @@ import app.drydock.state.json.JsonWriter;
  * wants. {@link #mirrorPersonalConfig} therefore seeds the config dir with
  * a copy of {@code ~/.claude.json} (onboarding/trust/project state, so
  * nothing asks again) and symlinks the personal content dirs
- * ({@code skills}, {@code plugins}, {@code agents}, {@code commands},
- * {@code CLAUDE.md}) into {@code ~/.claude}; {@link #wrap} bind-mounts
- * {@code ~/.claude} read-only at its original host path so the symlinks
- * and the plugin state's absolute install paths resolve unchanged.
- * Directory-source marketplaces named in
- * {@code ~/.claude/plugins/known_marketplaces.json} that live outside
- * {@code ~/.claude} get their own read-only mounts, for the same reason.
+ * ({@code skills}, {@code agents}, {@code commands}, {@code CLAUDE.md})
+ * into {@code ~/.claude}; {@link #wrap} bind-mounts {@code ~/.claude}
+ * read-only at its original host path so the symlinks and the plugin
+ * state's absolute install paths resolve unchanged. The {@code plugins}
+ * dir is mirrored separately ({@link #mirrorPluginState}): its state files
+ * are copied per-session (writable, so the session can materialize
+ * marketplaces and auto-install plugins without touching the host store)
+ * while its content dirs are symlinked read-only.
+ * Directory-source marketplaces -- materialized in
+ * {@code ~/.claude/plugins/known_marketplaces.json} or only declared in
+ * the user's {@code extraKnownMarketplaces} -- that live outside
+ * {@code ~/.claude} get their own read-only mounts, for the same reason; a
+ * declaration that has not been materialized on the host yet has its
+ * known-marketplaces entry fabricated into the per-session copy, because
+ * the plugin catalog is read at startup only from known marketplaces and
+ * an eval session's config dir is fresh every time (a hand-registered
+ * marketplace would otherwise never load in its first -- only -- run).
  * Members that reference host-only tooling (hooks calling {@code rtk},
  * {@code ddtool}-backed MCP servers) are stripped, not mirrored: in the
  * slim image they would fail on every tool call.</p>
@@ -149,9 +159,32 @@ public class ClaudeEvalContainer {
      * eval edits). {@code .claude.json} likewise: copied, not symlinked,
      * because the container session updates it (trust, history) and those
      * updates must die with the session, not leak into the host copy.
+     * {@code plugins} is absent: it gets special treatment
+     * (see {@link #mirrorPluginState}) -- its state files must be writable
+     * per-session while its content dirs stay shared read-only.
      */
     private static final List<String> MIRRORED_ENTRIES = List.of(
-            "skills", "plugins", "agents", "commands", "CLAUDE.md");
+            "skills", "agents", "commands", "CLAUDE.md");
+
+    /**
+     * Plugin-state files, copied per-session so the container session can
+     * update them (marketplace materialization, plugin auto-install) without
+     * touching the host's store. Small (kilobytes).
+     */
+    private static final List<String> PLUGIN_STATE_FILES = List.of(
+            "known_marketplaces.json", "installed_plugins.json", "config.json",
+            "blocklist.json", "plugin-catalog-cache.json");
+
+    /**
+     * Plugin-content dirs, symlinked into the host's {@code ~/.claude/plugins}
+     * (read-only in the container via the {@code ~/.claude} mount): marketplaces
+     * can be gigabytes, so copying is out of the question and the content is
+     * read-mostly anyway. {@code repos} holds plugin checkout copies (may be
+     * absent). {@code data} is NOT here: it is session-writable state, so it
+     * is created as a fresh empty dir per session.
+     */
+    private static final List<String> PLUGIN_CONTENT_DIRS = List.of(
+            "marketplaces", "cache", "repos");
 
     /**
      * User-scope settings members that cannot work inside the slim eval
@@ -384,23 +417,36 @@ public class ClaudeEvalContainer {
 
     /**
      * Directory-source marketplace paths that need their own bind mount:
-     * {@code installLocation}s from {@code ~/.claude/plugins/known_marketplaces.json}
-     * that exist, are directories, and live outside {@code ~/.claude} (the
-     * ones inside are already covered by its mount). Best-effort: an
-     * unreadable or malformed file contributes nothing. Sorted, so the
-     * built command string is deterministic.
+     * the {@code installLocation}s from
+     * {@code ~/.claude/plugins/known_marketplaces.json}, plus the directory
+     * paths declared in the user's {@code extraKnownMarketplaces} -- an
+     * in-progress registration may not be materialized into
+     * known_marketplaces.json yet. Only paths that exist, are directories,
+     * and live outside {@code ~/.claude} are included (the ones inside are
+     * already covered by its mount). Best-effort: unreadable or malformed
+     * sources contribute nothing. Sorted, so the built command string is
+     * deterministic.
      */
     static List<Path> extraMarketplacePaths() {
+        LinkedHashSet<Path> paths = new LinkedHashSet<>();
+        collectMarketplaceInstallLocations(paths);
+        collectDeclaredMarketplacePaths(paths);
+        List<Path> sorted = new ArrayList<>(paths);
+        sorted.sort(Comparator.naturalOrder());
+        return List.copyOf(sorted);
+    }
+
+    /** installLocation paths from known_marketplaces.json into {@code paths}. */
+    private static void collectMarketplaceInstallLocations(LinkedHashSet<Path> paths) {
         Path known = userClaudeDir().resolve("plugins").resolve("known_marketplaces.json");
         if (!Files.isReadable(known)) {
-            return List.of();
+            return;
         }
         try {
             JsonValue parsed = JsonParser.parse(Files.readString(known, StandardCharsets.UTF_8));
             if (!(parsed instanceof JsonObject root)) {
-                return List.of();
+                return;
             }
-            LinkedHashSet<Path> paths = new LinkedHashSet<>();
             for (JsonValue entry : root.members().values()) {
                 if (!(entry instanceof JsonObject market)) {
                     continue;
@@ -413,14 +459,33 @@ public class ClaudeEvalContainer {
                     paths.add(p);
                 }
             }
-            List<Path> sorted = new ArrayList<>(paths);
-            sorted.sort(Comparator.naturalOrder());
-            return List.copyOf(sorted);
         } catch (IOException | JsonParseException e) {
             LOG.log(Level.WARNING, () -> "Could not read known marketplaces " + known + ": " + e.getMessage());
-            return List.of();
         }
     }
+
+    /** Directory paths from the user's extraKnownMarketplaces into {@code paths}. */
+    private static void collectDeclaredMarketplacePaths(LinkedHashSet<Path> paths) {
+        Optional<JsonObject> extra = readExtraKnownMarketplaces();
+        if (extra.isEmpty()) {
+            return;
+        }
+        for (JsonValue entry : extra.get().members().values()) {
+            if (!(entry instanceof JsonObject market)
+                    || !(market.members().get("source") instanceof JsonObject src)
+                    || !(src.members().get("source") instanceof JsonString kind)
+                    || !"directory".equals(kind.value())
+                    || !(src.members().get("path") instanceof JsonString path)) {
+                continue;
+            }
+            Path p = Path.of(path.value());
+            if (Files.isDirectory(p) && !p.startsWith(userClaudeDir())) {
+                paths.add(p);
+            }
+        }
+    }
+
+
 
     /**
      * Builds {@code <configDir>/settings.json} so the container session
@@ -519,6 +584,7 @@ public class ClaudeEvalContainer {
      */
     void mirrorPersonalConfig(Path configDir) throws IOException {
         mirrorClaudeJson(configDir);
+        mirrorPluginState(configDir);
         for (String entry : MIRRORED_ENTRIES) {
             Path source = userClaudeDir().resolve(entry);
             if (!Files.exists(source)) {
@@ -535,6 +601,147 @@ public class ClaudeEvalContainer {
                         + entry + ": " + e.getMessage());
             }
         }
+    }
+
+    /**
+     * Builds {@code <configDir>/plugins} so the container sees the host's
+     * plugin state but owns its session updates: state files are copied
+     * (writable, die with the session), content dirs are symlinked to the
+     * host's read-only store.
+     *
+     * <p>On top of the plain copy, {@code known_marketplaces.json} gains an
+     * entry for every directory-source marketplace the user declared in
+     * {@code extraKnownMarketplaces} but that has not been materialized on
+     * the host yet (an in-progress registration, hand-added to settings
+     * before any host session ran {@code claude plugin marketplace add}).
+     * Without the entry, the marketplace's plugins cannot load in the
+     * session that first sees the declaration: the plugin catalog is read
+     * at startup only from known marketplaces, and the container cannot
+     * materialize the entry itself into the host's read-only store (on the
+     * host, the next session does it; each eval session would otherwise be
+     * that "first session" forever, because its config dir is fresh).
+     * Fabricating the entry here is safe exactly because the state file is
+     * per-session: worst case, if Claude Code's schema moves on, the
+     * container re-materializes from the declaration into the copy and the
+     * plugin loads one resume later -- the same degraded bootstrap the
+     * host itself has.
+     */
+    void mirrorPluginState(Path configDir) throws IOException {
+        Path hostPlugins = userClaudeDir().resolve("plugins");
+        if (!Files.isDirectory(hostPlugins)) {
+            return;
+        }
+        Path target = configDir.resolve("plugins");
+        Files.createDirectories(target);
+        for (String file : PLUGIN_STATE_FILES) {
+            Path source = hostPlugins.resolve(file);
+            if (Files.isRegularFile(source)) {
+                Files.copy(source, target.resolve(file), StandardCopyOption.REPLACE_EXISTING);
+            }
+        }
+        // Session-writable plugin data; host data is not carried over (it is
+        // per-machine state, not content).
+        Files.createDirectories(target.resolve("data"));
+        for (String dir : PLUGIN_CONTENT_DIRS) {
+            Path source = hostPlugins.resolve(dir);
+            if (!Files.isDirectory(source)) {
+                continue;
+            }
+            Path link = target.resolve(dir);
+            try {
+                Files.deleteIfExists(link);
+                Files.createSymbolicLink(link, source);
+            } catch (IOException | UnsupportedOperationException e) {
+                LOG.log(Level.DEBUG, () -> "Could not symlink plugin content dir "
+                        + dir + ": " + e.getMessage());
+            }
+        }
+        fabricateDeclaredMarketplaces(target.resolve("known_marketplaces.json"));
+    }
+
+    /**
+     * Rewrites {@code knownMarketplacesFile} (the per-session copy) with an
+     * entry added for every directory-source {@code extraKnownMarketplaces}
+     * declaration from the user's settings that is missing from it. See
+     * {@link #mirrorPluginState} for why the entry must exist up front. The
+     * entry shape matches what {@code claude plugin marketplace add} writes
+     * for a directory source (verified against a host-materialized file):
+     * {@code source}, {@code installLocation} (== the declared path) and
+     * {@code lastUpdated}.
+     */
+    private void fabricateDeclaredMarketplaces(Path knownMarketplacesFile) throws IOException {
+        Optional<JsonObject> extra = readExtraKnownMarketplaces();
+        if (extra.isEmpty()) {
+            return;
+        }
+        JsonObject known;
+        try {
+            if (Files.isReadable(knownMarketplacesFile)) {
+                JsonValue parsed = JsonParser.parse(
+                        Files.readString(knownMarketplacesFile, StandardCharsets.UTF_8));
+                if (!(parsed instanceof JsonObject o)) {
+                    return;
+                }
+                known = o;
+            } else {
+                known = JsonObject.empty();
+            }
+        } catch (IOException | JsonParseException e) {
+            LOG.log(Level.WARNING, () -> "Could not read " + knownMarketplacesFile
+                    + "; extra marketplaces not materialized: " + e.getMessage());
+            return;
+        }
+        boolean added = false;
+        for (Map.Entry<String, JsonValue> e : extra.get().members().entrySet()) {
+            String name = e.getKey();
+            if (known.has(name) || !(e.getValue() instanceof JsonObject market)) {
+                continue;
+            }
+            JsonValue sourceMember = market.members().get("source");
+            // Only directory sources can be mirrored without cloning.
+            if (!(sourceMember instanceof JsonObject src)
+                    || !(src.members().get("source") instanceof JsonString kind)
+                    || !"directory".equals(kind.value())
+                    || !(src.members().get("path") instanceof JsonString path)) {
+                continue;
+            }
+            Path dir = Path.of(path.value());
+            if (!Files.isDirectory(dir)) {
+                LOG.log(Level.DEBUG, () -> "extraKnownMarketplaces \"" + name + "\" points at "
+                        + dir + ", which does not exist; skipping");
+                continue;
+            }
+            JsonObject entry = new JsonObject(new LinkedHashMap<>());
+            entry.put("source", src);
+            entry.put("installLocation", new JsonString(dir.toString()));
+            entry.put("lastUpdated", new JsonString(Instant.now().toString()));
+            known.put(name, entry);
+            added = true;
+        }
+        if (added) {
+            Files.writeString(knownMarketplacesFile, JsonWriter.write(known), StandardCharsets.UTF_8);
+        }
+    }
+
+    /**
+     * The {@code extraKnownMarketplaces} object from the user's personal
+     * settings, if present and an object. Empty otherwise.
+     */
+    private static Optional<JsonObject> readExtraKnownMarketplaces() {
+        Path settings = userClaudeDir().resolve("settings.json");
+        try {
+            if (!Files.isReadable(settings)) {
+                return Optional.empty();
+            }
+            JsonValue parsed = JsonParser.parse(Files.readString(settings, StandardCharsets.UTF_8));
+            if (parsed instanceof JsonObject o
+                    && o.members().get("extraKnownMarketplaces") instanceof JsonObject extra) {
+                return Optional.of(extra);
+            }
+        } catch (IOException | JsonParseException e) {
+            LOG.log(Level.DEBUG, () -> "Could not read user settings for extra marketplaces: " + e.getMessage());
+        }
+        return Optional.empty();
     }
 
     /**

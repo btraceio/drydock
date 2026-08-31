@@ -196,7 +196,12 @@ class ClaudeEvalContainerTest {
                 """);
         // Personal content entries.
         Files.createDirectories(fixtureHome.resolve(".claude/skills/someskill"));
-        Files.createDirectories(fixtureHome.resolve(".claude/plugins"));
+        Files.createDirectories(fixtureHome.resolve(".claude/plugins/marketplaces"));
+        Files.createDirectories(fixtureHome.resolve(".claude/plugins/cache"));
+        Files.writeString(fixtureHome.resolve(".claude/plugins/known_marketplaces.json"),
+                "{\"materialized\": {\"installLocation\": \"" + fixtureHome + "/inner-market\"}}");
+        Files.writeString(fixtureHome.resolve(".claude/plugins/installed_plugins.json"),
+                "{\"version\": 2, \"plugins\": {}}");
         Files.createDirectories(fixtureHome.resolve(".claude/agents"));
         Files.createDirectories(fixtureHome.resolve(".claude/commands"));
         Files.writeString(fixtureHome.resolve(".claude/CLAUDE.md"), "memory");
@@ -211,12 +216,70 @@ class ClaudeEvalContainerTest {
         assertFalse(claudeJson.contains("mcpServers"), "host MCP servers stripped");
         assertFalse(claudeJson.contains("apiKeyHelper"), "host auth helper stripped");
         // Content entries: symlinks resolving into the fixture home.
-        for (String entry : new String[] {"skills", "plugins", "agents", "commands", "CLAUDE.md"}) {
+        for (String entry : new String[] {"skills", "agents", "commands", "CLAUDE.md"}) {
             Path link = configDir.resolve(entry);
             assertTrue(Files.isSymbolicLink(link), entry + " is a symlink");
             assertEquals(fixtureHome.resolve(".claude").resolve(entry).toRealPath(),
                     Files.readSymbolicLink(link).toRealPath(), entry + " points at ~/.claude");
         }
+        // plugins: a real dir -- state files copied (writable), content
+        // dirs symlinked (read-only host content).
+        Path plugins = configDir.resolve("plugins");
+        assertTrue(Files.isDirectory(plugins), "plugins is a real dir, not a symlink");
+        assertTrue(Files.isRegularFile(plugins.resolve("installed_plugins.json")),
+                "installed_plugins.json copied");
+        assertTrue(Files.isRegularFile(plugins.resolve("known_marketplaces.json")),
+                "known_marketplaces.json present");
+        assertTrue(Files.isDirectory(plugins.resolve("data")), "session-writable data dir created");
+        for (String dir : new String[] {"marketplaces", "cache"}) {
+            assertTrue(Files.isSymbolicLink(plugins.resolve(dir)), dir + " symlinked to host content");
+        }
+    }
+
+    @Test
+    void markMaterializesDeclaredMarketplacesIntoPluginState() throws Exception {
+        // A known marketplace (already materialized on the host) plus an
+        // in-progress one declared only in extraKnownMarketplaces.
+        Files.createDirectories(fixtureHome.resolve(".claude/plugins"));
+        Files.writeString(fixtureHome.resolve(".claude/plugins/known_marketplaces.json"), """
+                {
+                  "existing": {
+                    "source": {"source": "directory", "path": "%s/existing-market"},
+                    "installLocation": "%s/existing-market",
+                    "lastUpdated": "2026-01-01T00:00:00.000Z"
+                  }
+                }
+                """.formatted(fixtureHome, fixtureHome));
+        Files.writeString(fixtureHome.resolve(".claude/settings.json"), """
+                {
+                  "extraKnownMarketplaces": {
+                    "in-progress": {
+                      "source": {"source": "directory", "path": "%s/in-progress-market"}
+                    },
+                    "existing": {
+                      "source": {"source": "directory", "path": "%s/existing-market"}
+                    },
+                    "missing-on-disk": {
+                      "source": {"source": "directory", "path": "%s/deleted-market"}
+                    },
+                    "remote": {
+                      "source": {"source": "github", "repo": "owner/repo"}
+                    }
+                  }
+                }
+                """.formatted(fixtureHome, fixtureHome, fixtureHome));
+        Files.createDirectories(fixtureHome.resolve("in-progress-market"));
+
+        ClaudeEvalContainer c = new ClaudeEvalContainer(tmp, fixedToken("tok", Instant.now().plusSeconds(60)));
+        Path configDir = c.mark("sess").orElseThrow().configDir();
+
+        String known = Files.readString(configDir.resolve("plugins/known_marketplaces.json"));
+        assertTrue(known.contains("\"existing\""), "already-materialized marketplace kept");
+        assertTrue(known.contains("\"in-progress\""), "declared marketplace materialized");
+        assertTrue(known.contains(fixtureHome + "/in-progress-market\""),
+                "installLocation equals the declared path");
+        assertFalse(known.contains("deleted-market"), "nonexistent path not materialized");
+        assertFalse(known.contains("owner/repo"), "github-source declaration not materialized");
     }
 
     @Test
@@ -265,7 +328,9 @@ class ClaudeEvalContainerTest {
     @Test
     void wrapMountsUserClaudeAndExternalMarketplaces() throws Exception {
         // One marketplace inside ~/.claude (covered by its mount), one
-        // outside that exists, one outside that does not.
+        // outside that exists (materialized), one outside that exists only
+        // as an extraKnownMarketplaces declaration, one outside that does
+        // not exist at all.
         Files.createDirectories(fixtureHome.resolve(".claude/plugins/marketplaces/inner"));
         Files.writeString(fixtureHome.resolve(".claude/plugins/known_marketplaces.json"), """
                 {
@@ -274,7 +339,20 @@ class ClaudeEvalContainerTest {
                   "gone": {"installLocation": "%s/deleted-market"}
                 }
                 """.formatted(fixtureHome, fixtureHome, fixtureHome));
+        Files.writeString(fixtureHome.resolve(".claude/settings.json"), """
+                {
+                  "extraKnownMarketplaces": {
+                    "declared-only": {
+                      "source": {"source": "directory", "path": "%s/declared-market"}
+                    },
+                    "declared-gone": {
+                      "source": {"source": "directory", "path": "%s/declared-deleted"}
+                    }
+                  }
+                }
+                """.formatted(fixtureHome, fixtureHome));
         Files.createDirectories(fixtureHome.resolve("outer-market"));
+        Files.createDirectories(fixtureHome.resolve("declared-market"));
 
         ClaudeEvalContainer c = new ClaudeEvalContainer(tmp, fixedToken("tok", Instant.now().plusSeconds(60)));
         ClaudeEvalContainer.EvalSetup setup = c.mark("sess").orElseThrow();
@@ -288,7 +366,10 @@ class ClaudeEvalContainerTest {
                 + "/.claude':ro"), "~/.claude mounted read-only at its host path: " + cmd);
         assertTrue(cmd.contains("-v '" + fixtureHome + "/outer-market':'" + fixtureHome
                 + "/outer-market':ro"), "existing external marketplace mounted");
+        assertTrue(cmd.contains("-v '" + fixtureHome + "/declared-market':'" + fixtureHome
+                + "/declared-market':ro"), "declared-only marketplace mounted");
         assertFalse(cmd.contains("deleted-market"), "missing external marketplace not mounted");
+        assertFalse(cmd.contains("declared-deleted"), "missing declared marketplace not mounted");
         assertFalse(cmd.contains("marketplaces/inner"), "in-~/.claude marketplace needs no own mount");
     }
 
