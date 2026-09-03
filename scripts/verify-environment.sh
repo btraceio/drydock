@@ -15,6 +15,18 @@ section() {
     printf '\n== %s ==\n' "$1"
 }
 
+# This machine's real CPU, seen through Rosetta: uname(3) reports x86_64 inside
+# a translated process, so consult Apple's sysctl.proc_translated flag first
+# (1 = translated; absent, hence the fallback, on a genuine Intel Mac).
+# https://developer.apple.com/documentation/apple-silicon/about-the-rosetta-translation-environment
+hardware_cpu() {
+    if [[ "$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)" == "1" ]]; then
+        echo arm64
+    else
+        uname -m
+    fi
+}
+
 check_jdk26() {
     section "JDK 26"
 
@@ -100,18 +112,75 @@ check_gradle() {
 
 check_arch() {
     section "Architecture"
-    echo "os.arch (uname -m): $(uname -m)"
+
+    local uname_arch translated hardware_arch
+    uname_arch="$(uname -m)"
+    translated="$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)"
+    hardware_arch="$(hardware_cpu)"
+
+    echo "hardware CPU:       $hardware_arch"
+    echo "this shell (uname): $uname_arch"
+
+    if [[ "$translated" == "1" ]]; then
+        echo "PROBLEM: this shell runs under Rosetta 2 (sysctl.proc_translated=1)."
+        echo "  Everything launched from it -- Homebrew, gradlew, the JVM -- defaults to"
+        echo "  x86_64, and this project picks the native slice from the JVM's os.arch, so"
+        echo "  the build produces an x86_64 app (x86_64 libghostty) on arm64 hardware."
+        echo "  Start a native shell first: arch -arm64 /bin/zsh"
+        fail=1
+    fi
+
+    # The JVM's os.arch -- not the machine's -- is what selects
+    # build/native/<arch>/libghostty.dylib at runtime (NativeLibraryLocator) and
+    # what the packaging tasks bundle (buildSrc drydock.packaging.gradle.kts).
+    # An x86_64 JDK runs fine on Apple Silicon under Rosetta and reports
+    # os.arch=x86_64, which is exactly how an all-x86_64 build happens there.
+    local java_bin=""
+    if [[ -n "${JAVA_HOME:-}" && -x "$JAVA_HOME/bin/java" ]]; then
+        java_bin="$JAVA_HOME/bin/java"
+    elif command -v java >/dev/null 2>&1; then
+        java_bin="$(command -v java)"
+    fi
+
+    if [[ -n "$java_bin" ]]; then
+        local java_arch
+        java_arch="$("$java_bin" -XshowSettings:properties -version 2>&1 \
+            | awk -F' = ' '/^ *os\.arch/ {print $2; exit}')"
+        echo "java os.arch:       ${java_arch:-unknown} ($java_bin)"
+        if [[ "$hardware_arch" == "arm64" && "$java_arch" == "x86_64" ]]; then
+            echo "PROBLEM: that JDK is an x86_64 build on arm64 hardware."
+            echo "  Install a native arm64 JDK; a translated one makes every arch-dependent"
+            echo "  part of the build (native slice selection, jlink output) x86_64."
+            fail=1
+        fi
+    else
+        echo "java os.arch:       (no java found to inspect)"
+    fi
+
     echo "Supported per docs/implementation-plan.md deviation: x86_64 and arm64 macOS."
+    echo "The JDKs that actually decide this are Gradle's daemon JVM"
+    echo "(gradle/gradle-daemon-jvm.properties, toolchainVersion=17) and the JDK 26"
+    echo "toolchain -- list them with: ./gradlew -q javaToolchains"
 }
 
 check_zig() {
     section "zig 0.15.x (for libghostty)"
-    local zig_bin=""
-    if [[ -x /usr/local/opt/zig@0.15/bin/zig ]]; then
-        zig_bin=/usr/local/opt/zig@0.15/bin/zig
-    elif [[ -x /opt/homebrew/opt/zig@0.15/bin/zig ]]; then
-        zig_bin=/opt/homebrew/opt/zig@0.15/bin/zig
-    elif command -v zig >/dev/null 2>&1; then
+    # Same candidate order scripts/build-ghostty.sh uses, so this reports the
+    # zig the build will actually pick: the Homebrew prefix matching this
+    # machine's real CPU first (/opt/homebrew on Apple Silicon, /usr/local on
+    # Intel or an Intel/Rosetta Homebrew), then the other, then PATH.
+    local zig_bin="" candidate
+    local zig_candidates=(/usr/local/opt/zig@0.15/bin/zig /opt/homebrew/opt/zig@0.15/bin/zig)
+    if [[ "$(hardware_cpu)" == "arm64" ]]; then
+        zig_candidates=(/opt/homebrew/opt/zig@0.15/bin/zig /usr/local/opt/zig@0.15/bin/zig)
+    fi
+    for candidate in "${zig_candidates[@]}"; do
+        if [[ -x "$candidate" ]]; then
+            zig_bin="$candidate"
+            break
+        fi
+    done
+    if [[ -z "$zig_bin" ]] && command -v zig >/dev/null 2>&1; then
         zig_bin="$(command -v zig)"
     fi
 

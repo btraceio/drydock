@@ -18,8 +18,10 @@
 #   ghostty-version.properties
 #
 # Environment overrides (all optional):
-#   ZIG_BIN         Path to the Zig 0.15.x binary to use. Defaults to
-#                   /usr/local/opt/zig@0.15/bin/zig if present, else `zig`
+#   ZIG_BIN         Path to the Zig 0.15.x binary to use. Defaults to the
+#                   Homebrew zig@0.15 keg under the prefix matching this
+#                   machine's real CPU (/opt/homebrew on Apple Silicon,
+#                   /usr/local on Intel), then the other prefix, then `zig`
 #                   resolved from PATH.
 #   GHOSTTY_DIR     Path to the ghostty submodule checkout.
 #                   Default: <repo-root>/third_party/ghostty
@@ -104,13 +106,46 @@ fail() {
 # (0.15.x only) at comptime. The Homebrew default `zig` may be a newer,
 # incompatible release (0.16.x was observed on this machine, which cannot
 # even parse Ghostty's build.zig -- std.process.EnvMap was removed).
+#
+# Homebrew uses a different prefix per architecture -- /opt/homebrew for a
+# native Apple Silicon install, /usr/local for an Intel one (including an
+# Intel/Rosetta Homebrew on an Apple Silicon machine, which is why both can
+# exist side by side; that setup is also what makes `brew install` demand an
+# explicit `--arch`). Probing only /usr/local, as this script used to, picks
+# the x86_64 keg on an Apple Silicon machine that has both and runs the whole
+# libghostty build under Rosetta. That does NOT produce wrong-architecture
+# output -- every slice below is built with an explicit `-Dtarget` and
+# verified with file(1) -- but it is needlessly slow and hides which
+# toolchain is actually in use, so probe this machine's own prefix first.
 if [[ -z "${ZIG_BIN:-}" ]]; then
-    if [[ -x /usr/local/opt/zig@0.15/bin/zig ]]; then
-        ZIG_BIN=/usr/local/opt/zig@0.15/bin/zig
-    elif command -v zig >/dev/null 2>&1; then
-        ZIG_BIN="$(command -v zig)"
+    # Apple's documented "is this process translated" flag: 0 native,
+    # 1 Rosetta, key absent (ENOENT -> non-zero exit here) on a real Intel
+    # Mac. https://developer.apple.com/documentation/apple-silicon/about-the-rosetta-translation-environment
+    host_cpu="$(uname -m)"
+    if [[ "$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)" == "1" ]]; then
+        host_cpu="arm64"
+    fi
+
+    if [[ "$host_cpu" == "arm64" ]]; then
+        zig_candidates=(/opt/homebrew/opt/zig@0.15/bin/zig /usr/local/opt/zig@0.15/bin/zig)
     else
-        fail "No 'zig' found. Install Zig 0.15.2, e.g.: brew install zig@0.15
+        zig_candidates=(/usr/local/opt/zig@0.15/bin/zig /opt/homebrew/opt/zig@0.15/bin/zig)
+    fi
+
+    for candidate in "${zig_candidates[@]}"; do
+        if [[ -x "$candidate" ]]; then
+            ZIG_BIN="$candidate"
+            break
+        fi
+    done
+
+    if [[ -z "${ZIG_BIN:-}" ]] && command -v zig >/dev/null 2>&1; then
+        ZIG_BIN="$(command -v zig)"
+    fi
+
+    if [[ -z "${ZIG_BIN:-}" ]]; then
+        fail "No 'zig' found (checked ${zig_candidates[*]} and PATH).
+Install Zig 0.15.2, e.g.: brew install zig@0.15
 (see docs/native-integration.md, section 'Required Zig version')."
     fi
 fi
@@ -124,8 +159,10 @@ case "$zig_version" in
         fail "Zig at '$ZIG_BIN' reports version '$zig_version', but Ghostty
 requires exactly 0.15.x (build.zig.zon: minimum_zig_version = 0.15.2).
 Install it with: brew install zig@0.15
-and re-run with ZIG_BIN=/usr/local/opt/zig@0.15/bin/zig (or let this script
-auto-detect that path)." ;;
+and re-run with ZIG_BIN=<brew --prefix>/opt/zig@0.15/bin/zig -- that is
+/opt/homebrew/opt/zig@0.15/bin/zig on Apple Silicon and
+/usr/local/opt/zig@0.15/bin/zig on Intel (or let this script auto-detect
+whichever of the two matches this machine)." ;;
 esac
 
 # --- Validate Xcode command line tools ---------------------------------------

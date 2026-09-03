@@ -50,6 +50,114 @@ val hostArchLabel = when (hostOsArch) {
 }
 val machOArchToken = mapOf("macos-x86_64" to "x86_64", "macos-arm64" to "arm64")
 
+// --- Rosetta / foreign-architecture guard ------------------------------------
+//
+// hostArchLabel above comes from the Gradle DAEMON JVM's os.arch, and that is
+// the only thing deciding which build/native/<arch>/ slice the packaging tasks
+// copy into the image, and what expectedMachOArch demands of jlink's output.
+// On Apple Silicon an x86_64 JDK runs transparently under Rosetta 2 and
+// reports os.arch=x86_64, so a machine whose only JDK 17 is an Intel build
+// (an Intel Homebrew under /usr/local, say) silently produces a fully x86_64
+// Drydock.app -- x86_64 libghostty slice included -- while every existing
+// architecture check still passes: the daemon, the JDK 26 toolchain jlink runs
+// from, and the copied dylib all agree with each other. They are simply all
+// wrong for the machine. Nothing in the build compared them against the actual
+// CPU until this check.
+//
+// Apple's documented signal is the sysctl.proc_translated flag: 0 for a native
+// process, 1 for a translated one, and the key does not exist at all on an
+// Intel Mac (sysctlbyname reports ENOENT, i.e. a non-zero exit here).
+// https://developer.apple.com/documentation/apple-silicon/about-the-rosetta-translation-environment
+//
+// Both tools are invoked by absolute path: this runs inside the Gradle daemon,
+// whose PATH is inherited from whatever launched it and need not include
+// /usr/sbin. The sysctl probe runs through `sh -c ... || echo 0` so a genuine
+// Intel Mac's non-zero exit is not an exec failure, and it is skipped entirely
+// when uname already says arm64 -- a translated process always reports x86_64
+// from uname(3), so arm64 there is conclusive on its own.
+val hardwareArchLabel: String? = if (!isMacOsHost) null else {
+    val unameArch = providers.exec {
+        commandLine("/usr/bin/uname", "-m")
+    }.standardOutput.asText.get().trim()
+    when (unameArch) {
+        "arm64" -> "macos-arm64"
+        "x86_64" -> {
+            val translated = providers.exec {
+                commandLine(
+                    "/bin/sh", "-c",
+                    "/usr/sbin/sysctl -n sysctl.proc_translated 2>/dev/null || echo 0"
+                )
+            }.standardOutput.asText.get().trim() == "1"
+            if (translated) "macos-arm64" else "macos-x86_64"
+        }
+        else -> null
+    }
+}
+
+// Escape hatch for deliberately packaging from a translated daemon.
+val allowForeignArchPackaging = providers.gradleProperty("packaging.allowRosetta")
+    .map { it.toBoolean() }.orElse(false).get()
+
+if (hardwareArchLabel != null && hostArchLabel != null &&
+    hardwareArchLabel != hostArchLabel
+) {
+    val hostToken = machOArchToken.getValue(hostArchLabel)
+    val hardwareToken = machOArchToken.getValue(hardwareArchLabel)
+
+    // Warned on every build, not only packaging ones: the same mismatch makes
+    // `./gradlew run` load build/native/macos-x86_64/libghostty.dylib on an
+    // Apple Silicon machine (NativeLibraryLocator keys off the app JVM's
+    // os.arch, and a translated JVM can only load a translated slice -- that
+    // part is correct; it is the JVM choice that is wrong).
+    logger.warn(
+        "WARNING: Gradle is running on a $hostToken JVM on $hardwareToken hardware " +
+            "(Rosetta 2). Native slice selection, `run`, and packaging all follow the " +
+            "JVM's os.arch, so this is a $hostToken build of Drydock. " +
+            "Run scripts/verify-environment.sh for the details."
+    )
+
+    // The failure is deliberately NOT at configuration time: an x86_64 daemon
+    // still compiles and tests the application perfectly well, and blocking
+    // `:app:test` on it would be gratuitous. The mismatch only becomes a
+    // shipped artifact in a RuntimeImageTask, so that is where it is refused
+    // -- which also covers appImage and dmg, both of which run downstream of
+    // one, and the two cross-arch instances, whose host/cross roles this same
+    // mismatch silently swaps.
+    val message = """
+        This machine's CPU is $hardwareToken, but the Gradle daemon JVM reports
+        os.arch=${System.getProperty("os.arch")} -- it is a $hostToken JVM, running under Rosetta 2
+        on $hardwareToken hardware.
+
+        Every packaging decision keys off the daemon's os.arch, so this build would
+        bundle build/native/$hostArchLabel/*.dylib (libghostty included) and jlink a
+        $hostToken runtime, producing a $hostToken app on a $hardwareToken machine
+        without any other check noticing.
+
+        Fix the daemon JVM (gradle/gradle-daemon-jvm.properties pins toolchainVersion=17):
+          ./gradlew --stop
+          /usr/libexec/java_home -V                 # list installed JDKs
+          file "${'$'}(/usr/libexec/java_home -v 17)/bin/java"   # must say $hardwareToken
+          ./gradlew -q javaToolchains              # and check the JDK 26 toolchain too
+        Install a native $hardwareToken JDK if the only 17/26 present are $hostToken builds.
+
+        To produce a $hostToken image on purpose, you do not need a translated daemon:
+        run :app:runtimeImageMacosX8664 (or :app:runtimeImageAllArches) from a native
+        $hardwareToken daemon, which jlink-cross-links it properly.
+
+        To package from this translated daemon anyway: -Ppackaging.allowRosetta=true
+    """.trimIndent()
+
+    // configureEach stays lazy, so this costs nothing unless a packaging task
+    // actually runs. The action captures nothing but the already-built String
+    // -- no `project` access at execution time, the property the rest of this
+    // file is careful about.
+    if (!allowForeignArchPackaging) {
+        tasks.withType<RuntimeImageTask>().configureEach {
+            doFirst { throw GradleException(message) }
+        }
+    }
+}
+
 // Mac-only block: the runtime image task, the .app bundle, the .dmg,
 // and the cross-arch tasks all assume a Mac host. On non-Mac hosts (the
 // Windows CI runner, primarily) only the Windows runtime image task is

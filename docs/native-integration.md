@@ -71,6 +71,20 @@ $ cd third_party/ghostty && /usr/local/opt/zig@0.15/bin/zig build --help
 # succeeds, lists steps (install, lib-vt, run, test, dist, distcheck, ...)
 ```
 
+> **Prefix note (Apple Silicon).** The `/usr/local/...` paths above are the
+> **Intel** Homebrew prefix; they are what this machine had at the time of
+> writing. A native Apple Silicon Homebrew installs the same keg at
+> `/opt/homebrew/opt/zig@0.15/bin/zig`, and a machine can have both (an
+> Intel/Rosetta Homebrew under `/usr/local` alongside a native one under
+> `/opt/homebrew` — the setup that makes `brew install` ask for an explicit
+> `--arch`). `scripts/build-ghostty.sh` and `scripts/verify-environment.sh`
+> therefore probe the prefix matching the machine's real CPU first, then the
+> other one, then `PATH`. Picking the x86_64 keg does not corrupt the output —
+> each slice is built with an explicit `-Dtarget` and verified with `file(1)` —
+> it just runs the build under Rosetta. What *does* silently produce an x86_64
+> app is a translated **JDK** — see "Which architecture actually gets used"
+> under [Architecture settings](#architecture-settings) below.
+
 **Action required for all future native build tasks (Task 3+)**: any Gradle
 task that shells out to `zig build` for libghostty must explicitly invoke
 `/usr/local/opt/zig@0.15/bin/zig` (or a `zig` resolved via `PATH="/usr/local/opt/zig@0.15/bin:$PATH"`),
@@ -329,6 +343,44 @@ alone — record whatever missing-symbol/framework errors appear, if any.
   like `apple_a15`"), i.e. it does not build against a specific narrow CPU
   microarchitecture, favoring portability over microarchitecture-specific
   codegen.
+
+### Which architecture actually gets used (and how Rosetta breaks it)
+
+Both slices are always *built*, and each is verified with `file(1)` before the
+build script exits (`scripts/build-ghostty.sh`, `scripts/build-native-host.sh`),
+so `build/native/macos-arm64/libghostty.dylib` cannot contain x86_64 code.
+Which slice gets *used*, however, is decided in three places — and every one of
+them reads a **JVM's `os.arch`**, never the machine's CPU:
+
+| Decision | Made by | Reads |
+| --- | --- | --- |
+| Which dylib the running app loads | `NativeLibraryLocator.detectArchDirectoryName()` | the **application** JVM's `os.arch` |
+| Which dylib gets packaged, and `expectedMachOArch` | `hostArchLabel` in `buildSrc/src/main/kotlin/drydock.packaging.gradle.kts` | the **Gradle daemon** JVM's `os.arch` (JDK 17, `gradle/gradle-daemon-jvm.properties`) |
+| The architecture of `runtime/bin/java` in the image | `jlink` | the **JDK 26 toolchain** it is invoked from |
+
+On Apple Silicon an x86_64 JDK runs transparently under Rosetta 2 and reports
+`os.arch=x86_64`. If the daemon and toolchain JDKs are x86_64 builds — easy to
+end up with when the only JDK 17/26 on the machine came from an Intel Homebrew
+under `/usr/local`, or when `gradlew` was launched from a Rosetta shell — then
+all three answers agree on x86_64, every existing check passes, and the result
+is a fully x86_64 Drydock (x86_64 libghostty included) on arm64 hardware. The
+app loading the x86_64 slice is *correct* in that situation: dyld cannot load an
+arm64 dylib into a translated process. The wrong choice happened earlier, when
+the JVM was selected.
+
+`drydock.packaging.gradle.kts` therefore compares the daemon's `os.arch`
+against the real CPU — `uname -m`, corrected with Apple's documented
+[`sysctl.proc_translated`](https://developer.apple.com/documentation/apple-silicon/about-the-rosetta-translation-environment)
+flag (`0` native, `1` translated, key absent on a genuine Intel Mac) — and:
+
+- warns on every build when they disagree, and
+- fails any `RuntimeImageTask` (so also `appImage`/`dmg`) rather than shipping a
+  mislabelled image. Override with `-Ppackaging.allowRosetta=true`.
+
+`scripts/verify-environment.sh` reports the same three facts (hardware CPU,
+shell translation, JDK `os.arch`) up front. To build an x86_64 image on purpose,
+use `:app:runtimeImageMacosX8664` / `:app:runtimeImageAllArches` from a
+*native* arm64 daemon — real jlink cross-linking, no Rosetta required.
 
 ## Embedding examples
 
