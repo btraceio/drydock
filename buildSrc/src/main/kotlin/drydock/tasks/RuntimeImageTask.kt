@@ -1,5 +1,6 @@
 package drydock.tasks
 
+import drydock.NativeArch
 import org.gradle.api.DefaultTask
 import org.gradle.api.GradleException
 import org.gradle.api.file.ConfigurableFileCollection
@@ -304,15 +305,32 @@ abstract class RuntimeImageTask @Inject constructor(
             val src = File(nativeOut, arch)
             val dst = File(libDir, arch)
             dst.mkdirs()
+            val expectedDylibArch = arch.removePrefix("macos-")
             for (name in listOf("libghostty.dylib", "libdrydockterminalhost.dylib")) {
                 val source = File(src, name)
-                if (source.isFile) {
-                    source.copyTo(File(dst, name), overwrite = true)
-                } else {
+                if (!source.isFile) {
                     throw GradleException(
                         "Missing $source -- run './gradlew buildGhosttyNative buildNativeHost' first."
                     )
                 }
+                // The image ships BOTH slices and NativeLibraryLocator picks one
+                // by directory name at launch, so a dylib sitting in the wrong
+                // directory is only discovered when a user's dyld refuses to load
+                // it. The native build scripts verify what they build with
+                // file(1), but nothing had verified what merely *sits* in
+                // build/native -- downloaded pre-built natives, a stale slice from
+                // an interrupted build, a hand-copy. expectedMachOArch above
+                // covers the jlinked runtime; this covers what it will load.
+                val actualDylibArch = NativeArch.machOArch(source)
+                if (actualDylibArch != expectedDylibArch) {
+                    throw GradleException(
+                        "$source is ${actualDylibArch ?: "not a thin 64-bit Mach-O file"}, but it sits in " +
+                            "$arch/ and would be loaded by a $expectedDylibArch JVM. Rebuild the natives " +
+                            "(./gradlew buildGhosttyNative buildNativeHost) or check how that file got " +
+                            "there (inspect with: file ${src.absolutePath}/*.dylib)."
+                    )
+                }
+                source.copyTo(File(dst, name), overwrite = true)
             }
         }
 

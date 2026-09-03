@@ -17,6 +17,7 @@
 // (buildGhosttyNative/buildNativeHost, declared in the root build file)
 // already does.
 
+import drydock.NativeArch
 import drydock.tasks.AppBundleTask
 import drydock.tasks.DmgTask
 import drydock.tasks.DownloadCrossJmodsTask
@@ -52,17 +53,20 @@ val machOArchToken = mapOf("macos-x86_64" to "x86_64", "macos-arm64" to "arm64")
 
 // --- Rosetta / foreign-architecture guard ------------------------------------
 //
-// hostArchLabel above comes from the Gradle DAEMON JVM's os.arch, and that is
-// the only thing deciding which build/native/<arch>/ slice the packaging tasks
-// copy into the image, and what expectedMachOArch demands of jlink's output.
-// On Apple Silicon an x86_64 JDK runs transparently under Rosetta 2 and
-// reports os.arch=x86_64, so a machine whose only JDK 17 is an Intel build
-// (an Intel Homebrew under /usr/local, say) silently produces a fully x86_64
-// Drydock.app -- x86_64 libghostty slice included -- while every existing
-// architecture check still passes: the daemon, the JDK 26 toolchain jlink runs
-// from, and the copied dylib all agree with each other. They are simply all
-// wrong for the machine. Nothing in the build compared them against the actual
-// CPU until this check.
+// hostArchLabel above comes from the Gradle DAEMON JVM's os.arch, and it is
+// what expectedMachOArch then demands of jlink's output (and what decides which
+// architecture counts as "cross" further down). The image itself ships BOTH
+// dylib slices -- RuntimeImageTask step 3 -- so the architecture of the jlinked
+// runtime is what picks one at launch, via NativeLibraryLocator.
+//
+// On Apple Silicon an x86_64 JDK runs transparently under Rosetta 2 and reports
+// os.arch=x86_64. A machine whose JDKs are Intel builds (an Intel Homebrew
+// under /usr/local, say) therefore jlinks an x86_64 runtime, expects an x86_64
+// runtime, and ships an app that loads the x86_64 libghostty -- with every
+// existing architecture check passing, because the daemon, the JDK 26 toolchain
+// jlink runs from, and the expectation all agree with each other. They are
+// simply all wrong for the machine. Nothing in the build compared them against
+// the actual CPU until this check.
 //
 // Apple's documented signal is the sysctl.proc_translated flag: 0 for a native
 // process, 1 for a translated one, and the key does not exist at all on an
@@ -128,10 +132,12 @@ if (hardwareArchLabel != null && hostArchLabel != null &&
         os.arch=${System.getProperty("os.arch")} -- it is a $hostToken JVM, running under Rosetta 2
         on $hardwareToken hardware.
 
-        Every packaging decision keys off the daemon's os.arch, so this build would
-        bundle build/native/$hostArchLabel/*.dylib (libghostty included) and jlink a
-        $hostToken runtime, producing a $hostToken app on a $hardwareToken machine
-        without any other check noticing.
+        The daemon's os.arch is what expectedMachOArch demands of jlink, and the JDKs
+        that produce a translated daemon are normally translated toolchains too, so
+        this build would jlink a $hostToken runtime and pass its own check. The image
+        ships both dylib slices, so that runtime then loads the $hostToken libghostty
+        at launch: a $hostToken Drydock on a $hardwareToken machine, with nothing else
+        noticing.
 
         Fix the daemon JVM (gradle/gradle-daemon-jvm.properties pins toolchainVersion=17):
           ./gradlew --stop
@@ -154,6 +160,45 @@ if (hardwareArchLabel != null && hostArchLabel != null &&
     if (!allowForeignArchPackaging) {
         tasks.withType<RuntimeImageTask>().configureEach {
             doFirst { throw GradleException(message) }
+        }
+    }
+}
+
+// The daemon check above cannot see the JDK 26 toolchain, and that is the JVM
+// that actually executes application code: `run`, the spikes and the tests all
+// fork it, so IT is the os.arch NativeLibraryLocator reads when picking a
+// build/native/<arch>/ slice. A native arm64 daemon paired with an x86_64
+// JDK 26 -- perfectly possible, since Gradle resolves the two independently --
+// passes the check above and still runs Drydock, and libghostty, translated.
+//
+// Packaging already catches that pairing (RuntimeImageTask compares the jlinked
+// runtime against the daemon-derived expectedMachOArch, and jlink emits the
+// toolchain's own architecture), so what is left uncovered is execution, hence
+// a warning on JavaExec rather than a second hard failure: a translated `run`
+// works, it is just not what anyone wants on this machine.
+//
+// The toolchain's architecture comes from the OS_ARCH line of its own `release`
+// file: Gradle's JavaInstallationMetadata exposes vendor, versions and
+// installation path, but no architecture, and launching the JVM just to ask it
+// would cost a fork per task. Resolved inside doFirst so that no toolchain is
+// resolved (or provisioned) by merely configuring the build.
+if (hardwareArchLabel != null) {
+    val hardwareToken = machOArchToken.getValue(hardwareArchLabel)
+    tasks.withType<JavaExec>().configureEach {
+        val taskPath = path
+        val launcher = javaLauncher
+        doFirst {
+            val toolchainHome = launcher.orNull?.metadata?.installationPath?.asFile
+                ?: return@doFirst
+            val toolchainArch = NativeArch.jdkOsArch(toolchainHome) ?: return@doFirst
+            if (toolchainArch != hardwareToken) {
+                logger.warn(
+                    "WARNING: $taskPath runs on a $toolchainArch JVM ($toolchainHome) on " +
+                        "$hardwareToken hardware, so it loads " +
+                        "build/native/macos-$toolchainArch/libghostty.dylib under Rosetta 2. " +
+                        "Install a native $hardwareToken JDK 26 (./gradlew -q javaToolchains)."
+                )
+            }
         }
     }
 }

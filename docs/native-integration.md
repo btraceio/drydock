@@ -346,41 +346,59 @@ alone — record whatever missing-symbol/framework errors appear, if any.
 
 ### Which architecture actually gets used (and how Rosetta breaks it)
 
-Both slices are always *built*, and each is verified with `file(1)` before the
-build script exits (`scripts/build-ghostty.sh`, `scripts/build-native-host.sh`),
-so `build/native/macos-arm64/libghostty.dylib` cannot contain x86_64 code.
-Which slice gets *used*, however, is decided in three places — and every one of
-them reads a **JVM's `os.arch`**, never the machine's CPU:
+Both slices are always *built*, each is verified with `file(1)` before the build
+script exits (`scripts/build-ghostty.sh`, `scripts/build-native-host.sh`), and
+**both** are shipped: `RuntimeImageTask` copies `macos-x86_64/` and
+`macos-arm64/` into the image's `lib/`, and `jbangJar` bundles both under
+`native/`. Packaging never picks a slice — the JVM does, at launch. Which one
+that is comes down to three decisions, and every one of them reads a **JVM's
+`os.arch`**, never the machine's CPU:
 
 | Decision | Made by | Reads |
 | --- | --- | --- |
-| Which dylib the running app loads | `NativeLibraryLocator.detectArchDirectoryName()` | the **application** JVM's `os.arch` |
-| Which dylib gets packaged, and `expectedMachOArch` | `hostArchLabel` in `buildSrc/src/main/kotlin/drydock.packaging.gradle.kts` | the **Gradle daemon** JVM's `os.arch` (JDK 17, `gradle/gradle-daemon-jvm.properties`) |
-| The architecture of `runtime/bin/java` in the image | `jlink` | the **JDK 26 toolchain** it is invoked from |
+| Which dylib the running app loads | `NativeLibraryLocator.detectArchDirectoryName()` | the **application** JVM: the JDK 26 toolchain for `run`/tests/spikes, the jlinked `runtime/bin/java` for a packaged app |
+| What `expectedMachOArch` demands of jlink's output, and which architecture counts as "cross" | `hostArchLabel` in `buildSrc/src/main/kotlin/drydock.packaging.gradle.kts` | the **Gradle daemon** JVM (JDK 17, `gradle/gradle-daemon-jvm.properties`) |
+| The architecture `jlink` actually emits | `jlink` | the **JDK 26 toolchain** it is invoked from |
 
 On Apple Silicon an x86_64 JDK runs transparently under Rosetta 2 and reports
 `os.arch=x86_64`. If the daemon and toolchain JDKs are x86_64 builds — easy to
 end up with when the only JDK 17/26 on the machine came from an Intel Homebrew
 under `/usr/local`, or when `gradlew` was launched from a Rosetta shell — then
-all three answers agree on x86_64, every existing check passes, and the result
-is a fully x86_64 Drydock (x86_64 libghostty included) on arm64 hardware. The
-app loading the x86_64 slice is *correct* in that situation: dyld cannot load an
-arm64 dylib into a translated process. The wrong choice happened earlier, when
-the JVM was selected.
+all three answers agree on x86_64, every check passes because they agree with
+*each other*, and the result is a fully x86_64 Drydock (loading the x86_64
+libghostty) on arm64 hardware. The app loading the x86_64 slice is *correct* in
+that situation: dyld cannot load an arm64 dylib into a translated process. The
+wrong choice happened earlier, when the JVM was selected.
 
-`drydock.packaging.gradle.kts` therefore compares the daemon's `os.arch`
-against the real CPU — `uname -m`, corrected with Apple's documented
+Four checks now cover this, all in terms of the real CPU — `uname -m`, corrected
+with Apple's documented
 [`sysctl.proc_translated`](https://developer.apple.com/documentation/apple-silicon/about-the-rosetta-translation-environment)
-flag (`0` native, `1` translated, key absent on a genuine Intel Mac) — and:
+flag (`0` native, `1` translated, key absent on a genuine Intel Mac):
 
-- warns on every build when they disagree, and
-- fails any `RuntimeImageTask` (so also `appImage`/`dmg`) rather than shipping a
-  mislabelled image. Override with `-Ppackaging.allowRosetta=true`.
+1. **Daemon vs. hardware** (`drydock.packaging.gradle.kts`): warns on every
+   build, and fails any `RuntimeImageTask` — so `appImage`/`dmg` too — rather
+   than producing a translated image. Override: `-Ppackaging.allowRosetta=true`.
+2. **Toolchain vs. hardware** (same file, on every `JavaExec`): warns that `run`
+   / the spikes will execute translated and load the x86_64 slice. Only a
+   warning — a translated `run` works, it is just not what you want here. The
+   toolchain's architecture is read from the `OS_ARCH` line of its `release`
+   file (`drydock.NativeArch.jdkOsArch`); Gradle's `JavaInstallationMetadata`
+   does not expose an architecture.
+3. **jlink output vs. expectation** (`RuntimeImageTask`, pre-existing): catches a
+   toolchain whose architecture differs from the daemon's, via `file(1)` on
+   `runtime/bin/java`.
+4. **Dylib labels vs. their directory** (`RuntimeImageTask` and
+   `checkPrebuiltNatives`): the Mach-O header of each dylib must match the
+   `macos-<arch>/` directory it sits in (`drydock.NativeArch.machOArch`). The
+   build scripts verify what they *build*; this verifies what merely *sits* in
+   `build/native/` — pre-built natives downloaded by CI's fan-in, a stale slice
+   from an interrupted build, a hand-copy. Without it a swapped pair of CI
+   artifacts would ship in the jbang jar and only fail on a user's machine.
 
-`scripts/verify-environment.sh` reports the same three facts (hardware CPU,
-shell translation, JDK `os.arch`) up front. To build an x86_64 image on purpose,
-use `:app:runtimeImageMacosX8664` / `:app:runtimeImageAllArches` from a
-*native* arm64 daemon — real jlink cross-linking, no Rosetta required.
+`scripts/verify-environment.sh` reports hardware CPU, shell translation and JDK
+`os.arch` up front. To build an x86_64 image on purpose, use
+`:app:runtimeImageMacosX8664` / `:app:runtimeImageAllArches` from a *native*
+arm64 daemon — real jlink cross-linking, no Rosetta required.
 
 ## Embedding examples
 

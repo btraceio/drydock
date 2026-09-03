@@ -132,15 +132,41 @@ val prebuiltNativeDylibs = listOf("macos-arm64", "macos-x86_64").flatMap { arch 
 
 tasks.register("checkPrebuiltNatives") {
     group = "native"
-    description = "Verifies pre-built native dylibs are present (for -Pnatives.prebuilt=true)."
+    description = "Verifies pre-built native dylibs are present and correctly labelled " +
+        "(for -Pnatives.prebuilt=true)."
     onlyIf { nativesPrebuilt.get() }
     doLast {
-        val missing = prebuiltNativeDylibs.map { it.get().asFile }.filterNot { it.isFile }
+        val files = prebuiltNativeDylibs.map { it.get().asFile }
+        val missing = files.filterNot { it.isFile }
         if (missing.isNotEmpty()) {
             throw GradleException(
                 "natives.prebuilt=true but expected native libraries are missing:\n" +
                     missing.joinToString("\n") { "  - $it" } +
                     "\nEach must be downloaded from the per-arch native build job into build/native/<arch>/."
+            )
+        }
+
+        // Presence alone is not enough. scripts/build-{ghostty,native-host}.sh
+        // verify each slice with file(1) on the machine that builds it, but on
+        // the -Pnatives.prebuilt=true path those scripts never run here: the
+        // dylibs arrive as downloaded CI artifacts and go straight into
+        // jbangJar's native/<arch>/ entries. Two artifacts downloaded into each
+        // other's directory, or a stale/hand-copied dylib, would ship silently
+        // -- NativeLibraryLocator picks the directory by the JVM's os.arch and
+        // trusts the label, so the failure would land on a user as a dlopen
+        // error, not here. Verify the label against the Mach-O header instead.
+        val mislabelled = files.mapNotNull { file ->
+            val expected = file.parentFile.name.removePrefix("macos-")
+            val actual = drydock.NativeArch.machOArch(file)
+            if (actual == expected) null else "  - $file is ${actual ?: "not a thin 64-bit Mach-O file"}, expected $expected"
+        }
+        if (mislabelled.isNotEmpty()) {
+            throw GradleException(
+                "natives.prebuilt=true but these native libraries do not match the " +
+                    "architecture of the directory they are in:\n" +
+                    mislabelled.joinToString("\n") +
+                    "\nCheck that each per-arch CI artifact was downloaded into the matching " +
+                    "build/native/<arch>/ directory (inspect with: file build/native/*/*.dylib)."
             )
         }
     }
