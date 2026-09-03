@@ -1,0 +1,92 @@
+name: Build Artifacts (Manual)
+
+# On-demand build of downloadable binaries for a chosen branch/tag/commit.
+# Pure build-and-upload: no version bump, no git tag, no push, no Maven
+# Central publish, no GitHub Release. See release.yml for the actual
+# release pipeline that does those things.
+#
+# Triggering manually (Actions tab -> this workflow -> "Run workflow")
+# shows GitHub's built-in "Use workflow from" branch/tag picker; every
+# checkout below omits `ref` so it resolves to whatever was picked there.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  # Build each macOS arch slice natively on its own runner, both on the
+  # macOS 15 image generation -- mirrors the `native` job in release.yml
+  # (see its comment for why macos-15/macos-15-intel specifically), but
+  # here each runner packages its own arch straight into a .dmg instead of
+  # uploading raw dylibs for a later fan-in stage.
+  macos-dmg:
+    name: Build macOS .dmg (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+            java_env_suffix: ARM64
+          - arch: x86_64
+            runner: macos-15-intel
+            java_env_suffix: X64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          submodules: recursive
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.15.2
+      - name: Ensure Metal Toolchain
+        run: xcodebuild -downloadComponent MetalToolchain || echo "Metal Toolchain already present or bundled"
+      - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: |
+            26
+            17
+      - name: Build .dmg (${{ matrix.arch }})
+        run: |
+          ./gradlew :app:dmg \
+            --no-daemon --stacktrace \
+            -Dorg.gradle.java.installations.fromEnv=JAVA_HOME_17_${{ matrix.java_env_suffix }},JAVA_HOME_26_${{ matrix.java_env_suffix }}
+      - name: Upload .dmg
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: drydock-macos-${{ matrix.arch }}
+          path: build/dist/Drydock.dmg
+          if-no-files-found: error
+          retention-days: 14
+
+  # Windows jlink runtime image (jlink + drydock.bat launcher, no native
+  # deps -- see the windows-runtime-image job in tests.yml, which this
+  # mirrors for the manual-build case).
+  windows-image:
+    name: Build Windows runtime image
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          submodules: false
+      - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: 26
+          cache: gradle
+      - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Build the Windows runtime image
+        shell: bash
+        run: ./gradlew --no-daemon :app:windowsRuntimeImage
+      - name: Upload Windows runtime image
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: drydock-windows-image
+          path: build/image-windows
+          if-no-files-found: error
+          retention-days: 14
