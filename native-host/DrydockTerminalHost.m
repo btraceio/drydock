@@ -2,6 +2,7 @@
 // DrydockTerminalHost.h. See that header and docs/native-integration.md for the
 // contract and rationale.
 #import <Cocoa/Cocoa.h>
+#import <QuartzCore/QuartzCore.h>
 #import "DrydockTerminalHost.h"
 
 // A small NSView subclass that does the minimum needed to be a usable host:
@@ -19,6 +20,13 @@
 @property(nonatomic, assign) void *mousePosCallbackUserdata;
 @property(nonatomic, assign) drydock_terminal_host_mouse_button_event_cb mouseButtonCallback;
 @property(nonatomic, assign) void *mouseButtonCallbackUserdata;
+// Display-change callback + the observers that feed it. The observers are
+// registered on the view's window in -viewDidMoveToWindow (see below) and
+// torn down on move-away / destroy.
+@property(nonatomic, assign) drydock_terminal_host_display_change_cb displayChangeCallback;
+@property(nonatomic, assign) void *displayChangeCallbackUserdata;
+@property(nonatomic, strong) id screenChangeObserver;
+@property(nonatomic, strong) id screenParamsObserver;
 @property(nonatomic, strong) NSTrackingArea *drydockTrackingArea;
 /// Local NSEvent monitor installed while this view exists (see
 /// drydock_terminal_host_create). JavaFX's Glass layer intercepts some key
@@ -217,6 +225,78 @@
     [self forwardKeyEvent:event down:YES];
 }
 
+// Reports the window's current screen displayID to the Java display-change
+// callback (used to drive ghostty_surface_set_display_id for per-display
+// vsync). No-op if no callback is registered or the view has no window yet.
+- (void)drydockReportDisplayID {
+    if (self.displayChangeCallback == NULL) {
+        return;
+    }
+    NSWindow *window = self.window;
+    uint32_t displayID = 0;
+    if (window != nil) {
+        NSScreen *screen = window.screen;
+        if (screen != nil) {
+            // NSScreen has no public -displayID property; the
+            // CGDirectDisplayID is carried in the device description under
+            // NSScreenNumber (same lookup ghostty's own NSScreen.displayID
+            // Swift extension uses).
+            NSNumber *screenNumber =
+                [screen.deviceDescription objectForKey:@"NSScreenNumber"];
+            if (screenNumber != nil) {
+                displayID = (uint32_t)[screenNumber unsignedIntValue];
+            }
+        }
+    }
+    self.displayChangeCallback(self.displayChangeCallbackUserdata, displayID);
+}
+
+// Called by AppKit when this view is added to / removed from a window. The
+// host view is added to the JavaFX content view in
+// drydock_terminal_host_create, so this fires once at creation (before any
+// display-change callback is registered -- that initial call is dropped by
+// drydockReportDisplayID's NULL-callback guard) and again whenever JavaFX
+// rebuilds the window's view tree. We (re)register the screen-change
+// observers on the current window so the display-change callback tracks the
+// window's actual NSScreen as it moves between monitors or the display
+// configuration changes (suspend/wake).
+- (void)viewDidMoveToWindow {
+    [super viewDidMoveToWindow];
+    NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
+    if (self.screenChangeObserver != nil) {
+        [center removeObserver:self.screenChangeObserver];
+        self.screenChangeObserver = nil;
+    }
+    if (self.screenParamsObserver != nil) {
+        [center removeObserver:self.screenParamsObserver];
+        self.screenParamsObserver = nil;
+    }
+    NSWindow *window = self.window;
+    if (window == nil) {
+        return;
+    }
+    __weak DrydockTerminalHostKeyForwardingView *weakSelf = self;
+    self.screenChangeObserver = [center
+        addObserverForName:NSWindowDidChangeScreenNotification
+                    object:window
+                     queue:nil
+                usingBlock:^(NSNotification * __unused note) {
+        [weakSelf drydockReportDisplayID];
+    }];
+    // NSApplicationDidChangeScreenParametersNotification fires on global
+    // display reconfiguration (suspend/wake, monitor attach/detach, system
+    // scaling change). It is not window-specific, so the observer's object
+    // is nil; the handler re-reports this view's current screen, which may
+    // have a new displayID / backing scale after the reconfiguration.
+    self.screenParamsObserver = [center
+        addObserverForName:NSApplicationDidChangeScreenParametersNotification
+                    object:nil
+                     queue:nil
+                usingBlock:^(NSNotification * __unused note) {
+        [weakSelf drydockReportDisplayID];
+    }];
+}
+
 @end
 
 // Enforces the header's "all functions MUST be called on the AppKit main
@@ -367,6 +447,16 @@ void drydock_terminal_host_destroy(drydock_terminal_host_t host) {
     view.mousePosCallbackUserdata = NULL;
     view.mouseButtonCallback = NULL;
     view.mouseButtonCallbackUserdata = NULL;
+    view.displayChangeCallback = NULL;
+    view.displayChangeCallbackUserdata = NULL;
+    if (view.screenChangeObserver != nil) {
+        [[NSNotificationCenter defaultCenter] removeObserver:view.screenChangeObserver];
+        view.screenChangeObserver = nil;
+    }
+    if (view.screenParamsObserver != nil) {
+        [[NSNotificationCenter defaultCenter] removeObserver:view.screenParamsObserver];
+        view.screenParamsObserver = nil;
+    }
     if (view.drydockTrackingArea != nil) {
         [view removeTrackingArea:view.drydockTrackingArea];
         view.drydockTrackingArea = nil;
@@ -422,4 +512,49 @@ void drydock_terminal_host_set_mouse_button_event_callback(drydock_terminal_host
     DrydockTerminalHostKeyForwardingView *view = (__bridge DrydockTerminalHostKeyForwardingView *)host;
     view.mouseButtonCallback = callback;
     view.mouseButtonCallbackUserdata = userdata;
+}
+
+void drydock_terminal_host_set_content_scale(drydock_terminal_host_t host, double scale) {
+    DRYDOCK_ASSERT_MAIN_THREAD("drydock_terminal_host_set_content_scale");
+    if (host == NULL) {
+        return;
+    }
+    NSView *view = (__bridge NSView *)host;
+    // libghostty's Metal renderer makes this view layer-hosting and assigns
+    // its CAMetalLayer as view.layer (see src/renderer/Metal.zig); the
+    // renderer reads layer.contentsScale every frame to size its drawable.
+    // Update it to the window's current backing scale so the renderer
+    // composites at the right resolution after a scale change. Guard against
+    // a layer-less view (before the surface is created / on a non-Metal
+    // backend) -- setContentsScale: on a nil layer is a no-op, but the
+    // explicit nil check documents the intent.
+    if (view.layer != nil && scale > 0) {
+        // Disable Core Animation's implicit contentsScale animation so a
+        // scale change does not animate the layer contents (matches
+        // ghostty's own viewDidChangeBackingProperties CATransaction
+        // disable-actions pattern).
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        view.layer.contentsScale = scale;
+        [CATransaction commit];
+    }
+}
+
+void drydock_terminal_host_set_display_change_callback(drydock_terminal_host_t host,
+                                                     drydock_terminal_host_display_change_cb callback,
+                                                     void *userdata) {
+    DRYDOCK_ASSERT_MAIN_THREAD("drydock_terminal_host_set_display_change_callback");
+    if (host == NULL) {
+        return;
+    }
+    DrydockTerminalHostKeyForwardingView *view = (__bridge DrydockTerminalHostKeyForwardingView *)host;
+    view.displayChangeCallback = callback;
+    view.displayChangeCallbackUserdata = userdata;
+    // Dispatch once immediately so a freshly created surface gets its
+    // initial displayID (the observers registered in viewDidMoveToWindow
+    // only fire on *changes*, and viewDidMoveToWindow itself ran before
+    // this callback existed -- at host creation).
+    if (callback != NULL) {
+        [view drydockReportDisplayID];
+    }
 }

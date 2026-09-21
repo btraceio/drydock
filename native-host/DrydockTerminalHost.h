@@ -174,6 +174,43 @@ void drydock_terminal_host_set_mouse_button_event_callback(drydock_terminal_host
                                                         drydock_terminal_host_mouse_button_event_cb callback,
                                                         void *userdata);
 
+// Updates the host view's backing-layer content scale to `scale` (e.g. 2.0 on
+// a Retina display, 1.0 on a standard-DPI one). libghostty's Metal renderer
+// makes this view layer-hosting and assigns its own CAMetalLayer as the view's
+// -layer; that layer's contentsScale is set once at renderer init and read
+// back every frame to size the drawable, but libghostty never updates it after
+// init -- ghostty's own macOS SurfaceView does this in -viewDidChangeBackingProperties
+// (layer?.contentsScale = window.backingScaleFactor). This shim's host view
+// does not override that method, so without this call the Metal layer keeps
+// its original contentsScale after the window moves between Retina/non-Retina
+// displays or the system backing scale changes (suspend/wake), and the
+// renderer composites at the wrong resolution (blurry / mis-sized output).
+// Must be called whenever the window's output scale changes; cheap to call
+// with an unchanged value.
+void drydock_terminal_host_set_content_scale(drydock_terminal_host_t host,
+                                          double scale);
+
+// Reports that the host view's window has moved to a different NSScreen, or
+// that the display configuration has changed (suspend/wake, monitor
+// reconfigured). `display_id` is the CGDirectDisplayID of the window's
+// current NSScreen (0 if none). The host view observes NSWindow.didChangeScreen
+// and NSApplicationDidChangeScreenParametersNotification on its window and
+// dispatches this callback for each change; registering the callback also
+// dispatches it once immediately with the current display id so the initial
+// value is set on a freshly created surface. Mirrors ghostty's own
+// SurfaceView_AppKit windowDidChangeScreen -> ghostty_surface_set_display_id
+// (used by the renderer's CVDisplayLink for per-display vsync).
+typedef void (*drydock_terminal_host_display_change_cb)(void *userdata,
+                                                      uint32_t display_id);
+
+// Registers (or clears, if callback is NULL) the display-change callback for
+// this host. Registering a non-NULL callback also dispatches it once
+// synchronously with the window's current display id. Only one callback may
+// be registered at a time.
+void drydock_terminal_host_set_display_change_callback(drydock_terminal_host_t host,
+                                                     drydock_terminal_host_display_change_cb callback,
+                                                     void *userdata);
+
 #ifdef __cplusplus
 }
 #endif

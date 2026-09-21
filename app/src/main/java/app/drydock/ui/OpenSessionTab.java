@@ -282,7 +282,7 @@ final class OpenSessionTab {
         this.unsupportedAgent = unsupportedAgent;
         this.stage = stage;
         this.isRemote = repository.map(Repository::isRemote).orElse(false);
-        this.bridge = new TerminalBridge(app, host, placeholder, stage::getOutputScaleX,
+        this.bridge = new TerminalBridge(app, host, placeholder, stage,
                 this::sessionId, this::runShortcut);
 
         placeholder.getStyleClass().add("terminal-region");
@@ -935,7 +935,7 @@ final class OpenSessionTab {
                 return null; // provider unavailable (e.g. headless test)
             }
             pane.bridge = new TerminalBridge(shell.runtime(), shell.host(), pane.placeholder,
-                    stage::getOutputScaleX, this::sessionId, this::runShortcut);
+                    stage, this::sessionId, this::runShortcut);
             pane.placeholder.getStyleClass().add("terminal-region");
             // Keyboard-ownership indicator: each terminal's placeholder focus
             // lights its own stripe tab AND the main Terminal sub-tab button

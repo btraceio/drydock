@@ -40,6 +40,7 @@ public final class DrydockTerminalHost implements TerminalHostView, AutoCloseabl
     private boolean scrollListenerRegistered;
     private boolean mousePosListenerRegistered;
     private boolean mouseButtonListenerRegistered;
+    private boolean displayChangeListenerRegistered;
 
     private DrydockTerminalHost(DrydockTerminalHostBinding binding, MemorySegment handle) {
         this.binding = binding;
@@ -137,6 +138,31 @@ public final class DrydockTerminalHost implements TerminalHostView, AutoCloseabl
         }
         mouseButtonListenerRegistered = true;
         binding.setMouseButtonEventCallback(handle, listener, keyCallbackArena);
+    }
+
+    /** Updates the host view's Metal layer {@code contentsScale} to {@code scale}. */
+    @Override
+    public void setContentScale(double scale) {
+        checkFxThread();
+        checkNotDestroyed();
+        binding.setContentScale(handle, scale);
+    }
+
+    /**
+     * Registers the display-change callback (register-once). Registering a
+     * non-null listener also dispatches it once synchronously with the
+     * window's current display id, so a freshly created surface gets its
+     * initial display id.
+     */
+    @Override
+    public void setDisplayChangeListener(TerminalHostView.DisplayChangeListener listener) {
+        checkFxThread();
+        checkNotDestroyed();
+        if (displayChangeListenerRegistered) {
+            throw new IllegalStateException("display change listener already registered");
+        }
+        displayChangeListenerRegistered = true;
+        binding.setDisplayChangeCallback(handle, listener, keyCallbackArena);
     }
 
     /**

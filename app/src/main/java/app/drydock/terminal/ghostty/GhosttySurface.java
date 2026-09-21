@@ -166,6 +166,46 @@ public final class GhosttySurface implements TerminalSurface, AutoCloseable {
         }
     }
 
+    /**
+     * Updates the surface's backing content scale via
+     * {@code ghostty_surface_set_content_scale}. libghostty's
+     * {@code updateContentScale} recomputes the DPI-dependent font size,
+     * padding, and grid, and forces a resize; it early-returns when the DPI
+     * is unchanged, so calling this every geometry update is cheap. Must be
+     * paired with {@link #setSize} after a backing-scale change: the content
+     * scale drives the font/DPI, the size drives the pixel grid, and the
+     * host view's layer {@code contentsScale} (set by the bridge via
+     * {@link DrydockTerminalHost#setContentScale}) drives the Metal
+     * drawable's resolution.
+     */
+    @Override
+    public void setContentScale(double scaleX, double scaleY) {
+        checkFxThread();
+        checkOpen();
+        try {
+            binding.surfaceSetContentScale.invoke(surface, scaleX, scaleY);
+        } catch (Throwable t) {
+            throw new GhosttyBinding.GhosttyNativeCallException("ghostty_surface_set_content_scale", t);
+        }
+    }
+
+    /**
+     * Targets the surface's renderer at display {@code displayId} via
+     * {@code ghostty_surface_set_display_id} (macOS only). Used by the
+     * Metal renderer's CVDisplayLink for per-display vsync; mirrors ghostty's
+     * own {@code SurfaceView_AppKit.windowDidChangeScreen}.
+     */
+    @Override
+    public void setDisplayId(int displayId) {
+        checkFxThread();
+        checkOpen();
+        try {
+            binding.surfaceSetDisplayId.invoke(surface, displayId);
+        } catch (Throwable t) {
+            throw new GhosttyBinding.GhosttyNativeCallException("ghostty_surface_set_display_id", t);
+        }
+    }
+
     @Override
     public void setFocus(boolean focused) {
         checkFxThread();

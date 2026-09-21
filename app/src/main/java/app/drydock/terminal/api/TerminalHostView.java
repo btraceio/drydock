@@ -33,6 +33,42 @@ public interface TerminalHostView extends AutoCloseable {
     void setMouseButtonEventListener(MouseButtonEventListener listener);
 
     /**
+     * Updates the host view's backing-layer content scale to {@code scale}
+     * (e.g. 2.0 on Retina, 1.0 on a standard-DPI display). The native host
+     * applies this to its Metal layer's {@code contentsScale}; a pure-JavaFX
+     * backend ignores it (JavaFX scales its own scene). Called by the bridge
+     * on every geometry update so the renderer composites at the right
+     * resolution after the window's backing scale changes (monitor move,
+     * suspend/wake, system scaling preference).
+     */
+    default void setContentScale(double scale) {
+        // No-op: a non-native host has no backing layer to scale.
+    }
+
+    /**
+     * Registers the display-change listener (at most once per view). The
+     * native host dispatches it when its window moves to a different screen
+     * or the display configuration changes (suspend/wake), and once
+     * immediately on registration with the current display id; a pure-JavaFX
+     * backend never dispatches it. {@code displayId} is the macOS
+     * {@code CGDirectDisplayID} (0 if unknown).
+     */
+    default void setDisplayChangeListener(DisplayChangeListener listener) {
+        // No-op: a non-native host has no per-display id to report.
+    }
+
+    /**
+     * A display-configuration change: the host view's window moved to a
+     * different screen, or the display configuration changed (suspend/wake,
+     * monitor attach/detach). {@code displayId} is the macOS
+     * {@code CGDirectDisplayID} of the window's current screen (0 if none).
+     */
+    @FunctionalInterface
+    interface DisplayChangeListener {
+        void onDisplayChange(int displayId);
+    }
+
+    /**
      * The JavaFX node this host renders into, if any.
      *
      * <p>The macOS AppKit host returns {@link Optional#empty()} (it overlays a

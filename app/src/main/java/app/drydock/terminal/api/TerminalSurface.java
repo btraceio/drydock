@@ -25,6 +25,28 @@ public interface TerminalSurface extends AutoCloseable {
 
     void setSize(int widthPx, int heightPx);
 
+    /**
+     * Updates the surface's backing content scale (e.g. 2.0 on Retina, 1.0
+     * on a standard-DPI display). The native ghostty surface recomputes its
+     * DPI-dependent font size, padding, and grid from this; a pure-JavaFX
+     * backend ignores it. Called by the bridge on every geometry update so a
+     * backing-scale change (monitor move, suspend/wake) propagates to the
+     * running terminal.
+     */
+    default void setContentScale(double scaleX, double scaleY) {
+        // No-op: a non-native surface derives its scale from the scene graph.
+    }
+
+    /**
+     * Targets the surface's renderer at display {@code displayId} (a macOS
+     * {@code CGDirectDisplayID}, used for per-display vsync). Called by the
+     * bridge when the host view's window changes screen. A pure-JavaFX
+     * backend ignores it.
+     */
+    default void setDisplayId(int displayId) {
+        // No-op: a non-native surface has no per-display vsync target.
+    }
+
     void setFocus(boolean focused);
 
     void draw();

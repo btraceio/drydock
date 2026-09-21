@@ -43,6 +43,7 @@ build_arch() {
         -fobjc-arc \
         -Wall -Wextra -Werror \
         -framework Cocoa \
+        -framework QuartzCore \
         -install_name "@rpath/libdrydockterminalhost.dylib" \
         -o "$OUT_DIR/$out_subdir/libdrydockterminalhost.dylib" \
         "$src_dir/DrydockTerminalHost.m"

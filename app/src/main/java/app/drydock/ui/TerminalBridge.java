@@ -6,13 +6,15 @@ import app.drydock.terminal.api.TerminalHostView;
 import app.drydock.terminal.api.TerminalRuntime;
 import app.drydock.terminal.api.TerminalSurface;
 import javafx.application.Platform;
+import javafx.beans.value.ChangeListener;
+import javafx.beans.value.ObservableValue;
 import javafx.geometry.Bounds;
 import javafx.scene.layout.Region;
+import javafx.stage.Window;
 
 import java.lang.System.Logger;
 import java.nio.file.Path;
 import java.util.function.Consumer;
-import java.util.function.DoubleSupplier;
 import java.util.function.Supplier;
 
 /**
@@ -50,12 +52,24 @@ final class TerminalBridge {
     private final TerminalHostView host;
     /** The JavaFX layout anchor whose scene bounds position the native view (owned by the tab's chrome). */
     private final Region anchor;
-    /** The window's output scale ({@code Stage#getOutputScaleX}; 2.0 on Retina). */
-    private final DoubleSupplier outputScale;
+    /**
+     * The window the terminal is overlaid on. Its output scale is read live
+     * for pixel-size math, and its {@code outputScaleX/Y} properties are
+     * observed so a backing-scale change (Retina/non-Retina monitor move,
+     * suspend/wake reconfiguration, system scaling preference) re-runs
+     * {@link #updateGeometry()} and propagates the new scale to the surface
+     * -- without this, only the anchor's local bounds/transform changes
+     * triggered a resize, and a pure scale change left the terminal at its
+     * old backing resolution.
+     */
+    private final Window window;
     /** The hosting tab's session id, read live (it may be adopted after launch); log messages only. */
     private final Supplier<ManagedSessionId> sessionId;
     /** Performs an intercepted app shortcut (wired to the tab's sub-tab/cycling/sidebar handlers). */
     private final Consumer<Shortcut> shortcutHandler;
+    /** Output-scale listeners on {@link #window}; held as fields so {@link #disposeNativeResources()} can remove them. */
+    private final ChangeListener<Number> scaleXListener;
+    private final ChangeListener<Number> scaleYListener;
 
     private TerminalSurface surface;
     private boolean disposed;
@@ -72,15 +86,32 @@ final class TerminalBridge {
      * the {@code app.drydock.diag.tabScript} keys dump reports.
      */
     private boolean nativeFocusRequested;
+    /**
+     * The last backing scale propagated to the surface + host layer, so the
+     * common no-scale-change layout path (sidebar drag, tab switch) skips the
+     * content-scale native calls instead of re-issuing them every geometry
+     * update. {@code -1} means "not yet applied" (forces a first propagation).
+     */
+    private double lastAppliedScale = -1;
 
-    TerminalBridge(TerminalRuntime app, TerminalHostView host, Region anchor, DoubleSupplier outputScale,
+    TerminalBridge(TerminalRuntime app, TerminalHostView host, Region anchor, Window window,
                    Supplier<ManagedSessionId> sessionId, Consumer<Shortcut> shortcutHandler) {
         this.app = app;
         this.host = host;
         this.anchor = anchor;
-        this.outputScale = outputScale;
+        this.window = window;
         this.sessionId = sessionId;
         this.shortcutHandler = shortcutHandler;
+        // A backing-scale change does NOT change the anchor's local bounds or
+        // its local-to-scene transform, so the listeners OpenSessionTab wires
+        // on those do not fire -- only the window's outputScaleX/Y change. Run
+        // the geometry refresh on the next FX pulse (Platform.runLater) so a
+        // burst of related scale/screen changes coalesces into one resize and
+        // the new scale value is settled before we read it.
+        this.scaleXListener = (obs, o, n) -> Platform.runLater(this::updateGeometry);
+        this.scaleYListener = (obs, o, n) -> Platform.runLater(this::updateGeometry);
+        window.outputScaleXProperty().addListener(scaleXListener);
+        window.outputScaleYProperty().addListener(scaleYListener);
     }
 
     TerminalRuntime app() {
@@ -145,6 +176,26 @@ final class TerminalBridge {
         host.setScrollEventListener(this::onScrollEvent);
         host.setMousePosEventListener(this::onMousePosEvent);
         host.setMouseButtonEventListener(this::onMouseButtonEvent);
+        // The native host dispatches this when its window changes screen or
+        // the display configuration changes (suspend/wake), and once
+        // immediately on registration with the current display id. We target
+        // the renderer at the new display and re-run geometry so a backing
+        // scale change that accompanied the screen change propagates even if
+        // the window's outputScaleX/Y properties lag the reconfiguration.
+        host.setDisplayChangeListener(this::onDisplayChange);
+    }
+
+    /** See {@link #wireInputListeners()}; routes a display change to the surface + a geometry refresh. */
+    private void onDisplayChange(int displayId) {
+        if (disposed || surfaceClosing || surface == null) {
+            return;
+        }
+        try {
+            surface.setDisplayId(displayId);
+            updateGeometry();
+        } catch (IllegalStateException e) {
+            // Surface closed in the teardown gap; see tickAndDraw's identical catch.
+        }
     }
 
     /** Forwards the mouse position (view points, top-left origin) to the surface. */
@@ -409,8 +460,32 @@ final class TerminalBridge {
             return;
         }
         try {
-            double scale = outputScale.getAsDouble();
+            double scale = window.getOutputScaleX();
             host.setFrame(sceneBounds.getMinX(), sceneBounds.getMinY(), sceneBounds.getWidth(), sceneBounds.getHeight());
+            // Propagate the backing scale only when it actually changed: the
+            // host view's Metal layer contentsScale and the surface's content
+            // scale are both DPI-driven and expensive enough (a layer property
+            // write; a libghostty DPI/font/grid recompute) to skip on the hot
+            // layout path, and both are no-ops when the value is unchanged.
+            // The first call (lastAppliedScale == -1) always propagates so a
+            // freshly created surface gets its initial scale.
+            if (lastAppliedScale != scale) {
+                // Keep the host view's Metal layer contentsScale in sync with
+                // the window's backing scale: libghostty sets it once at
+                // renderer init and reads it back every frame to size the
+                // drawable, but never updates it -- without this the renderer
+                // composites at the old resolution after a backing-scale change
+                // (blurry / mis-sized).
+                host.setContentScale(scale);
+                // Drive the surface's content scale before its pixel size:
+                // ghostty's contentScaleCallback recomputes the DPI-dependent
+                // font/padding and forces a resize from the *current* pixel
+                // size, then setSize applies the new pixel size -- the final
+                // state is correct either way, but updating the scale first
+                // avoids one grid computed from a stale cell size.
+                surface.setContentScale(scale, scale);
+                lastAppliedScale = scale;
+            }
             surface.setSize((int) Math.round(sceneBounds.getWidth() * scale), (int) Math.round(sceneBounds.getHeight() * scale));
             surface.draw();
         } catch (IllegalStateException e) {
@@ -456,6 +531,10 @@ final class TerminalBridge {
         }
         disposed = true;
         assert Platform.isFxApplicationThread() : "native resource teardown must run on the FX Application Thread";
+        // Drop the output-scale listeners so a closed tab's bridge is not
+        // kept alive (and re-driven) by the window's scale properties.
+        window.outputScaleXProperty().removeListener(scaleXListener);
+        window.outputScaleYProperty().removeListener(scaleYListener);
         try {
             host.close();
         } catch (RuntimeException e) {

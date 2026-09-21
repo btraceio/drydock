@@ -174,6 +174,8 @@ final class GhosttyAppBinding {
     final MethodHandle surfaceNew;
     final MethodHandle surfaceFree;
     final MethodHandle surfaceSetSize;
+    final MethodHandle surfaceSetContentScale;
+    final MethodHandle surfaceSetDisplayId;
     final MethodHandle surfaceSetFocus;
     final MethodHandle surfaceDraw;
     final MethodHandle surfaceRefresh;
@@ -241,6 +243,16 @@ final class GhosttyAppBinding {
         this.surfaceSetSize = linker.downcallHandle(
             find(lookup, "ghostty_surface_set_size"),
             FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT)
+        );
+        // void ghostty_surface_set_content_scale(ghostty_surface_t, double, double);
+        this.surfaceSetContentScale = linker.downcallHandle(
+            find(lookup, "ghostty_surface_set_content_scale"),
+            FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.JAVA_DOUBLE, ValueLayout.JAVA_DOUBLE)
+        );
+        // void ghostty_surface_set_display_id(ghostty_surface_t, uint32_t);  (macOS only)
+        this.surfaceSetDisplayId = linker.downcallHandle(
+            find(lookup, "ghostty_surface_set_display_id"),
+            FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.JAVA_INT)
         );
         // void ghostty_surface_set_focus(ghostty_surface_t, bool);
         this.surfaceSetFocus = linker.downcallHandle(

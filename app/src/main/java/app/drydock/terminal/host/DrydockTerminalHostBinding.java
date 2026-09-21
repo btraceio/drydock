@@ -70,10 +70,17 @@ final class DrydockTerminalHostBinding {
         ValueLayout.JAVA_INT  // uint32_t modifier_flags
     );
 
+    /** Native shape of {@code drydock_terminal_host_display_change_cb}. */
+    private static final FunctionDescriptor DISPLAY_CHANGE_CB_DESCRIPTOR = FunctionDescriptor.ofVoid(
+        ValueLayout.ADDRESS,  // void* userdata
+        ValueLayout.JAVA_INT  // uint32_t display_id (CGDirectDisplayID)
+    );
+
     private static final MethodHandle KEY_EVENT_TRAMPOLINE;
     private static final MethodHandle SCROLL_EVENT_TRAMPOLINE;
     private static final MethodHandle MOUSE_POS_EVENT_TRAMPOLINE;
     private static final MethodHandle MOUSE_BUTTON_EVENT_TRAMPOLINE;
+    private static final MethodHandle DISPLAY_CHANGE_TRAMPOLINE;
 
     static {
         try {
@@ -129,6 +136,16 @@ final class DrydockTerminalHostBinding {
                     int.class
                 )
             );
+            DISPLAY_CHANGE_TRAMPOLINE = MethodHandles.lookup().findStatic(
+                DrydockTerminalHostBinding.class,
+                "dispatchDisplayChange",
+                MethodType.methodType(
+                    void.class,
+                    TerminalHostView.DisplayChangeListener.class,
+                    MemorySegment.class,
+                    int.class
+                )
+            );
         } catch (ReflectiveOperationException e) {
             throw new ExceptionInInitializerError(e);
         }
@@ -160,6 +177,8 @@ final class DrydockTerminalHostBinding {
     private final MethodHandle setScrollEventCallback;
     private final MethodHandle setMousePosEventCallback;
     private final MethodHandle setMouseButtonEventCallback;
+    private final MethodHandle setContentScale;
+    private final MethodHandle setDisplayChangeCallback;
 
     private DrydockTerminalHostBinding(SymbolLookup lookup) {
         // drydock_terminal_host_t drydock_terminal_host_create(void* parent_nsview);
@@ -225,6 +244,18 @@ final class DrydockTerminalHostBinding {
         // void drydock_terminal_host_set_mouse_button_event_callback(host, cb, userdata);
         this.setMouseButtonEventCallback = linker.downcallHandle(
             find(lookup, "drydock_terminal_host_set_mouse_button_event_callback"),
+            FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
+        );
+
+        // void drydock_terminal_host_set_content_scale(host, double scale);
+        this.setContentScale = linker.downcallHandle(
+            find(lookup, "drydock_terminal_host_set_content_scale"),
+            FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.JAVA_DOUBLE)
+        );
+
+        // void drydock_terminal_host_set_display_change_callback(host, cb, userdata);
+        this.setDisplayChangeCallback = linker.downcallHandle(
+            find(lookup, "drydock_terminal_host_set_display_change_callback"),
             FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
         );
     }
@@ -344,6 +375,34 @@ final class DrydockTerminalHostBinding {
         }
     }
 
+    /**
+     * Updates the host view's backing-layer content scale; see
+     * {@code drydock_terminal_host_set_content_scale}'s header comment.
+     */
+    void setContentScale(MemorySegment host, double scale) {
+        try {
+            setContentScale.invoke(host, scale);
+        } catch (Throwable t) {
+            throw new HostNativeCallException("drydock_terminal_host_set_content_scale", t);
+        }
+    }
+
+    /**
+     * Registers {@code listener} as the host's display-change callback; same
+     * arena-lifetime contract as {@link #setKeyEventCallback}. Registering a
+     * non-null listener also dispatches it once synchronously with the
+     * window's current display id (the native side does this).
+     */
+    void setDisplayChangeCallback(MemorySegment host, TerminalHostView.DisplayChangeListener listener, Arena arena) {
+        MethodHandle bound = MethodHandles.insertArguments(DISPLAY_CHANGE_TRAMPOLINE, 0, listener);
+        MemorySegment stub = linker.upcallStub(bound, DISPLAY_CHANGE_CB_DESCRIPTOR, arena);
+        try {
+            setDisplayChangeCallback.invoke(host, stub, MemorySegment.NULL);
+        } catch (Throwable t) {
+            throw new HostNativeCallException("drydock_terminal_host_set_display_change_callback", t);
+        }
+    }
+
     // Every dispatch trampoline below is wrapped in try/catch (Throwable): a
     // Java exception escaping an FFM upcall stub into native code terminates
     // the whole JVM, so a throwing user-supplied listener must be logged and
@@ -412,6 +471,19 @@ final class DrydockTerminalHostBinding {
             listener.onKeyEvent(keyCode & 0xFFFF, modifierFlags, isKeyDown != 0, text, unshiftedText);
         } catch (Throwable t) {
             LOG.log(Logger.Level.ERROR, "key event listener failed", t);
+        }
+    }
+
+    /** Upcall trampoline invoked directly by native code; see DISPLAY_CHANGE_TRAMPOLINE. */
+    @SuppressWarnings("unused")
+    private static void dispatchDisplayChange(
+            TerminalHostView.DisplayChangeListener listener,
+            MemorySegment userdata,
+            int displayId) {
+        try {
+            listener.onDisplayChange(displayId);
+        } catch (Throwable t) {
+            LOG.log(Logger.Level.ERROR, "display-change listener failed", t);
         }
     }
 
