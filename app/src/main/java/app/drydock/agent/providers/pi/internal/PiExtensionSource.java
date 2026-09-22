@@ -173,20 +173,47 @@ public final class PiExtensionSource {
               });
 
               // Eval mode: when the harness sets DRYDOCK_EVAL=1 it wants this
-              // session's model traffic charged to the "eval" account, so the
-              // Anthropic provider gets an x-target-account: eval header
-              // override. Only the header is supplied, so pi preserves the
-              // provider's existing models and base URL -- this is an addition,
-              // not a replacement. Registered in the factory body (before any
-              // await) so it is in place before the first model request,
-              // independently of whether the drydock MCP handshake below
-              // succeeds. Wrapped so a registration failure can never sink the
-              // bridge: eval routing is best-effort, not load-critical.
+              // session's model traffic charged to the "eval" account: every
+              // configured provider gets an x-target-account: eval header
+              // override. Only the header is supplied, so pi preserves each
+              // provider's existing models and base URL -- an addition, not a
+              // replacement. Providers are enumerated from the user's
+              // models.json (falling back to the built-in "anthropic" id when
+              // unreadable) so the tag rides whatever provider the session's
+              // model actually uses -- traffic accounting must not depend on
+              // which provider id the model happens to be served under.
+              // Registered in the factory body (before any await) so it is in
+              // place before the first model request, independently of whether
+              // the drydock MCP handshake below succeeds. Wrapped so a
+              // registration failure can never sink the bridge: eval routing
+              // is best-effort, not load-critical.
               try {
                 if (process.env.DRYDOCK_EVAL === "1") {
-                  pi.registerProvider("anthropic", {
-                    headers: { [EVAL_HEADER_NAME]: EVAL_HEADER_VALUE },
-                  } as any);
+                  const ids = new Set<string>(["anthropic"]);
+                  try {
+                    const os = require("node:os");
+                    const fs = require("node:fs");
+                    const cfgPath = [os.homedir(), ".pi", "agent", "models.json"].join("/");
+                    const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf-8"));
+                    const providers = cfg?.providers;
+                    if (Array.isArray(providers)) {
+                      for (const p of providers) if (p?.id) ids.add(String(p.id));
+                    } else if (providers && typeof providers === "object") {
+                      for (const id of Object.keys(providers)) ids.add(id);
+                    }
+                  } catch (readErr: any) {
+                    // Unreadable models.json: still tag the built-in provider.
+                    console.warn("drydock: could not read models.json for eval routing;", readErr?.message ?? readErr);
+                  }
+                  for (const id of ids) {
+                    try {
+                      pi.registerProvider(id, {
+                        headers: { [EVAL_HEADER_NAME]: EVAL_HEADER_VALUE },
+                      } as any);
+                    } catch (regErr: any) {
+                      console.warn("drydock: eval-account routing skipped for provider", id, ";", regErr?.message ?? regErr);
+                    }
+                  }
                 }
               } catch (e: any) {
                 // No session ctx is in scope at factory load time, so a
