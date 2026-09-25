@@ -179,6 +179,11 @@ class ClaudeEvalContainerTest {
         String imageAndAfter = cmd.substring(cmd.indexOf("drydock-claude-eval:latest"));
         assertFalse(imageAndAfter.contains(" sh "), "no extra 'sh' after the image (entrypoint is already sh)");
         assertTrue(imageAndAfter.startsWith("drydock-claude-eval:latest '"));
+        // Named after the session key, so unmark() can remove the container.
+        assertTrue(cmd.contains(" --name 'drydock-eval-sess' "), () -> "container named after the key: " + cmd);
+        // The shared data volume backs XDG_DATA_HOME, so plugin installs persist.
+        assertTrue(cmd.contains(" -v drydock-claude-eval-data:/var/lib/drydock-eval-data "
+                + "-e XDG_DATA_HOME=/var/lib/drydock-eval-data "), () -> "shared data volume: " + cmd);
     }
 
     @Test

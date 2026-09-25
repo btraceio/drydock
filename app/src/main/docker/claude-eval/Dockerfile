@@ -13,9 +13,15 @@ FROM debian:bookworm-slim
 # git: Claude's own Bash tool calls `git`; the worktree's .git points back
 #       into the main repo object store, both mounted from the host.
 # curl + ca-certificates: the native installer downloads over HTTPS.
+# python3: plugin MCP servers and hooks run Python (e.g. sphinx's server,
+#          which needs >= 3.11; bookworm ships 3.11).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl git \
+        ca-certificates curl git python3 \
     && rm -rf /var/lib/apt/lists/*
+
+# uv: plugin launchers (e.g. sphinx-mcp.sh) use `uv run` to install their
+# pinned Python deps on first start. Installs to ~/.local/bin (on PATH below).
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Claude Code native build. The install script places the launcher at
 # ~/.local/bin/claude and the versioned binary under ~/.local/share/claude.
