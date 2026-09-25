@@ -10,6 +10,7 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.FileAttribute;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.nio.file.attribute.PosixFilePermission;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -27,6 +28,7 @@ import java.util.regex.Pattern;
 import app.drydock.agent.api.EvalTokenResolver;
 import app.drydock.process.ProcessResult;
 import app.drydock.process.ProcessRunner;
+import app.drydock.process.ProcessTimeoutException;
 import app.drydock.state.json.JsonParseException;
 import app.drydock.state.json.JsonParser;
 import app.drydock.state.json.JsonValue;
@@ -287,6 +289,9 @@ public class ClaudeEvalContainer {
         if (sessionKey == null || sessionKey.isBlank()) {
             return Optional.empty();
         }
+        // A container left behind by a crash (no unmark) would make this
+        // launch's `docker run --name` fail on the name conflict.
+        removeContainer(sessionKey);
         Path configDir = stateDirectory.resolve("eval").resolve(sessionKey);
         try {
             Files.createDirectories(configDir);
@@ -306,17 +311,46 @@ public class ClaudeEvalContainer {
         return Optional.of(setup);
     }
 
-    /** Reverses {@link #mark}: deletes the per-session config dir and drops the stash. Idempotent. */
+    /**
+     * Reverses {@link #mark}: removes the session's container, deletes the
+     * per-session config dir and drops the stash. Idempotent.
+     */
     public void unmark(String sessionKey) {
         if (sessionKey == null || sessionKey.isBlank()) {
             return;
         }
         setups.remove(sessionKey);
+        removeContainer(sessionKey);
         Path configDir = stateDirectory.resolve("eval").resolve(sessionKey);
         try {
             deleteRecursively(configDir);
         } catch (IOException e) {
             LOG.log(Level.DEBUG, () -> "Could not delete eval config dir " + configDir + ": " + e.getMessage());
+        }
+    }
+
+    /** The {@code docker run --name} of {@code sessionKey}'s container. */
+    static String containerName(String sessionKey) {
+        return "drydock-eval-" + sessionKey;
+    }
+
+    /**
+     * Force-removes {@code sessionKey}'s container, if one exists. Closing a
+     * session's terminal kills only the {@code docker} client; without this
+     * the container keeps running with its mounts indefinitely.
+     */
+    private static void removeContainer(String sessionKey) {
+        String name = containerName(sessionKey);
+        try {
+            ProcessResult res = ProcessRunner.run(List.of("docker", "rm", "-f", name), null, Duration.ofSeconds(15));
+            if (res.exitCode() != 0 && !res.stderr().contains("No such container")) {
+                LOG.log(Level.WARNING, () -> "Could not remove eval container " + name + " (exit "
+                        + res.exitCode() + "): " + ProcessRunner.excerpt(res.stderr()));
+            }
+        } catch (IOException | ProcessTimeoutException e) {
+            LOG.log(Level.WARNING, () -> "Could not remove eval container " + name + ": " + e.getMessage());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 
@@ -373,6 +407,9 @@ public class ClaudeEvalContainer {
 
         Path mainRepoRoot = resolveMainRepoRoot(worktree);
         StringBuilder cmd = new StringBuilder("docker run --rm -it");
+        // Named after the session key (mark() names the config dir after it)
+        // so unmark() can remove the container.
+        cmd.append(" --name ").append(shellQuote(containerName(setup.configDir().getFileName().toString())));
         cmd.append(" --add-host=host.docker.internal:host-gateway");
         cmd.append(" -e ").append(CONFIG_DIR_ENV).append('=').append(shellQuote(setup.configDir().toString()));
         cmd.append(" -v ").append(shellQuote(setup.configDir().toString()))

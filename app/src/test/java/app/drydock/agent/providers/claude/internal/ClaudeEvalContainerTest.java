@@ -179,6 +179,8 @@ class ClaudeEvalContainerTest {
         String imageAndAfter = cmd.substring(cmd.indexOf("drydock-claude-eval:latest"));
         assertFalse(imageAndAfter.contains(" sh "), "no extra 'sh' after the image (entrypoint is already sh)");
         assertTrue(imageAndAfter.startsWith("drydock-claude-eval:latest '"));
+        // Named after the session key, so unmark() can remove the container.
+        assertTrue(cmd.contains(" --name 'drydock-eval-sess' "), () -> "container named after the key: " + cmd);
     }
 
     @Test
