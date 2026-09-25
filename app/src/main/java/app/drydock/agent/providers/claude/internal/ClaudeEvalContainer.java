@@ -102,7 +102,9 @@ import app.drydock.state.json.JsonWriter;
  * {@code --settings}/{@code --mcp-config} flags resolve unchanged and the
  * host-side activity watcher keeps reading the same files. The personal
  * config mounts are read-only (see above); everything else is writable
- * because the session owns its state there.</p>
+ * because the session owns its state there. One named volume is shared by
+ * all eval containers as {@code XDG_DATA_HOME} (see {@link #DATA_VOLUME}),
+ * so plugin installs made on first start outlive the container.</p>
  *
  * <p>All methods are blocking and must be called off the JavaFX application
  * thread. {@link #probe} is run once at provider init (background) and its
@@ -115,6 +117,15 @@ public class ClaudeEvalContainer {
     /** The image tag built by the {@code claudeEvalImage} Gradle task. */
     private static final String IMAGE = System.getProperty(
             "app.drydock.eval.claude.image", "drydock-claude-eval:latest");
+
+    /**
+     * Named volume shared by every eval container and mounted as
+     * {@code XDG_DATA_HOME}, so what plugins install there on first start
+     * (e.g. sphinx's uv venv, about a minute to build) persists across
+     * sessions instead of being rebuilt in each fresh container.
+     */
+    private static final String DATA_VOLUME = "drydock-claude-eval-data";
+    private static final String DATA_VOLUME_PATH = "/var/lib/drydock-eval-data";
 
     /**
      * Managed-settings locations, in precedence order (macOS first, then Linux).
@@ -424,6 +435,8 @@ public class ClaudeEvalContainer {
                 .append(':').append(shellQuote(hooksDir.toString()));
         cmd.append(" -v ").append(shellQuote(activityDir.toString()))
                 .append(':').append(shellQuote(activityDir.toString()));
+        cmd.append(" -v ").append(DATA_VOLUME).append(':').append(DATA_VOLUME_PATH);
+        cmd.append(" -e XDG_DATA_HOME=").append(DATA_VOLUME_PATH);
         // The config-dir symlinks (mirrorPersonalConfig) resolve against the
         // user's ~/.claude, so it must exist in the container at its original
         // host path -- read-only, so a container session can never mutate the
