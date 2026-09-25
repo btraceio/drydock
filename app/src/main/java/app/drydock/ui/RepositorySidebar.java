@@ -12,6 +12,7 @@ import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionActivity;
 import app.drydock.domain.SessionStatus;
+import app.drydock.domain.SessionStatusFacet;
 import app.drydock.git.GhCliService;
 import app.drydock.git.GitStatus;
 import app.drydock.git.GitStatusService;
@@ -3268,6 +3269,20 @@ public final class RepositorySidebar extends VBox {
             MenuItem remove = new MenuItem("Remove from manager");
             remove.setOnAction(e -> onRemoveRepository(repository));
 
+            // Bulk session management. Both labels carry a live count of the
+            // sessions they would act on, relabelled on every showing (the
+            // menu is cached for the row's life, and the set moves underneath
+            // it as sessions start/stop and branches merge). The count is
+            // what makes "Delete all stale sessions" honest: it uses the same
+            // merged-branch-or-idle definition the sidebar classifies, so the
+            // number in the label matches the rows a user can delete by hand
+            // -- the discrepancy that surfaced this feature was the header's
+            // "· N stale" counting only session-less worktrees.
+            MenuItem closeInactive = new MenuItem("Close inactive sessions");
+            closeInactive.setOnAction(e -> onCloseInactiveSessions(repository));
+            MenuItem deleteStale = new MenuItem("Delete all stale sessions");
+            deleteStale.setOnAction(e -> onDeleteStaleSessions(repository));
+
             ContextMenu menu = new ContextMenu();
             menu.getItems().add(newSession);
             if (!repository.isRemote()) {
@@ -3282,8 +3297,8 @@ public final class RepositorySidebar extends VBox {
 
                 menu.getItems().addAll(newWorktree, rescan);
             }
-            menu.getItems().add(new SeparatorMenuItem());
-            menu.getItems().add(refresh);
+            menu.getItems().addAll(new SeparatorMenuItem(), closeInactive, deleteStale,
+                    new SeparatorMenuItem(), refresh);
             if (!repository.isRemote()) {
                 MenuItem openFinder = new MenuItem("Open in Finder");
                 openFinder.setOnAction(e -> onOpenInFinder(repository));
@@ -3294,7 +3309,154 @@ public final class RepositorySidebar extends VBox {
                 menu.getItems().addAll(openFinder, openEditor);
             }
             menu.getItems().addAll(new SeparatorMenuItem(), remove);
+            // Relabel the bulk session items on every showing: a cached menu
+            // would otherwise freeze the count at whatever was true when it
+            // was first built, and disable/enable them when there is nothing
+            // to act on so the gesture cannot fire on an empty set.
+            menu.setOnShowing(e -> applyBulkSessionMenuLabels(closeInactive, deleteStale, repository));
+            applyBulkSessionMenuLabels(closeInactive, deleteStale, repository);
             return menu;
         });
+    }
+
+    /**
+     * Relabels the repo menu's bulk session items with live counts and
+     * disables them when their target set is empty. Excludes the active
+     * session from both sets so the gesture never yanks the tab the user is
+     * currently looking at -- "close inactive" would close the focused idle
+     * tab out from under the user, and "delete stale" would drop the focused
+     * session's metadata.
+     */
+    private void applyBulkSessionMenuLabels(MenuItem closeInactive, MenuItem deleteStale,
+                                             Repository repository) {
+        List<ManagedAgentSession> inactive = inactiveSessionsOf(repository);
+        List<ManagedAgentSession> stale = staleSessionsOf(repository);
+        closeInactive.setText("Close inactive sessions"
+                + (inactive.isEmpty() ? "" : " (" + inactive.size() + ")"));
+        closeInactive.setDisable(inactive.isEmpty());
+        deleteStale.setText("Delete all stale sessions"
+                + (stale.isEmpty() ? "" : " (" + stale.size() + ")"));
+        deleteStale.setDisable(stale.isEmpty());
+    }
+
+    /**
+     * Sessions of {@code repository} whose surface is safe to close: the idle
+     * band (INACTIVE/EXITED), minus the active session. Closing is reversible
+     * (a resume reopens the tab), so this only frees the terminal surfaces of
+     * sessions that are not running -- it never stops a live process and never
+     * touches session metadata.
+     */
+    private List<ManagedAgentSession> inactiveSessionsOf(Repository repository) {
+        SidebarChildren classified = childrenOf(repository);
+        if (classified == null) {
+            return List.of();
+        }
+        ManagedSessionId active = viewModel.activeSession().orElse(null);
+        return classified.idleSessions().stream()
+                .filter(session -> !session.id().equals(active))
+                .toList();
+    }
+
+    /**
+     * Sessions of {@code repository} that are stale and safe to offer for bulk
+     * delete: idle (INACTIVE/EXITED) OR on a merged/prunable/detached,
+     * non-main, non-locked worktree -- the definition {@link SidebarChildren}
+     * classifies -- minus the active session. See {@link
+     * #applyBulkSessionMenuLabels} for why the count this returns is the one
+     * the menu label shows.
+     */
+    private List<ManagedAgentSession> staleSessionsOf(Repository repository) {
+        SidebarChildren classified = childrenOf(repository);
+        if (classified == null) {
+            return List.of();
+        }
+        ManagedSessionId active = viewModel.activeSession().orElse(null);
+        return classified.staleSessions().stream()
+                .filter(session -> !session.id().equals(active))
+                .toList();
+    }
+
+    /**
+     * {@link #staleSessionsOf} without the active-session exclusion, so the
+     * delete confirm can tell the user when the session they are looking at is
+     * itself stale (and therefore deliberately left out of the delete set).
+     */
+    private List<ManagedAgentSession> staleSessionsOfIgnoringActive(Repository repository) {
+        SidebarChildren classified = childrenOf(repository);
+        return classified == null ? List.of() : classified.staleSessions();
+    }
+
+    /**
+     * Bulk-closes the terminal surfaces of a repository's inactive sessions.
+     * One confirm, then {@link WorkspaceNavigator#closeSession} per session --
+     * a no-op for sessions with no open surface, so only idle tabs that are
+     * actually open disappear. Session metadata is kept; a resume reopens.
+     */
+    private void onCloseInactiveSessions(Repository repository) {
+        List<ManagedAgentSession> sessions = inactiveSessionsOf(repository);
+        if (sessions.isEmpty()) {
+            return;
+        }
+        Alert confirm = new Alert(AlertType.CONFIRMATION);
+        confirm.setTitle("Close inactive sessions");
+        confirm.setHeaderText("Close " + sessions.size() + " inactive session"
+                + (sessions.size() == 1 ? "" : "s") + "?");
+        confirm.setContentText("Closes the terminal tabs of sessions that are not running. "
+                + "The sessions are kept and can be resumed. Running sessions are untouched.");
+        if (confirm.showAndWait().filter(button -> button == ButtonType.OK).isEmpty()) {
+            return;
+        }
+        for (ManagedAgentSession session : sessions) {
+            navigator.closeSession(session.id());
+        }
+    }
+
+    /**
+     * Bulk-deletes a repository's stale sessions. One confirm -- spelling out
+     * how many are running, since a stale-by-merged-branch session may still
+     * be running and {@code deleteSession} stops it first -- then {@link
+     * SessionManager#deleteSession} per session, each surfacing its own
+     * failure. The active session is excluded (see {@link #staleSessionsOf});
+     * the confirm names that so the count is not a surprise.
+     */
+    private void onDeleteStaleSessions(Repository repository) {
+        List<ManagedAgentSession> sessions = staleSessionsOf(repository);
+        if (sessions.isEmpty()) {
+            return;
+        }
+        long running = sessions.stream()
+                .filter(session -> SessionStatusFacet.of(session.status()) == SessionStatusFacet.RUNNING)
+                .count();
+        Alert confirm = new Alert(AlertType.CONFIRMATION);
+        confirm.setTitle("Delete stale sessions");
+        confirm.setHeaderText("Delete " + sessions.size() + " stale session"
+                + (sessions.size() == 1 ? "" : "s") + "?");
+        StringBuilder content = new StringBuilder()
+                .append("Stale = idle (INACTIVE/EXITED) or on a merged/prunable/detached branch. "
+                        + "Each session is stopped first if running, then removed from the manager. "
+                        + "The agent's own conversation history on disk is not deleted.");
+        if (running > 0) {
+            content.append("\n\n").append(running)
+                    .append(" of these are still running and will be stopped.");
+        }
+        ManagedSessionId active = viewModel.activeSession().orElse(null);
+        if (active != null && staleSessionsOfIgnoringActive(repository).stream()
+                .anyMatch(session -> session.id().equals(active))) {
+            content.append("\n\nThe active session is stale but is kept (close its tab first to "
+                    + "delete it). It is not counted above.");
+        }
+        confirm.setContentText(content.toString());
+        if (confirm.showAndWait().filter(button -> button == ButtonType.OK).isEmpty()) {
+            return;
+        }
+        for (ManagedAgentSession session : sessions) {
+            sessionManager.deleteSession(session.id()).whenComplete((v, ex) -> Platform.runLater(() -> {
+                if (ex != null) {
+                    UiErrors.show("Could not delete session", ex);
+                } else {
+                    navigator.noteSessionDeleted(session.id());
+                }
+            }));
+        }
     }
 }

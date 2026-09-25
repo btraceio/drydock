@@ -21,10 +21,24 @@ import java.util.function.Function;
  * the header counts. Toolkit-free and side-effect-free so it can be unit
  * tested without a JavaFX runtime; {@code RepositorySidebar} wraps the result
  * into tree rows.
+ *
+ * <p>{@code staleSessions} is the set a bulk "Delete all stale sessions"
+ * gesture operates on, and it is what makes that action's count agree with
+ * what a user can delete by hand: a session is stale when its worktree's
+ * branch is merged/prunable/detached (the same test {@link #staleWorktrees}
+ * applies to session-less worktrees, now applied to session-backed ones too)
+ * <em>or</em> the session is idle ({@link SessionStatusFacet#IDLE}). Without
+ * this, the header's {@code · N stale} count -- which only ever sees
+ * session-less worktrees -- under-counts: a merged-branch worktree that still
+ * has a session renders as a session row and was never counted, so a user
+ * could delete far more sessions by hand than the "stale" number promised.
+ * The {@code staleSessions} list carries the same definition onto sessions,
+ * so the action's label count and the deletable set cannot drift apart.</p>
  */
 record SidebarChildren(
         List<ManagedAgentSession> liveSessions,
         List<ManagedAgentSession> idleSessions,
+        List<ManagedAgentSession> staleSessions,
         List<Worktree> openWorktrees,
         List<Worktree> staleWorktrees,
         List<Worktree> lockedWorktrees,
@@ -114,7 +128,34 @@ record SidebarChildren(
         int worktreeCount = (int) openWorktrees.stream().filter(w -> !w.mainCheckout()).count()
                 + (int) sessionRows.stream().filter(s -> s.worktreeRoot().isPresent()).count();
 
-        return new SidebarChildren(List.copyOf(live), List.copyOf(idle),
+        // Stale sessions: the bulk "Delete all stale sessions" target set.
+        // A session is stale when it is idle (INACTIVE/EXITED) OR its worktree
+        // is stale-by-branch -- non-main, not locked, and merged/prunable/
+        // detached. {@link #bucket} applies exactly that test to session-less
+        // worktrees; this applies the same test to the worktree a session sits
+        // on, so a merged-branch worktree that still owns a session row is no
+        // longer invisible to the staleness count. Locked precedes stale
+        // (mirroring bucket): a locked worktree is held on purpose, so its
+        // session is not stale-by-branch regardless of the branch's state.
+        Set<Path> branchStalePaths = new LinkedHashSet<>();
+        for (Worktree worktree : worktrees) {
+            if (!worktree.mainCheckout() && !worktree.locked()
+                    && (worktree.merged() || worktree.prunable() || worktree.detached())) {
+                branchStalePaths.add(worktree.path());
+            }
+        }
+        List<ManagedAgentSession> staleSessions = new ArrayList<>();
+        for (ManagedAgentSession session : sessionRows) {
+            boolean idleStatus = !isRunning(session.status());
+            boolean branchStale = session.worktreeRoot()
+                    .map(branchStalePaths::contains).orElse(false);
+            if (idleStatus || branchStale) {
+                staleSessions.add(session);
+            }
+        }
+        staleSessions.sort(byRecency);
+
+        return new SidebarChildren(List.copyOf(live), List.copyOf(idle), List.copyOf(staleSessions),
                 List.copyOf(openWorktrees), List.copyOf(staleWorktrees), List.copyOf(lockedWorktrees),
                 worktreeCount, staleWorktrees.size(), lockedWorktrees.size());
     }
