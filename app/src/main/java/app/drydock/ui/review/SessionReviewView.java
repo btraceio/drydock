@@ -3288,7 +3288,7 @@ public final class SessionReviewView extends BorderPane {
      * background build's completion -- {@link #refreshReviewState()} runs
      * from its {@code Platform.runLater} callback regardless of success or
      * failure, rebuilds the rail's cards, and can hand focus somewhere the
-     * click never put it (see {@code diagFocusSnapshot}'s javadoc). Letting
+     * click never put it. Letting
      * a fixture wait on this before a test method starts closes that race
      * instead of leaving every test built on it to hit it by chance.
      */
@@ -3316,13 +3316,11 @@ public final class SessionReviewView extends BorderPane {
     /**
      * Diagnostic-only: what {@link #settleUnit()} would read right now, and
      * the Scene focus state it derives that from -- for a test to log when a
-     * settle action lands on the wrong unit. Exists because {@code
-     * withTheDiffColumnFocusedApproveSettlesOneHunk} settles the whole
-     * section (as if {@link #settleUnit()} read {@code SECTION}) on CI
-     * runners but not in any local run, isolated or full-suite; this pins
-     * down whether the Scene's focus owner ever actually lands inside {@link
-     * #diffColumn} on a run where it happens, instead of guessing from the
-     * assertion failure alone.
+     * settle action lands on the wrong unit. A bare "focus never arrived"
+     * says nothing; naming the owner and its ancestors is what traced a
+     * CI-only failure to a click aimed at a diff cell hanging below the
+     * list's viewport, whose centre lay over the verdict bar (see {@code
+     * ReviewViewFixture#focusDiffColumn}).
      */
     String diagFocusSnapshot() {
         return ReviewDiagFxThread.call(() -> {

@@ -372,27 +372,7 @@ final class ReviewDiffColumn extends BorderPane {
         // this column today. Node.requestFocus() does not require
         // focusTraversable -- that flag only gates the Tab engine -- so this
         // does not reopen Tab-key traversal into the list.
-        list.addEventFilter(MouseEvent.MOUSE_PRESSED, e -> {
-            // TEMPORARY: investigating a CI-only failure where a TestFX
-            // press never lands real focus here (see
-            // SessionReviewView#diagFocusInDiffColumn's javadoc, and
-            // ReviewViewFixture#focusDiffColumn). Confirms whether the press
-            // ever reaches this filter at all on CI, and what it actually
-            // hit -- remove once that investigation closes.
-            System.out.println("[diag] review-diff-list MOUSE_PRESSED target=" + e.getTarget()
-                    + " sceneXY=" + e.getSceneX() + "," + e.getSceneY());
-            list.requestFocus();
-            // TEMPORARY, same investigation: Scene.requestFocus silently
-            // ignores a node that cannot receive focus right now (invisible,
-            // disabled, or detached), so "requestFocus ran" alone never
-            // proved the list became the owner. This says whether it did,
-            // and if not, which eligibility condition refused it.
-            System.out.println("[diag] review-diff-list after requestFocus: tookFocus="
-                    + (list.getScene() != null && list.getScene().getFocusOwner() == list)
-                    + " inScene=" + (list.getScene() != null)
-                    + " visible=" + list.isVisible() + " disabled=" + list.isDisabled()
-                    + " columnVisible=" + isVisible() + " columnParent=" + getParent());
-        });
+        list.addEventFilter(MouseEvent.MOUSE_PRESSED, e -> list.requestFocus());
         list.setCellFactory(view -> new DiffCell());
         // Long lines wrap; the column never scrolls sideways. See
         // viewportWidth for what this replaces.

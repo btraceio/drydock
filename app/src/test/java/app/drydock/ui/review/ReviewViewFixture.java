@@ -9,11 +9,9 @@ import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
 import app.drydock.review.SessionReviewScopes;
 
-import javafx.beans.value.ChangeListener;
 import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.Label;
-import javafx.scene.control.ListCell;
 import javafx.scene.input.MouseButton;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
@@ -110,9 +108,7 @@ abstract class ReviewViewFixture extends ApplicationTest {
         // refreshes the rail and diff column from the FX thread whenever it
         // happens to land. A test that starts clicking before it settles
         // races that refresh -- which can rebuild the very node the click
-        // just focused and hand focus somewhere else (see
-        // SessionReviewView#diagFocusSnapshot's javadoc, and the CI-only
-        // failure it was added to diagnose). Waiting here, once, closes the
+        // just focused and hand focus somewhere else. Waiting here, once, closes the
         // race for every test built on this fixture instead of leaving each
         // one to hit it by chance.
         WaitForAsyncUtils.waitFor(10, TimeUnit.SECONDS, () -> !view.diagGraphBuildPending(scope.id()));
@@ -143,81 +139,34 @@ abstract class ReviewViewFixture extends ApplicationTest {
     /**
      * A plain click into the diff column -- see {@link #focusRail}.
      *
-     * <p>Uses {@code moveTo} + a separate {@code press}/{@code release}
-     * rather than the compound {@code clickOn(String)} that {@link
-     * #focusRail} uses for the rail: {@code
-     * withAGutterSelectionOpenApproveSettlesTheSelectedHunkNotTheAnchor} (the
-     * one test in this class using that same move-then-press shape, on the
-     * gutter) has never once failed on CI, while every test going through
-     * {@code clickOn(".review-diff-cell")} has -- see the CI-only failure
-     * {@code diagFocusSnapshot} was added to diagnose, still not fully
-     * understood, and TEMPORARY diagnostics below re-added to observe it.</p>
+     * <p>Aims at the list itself, never at {@code ".review-diff-cell"}. A
+     * {@code VirtualFlow} keeps a spare cell hanging past the bottom of its
+     * clipped viewport, and a cell lookup's order follows the flow's cell
+     * recycling, which is timing-dependent. Whenever that spare cell came
+     * first, its centre lay over the verdict bar, the press landed there,
+     * and focus never moved -- a CI-only flake, because only a slower
+     * machine recycled cells in that order. The list's own centre is inside
+     * its viewport whatever the recycling did.</p>
      *
-     * <p>Also polls {@link SessionReviewView#diagFocusInDiffColumn()} after
-     * the click rather than trusting one {@code waitForFxEvents()}: a real
-     * robot press is delivered to the FX thread asynchronously, off this
-     * thread, and a single drain only waits for whatever was ALREADY queued
-     * when it is called.</p>
+     * <p>Polls {@link SessionReviewView#diagFocusInDiffColumn()} after the
+     * click rather than trusting one {@code waitForFxEvents()}: a real robot
+     * press is delivered to the FX thread asynchronously, off this thread,
+     * and a single drain only waits for whatever was ALREADY queued when it
+     * is called.</p>
      */
     final void focusDiffColumn() throws TimeoutException {
-        // TEMPORARY: logs every ".review-diff-cell" match's empty/visible/
-        // bounds state before the click, and (via ReviewDiffColumn's own
-        // filter) whether the press physically reaches production code at
-        // all. Remove once the CI-only failure this investigates is
-        // understood -- see the class javadoc above.
-        interact(() -> lookup(".review-diff-cell").<Node>queryAll().forEach(node -> {
-            String empty = node instanceof ListCell<?> cell ? String.valueOf(cell.isEmpty()) : "n/a";
-            System.out.println("[diag] .review-diff-cell candidate empty=" + empty
-                    + " visible=" + node.isVisible()
-                    + " boundsInLocal=" + node.getBoundsInLocal()
-                    + " boundsInScene=" + node.localToScene(node.getBoundsInLocal()));
-        }));
-        // TEMPORARY: a before/after snapshot only ever showed the WRONG
-        // final owner (e.g. the top bar's density button), never how it got
-        // there -- this logs every transition around the click, in order, so
-        // the next failure shows whether `list` is ever the owner at all, or
-        // what it flips through on the way to the wrong one.
-        int[] seq = {0};
-        // The stack is the point: it names the code path that moved focus
-        // (a requestFocus caller, Scene's own traversal after a node went
-        // ineligible, a window-focus change...), which the owners alone
-        // never could.
-        ChangeListener<Node> tracker = (obs, oldOwner, newOwner) -> System.out.println(
-                "[diag] focusOwner #" + (seq[0]++) + " " + describeForDiag(oldOwner)
-                        + " -> " + describeForDiag(newOwner) + " via\n" + StackWalker.getInstance()
-                        .walk(frames -> frames.skip(1).limit(40)
-                                .map(f -> "[diag]     at " + f)
-                                .collect(java.util.stream.Collectors.joining("\n"))));
-        interact(() -> view.getScene().focusOwnerProperty().addListener(tracker));
+        moveTo(".review-diff-list");
+        press(MouseButton.PRIMARY);
+        release(MouseButton.PRIMARY);
+        WaitForAsyncUtils.waitForFxEvents();
         try {
-            moveTo(".review-diff-cell");
-            press(MouseButton.PRIMARY);
-            release(MouseButton.PRIMARY);
-            WaitForAsyncUtils.waitForFxEvents();
-            try {
-                WaitForAsyncUtils.waitFor(5, TimeUnit.SECONDS, view::diagFocusInDiffColumn);
-            } catch (TimeoutException e) {
-                // TEMPORARY: a bare TimeoutException says only "it never
-                // happened", not what focus actually settled on instead.
-                throw new TimeoutException(
-                        "focus never landed in the diff column within 5s; " + view.diagFocusSnapshot());
-            }
-        } finally {
-            interact(() -> view.getScene().focusOwnerProperty().removeListener(tracker));
+            WaitForAsyncUtils.waitFor(5, TimeUnit.SECONDS, view::diagFocusInDiffColumn);
+        } catch (TimeoutException e) {
+            // A bare TimeoutException says only "it never happened", not
+            // what focus actually settled on instead.
+            throw new TimeoutException(
+                    "focus never landed in the diff column within 5s; " + view.diagFocusSnapshot());
         }
-    }
-
-    /** TEMPORARY: same shape as SessionReviewView's private diagDescribe, for the focus tracker above. */
-    private static String describeForDiag(Node node) {
-        if (node == null) {
-            return "none";
-        }
-        StringBuilder sb = new StringBuilder(node.getClass().getSimpleName());
-        node.getStyleClass().forEach(c -> sb.append('.').append(c));
-        if (node instanceof javafx.scene.control.Labeled labeled) {
-            sb.append("(\"").append(labeled.getText()).append("\")");
-        }
-        return sb.toString();
     }
 
     /** How many hunks {@link #FILE_A} has -- what {@code ⇧A}/{@code ⇧R} settle. */

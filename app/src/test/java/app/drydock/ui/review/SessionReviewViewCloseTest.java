@@ -23,6 +23,8 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -87,14 +89,18 @@ class SessionReviewViewCloseTest extends ApplicationTest {
      * button's label off "(section)".
      */
     @Test
-    void closeStopsTheBarFromReactingToLaterFocusChanges() {
+    void closeStopsTheBarFromReactingToLaterFocusChanges() throws TimeoutException {
         clickOn(".review-intent-card");
         WaitForAsyncUtils.waitForFxEvents();
         assertEquals("Approve (section)", approveButtonText());
 
         interact(view::close);
-        clickOn(".review-diff-cell");
-        WaitForAsyncUtils.waitForFxEvents();
+        // The list, not a ".review-diff-cell": a cell lookup can return the
+        // spare cell hanging below the list's viewport, whose centre lies over
+        // the verdict bar -- a click that moves no focus at all, which would
+        // pass this test whether or not close() detached anything.
+        clickOn(".review-diff-list");
+        WaitForAsyncUtils.waitFor(5, TimeUnit.SECONDS, view::diagFocusInDiffColumn);
 
         assertEquals("Approve (section)", approveButtonText(),
                 "close() must detach the focus listener so a later focus change no longer "
