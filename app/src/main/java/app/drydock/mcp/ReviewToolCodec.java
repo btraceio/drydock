@@ -3,9 +3,13 @@ package app.drydock.mcp;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.Confidence;
+import app.drydock.review.HunkDigest;
+import app.drydock.review.RecheckAssessment;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
+import app.drydock.review.ReviewVerdict;
+import app.drydock.review.Sections;
 import app.drydock.review.Severity;
 import app.drydock.state.json.JsonValue;
 import app.drydock.state.json.JsonValue.JsonArray;
@@ -16,8 +20,11 @@ import app.drydock.state.json.JsonValue.JsonString;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * Encodes and decodes the Review MCP payloads (schema §§1-4), keeping the
@@ -217,12 +224,35 @@ final class ReviewToolCodec {
     }
 
     /**
-     * Byte cost of an encoded hunk, measured on its own serialization rather
+     * Byte cost of an encoded value, measured on its own serialization rather
      * than estimated: the budget exists to keep a response under a hard limit,
      * and an estimate that drifts would either waste the budget or blow it.
+     * Package-private so {@link McpToolRouter} can charge the {@code
+     * sections} include against the same budget {@code hunks} pays from.
      */
-    private static int approximateBytes(JsonValue value) {
+    static int approximateBytes(JsonValue value) {
         return app.drydock.state.json.JsonWriter.write(value).getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+    }
+
+    /**
+     * drydock's computed grouping ({@code review_scope}'s {@code sections}
+     * include), offered so an agent can accept-and-name it rather than
+     * regroup from scratch and lose the header conventions and the
+     * dependency order {@link Sections#of} already worked out.
+     */
+    static JsonValue sectionsToJson(List<Sections.Section> sections) {
+        List<JsonValue> entries = new ArrayList<>();
+        for (Sections.Section section : sections) {
+            JsonObject obj = JsonObject.empty();
+            obj.put("title", new JsonString(section.title()));
+            obj.put("files", new JsonArray(section.files().stream()
+                    .map(file -> (JsonValue) new JsonString(file)).toList()));
+            obj.put("hunkIds", new JsonArray(section.hunkIds().stream()
+                    .map(id -> (JsonValue) new JsonString(id)).toList()));
+            section.hubSymbol().ifPresent(hub -> obj.put("hubSymbol", new JsonString(hub)));
+            entries.add(obj);
+        }
+        return new JsonArray(entries);
     }
 
     // ---- review_intents (agent -> drydock) ----------------------------------
@@ -232,6 +262,10 @@ final class ReviewToolCodec {
             throw new McpToolException("intents must be an array");
         }
         List<ReviewIntent> intents = new ArrayList<>();
+        // Provisional only: IntentGrouping.set re-assigns a dense 1..N over
+        // the order `reads` produces and discards whatever arrives here, so
+        // this numbering never reaches a rail. It is kept because a
+        // ReviewIntent has to carry SOME number to be constructed at all.
         int number = 1;
         for (JsonValue element : array.elements()) {
             if (!(element instanceof JsonObject obj)) {
@@ -248,9 +282,84 @@ final class ReviewToolCodec {
                             "intent.rationale"),
                     stringList(obj, "hunkIds"),
                     collapseFromJson(obj),
-                    obj.get("autoApprove") instanceof JsonBoolean auto && auto.value()));
+                    obj.get("autoApprove") instanceof JsonBoolean auto && auto.value(),
+                    readsFromJson(obj, id)));
         }
+        checkReadsResolve(intents);
         return List.copyOf(intents);
+    }
+
+    /**
+     * One intent's {@code reads}, rejecting a malformed one rather than
+     * quietly reading it as an empty list.
+     *
+     * <p>Decoded here and not through {@link #stringList}, which answers
+     * {@code List.of()} for any non-array and drops any non-string element.
+     * That lenience predates this task and is shared with {@code hunkIds},
+     * where a dropped entry costs at worst one hunk's membership in a group
+     * a human can see and fix. It costs far more here: {@code
+     * "reads":"the-guard"} -- one dependency written without the brackets,
+     * which is the likeliest way to get this wrong -- would decode as
+     * "declared nothing", and the rail would then render the exact REVERSE of
+     * the order the agent asserted. With no diagnostic on any surface, and
+     * {@code reads} echoed on no outbound wire, the agent could not discover
+     * it had happened. Absent and broken must not look the same -- the same
+     * rule {@link app.drydock.review.Graphs#topologicalOrder} keeps for an
+     * edge pointing outside its nodes, and the reason {@link
+     * #checkReadsResolve} exists at all.</p>
+     *
+     * <p>An explicit {@code null} is absent, not broken: it is how several
+     * clients spell an omitted optional field.</p>
+     */
+    private static List<String> readsFromJson(JsonObject obj, String id) throws McpToolException {
+        JsonValue raw = obj.get("reads");
+        if (raw == null || raw instanceof JsonValue.JsonNull) {
+            return List.of();
+        }
+        if (!(raw instanceof JsonArray array)) {
+            throw new McpToolException("intent '" + id + "' has a reads that is not an array; "
+                    + "one dependency is [\"other-id\"], not \"other-id\"");
+        }
+        List<String> reads = new ArrayList<>();
+        for (JsonValue element : array.elements()) {
+            if (!(element instanceof JsonString read)) {
+                throw new McpToolException("intent '" + id + "' has a reads entry that is not a "
+                        + "string; every entry names an intent id in this call");
+            }
+            reads.add(read.value());
+        }
+        return List.copyOf(reads);
+    }
+
+    /**
+     * Rejects the whole batch when a {@code reads} names an id no intent in
+     * the same call carries.
+     *
+     * <p>Checked HERE, at decode, and not where the order is actually built:
+     * {@link app.drydock.review.Graphs#topologicalOrder} does refuse an edge
+     * pointing outside its nodes -- deliberately, so absent and broken cannot
+     * look the same -- but it refuses with an {@link IllegalArgumentException}
+     * on whatever thread {@code IntentGrouping.set} was called from, where
+     * the agent that sent the payload never hears about it. An MCP error
+     * naming the id and the intent that declared it is the report the agent
+     * can act on.</p>
+     *
+     * <p>All-or-nothing, like the rest of the batch: half a grouping, with
+     * some intents' declared order silently dropped, is worse than none.</p>
+     */
+    private static void checkReadsResolve(List<ReviewIntent> intents) throws McpToolException {
+        Set<String> ids = new LinkedHashSet<>();
+        for (ReviewIntent intent : intents) {
+            ids.add(intent.id());
+        }
+        for (ReviewIntent intent : intents) {
+            for (String read : intent.reads()) {
+                if (!ids.contains(read)) {
+                    throw new McpToolException("intent '" + intent.id() + "' reads '" + read
+                            + "', which is not an intent in this call");
+                }
+            }
+        }
     }
 
     private static Optional<ReviewIntent.Collapse> collapseFromJson(JsonObject obj)
@@ -264,6 +373,142 @@ final class ReviewToolCodec {
                         "collapse.evidence"),
                 collapse.get("hunkCount") instanceof JsonNumber count ? count.asInt() : 0,
                 collapse.get("fileCount") instanceof JsonNumber count ? count.asInt() : 0));
+    }
+
+    // ---- review_recheck (agent -> drydock) ----------------------------------
+
+    /**
+     * Decodes {@code review_recheck}'s {@code assessments} array, translating
+     * each wire {@code hunkId} into the content digest a verdict is actually
+     * keyed by (spec §9.7).
+     *
+     * <p><strong>The two ids are different things.</strong> {@link
+     * ReviewIntent#hunkId} is POSITIONAL -- a file and an index into that
+     * file's hunks -- and is what an agent reads off {@code review_scope}.
+     * {@link HunkDigest#of} is CONTENT-ADDRESSED and deliberately excludes
+     * line numbers, so a hunk that merely moved keeps its digest. Storing the
+     * positional id would strand every assessment the moment the diff
+     * re-hunked; this walks the diff the same way {@code IntentHunks.digestsOf}
+     * does and stores the digest.</p>
+     *
+     * <p>The base PAIR is derived, never taken from the wire. {@code fromBase}
+     * is the base the hunk's own verdict was recorded against and {@code
+     * toBase} is the scope's current base commit, so the key this writes is
+     * by construction the key the board later reads with. An agent-supplied
+     * pair could name commits no verdict was ever judged against, and the
+     * recheck would then sit in the store answering a question nobody asks --
+     * absent and broken looking the same again.</p>
+     *
+     * <p>Five things reject the whole batch, each naming the offending id: a
+     * {@code hunkId} that resolves to nothing in the current diff; a hunk that
+     * carries no verdict at all, which has no {@code fromBase} and therefore
+     * nothing to recheck; a mark with no {@code why}, which is the reflexive
+     * signal this tool is asymmetric to avoid; a {@code why} that fails {@link
+     * PromptSafety}; and an {@code affected} or {@code why} of the wrong JSON
+     * type, which must not decode as "said nothing" (see {@link
+     * #affectedFromJson}). All-or-nothing like the rest of this surface: a
+     * silently skipped entry is an agent's recheck that the human believes
+     * happened and did not.</p>
+     */
+    static List<RecheckAssessment> assessmentsFromJson(String scopeId, JsonValue value, UnifiedDiff diff,
+                                                       Map<String, ReviewVerdict> verdictsByDigest,
+                                                       String toBase, Instant at)
+            throws McpToolException {
+        if (!(value instanceof JsonArray array)) {
+            throw new McpToolException("assessments must be an array");
+        }
+        List<RecheckAssessment> assessments = new ArrayList<>();
+        for (JsonValue element : array.elements()) {
+            if (!(element instanceof JsonObject obj)) {
+                throw new McpToolException("each assessment must be an object");
+            }
+            String hunkId = requireString(obj, "hunkId");
+            String digest = digestOfHunkId(diff, hunkId).orElseThrow(() -> new McpToolException(
+                    "assessment names hunkId '" + hunkId + "', which is not a hunk of this scope's "
+                            + "current diff; hunk ids are the ones review_scope reports and are "
+                            + "positional, so a re-diff can strand them"));
+            ReviewVerdict verdict = verdictsByDigest.get(digest);
+            if (verdict == null) {
+                throw new McpToolException("assessment names hunkId '" + hunkId + "', which carries "
+                        + "no verdict; a recheck says whether a base move undermines a decision, "
+                        + "and there is no decision on that hunk to undermine");
+            }
+            boolean affected = affectedFromJson(obj, hunkId);
+            String why = PromptSafety.checkInboundText(whyFromJson(obj, hunkId), "assessment.why");
+            if (affected && why.isBlank()) {
+                throw new McpToolException("assessment marks hunkId '" + hunkId + "' affected with "
+                        + "no why; a staleness signal asserted with no reason is the reflexive "
+                        + "click this recheck is asymmetric to avoid, and a human will be shown "
+                        + "the reason as the whole justification for re-reading the hunk");
+            }
+            assessments.add(new RecheckAssessment(scopeId, digest, verdict.baseCommit(), toBase,
+                    affected, why, at));
+        }
+        return List.copyOf(assessments);
+    }
+
+    /**
+     * One assessment's {@code affected}, refusing anything that is not a
+     * boolean rather than quietly reading it as {@code false}.
+     *
+     * <p>The same rule {@link #readsFromJson} keeps, and for the same reason:
+     * absent and broken must not look the same. {@code "affected":"true"} from
+     * a stringifying client -- not hypothetical, {@code
+     * McpToolRouter.optionalIntArg} exists to accommodate one -- would
+     * otherwise decode as "the agent looked and found nothing", which is the
+     * one answer this tool must never manufacture. The direction is inert, so
+     * nothing unsafe follows; what follows is a recheck the human believes
+     * happened and did not, which is the failure this whole surface is drawn
+     * around.</p>
+     *
+     * <p>Absent, and an explicit {@code null}, stay ABSENT and decode as
+     * {@code false}: an assessment that says nothing about a hunk is a legal
+     * thing to send, and {@code null} is how several clients spell an omitted
+     * optional field.</p>
+     */
+    private static boolean affectedFromJson(JsonObject obj, String hunkId) throws McpToolException {
+        JsonValue raw = obj.get("affected");
+        if (raw == null || raw instanceof JsonValue.JsonNull) {
+            return false;
+        }
+        if (!(raw instanceof JsonBoolean flag)) {
+            throw new McpToolException("assessment for hunkId '" + hunkId + "' has an affected that "
+                    + "is not a boolean; it is true or false, not \"true\" or 1");
+        }
+        return flag.value();
+    }
+
+    /** One assessment's {@code why}, refusing a non-string for {@link #affectedFromJson}'s reason. */
+    private static String whyFromJson(JsonObject obj, String hunkId) throws McpToolException {
+        JsonValue raw = obj.get("why");
+        if (raw == null || raw instanceof JsonValue.JsonNull) {
+            return "";
+        }
+        if (!(raw instanceof JsonString why)) {
+            throw new McpToolException("assessment for hunkId '" + hunkId + "' has a why that is "
+                    + "not a string; it is the sentence a human reads as the reason");
+        }
+        return why.value();
+    }
+
+    /**
+     * The content digest of the hunk {@code hunkId} names in {@code diff}, or
+     * empty when it names no hunk there -- an unknown file, or an index past
+     * that file's hunk count.
+     */
+    private static Optional<String> digestOfHunkId(UnifiedDiff diff, String hunkId) {
+        return ReviewIntent.parseHunkId(hunkId).flatMap(anchor -> {
+            for (UnifiedDiff.FileDiff file : diff.files()) {
+                if (!file.path().equals(anchor.file())) {
+                    continue;
+                }
+                List<UnifiedDiff.Hunk> hunks = file.hunks();
+                return anchor.hunkIndex() < hunks.size()
+                        ? Optional.of(HunkDigest.of(file.path(), hunks.get(anchor.hunkIndex())))
+                        : Optional.empty();
+            }
+            return Optional.empty();
+        });
     }
 
     // ---- review_finding (agent -> drydock) ----------------------------------

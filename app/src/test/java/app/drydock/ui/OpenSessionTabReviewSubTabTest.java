@@ -4,6 +4,8 @@ import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
+import app.drydock.review.BaseMove;
+import app.drydock.review.ChangeGraph;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
@@ -33,6 +35,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.TreeSet;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -56,8 +59,7 @@ class OpenSessionTabReviewSubTabTest extends ApplicationTest {
     @Override
     public void start(Stage stage) {
         this.stage = stage;
-        stage.setScene(new Scene(new StackPane(), 200, 200));
-        stage.show();
+        TestStages.show(stage, new Scene(new StackPane(), 200, 200));
     }
 
     @AfterEach
@@ -485,17 +487,49 @@ class OpenSessionTabReviewSubTabTest extends ApplicationTest {
         }
 
         @Override
-        public List<ReviewIntent> intents(ReviewScope scope, UnifiedDiff diff) {
+        public List<ReviewIntent> intents(ReviewScope scope, UnifiedDiff diff,
+                                          Optional<ChangeGraph> graph) {
             return List.of();
         }
 
         @Override
-        public Optional<ReviewVerdict> verdict(ReviewScope scope, ReviewIntent intent) {
+        public long groupingVersion(ReviewScope scope) {
+            return 0;
+        }
+
+        @Override
+        public boolean hasReviewerGrouping(ReviewScope scope) {
+            return false;
+        }
+
+        @Override
+        public Optional<ReviewVerdict> verdict(ReviewScope scope, String hunkDigest) {
             return Optional.empty();
         }
 
         @Override
-        public void setVerdict(ReviewScope scope, ReviewIntent intent, Optional<ReviewVerdict.Decision> decision) {
+        public void setVerdict(ReviewScope scope, ReviewIntent intent, List<String> hunkDigests,
+                               Optional<ReviewVerdict.Decision> decision, boolean blocked) {
+        }
+
+        @Override
+        public void confirmStillGood(ReviewScope scope, List<String> hunkDigests) {
+        }
+
+        @Override
+        public String currentBase(ReviewScope scope) {
+            return SessionReviewView.UNRESOLVED_BASE;
+        }
+
+        @Override
+        public BaseMove.Delta baseMove(ReviewScope scope, String recordedBase) {
+            return new BaseMove.Delta(true, new TreeSet<>());
+        }
+
+        @Override
+        public boolean assessedAffected(ReviewScope scope, String hunkDigest,
+                                        String fromBase, String toBase) {
+            return false;
         }
 
         @Override
@@ -523,7 +557,8 @@ class OpenSessionTabReviewSubTabTest extends ApplicationTest {
         }
 
         @Override
-        public void askAgentToFix(ReviewScope scope, ReviewIntent intent, List<ReviewAnnotation> findings) {
+        public boolean askAgentToFix(ReviewScope scope, ReviewIntent intent, List<ReviewAnnotation> findings) {
+            return false;
         }
 
         @Override
@@ -532,6 +567,21 @@ class OpenSessionTabReviewSubTabTest extends ApplicationTest {
 
         @Override
         public boolean runReview(ReviewScope scope) {
+            return false;
+        }
+
+        @Override
+        public boolean dispatchRecheck(ReviewScope scope, String fromBase, String toBase) {
+            return false;
+        }
+
+        @Override
+        public boolean supportsAutomaticRecheck(ReviewScope scope) {
+            return false;
+        }
+
+        @Override
+        public boolean assessedMove(ReviewScope scope, String fromBase, String toBase) {
             return false;
         }
     }

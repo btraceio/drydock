@@ -62,7 +62,7 @@ class ShortcutsOverlayParityTest {
                 .collect(Collectors.toSet());
 
         Set<String> bound = Set.of("d", "c", "m", "i", "\\", "[", "]", "n", "a", "r", "u",
-                "⏎", "⇧F", "f");
+                "⏎", "⇧F", "f", "⇧A", "⇧R", "p");
 
         assertEquals(bound, advertised,
                 "the overlay's IN REVIEW rows and what SessionReviewView.handleShortcut "

@@ -728,6 +728,44 @@ public final class GitStatusService implements AutoCloseable {
         return sha.isEmpty() ? Optional.empty() : Optional.of(sha);
     }
 
+    /**
+     * The commit {@code ref} names in {@code workingDirectory}, or empty when
+     * it names none -- a branch that does not exist here, a tag that was
+     * never fetched, or a directory that is not a repository.
+     *
+     * <p>Empty rather than throwing, for {@link #headCommitBlocking}'s
+     * reason: the caller is stamping or comparing metadata, and a base branch
+     * that cannot be resolved right now is an ordinary state of a fresh
+     * worktree, not a failure worth costing the caller its operation. What
+     * the caller must NOT do is fall back to the ref name -- a verdict
+     * recorded against {@code "main"} and compared against {@code "main"}
+     * would never read as stale, which is the inert no-op this method
+     * exists to end.</p>
+     *
+     * <p>{@code --end-of-options} precedes the ref because a ref may begin
+     * with {@code -} and would otherwise be read as a flag. Blocking; never
+     * call on the FX thread.</p>
+     */
+    public Optional<String> commitForRefBlocking(Path workingDirectory, String ref) {
+        Optional<Path> git = locator.locate();
+        if (git.isEmpty() || ref == null || ref.isBlank()) {
+            return Optional.empty();
+        }
+        ProcessResult result = run(List.of(git.get().toString(), "-C", workingDirectory.toString(),
+                "rev-parse", "--verify", "--end-of-options", ref + "^{commit}"));
+        if (result.exitCode() != 0) {
+            // Logged rather than folded silently into the empty result: an
+            // unresolvable base is what makes every verdict on the scope read
+            // as stale, and a reader asking why must be able to find out.
+            LOG.log(Level.WARNING, "git rev-parse --verify " + ref + " failed (exit "
+                    + result.exitCode() + ") in " + workingDirectory + ": "
+                    + ProcessRunner.excerpt(result.stderr()));
+            return Optional.empty();
+        }
+        String sha = result.stdout().strip();
+        return sha.isEmpty() ? Optional.empty() : Optional.of(sha);
+    }
+
     /** Async form of {@link #headCommitBlocking}, on this service's background executor. */
     public CompletableFuture<Optional<String>> headCommit(Path workingDirectory) {
         return CompletableFuture.supplyAsync(() -> headCommitBlocking(workingDirectory), executor);

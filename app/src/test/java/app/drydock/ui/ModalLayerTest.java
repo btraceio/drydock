@@ -32,8 +32,7 @@ class ModalLayerTest extends ApplicationTest {
     @Override
     public void start(Stage stage) {
         layer = new ModalLayer();
-        stage.setScene(new Scene(new StackPane(layer), 400, 300));
-        stage.show();
+        TestStages.show(stage, new Scene(new StackPane(layer), 400, 300));
     }
 
     @Test

@@ -3,6 +3,8 @@ package app.drydock.ui.review;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.AnnotationStore;
+import app.drydock.review.BaseMove;
+import app.drydock.review.ChangeGraph;
 import app.drydock.review.IntentGrouping;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewIntent;
@@ -16,6 +18,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.TreeSet;
 
 /**
  * A {@link SessionReviewView.Host} backed by a real {@link AnnotationStore}
@@ -33,6 +36,18 @@ final class FakeReviewHost implements SessionReviewView.Host {
     final IntentGrouping intents = new IntentGrouping();
 
     final List<String> handedOffPrompts = new ArrayList<>();
+
+    /** Every automatic recheck asked for, as {@code fromBase->toBase}. */
+    final List<String> recheckDispatches = new ArrayList<>();
+
+    /** Whether the recheck hand-off reaches a terminal; false stands in for a closed tab. */
+    boolean recheckHandOffSucceeds = true;
+
+    /** Whether this scope's agent may be asked automatically (spec §9.7). */
+    boolean supportsAutomaticRecheck = true;
+
+    /** Per-recorded-base deltas; {@link #baseDelta} answers for any base not listed. */
+    final java.util.Map<String, BaseMove.Delta> baseDeltaByRecordedBase = new java.util.HashMap<>();
     final List<String> submittedScopes = new ArrayList<>();
     final List<Path> explorerJumps = new ArrayList<>();
 
@@ -42,6 +57,22 @@ final class FakeReviewHost implements SessionReviewView.Host {
 
     /** What {@link #intents} groups by when no reviewer has supplied a grouping. */
     UnifiedDiff diff = new UnifiedDiff(List.of());
+
+    /**
+     * What {@code scope.base()} / {@code scope.head()} RESOLVE to. Refs are
+     * branch names; a verdict stamped with one and compared against the same
+     * one could never be stale, so the real host resolves them through git
+     * and this fake stands in for that answer. Tests move {@link #baseCommit}
+     * to make a verdict stale.
+     */
+    String baseCommit = "1".repeat(40);
+    String headCommit = "2".repeat(40);
+
+    /**
+     * What a base move touched, as {@code BaseMove.between} would report it.
+     * Empty and resolvable by default: a move that provably could not matter.
+     */
+    BaseMove.Delta baseDelta = new BaseMove.Delta(false, new TreeSet<>());
 
     /** Whether the Explorer jump can succeed (no session bound = false). */
     boolean explorerAvailable;
@@ -95,38 +126,91 @@ final class FakeReviewHost implements SessionReviewView.Host {
     }
 
     @Override
-    public List<ReviewIntent> intents(ReviewScope scope, UnifiedDiff diff) {
-        List<ReviewIntent> grouped = intents.intentsFor(scope.id(), diff);
-        // The real host migrates here too. A fake that skipped it would be
-        // fine right up until the migration broke, which is the one moment a
-        // fake earns its keep.
-        store.migrateLegacyVerdicts(scope.id(), grouped);
-        return grouped;
+    public List<ReviewIntent> intents(ReviewScope scope, UnifiedDiff diff,
+                                      Optional<ChangeGraph> graph) {
+        return intents.intentsFor(scope.id(), diff, graph);
     }
 
     @Override
-    public Optional<ReviewVerdict> verdict(ReviewScope scope, ReviewIntent intent) {
-        return store.verdict(scope.id(), intent.id());
+    public long groupingVersion(ReviewScope scope) {
+        return intents.version(scope.id());
     }
 
     @Override
-    public void setVerdict(ReviewScope scope, ReviewIntent intent,
-                           Optional<ReviewVerdict.Decision> decision) {
+    public boolean hasReviewerGrouping(ReviewScope scope) {
+        return intents.hasReviewerGrouping(scope.id());
+    }
+
+    @Override
+    public Optional<ReviewVerdict> verdict(ReviewScope scope, String hunkDigest) {
+        return store.verdict(scope.id(), hunkDigest);
+    }
+
+    @Override
+    public void setVerdict(ReviewScope scope, ReviewIntent intent, List<String> hunkDigests,
+                           Optional<ReviewVerdict.Decision> decision, boolean blocked) {
         if (decision.isEmpty()) {
-            store.clearVerdict(scope.id(), intent.id());
+            for (String digest : hunkDigests) {
+                store.clearVerdict(scope.id(), digest);
+            }
             return;
         }
-        if (decision.get() == ReviewVerdict.Decision.APPROVED && blocked(scope, intent)) {
+        if (decision.get() == ReviewVerdict.Decision.APPROVED && blocked) {
             return;
         }
-        store.putVerdict(new ReviewVerdict(scope.id(), intent.id(), decision.get(),
-                Optional.empty(), Instant.now()));
+        for (String digest : hunkDigests) {
+            store.putVerdict(new ReviewVerdict(scope.id(), digest, decision.get(),
+                    Optional.empty(), Instant.now(), baseCommit, headCommit));
+        }
     }
 
-    private boolean blocked(ReviewScope scope, ReviewIntent intent) {
-        return store.forScope(scope.id()).stream()
-                .filter(finding -> finding.intentId().map(id -> id.equals(intent.id())).orElse(true))
-                .anyMatch(ReviewAnnotation::blocksApproval);
+    @Override
+    public void confirmStillGood(ReviewScope scope, List<String> hunkDigests) {
+        Instant now = Instant.now();
+        for (String digest : hunkDigests) {
+            store.verdict(scope.id(), digest).ifPresent(verdict ->
+                    store.putVerdict(verdict.confirmedAgainst(baseCommit, headCommit, now)));
+        }
+    }
+
+    @Override
+    public String currentBase(ReviewScope scope) {
+        return baseCommit;
+    }
+
+    @Override
+    public BaseMove.Delta baseMove(ReviewScope scope, String recordedBase) {
+        // Per RECORDED base, like the real host, which memoizes one delta per
+        // (scope, oldBase, newBase). Returning one field for every base was a
+        // fiction that made a whole defect class untestable: two approvals
+        // recorded at different bases genuinely can resolve differently --
+        // one MOVED, one still in flight, one provably irrelevant -- and a
+        // fake that collapses them cannot express it.
+        return baseDeltaByRecordedBase.getOrDefault(recordedBase, baseDelta);
+    }
+
+    /** Reads the real store, so a test drives this through {@code putAssessment}. */
+    @Override
+    public boolean assessedAffected(ReviewScope scope, String hunkDigest,
+                                    String fromBase, String toBase) {
+        return store.assessedAffected(scope.id(), hunkDigest, fromBase, toBase);
+    }
+
+    @Override
+    public boolean supportsAutomaticRecheck(ReviewScope scope) {
+        return supportsAutomaticRecheck;
+    }
+
+    /** Reads the real store, like {@link #assessedAffected}. */
+    @Override
+    public boolean assessedMove(ReviewScope scope, String fromBase, String toBase) {
+        return store.assessedMove(scope.id(), fromBase, toBase);
+    }
+
+    @Override
+    public boolean dispatchRecheck(ReviewScope scope, String fromBase, String toBase) {
+        recheckDispatches.add(fromBase + "->" + toBase);
+        return recheckHandOffSucceeds;
     }
 
     @Override
@@ -165,12 +249,20 @@ final class FakeReviewHost implements SessionReviewView.Host {
         store.mutate(finding.key(), current -> current.withSeverityOverride(severity));
     }
 
+    /**
+     * Whether a session is bound to hand work to. False models the real
+     * "no session, or its tab is closed" case, which the real host reports
+     * through {@code sendToBoundSession}'s own boolean.
+     */
+    boolean sessionBound = true;
+
     @Override
-    public void askAgentToFix(ReviewScope scope, ReviewIntent intent, List<ReviewAnnotation> findings) {
-        if (findings.isEmpty()) {
-            return;
+    public boolean askAgentToFix(ReviewScope scope, ReviewIntent intent, List<ReviewAnnotation> findings) {
+        if (findings.isEmpty() || !sessionBound) {
+            return false;
         }
         handedOffPrompts.add(intent.title() + ": " + findings.size() + " findings");
+        return true;
     }
 
     @Override
