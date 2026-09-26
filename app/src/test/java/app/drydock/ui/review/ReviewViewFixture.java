@@ -9,6 +9,7 @@ import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
 import app.drydock.review.SessionReviewScopes;
 
+import javafx.beans.value.ChangeListener;
 import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.Label;
@@ -171,18 +172,52 @@ abstract class ReviewViewFixture extends ApplicationTest {
                     + " boundsInLocal=" + node.getBoundsInLocal()
                     + " boundsInScene=" + node.localToScene(node.getBoundsInLocal()));
         }));
-        moveTo(".review-diff-cell");
-        press(MouseButton.PRIMARY);
-        release(MouseButton.PRIMARY);
-        WaitForAsyncUtils.waitForFxEvents();
+        // TEMPORARY: a before/after snapshot only ever showed the WRONG
+        // final owner (e.g. the top bar's density button), never how it got
+        // there -- this logs every transition around the click, in order, so
+        // the next failure shows whether `list` is ever the owner at all, or
+        // what it flips through on the way to the wrong one.
+        int[] seq = {0};
+        // The stack is the point: it names the code path that moved focus
+        // (a requestFocus caller, Scene's own traversal after a node went
+        // ineligible, a window-focus change...), which the owners alone
+        // never could.
+        ChangeListener<Node> tracker = (obs, oldOwner, newOwner) -> System.out.println(
+                "[diag] focusOwner #" + (seq[0]++) + " " + describeForDiag(oldOwner)
+                        + " -> " + describeForDiag(newOwner) + " via\n" + StackWalker.getInstance()
+                        .walk(frames -> frames.skip(1).limit(40)
+                                .map(f -> "[diag]     at " + f)
+                                .collect(java.util.stream.Collectors.joining("\n"))));
+        interact(() -> view.getScene().focusOwnerProperty().addListener(tracker));
         try {
-            WaitForAsyncUtils.waitFor(5, TimeUnit.SECONDS, view::diagFocusInDiffColumn);
-        } catch (TimeoutException e) {
-            // TEMPORARY: a bare TimeoutException says only "it never
-            // happened", not what focus actually settled on instead.
-            throw new TimeoutException(
-                    "focus never landed in the diff column within 5s; " + view.diagFocusSnapshot());
+            moveTo(".review-diff-cell");
+            press(MouseButton.PRIMARY);
+            release(MouseButton.PRIMARY);
+            WaitForAsyncUtils.waitForFxEvents();
+            try {
+                WaitForAsyncUtils.waitFor(5, TimeUnit.SECONDS, view::diagFocusInDiffColumn);
+            } catch (TimeoutException e) {
+                // TEMPORARY: a bare TimeoutException says only "it never
+                // happened", not what focus actually settled on instead.
+                throw new TimeoutException(
+                        "focus never landed in the diff column within 5s; " + view.diagFocusSnapshot());
+            }
+        } finally {
+            interact(() -> view.getScene().focusOwnerProperty().removeListener(tracker));
         }
+    }
+
+    /** TEMPORARY: same shape as SessionReviewView's private diagDescribe, for the focus tracker above. */
+    private static String describeForDiag(Node node) {
+        if (node == null) {
+            return "none";
+        }
+        StringBuilder sb = new StringBuilder(node.getClass().getSimpleName());
+        node.getStyleClass().forEach(c -> sb.append('.').append(c));
+        if (node instanceof javafx.scene.control.Labeled labeled) {
+            sb.append("(\"").append(labeled.getText()).append("\")");
+        }
+        return sb.toString();
     }
 
     /** How many hunks {@link #FILE_A} has -- what {@code ⇧A}/{@code ⇧R} settle. */

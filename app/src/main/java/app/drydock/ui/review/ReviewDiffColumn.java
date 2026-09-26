@@ -382,6 +382,16 @@ final class ReviewDiffColumn extends BorderPane {
             System.out.println("[diag] review-diff-list MOUSE_PRESSED target=" + e.getTarget()
                     + " sceneXY=" + e.getSceneX() + "," + e.getSceneY());
             list.requestFocus();
+            // TEMPORARY, same investigation: Scene.requestFocus silently
+            // ignores a node that cannot receive focus right now (invisible,
+            // disabled, or detached), so "requestFocus ran" alone never
+            // proved the list became the owner. This says whether it did,
+            // and if not, which eligibility condition refused it.
+            System.out.println("[diag] review-diff-list after requestFocus: tookFocus="
+                    + (list.getScene() != null && list.getScene().getFocusOwner() == list)
+                    + " inScene=" + (list.getScene() != null)
+                    + " visible=" + list.isVisible() + " disabled=" + list.isDisabled()
+                    + " columnVisible=" + isVisible() + " columnParent=" + getParent());
         });
         list.setCellFactory(view -> new DiffCell());
         // Long lines wrap; the column never scrolls sideways. See
