@@ -463,7 +463,13 @@ public final class GitStatusService implements AutoCloseable {
         // default branch scores identically against every integration branch
         // that has not moved since, and the default is then the right answer.
         List<String> candidates = new ArrayList<>();
-        candidates.add(defaultBranch);
+        // The default arrives as a bare local name or as origin/<name>
+        // (defaultBranch's own local-first rule); resolved through the same
+        // remote-first rule as every other candidate, or kept verbatim when
+        // it resolves to nothing, so the fallback below is unchanged.
+        String defaultName = defaultBranch.startsWith("origin/")
+                ? defaultBranch.substring("origin/".length()) : defaultBranch;
+        candidates.add(resolveBranch(git, checkoutRoot, defaultName).orElse(defaultBranch));
         for (String name : INTEGRATION_BRANCHES) {
             resolveBranch(git, checkoutRoot, name)
                     .filter(resolved -> !candidates.contains(resolved))
@@ -490,20 +496,28 @@ public final class GitStatusService implements AutoCloseable {
     }
 
     /**
-     * The local branch {@code name} when it exists, otherwise {@code
-     * origin/name} when that does, otherwise empty -- the same local-then-
-     * remote rule {@link #defaultBranchBlocking} applies, and for the same
-     * reason: a PR base branch is often not checked out locally at all.
+     * {@code origin/name} when it exists, otherwise the local branch {@code
+     * name}, otherwise empty. Deliberately the REVERSE of {@link
+     * #defaultBranchBlocking}'s local-first rule: that one names a branch,
+     * this one picks the revision a review diffs against, where a stale
+     * local copy is wrong rather than merely out of date.
      */
     private Optional<String> resolveBranch(Path git, Path repositoryRoot, String name) {
         if (name.isBlank() || name.startsWith("-")) {
             return Optional.empty();
         }
-        if (resolves(git, repositoryRoot, "refs/heads/" + name)) {
-            return Optional.of(name);
-        }
+        // Remote-tracking FIRST. The remote branch is what GitHub diffs a
+        // pull request against, and a local integration branch goes stale
+        // as a matter of course in a worktree workflow -- nobody pulls it.
+        // Resolved local-first, a develop 32 commits behind origin/develop
+        // put all 32 already-merged commits into the review, which then
+        // matched neither the working tree nor the PR. The local branch is
+        // still the answer for a repository with no remote copy of it.
         if (resolves(git, repositoryRoot, "refs/remotes/origin/" + name)) {
             return Optional.of("origin/" + name);
+        }
+        if (resolves(git, repositoryRoot, "refs/heads/" + name)) {
+            return Optional.of(name);
         }
         return Optional.empty();
     }
