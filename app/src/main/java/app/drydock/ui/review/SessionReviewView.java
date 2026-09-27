@@ -2297,6 +2297,12 @@ public final class SessionReviewView extends BorderPane {
         return ReviewDiagFxThread.call(() -> {
             if (!pathMode) {
                 togglePathMode();
+                // The rows togglePathMode just built have no skins until a
+                // CSS pass, and the fan-in control lives inside a row's
+                // graphic -- so without this it has no screen bounds, and
+                // showFanIn builds a popover it has nowhere to show.
+                intentRail.applyCss();
+                intentRail.layout();
             }
             return intentRail.diagOpenFanIn();
         });

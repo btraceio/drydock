@@ -252,6 +252,27 @@ class ReviewFanInPopoverTest extends ApplicationTest {
                 "the changed file is not OUTSIDE the change: " + texts);
     }
 
+    /**
+     * The diag verb starts from INTENTS mode as often as not. It used to
+     * switch to PATH mode and fire the new row's fan-in control in the same
+     * FX block, before any row had a skin -- so the control, living inside a
+     * row's graphic, had no screen bounds, and the popover it built was never
+     * shown. Every real-app {@code faninshot} came back empty because of it.
+     */
+    @Test
+    void theDiagVerbOpensThePopoverEvenFromIntentsMode() {
+        showRichBoard(repo);
+        awaitFanInCount();
+        press(KeyCode.P).release(KeyCode.P);
+        WaitForAsyncUtils.waitForFxEvents();
+
+        String fired = view.diagOpenFanIn();
+        WaitForAsyncUtils.waitForFxEvents();
+
+        assertTrue(popoverTexts().stream().anyMatch(text -> text.contains("usages")),
+                "the verb reported '" + fired + "' but no popover is showing");
+    }
+
     /** No new interaction is invented: it is the same popover on a third source. */
     @Test
     void thePopoverOffersUsagesAndAskTheAgent() {
