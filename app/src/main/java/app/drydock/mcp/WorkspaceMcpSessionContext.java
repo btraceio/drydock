@@ -314,9 +314,7 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
                     + " is not checked out, so it has no diff to read. "
                     + "Check it out first, or read the patch with the GitHub CLI.");
         }
-        DiffScope diffScope = scope.kind() == ReviewScope.Kind.WORKING_TREE
-                ? DiffScope.WORKING_TREE
-                : DiffScope.BASE;
+        DiffScope diffScope = scope.diffScope();
         try {
             return diffService.diff(scope.diffRoot(), diffScope, scope.base(),
                     DiffService.REVIEW_CONTEXT_LINES).get(JOIN_TIMEOUT_SECONDS, TimeUnit.SECONDS);

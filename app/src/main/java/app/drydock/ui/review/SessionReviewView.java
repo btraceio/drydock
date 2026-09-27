@@ -1133,12 +1133,15 @@ public final class SessionReviewView extends BorderPane {
      *
      * <p>A working tree is diffed against its own {@code HEAD}, never against
      * the base branch, so naming the branch there claimed a comparison the
-     * column was not making.</p>
+     * column was not making. A worktree's diff reaches past HEAD into its
+     * uncommitted work, and says so for the same reason.</p>
      */
     private static String headerContextFor(ReviewScope scope) {
-        String against = scope.kind() == ReviewScope.Kind.WORKING_TREE
-                ? "HEAD"
-                : scope.base();
+        String against = switch (scope.diffScope()) {
+            case WORKING_TREE -> "HEAD";
+            case BRANCH_WORKING_TREE -> scope.base() + "  ·  incl. uncommitted";
+            case BASE, UPSTREAM -> scope.base();
+        };
         String provenance = scope.baseOrigin()
                 .filter(origin -> origin == ReviewBase.Origin.DEFAULT_UNMEASURED)
                 .map(origin -> "  ·  " + origin.description())

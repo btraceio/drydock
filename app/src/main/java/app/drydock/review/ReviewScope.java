@@ -1,6 +1,7 @@
 package app.drydock.review;
 
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.git.DiffScope;
 import app.drydock.git.ReviewBase;
 
 import java.nio.file.Path;
@@ -83,6 +84,26 @@ public record ReviewScope(
      */
     public Path diffRoot() {
         return worktree.orElse(repoRoot);
+    }
+
+    /**
+     * What this scope's diff covers -- the ONE mapping every reader of a
+     * scope's diff goes through (the diff column, intent grouping, the
+     * agent's review tools), so a human and an agent can never be shown
+     * different code under the same scope id.
+     *
+     * <p>A worktree session's "Local changes" is everything the worktree
+     * would contribute: its branch commits and its uncommitted work, from
+     * the fork point ({@link DiffScope#BRANCH_WORKING_TREE}). It used to be
+     * {@code base...HEAD}, which silently left out every edit not yet
+     * committed under a chip promising local changes.</p>
+     */
+    public DiffScope diffScope() {
+        return switch (kind) {
+            case WORKING_TREE -> DiffScope.WORKING_TREE;
+            case WORKTREE -> DiffScope.BRANCH_WORKING_TREE;
+            case BRANCH, PR, STACK -> DiffScope.BASE;
+        };
     }
 
     /**

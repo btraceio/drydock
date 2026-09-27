@@ -447,9 +447,7 @@ final class ReviewDiffColumn extends BorderPane {
         ReviewScope requested = scope;
         long token = ++requestToken;
         showMessage("Diffing…");
-        DiffScope diffScope = requested.kind() == ReviewScope.Kind.WORKING_TREE
-                ? DiffScope.WORKING_TREE
-                : DiffScope.BASE;
+        DiffScope diffScope = requested.diffScope();
         diffService.diff(requested.diffRoot(), diffScope, requested.base(),
                         DiffService.REVIEW_CONTEXT_LINES)
                 .whenComplete((result, failure) -> Platform.runLater(() -> {

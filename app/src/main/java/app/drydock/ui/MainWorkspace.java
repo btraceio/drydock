@@ -1618,6 +1618,9 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         resolved.add(scopes.local());
         scopes.pullRequest().ifPresent(resolved::add);
         for (ReviewScope scope : resolved) {
+            // Deliberately NOT scope.diffScope(): legacy annotations were
+            // filed under the scope as it was mapped THEN (a worktree under
+            // BASE), and adopting them means matching that key.
             DiffScope diffScope = scope.kind() == ReviewScope.Kind.WORKING_TREE
                     ? DiffScope.WORKING_TREE
                     : DiffScope.BASE;
@@ -3388,9 +3391,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 continue;   // a PR with no checkout has no diff; see reviewDiff
             }
             try {
-                DiffScope diffScope = scope.kind() == ReviewScope.Kind.WORKING_TREE
-                        ? DiffScope.WORKING_TREE
-                        : DiffScope.BASE;
+                DiffScope diffScope = scope.diffScope();
                 UnifiedDiff diff = diffService
                         .diff(scope.diffRoot(), diffScope, scope.base(), DiffService.REVIEW_CONTEXT_LINES)
                         .get(INTENT_DIFF_TIMEOUT_SECONDS, TimeUnit.SECONDS);
