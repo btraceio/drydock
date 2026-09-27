@@ -2,6 +2,7 @@ package app.drydock.ui.review;
 
 import app.drydock.ui.TestStages;
 import app.drydock.review.Provenance;
+import app.drydock.review.ReadingPath;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewVerdict;
 
@@ -153,6 +154,46 @@ class ReviewIntentRailCardHeightTest extends ApplicationTest {
         showIntents(List.of(intent(1, "guards.h", ReviewIntent.Kind.CHANGE, "")));
 
         assertSaneHeight(cardHeights().get(0));
+    }
+
+    /**
+     * The narrow rail (a 1280px window) squeezed the entry row's badge and
+     * path into one line: HBox shrank the badge to "START H…", and the path
+     * -- a Label that wraps only at whitespace -- broke mid-name as
+     * "Level.ja / va" in the width left beside it. The badge must render
+     * whole, and a path that fits the row's full width must get it.
+     */
+    @Test
+    void theEntryRowKeepsItsBadgeAndPathWholeOnTheNarrowRail() {
+        narrow();
+        ReadingPath.Step entry = new ReadingPath.Step("h_a_0", "src/demo/Level.java", 1,
+                "referenced by ②, ③", List.of(), true);
+        ReadingPath.Step next = new ReadingPath.Step("h_b_0", "src/demo/Store.java", 2,
+                "builds on ①", List.of(), false);
+        interact(() -> rail.showPath(List.of(entry, next), "h_a_0", ReviewIntentRail.Empty.NONE));
+        WaitForAsyncUtils.waitForFxEvents();
+        interact(() -> rail.getScene().getRoot().layout());
+        WaitForAsyncUtils.waitForFxEvents();
+
+        double[] badge = new double[2];
+        double[] path = new double[2];
+        interact(() -> {
+            javafx.scene.control.Label b = (javafx.scene.control.Label) lookup(".review-path-badge").queryAll()
+                    .stream().filter(n -> ((javafx.scene.control.Label) n).getText().startsWith("START HERE"))
+                    .findFirst().orElseThrow();
+            badge[0] = b.getWidth();
+            badge[1] = b.prefWidth(-1);
+            javafx.scene.control.Label p = (javafx.scene.control.Label) lookup(".review-path-file").queryAll()
+                    .stream().filter(n -> ((javafx.scene.control.Label) n).getText().equals("src/demo/Level.java"))
+                    .findFirst().orElseThrow();
+            path[0] = p.getWidth();
+            path[1] = p.prefWidth(-1);
+        });
+        assertEquals(ReviewIntentRail.NARROW_WIDTH, rail.getWidth(), 0.5, "the rail really is narrow");
+        assertTrue(badge[0] >= badge[1] - 0.5,
+                "START HERE badge elided: " + badge[0] + "px of " + badge[1] + "px");
+        assertTrue(path[0] >= path[1] - 0.5,
+                "a path that fits the row was wrapped mid-name: " + path[0] + "px of " + path[1] + "px");
     }
 
     /**

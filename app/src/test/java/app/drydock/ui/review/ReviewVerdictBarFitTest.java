@@ -153,6 +153,40 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
     }
 
     /**
+     * The hint is kept or dropped whole -- never elided. fitActionRow keeps
+     * it only when it fits beside the title's 96px floor, but the title's
+     * PREFERRED width is usually wider, and HBox then shrank both labels
+     * together, so a kept hint rendered as "… n jumps to the n…" (seen at
+     * a 1280px window). Swept across widths because the defect only exists
+     * in the band between "hint dropped" and "everything fits".
+     */
+    @Test
+    void theHintIsEitherDroppedOrShownWholeAtEveryWidth() {
+        show(intent(2, "append · 3 files · a title long enough to want more room"), Optional.empty());
+        for (double width = BAR_WIDTH_AT_FLOOR; width <= 1400; width += 20) {
+            double w = width;
+            interact(() -> bar.getScene().getWindow().setWidth(w));
+            WaitForAsyncUtils.waitForFxEvents();
+            interact(() -> bar.getScene().getRoot().layout());
+            double[] rendered = new double[2];
+            boolean[] managed = new boolean[1];
+            interact(() -> lookup(".review-verdict-hint").queryAll().stream()
+                    .filter(node -> ((Label) node).getText().contains("jumps to the next"))
+                    .findFirst().ifPresent(node -> {
+                        Label hint = (Label) node;
+                        managed[0] = hint.isManaged();
+                        rendered[0] = hint.getWidth();
+                        rendered[1] = hint.prefWidth(-1);
+                    }));
+            if (managed[0]) {
+                assertTrue(rendered[0] >= rendered[1] - 0.5,
+                        "at width " + w + " the hint is kept but elided: " + rendered[0]
+                                + "px of " + rendered[1] + "px");
+            }
+        }
+    }
+
+    /**
      * The stale banner (spec §9.2) swaps in a label plus two more buttons,
      * "Confirm still good" and "Re-review"; the Phase 1 gate named it as new
      * UI with no fit coverage, and the coordinator's review found the gap

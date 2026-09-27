@@ -216,6 +216,11 @@ final class ReviewVerdictBar extends VBox {
             action.setMinWidth(Region.USE_PREF_SIZE);
         }
         navHint.getStyleClass().add("review-verdict-hint");
+        // Kept or dropped whole (fitActionRow decides which). Left at its
+        // default ellipsis minimum, HBox shrank it alongside the title
+        // whenever the title's preferred width exceeded INTENT_LABEL_MIN --
+        // so a hint judged to fit still rendered as "n jumps to the n…".
+        navHint.setMinWidth(Region.USE_PREF_SIZE);
         HBox.setHgrow(actionSpacer, Priority.ALWAYS);
 
         previousButton.getStyleClass().addAll("review-verdict-nav", "review-verdict-previous");

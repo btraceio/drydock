@@ -20,6 +20,7 @@ import javafx.scene.control.Labeled;
 import javafx.scene.control.ScrollPane;
 import javafx.scene.control.Tooltip;
 import javafx.scene.layout.HBox;
+import javafx.scene.layout.Pane;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
 import javafx.scene.layout.VBox;
@@ -514,6 +515,8 @@ final class ReviewIntentRail extends VBox {
                 ? "START HERE " + SectionStates.sectionMark(step.sectionNumber())
                 : SectionStates.sectionMark(step.sectionNumber()));
         badge.getStyleClass().add("review-path-badge");
+        // Never elided: "START H…" names nothing.
+        badge.setMinWidth(Region.USE_PREF_SIZE);
 
         Label where = new Label(hunksInFile > 1
                 ? step.file() + "  ·  hunk " + (indexInFile + 1) + "/" + hunksInFile
@@ -521,8 +524,20 @@ final class ReviewIntentRail extends VBox {
         where.getStyleClass().add("review-path-file");
         where.setWrapText(true);
         HBox.setHgrow(where, Priority.ALWAYS);
-        HBox headerRow = new HBox(6, badge, where);
-        headerRow.setAlignment(Pos.TOP_LEFT);
+        // The entry badge ("START HERE ①") is too wide to share a line with
+        // the path on the narrow rail: what it left the path was less than a
+        // short file name, and a Label wraps only at whitespace, so the path
+        // broke mid-name ("Level.ja" / "va"). Above the path it costs a line
+        // and leaves the path the row's full width. A bare "②" is narrow
+        // enough to stay inline.
+        Pane headerRow;
+        if (step.entryPoint()) {
+            headerRow = new VBox(2, badge, where);
+        } else {
+            HBox inline = new HBox(6, badge, where);
+            inline.setAlignment(Pos.TOP_LEFT);
+            headerRow = inline;
+        }
 
         Label reason = new Label("file " + step.reason());
         reason.getStyleClass().add("review-path-reason");
