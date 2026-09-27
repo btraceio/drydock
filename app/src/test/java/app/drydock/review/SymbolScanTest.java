@@ -120,6 +120,50 @@ class SymbolScanTest {
         assertFalse(symbols.stream().anyMatch(s -> s.name().equals("id")));
     }
 
+    /**
+     * A name the grammar parsed as an identifier IS one. {@code record},
+     * {@code var} and {@code yield} are only contextual keywords in Java,
+     * and {@code from} is a keyword in Python alone -- all legal method
+     * names, so a scan that dropped them left every call to them unlinked.
+     */
+    @Test
+    void aParsedIdentifierIsASymbolEvenWhenItIsSomeLanguagesKeyword() {
+        List<SymbolScan.Symbol> symbols = SymbolScan.of(file("src/Audit.java",
+                "class Audit {",
+                "  static void record(String m) { from(m); }",
+                "  static String from(String m) { return m; }",
+                "}"));
+
+        assertTrue(has(symbols, "record", true), "record declared");
+        assertTrue(has(symbols, "from", true), "from declared");
+        assertTrue(has(symbols, "from", false), "from used");
+    }
+
+    /**
+     * Some grammars DO emit a receiver as an ordinary identifier -- Python's
+     * {@code self} -- and linking every method that mentions it as "same
+     * concept" would make that link mean nothing.
+     */
+    @Test
+    void aReceiverTheGrammarCallsAnIdentifierIsStillNotASymbol() {
+        List<SymbolScan.Symbol> symbols = SymbolScan.of(file("src/audit.py",
+                "class Audit:",
+                "    def record(self, message):",
+                "        self.flush(message)"));
+
+        assertFalse(symbols.stream().anyMatch(s -> s.name().equals("self")));
+        assertTrue(has(symbols, "record", true));
+    }
+
+    /** Without a grammar nothing classified the word, so the keyword list still applies. */
+    @Test
+    void aLexicalScanStillDropsKeywords() {
+        List<SymbolScan.Symbol> symbols = SymbolScan.of(file("build/setup.zig",
+                "record var yield;"));
+
+        assertFalse(symbols.stream().anyMatch(s -> s.name().equals("record")));
+    }
+
     /** Context lines are scanned but marked, so an edge can require a changed line. */
     @Test
     void aSymbolOnAContextLineIsNotOnAChangedLine() {

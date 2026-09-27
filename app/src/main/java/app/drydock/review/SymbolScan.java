@@ -405,7 +405,7 @@ public final class SymbolScan {
         }
         String name = new String(fragment.utf8(), start, node.getEndByte() - start,
                 StandardCharsets.UTF_8);
-        if (SymbolWords.isSymbol(name)) {
+        if (SymbolWords.isParsedSymbol(name)) {
             out.add(new Symbol(name, path, hunkIndex, declaration, fragment.changed(index)));
         }
     }
