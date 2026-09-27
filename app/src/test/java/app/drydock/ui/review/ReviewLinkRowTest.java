@@ -98,6 +98,39 @@ class ReviewLinkRowTest extends ApplicationTest {
                 "no rendered text may carry the h_ hunk-id prefix: " + texts);
     }
 
+    /**
+     * The LAST row of a card is styled {@code card-bottom}, and that rule's
+     * {@code -fx-padding: 0 0 6 0} outranked the density rule's horizontal
+     * inset -- so whichever footer happened to close the card (a same-concept
+     * {@code ↔}, usually) sat flush against the card edge while its siblings
+     * were indented. Measured at every density, since each one carries its
+     * own padding rule.
+     */
+    @Test
+    void everyFooterRowSharesOneLeftInsetIncludingTheOneClosingTheCard() {
+        showTwoFileDiff();
+        setLinks(Map.of(ReviewIntent.hunkId(FILE_A, 0), List.of(
+                new ReadingPath.Link(ReadingPath.CALLS, ReviewIntent.hunkId(FILE_B, 0), "guards.cpp:x"),
+                new ReadingPath.Link(ReadingPath.CALLED_BY, ReviewIntent.hunkId(FILE_C, 0), "unrelated.cpp:y"),
+                new ReadingPath.Link(ReadingPath.SAME_CONCEPT, ReviewIntent.hunkId(FILE_C, 0),
+                        "unrelated.cpp · both touch z"))));
+
+        for (ReviewDensity density : ReviewDensity.values()) {
+            interact(() -> column.setDensity(density));
+            WaitForAsyncUtils.waitForFxEvents();
+            List<Double> insets = new ArrayList<>();
+            interact(() -> lookup(".review-link-row").queryAll().forEach(node -> {
+                node.applyCss();
+                insets.add(((Button) node).getPadding().getLeft());
+            }));
+
+            assertEquals(3, insets.size(), density + ": one row per link");
+            assertTrue(insets.get(0) > 0, density + ": footers are inset from the card edge: " + insets);
+            assertEquals(1, insets.stream().distinct().count(),
+                    density + ": every footer row, the card's last included, shares one inset: " + insets);
+        }
+    }
+
     @Test
     void aHunkWithNoLinksGetsNoFooterRow() {
         showTwoFileDiff();
