@@ -4006,18 +4006,34 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 }
             }
             case SessionOpenResult.MissingWorkingDirectory missing -> {
+                logResumeClosedTab(requested, "its working directory is missing; asking for a replacement");
                 removeTab(placeholderTab);
                 promptForReplacementDirectory(missing.session());
             }
             case SessionOpenResult.MissingConversation missing -> {
+                logResumeClosedTab(requested, "its pinned conversation has no transcript; "
+                        + "offering a fresh one or deletion");
                 removeTab(placeholderTab);
                 promptForMissingConversation(missing.session());
             }
             case SessionOpenResult.UnsupportedAgent unsupported -> {
+                logResumeClosedTab(requested, "its agent is not supported by this build");
                 removeTab(placeholderTab);
                 showUnsupportedAgent(unsupported.session());
             }
         }
+    }
+
+    /**
+     * Every outcome that takes the placeholder tab away hands the decision
+     * to a dialog -- its own window, which a scene snapshot cannot see and a
+     * diag driver cannot read. Without this line such a resume leaves no
+     * trace at all: the tab appears and vanishes, and "nothing happened" is
+     * indistinguishable from a correct refusal.
+     */
+    private static void logResumeClosedTab(ManagedAgentSession session, String why) {
+        LOG.log(Level.INFO, "Resume of session {0} (\"{1}\") did not open a tab: {2}",
+                new Object[] {session.id(), session.displayName(), why});
     }
 
     /**
