@@ -1,6 +1,10 @@
 package app.drydock.ui.review;
 
+import app.drydock.ui.TestStages;
+import app.drydock.review.Provenance;
+import app.drydock.review.ReadingPath;
 import app.drydock.review.ReviewIntent;
+import app.drydock.review.ReviewVerdict;
 
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
@@ -57,8 +61,7 @@ class ReviewIntentRailCardHeightTest extends ApplicationTest {
         scene.getStylesheets().addAll(
                 getClass().getResource("/app/drydock/ui/app.css").toExternalForm(),
                 getClass().getResource("/app/drydock/ui/theme-dark.css").toExternalForm());
-        stage.setScene(scene);
-        stage.show();
+        TestStages.show(stage, scene);
     }
 
     @Test
@@ -95,10 +98,128 @@ class ReviewIntentRailCardHeightTest extends ApplicationTest {
                 "the only card is " + Math.round(height) + "px tall; " + diagCard());
     }
 
+    // ---- Task 6's three new card elements, at the narrow rail width --------
+
+    /**
+     * The gate that closed Phase 1 found these three -- the settled-
+     * elsewhere marker, the adrift message and the stale banner -- with
+     * presence coverage but no fit coverage at either rail width. All three
+     * are {@code wrapText} labels, so "fit" here means what this class
+     * already measures: a sane card height, not the hundreds of pixels a
+     * label wrapped at zero width produces (see the class javadoc).
+     */
+    @Test
+    void theSettledElsewhereMarkerNamingSeveralSectionsFitsAtNarrowWidth() {
+        narrow();
+        rail.setSectionStateLookup(intent -> new SectionStates.SectionState(
+                Optional.empty(), 1, 1, 3, SectionStates.Staleness.FRESH,
+                List.of("①", "②", "③", "④", "⑤"), false, Provenance.MEASURED));
+        showIntents(List.of(intent(1, "guards.h", ReviewIntent.Kind.CHANGE, "shared hunk")));
+
+        assertSaneHeight(cardHeights().get(0));
+    }
+
+    /**
+     * The agent-asserted banner is LONGER than the measured one ("⚠ agent:
+     * base moved — confirm"), and this rail has truncated before -- Task 18
+     * shipped an illegible one. A longer string on the narrowest card is
+     * exactly where that recurs.
+     */
+    @Test
+    void theClaimedStaleBannerFitsAtNarrowWidth() {
+        narrow();
+        rail.setSectionStateLookup(intent -> new SectionStates.SectionState(
+                Optional.of(ReviewVerdict.Decision.APPROVED), 2, 2, 2,
+                SectionStates.Staleness.MOVED, List.of(), false, Provenance.CLAIMED));
+        showIntents(List.of(intent(1, "guards.h", ReviewIntent.Kind.CHANGE, "")));
+
+        assertSaneHeight(cardHeights().get(0));
+    }
+
+    @Test
+    void theAdriftMessageFitsAtNarrowWidth() {
+        narrow();
+        rail.setSectionStateLookup(intent -> SectionStates.SectionState.notInDiff());
+        showIntents(List.of(intent(1, "profiler.cpp", ReviewIntent.Kind.CHANGE, "")));
+
+        assertSaneHeight(cardHeights().get(0));
+    }
+
+    @Test
+    void theStaleBannerFitsAtNarrowWidth() {
+        narrow();
+        rail.setSectionStateLookup(intent -> new SectionStates.SectionState(
+                Optional.of(ReviewVerdict.Decision.APPROVED), 2, 2, 2,
+                SectionStates.Staleness.MOVED, List.of(), false, Provenance.MEASURED));
+        showIntents(List.of(intent(1, "guards.h", ReviewIntent.Kind.CHANGE, "")));
+
+        assertSaneHeight(cardHeights().get(0));
+    }
+
+    /**
+     * The narrow rail (a 1280px window) squeezed the entry row's badge and
+     * path into one line: HBox shrank the badge to "START H…", and the path
+     * -- a Label that wraps only at whitespace -- broke mid-name as
+     * "Level.ja / va" in the width left beside it. The badge must render
+     * whole, and a path that fits the row's full width must get it.
+     */
+    @Test
+    void theEntryRowKeepsItsBadgeAndPathWholeOnTheNarrowRail() {
+        narrow();
+        ReadingPath.Step entry = new ReadingPath.Step("h_a_0", "src/demo/Level.java", 1,
+                "referenced by ②, ③", List.of(), true);
+        ReadingPath.Step next = new ReadingPath.Step("h_b_0", "src/demo/Store.java", 2,
+                "builds on ①", List.of(), false);
+        interact(() -> rail.showPath(List.of(entry, next), "h_a_0", ReviewIntentRail.Empty.NONE));
+        WaitForAsyncUtils.waitForFxEvents();
+        interact(() -> rail.getScene().getRoot().layout());
+        WaitForAsyncUtils.waitForFxEvents();
+
+        double[] badge = new double[2];
+        double[] path = new double[2];
+        interact(() -> {
+            javafx.scene.control.Label b = (javafx.scene.control.Label) lookup(".review-path-badge").queryAll()
+                    .stream().filter(n -> ((javafx.scene.control.Label) n).getText().startsWith("START HERE"))
+                    .findFirst().orElseThrow();
+            badge[0] = b.getWidth();
+            badge[1] = b.prefWidth(-1);
+            javafx.scene.control.Label p = (javafx.scene.control.Label) lookup(".review-path-file").queryAll()
+                    .stream().filter(n -> ((javafx.scene.control.Label) n).getText().equals("src/demo/Level.java"))
+                    .findFirst().orElseThrow();
+            path[0] = p.getWidth();
+            path[1] = p.prefWidth(-1);
+        });
+        assertEquals(ReviewIntentRail.NARROW_WIDTH, rail.getWidth(), 0.5, "the rail really is narrow");
+        assertTrue(badge[0] >= badge[1] - 0.5,
+                "START HERE badge elided: " + badge[0] + "px of " + badge[1] + "px");
+        assertTrue(path[0] >= path[1] - 0.5,
+                "a path that fits the row was wrapped mid-name: " + path[0] + "px of " + path[1] + "px");
+    }
+
+    /**
+     * Sets the rail's resolved width directly to {@link
+     * ReviewIntentRail#NARROW_WIDTH} rather than through {@code setNarrow},
+     * whose collapse/expand path animates over 160ms -- this needs the
+     * width in place before the very first layout, not 160ms after it.
+     */
+    private void narrow() {
+        interact(() -> {
+            rail.setMinWidth(ReviewIntentRail.NARROW_WIDTH);
+            rail.setPrefWidth(ReviewIntentRail.NARROW_WIDTH);
+            rail.setMaxWidth(ReviewIntentRail.NARROW_WIDTH);
+        });
+    }
+
+    private void assertSaneHeight(double height) {
+        assertTrue(height > 0 && height < SANE_CARD_HEIGHT,
+                "card is " + Math.round(height) + "px tall; cards are tens of pixels, not hundreds");
+    }
+
     // ---- helpers --------------------------------------------------------
 
     private void showIntents(List<ReviewIntent> intents) {
-        interact(() -> rail.setIntents(intents, intents.get(0).id(), ReviewIntentRail.Empty.NONE));
+        interact(() -> rail.setIntents(intents, intents.get(0).id(), ReviewIntentRail.Empty.NONE,
+                Provenance.MEASURED));
         WaitForAsyncUtils.waitForFxEvents();
         // Heights are only real once a layout pass has run over the shown scene.
         interact(() -> rail.getScene().getRoot().layout());

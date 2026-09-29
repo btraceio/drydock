@@ -325,6 +325,61 @@ class GitStatusServiceTest {
         assertEquals("origin/develop", service.reviewBase(clone, Optional.of("develop"), "main").get().ref());
     }
 
+    /**
+     * A clone whose upstream {@code develop} moved on after the local
+     * {@code develop} was last updated, with a feature branch cut from the
+     * NEW upstream tip. Local integration branches go stale as a matter of
+     * course in a worktree workflow -- nobody pulls them -- and a base
+     * resolved to one diffs in every commit it is missing.
+     */
+    private Path cloneWithStaleLocalDevelop(Path tmp) throws Exception {
+        Path upstream = tmp.resolve("upstream");
+        Files.createDirectory(upstream);
+        initRepo(upstream, "master");
+        writeFile(upstream, "README.md", "hello\n");
+        runGit(upstream, "add", "README.md");
+        commit(upstream, "initial commit");
+        runGit(upstream, "branch", "develop");
+        Path clone = tmp.resolve("clone");
+        runGitIn(tmp, "clone", "--quiet", upstream.toString(), clone.toString());
+        runGit(clone, "branch", "develop", "origin/develop");
+
+        runGit(upstream, "checkout", "develop");
+        for (int i = 0; i < 2; i++) {
+            writeFile(upstream, "merged-" + i + ".txt", "m\n");
+            runGit(upstream, "add", "merged-" + i + ".txt");
+            commit(upstream, "someone else's merged work " + i);
+        }
+        runGit(clone, "fetch", "--quiet", "origin");
+        runGit(clone, "checkout", "-b", "feat/x", "origin/develop");
+        writeFile(clone, "feature.txt", "f\n");
+        runGit(clone, "add", "feature.txt");
+        commit(clone, "the one commit under review");
+        return clone;
+    }
+
+    /**
+     * Found live on btrace: local {@code develop} 35 commits behind the
+     * branch, {@code origin/develop} 3 -- so the review showed 32 commits
+     * that had already landed upstream, matching neither the working tree
+     * nor GitHub's diff.
+     */
+    @Test
+    void theReviewBaseIsTheRemoteBranchWhenTheLocalCopyIsStale(@TempDir Path tmp) throws Exception {
+        Path clone = cloneWithStaleLocalDevelop(tmp);
+
+        assertEquals("origin/develop", service.reviewBase(clone, Optional.empty(), "master").get().ref());
+    }
+
+    /** The same for a PR's declared base: GitHub diffs against the remote branch, so must this. */
+    @Test
+    void aPullRequestBaseResolvesToTheRemoteBranchEvenWithAStaleLocalCopy(@TempDir Path tmp)
+            throws Exception {
+        Path clone = cloneWithStaleLocalDevelop(tmp);
+
+        assertEquals("origin/develop", service.reviewBase(clone, Optional.of("develop"), "master").get().ref());
+    }
+
     /** An unresolvable declared base falls through to the local answer rather than failing the diff. */
     @Test
     void anUnknownPullRequestBaseFallsBackToTheLocalGuess(@TempDir Path repo) throws Exception {
@@ -552,6 +607,55 @@ class GitStatusServiceTest {
 
         assertTrue(service.listBranches(clone).get().branches().stream()
                 .anyMatch(branch -> branch.name().equals("origin/added-later")));
+    }
+
+    // ---- resolving a ref to a commit ------------------------------------
+
+    /**
+     * A verdict is stamped with a COMMIT, never with the branch name a scope
+     * carries: recorded against {@code "main"} and compared against
+     * {@code "main"}, it could never be stale.
+     */
+    @Test
+    void aBranchNameResolvesToItsCommit(@TempDir Path repo) throws Exception {
+        initRepo(repo, "main");
+        writeFile(repo, "a.txt", "one");
+        runGit(repo, "add", ".");
+        commit(repo, "first");
+
+        String resolved = service.commitForRefBlocking(repo, "main").orElseThrow();
+
+        assertEquals(service.headCommitBlocking(repo).orElseThrow(), resolved);
+        assertEquals(40, resolved.length(), "a full sha, not an abbreviation: " + resolved);
+    }
+
+    /** Empty, not an exception and not the ref name -- the caller stores "unresolved". */
+    @Test
+    void anUnknownRefResolvesToNothing(@TempDir Path repo) throws Exception {
+        initRepo(repo, "main");
+        writeFile(repo, "a.txt", "one");
+        runGit(repo, "add", ".");
+        commit(repo, "first");
+
+        assertTrue(service.commitForRefBlocking(repo, "no-such-branch").isEmpty());
+    }
+
+    /**
+     * A base is a string this service is handed, not one it chose, and a
+     * string beginning with {@code -} is an option to git unless
+     * {@code --end-of-options} says otherwise -- {@code git rev-parse
+     * --verify --git-dir} answers with the repository's git directory rather
+     * than refusing. It must resolve to nothing, never to whatever a flag
+     * would have printed.
+     */
+    @Test
+    void aRefBeginningWithADashIsReadAsARefNeverAsAnOption(@TempDir Path repo) throws Exception {
+        initRepo(repo, "main");
+        writeFile(repo, "a.txt", "one");
+        runGit(repo, "add", ".");
+        commit(repo, "first");
+
+        assertTrue(service.commitForRefBlocking(repo, "--git-dir").isEmpty());
     }
 
     private GitStatus getStatus(Path repo) throws ExecutionException, InterruptedException {

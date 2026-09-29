@@ -13,6 +13,13 @@ import java.util.Optional;
  * with no {@code review_intents} call the UI falls back to one intent per
  * file (schema §2), which is what keeps the verdict bar meaningful with no
  * reviewer configured.</p>
+ *
+ * <p>{@link #reads()} is the agent's own dependency order: the intents this
+ * one is built on. drydock renders the assertion and never verifies it,
+ * which is the {@link Collapse} precedent (spec §8) -- what it does with it
+ * is order the rail foundation first ({@link IntentGrouping#set}), so the
+ * reading order is one the agent asserted rather than one drydock
+ * computed.</p>
  */
 public record ReviewIntent(
         String id,
@@ -23,7 +30,8 @@ public record ReviewIntent(
         String rationale,
         List<String> hunkIds,
         Optional<Collapse> collapse,
-        boolean autoApprove) {
+        boolean autoApprove,
+        List<String> reads) {
 
     /** What kind of change this intent is; drives the tag beside its title. */
     public enum Kind {
@@ -93,6 +101,25 @@ public record ReviewIntent(
             throw new IllegalArgumentException("intent id must not be blank");
         }
         hunkIds = List.copyOf(Objects.requireNonNull(hunkIds, "hunkIds"));
+        reads = List.copyOf(Objects.requireNonNull(reads, "reads"));
+    }
+
+    /**
+     * The same intent with nothing declared about what it is built on --
+     * {@code reads} is optional on the wire, and the several dozen callers
+     * that predate it have no opinion about it. They say so once, here,
+     * rather than each spelling an empty list, which would be a wide edit
+     * carrying no new decision.
+     *
+     * <p>Every PRODUCTION site names {@code reads} explicitly through the
+     * canonical constructor even when it passes {@link List#of()}, so
+     * "declares nothing" is a choice made and visible at each one rather
+     * than a default it fell into by still compiling.</p>
+     */
+    public ReviewIntent(String id, int number, String title, Kind kind, Risk risk,
+                        String rationale, List<String> hunkIds, Optional<Collapse> collapse,
+                        boolean autoApprove) {
+        this(id, number, title, kind, risk, rationale, hunkIds, collapse, autoApprove, List.of());
     }
 
     /**
@@ -180,7 +207,15 @@ public record ReviewIntent(
         return Optional.empty();
     }
 
-    private static Optional<Anchor> parseHunkId(String hunkId) {
+    /**
+     * The inverse of {@link #hunkId}: {@code file} and {@code index} back out
+     * of a raw hunk id, or empty for anything not shaped like one. Public so
+     * a caller that only HAS a hunk id -- {@link
+     * app.drydock.review.ReadingPath.Link#targetHunkId()}, most notably --
+     * can resolve it without building a throwaway one-hunk {@link
+     * ReviewIntent} purely to call {@link #anchor()} on it.
+     */
+    public static Optional<Anchor> parseHunkId(String hunkId) {
         if (hunkId == null || !hunkId.startsWith(HUNK_ID_PREFIX)) {
             return Optional.empty();
         }

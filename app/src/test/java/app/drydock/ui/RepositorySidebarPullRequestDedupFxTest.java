@@ -99,8 +99,7 @@ class RepositorySidebarPullRequestDedupFxTest extends ApplicationTest {
         sidebar = new RepositorySidebar(repositoryManager, gitStatusService, worktreeService, repositoryPullRequests,
                 sessionManager, agentRegistry, navigator, viewModel);
 
-        stage.setScene(new Scene(new StackPane(sidebar), 360, 640));
-        stage.show();
+        TestStages.show(stage, new Scene(new StackPane(sidebar), 360, 640));
 
         repository = repositoryManager.addRepository(repoRoot)
                 .get(20, TimeUnit.SECONDS);

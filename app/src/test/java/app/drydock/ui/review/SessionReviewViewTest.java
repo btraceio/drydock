@@ -1,5 +1,6 @@
 package app.drydock.ui.review;
 
+import app.drydock.ui.TestStages;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.review.ReviewScope;
@@ -97,8 +98,7 @@ class SessionReviewViewTest extends ApplicationTest {
         scene.getStylesheets().addAll(
                 getClass().getResource("/app/drydock/ui/app.css").toExternalForm(),
                 getClass().getResource("/app/drydock/ui/theme-dark.css").toExternalForm());
-        stage.setScene(scene);
-        stage.show();
+        TestStages.show(stage, scene);
     }
 
     @Test
@@ -278,6 +278,14 @@ class SessionReviewViewTest extends ApplicationTest {
                 SessionReviewScopes.Choice.LOCAL);
         view.diagSelectChoice(SessionReviewScopes.Choice.PULL_REQUEST);
         view.diagSelectChoice(SessionReviewScopes.Choice.LOCAL);
+        // The virtualized ListView lays out its cells on the pulse AFTER the
+        // scope switch, not synchronously within it -- under a full suite run
+        // (other tests' own background section-graph builds competing for
+        // the same CPU, see SessionReviewView#requestGraph) that pulse can
+        // land late enough that the lookup below races an empty cell list.
+        // Every other diff-driven lookup in this suite already pumps events
+        // first; this one predates that convention.
+        WaitForAsyncUtils.waitForFxEvents();
 
         // fire() rather than clickOn(): the button lives inside a virtualized
         // ListView cell, so the robot's hit test depends on where the list

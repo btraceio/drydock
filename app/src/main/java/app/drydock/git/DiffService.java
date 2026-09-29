@@ -127,6 +127,10 @@ public final class DiffService implements AutoCloseable {
             case WORKING_TREE -> "HEAD";
             case UPSTREAM -> "@{upstream}...HEAD";
             case BASE -> baseBranch + "...HEAD";
+            // One revision, so git compares the WORKING TREE against it: the
+            // branch's commits and its uncommitted edits in a single diff,
+            // measured from the fork point as BASE's three dots are.
+            case BRANCH_WORKING_TREE -> mergeBase(git, checkoutRoot, baseBranch);
         };
         // --end-of-options: a branch name that looks like an option must
         // reach git as a revision, never be parsed as a flag.
@@ -141,7 +145,9 @@ public final class DiffService implements AutoCloseable {
         // `git diff` twice and throwing the first result away doubled the
         // whole diff computation on every refresh of a working tree that had
         // any untracked file in it.
-        Set<String> untrackedPaths = scope == DiffScope.WORKING_TREE
+        boolean includesWorkingTree = scope == DiffScope.WORKING_TREE
+                || scope == DiffScope.BRANCH_WORKING_TREE;
+        Set<String> untrackedPaths = includesWorkingTree
                 ? untrackedPaths(git, checkoutRoot)
                 : Set.of();
         if (untrackedPaths.size() > MAX_UNTRACKED) {
@@ -160,7 +166,7 @@ public final class DiffService implements AutoCloseable {
 
         // Working-tree scope tags each file with whether (part of) its
         // change is staged, for the staged/unstaged chip.
-        Set<String> stagedPaths = scope == DiffScope.WORKING_TREE
+        Set<String> stagedPaths = includesWorkingTree
                 ? stagedPaths(git, checkoutRoot)
                 : Set.of();
 
@@ -482,6 +488,15 @@ public final class DiffService implements AutoCloseable {
      * probe is the command that fails first, and it has to report that the
      * same way the diff used to.</p>
      */
+    /** The commit {@code HEAD} forked from {@code baseBranch} at -- what {@code base...HEAD} measures from. */
+    private static String mergeBase(Path git, Path checkoutRoot, String baseBranch) {
+        List<String> command = List.of(git.toString(), "-C", checkoutRoot.toString(),
+                "merge-base", "--end-of-options", baseBranch, "HEAD");
+        ProcessResult result = run(command);
+        failIfFailed(command, result, checkoutRoot);
+        return result.stdout().strip();
+    }
+
     private static void failIfFailed(List<String> command, ProcessResult result, Path checkoutRoot) {
         if (result.exitCode() == 0) {
             return;

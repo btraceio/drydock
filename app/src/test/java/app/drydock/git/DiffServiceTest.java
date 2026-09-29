@@ -47,6 +47,43 @@ class DiffServiceTest {
         assertTrue(staged.staged());
     }
 
+    /**
+     * A worktree session's "Local changes": everything this checkout would
+     * contribute -- the branch's commits AND what is not committed yet --
+     * measured from where it forked, so work that landed on the base
+     * afterwards is not attributed to it. BASE ({@code base...HEAD}) showed
+     * the commits only; WORKING_TREE ({@code HEAD}) the edits only.
+     */
+    @Test
+    void branchWorkingTreeScopeSeesTheBranchAndItsUncommittedWorkSinceTheFork(@TempDir Path repoDir)
+            throws Exception {
+        Path repo = initCommittedRepo(repoDir, "one\ntwo\nthree\n");
+        Files.writeString(repo.resolve("upstream.txt"), "base\n");
+        runGit(repo, "add", "upstream.txt");
+        commit(repo, "base file");
+        runGit(repo, "checkout", "-b", "feat/change");
+        Files.writeString(repo.resolve("committed.txt"), "on the branch\n");
+        runGit(repo, "add", "committed.txt");
+        commit(repo, "branch commit");
+        runGit(repo, "checkout", "main");
+        Files.writeString(repo.resolve("upstream.txt"), "moved on after the fork\n");
+        runGit(repo, "add", "upstream.txt");
+        commit(repo, "main moves on");
+        runGit(repo, "checkout", "feat/change");
+        Files.writeString(repo.resolve("README.md"), "one\nEDITED\nthree\n");
+        Files.writeString(repo.resolve("staged.txt"), "staged\n");
+        runGit(repo, "add", "staged.txt");
+        Files.writeString(repo.resolve("untracked.txt"), "brand new\n");
+
+        UnifiedDiff diff = service.diff(repo, DiffScope.BRANCH_WORKING_TREE, "main").get();
+
+        Set<String> paths = new java.util.TreeSet<>();
+        diff.files().forEach(file -> paths.add(file.path()));
+        assertEquals(Set.of("README.md", "committed.txt", "staged.txt", "untracked.txt"), paths,
+                "branch commits + unstaged + staged + untracked, and NOT main's later upstream.txt");
+        assertTrue(fileByPath(diff, "staged.txt").staged(), "staging is still reported");
+    }
+
     @Test
     void baseScopeDiffsTheWholeBranchWithLineNumbers(@TempDir Path repoDir) throws Exception {
         Path repo = initCommittedRepo(repoDir, "one\ntwo\nthree\n");

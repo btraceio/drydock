@@ -1,9 +1,12 @@
 package app.drydock.ui.review;
 
+import app.drydock.ui.TestStages;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.review.AnnotationStatus;
+import app.drydock.review.BaseMove;
 import app.drydock.review.Confidence;
+import app.drydock.review.HunkDigest;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
@@ -35,6 +38,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.TreeSet;
 import java.util.OptionalInt;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -74,8 +78,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
         scene.getStylesheets().addAll(
                 getClass().getResource("/app/drydock/ui/app.css").toExternalForm(),
                 getClass().getResource("/app/drydock/ui/theme-dark.css").toExternalForm());
-        stage.setScene(scene);
-        stage.show();
+        TestStages.show(stage, scene);
     }
 
     @AfterEach
@@ -268,7 +271,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
         type(KeyCode.A);
 
         assertEquals(ReviewVerdict.Decision.APPROVED,
-                host.store.verdict(scope.id(), "auto:change:src").orElseThrow().decision());
+                host.store.verdict(scope.id(), digestOfMain()).orElseThrow().decision());
     }
 
     /** Spec §4.6: approval is refused while a blocking finding of the intent is open. */
@@ -278,7 +281,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
 
         type(KeyCode.A);
 
-        assertTrue(host.store.verdict(scope.id(), "auto:change:src").isEmpty(),
+        assertTrue(host.store.verdict(scope.id(), digestOfMain()).isEmpty(),
                 "an open blocking finding must refuse approval");
         assertFalse(lookup(".review-verdict-refusal").queryAll().isEmpty(),
                 "the refusal must be visible, not silent");
@@ -288,14 +291,14 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
     void resolvingTheBlockerLetsTheApprovalThrough() {
         seed(finding("f1", Severity.BLOCKING));
         type(KeyCode.A);
-        assertTrue(host.store.verdict(scope.id(), "auto:change:src").isEmpty());
+        assertTrue(host.store.verdict(scope.id(), digestOfMain()).isEmpty());
 
         host.store.mutate(new ReviewAnnotation.Key(scope.id(), "f1"),
                 current -> current.withStatus(AnnotationStatus.RESOLVED));
         interact(view::refreshReviewState);
         type(KeyCode.A);
 
-        assertTrue(host.store.verdict(scope.id(), "auto:change:src").isPresent());
+        assertTrue(host.store.verdict(scope.id(), digestOfMain()).isPresent());
     }
 
     /** A human downgrade after a discussion is the other way past a blocker. */
@@ -306,7 +309,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
         interact(() -> fire(".review-card-action", "Downgrade"));
         type(KeyCode.A);
 
-        assertTrue(host.store.verdict(scope.id(), "auto:change:src").isPresent());
+        assertTrue(host.store.verdict(scope.id(), digestOfMain()).isPresent());
         assertEquals(Severity.BLOCKING, host.store.byId(scope.id(), "f1").orElseThrow().severity(),
                 "the reviewer's original opinion is kept alongside the override");
     }
@@ -317,10 +320,10 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
 
         type(KeyCode.R);
         assertEquals(ReviewVerdict.Decision.CHANGES,
-                host.store.verdict(scope.id(), "auto:change:src").orElseThrow().decision());
+                host.store.verdict(scope.id(), digestOfMain()).orElseThrow().decision());
 
         type(KeyCode.U);
-        assertTrue(host.store.verdict(scope.id(), "auto:change:src").isEmpty());
+        assertTrue(host.store.verdict(scope.id(), digestOfMain()).isEmpty());
     }
 
     @Test
@@ -561,6 +564,194 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
         return minted;
     }
 
+    /**
+     * Fix round 2. "Ask the agent to fix it" hands the intent's open findings
+     * to the bound session -- and with no session bound it hands over
+     * NOTHING while looking exactly as though it worked. That is the defect
+     * ruling 1 legislated against for the Explorer jump and round 1 fixed on
+     * the fan-in popover; this is the same defect on the verdict bar, and it
+     * is a button a reader can press all day for no effect and no word.
+     */
+    @Test
+    void askingTheAgentWithNoBoundSessionSaysSoOnTheBar() {
+        seed(finding("f1", Severity.NIT));
+        host.sessionBound = false;
+
+        clickAskAgent();
+
+        assertTrue(host.handedOffPrompts.isEmpty(), "nothing can be sent with no session");
+        assertEquals("⚠ " + ReviewVerdictBar.NOTHING_TO_SEND, askRefusal(),
+                "a click that handed nothing over must say so");
+    }
+
+    /** The other half: a hand-off that WORKED must not leave a refusal on the bar. */
+    @Test
+    void askingTheAgentWithASessionBoundReportsNoRefusal() {
+        seed(finding("f1", Severity.NIT));
+        host.sessionBound = true;
+
+        clickAskAgent();
+
+        assertEquals(1, host.handedOffPrompts.size(), "the findings must reach the session");
+        assertEquals("", askRefusal(), "a hand-off that worked must say nothing");
+    }
+
+    /**
+     * The refusal describes ONE CLICK, not a state, so anything that
+     * re-renders the bar supersedes it -- otherwise a message about a click
+     * the reader has long moved on from sits there looking current.
+     */
+    @Test
+    void theAskRefusalIsClearedByTheNextBarUpdate() {
+        seed(finding("f1", Severity.NIT));
+        host.sessionBound = false;
+        clickAskAgent();
+        assertFalse(askRefusal().isBlank());
+
+        type(KeyCode.CLOSE_BRACKET);
+
+        assertEquals("", askRefusal(), "moving to another intent must clear it");
+    }
+
+    /**
+     * Round 3, item 3, widened in round 5 to all four paths.
+     *
+     * <p>Driven through the REAL view, because the bar-only fit fixture
+     * measures the bar at the window's full width and production does not
+     * give it that: at a 560px window the real bar is 525px, so a loop over
+     * the four strings there over-states the room by 35px -- about six
+     * characters, which is exactly the margin two of these strings live
+     * in. Each of the four is raised through the code path that actually
+     * raises it, so nothing here rests on substituting one message into
+     * another's layout.</p>
+     */
+    @Test
+    void theNeedsVerdictRefusalFitsAtTheCodeColumnFloor() {
+        seed();
+        atTheFloor();
+
+        type(KeyCode.ENTER);
+
+        assertSubmitRefusalFits(SessionReviewView.NEEDS_VERDICT);
+    }
+
+    @Test
+    void theFailedDiffRefusalFitsAtTheCodeColumnFloor() {
+        seedWithNoDiffInTheColumn(mintPrScope(), new DiffOutcome.Failed("Could not diff /wt/feat"));
+        atTheFloor();
+
+        type(KeyCode.ENTER);
+
+        assertSubmitRefusalFits(SessionReviewView.DIFF_FAILED);
+    }
+
+    @Test
+    void theStillLoadingRefusalFitsAtTheCodeColumnFloor() {
+        seedWithNoDiffInTheColumn(mintPrScope(), new DiffOutcome.Diffing());
+        atTheFloor();
+
+        type(KeyCode.ENTER);
+
+        assertSubmitRefusalFits(SessionReviewView.DIFF_LOADING);
+    }
+
+    /** Everything settled, but against a base that has since moved. */
+    @Test
+    void theStaleBaseRefusalFitsAtTheCodeColumnFloor() {
+        seed();
+        type(KeyCode.A);
+        type(KeyCode.CLOSE_BRACKET);
+        type(KeyCode.A);
+        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of("src/Main.java")));
+        host.baseCommit = "9".repeat(40);
+        atTheFloor();
+
+        type(KeyCode.ENTER);
+
+        assertSubmitRefusalFits(SessionReviewView.STALE_BASE);
+    }
+
+    /**
+     * What keeps {@code ReviewVerdictBarFitTest}'s own fixture honest: it
+     * builds the bar at {@code BAR_WIDTH_AT_FLOOR}, a number taken FROM this
+     * measurement, and a bar-only fixture wider than production would let a
+     * string pass there and truncate here. If the view's chrome ever takes
+     * more room, this fails and that constant has to follow.
+     */
+    @Test
+    void theRealBarIsNoNarrowerThanTheFitFixtureAssumes() {
+        seed();
+        atTheFloor();
+
+        double[] barWidth = new double[1];
+        interact(() -> barWidth[0] = lookup(".review-verdict-bar").query().getBoundsInLocal().getWidth());
+        assertTrue(barWidth[0] >= ReviewVerdictBarFitTest.BAR_WIDTH_AT_FLOOR,
+                "the real bar is " + Math.round(barWidth[0]) + "px at a "
+                        + (int) RailLayout.CODE_MIN_WIDTH + "px window, but the bar-only fit "
+                        + "fixture assumes " + (int) ReviewVerdictBarFitTest.BAR_WIDTH_AT_FLOOR
+                        + "px -- every string it clears would truncate in production");
+    }
+
+    /**
+     * Narrows the window to the code column's floor -- the width at which
+     * every rail is collapsed and the bar is the only surface left. {@link
+     * #seed} puts it back for the next test; nothing outside this class
+     * depends on the width it is left at, since every rendering class now
+     * takes its own through {@code TestStages.show}.
+     */
+    private void atTheFloor() {
+        interact(() -> view.getScene().getWindow().setWidth(RailLayout.CODE_MIN_WIDTH));
+        WaitForAsyncUtils.waitForFxEvents();
+    }
+
+    /** The refusal on screen is {@code expected}, and it is not truncated. */
+    private void assertSubmitRefusalFits(SessionReviewView.SubmitRefusal expected) {
+        interact(() -> view.getScene().getRoot().layout());
+        WaitForAsyncUtils.waitForFxEvents();
+
+        Node label = lookup(".review-verdict-submit-refusal").queryAll().stream()
+                .filter(Node::isVisible)
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("no submit refusal is showing"));
+        assertEquals("⚠ " + expected.reason(), ((Label) label).getText(),
+                "the rendered text must be the PRODUCTION constant, not a copy kept in step by hand");
+        double got = label.getBoundsInLocal().getWidth();
+        double wanted = ((Label) label).prefWidth(-1);
+        assertTrue(got + 0.5 >= wanted, "'" + ((Label) label).getText() + "' got "
+                + Math.round(got) + " of " + Math.round(wanted) + "px at the "
+                + (int) RailLayout.CODE_MIN_WIDTH + "px floor");
+        // The primary action is charged the same rent: a refusal that fits by
+        // taking Submit's last character has not fitted.
+        Node submit = lookup(".review-verdict-action").queryAll().stream()
+                .map(Button.class::cast)
+                .filter(button -> button.getText().startsWith("Submit"))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("no Submit button"));
+        assertTrue(submit.getBoundsInLocal().getWidth() + 0.5 >= ((Button) submit).prefWidth(-1),
+                "'" + ((Button) submit).getText() + "' got "
+                        + Math.round(submit.getBoundsInLocal().getWidth()) + " of "
+                        + Math.round(((Button) submit).prefWidth(-1)) + "px beside that refusal");
+    }
+
+    private void clickAskAgent() {
+        interact(() -> lookup(".review-verdict-action").queryAll().stream()
+                .map(Button.class::cast)
+                .filter(button -> "Ask the agent to fix it".equals(button.getText()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("no Ask-the-agent button found"))
+                .fire());
+        WaitForAsyncUtils.waitForFxEvents();
+    }
+
+    /** The text of the verdict bar's ask-refusal label; blank when it is not showing. */
+    private String askRefusal() {
+        return lookup(".review-verdict-ask-refusal").queryAll().stream()
+                .filter(Node::isVisible)
+                .map(node -> ((Label) node).getText())
+                .findFirst()
+                .orElse("");
+    }
+
     /** The text of the verdict bar's submit-refusal label; blank when it is not showing. */
     private String submitRefusal() {
         return lookup(".review-verdict-submit-refusal").queryAll().stream()
@@ -591,6 +782,14 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
 
     /** Shows the board on one scope and seeds the store with {@code findings}. */
     private void seed(ReviewAnnotation... findings) {
+        // The stage is shared across classes and across tests, and tests
+        // here narrow it deliberately -- so start every board from a known
+        // width rather than from whatever the last one left.
+        interact(() -> {
+            view.getScene().getWindow().setWidth(1400);
+            view.getScene().getWindow().setHeight(900);
+        });
+        WaitForAsyncUtils.waitForFxEvents();
         ReviewScope minted = mintScope();
         for (ReviewAnnotation finding : findings) {
             host.store.upsert(finding);
@@ -620,6 +819,15 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
                 Optional.empty(), Optional.empty(), List.of(),
                 List.of(new ReviewAnnotation.Message("Claude", Instant.EPOCH, "body of " + id)),
                 Optional.empty(), AnnotationStatus.OPEN, Optional.empty(), false);
+    }
+
+    /**
+     * The digest {@code src/Main.java}'s only hunk is approved under -- what
+     * a verdict is keyed by now that sections may overlap. The intent id
+     * ({@code auto:change:src}) keys nothing.
+     */
+    private static String digestOfMain() {
+        return HunkDigest.of("src/Main.java", file("src/Main.java").hunks().get(0));
     }
 
     private static UnifiedDiff.FileDiff file(String path) {

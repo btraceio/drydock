@@ -1,5 +1,6 @@
 package app.drydock.ui.review;
 
+import app.drydock.ui.TestStages;
 import app.drydock.git.DiffService;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
@@ -42,8 +43,7 @@ class ReviewDiffColumnPublishTest extends ApplicationTest {
             published.put(scopeId, outcome);
             order.add(scopeId);
         });
-        stage.setScene(new Scene(column, 1400, 900));
-        stage.show();
+        TestStages.show(stage, new Scene(column, 1400, 900));
     }
 
     @AfterEach

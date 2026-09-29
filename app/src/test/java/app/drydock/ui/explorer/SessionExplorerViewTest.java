@@ -1,5 +1,6 @@
 package app.drydock.ui.explorer;
 
+import app.drydock.ui.TestStages;
 import app.drydock.search.SessionSearchService;
 import javafx.geometry.Pos;
 import javafx.scene.Node;
@@ -78,8 +79,7 @@ class SessionExplorerViewTest extends ApplicationTest {
         scene.getStylesheets().addAll(
                 SessionExplorerView.class.getResource("/app/drydock/ui/theme-dark.css").toExternalForm(),
                 SessionExplorerView.class.getResource("/app/drydock/ui/app.css").toExternalForm());
-        stage.setScene(scene);
-        stage.show();
+        TestStages.show(stage, scene);
     }
 
     @AfterEach

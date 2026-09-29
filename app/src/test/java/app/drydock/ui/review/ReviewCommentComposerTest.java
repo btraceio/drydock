@@ -1,5 +1,6 @@
 package app.drydock.ui.review;
 
+import app.drydock.ui.TestStages;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.review.ReviewAnnotation;
@@ -61,8 +62,7 @@ class ReviewCommentComposerTest extends ApplicationTest {
         scene.getStylesheets().addAll(
                 getClass().getResource("/app/drydock/ui/app.css").toExternalForm(),
                 getClass().getResource("/app/drydock/ui/theme-dark.css").toExternalForm());
-        stage.setScene(scene);
-        stage.show();
+        TestStages.show(stage, scene);
     }
 
     @AfterEach
@@ -183,7 +183,7 @@ class ReviewCommentComposerTest extends ApplicationTest {
 
         Optional<String> intentId = host.findings(scope).get(0).intentId();
         assertTrue(intentId.isPresent(), "the comment must name an intent");
-        assertTrue(host.intents(scope, host.diff).stream()
+        assertTrue(host.intents(scope, host.diff, Optional.empty()).stream()
                         .anyMatch(intent -> intent.id().equals(intentId.get())),
                 "and it must be an intent that exists: " + intentId.get());
     }

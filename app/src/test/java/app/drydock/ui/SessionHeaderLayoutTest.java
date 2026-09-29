@@ -71,8 +71,7 @@ class SessionHeaderLayoutTest extends ApplicationTest {
         scene.getStylesheets().setAll(
                 SessionHeaderLayoutTest.class.getResource("/app/drydock/ui/theme-dark.css").toExternalForm(),
                 SessionHeaderLayoutTest.class.getResource("/app/drydock/ui/app.css").toExternalForm());
-        stage.setScene(scene);
-        stage.show();
+        TestStages.show(stage, scene);
     }
 
     @BeforeEach

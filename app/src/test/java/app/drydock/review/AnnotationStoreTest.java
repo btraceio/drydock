@@ -101,7 +101,7 @@ class AnnotationStoreTest {
             store.upsert(finding("rs_left", "f1"));
             store.upsert(finding("rs_right", "f1"));
             store.putVerdict(new ReviewVerdict("rs_left", "i1", ReviewVerdict.Decision.APPROVED,
-                    Optional.empty(), AT));
+                    Optional.empty(), AT, "base-1", "head-1"));
 
             store.removeScope("rs_left");
 
@@ -198,9 +198,9 @@ class AnnotationStoreTest {
     void verdictsAreKeyedByScopeAndIntent(@TempDir Path dir) {
         try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
             store.putVerdict(new ReviewVerdict("rs_a", "i1", ReviewVerdict.Decision.APPROVED,
-                    Optional.empty(), AT));
+                    Optional.empty(), AT, "base-1", "head-1"));
             store.putVerdict(new ReviewVerdict("rs_b", "i1", ReviewVerdict.Decision.CHANGES,
-                    Optional.of("needs a test"), AT));
+                    Optional.of("needs a test"), AT, "base-1", "head-1"));
 
             assertEquals(ReviewVerdict.Decision.APPROVED,
                     store.verdict("rs_a", "i1").orElseThrow().decision());
@@ -213,9 +213,9 @@ class AnnotationStoreTest {
     void clearingAVerdictOnlyClearsThatOne(@TempDir Path dir) {
         try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
             store.putVerdict(new ReviewVerdict("rs_a", "i1", ReviewVerdict.Decision.APPROVED,
-                    Optional.empty(), AT));
+                    Optional.empty(), AT, "base-1", "head-1"));
             store.putVerdict(new ReviewVerdict("rs_a", "i2", ReviewVerdict.Decision.APPROVED,
-                    Optional.empty(), AT));
+                    Optional.empty(), AT, "base-1", "head-1"));
 
             store.clearVerdict("rs_a", "i1");
 
@@ -303,7 +303,7 @@ class AnnotationStoreTest {
     @Test
     void verdictsAndSubmissionsRoundTripThroughJson() {
         ReviewVerdict verdict = new ReviewVerdict("rs_a", "i1", ReviewVerdict.Decision.CHANGES,
-                Optional.of("please add a test"), AT);
+                Optional.of("please add a test"), AT, "base-1", "head-1");
 
         String json = JsonWriter.write(AnnotationStore.toJson(List.of(), List.of(verdict), List.of("rs_a")));
 
@@ -317,7 +317,7 @@ class AnnotationStoreTest {
         try (AnnotationStore store = new AnnotationStore(file)) {
             store.upsert(finding("rs_a", "f1"));
             store.putVerdict(new ReviewVerdict("rs_a", "i1", ReviewVerdict.Decision.APPROVED,
-                    Optional.empty(), AT));
+                    Optional.empty(), AT, "base-1", "head-1"));
             store.markSubmitted("rs_a");
             store.flushPendingSaves();
         }

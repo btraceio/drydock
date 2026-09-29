@@ -463,7 +463,13 @@ public final class GitStatusService implements AutoCloseable {
         // default branch scores identically against every integration branch
         // that has not moved since, and the default is then the right answer.
         List<String> candidates = new ArrayList<>();
-        candidates.add(defaultBranch);
+        // The default arrives as a bare local name or as origin/<name>
+        // (defaultBranch's own local-first rule); resolved through the same
+        // remote-first rule as every other candidate, or kept verbatim when
+        // it resolves to nothing, so the fallback below is unchanged.
+        String defaultName = defaultBranch.startsWith("origin/")
+                ? defaultBranch.substring("origin/".length()) : defaultBranch;
+        candidates.add(resolveBranch(git, checkoutRoot, defaultName).orElse(defaultBranch));
         for (String name : INTEGRATION_BRANCHES) {
             resolveBranch(git, checkoutRoot, name)
                     .filter(resolved -> !candidates.contains(resolved))
@@ -490,20 +496,28 @@ public final class GitStatusService implements AutoCloseable {
     }
 
     /**
-     * The local branch {@code name} when it exists, otherwise {@code
-     * origin/name} when that does, otherwise empty -- the same local-then-
-     * remote rule {@link #defaultBranchBlocking} applies, and for the same
-     * reason: a PR base branch is often not checked out locally at all.
+     * {@code origin/name} when it exists, otherwise the local branch {@code
+     * name}, otherwise empty. Deliberately the REVERSE of {@link
+     * #defaultBranchBlocking}'s local-first rule: that one names a branch,
+     * this one picks the revision a review diffs against, where a stale
+     * local copy is wrong rather than merely out of date.
      */
     private Optional<String> resolveBranch(Path git, Path repositoryRoot, String name) {
         if (name.isBlank() || name.startsWith("-")) {
             return Optional.empty();
         }
-        if (resolves(git, repositoryRoot, "refs/heads/" + name)) {
-            return Optional.of(name);
-        }
+        // Remote-tracking FIRST. The remote branch is what GitHub diffs a
+        // pull request against, and a local integration branch goes stale
+        // as a matter of course in a worktree workflow -- nobody pulls it.
+        // Resolved local-first, a develop 32 commits behind origin/develop
+        // put all 32 already-merged commits into the review, which then
+        // matched neither the working tree nor the PR. The local branch is
+        // still the answer for a repository with no remote copy of it.
         if (resolves(git, repositoryRoot, "refs/remotes/origin/" + name)) {
             return Optional.of("origin/" + name);
+        }
+        if (resolves(git, repositoryRoot, "refs/heads/" + name)) {
+            return Optional.of(name);
         }
         return Optional.empty();
     }
@@ -722,6 +736,44 @@ public final class GitStatusService implements AutoCloseable {
         ProcessResult result = run(List.of(
                 git.get().toString(), "-C", workingDirectory.toString(), "rev-parse", "--verify", "HEAD"));
         if (result.exitCode() != 0) {
+            return Optional.empty();
+        }
+        String sha = result.stdout().strip();
+        return sha.isEmpty() ? Optional.empty() : Optional.of(sha);
+    }
+
+    /**
+     * The commit {@code ref} names in {@code workingDirectory}, or empty when
+     * it names none -- a branch that does not exist here, a tag that was
+     * never fetched, or a directory that is not a repository.
+     *
+     * <p>Empty rather than throwing, for {@link #headCommitBlocking}'s
+     * reason: the caller is stamping or comparing metadata, and a base branch
+     * that cannot be resolved right now is an ordinary state of a fresh
+     * worktree, not a failure worth costing the caller its operation. What
+     * the caller must NOT do is fall back to the ref name -- a verdict
+     * recorded against {@code "main"} and compared against {@code "main"}
+     * would never read as stale, which is the inert no-op this method
+     * exists to end.</p>
+     *
+     * <p>{@code --end-of-options} precedes the ref because a ref may begin
+     * with {@code -} and would otherwise be read as a flag. Blocking; never
+     * call on the FX thread.</p>
+     */
+    public Optional<String> commitForRefBlocking(Path workingDirectory, String ref) {
+        Optional<Path> git = locator.locate();
+        if (git.isEmpty() || ref == null || ref.isBlank()) {
+            return Optional.empty();
+        }
+        ProcessResult result = run(List.of(git.get().toString(), "-C", workingDirectory.toString(),
+                "rev-parse", "--verify", "--end-of-options", ref + "^{commit}"));
+        if (result.exitCode() != 0) {
+            // Logged rather than folded silently into the empty result: an
+            // unresolvable base is what makes every verdict on the scope read
+            // as stale, and a reader asking why must be able to find out.
+            LOG.log(Level.WARNING, "git rev-parse --verify " + ref + " failed (exit "
+                    + result.exitCode() + ") in " + workingDirectory + ": "
+                    + ProcessRunner.excerpt(result.stderr()));
             return Optional.empty();
         }
         String sha = result.stdout().strip();

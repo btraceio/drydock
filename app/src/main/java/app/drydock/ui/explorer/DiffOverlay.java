@@ -43,6 +43,9 @@ public final class DiffOverlay {
             case BASE -> DiffScope.WORKING_TREE;
             case WORKING_TREE -> DiffScope.UPSTREAM;
             case UPSTREAM -> DiffScope.BASE;
+            // Not part of this overlay's cycle (it is Review's worktree
+            // scope); should one arrive, cycling continues from the start.
+            case BRANCH_WORKING_TREE -> DiffScope.BASE;
         };
     }
 
@@ -52,6 +55,7 @@ public final class DiffOverlay {
             case BASE -> "the diff vs " + baseBranch;
             case WORKING_TREE -> "the working-tree diff";
             case UPSTREAM -> "the diff vs upstream";
+            case BRANCH_WORKING_TREE -> "the branch and uncommitted diff vs " + baseBranch;
         };
     }
 

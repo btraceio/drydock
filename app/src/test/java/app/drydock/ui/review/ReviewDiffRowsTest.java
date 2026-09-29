@@ -1,10 +1,13 @@
 package app.drydock.ui.review;
 
 import app.drydock.git.UnifiedDiff;
+import app.drydock.review.ReadingPath;
+import app.drydock.review.ReviewIntent;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.OptionalInt;
 import java.util.Set;
 
@@ -223,6 +226,100 @@ class ReviewDiffRowsTest {
         assertEquals("n7", ((ReviewDiffRow.Line) rows.get(1)).lineKey());
         assertEquals("o3", ((ReviewDiffRow.Line) rows.get(2)).lineKey());
         assertFalse(rows.isEmpty());
+    }
+
+    /**
+     * A hunk with a link in {@code linksByHunk} gets a footer row after its
+     * body, closing the card -- the one row a reader who just finished this
+     * hunk sees before moving on.
+     */
+    @Test
+    void aHunkWithALinkGetsAFooterRowThatClosesTheCard() {
+        UnifiedDiff diff = diff(file("A.java", hunk(add(1))));
+        ReadingPath.Link link = link("calls", "B.java", 0, "B.java:helper");
+        ReviewDiffRows.Options options = withLinks(Map.of(ReviewIntent.hunkId("A.java", 0), List.of(link)));
+
+        List<ReviewDiffRow> rows = ReviewDiffRows.build(diff, options);
+
+        assertEquals(3, rows.size(), "header, one line, one link row");
+        ReviewDiffRow.LinkRow footer = (ReviewDiffRow.LinkRow) rows.get(2);
+        assertEquals(link, footer.link());
+        assertEquals(ReviewDiffRow.Edge.BOTTOM, footer.edge(),
+                "the link row is now the last row, so it must close the card");
+        assertEquals(ReviewDiffRow.Edge.BODY, rows.get(1).edge(),
+                "the line above it must lose BOTTOM now that something follows it");
+    }
+
+    /** A hunk absent from {@code linksByHunk} gets no footer row at all -- not an empty one. */
+    @Test
+    void aHunkWithNoEntryInLinksByHunkGetsNoFooterRow() {
+        UnifiedDiff diff = diff(file("A.java", hunk(add(1))));
+        ReviewDiffRows.Options options = withLinks(Map.of(
+                ReviewIntent.hunkId("SOMETHING_ELSE.java", 0), List.of(link("calls", "B.java", 0, "x"))));
+
+        List<ReviewDiffRow> rows = ReviewDiffRows.build(diff, options);
+
+        assertTrue(rows.stream().noneMatch(ReviewDiffRow.LinkRow.class::isInstance),
+                "a hunk this map says nothing about must render no footer");
+    }
+
+    /** Each hunk's own footer is keyed off ITS hunk id, not off the file's first hunk. */
+    @Test
+    void eachHunkGetsOnlyItsOwnLinks() {
+        UnifiedDiff diff = diff(file("A.java", hunk(add(1)), hunk(add(2))));
+        ReadingPath.Link linkOnSecond = link("called by", "B.java", 0, "B.java:x");
+        ReviewDiffRows.Options options = withLinks(Map.of(ReviewIntent.hunkId("A.java", 1), List.of(linkOnSecond)));
+
+        List<ReviewDiffRow> rows = ReviewDiffRows.build(diff, options);
+
+        long footers = rows.stream().filter(ReviewDiffRow.LinkRow.class::isInstance).count();
+        assertEquals(1, footers, "only the second hunk carries a link");
+        int firstCardEnd = indexOfSecondHeader(rows);
+        assertTrue(rows.subList(0, firstCardEnd).stream()
+                        .noneMatch(ReviewDiffRow.LinkRow.class::isInstance),
+                "the FIRST hunk's card must carry no footer of its own");
+    }
+
+    /** More than one link on a hunk becomes more than one footer row, in the order supplied. */
+    @Test
+    void multipleLinksBecomeMultipleFooterRowsInOrder() {
+        UnifiedDiff diff = diff(file("A.java", hunk(add(1))));
+        ReadingPath.Link first = link("calls", "B.java", 0, "B.java:x");
+        ReadingPath.Link second = link("same concept", "C.java", 0, "C.java: shared y");
+        ReviewDiffRows.Options options =
+                withLinks(Map.of(ReviewIntent.hunkId("A.java", 0), List.of(first, second)));
+
+        List<ReviewDiffRow> rows = ReviewDiffRows.build(diff, options);
+
+        List<ReadingPath.Link> footers = rows.stream()
+                .filter(ReviewDiffRow.LinkRow.class::isInstance)
+                .map(row -> ((ReviewDiffRow.LinkRow) row).link())
+                .toList();
+        assertEquals(List.of(first, second), footers);
+        assertEquals(ReviewDiffRow.Edge.BODY, rows.get(rows.size() - 2).edge(),
+                "only the LAST link row closes the card");
+        assertEquals(ReviewDiffRow.Edge.BOTTOM, rows.get(rows.size() - 1).edge());
+    }
+
+    private static int indexOfSecondHeader(List<ReviewDiffRow> rows) {
+        int seen = 0;
+        for (int i = 0; i < rows.size(); i++) {
+            if (rows.get(i) instanceof ReviewDiffRow.HunkHeader) {
+                if (seen == 1) {
+                    return i;
+                }
+                seen++;
+            }
+        }
+        throw new AssertionError("expected two hunk headers in " + rows);
+    }
+
+    private static ReviewDiffRows.Options withLinks(Map<String, List<ReadingPath.Link>> linksByHunk) {
+        return new ReviewDiffRows.Options(true, Set.of(), 3000, ReviewDiffRows.HunkFilter.ALL, linksByHunk);
+    }
+
+    private static ReadingPath.Link link(String kind, String targetFile, int targetHunkIndex, String label) {
+        return new ReadingPath.Link(kind, ReviewIntent.hunkId(targetFile, targetHunkIndex), label);
     }
 
     // ---- fixtures -----------------------------------------------------------

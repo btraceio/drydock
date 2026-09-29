@@ -91,8 +91,7 @@ class NewWorktreeModalTest extends ApplicationTest {
                             : null;
                 });
 
-        stage.setScene(new Scene(new StackPane(modal), 620, 640));
-        stage.show();
+        TestStages.show(stage, new Scene(new StackPane(modal), 620, 640));
     }
 
     /**

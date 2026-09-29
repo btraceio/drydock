@@ -74,6 +74,11 @@ public final class PanelHeader {
         return button;
     }
 
+    /** Swaps the title text -- for a panel that renders more than one mode under one header. */
+    public void setTitle(String text) {
+        title.setText(text);
+    }
+
     public void setTitleVisible(boolean visible) {
         title.setVisible(visible);
         title.setManaged(visible);
