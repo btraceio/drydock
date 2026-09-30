@@ -512,6 +512,22 @@
     -fx-text-fill: -drydock-text;
 }
 
+/* Project group badge on session tabs. A narrow vertical strip so it reads
+   as a group marker rather than a second status dot. */
+.project-badge {
+    -fx-min-width: 4px;  -fx-max-width: 4px;
+    -fx-min-height: 16px; -fx-max-height: 16px;
+    -fx-background-radius: 2px;
+}
+.project-badge-0 { -fx-background-color: -drydock-project-0; }
+.project-badge-1 { -fx-background-color: -drydock-project-1; }
+.project-badge-2 { -fx-background-color: -drydock-project-2; }
+.project-badge-3 { -fx-background-color: -drydock-project-3; }
+.project-badge-4 { -fx-background-color: -drydock-project-4; }
+.project-badge-5 { -fx-background-color: -drydock-project-5; }
+.project-badge-6 { -fx-background-color: -drydock-project-6; }
+.project-badge-7 { -fx-background-color: -drydock-project-7; }
+
 /* The small × inside a ClearableTextField, pinned to the field's right edge.
    Visible only while the field has text (see ClearableTextField). */
 .clear-text-button {

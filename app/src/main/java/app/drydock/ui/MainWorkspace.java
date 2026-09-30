@@ -298,6 +298,9 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     /** The one {@link ReviewHost}, shared by every session tab's Review sub-tab. */
     private final ReviewHost reviewHost = new ReviewHost();
 
+    /** Open-repository badge colors: one palette slot per project, freed when its last tab closes. */
+    private final ProjectTabGroup projectTabGroup = new ProjectTabGroup();
+
     private final PrCheckoutService prCheckoutService = new PrCheckoutService();
     private final ReviewScopeRegistry reviewScopeRegistry;
     /** Resolves one checkout's scopes for its session's Review sub-tab (spec §3.2). */
@@ -4571,8 +4574,23 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     }
 
     private void addAndSelect(OpenSessionTab openTab) {
-        tabPane.getTabs().add(openTab.tab);
+        int index = ProjectTabGroup.insertionIndexFor(tabPane.getTabs(), openTab.repository(), this::repositoryForTab);
+        tabPane.getTabs().add(index, openTab.tab);
         tabPane.getSelectionModel().select(openTab.tab);
+    }
+
+    private Optional<Repository> repositoryForTab(Tab tab) {
+        for (OpenSessionTab open : openTabs.values()) {
+            if (open.tab == tab) {
+                return open.repository();
+            }
+        }
+        for (OpenSessionTab open : pendingTabs.values()) {
+            if (open.tab == tab) {
+                return open.repository();
+            }
+        }
+        return Optional.empty();
     }
 
     private CompletableFuture<Void> removeTab(OpenSessionTab openTab) {
@@ -4592,9 +4610,16 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         // OpenSessionTab.markSurfaceClosing()'s Javadoc.
         openTab.markSurfaceClosing();
         tabPane.getTabs().remove(openTab.tab);
-        openTabs.remove(openTab.sessionId(), openTab);
-        pendingTabs.remove(openTab.sessionId(), openTab);
+        // remove(key, value), not remove(key): a tab that already went
+        // through here maps to neither id, so a second call cannot
+        // over-release the repository's badge slot, which was acquired
+        // one-for-one at tab creation.
+        boolean wasTracked = openTabs.remove(openTab.sessionId(), openTab)
+                | pendingTabs.remove(openTab.sessionId(), openTab);
         exitRecorded.remove(openTab.sessionId());
+        if (wasTracked) {
+            openTab.repository().ifPresent(projectTabGroup::releaseBadgeStyle);
+        }
         if (!shuttingDown && restoringSessionIds.remove(openTab.sessionId())) {
             persistOpenSessionIds();
         }
@@ -4663,6 +4688,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         OpenSessionTab openTab =
                 new OpenSessionTab(sessionId, displayName, agentName, agentKind, unsupportedAgent, repository, stage, app, host);
         holder[0] = openTab;
+        openTab.setProjectBadge(repository.map(projectTabGroup::acquireBadgeStyle));
 
         // The ephemeral shell Terminal sub-tab (created lazily on first
         // switch): mirrors the Claude runtime/host creation, themed

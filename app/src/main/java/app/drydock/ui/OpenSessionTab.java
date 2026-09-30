@@ -201,6 +201,8 @@ final class OpenSessionTab {
     private final Region tabDot = SessionStatusStyles.createDot(7, SessionStatus.STARTING);
     /** The per-agent glyph in the tab's leading gutter, mirroring the sidebar row. */
     private final Label tabAgentMark = new Label();
+    /** Colored strip that identifies which project (repository) this tab belongs to. */
+    private final Region projectBadge = new Region();
 
     /** Shown only while this session's Claude is waiting on the user; see {@link #setNeedsAttention}. */
     private final Label tabAttentionDot = new Label("waiting");
@@ -263,6 +265,9 @@ final class OpenSessionTab {
      */
     private final boolean isRemote;
 
+    /** The repository this tab belongs to, kept for project grouping in the tab strip. */
+    private final Optional<Repository> repository;
+
     /**
      * @param agentName display name of the agent this session runs (see
      *                  {@link AgentLabels}); it labels the agent sub-tab, which
@@ -282,6 +287,7 @@ final class OpenSessionTab {
         this.unsupportedAgent = unsupportedAgent;
         this.stage = stage;
         this.isRemote = repository.map(Repository::isRemote).orElse(false);
+        this.repository = repository;
         this.bridge = new TerminalBridge(app, host, placeholder, stage,
                 this::sessionId, this::runShortcut);
 
@@ -338,6 +344,11 @@ final class OpenSessionTab {
 
     ManagedSessionId sessionId() {
         return sessionId;
+    }
+
+    /** The repository this tab groups by; empty for sessions with no registered repository. */
+    Optional<Repository> repository() {
+        return repository;
     }
 
     /** See {@link #sessionId}: adopts the real session id once SessionManager has minted it. */
@@ -1035,6 +1046,10 @@ final class OpenSessionTab {
         tabCloseButton.setFocusTraversable(false);
         tabCloseButton.setOnAction(e -> onCloseRequested.run());
 
+        projectBadge.getStyleClass().add("project-badge");
+        projectBadge.setVisible(false);
+        projectBadge.setManaged(false);
+
         tabAttentionDot.getStyleClass().add("attention-badge");
         tabAttentionDot.setVisible(false);
         tabAttentionDot.setManaged(false);
@@ -1043,7 +1058,7 @@ final class OpenSessionTab {
         tabEvalBadge.setTooltip(new Tooltip("Eval mode: this session's model traffic is routed to the eval account"));
         tabEvalBadge.setVisible(false);
         tabEvalBadge.setManaged(false);
-        HBox graphic = new HBox(8, tabStatusCol, tabLabels, tabEvalBadge, tabCostBadge, tabAttentionDot, tabCloseButton);
+        HBox graphic = new HBox(8, tabStatusCol, projectBadge, tabLabels, tabEvalBadge, tabCostBadge, tabAttentionDot, tabCloseButton);
         graphic.setAlignment(Pos.CENTER_LEFT);
 
         // Double-click the tab -> inline rename (Enter/blur commits, Esc cancels).
@@ -1240,6 +1255,14 @@ final class OpenSessionTab {
                 headerPrChip.setManaged(true);
             }
         }
+    }
+
+    /** Sets the project-group color badge, or hides it when there is no repository. */
+    void setProjectBadge(Optional<String> colorStyleClass) {
+        projectBadge.setVisible(colorStyleClass.isPresent());
+        projectBadge.setManaged(colorStyleClass.isPresent());
+        projectBadge.getStyleClass().removeIf(style -> style.startsWith("project-badge-"));
+        colorStyleClass.ifPresent(projectBadge.getStyleClass()::add);
     }
 
     /** Swaps Finish ▸ for the spinner pill ({@code Claude is merging…} etc.) while a hand-off runs. */

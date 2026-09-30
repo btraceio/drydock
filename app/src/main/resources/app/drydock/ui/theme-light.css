@@ -46,6 +46,18 @@
     -drydock-agent-codex: #3f8f88;
     -drydock-agent-pi: #b04a86;
 
+    /* Project tab-group badges. Distinct from agent colors; picked to stay
+       legible against the light tabbar while being clearly different from
+       neighbouring groups. */
+    -drydock-project-0: #4b7bcd;
+    -drydock-project-1: #b8860b;
+    -drydock-project-2: #4ca154;
+    -drydock-project-3: #7e57c2;
+    -drydock-project-4: #c6493f;
+    -drydock-project-5: #008b8b;
+    -drydock-project-6: #b04a86;
+    -drydock-project-7: #6b655d;
+
     /* Sidebar row overlay fade (light equivalents of the dark set; see
      * theme-dark.css for the compositing arithmetic). Composited from
      * -drydock-sidebar against -hover / -active-bg:

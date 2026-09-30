@@ -55,6 +55,17 @@
     -drydock-agent-codex: #5bb3ab;
     -drydock-agent-pi: #d977b0;
 
+    /* Project tab-group badges. Distinct from agent colors; chosen bright
+       enough to read against the dark tabbar. */
+    -drydock-project-0: #5b8fce;
+    -drydock-project-1: #e0a93a;
+    -drydock-project-2: #6cc07a;
+    -drydock-project-3: #b07ad9;
+    -drydock-project-4: #e06c6c;
+    -drydock-project-5: #5bb3ab;
+    -drydock-project-6: #d977b0;
+    -drydock-project-7: #a8a29b;
+
     /* Sidebar row overlay fade. The hover-action strip is only ever visible
      * while its row is hovered, so the fade must match the HOVERED row
      * color, not the resting sidebar background -- and the active row wins
