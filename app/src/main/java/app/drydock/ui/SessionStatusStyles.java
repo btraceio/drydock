@@ -6,9 +6,12 @@ import javafx.animation.Animation;
 import javafx.animation.FadeTransition;
 import javafx.animation.ParallelTransition;
 import javafx.animation.ScaleTransition;
+import javafx.beans.value.ChangeListener;
 import javafx.css.PseudoClass;
+import javafx.scene.CacheHint;
 import javafx.scene.Node;
 import javafx.scene.layout.Region;
+import javafx.stage.Window;
 import javafx.util.Duration;
 
 /**
@@ -72,6 +75,14 @@ final class SessionStatusStyles {
         if (!filled && !isError(initialStatus)) {
             dot.getStyleClass().add("dot-hollow");
         }
+        // The pulse animates opacity and scale at pulse rate (60fps while it
+        // runs). Rendered uncached, every tick re-rasterizes the node and
+        // re-uploads its mask texture; cached, both properties become
+        // transforms of a fixed texture (SCALE hint), and the per-frame cost
+        // collapses to a composite. The dot is a few px across, so the
+        // snapshot is negligible.
+        dot.setCache(true);
+        dot.setCacheHint(CacheHint.SCALE);
 
         FadeTransition fade = new FadeTransition(Duration.seconds(1), dot);
         fade.setFromValue(1.0);
@@ -88,39 +99,98 @@ final class SessionStatusStyles {
 
         // The pulse is INDEFINITE, so a dot discarded while running (the
         // sidebar rebuilds all rows on every refresh) would leave its
-        // transition animating a detached node forever -- stop it when the
-        // dot leaves the scene, and resume when it is re-attached still
-        // wanting to pulse (e.g. the collapsed sidebar returning via ⌘0).
+        // transition animating a detached node forever. It also has no
+        // business ticking while the window cannot show it: the gate stops
+        // the pulse when the dot detaches, when its window stops showing
+        // (minimized/closed), and when the window loses focus -- and parks
+        // the dot at its rest state instead of freezing mid-fade.
         dot.sceneProperty().addListener((obs, oldScene, newScene) -> {
-            if (newScene == null) {
-                pulse.stop();
-            } else if (Boolean.TRUE.equals(dot.getProperties().get("drydock.pulsing"))) {
-                pulse.play();
+            if (oldScene != null) {
+                unwatchWindow(dot);
+                oldScene.windowProperty().removeListener(dotWindowListener(dot));
             }
+            if (newScene != null) {
+                newScene.windowProperty().addListener(dotWindowListener(dot));
+                watchWindow(dot, newScene.getWindow());
+            }
+            refreshPulse(dot);
         });
 
         updateDot(dot, initialStatus);
         return dot;
     }
 
-    /** Re-applies status pseudo-classes on a dot created by {@link #createDot} and starts/stops its pulse. */
+    private static ChangeListener<Window> dotWindowListener(Region dot) {
+        return (obs, oldWindow, newWindow) -> {
+            unwatchWindow(dot);
+            watchWindow(dot, newWindow);
+            refreshPulse(dot);
+        };
+    }
+
+    /** Starts gating the dot's pulse on {@code window}'s showing/focused state. */
+    private static void watchWindow(Region dot, Window window) {
+        if (window == null) {
+            return;
+        }
+        ChangeListener<Boolean> gate = (obs, was, is) -> refreshPulse(dot);
+        window.showingProperty().addListener(gate);
+        window.focusedProperty().addListener(gate);
+        dot.getProperties().put("drydock.pulse.window", window);
+        dot.getProperties().put("drydock.pulse.gate", gate);
+    }
+
+    /** Undoes {@link #watchWindow} for whatever window the dot currently tracks. */
+    @SuppressWarnings("unchecked")
+    private static void unwatchWindow(Region dot) {
+        if (dot.getProperties().remove("drydock.pulse.window") instanceof Window window
+                && dot.getProperties().remove("drydock.pulse.gate") instanceof ChangeListener<?> gate) {
+            ChangeListener<Boolean> typed = (ChangeListener<Boolean>) gate;
+            window.showingProperty().removeListener(typed);
+            window.focusedProperty().removeListener(typed);
+        }
+    }
+
+    /**
+     * Plays the pulse only when it is wanted and the window can actually
+     * show it; stops it (parked at the rest state) otherwise. Called from
+     * every lifecycle event: status change, scene attach/detach, window
+     * swap, window show/hide, window focus.
+     */
+    private static void refreshPulse(Region dot) {
+        if (!(dot.getProperties().get("drydock.pulse") instanceof ParallelTransition pulse)) {
+            return;
+        }
+        if (!Boolean.TRUE.equals(dot.getProperties().get("drydock.pulsing"))) {
+            pulse.stop();
+            park(dot);
+            return;
+        }
+        Window window = dot.getScene() == null ? null : dot.getScene().getWindow();
+        if (window != null && window.isShowing() && window.isFocused()) {
+            if (pulse.getStatus() != Animation.Status.RUNNING) {
+                pulse.play();
+            }
+        } else if (pulse.getStatus() == Animation.Status.RUNNING) {
+            pulse.stop();
+            park(dot);
+        }
+    }
+
+    /** Restores the dot's rest state -- a stopped pulse must not freeze mid-fade. */
+    private static void park(Region dot) {
+        dot.setOpacity(1.0);
+        dot.setScaleX(1.0);
+        dot.setScaleY(1.0);
+    }
+
+    /** Re-applies status pseudo-classes on a dot created by {@link #createDot} and re-evaluates its pulse. */
     static void updateDot(Region dot, SessionStatus status) {
         applyStatus(dot, status);
-        if (dot.getProperties().get("drydock.pulse") instanceof ParallelTransition pulse) {
-            boolean pulsing = isRunning(status);
-            // Remembered separately from the transition's own state so the
-            // scene listener in createDot can resume after a detach/attach.
-            dot.getProperties().put("drydock.pulsing", pulsing);
-            if (pulsing) {
-                if (pulse.getStatus() != Animation.Status.RUNNING && dot.getScene() != null) {
-                    pulse.play();
-                }
-            } else {
-                pulse.stop();
-                dot.setOpacity(1.0);
-                dot.setScaleX(1.0);
-                dot.setScaleY(1.0);
-            }
-        }
+        // Remembered separately from the transition's own state so the
+        // scene/window listeners in createDot can resume after a
+        // detach/attach or a focus loss.
+        dot.getProperties().put("drydock.pulsing", isRunning(status));
+        refreshPulse(dot);
     }
 }
