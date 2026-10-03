@@ -37,10 +37,10 @@ class ReviewInstructionsTest {
     }
 
     @Test
-    void bothFormsAskForIntentsAndFindings() {
+    void bothFormsAskForATourAndFindings() {
         for (boolean subagents : new boolean[] {true, false}) {
             String instruction = ReviewInstructions.forScope("rs_abc123", subagents);
-            assertTrue(instruction.contains("review_intents"));
+            assertTrue(instruction.contains("review_tour"));
             assertTrue(instruction.contains("review_finding"));
         }
     }

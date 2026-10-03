@@ -10,6 +10,7 @@ import app.drydock.mcp.McpSessionContext.RenameOutcome;
 import app.drydock.review.FallbackIntents;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewIntent;
+import app.drydock.review.tour.TourRecord;
 
 import java.nio.file.Path;
 import java.time.Instant;
@@ -114,6 +115,11 @@ final class FakeMcpSessionContext implements McpSessionContext {
     /** The last intent grouping {@link #putIntents} received. */
     final Map<String, List<ReviewIntent>> intents = new HashMap<>();
 
+    final Map<String, TourRecord> tours = new HashMap<>();
+
+    /** When non-null, {@link #excerpt} answers this regardless of file and line. */
+    public Optional<String> excerptAnswer;
+
     final List<app.drydock.review.ReviewVerdict> verdicts = new ArrayList<>();
     final Set<String> submitted = new LinkedHashSet<>();
 
@@ -139,6 +145,16 @@ final class FakeMcpSessionContext implements McpSessionContext {
             throw reviewDiffFailure;
         }
         return reviewDiff;
+    }
+
+    @Override
+    public Optional<TourRecord> tourOf(String scopeId) {
+        return Optional.ofNullable(tours.get(scopeId));
+    }
+
+    @Override
+    public void putTour(TourRecord record) {
+        tours.put(record.tour().scopeId(), record);
     }
 
     @Override
@@ -228,6 +244,9 @@ final class FakeMcpSessionContext implements McpSessionContext {
 
     @Override
     public Optional<String> excerpt(ManagedSessionId caller, String file, int line, int context) {
+        if (excerptAnswer != null) {
+            return excerptAnswer;
+        }
         return Optional.ofNullable(excerpts.get(file + ":" + line));
     }
 

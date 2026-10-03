@@ -21,9 +21,11 @@ public final class ReviewInstructions {
 
     public static String forScope(String scopeId, boolean supportsSubagents) {
         Objects.requireNonNull(scopeId, "scopeId");
-        String work = "read review_scope for handle " + scopeId
+        String work = "read review_scope for handle " + scopeId + " with include=sections"
                 + ", call review_state first so already-settled findings are not re-flagged, "
-                + "then post review_intents and review_finding against that handle";
+                + "then post review_finding and review_tour against that handle; review_tour is validated "
+                + "(every changed row in a step, each step at least one check with an alternate) and lists "
+                + "every problem if it is rejected, so fix them and post it again";
         return supportsSubagents
                 ? "Dispatch a code-review subagent to review the changes in this worktree: it must "
                         + work + ". Report only its summary back here."

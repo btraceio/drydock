@@ -36,6 +36,7 @@ import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewVerdict;
 import app.drydock.review.ReviewScopeRegistry;
 import app.drydock.review.ReviewAnnotation;
+import app.drydock.review.tour.TourRecord;
 import app.drydock.review.tour.TourStore;
 
 import java.io.IOException;
@@ -331,6 +332,17 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
         } catch (TimeoutException e) {
             throw new McpToolException("Timed out diffing " + scope.diffRoot());
         }
+    }
+
+    @Override
+    public Optional<TourRecord> tourOf(String scopeId) {
+        return tourStore.forScope(scopeId);
+    }
+
+    @Override
+    public void putTour(TourRecord record) {
+        tourStore.put(record);
+        tourStore.flushPendingSaves();
     }
 
     @Override

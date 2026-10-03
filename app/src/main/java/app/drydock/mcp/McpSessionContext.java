@@ -9,6 +9,7 @@ import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewVerdict;
+import app.drydock.review.tour.TourRecord;
 
 import java.nio.file.Path;
 import java.util.List;
@@ -94,6 +95,12 @@ public interface McpSessionContext {
 
     /** Replaces a scope's intent grouping ({@code review_intents}). */
     void putIntents(String scopeId, List<ReviewIntent> intents);
+
+    /** The scope's tour record, if the agent has posted one. */
+    Optional<TourRecord> tourOf(String scopeId);
+
+    /** Stores (replaces) the scope's tour record and flushes it to disk. */
+    void putTour(TourRecord record);
 
     /**
      * {@code scopeId}'s intents over {@code diff}: the reviewer's grouping

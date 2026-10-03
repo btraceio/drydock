@@ -65,7 +65,7 @@ class McpToolRouterReadTest {
                 .toList();
 
         assertEquals(List.of("review_comments", "review_reply", "review_scope", "review_intents",
-                "review_finding", "review_answer", "review_state", "review_recheck",
+                "review_tour", "review_finding", "review_answer", "review_state", "review_recheck",
                 "worktree_create", "session_start", "session_rename", "session_handoff",
                 "repos_list", "sessions_list"), names);
     }
@@ -93,6 +93,7 @@ class McpToolRouterReadTest {
                 Map.entry("review_reply", List.of("id", "note")),
                 Map.entry("review_scope", List.of("scopeId")),
                 Map.entry("review_intents", List.of("scopeId", "intents")),
+                Map.entry("review_tour", List.of("scopeId", "steps")),
                 Map.entry("review_finding", List.of("scopeId", "findings")),
                 Map.entry("review_answer", List.of("scopeId", "findingId", "body")),
                 Map.entry("review_state", List.of("scopeId")),

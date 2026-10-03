@@ -22,6 +22,14 @@ import app.drydock.review.Sections;
 import app.drydock.review.Severity;
 import app.drydock.review.SymbolScan;
 import app.drydock.review.VerdictMerge;
+import app.drydock.review.tour.ImpactNote;
+import app.drydock.review.tour.ReviewTour;
+import app.drydock.review.tour.TourCheck;
+import app.drydock.review.tour.TourCodec;
+import app.drydock.review.tour.TourFingerprint;
+import app.drydock.review.tour.TourRecord;
+import app.drydock.review.tour.TourStep;
+import app.drydock.review.tour.TourValidator;
 import app.drydock.state.json.JsonValue;
 import app.drydock.state.json.JsonValue.JsonArray;
 import app.drydock.state.json.JsonValue.JsonBoolean;
@@ -169,6 +177,21 @@ public final class McpToolRouter {
                                         + "reads names the intents this one is built on; drydock "
                                         + "orders the rail by it and does not verify it.")),
                         "scopeId", "intents"),
+                descriptor("review_tour",
+                        "Posts the guided tour of a scope: ordered steps a human walks in full files. Validated "
+                                + "against the review diff and stored only if valid; on rejection nothing is stored "
+                                + "and every problem is listed. Every changed row must lie in some step's anchor; "
+                                + "each step needs a narrative and at least one check, each check at least one "
+                                + "alternate. Anchor keys are line keys from review_scope (n<newLine> or "
+                                + "o<oldLine>); answer is a 0-based index into choices.",
+                        JsonObject.empty()
+                                .put("scopeId", schemaString("Review scope handle."))
+                                .put("steps", schemaString("Array of {id, title, narrative (<=1000 chars), "
+                                        + "anchors[{file, startKey, endKey?}], impactNotes?[{file, line, text}], "
+                                        + "checks[{id, kind: predict|trace|risk, prompt, choices?[{text, at?{file, "
+                                        + "line}}] (2-4, not for risk), answer? (0-based, not for risk), explanation, "
+                                        + "alternates[{...same, no alternates}]}]}; at most 40 steps, 6 checks each.")),
+                        "scopeId", "steps"),
                 descriptor("review_finding",
                         "Records findings against a scope. Idempotent on finding id: a re-run upserts, so "
                                 + "existing threads, human severity overrides and resolutions survive. A "
@@ -276,6 +299,7 @@ public final class McpToolRouter {
             case "review_reply" -> reviewReply(caller, arguments);
             case "review_scope" -> reviewScope(caller, arguments);
             case "review_intents" -> reviewIntents(caller, arguments);
+            case "review_tour" -> reviewTour(caller, arguments);
             case "review_finding" -> reviewFinding(caller, arguments);
             case "review_answer" -> reviewAnswer(caller, arguments);
             case "review_state" -> reviewState(caller, arguments);
@@ -616,7 +640,78 @@ public final class McpToolRouter {
                         .map(ReviewToolCodec::findingStateToJson)
                         .toList()))
                 .put("submitted", new JsonBoolean(context.reviewSubmitted(scope.id())));
+        Optional<TourRecord> tour = context.tourOf(scope.id());
+        if (tour.isPresent()) {
+            try {
+                String current = TourFingerprint.of(context.reviewDiff(scope));
+                result.put("tour", TourStateJson.of(tour.get(), current));
+            } catch (McpToolException e) {
+                LOG.log(Level.WARNING, "review_state: could not diff scope " + scope.id() + " for its tour", e);
+            }
+        }
         return result;
+    }
+
+    // ---- review_tour ---------------------------------------------------
+
+    private JsonValue reviewTour(ManagedSessionId caller, JsonValue arguments) throws McpToolException {
+        requireLiveSession(caller);
+        JsonObject args = asObject(arguments);
+        ReviewScope scope = requireScope(caller, args);
+        UnifiedDiff diff = context.reviewDiff(scope);
+        List<TourStep> steps;
+        try {
+            steps = TourCodec.stepsFromAgent(args.get("steps"));
+        } catch (TourCodec.InvalidTour e) {
+            throw new McpToolException("review_tour rejected, nothing stored: " + e.getMessage());
+        }
+        checkTourText(steps);
+        ReviewTour tour = new ReviewTour(scope.id(), TourFingerprint.of(diff), steps);
+        List<String> errors = new ArrayList<>(TourValidator.validate(tour, diff));
+        errors.addAll(impactNoteErrors(caller, steps));
+        if (!errors.isEmpty()) {
+            throw new McpToolException("review_tour rejected, nothing stored:\n- " + String.join("\n- ", errors));
+        }
+        context.putTour(TourRecord.fresh(tour, diff));
+        int checks = steps.stream().mapToInt(step -> step.checks().size()).sum();
+        return JsonObject.empty()
+                .put("scopeId", new JsonString(scope.id()))
+                .put("steps", JsonNumber.of(steps.size()))
+                .put("checks", JsonNumber.of(checks));
+    }
+
+    private static void checkTourText(List<TourStep> steps) throws McpToolException {
+        for (TourStep step : steps) {
+            PromptSafety.checkInboundText(step.title(), "tour.step.title");
+            PromptSafety.checkInboundText(step.narrative(), "tour.step.narrative");
+            for (ImpactNote note : step.impactNotes()) {
+                PromptSafety.checkInboundText(note.text(), "tour.impactNote.text");
+            }
+            for (TourCheck check : step.checks()) {
+                for (int attempt = 0; attempt < check.versions(); attempt++) {
+                    TourCheck version = check.version(attempt);
+                    PromptSafety.checkInboundText(version.prompt(), "tour.check.prompt");
+                    PromptSafety.checkInboundText(version.explanation(), "tour.check.explanation");
+                    for (TourCheck.Choice choice : version.choices()) {
+                        PromptSafety.checkInboundText(choice.text(), "tour.check.choice");
+                    }
+                }
+            }
+        }
+    }
+
+    /** A claimed impact note must point at a line that exists in the checkout. */
+    private List<String> impactNoteErrors(ManagedSessionId caller, List<TourStep> steps) {
+        List<String> errors = new ArrayList<>();
+        for (TourStep step : steps) {
+            for (ImpactNote note : step.impactNotes()) {
+                if (note.line() >= 1 && context.excerpt(caller, note.file(), note.line(), 0).isEmpty()) {
+                    errors.add("step " + step.id() + ": impact note points at " + note.file() + ":" + note.line()
+                            + ", which does not exist in the checkout");
+                }
+            }
+        }
+        return errors;
     }
 
     /** The scope's intents joined against their verdicts, as {@code review_state} reports them. */
