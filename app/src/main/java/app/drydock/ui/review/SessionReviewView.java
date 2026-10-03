@@ -23,6 +23,7 @@ import app.drydock.review.Severity;
 import app.drydock.review.SubmitPlan;
 import app.drydock.review.tour.AnchorIndex;
 import app.drydock.review.tour.HunkOverride;
+import app.drydock.review.tour.ReviewTour;
 import app.drydock.review.tour.StepGate;
 import app.drydock.review.tour.StepGrading;
 import app.drydock.review.tour.StepProgress;
@@ -774,6 +775,9 @@ public final class SessionReviewView extends BorderPane {
     }
 
     private Optional<TourFailure> tourFailure = Optional.empty();
+
+    /** The tour instance each scope's pre-tour verdicts were last considered for; see {@link #seedPreTourVerdicts}. */
+    private final Map<String, ReviewTour> seededTours = new HashMap<>();
 
     /** How long "Building tour…" waits before offering Retry / Open diff review. */
     private final PauseTransition tourWait = new PauseTransition(Duration.minutes(15));
@@ -3207,9 +3211,7 @@ public final class SessionReviewView extends BorderPane {
                 }
             } else if (host.tour(scope).isEmpty()) {
                 tourFailure = Optional.of(new TourFailure(scope.id(), "Could not reach this session's agent."));
-                if (mode == ReviewMode.TOUR) {
-                    renderTour(Optional.empty());
-                }
+                applyMode();
             }
         });
     }
@@ -3423,6 +3425,10 @@ public final class SessionReviewView extends BorderPane {
         return selectedScope().flatMap(host::tour);
     }
 
+    private Optional<TourFailure> failureForSelection() {
+        return selectedScope().flatMap(scope -> tourFailure.filter(f -> f.scopeId().equals(scope.id())));
+    }
+
     private boolean tourPending() {
         return selectedScope().map(scope -> tourPendingScopeId.filter(scope.id()::equals).isPresent())
                 .orElse(false);
@@ -3440,7 +3446,11 @@ public final class SessionReviewView extends BorderPane {
             endTourWait();
         }
         if (!userChoseMode) {
-            mode = tour.isPresent() || tourPending() ? ReviewMode.TOUR : ReviewMode.DIFF;
+            // A failed run is shown where its Retry / Open diff review live,
+            // and stays shown across refreshes until the reader picks one.
+            mode = tour.isPresent() || tourPending() || failureForSelection().isPresent()
+                    ? ReviewMode.TOUR
+                    : ReviewMode.DIFF;
         }
         boolean touring = mode == ReviewMode.TOUR;
         boolean swapped = false;
@@ -3473,8 +3483,7 @@ public final class SessionReviewView extends BorderPane {
             return;
         }
         if (tour.isEmpty()) {
-            Optional<TourFailure> failure = selectedScope()
-                    .flatMap(scope -> tourFailure.filter(f -> f.scopeId().equals(scope.id())));
+            Optional<TourFailure> failure = failureForSelection();
             if (tourPending()) {
                 outline.showMessage("Building tour…", Optional.empty(), () -> { });
                 stepPanel.showMessage("The agent is writing the tour. Its MCP calls show below.");
@@ -3576,8 +3585,61 @@ public final class SessionReviewView extends BorderPane {
      * verdicts are keyed by it.
      */
     private void syncTourVerdicts(TourRecord record) {
-        loadedDiff().ifPresent(diff -> selectedScope().ifPresent(scope ->
-                host.applyTourVerdicts(scope, StepVerdicts.derive(record, AnchorIndex.of(diff)))));
+        loadedDiff().ifPresent(diff -> selectedScope().ifPresent(scope -> {
+            AnchorIndex index = AnchorIndex.of(diff);
+            TourRecord seeded = seedPreTourVerdicts(scope, record, index);
+            host.applyTourVerdicts(scope, StepVerdicts.derive(seeded, index));
+        }));
+    }
+
+    /**
+     * Verdicts set in the hunk diff before the scope had a tour would be
+     * cleared by the first derivation, which covers every hunk. So the first
+     * time this view syncs a tour, each stored verdict is carried over as a
+     * hunk override -- the same thing a hunk-diff verdict set while the tour
+     * exists becomes.
+     *
+     * <p>"First time" is per tour INSTANCE ({@link #seededTours}, compared
+     * by identity): the store hands back the same {@link ReviewTour} object
+     * across every progress change, and a new one only when a tour is posted
+     * or loaded from disk. On top of that, a record that already has hunk
+     * overrides or a decided step is never seeded. That combination keeps
+     * out the case a state check alone would get wrong: a step passed, its
+     * hunks derived APPROVED, then undone with {@code u} -- the record is
+     * back to "no decisions, no overrides" while the derived verdicts are
+     * still stored, and seeding them would turn the tour's own approvals
+     * into overrides.</p>
+     */
+    private TourRecord seedPreTourVerdicts(ReviewScope scope, TourRecord record, AnchorIndex index) {
+        if (seededTours.get(scope.id()) == record.tour()) {
+            return record;
+        }
+        seededTours.put(scope.id(), record.tour());
+        boolean untouched = record.hunkOverrides().isEmpty() && record.progress().values().stream()
+                .allMatch(progress -> progress.decision() == StepProgress.Decision.NONE);
+        if (!untouched) {
+            return record;
+        }
+        Map<String, HunkOverride> seeds = new LinkedHashMap<>();
+        for (AnchorIndex.HunkRef hunk : index.hunks()) {
+            // A human's decisions only; an automatic approval is not one.
+            host.verdict(scope, hunk.digest())
+                    .filter(verdict -> verdict.decision() == ReviewVerdict.Decision.APPROVED
+                            || verdict.decision() == ReviewVerdict.Decision.CHANGES)
+                    .ifPresent(verdict -> seeds.put(hunk.digest(),
+                            new HunkOverride(verdict.decision(), "set in the hunk diff before the tour")));
+        }
+        if (seeds.isEmpty()) {
+            return record;
+        }
+        host.updateTour(scope, current -> {
+            TourRecord next = current;
+            for (Map.Entry<String, HunkOverride> seed : seeds.entrySet()) {
+                next = next.withHunkOverride(seed.getKey(), Optional.of(seed.getValue()));
+            }
+            return next;
+        });
+        return host.tour(scope).orElse(record);
     }
 
     /**
@@ -4051,6 +4113,17 @@ public final class SessionReviewView extends BorderPane {
     /** Diagnostic-only: the step the tour is on, or null. Call on the FX thread. */
     String diagCurrentStepId() {
         return currentStepId;
+    }
+
+    /** Test-only: Run review as the top bar's button does, which a scope with no session disables. */
+    void diagRunReview() {
+        runReviewOnSelection();
+    }
+
+    /** Test-only: the "Building tour…" wait running out, without waiting 15 minutes. */
+    void diagExpireTourWait() {
+        tourWait.stop();
+        onTourWaitExpired();
     }
 
     TourOutline diagOutline() {

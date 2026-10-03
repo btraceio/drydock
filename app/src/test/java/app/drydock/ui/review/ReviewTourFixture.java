@@ -136,7 +136,8 @@ abstract class ReviewTourFixture extends ApplicationTest {
         }
     }
 
-    private static ReviewTour tour(String scopeId, UnifiedDiff diff) {
+    /** The fixture's two-step tour for {@code scopeId}, as a NEW instance each call. */
+    static ReviewTour tour(String scopeId, UnifiedDiff diff) {
         return new ReviewTour(scopeId, TourFingerprint.of(diff), List.of(
                 new TourStep("s1", "Guards header", "Why the header changes.",
                         List.of(new TourAnchor(FILE_A, "n1", "n11")), List.of(), List.of(predict("c1"))),

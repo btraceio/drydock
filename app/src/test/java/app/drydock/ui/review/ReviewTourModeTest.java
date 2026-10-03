@@ -1,13 +1,16 @@
 package app.drydock.ui.review;
 
 import app.drydock.review.ReviewVerdict;
+import app.drydock.review.tour.TourRecord;
 import app.drydock.review.tour.StepProgress;
 import javafx.scene.Node;
 import javafx.scene.input.KeyCode;
 import org.junit.jupiter.api.Test;
 import org.testfx.util.WaitForAsyncUtils;
 
+import java.time.Instant;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -67,6 +70,81 @@ class ReviewTourModeTest extends ReviewTourFixture {
         WaitForAsyncUtils.waitForFxEvents();
         assertTrue(!host.tours.forScope(scope.id()).orElseThrow().hunkOverrides().isEmpty());
         assertEquals(StepProgress.Decision.NONE, progress("s1").decision(), "the step itself is not passed");
+        // Which file the click lands in depends on layout (at 1400x900 it is
+        // FILE_B), so check every hunk the approval actually overrode.
+        Set<String> overridden = Set.copyOf(host.tours.forScope(scope.id()).orElseThrow().hunkOverrides().keySet());
+        press(KeyCode.V).release(KeyCode.V);
+        WaitForAsyncUtils.waitForFxEvents();
+        for (String digest : overridden) {
+            assertEquals(Optional.of(ReviewVerdict.Decision.APPROVED),
+                    ReviewDiagFxThread.call(() -> host.store.verdict(scope.id(), digest).map(ReviewVerdict::decision)),
+                    "re-deriving in tour mode keeps the hunk-diff approval on " + digest);
+        }
+    }
+
+    @Test
+    void aFailedRunFromTheHunkDiffShowsItsFailureAndKeepsIt() {
+        withoutTour();
+        interact(view::diagRunReview);
+        WaitForAsyncUtils.waitForFxEvents();
+        assertFailureShown("Could not reach this session's agent.");
+        interact(view::refreshReviewState);
+        WaitForAsyncUtils.waitForFxEvents();
+        assertFailureShown("Could not reach this session's agent.");
+    }
+
+    @Test
+    void aTourThatNeverArrivesShowsItsFailureAndKeepsIt() {
+        host.reviewers.add("claude");
+        try {
+            withoutTour();
+            interact(view::diagRunReview);
+            WaitForAsyncUtils.waitForFxEvents();
+            assertTrue(lookup("Building tour…").tryQuery().isPresent());
+            interact(view::diagExpireTourWait);
+            WaitForAsyncUtils.waitForFxEvents();
+            assertFailureShown("No tour arrived.");
+            interact(view::refreshReviewState);
+            WaitForAsyncUtils.waitForFxEvents();
+            assertFailureShown("No tour arrived.");
+        } finally {
+            host.reviewers.clear();
+        }
+    }
+
+    @Test
+    void verdictsFromBeforeTheTourSurviveItsFirstRender() {
+        String digest = digestOfHunk(FILE_A, 0);
+        interact(() -> {
+            host.tours.remove(scope.id());
+            view.refreshReviewState();
+            host.store.putVerdict(new ReviewVerdict(scope.id(), digest, ReviewVerdict.Decision.APPROVED,
+                    Optional.empty(), Instant.now(), host.baseCommit, host.headCommit));
+            host.tours.put(TourRecord.fresh(tour(scope.id(), host.diff), host.diff));
+            view.refreshReviewState();
+        });
+        WaitForAsyncUtils.waitForFxEvents();
+        assertEquals(SessionReviewView.ReviewMode.TOUR, ReviewDiagFxThread.call(view::diagMode));
+        assertEquals(Optional.of(ReviewVerdict.Decision.APPROVED), verdictOfHunk(FILE_A, 0));
+        assertTrue(ReviewDiagFxThread.call(() -> host.tours.forScope(scope.id()).orElseThrow()
+                .hunkOverrides().containsKey(digest)), "seeded as a hunk override");
+    }
+
+    private void assertFailureShown(String message) {
+        assertEquals(SessionReviewView.ReviewMode.TOUR, ReviewDiagFxThread.call(view::diagMode));
+        assertTrue(lookup(message).tryQuery().isPresent(), message);
+        assertTrue(lookup("Retry").tryQuery().isPresent(), "Retry");
+        assertTrue(lookup("Open diff review").tryQuery().isPresent(), "Open diff review");
+    }
+
+    /** Drops the scope's tour; with no run pending the board falls back to the hunk diff. */
+    private void withoutTour() {
+        interact(() -> {
+            host.tours.remove(scope.id());
+            view.refreshReviewState();
+        });
+        WaitForAsyncUtils.waitForFxEvents();
+        assertEquals(SessionReviewView.ReviewMode.DIFF, ReviewDiagFxThread.call(view::diagMode));
     }
 
     @Test
