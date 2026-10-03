@@ -8,6 +8,7 @@ import app.drydock.review.SymbolWords;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -94,7 +95,13 @@ public record StepImpact(List<Caller> calledFromOutside, List<InChange> inChange
                 .thenComparing(Caller::symbol));
 
         List<SignatureFlag> flags = new ArrayList<>();
+        SortedSet<String> unique = graph.changedDeclarations();
         for (ChangeGraph.DeclarationSite site : sites) {
+            // A name two changed files declare cannot be attributed to this
+            // declaration, so it is never flagged.
+            if (!unique.contains(site.name())) {
+                continue;
+            }
             // Every site is a declaration on a changed row by construction,
             // and the scan already dropped occurrences on changed rows, so
             // whatever it found is an unedited line still spelling the name.
@@ -170,12 +177,16 @@ public record StepImpact(List<Caller> calledFromOutside, List<InChange> inChange
 
     /**
      * Identifiers on the step's changed rows, by the lexical rule {@link
-     * SymbolWords} gives every lens, that the change does not declare. Most
-     * used first, then by name so the cut at {@link #MAX_CALLEES} is stable.
+     * SymbolWords} gives every lens, that the change does not declare. A name
+     * declared in more than one changed file is still declared in the
+     * change -- ambiguous, not unknown -- so it is not a callee to resolve.
+     * Most used first, then by name so the cut at {@link #MAX_CALLEES} is
+     * stable.
      */
     private static List<String> callees(TourStep step, AnchorIndex index, UnifiedDiff reviewDiff,
                                         ChangeGraph graph) {
-        SortedSet<String> declared = graph.changedDeclarations();
+        Set<String> declared = new HashSet<>();
+        graph.declarationSites().forEach(site -> declared.add(site.name()));
         Map<String, Integer> counts = new TreeMap<>();
         for (UnifiedDiff.FileDiff file : reviewDiff.files()) {
             for (UnifiedDiff.Hunk hunk : file.hunks()) {

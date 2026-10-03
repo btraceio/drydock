@@ -36,6 +36,27 @@ class ChangeGraphDeclarationSitesTest {
         assertEquals(1, sites.size(), "only foo is declared on a changed row: " + sites);
     }
 
+    /**
+     * An edited declaration line is a DEL row and an ADD row naming the same
+     * symbol. It is one declaration that changed, so one site -- the
+     * post-image row, the one a reader can open.
+     */
+    @Test
+    void anEditedDeclarationLineIsOneSiteOnItsNewRow() {
+        List<UnifiedDiff.Line> lines = List.of(
+                context(1, 1, "class Holder {"),
+                new UnifiedDiff.Line(UnifiedDiff.Line.Kind.DEL, OptionalInt.of(2), OptionalInt.empty(),
+                        "    void foo(int a) { }"),
+                new UnifiedDiff.Line(UnifiedDiff.Line.Kind.ADD, OptionalInt.empty(), OptionalInt.of(2),
+                        "    void foo(long a) { }"),
+                context(3, 3, "}"));
+        UnifiedDiff diff = new UnifiedDiff(List.of(new UnifiedDiff.FileDiff("src/A.java", "M", 1, 1,
+                false, false, List.of(new UnifiedDiff.Hunk("@@ -1,3 +1,3 @@", lines)))));
+
+        assertEquals(List.of(new ChangeGraph.DeclarationSite("foo", "src/A.java", "n2")),
+                List.copyOf(ChangeGraph.of(diff).declarationSites()));
+    }
+
     /** {@code class Holder} and {@code bar} are context; only {@code foo} on n3 is added. */
     private static UnifiedDiff holderDiff() {
         List<UnifiedDiff.Line> lines = List.of(

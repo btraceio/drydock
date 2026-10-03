@@ -9,6 +9,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Function;
 
 /**
  * The name-matching {@link UsageProvider}: answers from {@link
@@ -21,34 +22,43 @@ import java.util.concurrent.CompletableFuture;
  */
 public final class LexicalUsageProvider implements UsageProvider {
 
-    private final SymbolPeekService peeks;
-    private final Map<Path, Set<Integer>> changedLines;
+    private final Function<String, CompletableFuture<Optional<SymbolPeek>>> peek;
 
+    /** Peeks through {@code peeks}, marking occurrences against {@code changedLines}. */
     public LexicalUsageProvider(SymbolPeekService peeks, Map<Path, Set<Integer>> changedLines) {
-        this.peeks = peeks;
-        this.changedLines = Map.copyOf(changedLines);
+        this(symbolPeek(peeks, Map.copyOf(changedLines)));
+    }
+
+    /** Peeks through {@code peek}; the seam a test hands a canned peek through. */
+    public LexicalUsageProvider(Function<String, CompletableFuture<Optional<SymbolPeek>>> peek) {
+        this.peek = peek;
+    }
+
+    private static Function<String, CompletableFuture<Optional<SymbolPeek>>> symbolPeek(
+            SymbolPeekService peeks, Map<Path, Set<Integer>> changedLines) {
+        return symbol -> peeks.peek(symbol, changedLines);
     }
 
     /**
-     * The peek's best-scoring candidate, when it scored as a declaration. A
-     * peek that only found a first occurrence is not a declaration, and is
-     * not reported as one.
+     * The peek's best-scoring candidate. When it did not score as a
+     * declaration it is the first occurrence, returned with {@code
+     * resolvedDeclaration} false -- the same honesty label the peek card
+     * shows ("first occurrence") rather than a silent nothing.
      */
     @Override
     public CompletableFuture<Optional<Usage>> declaration(String symbol) {
-        return peeks.peek(symbol, changedLines).thenApply(peek -> peek
-                .filter(SymbolPeek::resolvedDeclaration)
-                .map(found -> new Usage(found.relativePath().toString(), found.startLine(),
-                        found.lines().isEmpty() ? "" : found.lines().get(0).strip(),
-                        Provenance.MEASURED)));
+        return peek.apply(symbol).thenApply(found -> found
+                .map(best -> new Usage(best.relativePath().toString(), best.startLine(),
+                        best.lines().isEmpty() ? "" : best.lines().get(0).strip(),
+                        Provenance.MEASURED, best.resolvedDeclaration())));
     }
 
     @Override
     public CompletableFuture<List<Usage>> usages(String symbol) {
-        return peeks.peek(symbol, changedLines).thenApply(peek -> peek
-                .map(found -> found.occurrences().stream()
+        return peek.apply(symbol).thenApply(found -> found
+                .map(best -> best.occurrences().stream()
                         .map(occurrence -> new Usage(occurrence.relativePath().toString(),
-                                occurrence.line(), occurrence.text(), Provenance.MEASURED))
+                                occurrence.line(), occurrence.text(), Provenance.MEASURED, false))
                         .toList())
                 .orElse(List.of()));
     }

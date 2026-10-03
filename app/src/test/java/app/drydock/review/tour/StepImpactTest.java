@@ -107,6 +107,52 @@ class StepImpactTest {
         assertFalse(impact.calleesToResolve().contains("foo"), "foo is declared in the change");
     }
 
+    /** One edited declaration line (DEL + ADD) is one changed declaration, so one flag. */
+    @Test
+    void anEditedDeclarationLineIsFlaggedOnce() {
+        UnifiedDiff edited = new UnifiedDiff(List.of(new UnifiedDiff.FileDiff(A, "M", 1, 1, false, false,
+                List.of(new UnifiedDiff.Hunk("@@ -1,3 +1,3 @@", List.of(
+                        new UnifiedDiff.Line(UnifiedDiff.Line.Kind.CONTEXT, OptionalInt.of(1), OptionalInt.of(1),
+                                "public class Alpha {"),
+                        new UnifiedDiff.Line(UnifiedDiff.Line.Kind.DEL, OptionalInt.of(2), OptionalInt.empty(),
+                                "    void foo(int a) { }"),
+                        new UnifiedDiff.Line(UnifiedDiff.Line.Kind.ADD, OptionalInt.empty(), OptionalInt.of(2),
+                                "    void foo(long a) { }"),
+                        new UnifiedDiff.Line(UnifiedDiff.Line.Kind.CONTEXT, OptionalInt.of(3), OptionalInt.of(3),
+                                "}")))))));
+        TourStep editStep = step("e1", new TourAnchor(A, "n1", "n3"));
+        OutOfDiffFanIn.Result fanIn = new OutOfDiffFanIn.Result(Map.of("foo", List.of(
+                new OutOfDiffFanIn.Occurrence("src/Yankee.java", 3, "y.foo(1);", false),
+                new OutOfDiffFanIn.Occurrence("src/Xray.java", 9, "x.foo(2);", false))), Optional.empty());
+
+        StepImpact impact = StepImpact.of(editStep, new ReviewTour("rs_1", "fp", List.of(editStep)), edited,
+                ChangeGraph.of(edited), fanIn);
+
+        assertEquals(List.of(new StepImpact.SignatureFlag("foo", A, "n2", 2)), impact.signatureFlags());
+    }
+
+    /**
+     * A name two changed files declare is still declared in the change: it
+     * is ambiguous, not an unknown callee to go and resolve.
+     */
+    @Test
+    void aNameDeclaredInTwoChangedFilesIsNotACalleeToResolve() {
+        UnifiedDiff ambiguous = new UnifiedDiff(List.of(
+                added("src/Caller.java",
+                        "public class Caller {",
+                        "    void go() { shared(); outsider(); }",
+                        "}"),
+                added("src/Gamma.java", "public class Gamma { void shared() { } }"),
+                added("src/Delta.java", "public class Delta { void shared() { } }")));
+        TourStep callerStep = step("c1", new TourAnchor("src/Caller.java", "n1", "n3"));
+
+        StepImpact impact = StepImpact.of(callerStep, new ReviewTour("rs_1", "fp", List.of(callerStep)),
+                ambiguous, ChangeGraph.of(ambiguous), new OutOfDiffFanIn.Result(Map.of(), false));
+
+        assertFalse(impact.calleesToResolve().contains("shared"), "callees were " + impact.calleesToResolve());
+        assertTrue(impact.calleesToResolve().contains("outsider"), "callees were " + impact.calleesToResolve());
+    }
+
     // ---- fixtures -----------------------------------------------------------
 
     private static TourStep step(String id, TourAnchor anchor) {

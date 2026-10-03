@@ -18,14 +18,23 @@ import java.util.concurrent.CompletableFuture;
  */
 public interface UsageProvider {
 
-    /** The best declaration of {@code symbol}, or empty when none was found. */
+    /**
+     * The best declaration of {@code symbol}, or empty when it occurs
+     * nowhere. A provider that found only a likely candidate returns it with
+     * {@link Usage#resolvedDeclaration} false rather than nothing.
+     */
     CompletableFuture<Optional<Usage>> declaration(String symbol);
 
     /** Every place {@code symbol} occurs. */
     CompletableFuture<List<Usage>> usages(String symbol);
 
-    /** One located line, and the warrant it was found under. */
-    record Usage(String file, int line, String text, Provenance provenance) {
+    /**
+     * One located line, and the warrant it was found under.
+     * {@code resolvedDeclaration} is true only for a declaration the
+     * provider is confident of; a fallback candidate, and every plain usage,
+     * carry false.
+     */
+    record Usage(String file, int line, String text, Provenance provenance, boolean resolvedDeclaration) {
         public Usage {
             Objects.requireNonNull(file, "file");
             Objects.requireNonNull(text, "text");

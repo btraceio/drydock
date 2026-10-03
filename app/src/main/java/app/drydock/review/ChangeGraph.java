@@ -79,10 +79,16 @@ public final class ChangeGraph {
 
     /**
      * Where one changed declaration sits: the row of the review diff that
-     * declares {@code name}, by its stable line key. Every declaration made
-     * on a changed row is a site, whether or not its name is unique across
-     * the change -- placing a declaration inside a tour anchor needs no
-     * name resolution.
+     * declares {@code name}, by its stable line key. Every name declared on
+     * a changed row has a site, whether or not it is unique across the
+     * change -- placing a declaration inside a tour anchor needs no name
+     * resolution.
+     *
+     * <p>One site per (file, name). An edited declaration line is a removed
+     * row and an added row naming the same symbol; that is one declaration
+     * that changed, not two, and its site is the added ({@code n}) row, the
+     * one that exists to be read. The same rule folds overloads in one file
+     * into one site -- they share every name-matched caller anyway.</p>
      */
     public record DeclarationSite(String name, String file, String lineKey)
             implements Comparable<DeclarationSite> {
@@ -143,7 +149,7 @@ public final class ChangeGraph {
         Map<String, List<String>> declaringFiles = new TreeMap<>();
         Map<String, SortedSet<String>> declarationsByFile = new TreeMap<>();
         Map<Hunk, SortedSet<String>> declarationsByHunk = new TreeMap<>();
-        SortedSet<DeclarationSite> declarationSites = new TreeSet<>();
+        Map<String, DeclarationSite> siteByFileAndName = new LinkedHashMap<>();
         for (Map.Entry<String, List<SymbolScan.Symbol>> entry : scans.entrySet()) {
             for (SymbolScan.Symbol symbol : entry.getValue()) {
                 if (symbol.declaration() && symbol.onChangedLine()) {
@@ -155,8 +161,10 @@ public final class ChangeGraph {
                             .computeIfAbsent(new Hunk(entry.getKey(), symbol.hunk()),
                                     key -> new TreeSet<>())
                             .add(symbol.name());
-                    declarationSites.add(new DeclarationSite(symbol.name(), entry.getKey(),
-                            symbol.lineKey()));
+                    DeclarationSite site = new DeclarationSite(symbol.name(), entry.getKey(),
+                            symbol.lineKey());
+                    siteByFileAndName.merge(entry.getKey() + '\0' + symbol.name(), site,
+                            (kept, next) -> !isPostImage(kept) && isPostImage(next) ? next : kept);
                 }
             }
         }
@@ -222,6 +230,7 @@ public final class ChangeGraph {
             }
         }
 
+        SortedSet<DeclarationSite> declarationSites = new TreeSet<>(siteByFileAndName.values());
         SortedSet<String> files = new TreeSet<>(scans.keySet());
         return new ChangeGraph(files, declarationsByFile, unique, out, in, inBySymbol,
                 declarationsByHunk, referencesByHunk, hunksDeclaringSymbol,
@@ -297,6 +306,10 @@ public final class ChangeGraph {
     /** Every declaration made on a changed row, with the row it sits on. */
     public SortedSet<DeclarationSite> declarationSites() {
         return Collections.unmodifiableSortedSet(declarationSites);
+    }
+
+    private static boolean isPostImage(DeclarationSite site) {
+        return site.lineKey().startsWith("n");
     }
 
     private static SortedSet<String> unmodifiable(SortedSet<String> set) {
