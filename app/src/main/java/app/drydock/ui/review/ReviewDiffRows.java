@@ -113,16 +113,6 @@ final class ReviewDiffRows {
     }
 
     /**
-     * One hunk's card: a header plus its body rows, plus a footer row for
-     * each of the hunk's {@link ReadingPath.Link}s (spec §7.2) -- last, so a
-     * reader reaches "what this hunk has to do with the rest of the diff"
-     * only after having read the hunk itself. Whichever row ends up last,
-     * body or link, is marked {@link ReviewDiffRow.Edge#BOTTOM} so the card
-     * closes on it. A hunk whose every line is dropped (all context, with
-     * context hidden) yields no card at all rather than an empty one --
-     * links belong to a hunk, not to a card with nothing else in it.
-     */
-    /**
      * In whole-file mode, the runs to fold so the rendered rows fit
      * {@code options.maxRows()}: longest first, because the longest unchanged
      * runs are the ones farthest from any change. Runs the user expanded are
@@ -174,6 +164,16 @@ final class ReviewDiffRows {
         return folds;
     }
 
+    /**
+     * One hunk's card: a header plus its body rows, plus a footer row for
+     * each of the hunk's {@link ReadingPath.Link}s (spec §7.2) -- last, so a
+     * reader reaches "what this hunk has to do with the rest of the diff"
+     * only after having read the hunk itself. Whichever row ends up last,
+     * body or link, is marked {@link ReviewDiffRow.Edge#BOTTOM} so the card
+     * closes on it. A hunk whose every line is dropped (all context, with
+     * context hidden) yields no card at all rather than an empty one --
+     * links belong to a hunk, not to a card with nothing else in it.
+     */
     private static List<ReviewDiffRow> buildCard(UnifiedDiff.FileDiff file, UnifiedDiff.Hunk hunk,
                                                  int hunkIndex, Options options,
                                                  Set<ReviewDiffRow.RunKey> folds) {

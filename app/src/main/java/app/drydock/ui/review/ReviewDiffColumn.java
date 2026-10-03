@@ -236,6 +236,8 @@ final class ReviewDiffColumn extends BorderPane {
      * diff everything else depends on.
      */
     private boolean wholeFiles;
+    /** The whole-file diff as fetched; {@link #wholeFileDiff} is it after the untracked filter. */
+    private UnifiedDiff wholeFileFull;
     private UnifiedDiff wholeFileDiff;
     private boolean wholeFileUnavailable;
     private long wholeRequestToken;
@@ -1046,6 +1048,7 @@ final class ReviewDiffColumn extends BorderPane {
     }
 
     private void resetWholeFiles() {
+        wholeFileFull = null;
         wholeFileDiff = null;
         wholeFileUnavailable = false;
         wholeRequestToken++;
@@ -1089,26 +1092,42 @@ final class ReviewDiffColumn extends BorderPane {
         long token = ++wholeRequestToken;
         diffService.diff(requested.diffRoot(), requested.diffScope(), requested.base(),
                         DiffService.WHOLE_FILE_CONTEXT_LINES)
-                .whenComplete((result, failure) -> Platform.runLater(() -> {
-                    if (token != wholeRequestToken || !wholeFiles) {
-                        return;
-                    }
-                    if (failure != null) {
-                        LOG.log(Level.WARNING, "Whole-file diff failed for scope " + requested.id() + ": "
-                                + UiErrors.unwrap(failure).getMessage());
-                        wholeFileUnavailable = true;
-                        wholeFileDiff = null;
-                    } else {
-                        wholeFileUnavailable = false;
-                        wholeFileDiff = withoutHiddenUntracked(result, requested.id());
-                    }
-                    rebuild();
-                    updateSummary();
-                }));
+                .whenComplete((result, failure) ->
+                        Platform.runLater(() -> applyWholeFileResult(token, result, failure)));
+    }
+
+    /**
+     * Applies a whole-file fetch outcome on the FX thread. A stale token (the
+     * scope or diff changed since the request) or a turned-off mode discards
+     * it; a failure falls back to the review diff and says so in the summary.
+     */
+    void applyWholeFileResult(long token, UnifiedDiff result, Throwable failure) {
+        if (token != wholeRequestToken || !wholeFiles) {
+            return;
+        }
+        if (failure != null) {
+            LOG.log(Level.WARNING, "Whole-file diff failed for scope " + displayedScopeId + ": "
+                    + UiErrors.unwrap(failure).getMessage());
+            wholeFileUnavailable = true;
+            wholeFileFull = null;
+            wholeFileDiff = null;
+        } else {
+            wholeFileUnavailable = false;
+            wholeFileFull = result;
+            wholeFileDiff = withoutHiddenUntracked(result, displayedScopeId);
+        }
+        rebuild();
+        updateSummary();
+    }
+
+    /** Test-only: the token a whole-file result must carry to be applied. */
+    long wholeRequestToken() {
+        return wholeRequestToken;
     }
 
     /** Diagnostic/test-only: supplies the whole-file display diff without running git. */
     void diagShowWholeFileDiff(UnifiedDiff diff) {
+        wholeFileFull = diff;
         wholeFileDiff = diff;
         wholeFileUnavailable = false;
         rebuild();
@@ -1150,6 +1169,9 @@ final class ReviewDiffColumn extends BorderPane {
     private void publishDisplayed(String scopeId) {
         displayedScopeId = scopeId;
         displayedDiff = withoutHiddenUntracked(fullDiff, scopeId);
+        if (wholeFileFull != null) {
+            wholeFileDiff = withoutHiddenUntracked(wholeFileFull, scopeId);
+        }
         symbolIndex = SymbolIndex.of(displayedDiff);
         rebuild();
         onDiffResolved.accept(scopeId, new DiffOutcome.Loaded(displayedDiff));
@@ -1180,8 +1202,13 @@ final class ReviewDiffColumn extends BorderPane {
     }
 
     private ReviewDiffRows.Options buildOptions() {
-        return new ReviewDiffRows.Options(showContext, expandedRuns, MAX_RENDERED_ROWS, hunkFilter(), linksByHunk,
-                wholeFiles && wholeFileDiff != null && !foldAll);
+        // Hunk ids (intent filter, links) are review-diff coordinates; the
+        // whole-file diff has different hunks, so it ignores both.
+        boolean whole = wholeFiles && wholeFileDiff != null;
+        return new ReviewDiffRows.Options(showContext, expandedRuns, MAX_RENDERED_ROWS,
+                whole ? ReviewDiffRows.HunkFilter.ALL : hunkFilter(),
+                whole ? Map.of() : linksByHunk,
+                whole && !foldAll);
     }
 
     /**
