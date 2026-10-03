@@ -116,4 +116,27 @@ class StepPanelTest extends ApplicationTest {
         interact(() -> panel.show(view(CheckProgress.fresh("c1"))));
         assertTrue(lookup("Could not save.").tryQuery().isEmpty());
     }
+
+    @Test
+    void aWhitespaceOnlyOverrideReasonKeepsTheOverrideDisabled() {
+        CheckProgress exhausted = new CheckProgress("c1", 1, CheckProgress.Status.EXHAUSTED, Optional.empty(),
+                Optional.empty(), Optional.empty());
+        interact(() -> panel.show(view(exhausted)));
+        clickOn(".step-override-reason").write("   ");
+        WaitForAsyncUtils.waitForFxEvents();
+        assertTrue(lookup("Approve without passing").queryAs(Button.class).isDisabled());
+    }
+
+    @Test
+    void aWhitespaceOnlyRiskAnswerKeepsSendDisabled() {
+        TourCheck risk = new TourCheck("r1", TourCheck.Kind.RISK, "What could break?", List.of(),
+                OptionalInt.empty(), "", List.of());
+        TourStep step = new TourStep("s1", "Guard", "Why.", List.of(), List.of(), List.of(risk));
+        StepView riskView = new StepView(step, 1, 1, new StepProgress("s1", List.of(),
+                Map.of("r1", CheckProgress.fresh("r1")), StepProgress.Decision.NONE, Optional.empty(), false));
+        interact(() -> panel.show(riskView));
+        clickOn(".text-area").write("   ");
+        WaitForAsyncUtils.waitForFxEvents();
+        assertTrue(lookup("Send answer").queryAs(Button.class).isDisabled());
+    }
 }

@@ -5,6 +5,9 @@ import app.drydock.review.tour.StepGate;
 import app.drydock.review.tour.StepProgress;
 import app.drydock.review.tour.TourAnchor;
 import app.drydock.review.tour.TourCheck;
+import javafx.beans.binding.Bindings;
+import javafx.beans.binding.BooleanBinding;
+import javafx.beans.value.ObservableStringValue;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
 import javafx.scene.control.ScrollPane;
@@ -132,6 +135,10 @@ final class StepPanel extends VBox {
         setMaxWidth(width);
     }
 
+    private static BooleanBinding blank(ObservableStringValue text) {
+        return Bindings.createBooleanBinding(() -> text.get().isBlank(), text);
+    }
+
     private FlowPane anchorChips(StepView view) {
         FlowPane chips = new FlowPane(6, 6);
         List<TourAnchor> anchors = view.step().anchors();
@@ -195,7 +202,7 @@ final class StepPanel extends VBox {
                 reason.setPromptText("Why approve without passing?");
                 reason.getStyleClass().add("step-override-reason");
                 Button override = new Button("Approve without passing");
-                override.disableProperty().bind(reason.textProperty().isEmpty());
+                override.disableProperty().bind(blank(reason.textProperty()));
                 override.setOnAction(event -> host.override(reason.getText().strip()));
                 Button ask = new Button("Ask the agent");
                 ask.setOnAction(event -> host.askAgent(check.id()));
@@ -216,7 +223,7 @@ final class StepPanel extends VBox {
             answer.setWrapText(true);
             answer.setPrefRowCount(3);
             Button send = new Button("Send answer");
-            send.disableProperty().bind(answer.textProperty().isEmpty());
+            send.disableProperty().bind(blank(answer.textProperty()));
             send.setOnAction(event -> host.submitRisk(check.id(), answer.getText().strip()));
             answer.addEventHandler(KeyEvent.KEY_PRESSED, event -> {
                 if (event.isShortcutDown() && event.getCode() == KeyCode.ENTER && !answer.getText().isBlank()) {
