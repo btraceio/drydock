@@ -64,9 +64,7 @@ abstract class ReviewTourFixture extends ApplicationTest {
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
-        host.diff = new UnifiedDiff(List.of(
-                file(FILE_A, "void foo();", "void bar();"),
-                file(FILE_B, "void baz();")));
+        host.diff = fixtureDiff();
         view = new SessionReviewView(host, diffService, null);
         Scene scene = new Scene(view, 1400, 900);
         scene.getStylesheets().addAll(
@@ -136,6 +134,13 @@ abstract class ReviewTourFixture extends ApplicationTest {
         }
     }
 
+    /** The diff the board shows; a subclass may swap in a variant built with {@link #file}. */
+    UnifiedDiff fixtureDiff() {
+        return new UnifiedDiff(List.of(
+                file(FILE_A, "void foo();", "void bar();"),
+                file(FILE_B, "void baz();")));
+    }
+
     /** The tour each test starts on; a subclass may swap in a variant of {@link #tour}. */
     ReviewTour tourFor(String scopeId, UnifiedDiff diff) {
         return tour(scopeId, diff);
@@ -163,7 +168,7 @@ abstract class ReviewTourFixture extends ApplicationTest {
     }
 
     /** One ADD row per hunk, hunk {@code i} at new line {@code i * 10 + 1}; see ReviewViewFixture. */
-    private static UnifiedDiff.FileDiff file(String path, String... hunkTexts) {
+    static UnifiedDiff.FileDiff file(String path, String... hunkTexts) {
         List<UnifiedDiff.Hunk> hunks = new ArrayList<>();
         for (int i = 0; i < hunkTexts.length; i++) {
             hunks.add(new UnifiedDiff.Hunk("@@ -1 +1 @@", List.of(

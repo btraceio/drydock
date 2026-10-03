@@ -3369,6 +3369,23 @@
     -fx-border-color: -drydock-text-faint;
     -fx-border-style: segments(3, 3) line-cap round;
 }
+/* The step panel's impact (guided tour, spec §6): each entry a Button laid
+ * out as a left-aligned row, each section's warrant a faint tag beside it.
+ * A claimed tag is italic for the same reason the stale chip above is; a
+ * resolved callee (a language server's answer, when one is wired) is set
+ * apart from a name match by weight rather than by a fifth hue. */
+.step-impact-entry {
+    -fx-alignment: center-left;
+}
+.step-impact-tag {
+    -fx-text-fill: -drydock-text-faint;
+}
+.step-impact-tag.provenance-claimed {
+    -fx-font-style: italic;
+}
+.step-impact-entry.provenance-resolved {
+    -fx-font-weight: bold;
+}
 .review-intent-card.collapsed {
     -fx-padding: 7 0 7 0;
     -fx-alignment: center;

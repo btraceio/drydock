@@ -1,9 +1,13 @@
 package app.drydock.ui.review;
 
+import app.drydock.review.Provenance;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.Triage;
+import app.drydock.review.UsageProvider;
 import app.drydock.review.tour.CheckProgress;
+import app.drydock.review.tour.ImpactNote;
 import app.drydock.review.tour.StepGate;
+import app.drydock.review.tour.StepImpact;
 import app.drydock.review.tour.StepProgress;
 import app.drydock.review.tour.TourAnchor;
 import app.drydock.review.tour.TourCheck;
@@ -25,14 +29,16 @@ import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /**
  * The right-hand panel in tour mode: the current step's narrative, anchors
  * and active check, the agent's findings on the step awaiting triage, and
- * the blocker banner that stands in front of the tour. View-only: every
- * action goes to {@link Host}.
+ * the blocker banner that stands in front of the tour, and the step's
+ * impact. View-only: every action goes to {@link Host}.
  */
 final class StepPanel extends VBox {
 
@@ -52,12 +58,41 @@ final class StepPanel extends VBox {
         void sendBack(List<ReviewAnnotation> confirmedBlockers);
         void reviewAnyway();
         void backToStep();
+        /** Peeks at {@code file}:{@code line} in place, over the diff column. */
+        void openLocation(String file, int line);
+        void selectStep(String stepId);
+    }
+
+    /**
+     * What the impact section shows for the current step (spec §6).
+     *
+     * @param claimed             the agent's impact notes, pinned on top
+     * @param measured            the step's measured impact; while {@code
+     *                            pending} its callers and signature flags are
+     *                            not yet measured and are not shown
+     * @param callees             resolutions of {@code measured}'s callees so
+     *                            far: absent means still resolving, an empty
+     *                            {@code Optional} means nothing was found
+     * @param pending             whether the out-of-diff caller scan is still
+     *                            running
+     * @param calleesUnavailable  why no callee can be resolved at all (no
+     *                            checkout to search), instead of "resolving…"
+     *                            forever
+     */
+    record ImpactView(List<ImpactNote> claimed, StepImpact measured,
+                      Map<String, Optional<UsageProvider.Usage>> callees, boolean pending,
+                      Optional<String> calleesUnavailable) {
+        ImpactView {
+            claimed = List.copyOf(claimed);
+            callees = Map.copyOf(callees);
+        }
     }
 
     private final Host host;
     private final VBox content = new VBox(10);
     private final VBox extraSections = new VBox(10);
     private final VBox triageSection = new VBox(8);
+    private final VBox impactSection = new VBox(6);
     private final ScrollPane scroll;
     private final Button backPill = new Button();
     private final List<Button> choiceButtons = new ArrayList<>();
@@ -70,6 +105,7 @@ final class StepPanel extends VBox {
         this.host = host;
         getStyleClass().add("step-panel");
         triageSection.getStyleClass().add("step-triage");
+        impactSection.getStyleClass().add("step-impact");
         scroll = new ScrollPane(new VBox(14, content, extraSections));
         scroll.setFitToWidth(true);
         // The "↩ back to step N" pill sits above the scroll, outside the
@@ -164,6 +200,154 @@ final class StepPanel extends VBox {
     }
 
     /**
+     * The step's impact, after the triage section: agent notes, signature
+     * flags, callers outside the change by file, edges to other steps, and
+     * callees outside the change. Every entry is a {@link Button}: a
+     * location peeks in place through {@link Host#openLocation}, an edge
+     * selects its step.
+     */
+    void showImpact(ImpactView view) {
+        impactSection.getChildren().clear();
+        if (!extraSections.getChildren().contains(impactSection)) {
+            int afterTriage = extraSections.getChildren().indexOf(triageSection) + 1;
+            extraSections.getChildren().add(afterTriage, impactSection);
+        }
+        StepImpact measured = view.measured();
+        if (!view.claimed().isEmpty()) {
+            impactSection.getChildren().add(heading("Agent notes", Provenance.CLAIMED));
+            for (ImpactNote note : view.claimed()) {
+                impactSection.getChildren().add(locationEntry(note.file() + ":" + note.line() + " — " + note.text(),
+                        note.file(), note.line(), "step-impact-note"));
+            }
+        }
+        if (view.pending()) {
+            impactSection.getChildren().add(impactLabel("Finding callers…", "step-impact-pending"));
+        } else if (measured.unavailableReason().isPresent()) {
+            impactSection.getChildren().add(impactLabel("callers unavailable: " + measured.unavailableReason().get(),
+                    "step-impact-unavailable"));
+        } else {
+            showSignatureFlags(measured);
+            showCallers(measured);
+        }
+        showInChange(measured);
+        showCallees(view);
+    }
+
+    private void showSignatureFlags(StepImpact measured) {
+        if (measured.signatureFlags().isEmpty()) {
+            return;
+        }
+        impactSection.getChildren().add(heading("Signature changed", Provenance.MEASURED));
+        for (StepImpact.SignatureFlag flag : measured.signatureFlags()) {
+            int count = flag.uneditedCallSites();
+            impactSection.getChildren().add(impactLabel(flag.symbol() + " in " + flag.file(), "step-impact-flag-name"));
+            impactSection.getChildren().add(impactLabel("declaration changed · " + count
+                    + (count == 1 ? " call site was not edited" : " call sites were not edited"),
+                    "step-impact-flag"));
+        }
+    }
+
+    private void showCallers(StepImpact measured) {
+        impactSection.getChildren().add(heading("Called from outside the change", null));
+        impactSection.getChildren().add(impactLabel("occurrences, not resolved references", "step-impact-tag"));
+        if (measured.calledFromOutside().isEmpty()) {
+            impactSection.getChildren().add(impactLabel("No callers outside the change", "step-impact-empty"));
+            return;
+        }
+        Map<String, List<StepImpact.Caller>> byFile = new LinkedHashMap<>();
+        for (StepImpact.Caller caller : measured.calledFromOutside()) {
+            byFile.computeIfAbsent(caller.file(), file -> new ArrayList<>()).add(caller);
+        }
+        byFile.forEach((file, callers) -> {
+            impactSection.getChildren().add(impactLabel(file, "step-impact-file"));
+            for (StepImpact.Caller caller : callers) {
+                String text = ":" + caller.line() + "  " + caller.text().strip()
+                        + (caller.inChangedFile() ? " · in a changed file" : "");
+                impactSection.getChildren().add(locationEntry(text, caller.file(), caller.line(),
+                        "step-impact-caller"));
+            }
+        });
+    }
+
+    private void showInChange(StepImpact measured) {
+        if (measured.inChange().isEmpty()) {
+            return;
+        }
+        impactSection.getChildren().add(heading("In this change", null));
+        for (StepImpact.InChange edge : measured.inChange()) {
+            String arrow = edge.direction() == StepImpact.Direction.CALLS ? "→ " : "← ";
+            Button entry = entry(arrow + edge.symbol() + " · step " + edge.otherStepNumber(), "step-impact-edge");
+            entry.setOnAction(event -> host.selectStep(edge.otherStepId()));
+            impactSection.getChildren().add(entry);
+        }
+    }
+
+    private void showCallees(ImpactView view) {
+        List<String> names = view.measured().calleesToResolve();
+        if (names.isEmpty()) {
+            return;
+        }
+        impactSection.getChildren().add(heading("Calls outside the change", Provenance.MEASURED));
+        for (String name : names) {
+            Optional<UsageProvider.Usage> resolution = view.callees().get(name);
+            if (resolution != null && resolution.isPresent()) {
+                UsageProvider.Usage usage = resolution.get();
+                String text = name + " → " + usage.file() + ":" + usage.line()
+                        + (usage.resolvedDeclaration() ? "" : " (first occurrence)");
+                Button entry = locationEntry(text, usage.file(), usage.line(), "step-impact-callee");
+                if (!usage.provenance().styleClass().isEmpty()) {
+                    entry.getStyleClass().add(usage.provenance().styleClass());
+                }
+                impactSection.getChildren().add(entry);
+                continue;
+            }
+            String state = resolution != null ? "no declaration found"
+                    : view.calleesUnavailable().map(reason -> "not resolved: " + reason).orElse("resolving…");
+            // A Button even without a target, so the list keeps one focus
+            // order; there is nowhere to go, so it does nothing.
+            Button entry = entry(name + " → " + state, "step-impact-callee");
+            entry.setDisable(true);
+            impactSection.getChildren().add(entry);
+        }
+    }
+
+    /** A section heading, with the provenance tag beside it when it has one. */
+    private static Node heading(String text, Provenance provenance) {
+        Label title = impactLabel(text, "step-impact-header");
+        if (provenance == null) {
+            return title;
+        }
+        Label tag = impactLabel(provenance.label(), "step-impact-tag");
+        if (!provenance.styleClass().isEmpty()) {
+            tag.getStyleClass().add(provenance.styleClass());
+        }
+        HBox row = new HBox(6, title, tag);
+        row.setAlignment(Pos.BASELINE_LEFT);
+        return row;
+    }
+
+    private static Label impactLabel(String text, String styleClass) {
+        Label label = new Label(text);
+        label.setWrapText(true);
+        label.getStyleClass().add(styleClass);
+        return label;
+    }
+
+    private static Button entry(String text, String styleClass) {
+        Button button = new Button(text);
+        button.getStyleClass().addAll("step-impact-entry", styleClass);
+        button.setWrapText(true);
+        button.setMaxWidth(Double.MAX_VALUE);
+        return button;
+    }
+
+    private Button locationEntry(String text, String file, int line, String styleClass) {
+        Button button = entry(text, styleClass);
+        button.setOnAction(event -> host.openLocation(file, line));
+        return button;
+    }
+
+    /**
      * The banner that stands instead of the step while the agent proposes
      * blocking problems (spec §4): one row per blocker, then send the
      * confirmed ones back or review anyway.
@@ -173,6 +357,7 @@ final class StepPanel extends VBox {
         riskBox = Optional.empty();
         overrideReason = Optional.empty();
         triageSection.getChildren().clear();
+        extraSections.getChildren().remove(impactSection);
         VBox banner = new VBox(8);
         banner.getStyleClass().add("step-blocker-banner");
         int count = blockers.size();
@@ -444,7 +629,18 @@ final class StepPanel extends VBox {
             choice.setMaxWidth(Double.MAX_VALUE);
             choice.setOnAction(event -> host.answerChoice(check.id(), index));
             choiceButtons.add(choice);
-            box.getChildren().add(choice);
+            Optional<TourCheck.Location> at = offered.choices().get(i).at();
+            if (offered.kind() == TourCheck.Kind.TRACE && at.isPresent()) {
+                Button peek = new Button("peek");
+                peek.getStyleClass().add("step-choice-peek");
+                peek.setOnAction(event -> host.openLocation(at.get().file(), at.get().line()));
+                HBox.setHgrow(choice, Priority.ALWAYS);
+                HBox row = new HBox(6, choice, peek);
+                row.setAlignment(Pos.CENTER_LEFT);
+                box.getChildren().add(row);
+            } else {
+                box.getChildren().add(choice);
+            }
         }
     }
 }

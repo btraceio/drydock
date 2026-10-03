@@ -61,6 +61,8 @@ class StepPanelTest extends ApplicationTest {
             @Override public void sendBack(List<ReviewAnnotation> blockers) { calls.add("send " + blockers.size()); }
             @Override public void reviewAnyway() { calls.add("review anyway"); }
             @Override public void backToStep() { calls.add("back to step"); }
+            @Override public void openLocation(String file, int line) { calls.add("open " + file + ":" + line); }
+            @Override public void selectStep(String stepId) { calls.add("select " + stepId); }
         });
         stage.setScene(new Scene(panel, 336, 700));
         stage.show();

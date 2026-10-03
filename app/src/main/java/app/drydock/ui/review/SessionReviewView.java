@@ -23,12 +23,14 @@ import app.drydock.review.SessionReviewScopes;
 import app.drydock.review.Severity;
 import app.drydock.review.Triage;
 import app.drydock.review.SubmitPlan;
+import app.drydock.review.UsageProvider;
 import app.drydock.review.tour.AnchorIndex;
 import app.drydock.review.tour.CheckProgress;
 import app.drydock.review.tour.HunkOverride;
 import app.drydock.review.tour.ReviewTour;
 import app.drydock.review.tour.StepGate;
 import app.drydock.review.tour.StepGrading;
+import app.drydock.review.tour.StepImpact;
 import app.drydock.review.tour.StepProgress;
 import app.drydock.review.tour.StepVerdicts;
 import app.drydock.review.tour.TourAnchor;
@@ -36,7 +38,9 @@ import app.drydock.review.tour.TourFindings;
 import app.drydock.review.tour.TourRecord;
 import app.drydock.review.tour.TourCheck;
 import app.drydock.review.tour.TourStep;
+import app.drydock.ui.UiErrors;
 import app.drydock.ui.nav.ExplorerTrailStore;
+import app.drydock.ui.nav.LexicalUsageProvider;
 import app.drydock.ui.nav.NavigationTrail;
 import app.drydock.ui.nav.PeekLayer;
 import app.drydock.ui.nav.SearchRail;
@@ -903,6 +907,55 @@ public final class SessionReviewView extends BorderPane {
     private boolean shownBannerShelved;
     private TourRecord shownMarksRecord;
     private String shownMarksStepId;
+    private StepPanel.ImpactView shownImpact;
+
+    /**
+     * Stands in for the caller scan in {@link StepImpact#of} until the scan
+     * has landed, so edges and callees can be measured meanwhile; the step
+     * panel shows "Finding callers…" for as long as an entry was computed
+     * from this instance (compared by identity).
+     */
+    private static final OutOfDiffFanIn.Result CALLERS_PENDING =
+            new OutOfDiffFanIn.Result(Map.of(), Optional.empty());
+
+    private static final StepImpact NO_IMPACT =
+            new StepImpact(List.of(), List.of(), List.of(), List.of(), Optional.empty());
+
+    /**
+     * Every step's measured impact, computed off the FX thread on {@link
+     * #SECTION_GRAPH_EXECUTOR} from the graph and scan the board already
+     * built -- never a scan of its own -- and recomputed only when one of
+     * its inputs is replaced. {@link #impactsInFlight} is the computation
+     * running now; a completion that is no longer it is dropped.
+     */
+    private ImpactEntry impacts;
+    private ImpactEntry impactsInFlight;
+
+    /** What {@link #impacts} was computed from: the diff, graph and scan by identity, the tour by value. */
+    private record ImpactEntry(String scopeId, UnifiedDiff diff, ChangeGraph graph, OutOfDiffFanIn.Result fanIn,
+                               ReviewTour tour, Map<String, StepImpact> byStep) {
+        boolean sameBoard(String otherScopeId, UnifiedDiff otherDiff, ChangeGraph otherGraph, ReviewTour otherTour) {
+            return scopeId.equals(otherScopeId) && diff == otherDiff && graph == otherGraph && tour.equals(otherTour);
+        }
+
+        boolean computedFrom(String otherScopeId, UnifiedDiff otherDiff, ChangeGraph otherGraph,
+                             OutOfDiffFanIn.Result otherFanIn, ReviewTour otherTour) {
+            return fanIn == otherFanIn && sameBoard(otherScopeId, otherDiff, otherGraph, otherTour);
+        }
+    }
+
+    /**
+     * Callee declarations resolved for one (scope, diff), by name: a
+     * declaration does not depend on which step asked, so steps share them.
+     * Reset when the scope or diff changes, which is also what drops a
+     * resolution that lands after the reviewer moved on.
+     */
+    private final Map<String, Optional<UsageProvider.Usage>> calleeResolutions = new HashMap<>();
+    private final Set<String> calleesResolving = new HashSet<>();
+    private String calleeScopeId;
+    private UnifiedDiff calleeDiff;
+    /** At most one re-render pending for however many callee resolutions land together. */
+    private boolean calleeRenderQueued;
 
     /**
      * @param activityLog the MCP traffic log the {@code \} panel renders, or
@@ -1853,29 +1906,37 @@ public final class SessionReviewView extends BorderPane {
                             // answer.
                             return;
                         }
+                        OutOfDiffFanIn.Result landed = result;
                         if (failure != null) {
-                            // Nothing is recorded, so fanInFor keeps
-                            // reporting "not scanned" -- absent, never zero.
+                            // Recorded as unavailable -- absent, never zero --
+                            // so the step panel stops "Finding callers…" and
+                            // says why instead.
                             LOG.log(Level.WARNING, "Could not scan out-of-diff fan-in for scope "
                                     + scopeId, failure);
-                            return;
+                            landed = new OutOfDiffFanIn.Result(Map.of(),
+                                    Optional.of("the caller search failed: " + UiErrors.message(failure)));
                         }
-                        // A scan that confirms what the board is already
+                        // A scan that confirms what the rail is already
                         // showing does not disturb the reader. The common
                         // case is a scope with nothing to grep (no worktree,
                         // or a checkout git cannot read): the answer is the
                         // same "unavailable, nothing measured" the board
                         // started with, and re-rendering the rail and
                         // re-narrowing the diff column to say so would move
-                        // the ground under whoever is mid-review.
+                        // the ground under whoever is mid-review. It is
+                        // still recorded: the step panel tells "not scanned
+                        // yet" from "scanned, and here is why not", and its
+                        // redraw guards keep the rest of the tour still.
                         OutOfDiffFanIn.Result previous = fanInFor(scopeId);
-                        if (previous.unavailable() == result.unavailable()
-                                && previous.bySymbol().equals(result.bySymbol())) {
-                            return;
-                        }
-                        fanInByScope.put(scopeId, result);
+                        boolean railUnchanged = previous.unavailable() == landed.unavailable()
+                                && previous.bySymbol().equals(landed.bySymbol());
+                        fanInByScope.put(scopeId, landed);
                         if (selectedScope().map(current -> current.id().equals(scopeId))
                                 .orElse(false)) {
+                            if (railUnchanged) {
+                                renderTour(currentTour());
+                                return;
+                            }
                             refreshReviewState();
                             // The scan is the reading path's FIRST rank term,
                             // so a landing scan can reorder the rail under
@@ -3694,6 +3755,7 @@ public final class SessionReviewView extends BorderPane {
             shownStepView = null;
             shownTriage = null;
             shownBanner = null;
+            shownImpact = null;
             outline.setNotice(Optional.empty());
             outline.setFooter(0, true);
             verdictBar.update(null, Optional.empty(), false);
@@ -3740,6 +3802,7 @@ public final class SessionReviewView extends BorderPane {
                 shownBannerShelved = record.shelved();
                 shownStepView = null;
                 shownTriage = null;
+                shownImpact = null;
             }
         } else {
             if (shownBanner != null || !stepView.equals(shownStepView)) {
@@ -3754,6 +3817,11 @@ public final class SessionReviewView extends BorderPane {
                 stepPanel.showTriage(proposals);
                 shownTriage = proposals;
             }
+            StepPanel.ImpactView impactView = impactView(record, step);
+            if (!impactView.equals(shownImpact)) {
+                stepPanel.showImpact(impactView);
+                shownImpact = impactView;
+            }
         }
         if (!tourMarksShown || !record.equals(shownMarksRecord) || !currentStepId.equals(shownMarksStepId)) {
             diffColumn.setStepMarkSource(new LiveTourMarks(record, currentStepId));
@@ -3763,6 +3831,140 @@ public final class SessionReviewView extends BorderPane {
         }
         renderTourVerdictBar(record, step, progress);
         syncTourVerdicts(record);
+    }
+
+    /**
+     * What the step panel's impact section shows for {@code step}: the
+     * agent's notes always, the measured part once {@link #impacts} has been
+     * computed for this board (the previous scan's while a newer one is
+     * being folded in), and the callee resolutions that have landed.
+     */
+    private StepPanel.ImpactView impactView(TourRecord record, TourStep step) {
+        Optional<ReviewScope> scope = selectedScope();
+        Optional<UnifiedDiff> diff = loadedDiff();
+        ChangeGraph graph = scope.map(each -> graphByScope.get(each.id())).orElse(null);
+        if (scope.isEmpty() || diff.isEmpty() || graph == null) {
+            return new StepPanel.ImpactView(step.impactNotes(), NO_IMPACT, Map.of(), true, Optional.empty());
+        }
+        String scopeId = scope.get().id();
+        OutOfDiffFanIn.Result fanIn = fanInByScope.getOrDefault(scopeId, CALLERS_PENDING);
+        ImpactEntry entry = impacts;
+        if (entry == null || !entry.computedFrom(scopeId, diff.get(), graph, fanIn, record.tour())) {
+            requestImpacts(new ImpactEntry(scopeId, diff.get(), graph, fanIn, record.tour(), Map.of()));
+        }
+        if (entry == null || !entry.sameBoard(scopeId, diff.get(), graph, record.tour())) {
+            return new StepPanel.ImpactView(step.impactNotes(), NO_IMPACT, Map.of(), true, Optional.empty());
+        }
+        StepImpact measured = entry.byStep().getOrDefault(step.id(), NO_IMPACT);
+        Optional<String> calleesUnavailable = navigation.isEmpty()
+                ? Optional.of("no checkout to search")
+                : Optional.empty();
+        Map<String, Optional<UsageProvider.Usage>> callees = new HashMap<>();
+        if (calleesUnavailable.isEmpty()) {
+            resolveCallees(scopeId, diff.get(), measured.calleesToResolve());
+            for (String name : measured.calleesToResolve()) {
+                Optional<UsageProvider.Usage> resolved = calleeResolutions.get(name);
+                if (resolved != null) {
+                    callees.put(name, resolved);
+                }
+            }
+        }
+        return new StepPanel.ImpactView(step.impactNotes(), measured, callees, entry.fanIn() == CALLERS_PENDING,
+                calleesUnavailable);
+    }
+
+    /** Computes every step's impact for {@code key}'s inputs off the FX thread, unless that is already running. */
+    private void requestImpacts(ImpactEntry key) {
+        ImpactEntry running = impactsInFlight;
+        if (running != null
+                && running.computedFrom(key.scopeId(), key.diff(), key.graph(), key.fanIn(), key.tour())) {
+            return;
+        }
+        impactsInFlight = key;
+        CompletableFuture
+                .supplyAsync(() -> {
+                    Map<String, StepImpact> byStep = new HashMap<>();
+                    for (TourStep each : key.tour().steps()) {
+                        byStep.put(each.id(), StepImpact.of(each, key.tour(), key.diff(), key.graph(), key.fanIn()));
+                    }
+                    return byStep;
+                }, SECTION_GRAPH_EXECUTOR)
+                .whenComplete((byStep, failure) -> {
+                    if (closed) {
+                        return;
+                    }
+                    Platform.runLater(() -> {
+                        if (closed || impactsInFlight != key) {
+                            return;
+                        }
+                        impactsInFlight = null;
+                        Map<String, StepImpact> computed = byStep;
+                        if (failure != null) {
+                            LOG.log(Level.WARNING, "Could not measure the tour's impact for scope "
+                                    + key.scopeId(), failure);
+                            StepImpact unmeasured = new StepImpact(List.of(), List.of(), List.of(), List.of(),
+                                    Optional.of("the impact could not be measured: " + UiErrors.message(failure)));
+                            computed = new HashMap<>();
+                            for (TourStep each : key.tour().steps()) {
+                                computed.put(each.id(), unmeasured);
+                            }
+                        }
+                        impacts = new ImpactEntry(key.scopeId(), key.diff(), key.graph(), key.fanIn(), key.tour(),
+                                Map.copyOf(computed));
+                        renderTour(currentTour());
+                    });
+                });
+    }
+
+    /**
+     * Resolves the callees not yet resolved or resolving, through the
+     * lexical {@link UsageProvider}, off the FX thread. Each landing is
+     * recorded on the FX thread and the tour re-rendered once per batch of
+     * landings, so the rows turn from "resolving…" as they arrive.
+     */
+    private void resolveCallees(String scopeId, UnifiedDiff diff, List<String> names) {
+        if (!scopeId.equals(calleeScopeId) || calleeDiff != diff) {
+            calleeScopeId = scopeId;
+            calleeDiff = diff;
+            calleeResolutions.clear();
+            calleesResolving.clear();
+        }
+        List<String> wanted = names.stream()
+                .filter(name -> !calleeResolutions.containsKey(name) && !calleesResolving.contains(name))
+                .toList();
+        if (wanted.isEmpty() || navigation.isEmpty()) {
+            return;
+        }
+        ReviewNavigation nav = navigation.get();
+        UsageProvider provider = new LexicalUsageProvider(new SymbolPeekService(nav.root(), nav.search()),
+                changedLinesOfReviewDiff());
+        for (String name : wanted) {
+            calleesResolving.add(name);
+            provider.declaration(name).whenComplete((found, failure) -> {
+                if (closed) {
+                    return;
+                }
+                Platform.runLater(() -> {
+                    if (closed || !scopeId.equals(calleeScopeId) || calleeDiff != diff) {
+                        return;
+                    }
+                    calleesResolving.remove(name);
+                    if (failure != null) {
+                        LOG.log(Level.WARNING, "Could not resolve the declaration of " + name, failure);
+                    }
+                    calleeResolutions.put(name, failure == null ? found : Optional.empty());
+                    if (!calleeRenderQueued) {
+                        calleeRenderQueued = true;
+                        Platform.runLater(() -> {
+                            calleeRenderQueued = false;
+                            if (!closed) {
+                                renderTour(currentTour());
+                            }
+                        });
+                    }
+                });
+            });
+        }
     }
 
     /** The selected scope's findings, minus withheld ones, that lie on {@code step} in the review diff. */
@@ -4529,6 +4731,16 @@ public final class SessionReviewView extends BorderPane {
         }
 
         @Override
+        public void openLocation(String file, int line) {
+            openLocationPeek(Path.of(file), line);
+        }
+
+        @Override
+        public void selectStep(String stepId) {
+            SessionReviewView.this.selectStep(stepId);
+        }
+
+        @Override
         public void retryRisk(String checkId) {
             updateCurrentTour(record -> record.tour().stepOfCheck(checkId)
                     .map(step -> {
@@ -4727,6 +4939,19 @@ public final class SessionReviewView extends BorderPane {
      */
     boolean diagGraphBuildPending(String scopeId) {
         return ReviewDiagFxThread.call(() -> graphBuilding.contains(scopeId));
+    }
+
+    /**
+     * Diagnostic-only: replaces {@code scopeId}'s caller scan with {@code
+     * result}, as if the scan had returned it. A real scan still in flight
+     * is superseded, so it cannot overwrite this when it lands. FX thread.
+     */
+    void diagSetFanIn(String scopeId, OutOfDiffFanIn.Result result) {
+        fanInGenerationByScope.merge(scopeId, 1, Integer::sum);
+        fanInByScope.put(scopeId, result);
+        if (selectedScope().map(scope -> scope.id().equals(scopeId)).orElse(false)) {
+            refreshReviewState();
+        }
     }
 
     /**
