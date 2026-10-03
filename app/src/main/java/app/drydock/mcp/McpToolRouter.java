@@ -23,8 +23,10 @@ import app.drydock.review.Severity;
 import app.drydock.review.SymbolScan;
 import app.drydock.review.VerdictMerge;
 import app.drydock.review.tour.AnchorIndex;
+import app.drydock.review.tour.CheckProgress;
 import app.drydock.review.tour.ImpactNote;
 import app.drydock.review.tour.ReviewTour;
+import app.drydock.review.tour.StepGrading;
 import app.drydock.review.tour.TourCheck;
 import app.drydock.review.tour.TourCodec;
 import app.drydock.review.tour.TourFingerprint;
@@ -193,6 +195,16 @@ public final class McpToolRouter {
                                         + "line}}] (2-4, not for risk), answer? (0-based, not for risk), explanation, "
                                         + "alternates[{...same, no alternates}]}]}; at most 40 steps, 6 checks each.")),
                         "scopeId", "steps"),
+                descriptor("review_check",
+                        "Judges the reviewer's free-text answer to a risk check, read from review_state "
+                                + "tour.awaitingAgent. Verdict holds, partly or doesNotHold, with a one-line "
+                                + "reason the reviewer will see.",
+                        JsonObject.empty()
+                                .put("scopeId", schemaString("Review scope handle."))
+                                .put("checkId", schemaString("The risk check being judged."))
+                                .put("verdict", schemaString("holds, partly or doesNotHold."))
+                                .put("reason", schemaString("One line the reviewer will read.")),
+                        "scopeId", "checkId", "verdict", "reason"),
                 descriptor("review_finding",
                         "Records findings against a scope. Idempotent on finding id: a re-run upserts, so "
                                 + "existing threads, human severity overrides, resolutions and triage survive. A "
@@ -302,6 +314,7 @@ public final class McpToolRouter {
             case "review_scope" -> reviewScope(caller, arguments);
             case "review_intents" -> reviewIntents(caller, arguments);
             case "review_tour" -> reviewTour(caller, arguments);
+            case "review_check" -> reviewCheck(caller, arguments);
             case "review_finding" -> reviewFinding(caller, arguments);
             case "review_answer" -> reviewAnswer(caller, arguments);
             case "review_state" -> reviewState(caller, arguments);
@@ -699,6 +712,43 @@ public final class McpToolRouter {
                 .put("scopeId", new JsonString(scope.id()))
                 .put("steps", JsonNumber.of(steps.size()))
                 .put("checks", JsonNumber.of(checks));
+    }
+
+    // ---- review_check --------------------------------------------------
+
+    private JsonValue reviewCheck(ManagedSessionId caller, JsonValue arguments) throws McpToolException {
+        requireLiveSession(caller);
+        JsonObject args = asObject(arguments);
+        ReviewScope scope = requireScope(caller, args);
+        String checkId = requiredStringArg(args, "checkId");
+        String rawVerdict = requiredStringArg(args, "verdict");
+        StepGrading.RiskVerdict verdict = StepGrading.RiskVerdict.fromWire(rawVerdict).orElseThrow(() ->
+                new McpToolException("verdict must be holds, partly or doesNotHold; got " + rawVerdict));
+        String reason = PromptSafety.checkInboundText(requiredStringArg(args, "reason"), "review_check.reason");
+        TourRecord record = context.tourOf(scope.id())
+                .orElseThrow(() -> new McpToolException("scope " + scope.id() + " has no tour"));
+        TourStep step = record.tour().stepOfCheck(checkId)
+                .orElseThrow(() -> new McpToolException("no check " + checkId + " in the tour"));
+        TourCheck check = step.check(checkId).orElseThrow();
+        CheckProgress progress = record.progress(step.id()).check(check.id());
+        if (progress.status() != CheckProgress.Status.AWAITING_AGENT) {
+            throw new McpToolException("check " + checkId + " is not awaiting a verdict (it is "
+                    + progress.status() + ")");
+        }
+        String current = TourFingerprint.of(context.reviewDiff(scope));
+        if (!current.equals(record.tour().diffFingerprint())) {
+            return JsonObject.empty()
+                    .put("scopeId", new JsonString(scope.id()))
+                    .put("checkId", new JsonString(checkId))
+                    .put("dropped", new JsonBoolean(true))
+                    .put("reason", new JsonString("the diff changed since this answer was given; verdict dropped"));
+        }
+        CheckProgress next = StepGrading.applyRiskVerdict(check, progress, verdict, reason);
+        context.putTour(record.withProgress(record.progress(step.id()).withCheck(next)));
+        return JsonObject.empty()
+                .put("scopeId", new JsonString(scope.id()))
+                .put("checkId", new JsonString(checkId))
+                .put("status", new JsonString(next.status().name()));
     }
 
     private static void checkTourText(List<TourStep> steps) throws McpToolException {

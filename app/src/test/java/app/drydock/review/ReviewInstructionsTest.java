@@ -44,4 +44,15 @@ class ReviewInstructionsTest {
             assertTrue(instruction.contains("review_finding"));
         }
     }
+
+    @Test
+    void aRiskCheckRequestNamesTheCheckAndTheToolInOneLine() {
+        String line = ReviewInstructions.forRiskCheck("rs_abc123", "c7");
+
+        assertTrue(line.contains("rs_abc123"));
+        assertTrue(line.contains("c7"));
+        assertTrue(line.contains("review_check"));
+        assertTrue(line.contains("review_state"));
+        assertFalse(line.contains("\n"));
+    }
 }

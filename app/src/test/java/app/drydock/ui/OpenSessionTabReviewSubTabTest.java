@@ -8,6 +8,7 @@ import app.drydock.review.BaseMove;
 import app.drydock.review.ChangeGraph;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewIntent;
+import app.drydock.domain.SessionActivity;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
 import app.drydock.review.SessionReviewScopes;
@@ -601,6 +602,16 @@ class OpenSessionTabReviewSubTabTest extends ApplicationTest {
         @Override
         public boolean dispatchRecheck(ReviewScope scope, String fromBase, String toBase) {
             return false;
+        }
+
+        @Override
+        public boolean dispatchRiskCheck(ReviewScope scope, String checkId) {
+            return false;
+        }
+
+        @Override
+        public SessionActivity agentActivity(ReviewScope scope) {
+            return SessionActivity.UNKNOWN;
         }
 
         @Override

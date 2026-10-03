@@ -1,5 +1,6 @@
 package app.drydock.ui.review;
 
+import app.drydock.domain.SessionActivity;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.AnnotationStore;
@@ -46,6 +47,15 @@ final class FakeReviewHost implements SessionReviewView.Host {
 
     /** Every automatic recheck asked for, as {@code fromBase->toBase}. */
     final List<String> recheckDispatches = new ArrayList<>();
+
+    /** Every risk check the agent was asked to judge, by check id. */
+    final List<String> riskCheckDispatches = new ArrayList<>();
+
+    /** Whether the risk-check hand-off reaches a terminal. */
+    boolean riskCheckHandOffSucceeds = true;
+
+    /** What {@link #agentActivity} reports. */
+    SessionActivity agentActivity = SessionActivity.IDLE;
 
     /** Whether the recheck hand-off reaches a terminal; false stands in for a closed tab. */
     boolean recheckHandOffSucceeds = true;
@@ -219,6 +229,17 @@ final class FakeReviewHost implements SessionReviewView.Host {
     public boolean dispatchRecheck(ReviewScope scope, String fromBase, String toBase) {
         recheckDispatches.add(fromBase + "->" + toBase);
         return recheckHandOffSucceeds;
+    }
+
+    @Override
+    public boolean dispatchRiskCheck(ReviewScope scope, String checkId) {
+        riskCheckDispatches.add(checkId);
+        return riskCheckHandOffSucceeds;
+    }
+
+    @Override
+    public SessionActivity agentActivity(ReviewScope scope) {
+        return agentActivity;
     }
 
     @Override

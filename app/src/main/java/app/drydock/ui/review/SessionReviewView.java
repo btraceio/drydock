@@ -1,5 +1,6 @@
 package app.drydock.ui.review;
 
+import app.drydock.domain.SessionActivity;
 import app.drydock.git.DiffService;
 import app.drydock.git.ReviewBase;
 import app.drydock.git.UnifiedDiff;
@@ -261,6 +262,17 @@ public final class SessionReviewView extends BorderPane {
          * here is a scope that silently never gets one.</p>
          */
         boolean dispatchRecheck(ReviewScope scope, String fromBase, String toBase);
+
+        /**
+         * Asks the scope's agent to judge the reviewer's free-text answer to
+         * {@code checkId}. The prompt carries only the check id; the agent
+         * reads the answer through {@code review_state}. False when the
+         * hand-off did not happen (no bound session, or its tab is not open).
+         */
+        boolean dispatchRiskCheck(ReviewScope scope, String checkId);
+
+        /** What the scope's agent is doing; UNKNOWN when it reports nothing (Codex, Pi). */
+        SessionActivity agentActivity(ReviewScope scope);
 
         /**
          * Whether this scope's agent may be asked for a recheck WITHOUT a
@@ -773,6 +785,7 @@ public final class SessionReviewView extends BorderPane {
 
     private final TourOutline outline = new TourOutline();
     private final StepPanel stepPanel = new StepPanel(new StepHost());
+    private final RiskCheckQueue riskQueue = new RiskCheckQueue(new RiskDispatcher());
     private ReviewMode mode = ReviewMode.DIFF;
 
     /** Set by {@code v} (and Open diff review); cleared per scope, so a fresh scope picks its own mode. */
@@ -1320,6 +1333,13 @@ public final class SessionReviewView extends BorderPane {
         }
         lastIntents = currentIntents;
         lastIntentsScopeId = scopeId;
+
+        // A verdict (or a diff change) lands as a tour write; the queue moves
+        // on once its in-flight check is no longer awaiting the agent.
+        Optional<TourRecord> tourNow = host.tour(scope.get());
+        if (tourNow.isPresent()) {
+            riskQueue.onTourChanged(scopeId, checkId -> checkStatus(tourNow, checkId));
+        }
 
         // Asks the agent about approvals this scope's base move disturbed.
         // Guarded per (scope, fromBase, toBase), so the many renders inside
@@ -3475,6 +3495,7 @@ public final class SessionReviewView extends BorderPane {
     public void close() {
         closed = true;
         tourWait.stop();
+        riskQueue.close();
         mcpPanel.ifPresent(ReviewMcpActivityPanel::detach);
         intentRail.stopWidthAnimation();
         if (getScene() != null) {
@@ -3967,7 +3988,6 @@ public final class SessionReviewView extends BorderPane {
 
         @Override
         public void submitRisk(String checkId, String answer) {
-            // Recorded as awaiting the agent; the dispatch to it is Task 13's.
             updateCurrentTour(record -> record.tour().stepOfCheck(checkId)
                     .map(step -> {
                         StepProgress p = record.progress(step.id());
@@ -3975,6 +3995,7 @@ public final class SessionReviewView extends BorderPane {
                                 StepGrading.submitRisk(p.check(checkId), answer)));
                     })
                     .orElse(record));
+            enqueueIfAwaiting(checkId);
         }
 
         @Override
@@ -3995,7 +4016,13 @@ public final class SessionReviewView extends BorderPane {
 
         @Override
         public void retryRisk(String checkId) {
-            LOG.log(Level.DEBUG, "Retry the agent's verdict on check " + checkId + ": not wired yet");
+            updateCurrentTour(record -> record.tour().stepOfCheck(checkId)
+                    .map(step -> {
+                        StepProgress p = record.progress(step.id());
+                        return record.withProgress(p.withCheck(StepGrading.retryRisk(p.check(checkId))));
+                    })
+                    .orElse(record));
+            enqueueIfAwaiting(checkId);
         }
 
         @Override
@@ -4030,6 +4057,49 @@ public final class SessionReviewView extends BorderPane {
         @Override
         public void reviewAnyway() {
             updateCurrentTour(record -> record.withReviewAnyway(true));
+        }
+    }
+
+    /** Hands a check the reviewer just answered to the risk queue, if it really is awaiting the agent. */
+    private void enqueueIfAwaiting(String checkId) {
+        Optional<ReviewScope> scope = selectedScope();
+        if (scope.isPresent() && checkStatus(currentTour(), checkId)
+                .filter(status -> status == CheckProgress.Status.AWAITING_AGENT).isPresent()) {
+            riskQueue.enqueue(scope.get().id(), checkId);
+        }
+    }
+
+    private static Optional<CheckProgress.Status> checkStatus(Optional<TourRecord> record, String checkId) {
+        return record.flatMap(r -> r.tour().stepOfCheck(checkId)
+                .map(step -> r.progress(step.id()).check(checkId).status()));
+    }
+
+    /** Maps the queue's scope ids back onto the scope the host knows. */
+    private final class RiskDispatcher implements RiskCheckQueue.Dispatcher {
+        @Override
+        public SessionActivity activity(String scopeId) {
+            return scopeById(scopeId).map(host::agentActivity).orElse(SessionActivity.UNKNOWN);
+        }
+
+        @Override
+        public boolean dispatch(String scopeId, String checkId) {
+            return scopeById(scopeId).map(scope -> host.dispatchRiskCheck(scope, checkId)).orElse(false);
+        }
+
+        @Override
+        public void timedOut(String scopeId, String checkId) {
+            scopeById(scopeId).ifPresent(scope -> {
+                host.updateTour(scope, record -> record.tour().stepOfCheck(checkId)
+                        .map(step -> {
+                            StepProgress p = record.progress(step.id());
+                            return record.withProgress(p.withCheck(
+                                    StepGrading.markAgentUnavailable(p.check(checkId))));
+                        })
+                        .orElse(record));
+                if (selectedScope().filter(selected -> selected.id().equals(scopeId)).isPresent()) {
+                    renderTour(currentTour());
+                }
+            });
         }
     }
 

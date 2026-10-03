@@ -1,10 +1,13 @@
 package app.drydock.mcp;
 
+import app.drydock.git.UnifiedDiff;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.Confidence;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.Severity;
 import app.drydock.review.Triage;
+import app.drydock.review.tour.CheckProgress;
+import app.drydock.review.tour.StepGrading;
 import app.drydock.review.tour.TourRecord;
 import app.drydock.state.json.JsonParser;
 import app.drydock.state.json.JsonValue;
@@ -135,6 +138,90 @@ class McpToolRouterTourTest extends McpRouterFixture {
         router.call(callerId(), "review_finding", withheldFindingArgs("src/Widget.java", "c1"));
 
         assertEquals(Optional.of("c1"), context.findingsOf(scopeId()).getFirst().withheldBy());
+    }
+
+    /** Posts the covering tour, then leaves c2 awaiting the agent on its risk alternate with this answer. */
+    private void awaitingAnswer(String answer) throws Exception {
+        router.call(callerId(), "review_tour", coveringArgs());
+        TourRecord record = context.tourOf(scopeId()).orElseThrow();
+        CheckProgress onRisk = new CheckProgress("c2", 1, CheckProgress.Status.OPEN, Optional.empty(),
+                Optional.empty(), Optional.empty());
+        CheckProgress waiting = StepGrading.submitRisk(onRisk, answer);
+        context.putTour(record.withProgress(record.progress("s2").withCheck(waiting)));
+    }
+
+    private JsonObject checkArgs(String verdict) {
+        return JsonPeek.args("scopeId", scopeId(), "checkId", "c2", "verdict", verdict, "reason", "It holds up.");
+    }
+
+    private CheckProgress storedC2() {
+        return context.tourOf(scopeId()).orElseThrow().progress("s2").check("c2");
+    }
+
+    @Test
+    void reviewStateListsTheAnswersAwaitingTheAgent() throws Exception {
+        awaitingAnswer("an empty list");
+
+        JsonValue state = router.call(callerId(), "review_state", JsonPeek.args("scopeId", scopeId()));
+
+        JsonValue waiting = JsonPeek.array(field(state, "tour"), "awaitingAgent").getFirst();
+        assertEquals("an empty list", JsonPeek.str(waiting, "answer"));
+        assertEquals("c2", JsonPeek.str(waiting, "checkId"));
+        assertEquals("s2", JsonPeek.str(waiting, "stepId"));
+        assertEquals("Risk?", JsonPeek.str(waiting, "prompt"));
+    }
+
+    @Test
+    void aHoldsVerdictPassesTheCheck() throws Exception {
+        awaitingAnswer("an empty list");
+
+        JsonValue result = router.call(callerId(), "review_check", checkArgs("holds"));
+
+        assertEquals("PASSED", JsonPeek.str(result, "status"));
+        assertEquals(CheckProgress.Status.PASSED, storedC2().status());
+        assertEquals(Optional.of("It holds up."), storedC2().agentReason());
+    }
+
+    @Test
+    void aVerdictWordOutsideTheVocabularyNamesTheAllowedOnes() throws Exception {
+        awaitingAnswer("an empty list");
+
+        McpToolException error = assertThrows(McpToolException.class,
+                () -> router.call(callerId(), "review_check", checkArgs("nonsense")));
+
+        assertTrue(error.getMessage().contains("holds, partly or doesNotHold"), error.getMessage());
+    }
+
+    @Test
+    void aCheckThatIsOpenIsNotAwaitingAVerdict() throws Exception {
+        router.call(callerId(), "review_tour", coveringArgs());
+
+        McpToolException error = assertThrows(McpToolException.class,
+                () -> router.call(callerId(), "review_check", checkArgs("holds")));
+
+        assertTrue(error.getMessage().contains("is not awaiting a verdict"), error.getMessage());
+    }
+
+    @Test
+    void anUnknownCheckIsRejected() throws Exception {
+        router.call(callerId(), "review_tour", coveringArgs());
+
+        McpToolException error = assertThrows(McpToolException.class, () -> router.call(callerId(),
+                "review_check", JsonPeek.args("scopeId", scopeId(), "checkId", "zzz", "verdict", "holds",
+                        "reason", "r")));
+
+        assertTrue(error.getMessage().contains("no check zzz"), error.getMessage());
+    }
+
+    @Test
+    void aRiskVerdictForAnOldFingerprintIsDropped() throws Exception {
+        awaitingAnswer("an empty list");
+        context.reviewDiff = new UnifiedDiff(List.of());
+
+        JsonValue result = router.call(callerId(), "review_check", checkArgs("holds"));
+
+        assertTrue(JsonPeek.bool(result, "dropped"));
+        assertEquals(CheckProgress.Status.AWAITING_AGENT, storedC2().status());
     }
 
     private JsonObject withheldFindingArgs(String file, String checkId) {

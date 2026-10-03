@@ -59,4 +59,19 @@ public final class ReviewInstructions {
         return "Dispatch a subagent to recheck stale approvals: " + work
                 + ". Report only its summary back here.";
     }
+
+    /**
+     * One line asking the agent to judge a reviewer's free-text answer.
+     *
+     * <p>Carries only the check id: the answer is the reviewer's own text and
+     * reaches the agent through {@code review_state}, not typed into its
+     * prompt.</p>
+     */
+    public static String forRiskCheck(String scopeId, String checkId) {
+        Objects.requireNonNull(scopeId, "scopeId");
+        Objects.requireNonNull(checkId, "checkId");
+        return "For review handle " + scopeId + ", call review_state and read the reviewer's answer to check "
+                + checkId + " under tour.awaitingAgent; judge it against the code and call review_check with "
+                + "verdict holds, partly or doesNotHold and a one-line reason.";
+    }
 }

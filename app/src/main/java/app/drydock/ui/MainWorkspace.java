@@ -2484,6 +2484,23 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             return handedOff;
         }
 
+        @Override
+        public boolean dispatchRiskCheck(ReviewScope scope, String checkId) {
+            OpenSessionTab open = scope.sessionId().map(openTabs::get).orElse(null);
+            if (open == null || open.isProcessExited()) {
+                return false;
+            }
+            boolean handedOff = sendToBoundSession(scope, ReviewInstructions.forRiskCheck(scope.id(), checkId));
+            LOG.log(Level.INFO, () -> (handedOff ? "Asked" : "Could not ask") + " the agent to judge check "
+                    + checkId + " for scope " + scope.id());
+            return handedOff;
+        }
+
+        @Override
+        public SessionActivity agentActivity(ReviewScope scope) {
+            return scope.sessionId().map(viewModel::activityOf).orElse(SessionActivity.UNKNOWN);
+        }
+
         /**
          * Spec §9.7 -- only a harness that can run the recheck in a subagent
          * is asked without a human having asked. The alternative for the
