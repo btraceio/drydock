@@ -14,6 +14,7 @@ import app.drydock.review.SessionReviewScopes;
 import app.drydock.review.ReviewVerdict;
 import app.drydock.review.Severity;
 import app.drydock.review.SubmitPlan;
+import app.drydock.review.Triage;
 import app.drydock.review.tour.TourRecord;
 import app.drydock.terminal.api.Shortcut;
 import app.drydock.terminal.api.TerminalHostView;
@@ -549,6 +550,11 @@ class OpenSessionTabReviewSubTabTest extends ApplicationTest {
 
         @Override
         public void setPostToPr(ReviewScope scope, ReviewAnnotation finding, boolean post) {
+        }
+
+        @Override
+        public void setTriage(ReviewScope scope, ReviewAnnotation finding, Triage triage,
+                              Optional<String> reason) {
         }
 
         @Override

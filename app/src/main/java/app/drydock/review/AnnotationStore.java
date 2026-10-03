@@ -77,9 +77,11 @@ public final class AnnotationStore implements AutoCloseable {
      * existing lenient decode. A v4 file needs no migration at all: {@link
      * #loadFromDisk} reads each named array independently, so one simply has
      * no {@code assessments} key and loads with none -- which {@code
-     * AnnotationStoreTest} pins rather than assumes.
+     * AnnotationStoreTest} pins rather than assumes. 6: findings carry
+     * triage (absent = confirmed) and withheldBy; a v5 file needs no
+     * migration, its findings simply decode as confirmed.
      */
-    private static final int SCHEMA_VERSION = 5;
+    private static final int SCHEMA_VERSION = 6;
     private static final SecureRandom RANDOM = new SecureRandom();
 
     /**
@@ -177,11 +179,11 @@ public final class AnnotationStore implements AutoCloseable {
         return byKey(new ReviewAnnotation.Key(scopeId, id));
     }
 
-    /** Open (unresolved) findings of a scope -- what the queue badge and the margin count. */
+    /** Open (unresolved, not dismissed) findings of a scope -- what the queue badge and the margin count. */
     public synchronized long openCount(String scopeId) {
         return findings.values().stream()
                 .filter(f -> f.scopeId().equals(scopeId))
-                .filter(f -> !f.resolved())
+                .filter(f -> !f.resolved() && f.triage() != Triage.DISMISSED)
                 .count();
     }
 
@@ -646,6 +648,8 @@ public final class AnnotationStore implements AutoCloseable {
         if (finding.postToPr()) {
             obj.put("postToPr", new JsonBoolean(true));
         }
+        obj.put("triage", new JsonString(finding.triage().wireName()));
+        finding.withheldBy().ifPresent(id -> obj.put("withheldBy", new JsonString(id)));
 
         if (!finding.evidence().isEmpty()) {
             obj.put("evidence", new JsonArray(finding.evidence().stream()
@@ -753,7 +757,9 @@ public final class AnnotationStore implements AutoCloseable {
                 optionalString(obj, "severityOverride").flatMap(Severity::fromWire),
                 AnnotationStatus.fromPersisted(requireString(obj, "status")),
                 githubFromJson(obj),
-                obj.get("postToPr") instanceof JsonBoolean flag && flag.value());
+                obj.get("postToPr") instanceof JsonBoolean flag && flag.value(),
+                optionalString(obj, "triage").flatMap(Triage::fromWire).orElse(Triage.CONFIRMED),
+                optionalString(obj, "withheldBy"));
     }
 
     private static Optional<ReviewAnnotation.GitHubComment> githubFromJson(JsonObject obj) {

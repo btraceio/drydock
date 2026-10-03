@@ -194,13 +194,14 @@ public final class McpToolRouter {
                         "scopeId", "steps"),
                 descriptor("review_finding",
                         "Records findings against a scope. Idempotent on finding id: a re-run upserts, so "
-                                + "existing threads, human severity overrides and resolutions survive. A "
-                                + "patch is a PROPOSAL -- drydock never applies one; the human clicks Apply.",
+                                + "existing threads, human severity overrides, resolutions and triage survive. A "
+                                + "patch is a PROPOSAL -- drydock never applies one; the human clicks Apply. "
+                                + "Findings land as proposals; the human confirms or dismisses each.",
                         JsonObject.empty()
                                 .put("scopeId", schemaString("Review scope handle."))
                                 .put("findings", schemaString("Array of {id, intentId?, anchor{file, "
                                         + "startKey, endKey?}, severity, confidence, title?, body, "
-                                        + "evidence?, patch?, deviatesFrom?, asks?}.")),
+                                        + "evidence?, patch?, deviatesFrom?, asks?, withheldBy?}.")),
                         "scopeId", "findings"),
                 descriptor("review_answer",
                         "Answers a human message in a finding's thread. proposeSeverity and proposeResolve "

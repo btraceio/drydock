@@ -3033,6 +3033,21 @@
 .review-finding-card.resolved {
     -fx-opacity: 0.55;
 }
+.review-finding-card.dismissed {
+    -fx-opacity: 0.5;
+}
+.review-finding-card.dismissed .review-finding-body {
+    -fx-strikethrough: true;
+}
+.review-card-proposed {
+    -fx-font-size: 9.5px;
+    -fx-font-weight: 700;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 6px;
+    -fx-padding: 1 6 1 6;
+}
+.review-dismiss-reason { -fx-font-size: 11px; }
 .review-finding-card.severity-blocking { -fx-border-color: -drydock-blocking; }
 .review-finding-card.severity-question { -fx-border-color: -drydock-question; }
 .review-finding-card.severity-deviation { -fx-border-color: -drydock-deviation; }

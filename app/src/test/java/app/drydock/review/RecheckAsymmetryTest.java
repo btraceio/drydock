@@ -145,7 +145,7 @@ class RecheckAsymmetryTest {
      * passes, which the reviewer demonstrated by doing exactly that.</p>
      */
     @Test
-    void theWrittenSchemaVersionIsFive() throws IOException {
+    void theWrittenSchemaVersionIsSix() throws IOException {
         Path file = Files.createTempDirectory("drydock-recheck").resolve("annotations.json");
         AnnotationStore store = new AnnotationStore(file);
         store.putAssessment(new RecheckAssessment("scope-1", "digest-1", "base-1", "base-2",
@@ -153,10 +153,10 @@ class RecheckAsymmetryTest {
         store.flushPendingSaves();
 
         JsonValue root = JsonParser.parse(Files.readString(file, StandardCharsets.UTF_8));
-        assertEquals(5, ((JsonValue.JsonNumber) ((JsonValue.JsonObject) root).get("schemaVersion"))
+        assertEquals(6, ((JsonValue.JsonNumber) ((JsonValue.JsonObject) root).get("schemaVersion"))
                         .asInt(),
-                "persisting a new assessments array is a schema change; without the bump a v4 "
-                        + "file and a v5 file are indistinguishable");
+                "persisting a new array or field is a schema change; without the bump an older "
+                        + "file and a current one are indistinguishable (6 added finding triage)");
     }
 
     /**

@@ -3,10 +3,12 @@ package app.drydock.ui.review;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.Severity;
+import app.drydock.review.Triage;
 
 import javafx.animation.KeyFrame;
 import javafx.animation.KeyValue;
 import javafx.animation.Timeline;
+import javafx.beans.binding.Bindings;
 import javafx.css.PseudoClass;
 import javafx.geometry.Pos;
 import javafx.scene.Node;
@@ -14,6 +16,7 @@ import javafx.scene.control.Button;
 import javafx.scene.control.Label;
 import javafx.scene.control.ScrollPane;
 import javafx.scene.control.TextArea;
+import javafx.scene.control.TextField;
 import javafx.scene.control.Tooltip;
 import javafx.scene.layout.FlowPane;
 import javafx.scene.layout.HBox;
@@ -78,6 +81,13 @@ final class ReviewFindingsMargin extends VBox {
          * publishes every one of them.
          */
         void setPostToPr(ReviewAnnotation finding, boolean post);
+
+        /**
+         * The human's verdict on a proposal: confirm it, or dismiss it with
+         * the reason, which the host appends to the thread so the agent can
+         * read why it was wrong.
+         */
+        void triage(ReviewAnnotation finding, Triage triage, Optional<String> reason);
     }
 
     /** {@code open} hides resolved findings; {@code all} widens to the whole review (F). */
@@ -269,9 +279,14 @@ final class ReviewFindingsMargin extends VBox {
 
     private List<ReviewAnnotation> visible() {
         return findings.stream()
-                .filter(finding -> filter == Filter.ALL || !finding.resolved())
+                .filter(finding -> filter == Filter.ALL || isOpen(finding))
                 .sorted(Comparator.comparingInt(finding -> finding.effectiveSeverity().ordinal()))
                 .toList();
+    }
+
+    /** Open means still worth a look: neither resolved nor dismissed. */
+    private static boolean isOpen(ReviewAnnotation finding) {
+        return !finding.resolved() && finding.triage() != Triage.DISMISSED;
     }
 
     private void rebuild() {
@@ -298,7 +313,7 @@ final class ReviewFindingsMargin extends VBox {
         }
         cards.getChildren().setAll(nodes);
 
-        long open = findings.stream().filter(finding -> !finding.resolved()).count();
+        long open = findings.stream().filter(ReviewFindingsMargin::isOpen).count();
         headerCount.setText(findings.size() + (findings.size() == 1 ? " thread" : " threads")
                 + (open == findings.size() ? "" : " · " + open + " open"));
         renderCollapsedStrip();
@@ -320,7 +335,7 @@ final class ReviewFindingsMargin extends VBox {
     }
 
     private void renderCollapsedStrip() {
-        long open = findings.stream().filter(finding -> !finding.resolved()).count();
+        long open = findings.stream().filter(ReviewFindingsMargin::isOpen).count();
         collapsedCount.setText(open == 0 ? "" : String.valueOf(open));
         collapsedCount.getStyleClass().removeIf(styleClass -> styleClass.startsWith("severity-"));
         worstSeverity().ifPresent(severity -> collapsedCount.getStyleClass().add(severity.styleClass()));
@@ -330,7 +345,7 @@ final class ReviewFindingsMargin extends VBox {
     /** The worst severity among unresolved findings; the collapsed strip's colour. */
     private Optional<Severity> worstSeverity() {
         return findings.stream()
-                .filter(finding -> !finding.resolved())
+                .filter(ReviewFindingsMargin::isOpen)
                 .map(ReviewAnnotation::effectiveSeverity)
                 .min(Comparator.comparingInt(Enum::ordinal));
     }
@@ -371,6 +386,9 @@ final class ReviewFindingsMargin extends VBox {
         if (finding.resolved()) {
             card.getStyleClass().add("resolved");
         }
+        if (finding.triage() == Triage.DISMISSED) {
+            card.getStyleClass().add("dismissed");
+        }
 
         card.getChildren().add(cardHeader(finding));
         card.getChildren().add(cardBody(finding));
@@ -383,6 +401,9 @@ final class ReviewFindingsMargin extends VBox {
         }
         threadBlock(finding).ifPresent(card.getChildren()::add);
         askChips(finding).ifPresent(card.getChildren()::add);
+        if (finding.triage() == Triage.PROPOSED) {
+            card.getChildren().add(triageRow(finding));
+        }
         card.getChildren().add(actions(finding));
         return card;
     }
@@ -398,6 +419,11 @@ final class ReviewFindingsMargin extends VBox {
         pin.getStyleClass().addAll("review-finding-pin", finding.effectiveSeverity().styleClass());
         HBox row = new HBox(6, severity, author, spacer, pin);
         row.setAlignment(Pos.CENTER_LEFT);
+        if (finding.triage() == Triage.PROPOSED) {
+            Label proposed = new Label("Proposed");
+            proposed.getStyleClass().add("review-card-proposed");
+            row.getChildren().add(row.getChildren().indexOf(spacer), proposed);
+        }
         // The human's override is recorded, and so is what the reviewer said.
         finding.severityOverride().ifPresent(override -> {
             Label original = new Label("was " + finding.severity().wireName());
@@ -564,6 +590,11 @@ final class ReviewFindingsMargin extends VBox {
                 ? "Include this comment when the review is submitted to the pull request"
                 : "Include this finding as a comment when the review is submitted to the pull request"));
         postToPr.setOnAction(e -> host.setPostToPr(finding, !finding.postToPr()));
+        if (!finding.counts()) {
+            // An unconfirmed agent finding must not reach the pull request.
+            postToPr.setDisable(true);
+            postToPr.setTooltip(new Tooltip("Confirm the finding before posting it"));
+        }
         buttons.getChildren().add(postToPr);
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
@@ -571,6 +602,59 @@ final class ReviewFindingsMargin extends VBox {
 
         VBox box = new VBox(6, reply, buttons);
         box.getStyleClass().add("review-card-actions");
+        return box;
+    }
+
+    /**
+     * Confirm / Dismiss / Not sure for a proposal. Dismiss asks for a reason
+     * first (inline, so the card does not jump into a modal): the reason is
+     * what tells the agent it was wrong. Not sure just moves to the reply box.
+     */
+    private Region triageRow(ReviewAnnotation finding) {
+        Button confirm = new Button("Confirm");
+        confirm.getStyleClass().addAll("review-card-action", "primary");
+        confirm.setTooltip(new Tooltip("This is a real finding: it can block, post and be sent to the agent"));
+        confirm.setOnAction(e -> host.triage(finding, Triage.CONFIRMED, Optional.empty()));
+
+        Button dismissStart = new Button("Dismiss…");
+        dismissStart.getStyleClass().add("review-card-action");
+
+        Button notSure = new Button("Not sure");
+        notSure.getStyleClass().add("review-card-action");
+        notSure.setTooltip(new Tooltip("Ask the agent before deciding"));
+
+        TextField reason = new TextField();
+        reason.getStyleClass().add("review-dismiss-reason");
+        reason.setPromptText("Why is it wrong?");
+        Button dismiss = new Button("Dismiss");
+        dismiss.getStyleClass().add("review-card-action");
+        dismiss.disableProperty().bind(Bindings.createBooleanBinding(
+                () -> reason.getText() == null || reason.getText().isBlank(), reason.textProperty()));
+        dismiss.setOnAction(e -> host.triage(finding, Triage.DISMISSED,
+                Optional.of(reason.getText().strip())));
+        HBox dismissRow = new HBox(6, reason, dismiss);
+        dismissRow.setAlignment(Pos.CENTER_LEFT);
+        HBox.setHgrow(reason, Priority.ALWAYS);
+        dismissRow.setVisible(false);
+        dismissRow.setManaged(false);
+        dismissStart.setOnAction(e -> {
+            dismissRow.setVisible(true);
+            dismissRow.setManaged(true);
+            reason.requestFocus();
+        });
+
+        HBox buttons = new HBox(6, confirm, dismissStart, notSure);
+        buttons.setAlignment(Pos.CENTER_LEFT);
+        VBox box = new VBox(6, buttons, dismissRow);
+        box.getStyleClass().add("review-card-triage");
+        // "Not sure" focuses this card's reply field, which actions() builds
+        // after this row; resolve it lazily at click time.
+        notSure.setOnAction(e -> {
+            Node field = box.getParent() == null ? null : box.getParent().lookup(".review-reply-input");
+            if (field != null) {
+                field.requestFocus();
+            }
+        });
         return box;
     }
 

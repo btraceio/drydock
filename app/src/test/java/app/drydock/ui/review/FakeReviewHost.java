@@ -11,6 +11,7 @@ import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewVerdict;
 import app.drydock.review.Severity;
+import app.drydock.review.Triage;
 import app.drydock.review.tour.TourRecord;
 import app.drydock.review.tour.TourStore;
 import javafx.scene.layout.Region;
@@ -241,6 +242,16 @@ final class FakeReviewHost implements SessionReviewView.Host {
     @Override
     public void setPostToPr(ReviewScope scope, ReviewAnnotation finding, boolean post) {
         store.mutate(finding.key(), current -> current.withPostToPr(post));
+    }
+
+    @Override
+    public void setTriage(ReviewScope scope, ReviewAnnotation finding, Triage triage,
+                          Optional<String> reason) {
+        store.mutate(finding.key(), current -> {
+            ReviewAnnotation next = current.withTriage(triage);
+            return reason.map(r -> next.withReply(
+                    new ReviewAnnotation.Message("You", Instant.now(), "Dismissed: " + r))).orElse(next);
+        });
     }
 
     @Override

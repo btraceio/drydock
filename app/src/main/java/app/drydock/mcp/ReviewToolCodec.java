@@ -11,6 +11,7 @@ import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewVerdict;
 import app.drydock.review.Sections;
 import app.drydock.review.Severity;
+import app.drydock.review.Triage;
 import app.drydock.state.json.JsonValue;
 import app.drydock.state.json.JsonValue.JsonArray;
 import app.drydock.state.json.JsonValue.JsonBoolean;
@@ -543,10 +544,17 @@ final class ReviewToolCodec {
             thread = List.copyOf(updated);
         }
 
+        Severity severity = optionalString(obj, "severity").flatMap(Severity::fromWire)
+                .orElse(Severity.QUESTION);
+        Optional<String> withheldBy = optionalString(obj, "withheldBy");
+        if (withheldBy.isPresent() && severity == Severity.BLOCKING) {
+            throw new McpToolException("a blocking finding is never withheld: " + id);
+        }
+
         return new ReviewAnnotation(scopeId, id,
                 optionalString(obj, "intentId"),
                 file, startKey, endKey,
-                optionalString(obj, "severity").flatMap(Severity::fromWire).orElse(Severity.QUESTION),
+                severity,
                 optionalString(obj, "confidence").flatMap(Confidence::fromWire).orElse(Confidence.MEDIUM),
                 Optional.ofNullable(PromptSafety.checkInboundText(
                         optionalString(obj, "title").orElse(null), "finding.title")),
@@ -564,7 +572,11 @@ final class ReviewToolCodec {
                 // Likewise GitHub state and the human's posting intent: an
                 // agent re-stating a finding must not un-post or un-link it.
                 existing.flatMap(ReviewAnnotation::github),
-                existing.map(ReviewAnnotation::postToPr).orElse(false));
+                existing.map(ReviewAnnotation::postToPr).orElse(false),
+                // Triage is the human's too: an agent re-stating a finding
+                // must not re-propose what they confirmed or dismissed.
+                existing.map(ReviewAnnotation::triage).orElse(Triage.PROPOSED),
+                withheldBy);
     }
 
     private static List<ReviewAnnotation.Evidence> evidenceFromJson(JsonObject obj)
@@ -631,6 +643,8 @@ final class ReviewToolCodec {
         obj.put("severity", new JsonString(finding.effectiveSeverity().wireName()));
         obj.put("resolved", new JsonBoolean(finding.resolved()));
         obj.put("status", new JsonString(finding.status().name()));
+        obj.put("triage", new JsonString(finding.triage().wireName()));
+        finding.withheldBy().ifPresent(id -> obj.put("withheldBy", new JsonString(id)));
         List<JsonValue> messages = new ArrayList<>();
         for (ReviewAnnotation.Message message : finding.thread()) {
             JsonObject messageObj = JsonObject.empty();

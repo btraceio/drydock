@@ -90,7 +90,9 @@ public record SubmitPlan(Event preselected, List<Comment> comments, List<ReviewA
      * ({@code Filter.OPEN}) hides resolved cards, so a stale {@code
      * postToPr} left over from before it was resolved has no visible toggle
      * to opt back out with short of switching to "all" -- posting it anyway
-     * would be a publish the human never had a real chance to review.</p>
+     * would be a publish the human never had a real chance to review. A
+     * finding the human has not {@linkplain Triage#CONFIRMED confirmed} is
+     * excluded the same way.</p>
      */
     public static SubmitPlan of(List<ReviewAnnotation> findings, List<ReviewVerdict.Decision> decisions,
                                  DiffIndex index) {
@@ -99,7 +101,7 @@ public record SubmitPlan(Event preselected, List<Comment> comments, List<ReviewA
         List<Refusal> refusals = new ArrayList<>();
 
         for (ReviewAnnotation finding : findings) {
-            if (!finding.postToPr() || finding.resolved()) {
+            if (!finding.postToPr() || finding.resolved() || !finding.counts()) {
                 continue;
             }
             String startCompositeKey = index.key(finding.file(), finding.startKey());
@@ -152,6 +154,13 @@ public record SubmitPlan(Event preselected, List<Comment> comments, List<ReviewA
         }
 
         return new SubmitPlan(preselect(decisions), comments, posting, refusals);
+    }
+
+    /** How many findings still wait for a human's confirm-or-dismiss: proposed and unresolved. */
+    public static long untriagedCount(List<ReviewAnnotation> findings) {
+        return findings.stream()
+                .filter(finding -> finding.triage() == Triage.PROPOSED && !finding.resolved())
+                .count();
     }
 
     /** The last message the human wrote on this thread, falling back to the finding's own first message. */

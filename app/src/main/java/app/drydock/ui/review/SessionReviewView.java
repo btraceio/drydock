@@ -20,6 +20,7 @@ import app.drydock.review.ReviewVerdict;
 import app.drydock.review.Sections;
 import app.drydock.review.SessionReviewScopes;
 import app.drydock.review.Severity;
+import app.drydock.review.Triage;
 import app.drydock.review.SubmitPlan;
 import app.drydock.review.tour.AnchorIndex;
 import app.drydock.review.tour.HunkOverride;
@@ -317,6 +318,13 @@ public final class SessionReviewView extends BorderPane {
          * authored by "You"; see {@link ReviewFindingsMargin.Host#setPostToPr}.
          */
         void setPostToPr(ReviewScope scope, ReviewAnnotation finding, boolean post);
+
+        /**
+         * Records the human's triage of an agent finding. A dismissal's
+         * {@code reason} is appended to the thread as
+         * {@code "Dismissed: <reason>"} by the host.
+         */
+        void setTriage(ReviewScope scope, ReviewAnnotation finding, Triage triage, Optional<String> reason);
 
         /** {@code Apply patch} -- a human click; drydock never applies one on its own. */
         void applyPatch(ReviewScope scope, ReviewAnnotation finding);
@@ -2375,6 +2383,7 @@ public final class SessionReviewView extends BorderPane {
         List<ReviewIntent> covering = intentsCoveringPathStep(step);
         return host.findings(scope).stream()
                 .filter(finding -> !finding.resolved())
+                .filter(ReviewAnnotation::counts)
                 .filter(finding -> covering.isEmpty()
                         ? finding.file().equals(step.file())
                         : covering.stream().anyMatch(intent -> belongsToIntent(finding, intent)))
@@ -2497,6 +2506,11 @@ public final class SessionReviewView extends BorderPane {
         public void setPostToPr(ReviewAnnotation finding, boolean post) {
             selectedScope().ifPresent(scope -> host.setPostToPr(scope, finding, post));
         }
+
+        @Override
+        public void triage(ReviewAnnotation finding, Triage triage, Optional<String> reason) {
+            selectedScope().ifPresent(scope -> host.setTriage(scope, finding, triage, reason));
+        }
     }
 
     /** The verdict bar's window onto the host, with the scope filled in. */
@@ -2567,6 +2581,7 @@ public final class SessionReviewView extends BorderPane {
             return selectedScope().map(scope -> host.askAgentToFix(scope, intent,
                             host.findings(scope).stream()
                                     .filter(finding -> !finding.resolved())
+                                    .filter(ReviewAnnotation::counts)
                                     .filter(SessionReviewView.this::belongsToCurrentIntent)
                                     .toList()))
                     .orElse(false);
