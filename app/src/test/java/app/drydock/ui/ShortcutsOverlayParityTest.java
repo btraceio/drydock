@@ -49,6 +49,12 @@ class ShortcutsOverlayParityTest {
     }
 
     /**
+     * Rows in "IN REVIEW" that the board's key filter does not bind: {@code
+     * ⌘⏎} sends a free-text answer from the step panel's own text area.
+     */
+    private static final Set<String> NOT_THE_REVIEW_BOARDS_OWN_BINDING = Set.of("⌘⏎");
+
+    /**
      * The review board's own single-letter layer, read straight off {@code
      * SessionReviewView.handleShortcut}'s switch. The section carried rows
      * for the departed destination's queue keys ({@code j}/{@code k}, {@code
@@ -58,11 +64,12 @@ class ShortcutsOverlayParityTest {
     @Test
     void theReviewBoardAdvertisesExactlyTheKeysItBinds() {
         Set<String> advertised = ShortcutsOverlay.diagKeysFor("IN REVIEW").stream()
+                .filter(keycap -> !NOT_THE_REVIEW_BOARDS_OWN_BINDING.contains(keycap))
                 .flatMap(keycap -> Arrays.stream(keycap.split(" / ")))
                 .collect(Collectors.toSet());
 
         Set<String> bound = Set.of("d", "c", "m", "i", "\\", "[", "]", "n", "a", "r", "u",
-                "⏎", "⇧F", "f", "⇧A", "⇧R", "p");
+                "⏎", "⇧F", "f", "⇧A", "⇧R", "p", "v", "1", "2", "3", "4");
 
         assertEquals(bound, advertised,
                 "the overlay's IN REVIEW rows and what SessionReviewView.handleShortcut "

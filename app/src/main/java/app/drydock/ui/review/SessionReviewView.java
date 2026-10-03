@@ -21,7 +21,17 @@ import app.drydock.review.Sections;
 import app.drydock.review.SessionReviewScopes;
 import app.drydock.review.Severity;
 import app.drydock.review.SubmitPlan;
+import app.drydock.review.tour.AnchorIndex;
+import app.drydock.review.tour.HunkOverride;
+import app.drydock.review.tour.StepGate;
+import app.drydock.review.tour.StepGrading;
+import app.drydock.review.tour.StepProgress;
+import app.drydock.review.tour.StepVerdicts;
+import app.drydock.review.tour.TourAnchor;
+import app.drydock.review.tour.TourRecord;
+import app.drydock.review.tour.TourStep;
 
+import javafx.animation.PauseTransition;
 import javafx.application.Platform;
 import javafx.beans.value.ChangeListener;
 import javafx.geometry.Pos;
@@ -37,6 +47,7 @@ import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
 import javafx.scene.layout.VBox;
+import javafx.util.Duration;
 
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
@@ -54,6 +65,7 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.function.Consumer;
+import java.util.function.UnaryOperator;
 
 /**
  * The review board of one session's Review sub-tab (spec §3.2): the intent
@@ -343,6 +355,20 @@ public final class SessionReviewView extends BorderPane {
          * reviewer, or no session to run it in).
          */
         boolean runReview(ReviewScope scope);
+
+        /** {@code scope}'s guided tour with its progress, if the agent has posted one. */
+        Optional<TourRecord> tour(ReviewScope scope);
+
+        /** Applies {@code transform} to {@code scope}'s tour record; nothing when there is none. */
+        void updateTour(ReviewScope scope, UnaryOperator<TourRecord> transform);
+
+        /**
+         * Brings {@code scope}'s stored hunk verdicts in line with what the
+         * tour derives ({@link StepVerdicts#derive}): an empty decision
+         * clears the hunk's verdict. Only hunks whose stored decision differs
+         * are written, so a derivation that changed nothing writes nothing.
+         */
+        void applyTourVerdicts(ReviewScope scope, Map<String, Optional<ReviewVerdict.Decision>> byDigest);
     }
 
     /**
@@ -716,6 +742,65 @@ public final class SessionReviewView extends BorderPane {
     private Region centre;
 
     /**
+     * Which surface the board shows (spec §5): the guided tour, or today's
+     * hunk diff -- intent rail, findings margin, path mode. {@code v} flips
+     * it; otherwise a scope with a tour (or a run building one) shows the
+     * tour.
+     */
+    enum ReviewMode { TOUR, DIFF }
+
+    /** The centre row: the body, then the findings margin or the step panel. */
+    private HBox columns;
+
+    private final TourOutline outline = new TourOutline();
+    private final StepPanel stepPanel = new StepPanel(new StepHost());
+    private ReviewMode mode = ReviewMode.DIFF;
+
+    /** Set by {@code v} (and Open diff review); cleared per scope, so a fresh scope picks its own mode. */
+    private boolean userChoseMode;
+
+    /** The step the panel shows; null until a tour renders, re-picked when it stops resolving. */
+    private String currentStepId;
+
+    /**
+     * The scope whose Run review is building a tour, while "Building tour…"
+     * shows. A scope id rather than a flag, so the other chip's scope does
+     * not claim a tour is coming for it.
+     */
+    private Optional<String> tourPendingScopeId = Optional.empty();
+
+    /** Why the last Run review produced no tour, for the scope it ran on. */
+    private record TourFailure(String scopeId, String message) {
+    }
+
+    private Optional<TourFailure> tourFailure = Optional.empty();
+
+    /** How long "Building tour…" waits before offering Retry / Open diff review. */
+    private final PauseTransition tourWait = new PauseTransition(Duration.minutes(15));
+
+    /** Whether the MCP panel was opened by the tour wait (and so is closed by it), not by {@code \}. */
+    private boolean mcpOpenedForTour;
+
+    /** Whether the diff column carries step marks, so DIFF mode clears them once rather than per refresh. */
+    private boolean tourMarksShown;
+
+    /** The outline footer's Acknowledge for files without line changes; per view, not persisted. */
+    private boolean filesWithoutChangesAcknowledged;
+
+    /**
+     * What the outline, the step panel and the step marks last rendered.
+     * {@link #renderTour} runs on every store write -- an agent's finding
+     * included -- and rebuilding the panel each time would drop a half-typed
+     * answer and its focus, so each is redrawn only when its input changed.
+     * Null whenever a message replaced the content.
+     */
+    private List<TourOutline.Row> shownRows;
+    private String shownRowsCurrent;
+    private StepView shownStepView;
+    private TourRecord shownMarksRecord;
+    private String shownMarksStepId;
+
+    /**
      * @param activityLog the MCP traffic log the {@code \} panel renders, or
      *                    {@code null} when no server is running -- Review must
      *                    work with no agent at all, so the panel is optional
@@ -746,6 +831,13 @@ public final class SessionReviewView extends BorderPane {
         centre = buildCenter();
         setLeft(intentRail);
         setCenter(centre);
+
+        outline.setOnSelected(this::selectStep);
+        outline.setOnAcknowledge(() -> {
+            filesWithoutChangesAcknowledged = true;
+            renderTour(currentTour());
+        });
+        tourWait.setOnFinished(event -> onTourWaitExpired());
 
         margin.setOnToggleCollapse(() -> setMarginCollapsed(!margin.collapsed()));
         intentRail.setOnToggleCollapse(() -> setIntentsCollapsed(!intentRail.collapsed()));
@@ -904,7 +996,7 @@ public final class SessionReviewView extends BorderPane {
         // The margin sits BESIDE the code, never inline, so the diff stays
         // continuous (spec §4.5); the verdict bar sits BELOW both, so
         // collapsing the margin never takes the primary action with it.
-        HBox columns = new HBox(body, margin);
+        columns = new HBox(body, margin);
         VBox.setVgrow(columns, Priority.ALWAYS);
 
         VBox centre = new VBox(header, columns);
@@ -1038,6 +1130,11 @@ public final class SessionReviewView extends BorderPane {
         lastSettledDigests = List.of();
         lastSettledPathHunkId = Optional.empty();
         lastSettledWasPath = false;
+        // Tour cursor and mode are per scope as well: the incoming scope
+        // opens on its own first unsettled step, in its own default mode.
+        currentStepId = null;
+        userChoseMode = false;
+        filesWithoutChangesAcknowledged = false;
         // The cursor is reset BEFORE the body is built, which the destination
         // did the other way round: a cached diff publishes Loaded
         // synchronously from inside bodyFor, and the diff-resolved handler
@@ -1252,6 +1349,7 @@ public final class SessionReviewView extends BorderPane {
         mcpPanel.filter(Node::isVisible)
                 .ifPresent(panel -> panel.setScope(scope.get()));
         renderVerdictBar(scope.get());
+        applyMode();
     }
 
     /**
@@ -2013,6 +2111,12 @@ public final class SessionReviewView extends BorderPane {
 
     /** Reveals whatever the rail's current mode has selected. */
     private void revealCurrentSelection() {
+        if (mode == ReviewMode.TOUR) {
+            // The tour reads whole files across the change; an intent or
+            // path-row filter left over from the hunk diff must not narrow it.
+            diffColumn.setIntent(null);
+            return;
+        }
         if (pathMode) {
             revealCurrentPathStep();
         } else {
@@ -2401,24 +2505,40 @@ public final class SessionReviewView extends BorderPane {
             // exactly what `a` does -- the selected PATH row, never
             // whatever `intent`/`unit` the bar's own (intents-cursor-driven)
             // render happened to capture.
+            if (mode == ReviewMode.TOUR) {
+                currentTour().ifPresent(SessionReviewView.this::passCurrentStep);
+                return;
+            }
             if (pathMode) {
                 pathVerdictAction(ReviewVerdict.Decision.APPROVED, false);
                 return;
             }
-            selectedScope().ifPresent(scope -> host.setVerdict(scope, intent,
-                    digestsForAction(intent, unit, false), Optional.of(ReviewVerdict.Decision.APPROVED),
-                    blockingFindingOpen(scope, intent)));
+            selectedScope().ifPresent(scope -> {
+                List<String> digests = digestsForAction(intent, unit, false);
+                host.setVerdict(scope, intent, digests, Optional.of(ReviewVerdict.Decision.APPROVED),
+                        blockingFindingOpen(scope, intent));
+                recordHunkOverrides(scope, digests, ReviewVerdict.Decision.APPROVED);
+            });
         }
 
         @Override
         public void requestChanges(ReviewIntent intent, SettleUnit unit) {
+            if (mode == ReviewMode.TOUR) {
+                if (currentTour().isPresent()) {
+                    decideCurrentStep(StepProgress.Decision.CHANGES, Optional.empty());
+                }
+                return;
+            }
             if (pathMode) {
                 pathVerdictAction(ReviewVerdict.Decision.CHANGES, false);
                 return;
             }
-            selectedScope().ifPresent(scope -> host.setVerdict(scope, intent,
-                    digestsForAction(intent, unit, false), Optional.of(ReviewVerdict.Decision.CHANGES),
-                    blockingFindingOpen(scope, intent)));
+            selectedScope().ifPresent(scope -> {
+                List<String> digests = digestsForAction(intent, unit, false);
+                host.setVerdict(scope, intent, digests, Optional.of(ReviewVerdict.Decision.CHANGES),
+                        blockingFindingOpen(scope, intent));
+                recordHunkOverrides(scope, digests, ReviewVerdict.Decision.CHANGES);
+            });
         }
 
         @Override
@@ -2460,15 +2580,26 @@ public final class SessionReviewView extends BorderPane {
             // digestsOf(intent) over the (invisible) intents cursor's whole
             // section -- a screenshot proved that click cleared two hunks
             // nowhere near the row on screen and left the visible one alone.
-            if (pathMode) {
-                currentPathStep().ifPresent(step -> selectedScope().ifPresent(scope ->
-                        loadedDiff().flatMap(diff -> digestOfPathStep(diff, step)).ifPresent(digest ->
-                                host.setVerdict(scope, pathStepAsIntent(step), List.of(digest),
-                                        Optional.empty(), false))));
+            if (mode == ReviewMode.TOUR) {
+                if (currentTour().isPresent()) {
+                    decideCurrentStep(StepProgress.Decision.NONE, Optional.empty());
+                }
                 return;
             }
-            selectedScope().ifPresent(scope ->
-                    host.setVerdict(scope, intent, digestsOf(intent), Optional.empty(), false));
+            if (pathMode) {
+                currentPathStep().ifPresent(step -> selectedScope().ifPresent(scope ->
+                        loadedDiff().flatMap(diff -> digestOfPathStep(diff, step)).ifPresent(digest -> {
+                            host.setVerdict(scope, pathStepAsIntent(step), List.of(digest),
+                                    Optional.empty(), false);
+                            clearHunkOverrides(scope, List.of(digest));
+                        })));
+                return;
+            }
+            selectedScope().ifPresent(scope -> {
+                List<String> digests = digestsOf(intent);
+                host.setVerdict(scope, intent, digests, Optional.empty(), false);
+                clearHunkOverrides(scope, digests);
+            });
         }
 
         @Override
@@ -2493,6 +2624,11 @@ public final class SessionReviewView extends BorderPane {
             // interface method of the SAME name, so an unqualified call
             // here would recurse into itself rather than reaching the
             // outer class's dispatcher.
+            if (mode == ReviewMode.TOUR) {
+                currentTour().flatMap(SessionReviewView.this::firstUnsettled)
+                        .ifPresent(SessionReviewView.this::selectStep);
+                return;
+            }
             SessionReviewView.this.nextUnsettled();
         }
 
@@ -2503,11 +2639,19 @@ public final class SessionReviewView extends BorderPane {
 
         @Override
         public void previousIntent() {
+            if (mode == ReviewMode.TOUR) {
+                currentTour().ifPresent(record -> moveStep(record, -1));
+                return;
+            }
             moveSelection(-1);
         }
 
         @Override
         public void nextIntent() {
+            if (mode == ReviewMode.TOUR) {
+                currentTour().ifPresent(record -> moveStep(record, 1));
+                return;
+            }
             moveSelection(1);
         }
     }
@@ -2694,10 +2838,17 @@ public final class SessionReviewView extends BorderPane {
             return;
         }
         showEveryRegion();
-        intentRail.setVisible(true);
-        intentRail.setManaged(true);
         RailLayout.Layout layout =
                 RailLayout.solve(width, intentsCollapsedByUser, marginCollapsedByUser);
+        if (mode == ReviewMode.TOUR) {
+            outline.setNarrow(layout.narrow());
+            outline.setCollapsed(layout.intentsCollapsed());
+            stepPanel.setNarrow(layout.narrow());
+            stepPanel.setCollapsed(layout.marginCollapsed());
+            return;
+        }
+        intentRail.setVisible(true);
+        intentRail.setManaged(true);
         intentRail.setNarrow(layout.narrow());
         intentRail.setCollapsed(layout.intentsCollapsed());
         margin.setNarrow(layout.narrow());
@@ -2714,6 +2865,7 @@ public final class SessionReviewView extends BorderPane {
         setCenter(centre);
         show(intentRail, false);
         show(margin, false);
+        show(stepPanel, false);
         show(verdictBar, false);
         show(itemHeader, false);
         mcpPanel.ifPresent(panel -> show(panel, false));
@@ -2722,10 +2874,11 @@ public final class SessionReviewView extends BorderPane {
     /** Undoes {@link #applyEmptySurface}; the responsive rules take it from here. */
     private void showEveryRegion() {
         show(margin, true);
+        show(stepPanel, true);
         show(verdictBar, true);
         show(itemHeader, true);
         if (getLeft() == null) {
-            setLeft(intentRail);
+            setLeft(mode == ReviewMode.TOUR ? outline : intentRail);
         }
     }
 
@@ -2758,6 +2911,47 @@ public final class SessionReviewView extends BorderPane {
         intentsCollapsedByUser = on;
         marginCollapsedByUser = on;
         applyResponsiveLayout(getWidth());
+    }
+
+    /**
+     * While a tour exists, a verdict set in the hunk diff is recorded as a
+     * hunk override (spec §5), so the derivation the tour runs keeps it
+     * rather than clearing it the next time tour mode shows. Only once the
+     * host actually recorded {@code decision} -- an approval it refused over
+     * a blocking finding is no override.
+     */
+    private void recordHunkOverrides(ReviewScope scope, List<String> digests, ReviewVerdict.Decision decision) {
+        if (host.tour(scope).isEmpty()) {
+            return;
+        }
+        List<String> recorded = digests.stream()
+                .filter(digest -> host.verdict(scope, digest).filter(v -> v.decision() == decision).isPresent())
+                .toList();
+        if (recorded.isEmpty()) {
+            return;
+        }
+        Optional<HunkOverride> override = Optional.of(new HunkOverride(decision, "set in the hunk diff"));
+        host.updateTour(scope, record -> {
+            TourRecord next = record;
+            for (String digest : recorded) {
+                next = next.withHunkOverride(digest, override);
+            }
+            return next;
+        });
+    }
+
+    /** Undo in the hunk diff removes the overrides it had recorded. */
+    private void clearHunkOverrides(ReviewScope scope, List<String> digests) {
+        if (host.tour(scope).isEmpty() || digests.isEmpty()) {
+            return;
+        }
+        host.updateTour(scope, record -> {
+            TourRecord next = record;
+            for (String digest : digests) {
+                next = next.withHunkOverride(digest, Optional.empty());
+            }
+            return next;
+        });
     }
 
     /**
@@ -2802,6 +2996,7 @@ public final class SessionReviewView extends BorderPane {
         if (!applied) {
             return;
         }
+        recordHunkOverrides(scope.get(), digests, decision);
         lastSettledWasPath = false;
         lastSettledIntentId = Optional.of(intent.get().id());
         lastSettledDigests = digests;
@@ -2842,6 +3037,7 @@ public final class SessionReviewView extends BorderPane {
         if (!applied) {
             return;
         }
+        recordHunkOverrides(scope.get(), digests, decision);
         lastSettledWasPath = true;
         lastSettledPathHunkId = Optional.of(step.hunkId());
         lastSettledDigests = digests;
@@ -2947,6 +3143,7 @@ public final class SessionReviewView extends BorderPane {
         // An undo is never refused (see the VerdictHost#undo javadoc); false
         // is inert here, not a claim that nothing is blocking.
         host.setVerdict(scope.get(), current.get(index), digests, Optional.empty(), false);
+        clearHunkOverrides(scope.get(), digests);
         intentIndex = index;
         refreshReviewState();
         revealCurrentIntent();
@@ -2982,6 +3179,7 @@ public final class SessionReviewView extends BorderPane {
             return;
         }
         host.setVerdict(scope.get(), pathStepAsIntent(target), digests, Optional.empty(), false);
+        clearHunkOverrides(scope.get(), digests);
         pathIndex = index;
         refreshReviewState();
         revealCurrentPathStep();
@@ -3000,6 +3198,18 @@ public final class SessionReviewView extends BorderPane {
                 // Only the label, and only until the next selection or state
                 // refresh: what the agent then does shows up as intents and
                 // findings, which are the real progress indication.
+                if (host.tour(scope).isEmpty()) {
+                    tourFailure = Optional.empty();
+                    tourPendingScopeId = Optional.of(scope.id());
+                    tourWait.playFromStart();
+                    openMcpPanelForTour();
+                    applyMode();
+                }
+            } else if (host.tour(scope).isEmpty()) {
+                tourFailure = Optional.of(new TourFailure(scope.id(), "Could not reach this session's agent."));
+                if (mode == ReviewMode.TOUR) {
+                    renderTour(Optional.empty());
+                }
             }
         });
     }
@@ -3080,12 +3290,25 @@ public final class SessionReviewView extends BorderPane {
                 || event.getTarget() instanceof TextInputControl) {
             return false;
         }
+        if (handleTourShortcut(event)) {
+            return true;
+        }
         boolean handled = switch (event.getCode()) {
+            case V -> { toggleMode(); yield true; }
             case D -> { cycleDensity(); yield true; }
             case C -> { diffColumn.toggleContext(); yield true; }
-            case M -> { setMarginCollapsed(!margin.collapsed()); yield true; }
+            // m collapses whichever right-hand node is showing.
+            case M -> {
+                setMarginCollapsed(!(mode == ReviewMode.TOUR ? stepPanel.collapsed() : margin.collapsed()));
+                yield true;
+            }
             case I -> { setIntentsCollapsed(!intentRail.collapsed()); yield true; }
-            case BACK_SLASH -> { toggleMcpPanel(); yield true; }
+            case BACK_SLASH -> {
+                // The reader now owns the panel; the tour wait must not close it.
+                mcpOpenedForTour = false;
+                toggleMcpPanel();
+                yield true;
+            }
             case P -> { togglePathMode(); yield true; }
             // [ and ] step whatever the rail is currently listing (spec
             // §7.1): sections in INTENTS mode, hunks in PATH mode -- one key
@@ -3186,10 +3409,426 @@ public final class SessionReviewView extends BorderPane {
      */
     public void close() {
         closed = true;
+        tourWait.stop();
         mcpPanel.ifPresent(ReviewMcpActivityPanel::detach);
         intentRail.stopWidthAnimation();
         if (getScene() != null) {
             getScene().focusOwnerProperty().removeListener(focusOwnerListener);
+        }
+    }
+
+    // ---- tour mode ----------------------------------------------------------
+
+    private Optional<TourRecord> currentTour() {
+        return selectedScope().flatMap(host::tour);
+    }
+
+    private boolean tourPending() {
+        return selectedScope().map(scope -> tourPendingScopeId.filter(scope.id()::equals).isPresent())
+                .orElse(false);
+    }
+
+    /**
+     * Shows the mode's nodes and renders the tour when it is showing. Runs at
+     * the end of every {@link #refreshReviewState}, so it only touches a node
+     * when the mode actually changed it: DIFF mode on a scope with no tour is
+     * today's board, untouched.
+     */
+    private void applyMode() {
+        Optional<TourRecord> tour = currentTour();
+        if (tour.isPresent() && tourPending()) {
+            endTourWait();
+        }
+        if (!userChoseMode) {
+            mode = tour.isPresent() || tourPending() ? ReviewMode.TOUR : ReviewMode.DIFF;
+        }
+        boolean touring = mode == ReviewMode.TOUR;
+        boolean swapped = false;
+        Node left = touring ? outline : intentRail;
+        if (getLeft() != left) {
+            setLeft(left);
+            swapped = true;
+        }
+        Node right = touring ? stepPanel : margin;
+        if (columns.getChildren().get(1) != right) {
+            columns.getChildren().set(1, right);
+            swapped = true;
+        }
+        if (diffColumn.wholeFiles() != touring) {
+            diffColumn.setWholeFiles(touring);
+        }
+        if (touring) {
+            renderTour(tour);
+        } else if (tourMarksShown) {
+            diffColumn.setStepMarkSource(null);
+            tourMarksShown = false;
+        }
+        if (swapped) {
+            applyResponsiveLayout(getWidth());
+        }
+    }
+
+    private void renderTour(Optional<TourRecord> tour) {
+        if (mode != ReviewMode.TOUR) {
+            return;
+        }
+        if (tour.isEmpty()) {
+            Optional<TourFailure> failure = selectedScope()
+                    .flatMap(scope -> tourFailure.filter(f -> f.scopeId().equals(scope.id())));
+            if (tourPending()) {
+                outline.showMessage("Building tour…", Optional.empty(), () -> { });
+                stepPanel.showMessage("The agent is writing the tour. Its MCP calls show below.");
+            } else if (failure.isPresent()) {
+                outline.showFailure(failure.get().message(), this::runReviewOnSelection, this::openDiffReview);
+                stepPanel.showMessage("No tour to show. Retry, or review the hunk diff.");
+            } else {
+                outline.showMessage("No tour yet.", Optional.of("Run review"), this::runReviewOnSelection);
+                stepPanel.showMessage("Run review asks this session's agent for a guided tour.");
+            }
+            shownRows = null;
+            shownStepView = null;
+            outline.setFooter(0, true);
+            verdictBar.update(null, Optional.empty(), false);
+            verdictBar.showProgress(0, 0);
+            if (tourMarksShown) {
+                diffColumn.setStepMarkSource(null);
+                tourMarksShown = false;
+            }
+            return;
+        }
+        TourRecord record = tour.get();
+        if (currentStepId == null || record.tour().step(currentStepId).isEmpty()) {
+            currentStepId = firstUnsettled(record).orElse(record.tour().steps().getFirst().id());
+        }
+        List<TourOutline.Row> rows = record.tour().steps().stream()
+                .map(step -> new TourOutline.Row(step.id(), record.tour().number(step.id()), step.title(),
+                        TourOutline.stateOf(record.progress(step.id()))))
+                .toList();
+        if (!rows.equals(shownRows) || !currentStepId.equals(shownRowsCurrent)) {
+            outline.setRows(rows, currentStepId);
+            shownRows = rows;
+            shownRowsCurrent = currentStepId;
+        }
+        outline.setFooter(filesWithoutLineChanges(), filesWithoutChangesAcknowledged);
+        TourStep step = record.tour().step(currentStepId).orElseThrow();
+        StepProgress progress = record.progress(step.id());
+        StepView stepView = new StepView(step, record.tour().number(step.id()), record.tour().steps().size(),
+                progress);
+        if (!stepView.equals(shownStepView)) {
+            stepPanel.show(stepView);
+            shownStepView = stepView;
+        }
+        if (!tourMarksShown || !record.equals(shownMarksRecord) || !currentStepId.equals(shownMarksStepId)) {
+            diffColumn.setStepMarkSource(new LiveTourMarks(record, currentStepId));
+            tourMarksShown = true;
+            shownMarksRecord = record;
+            shownMarksStepId = currentStepId;
+        }
+        renderTourVerdictBar(record, step, progress);
+        syncTourVerdicts(record);
+    }
+
+    /**
+     * The verdict bar in tour mode: the current step as its unit, progress
+     * in steps passed or overridden. The step goes in as a one-off {@link
+     * ReviewIntent} the way {@link #pathStepAsIntent} hands a path row in --
+     * the bar only labels it, and its buttons route back here through
+     * {@link VerdictHost}.
+     */
+    private void renderTourVerdictBar(TourRecord record, TourStep step, StepProgress progress) {
+        ReviewIntent asIntent = new ReviewIntent("tour:" + step.id(), record.tour().number(step.id()),
+                step.title(), ReviewIntent.Kind.CHANGE, ReviewIntent.Risk.NONE, step.narrative(),
+                List.of(), Optional.empty(), false, List.of());
+        Optional<ReviewVerdict.Decision> decision = switch (progress.decision()) {
+            case PASSED, OVERRIDDEN -> Optional.of(ReviewVerdict.Decision.APPROVED);
+            case CHANGES -> Optional.of(ReviewVerdict.Decision.CHANGES);
+            case NONE -> Optional.empty();
+        };
+        verdictBar.update(asIntent, decision, false);
+        int settled = (int) record.tour().steps().stream()
+                .filter(candidate -> record.progress(candidate.id()).settledForApproval())
+                .count();
+        verdictBar.showProgress(settled, record.tour().steps().size());
+        verdictBar.showStale(Optional.empty());
+    }
+
+    /** Files of the review diff with no hunk at all (mode or binary changes); spec §3's footer. */
+    private int filesWithoutLineChanges() {
+        return loadedDiff().map(diff -> (int) diff.files().stream()
+                        .filter(file -> file.hunks().isEmpty())
+                        .count())
+                .orElse(0);
+    }
+
+    private Optional<String> firstUnsettled(TourRecord record) {
+        return record.tour().steps().stream()
+                .filter(step -> {
+                    StepProgress p = record.progress(step.id());
+                    return p.stale() || p.decision() == StepProgress.Decision.NONE;
+                })
+                .map(TourStep::id)
+                .findFirst();
+    }
+
+    /**
+     * Writes the hunk verdicts the tour derives. Derived from the REVIEW
+     * diff only -- never the whole-file display diff -- because digests and
+     * verdicts are keyed by it.
+     */
+    private void syncTourVerdicts(TourRecord record) {
+        loadedDiff().ifPresent(diff -> selectedScope().ifPresent(scope ->
+                host.applyTourVerdicts(scope, StepVerdicts.derive(record, AnchorIndex.of(diff)))));
+    }
+
+    /**
+     * The tour's keys, ahead of the hunk diff's table. Only in TOUR mode;
+     * there {@code p}, {@code i} and {@code ⇧F} -- the intent rail's and the
+     * findings margin's keys -- are inert, and so are the step keys while no
+     * tour has arrived, rather than acting on a hunk-diff cursor nobody can
+     * see.
+     */
+    private boolean handleTourShortcut(KeyEvent event) {
+        if (mode != ReviewMode.TOUR) {
+            return false;
+        }
+        switch (event.getCode()) {
+            case V -> {
+                toggleMode();
+                return true;
+            }
+            case P, I -> {
+                return true;
+            }
+            case F -> {
+                return event.isShiftDown();
+            }
+            default -> { }
+        }
+        int digit = switch (event.getCode()) {
+            case DIGIT1 -> 1;
+            case DIGIT2 -> 2;
+            case DIGIT3 -> 3;
+            case DIGIT4 -> 4;
+            default -> 0;
+        };
+        boolean stepKey = digit > 0 || switch (event.getCode()) {
+            case A, R, U, N, OPEN_BRACKET, CLOSE_BRACKET -> true;
+            default -> false;
+        };
+        if (!stepKey) {
+            return false;
+        }
+        Optional<TourRecord> tour = currentTour();
+        if (tour.isEmpty()) {
+            return true;
+        }
+        TourRecord record = tour.get();
+        if (digit > 0) {
+            stepPanel.answerByKey(digit);
+            return true;
+        }
+        switch (event.getCode()) {
+            case A -> {
+                // ⇧A approves a whole file in the hunk diff; a step has no file to widen to.
+                if (!event.isShiftDown()) {
+                    passCurrentStep(record);
+                }
+            }
+            case R -> {
+                if (!event.isShiftDown()) {
+                    decideCurrentStep(StepProgress.Decision.CHANGES, Optional.empty());
+                }
+            }
+            case U -> decideCurrentStep(StepProgress.Decision.NONE, Optional.empty());
+            case N -> firstUnsettled(record).ifPresent(this::selectStep);
+            case OPEN_BRACKET -> moveStep(record, -1);
+            case CLOSE_BRACKET -> moveStep(record, 1);
+            default -> { }
+        }
+        return true;
+    }
+
+    /**
+     * {@code a}: passes the current step only when nothing stands between it
+     * and passing (spec §5); otherwise focus moves to the first unmet
+     * requirement, so the key always does something visible.
+     */
+    private void passCurrentStep(TourRecord record) {
+        Optional<TourStep> step = record.tour().step(currentStepId);
+        if (step.isEmpty()) {
+            return;
+        }
+        Optional<StepGate.Unmet> unmet = StepGate.unmet(step.get(), record.progress(step.get().id()));
+        if (unmet.isPresent()) {
+            stepPanel.focusUnmet(unmet.get());
+            return;
+        }
+        decideCurrentStep(StepProgress.Decision.PASSED, Optional.empty());
+        currentTour().flatMap(this::firstUnsettled).ifPresent(this::selectStep);
+    }
+
+    private void decideCurrentStep(StepProgress.Decision decision, Optional<String> reason) {
+        String stepId = currentStepId;
+        if (stepId == null) {
+            return;
+        }
+        updateCurrentTour(record -> record.tour().step(stepId).isEmpty()
+                ? record
+                : record.withProgress(record.progress(stepId).withDecision(decision, reason)));
+    }
+
+    /** Applies {@code transform} to the selected scope's tour, then re-renders it (and so re-syncs verdicts). */
+    private void updateCurrentTour(UnaryOperator<TourRecord> transform) {
+        selectedScope().ifPresent(scope -> host.updateTour(scope, transform));
+        renderTour(currentTour());
+    }
+
+    private void selectStep(String stepId) {
+        Optional<TourRecord> tour = currentTour();
+        Optional<TourStep> step = tour.flatMap(record -> record.tour().step(stepId));
+        if (step.isEmpty()) {
+            return;
+        }
+        currentStepId = stepId;
+        renderTour(tour);
+        revealAnchor(step.get(), 0);
+    }
+
+    private void moveStep(TourRecord record, int delta) {
+        List<TourStep> steps = record.tour().steps();
+        int index = Math.max(0, record.tour().number(currentStepId) - 1);
+        selectStep(steps.get(Math.clamp(index + delta, 0, steps.size() - 1)).id());
+    }
+
+    private void revealAnchor(TourStep step, int anchorIndex) {
+        if (anchorIndex >= 0 && anchorIndex < step.anchors().size()) {
+            TourAnchor anchor = step.anchors().get(anchorIndex);
+            diffColumn.revealLine(anchor.file(), anchor.startKey());
+        }
+    }
+
+    /** {@code v}: tour ↔ hunk diff, remembered until the scope changes. */
+    private void toggleMode() {
+        userChoseMode = true;
+        mode = mode == ReviewMode.TOUR ? ReviewMode.DIFF : ReviewMode.TOUR;
+        applyMode();
+        revealCurrentSelection();
+        if (mode == ReviewMode.TOUR) {
+            currentTour().flatMap(record -> record.tour().step(currentStepId))
+                    .ifPresent(step -> revealAnchor(step, 0));
+        }
+    }
+
+    /** The failure's "Open diff review": today's hunk diff, chosen. */
+    private void openDiffReview() {
+        userChoseMode = true;
+        mode = ReviewMode.DIFF;
+        applyMode();
+        revealCurrentSelection();
+    }
+
+    private void onTourWaitExpired() {
+        Optional<String> pending = tourPendingScopeId;
+        endTourWait();
+        pending.filter(scopeId -> scopeById(scopeId).flatMap(host::tour).isEmpty())
+                .ifPresent(scopeId -> tourFailure = Optional.of(new TourFailure(scopeId, "No tour arrived.")));
+        renderTour(currentTour());
+    }
+
+    /** Ends "Building tour…": the tour arrived or the wait ran out. */
+    private void endTourWait() {
+        tourPendingScopeId = Optional.empty();
+        tourWait.stop();
+        if (mcpOpenedForTour) {
+            mcpOpenedForTour = false;
+            if (mcpPanel.filter(Node::isVisible).isPresent()) {
+                toggleMcpPanel();
+            }
+        }
+    }
+
+    /** Shows the MCP activity panel while the tour is built, unless the reader already has it open. */
+    private void openMcpPanelForTour() {
+        if (mcpPanel.isPresent() && !mcpPanel.get().isVisible()) {
+            toggleMcpPanel();
+            mcpOpenedForTour = true;
+        }
+    }
+
+    /**
+     * Step marks for the rows the column actually renders. Built lazily per
+     * rendered diff, because the whole-file display diff lands after the
+     * mode switch and its rows differ from the review diff's.
+     */
+    private final class LiveTourMarks implements ReviewDiffColumn.StepMarkSource {
+        private final TourRecord record;
+        private final String stepId;
+        private UnifiedDiff builtFor;
+        private TourMarks marks = TourMarks.none();
+
+        LiveTourMarks(TourRecord record, String stepId) {
+            this.record = record;
+            this.stepId = stepId;
+        }
+
+        @Override
+        public Optional<StepMark> markAt(String file, String lineKey) {
+            UnifiedDiff rendered = diffColumn.renderedDiff();
+            if (rendered == null) {
+                return Optional.empty();
+            }
+            if (rendered != builtFor) {
+                marks = TourMarks.of(record, rendered, stepId);
+                builtFor = rendered;
+            }
+            return marks.markAt(file, lineKey);
+        }
+    }
+
+    /** The step panel's window onto the tour, with the scope filled in. */
+    private final class StepHost implements StepPanel.Host {
+        @Override
+        public void answerChoice(String checkId, int choiceIndex) {
+            updateCurrentTour(record -> record.tour().stepOfCheck(checkId)
+                    .flatMap(step -> step.check(checkId).map(check -> {
+                        StepProgress p = record.progress(step.id());
+                        return record.withProgress(p.withCheck(
+                                StepGrading.answerChoice(check, p.check(check.id()), choiceIndex)));
+                    }))
+                    .orElse(record));
+        }
+
+        @Override
+        public void submitRisk(String checkId, String answer) {
+            // Recorded as awaiting the agent; the dispatch to it is Task 13's.
+            updateCurrentTour(record -> record.tour().stepOfCheck(checkId)
+                    .map(step -> {
+                        StepProgress p = record.progress(step.id());
+                        return record.withProgress(p.withCheck(
+                                StepGrading.submitRisk(p.check(checkId), answer)));
+                    })
+                    .orElse(record));
+        }
+
+        @Override
+        public void override(String reason) {
+            decideCurrentStep(StepProgress.Decision.OVERRIDDEN, Optional.of(reason));
+        }
+
+        @Override
+        public void askAgent(String checkId) {
+            LOG.log(Level.DEBUG, "Ask the agent about check " + checkId + ": not wired yet");
+        }
+
+        @Override
+        public void goToAnchor(int anchorIndex) {
+            currentTour().flatMap(record -> record.tour().step(currentStepId))
+                    .ifPresent(step -> revealAnchor(step, anchorIndex));
+        }
+
+        @Override
+        public void retryRisk(String checkId) {
+            LOG.log(Level.DEBUG, "Retry the agent's verdict on check " + checkId + ": not wired yet");
         }
     }
 
@@ -3402,5 +4041,23 @@ public final class SessionReviewView extends BorderPane {
         return ReviewDiagFxThread.call(() -> lookupAll(".review-finding-body").stream()
                 .map(node -> ((Label) node).getText())
                 .toList());
+    }
+
+    /** Diagnostic-only: which surface the board shows. Call on the FX thread. */
+    ReviewMode diagMode() {
+        return mode;
+    }
+
+    /** Diagnostic-only: the step the tour is on, or null. Call on the FX thread. */
+    String diagCurrentStepId() {
+        return currentStepId;
+    }
+
+    TourOutline diagOutline() {
+        return outline;
+    }
+
+    StepPanel diagStepPanel() {
+        return stepPanel;
     }
 }

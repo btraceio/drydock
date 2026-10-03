@@ -11,14 +11,18 @@ import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewVerdict;
 import app.drydock.review.Severity;
+import app.drydock.review.tour.TourRecord;
+import app.drydock.review.tour.TourStore;
 import javafx.scene.layout.Region;
 
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.TreeSet;
+import java.util.function.UnaryOperator;
 
 /**
  * A {@link SessionReviewView.Host} backed by a real {@link AnnotationStore}
@@ -33,6 +37,8 @@ import java.util.TreeSet;
 final class FakeReviewHost implements SessionReviewView.Host {
 
     final AnnotationStore store;
+    /** The real tour store, on a sibling of {@link #store}'s file; closed by the fixture. */
+    final TourStore tours;
     final IntentGrouping intents = new IntentGrouping();
 
     final List<String> handedOffPrompts = new ArrayList<>();
@@ -82,6 +88,7 @@ final class FakeReviewHost implements SessionReviewView.Host {
 
     FakeReviewHost(Path storeFile) {
         this.store = new AnnotationStore(storeFile);
+        this.tours = new TourStore(storeFile.resolveSibling("review-tours.json"));
     }
 
     /**
@@ -285,5 +292,29 @@ final class FakeReviewHost implements SessionReviewView.Host {
         }
         reviewRuns.add(scope.id());
         return true;
+    }
+
+    @Override
+    public Optional<TourRecord> tour(ReviewScope scope) {
+        return tours.forScope(scope.id());
+    }
+
+    @Override
+    public void updateTour(ReviewScope scope, UnaryOperator<TourRecord> transform) {
+        tours.mutate(scope.id(), transform);
+    }
+
+    @Override
+    public void applyTourVerdicts(ReviewScope scope, Map<String, Optional<ReviewVerdict.Decision>> byDigest) {
+        byDigest.forEach((digest, decision) -> {
+            Optional<ReviewVerdict.Decision> stored = store.verdict(scope.id(), digest).map(ReviewVerdict::decision);
+            if (stored.equals(decision)) {
+                return;
+            }
+            decision.ifPresentOrElse(
+                    value -> store.putVerdict(new ReviewVerdict(scope.id(), digest, value,
+                            Optional.empty(), Instant.now(), baseCommit, headCommit)),
+                    () -> store.clearVerdict(scope.id(), digest));
+        });
     }
 }

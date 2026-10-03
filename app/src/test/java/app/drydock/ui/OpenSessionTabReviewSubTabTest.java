@@ -14,6 +14,7 @@ import app.drydock.review.SessionReviewScopes;
 import app.drydock.review.ReviewVerdict;
 import app.drydock.review.Severity;
 import app.drydock.review.SubmitPlan;
+import app.drydock.review.tour.TourRecord;
 import app.drydock.terminal.api.Shortcut;
 import app.drydock.terminal.api.TerminalHostView;
 import app.drydock.terminal.api.TerminalRuntime;
@@ -34,9 +35,11 @@ import org.testfx.util.WaitForAsyncUtils;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.TreeSet;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.UnaryOperator;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -568,6 +571,20 @@ class OpenSessionTabReviewSubTabTest extends ApplicationTest {
         @Override
         public boolean runReview(ReviewScope scope) {
             return false;
+        }
+
+        @Override
+        public Optional<TourRecord> tour(ReviewScope scope) {
+            return Optional.empty();
+        }
+
+        @Override
+        public void updateTour(ReviewScope scope, UnaryOperator<TourRecord> transform) {
+        }
+
+        @Override
+        public void applyTourVerdicts(ReviewScope scope,
+                                      Map<String, Optional<ReviewVerdict.Decision>> byDigest) {
         }
 
         @Override

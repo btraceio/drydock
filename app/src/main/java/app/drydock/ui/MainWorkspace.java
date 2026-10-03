@@ -59,6 +59,7 @@ import app.drydock.review.AnnotationStatus;
 import app.drydock.review.ReviewInstructions;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
+import app.drydock.review.tour.TourRecord;
 import app.drydock.review.tour.TourStore;
 import app.drydock.review.SessionReviewScopes;
 import app.drydock.review.SubmitPlan;
@@ -138,6 +139,7 @@ import java.util.function.DoubleSupplier;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
+import java.util.function.UnaryOperator;
 import java.util.stream.Collectors;
 
 /**
@@ -1878,10 +1880,11 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * Review's own subtree that binding, not Submit, is what a keypress
      * ought to reach.
      */
-    private static final java.util.Set<KeyCode> REPLAYABLE_OFF_REVIEW_SUBTREE = java.util.Set.of(
+    private static final Set<KeyCode> REPLAYABLE_OFF_REVIEW_SUBTREE = Set.of(
             KeyCode.D, KeyCode.C, KeyCode.M, KeyCode.I, KeyCode.BACK_SLASH,
             KeyCode.OPEN_BRACKET, KeyCode.CLOSE_BRACKET, KeyCode.N, KeyCode.A, KeyCode.R,
-            KeyCode.U, KeyCode.F);
+            KeyCode.U, KeyCode.F, KeyCode.V, KeyCode.DIGIT1, KeyCode.DIGIT2, KeyCode.DIGIT3,
+            KeyCode.DIGIT4);
 
     /**
      * The pure logic behind {@link #reviewKeyboardBackstop(KeyEvent)},
@@ -2366,6 +2369,46 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 return false;
             }
             return sendToBoundSession(scope, reviewInstruction(scope));
+        }
+
+        @Override
+        public Optional<TourRecord> tour(ReviewScope scope) {
+            return tourStore.forScope(scope.id());
+        }
+
+        @Override
+        public void updateTour(ReviewScope scope, UnaryOperator<TourRecord> transform) {
+            tourStore.mutate(scope.id(), transform);
+        }
+
+        /**
+         * Writes only the hunks whose stored decision differs from the
+         * derived one, stamped with the same baseline {@link #setVerdict}
+         * uses, so a re-derivation that changed nothing leaves the store
+         * (and its change listeners) alone.
+         */
+        @Override
+        public void applyTourVerdicts(ReviewScope scope,
+                                      Map<String, Optional<ReviewVerdict.Decision>> byDigest) {
+            ReviewBaseline baseline = null;
+            for (Map.Entry<String, Optional<ReviewVerdict.Decision>> entry : byDigest.entrySet()) {
+                String digest = entry.getKey();
+                Optional<ReviewVerdict.Decision> derived = entry.getValue();
+                Optional<ReviewVerdict.Decision> stored =
+                        annotationStore.verdict(scope.id(), digest).map(ReviewVerdict::decision);
+                if (stored.equals(derived)) {
+                    continue;
+                }
+                if (derived.isEmpty()) {
+                    annotationStore.clearVerdict(scope.id(), digest);
+                    continue;
+                }
+                if (baseline == null) {
+                    baseline = baselineOf(scope);
+                }
+                annotationStore.putVerdict(new ReviewVerdict(scope.id(), digest, derived.get(),
+                        Optional.empty(), Instant.now(), baseline.base(), baseline.head()));
+            }
         }
 
         /**
