@@ -55,7 +55,7 @@ class ReviewSubmitSheetTest extends ApplicationTest {
     @Override
     public void start(Stage stage) {
         this.stage = stage;
-        SubmitPlan plan = new SubmitPlan(Event.COMMENT, List.of(), List.of(), List.of());
+        SubmitPlan plan = new SubmitPlan(Event.COMMENT, List.of(), List.of(), List.of(), List.of());
         sheet = new ReviewSubmitSheet(plan, PR,
                 (event, summary) -> submitted.add(new Object[] { event, summary }),
                 () -> cancelled.set(true));
@@ -103,7 +103,7 @@ class ReviewSubmitSheetTest extends ApplicationTest {
         SubmitPlan.Refusal refusal = new SubmitPlan.Refusal(
                 new ReviewAnnotation.Key("scope-1", "finding-3"),
                 "line o5 is not in this diff");
-        SubmitPlan plan = new SubmitPlan(Event.APPROVE, List.of(ranged, single), List.of(), List.of(refusal));
+        SubmitPlan plan = new SubmitPlan(Event.APPROVE, List.of(ranged, single), List.of(), List.of(refusal), List.of());
 
         rebuildSheet(plan);
 
@@ -147,7 +147,7 @@ class ReviewSubmitSheetTest extends ApplicationTest {
     void aCrossSideAnchorLabelsEachEndWithItsOwnSide() {
         Comment crossSide = new Comment("src/Foo.java", "selecting across the deletion",
                 new Anchor(48, Side.RIGHT, OptionalInt.of(120), Optional.of(Side.LEFT)));
-        SubmitPlan plan = new SubmitPlan(Event.APPROVE, List.of(crossSide), List.of(), List.of());
+        SubmitPlan plan = new SubmitPlan(Event.APPROVE, List.of(crossSide), List.of(), List.of(), List.of());
 
         rebuildSheet(plan);
 
@@ -238,7 +238,7 @@ class ReviewSubmitSheetTest extends ApplicationTest {
     void aRealPointerClickOnSubmitInvokesOnSubmitWithTheChosenEventAndSummary() {
         Comment comment = new Comment("src/Foo.java", "existing finding",
                 new Anchor(12, Side.RIGHT, OptionalInt.empty(), Optional.empty()));
-        SubmitPlan plan = new SubmitPlan(Event.COMMENT, List.of(comment), List.of(), List.of());
+        SubmitPlan plan = new SubmitPlan(Event.COMMENT, List.of(comment), List.of(), List.of(), List.of());
         rebuildSheet(plan);
 
         clickOn(".review-composer-input");
@@ -257,11 +257,41 @@ class ReviewSubmitSheetTest extends ApplicationTest {
                 "the summary handed to onSubmit must be what was actually typed");
     }
 
+    @Test
+    void theSheetNamesTheRouteOfEveryCommentAndWhatWasApprovedUnverified() {
+        Comment inline = new Comment("src/Bar.java", "nit: rename",
+                new Anchor(12, Side.RIGHT, OptionalInt.empty(), Optional.empty()));
+        SubmitPlan.BodyNote note = new SubmitPlan.BodyNote(
+                new ReviewAnnotation.Key("scope-1", "finding-9"), "src/Foo.java", "500",
+                "callers.forEach(Caller::run);", "who else calls this?");
+        SubmitPlan plan = new SubmitPlan(Event.APPROVE, List.of(inline), List.of(), List.of(), List.of(note));
+
+        rebuildSheet(plan, new ReviewSubmitSheet.Unverified(2, 1, 3));
+
+        assertEquals(List.of("Inline comments (1)"), queryLabels(".review-submit-route-inline"));
+        assertEquals(List.of("In the review body (1)"), queryLabels(".review-submit-route-body"));
+        assertEquals(List.of("src/Foo.java:500"), queryLabels(".review-submit-note-location"));
+        assertEquals(List.of("Not verified: 2 steps approved without passing checks · "
+                        + "1 hunk approved in the hunk diff · 3 agent findings not reviewed"),
+                queryLabels(".review-submit-unverified"));
+    }
+
+    @Test
+    void theNotVerifiedLineIsAbsentWhenNothingWasApprovedUnverified() {
+        rebuildSheet(new SubmitPlan(Event.COMMENT, List.of(), List.of(), List.of(), List.of()));
+
+        assertTrue(queryLabels(".review-submit-unverified").isEmpty());
+    }
+
     // ---- helpers ------------------------------------------------------------
 
     private void rebuildSheet(SubmitPlan plan) {
+        rebuildSheet(plan, new ReviewSubmitSheet.Unverified(0, 0, 0));
+    }
+
+    private void rebuildSheet(SubmitPlan plan, ReviewSubmitSheet.Unverified unverified) {
         interact(() -> {
-            sheet = new ReviewSubmitSheet(plan, PR,
+            sheet = new ReviewSubmitSheet(plan, PR, unverified,
                     (event, summary) -> submitted.add(new Object[] { event, summary }),
                     () -> cancelled.set(true));
             Scene scene = new Scene(sheet, 640, 720);

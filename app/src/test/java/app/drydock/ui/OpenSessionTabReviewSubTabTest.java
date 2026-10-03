@@ -24,6 +24,7 @@ import app.drydock.terminal.api.TerminalSpec;
 import app.drydock.terminal.api.TerminalSurface;
 import app.drydock.ui.nav.SymbolPeek;
 import app.drydock.ui.review.ReviewNavigation;
+import app.drydock.ui.review.ReviewSubmitSheet;
 import app.drydock.ui.review.SessionReviewView;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
@@ -43,6 +44,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.TreeSet;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BiFunction;
 import java.util.function.UnaryOperator;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -579,7 +581,9 @@ class OpenSessionTabReviewSubTabTest extends ApplicationTest {
         }
 
         @Override
-        public void submit(ReviewScope scope, SubmitPlan.DiffIndex index, List<ReviewVerdict.Decision> decisions) {
+        public void submit(ReviewScope scope, SubmitPlan.DiffIndex index, List<ReviewVerdict.Decision> decisions,
+                           BiFunction<String, String, Optional<String>> lineText,
+                           ReviewSubmitSheet.Unverified unverified) {
         }
 
         @Override

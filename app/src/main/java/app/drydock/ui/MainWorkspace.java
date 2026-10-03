@@ -138,6 +138,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BiFunction;
 import java.util.function.DoubleSupplier;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
@@ -2260,10 +2261,12 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
          */
         @Override
         public void submit(ReviewScope scope, SubmitPlan.DiffIndex index,
-                           List<ReviewVerdict.Decision> decisions) {
+                           List<ReviewVerdict.Decision> decisions,
+                           BiFunction<String, String, Optional<String>> lineText,
+                           ReviewSubmitSheet.Unverified unverified) {
             Optional<ReviewScope.PullRequestRef> pr = scope.pr();
             if (pr.isPresent()) {
-                showSubmitSheet(scope, pr.get(), index, decisions);
+                showSubmitSheet(scope, pr.get(), index, decisions, lineText, unverified);
                 return;
             }
             annotationStore.markSubmitted(scope.id());
@@ -2286,7 +2289,9 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
          * null} path elsewhere) once it resolves.
          */
         private void showSubmitSheet(ReviewScope scope, ReviewScope.PullRequestRef pr,
-                                     SubmitPlan.DiffIndex index, List<ReviewVerdict.Decision> decisions) {
+                                     SubmitPlan.DiffIndex index, List<ReviewVerdict.Decision> decisions,
+                                     BiFunction<String, String, Optional<String>> lineText,
+                                     ReviewSubmitSheet.Unverified unverified) {
             if (modalLayer == null || !submitCheckInFlight.add(scope.id())) {
                 return;
             }
@@ -2307,17 +2312,19 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                             // now would bury whatever they opened next.
                             return;
                         }
-                        openSubmitSheet(scope, pr, index, decisions,
+                        openSubmitSheet(scope, pr, index, decisions, lineText, unverified,
                                 error != null ? Optional.of("Could not check gh: " + error.getMessage()) : reason);
                     }));
         }
 
         private void openSubmitSheet(ReviewScope scope, ReviewScope.PullRequestRef pr,
                                      SubmitPlan.DiffIndex index, List<ReviewVerdict.Decision> decisions,
+                                     BiFunction<String, String, Optional<String>> lineText,
+                                     ReviewSubmitSheet.Unverified unverified,
                                      Optional<String> unavailableReason) {
-            SubmitPlan plan = SubmitPlan.of(annotationStore.forScope(scope.id()), decisions, index);
+            SubmitPlan plan = SubmitPlan.of(annotationStore.forScope(scope.id()), decisions, index, lineText);
             ReviewSubmitSheet[] holder = new ReviewSubmitSheet[1];
-            holder[0] = new ReviewSubmitSheet(plan, pr,
+            holder[0] = new ReviewSubmitSheet(plan, pr, unverified,
                     (event, summary) -> postReview(scope, pr, plan, event, summary, holder[0]),
                     modalLayer::close);
             modalLayer.show(holder[0]);
@@ -2335,7 +2342,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
          */
         private void postReview(ReviewScope scope, ReviewScope.PullRequestRef pr, SubmitPlan plan,
                                 Event event, String summary, ReviewSubmitSheet sheet) {
-            gitHubReviewService.submit(scope.diffRoot(), pr.number(), event, summary, plan.comments())
+            gitHubReviewService.submit(scope.diffRoot(), pr.number(), event, plan.composeBody(summary), plan.comments())
                     .whenComplete((outcome, error) -> Platform.runLater(() -> {
                         if (error != null) {
                             reportPostFailure(sheet, "Could not post review: " + error.getMessage());

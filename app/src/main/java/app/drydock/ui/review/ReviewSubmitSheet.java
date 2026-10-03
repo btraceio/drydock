@@ -20,6 +20,8 @@ import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
 import javafx.scene.layout.VBox;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 import java.util.function.BiConsumer;
 
@@ -37,7 +39,38 @@ import java.util.function.BiConsumer;
  */
 public final class ReviewSubmitSheet extends VBox {
 
+    /**
+     * What the review approves without having verified it: steps approved
+     * with an override, hunks approved in the hunk diff, and agent findings
+     * the human never confirmed or dismissed.
+     */
+    public record Unverified(int stepOverrides, int hunkOverrides, long untriagedFindings) {
+
+        boolean any() {
+            return stepOverrides > 0 || hunkOverrides > 0 || untriagedFindings > 0;
+        }
+
+        /** The sheet's one-line summary; only the non-zero parts appear. */
+        String describe() {
+            List<String> parts = new ArrayList<>();
+            if (stepOverrides > 0) {
+                parts.add(stepOverrides + (stepOverrides == 1 ? " step" : " steps")
+                        + " approved without passing checks");
+            }
+            if (hunkOverrides > 0) {
+                parts.add(hunkOverrides + (hunkOverrides == 1 ? " hunk" : " hunks")
+                        + " approved in the hunk diff");
+            }
+            if (untriagedFindings > 0) {
+                parts.add(untriagedFindings + (untriagedFindings == 1 ? " agent finding" : " agent findings")
+                        + " not reviewed");
+            }
+            return "Not verified: " + String.join(" · ", parts);
+        }
+    }
+
     private final SubmitPlan plan;
+    private final Unverified unverified;
     private final BiConsumer<Event, String> onSubmit;
     private final Runnable onCancel;
 
@@ -63,7 +96,13 @@ public final class ReviewSubmitSheet extends VBox {
 
     public ReviewSubmitSheet(SubmitPlan plan, ReviewScope.PullRequestRef pr,
                               BiConsumer<Event, String> onSubmit, Runnable onCancel) {
+        this(plan, pr, new Unverified(0, 0, 0), onSubmit, onCancel);
+    }
+
+    public ReviewSubmitSheet(SubmitPlan plan, ReviewScope.PullRequestRef pr, Unverified unverified,
+                              BiConsumer<Event, String> onSubmit, Runnable onCancel) {
         this.plan = plan;
+        this.unverified = unverified;
         this.onSubmit = onSubmit;
         this.onCancel = onCancel;
 
@@ -75,6 +114,8 @@ public final class ReviewSubmitSheet extends VBox {
         title.getStyleClass().add("modal-title");
 
         VBox content = new VBox(14, buildEventPicker(), buildSummaryField(), buildCommentsBlock());
+        buildBodyNotesBlock().ifPresent(content.getChildren()::add);
+        buildUnverifiedBlock().ifPresent(content.getChildren()::add);
         buildRefusalsBlock().ifPresent(content.getChildren()::add);
 
         ScrollPane scroll = new ScrollPane(content);
@@ -185,9 +226,8 @@ public final class ReviewSubmitSheet extends VBox {
 
     /** Every comment the plan would post: {@code file:L40–48} (or a single line) plus its first line. */
     private Region buildCommentsBlock() {
-        Label header = new Label("Posting " + plan.comments().size()
-                + (plan.comments().size() == 1 ? " comment" : " comments"));
-        header.getStyleClass().add("modal-hint");
+        Label header = new Label("Inline comments (" + plan.comments().size() + ")");
+        header.getStyleClass().addAll("modal-hint", "review-submit-route-inline");
 
         VBox rows = new VBox(6);
         rows.getStyleClass().add("review-submit-comments");
@@ -198,6 +238,38 @@ public final class ReviewSubmitSheet extends VBox {
         VBox block = new VBox(6, header, rows);
         block.getStyleClass().add("review-submit-comments-block");
         return block;
+    }
+
+    /** Comments on lines GitHub cannot anchor: they travel in the review body, so say so. */
+    private Optional<Region> buildBodyNotesBlock() {
+        if (plan.bodyNotes().isEmpty()) {
+            return Optional.empty();
+        }
+        Label header = new Label("In the review body (" + plan.bodyNotes().size() + ")");
+        header.getStyleClass().addAll("modal-hint", "review-submit-route-body");
+        VBox rows = new VBox(6);
+        for (SubmitPlan.BodyNote note : plan.bodyNotes()) {
+            Label location = new Label(note.location());
+            location.getStyleClass().add("review-submit-note-location");
+            Label body = new Label(firstLine(note.body()));
+            body.getStyleClass().add("review-submit-comment-body");
+            HBox row = new HBox(8, location, body);
+            row.getStyleClass().add("review-submit-comment-row");
+            rows.getChildren().add(row);
+        }
+        VBox block = new VBox(6, header, rows);
+        block.getStyleClass().add("review-submit-body-notes");
+        return Optional.of(block);
+    }
+
+    private Optional<Region> buildUnverifiedBlock() {
+        if (!unverified.any()) {
+            return Optional.empty();
+        }
+        Label line = new Label(unverified.describe());
+        line.getStyleClass().addAll("modal-hint", "review-submit-unverified");
+        line.setWrapText(true);
+        return Optional.of(new VBox(line));
     }
 
     private static Region commentRow(Comment comment) {

@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.TreeSet;
+import java.util.function.BiFunction;
 import java.util.function.UnaryOperator;
 
 /**
@@ -325,7 +326,9 @@ final class FakeReviewHost implements SessionReviewView.Host {
 
     @Override
     public void submit(ReviewScope scope, app.drydock.review.SubmitPlan.DiffIndex index,
-                       List<ReviewVerdict.Decision> decisions) {
+                       List<ReviewVerdict.Decision> decisions,
+                       BiFunction<String, String, Optional<String>> lineText,
+                       ReviewSubmitSheet.Unverified unverified) {
         submittedScopes.add(scope.id());
         submittedIndexes.put(scope.id(), index);
         submittedDecisions.put(scope.id(), decisions);

@@ -271,4 +271,79 @@ class SubmitPlanTest {
         assertEquals(1, plan.comments().size());
         assertEquals("The agent's own finding text.", plan.comments().get(0).body());
     }
+
+    private static final SubmitPlan.DiffIndex EMPTY_INDEX = new SubmitPlan.DiffIndex(Map.of(), Map.of());
+
+    private static java.util.function.BiFunction<String, String, Optional<String>> lookup() {
+        return (file, key) -> file.equals("src/Foo.java") && key.equals("n500")
+                ? Optional.of("callers.forEach(Caller::run);") : Optional.empty();
+    }
+
+    @Test
+    void aFindingOutsideTheDiffBecomesABodyNoteWithTheLineExcerpt() {
+        ReviewAnnotation outside = finding("f9", "src/Foo.java", "n500", "n500");
+
+        SubmitPlan plan = SubmitPlan.of(List.of(outside), List.of(), EMPTY_INDEX, lookup());
+
+        assertTrue(plan.comments().isEmpty());
+        assertTrue(plan.refusals().isEmpty());
+        assertEquals(1, plan.bodyNotes().size());
+        SubmitPlan.BodyNote note = plan.bodyNotes().get(0);
+        assertEquals(outside.key(), note.key());
+        assertEquals("src/Foo.java", note.file());
+        assertEquals("500", note.lineLabel());
+        assertEquals("callers.forEach(Caller::run);", note.excerpt());
+        assertEquals("Something looks off here.", note.body());
+        assertEquals(List.of(outside.key()), plan.posting(),
+                "a note is posted, so postToPr must be cleared for it after a successful post");
+    }
+
+    @Test
+    void composeBodyAppendsTheNotesWithTheirExcerptsToTheSummary() {
+        ReviewAnnotation outside = finding("f10", "src/Foo.java", "n500", "n500");
+        SubmitPlan plan = SubmitPlan.of(List.of(outside), List.of(), EMPTY_INDEX, lookup());
+
+        String body = plan.composeBody("LGTM");
+
+        assertTrue(body.startsWith("LGTM\n\nComments on lines outside this diff:\n"), body);
+        assertTrue(body.contains("- `src/Foo.java:500` — Something looks off here."), body);
+        assertTrue(body.contains("callers.forEach(Caller::run);"), body);
+    }
+
+    @Test
+    void composeBodyIsTheSummaryUnchangedWithoutNotes() {
+        assertEquals("LGTM", SubmitPlan.of(List.of(), List.of(), EMPTY_INDEX, lookup()).composeBody("LGTM"));
+    }
+
+    @Test
+    void aNoteWithoutAnExcerptStillComposes() {
+        ReviewAnnotation outside = finding("f11", "src/Other.java", "n7", "n7");
+        SubmitPlan plan = SubmitPlan.of(List.of(outside), List.of(), EMPTY_INDEX, lookup());
+
+        assertEquals("", plan.bodyNotes().get(0).excerpt());
+        assertTrue(plan.composeBody("").contains("- `src/Other.java:7` — Something looks off here."));
+    }
+
+    @Test
+    void aSpanAcrossTwoHunksStaysARefusalEvenWithALookup() {
+        ReviewAnnotation spanning = finding("f12", "src/Foo.java", "n40", "n80");
+        SubmitPlan.DiffIndex index = new SubmitPlan.DiffIndex(
+                Map.of("src/Foo.java n40", 1, "src/Foo.java n80", 2),
+                Map.of("src/Foo.java n40", 0, "src/Foo.java n80", 1));
+
+        SubmitPlan plan = SubmitPlan.of(List.of(spanning), List.of(), index, lookup());
+
+        assertEquals(1, plan.refusals().size());
+        assertTrue(plan.bodyNotes().isEmpty());
+    }
+
+    @Test
+    void theThreeArgumentOfStillRefusesALineOutsideTheDiff() {
+        ReviewAnnotation outside = finding("f13", "src/Foo.java", "n500", "n500");
+
+        SubmitPlan plan = SubmitPlan.of(List.of(outside), List.of(), EMPTY_INDEX);
+
+        assertEquals(1, plan.refusals().size());
+        assertTrue(plan.bodyNotes().isEmpty());
+    }
 }

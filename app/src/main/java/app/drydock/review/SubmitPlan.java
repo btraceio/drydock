@@ -8,6 +8,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
+import java.util.function.BiFunction;
 
 /**
  * What Submit would post to GitHub, computed before a single network call is
@@ -18,7 +20,35 @@ import java.util.Objects;
  * into {@code app.drydock.ui}, which owns the host and cannot see a diff row.
  */
 public record SubmitPlan(Event preselected, List<Comment> comments, List<ReviewAnnotation.Key> posting,
-                          List<Refusal> refusals) {
+                          List<Refusal> refusals, List<BodyNote> bodyNotes) {
+
+    public SubmitPlan {
+        comments = List.copyOf(comments);
+        posting = List.copyOf(posting);
+        refusals = List.copyOf(refusals);
+        bodyNotes = List.copyOf(bodyNotes);
+    }
+
+    /**
+     * A comment on a line GitHub has no diff position for (an unchanged
+     * caller, say -- the point of whole-file review). It is posted inside the
+     * review body as {@code file:line}, with the line's text as an excerpt so
+     * the note still reads without the code beside it.
+     */
+    public record BodyNote(ReviewAnnotation.Key key, String file, String lineLabel, String excerpt, String body) {
+        public BodyNote {
+            Objects.requireNonNull(key, "key");
+            Objects.requireNonNull(file, "file");
+            Objects.requireNonNull(lineLabel, "lineLabel");
+            Objects.requireNonNull(excerpt, "excerpt");
+            Objects.requireNonNull(body, "body");
+        }
+
+        /** {@code file:line}, the form the review body and the submit sheet both show. */
+        public String location() {
+            return file + ":" + lineLabel;
+        }
+    }
 
     /** A finding GitHub would reject, and why -- named in words a human can act on. */
     public record Refusal(ReviewAnnotation.Key key, String reason) {
@@ -96,6 +126,23 @@ public record SubmitPlan(Event preselected, List<Comment> comments, List<ReviewA
      */
     public static SubmitPlan of(List<ReviewAnnotation> findings, List<ReviewVerdict.Decision> decisions,
                                  DiffIndex index) {
+        return build(findings, decisions, index, null);
+    }
+
+    /**
+     * As {@link #of(List, List, DiffIndex)}, except a finding whose start or
+     * end line is not in the diff becomes a {@link BodyNote} (its excerpt
+     * from {@code lineText(file, lineKey)}) instead of a refusal. The other
+     * refusals -- two hunks, backwards, cross-side -- are unchanged.
+     */
+    public static SubmitPlan of(List<ReviewAnnotation> findings, List<ReviewVerdict.Decision> decisions,
+                                 DiffIndex index, BiFunction<String, String, Optional<String>> lineText) {
+        return build(findings, decisions, index, Objects.requireNonNull(lineText, "lineText"));
+    }
+
+    private static SubmitPlan build(List<ReviewAnnotation> findings, List<ReviewVerdict.Decision> decisions,
+                                    DiffIndex index, BiFunction<String, String, Optional<String>> lineText) {
+        List<BodyNote> bodyNotes = new ArrayList<>();
         List<Comment> comments = new ArrayList<>();
         List<ReviewAnnotation.Key> posting = new ArrayList<>();
         List<Refusal> refusals = new ArrayList<>();
@@ -109,6 +156,13 @@ public record SubmitPlan(Event preselected, List<Comment> comments, List<ReviewA
 
             Integer startPosition = index.positionOfKey().get(startCompositeKey);
             Integer endPosition = index.positionOfKey().get(endCompositeKey);
+            if ((startPosition == null || endPosition == null) && lineText != null) {
+                bodyNotes.add(new BodyNote(finding.key(), finding.file(),
+                        lineLabel(finding.startKey(), finding.endKey()),
+                        lineText.apply(finding.file(), finding.startKey()).orElse(""), bodyOf(finding)));
+                posting.add(finding.key());
+                continue;
+            }
             if (startPosition == null || endPosition == null) {
                 refusals.add(new Refusal(finding.key(), "line %s is not in this diff"
                         .formatted(startPosition == null ? finding.startKey() : finding.endKey())));
@@ -153,7 +207,39 @@ public record SubmitPlan(Event preselected, List<Comment> comments, List<ReviewA
             posting.add(finding.key());
         }
 
-        return new SubmitPlan(preselect(decisions), comments, posting, refusals);
+        return new SubmitPlan(preselect(decisions), comments, posting, refusals, bodyNotes);
+    }
+
+    /**
+     * The review body: {@code summary}, then -- when there are notes -- a
+     * blank line, a heading, and one bullet per note with its excerpt on an
+     * indented line below it.
+     */
+    public String composeBody(String summary) {
+        if (bodyNotes.isEmpty()) {
+            return summary;
+        }
+        StringBuilder out = new StringBuilder(summary);
+        if (!summary.isBlank()) {
+            out.append("\n\n");
+        }
+        out.append("Comments on lines outside this diff:\n");
+        for (BodyNote note : bodyNotes) {
+            out.append("- `").append(note.location()).append("` — ").append(note.body()).append('\n');
+            if (!note.excerpt().isEmpty()) {
+                out.append("    ").append(note.excerpt()).append('\n');
+            }
+        }
+        return out.toString().stripTrailing();
+    }
+
+    /** {@code n500} reads {@code 500}; a deleted {@code o5} reads {@code 5(-)}; a range joins both ends. */
+    private static String lineLabel(String startKey, String endKey) {
+        return startKey.equals(endKey) ? labelOf(startKey) : labelOf(startKey) + "–" + labelOf(endKey);
+    }
+
+    private static String labelOf(String key) {
+        return key.startsWith("o") ? key.substring(1) + "(-)" : key.substring(1);
     }
 
     /** How many findings still wait for a human's confirm-or-dismiss: proposed and unresolved. */

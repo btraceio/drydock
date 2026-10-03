@@ -85,6 +85,7 @@ import java.util.OptionalInt;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
+import java.util.function.BiFunction;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.UnaryOperator;
@@ -395,7 +396,20 @@ public final class SessionReviewView extends BorderPane {
          * no visibility into {@code app.drydock.ui.review}'s
          * package-private types.
          */
-        void submit(ReviewScope scope, SubmitPlan.DiffIndex index, List<ReviewVerdict.Decision> decisions);
+        default void submit(ReviewScope scope, SubmitPlan.DiffIndex index, List<ReviewVerdict.Decision> decisions) {
+            submit(scope, index, decisions, (file, lineKey) -> Optional.empty(),
+                    new ReviewSubmitSheet.Unverified(0, 0, 0));
+        }
+
+        /**
+         * As {@link #submit(ReviewScope, SubmitPlan.DiffIndex, List)}, plus
+         * what lets a comment on a line outside the review diff travel in the
+         * review body: {@code lineText(file, lineKey)} is that line's text
+         * from the whole-file diff, and {@code unverified} is what the review
+         * approves without verification, for the submit sheet to state.
+         */
+        void submit(ReviewScope scope, SubmitPlan.DiffIndex index, List<ReviewVerdict.Decision> decisions,
+                    BiFunction<String, String, Optional<String>> lineText, ReviewSubmitSheet.Unverified unverified);
 
         /**
          * Runs the selected reviewer against {@code scope}: grants it the
@@ -3010,7 +3024,45 @@ public final class SessionReviewView extends BorderPane {
             }
             decisions.add(decision.get());
         }
-        host.submit(scope.get(), buildDiffIndex(diffColumn.displayedDiff()), decisions);
+        host.submit(scope.get(), buildDiffIndex(diffColumn.displayedDiff()), decisions,
+                lineTextLookup(diffColumn.renderedDiff()), unverifiedOf(scope.get()));
+    }
+
+    /** What the review approves without verification: step and hunk overrides, and untriaged agent findings. */
+    private ReviewSubmitSheet.Unverified unverifiedOf(ReviewScope scope) {
+        int stepOverrides = 0;
+        int hunkOverrides = 0;
+        Optional<TourRecord> record = host.tour(scope);
+        if (record.isPresent()) {
+            stepOverrides = (int) record.get().progress().values().stream()
+                    .filter(progress -> progress.decision() == StepProgress.Decision.OVERRIDDEN).count();
+            hunkOverrides = (int) record.get().hunkOverrides().values().stream()
+                    .filter(override -> override.decision() == ReviewVerdict.Decision.APPROVED).count();
+        }
+        return new ReviewSubmitSheet.Unverified(stepOverrides, hunkOverrides,
+                SubmitPlan.untriagedCount(host.findings(scope)));
+    }
+
+    /** {@code (file, lineKey)} to that line's text in {@code diff}; empty for a line the diff does not hold. */
+    private static BiFunction<String, String, Optional<String>> lineTextLookup(UnifiedDiff diff) {
+        return (file, lineKey) -> {
+            if (diff == null) {
+                return Optional.empty();
+            }
+            for (UnifiedDiff.FileDiff candidate : diff.files()) {
+                if (!candidate.path().equals(file)) {
+                    continue;
+                }
+                for (UnifiedDiff.Hunk hunk : candidate.hunks()) {
+                    for (UnifiedDiff.Line line : hunk.lines()) {
+                        if (line.lineKey().equals(lineKey)) {
+                            return Optional.of(line.text().strip());
+                        }
+                    }
+                }
+            }
+            return Optional.empty();
+        };
     }
 
     /**
