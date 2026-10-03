@@ -53,6 +53,13 @@ public final class DiffService implements AutoCloseable {
      */
     public static final int REVIEW_CONTEXT_LINES = 12;
 
+    /**
+     * Context for Review's whole-file display diff: large enough that every
+     * line of any file a reviewer reads is in the diff. Display only -- hunk
+     * digests, anchors and verdicts always come from {@link #REVIEW_CONTEXT_LINES}.
+     */
+    public static final int WHOLE_FILE_CONTEXT_LINES = 100_000;
+
     /** Every command here is a quick read-only query; a hung git must not park futures forever. */
     private static final Duration PROCESS_TIMEOUT = Duration.ofSeconds(15);
 

@@ -229,6 +229,18 @@ final class ReviewDiffColumn extends BorderPane {
     /** The one open lens popover, so a second click replaces it rather than stacking. */
     private Popup lensPopup;
     private boolean showContext = true;
+
+    /**
+     * Whole-file display mode: {@link #wholeFileDiff} (an unlimited-context
+     * diff) is what renders, while {@link #displayedDiff} stays the review
+     * diff everything else depends on.
+     */
+    private boolean wholeFiles;
+    private UnifiedDiff wholeFileDiff;
+    private boolean wholeFileUnavailable;
+    private long wholeRequestToken;
+    /** {@code c} in whole-file mode: fold every long unchanged run again. */
+    private boolean foldAll;
     private final Set<ReviewDiffRow.RunKey> expandedRuns = new HashSet<>();
 
     /**
@@ -417,6 +429,7 @@ final class ReviewDiffColumn extends BorderPane {
         scope = newScope;
         displayedScope = newScope;
         expandedRuns.clear();
+        resetWholeFiles();
         // The outgoing scope's intent must not filter the incoming scope's
         // diff: its hunk ids name files that are not in it, so the column
         // would render empty until the new selection caught up.
@@ -950,6 +963,7 @@ final class ReviewDiffColumn extends BorderPane {
         displayedScope = forScope;
         requestToken++;
         expandedRuns.clear();
+        resetWholeFiles();
         applyDiff(supplied, forScope.id());
     }
 
@@ -1000,13 +1014,18 @@ final class ReviewDiffColumn extends BorderPane {
 
     /** {@code c}: shows or hides unchanged lines entirely. */
     void toggleContext() {
-        showContext = !showContext;
+        if (wholeFiles) {
+            foldAll = !foldAll;
+        } else {
+            showContext = !showContext;
+        }
         updateContextToggle();
         rebuild();
     }
 
     private void updateContextToggle() {
-        contextToggle.setText(showContext ? "context" : "changed only");
+        boolean on = wholeFiles ? !foldAll : showContext;
+        contextToggle.setText(on ? "context" : wholeFiles ? "folded" : "changed only");
     }
 
     /**
@@ -1024,6 +1043,75 @@ final class ReviewDiffColumn extends BorderPane {
         untrackedToggle.setManaged(hasUntracked);
         untrackedToggle.setText(includeUntracked(scopeId) ? "untracked" : "no untracked");
         publishDisplayed(scopeId);
+    }
+
+    private void resetWholeFiles() {
+        wholeFileDiff = null;
+        wholeFileUnavailable = false;
+        wholeRequestToken++;
+    }
+
+    /** Whether the column is set to show whole files (the display diff may still be loading). */
+    boolean wholeFiles() {
+        return wholeFiles;
+    }
+
+    /** Whether the whole-file fetch failed and the review diff is shown instead. */
+    boolean wholeFileUnavailable() {
+        return wholeFileUnavailable;
+    }
+
+    /** What the rows are built from: the whole-file diff when it is on and loaded, else the review diff. */
+    UnifiedDiff renderedDiff() {
+        return wholeFiles && wholeFileDiff != null ? wholeFileDiff : displayedDiff;
+    }
+
+    /**
+     * Shows whole files (display only; approvals, symbol index and submit stay
+     * on the review diff). The unlimited-context diff is fetched off the FX
+     * thread; until it lands, or if it fails, the review diff renders.
+     */
+    void setWholeFiles(boolean on) {
+        wholeFiles = on;
+        updateContextToggle();
+        if (on && wholeFileDiff == null) {
+            fetchWholeFiles();
+        }
+        rebuild();
+        updateSummary();
+    }
+
+    private void fetchWholeFiles() {
+        ReviewScope requested = scope;
+        if (requested == null || !requested.diffable()) {
+            return; // diag/test path: diagShowWholeFileDiff supplies it
+        }
+        long token = ++wholeRequestToken;
+        diffService.diff(requested.diffRoot(), requested.diffScope(), requested.base(),
+                        DiffService.WHOLE_FILE_CONTEXT_LINES)
+                .whenComplete((result, failure) -> Platform.runLater(() -> {
+                    if (token != wholeRequestToken || !wholeFiles) {
+                        return;
+                    }
+                    if (failure != null) {
+                        LOG.log(Level.WARNING, "Whole-file diff failed for scope " + requested.id() + ": "
+                                + UiErrors.unwrap(failure).getMessage());
+                        wholeFileUnavailable = true;
+                        wholeFileDiff = null;
+                    } else {
+                        wholeFileUnavailable = false;
+                        wholeFileDiff = withoutHiddenUntracked(result, requested.id());
+                    }
+                    rebuild();
+                    updateSummary();
+                }));
+    }
+
+    /** Diagnostic/test-only: supplies the whole-file display diff without running git. */
+    void diagShowWholeFileDiff(UnifiedDiff diff) {
+        wholeFileDiff = diff;
+        wholeFileUnavailable = false;
+        rebuild();
     }
 
     /**
@@ -1061,18 +1149,26 @@ final class ReviewDiffColumn extends BorderPane {
      */
     private void publishDisplayed(String scopeId) {
         displayedScopeId = scopeId;
-        displayedDiff = includeUntracked(scopeId)
-                ? fullDiff
-                : new UnifiedDiff(fullDiff.files().stream()
-                        .filter(file -> !file.untracked())
-                        .toList());
+        displayedDiff = withoutHiddenUntracked(fullDiff, scopeId);
         symbolIndex = SymbolIndex.of(displayedDiff);
         rebuild();
         onDiffResolved.accept(scopeId, new DiffOutcome.Loaded(displayedDiff));
+        if (wholeFiles) {
+            fetchWholeFiles();
+        }
+    }
+
+    /** Drops untracked files when the scope's untracked toggle is off; applied to both diffs. */
+    private UnifiedDiff withoutHiddenUntracked(UnifiedDiff diff, String scopeId) {
+        return includeUntracked(scopeId)
+                ? diff
+                : new UnifiedDiff(diff.files().stream()
+                        .filter(file -> !file.untracked())
+                        .toList());
     }
 
     private void rebuild() {
-        rows.setAll(ReviewDiffRows.build(displayedDiff, buildOptions()));
+        rows.setAll(ReviewDiffRows.build(renderedDiff(), buildOptions()));
         // Re-anchored rather than dropped: a rebuild happens for reasons that
         // have nothing to do with the draft (a pin refresh, the context
         // toggle), and losing typed text to one of those is the kind of thing
@@ -1084,7 +1180,8 @@ final class ReviewDiffColumn extends BorderPane {
     }
 
     private ReviewDiffRows.Options buildOptions() {
-        return new ReviewDiffRows.Options(showContext, expandedRuns, MAX_RENDERED_ROWS, hunkFilter(), linksByHunk);
+        return new ReviewDiffRows.Options(showContext, expandedRuns, MAX_RENDERED_ROWS, hunkFilter(), linksByHunk,
+                wholeFiles && wholeFileDiff != null && !foldAll);
     }
 
     /**
@@ -1107,7 +1204,7 @@ final class ReviewDiffColumn extends BorderPane {
             return;
         }
         linksByHunk = copy;
-        rows.setAll(ReviewDiffRows.build(displayedDiff, buildOptions()));
+        rows.setAll(ReviewDiffRows.build(renderedDiff(), buildOptions()));
         // The graph this map is computed from lands asynchronously, well
         // after a reader may have already opened the gutter composer -- a
         // rebuild that dropped it here would lose an in-progress comment to
@@ -1160,7 +1257,8 @@ final class ReviewDiffColumn extends BorderPane {
         int deletions = displayedDiff.files().stream().mapToInt(UnifiedDiff.FileDiff::deletions).sum();
         summaryLabel.setText(files == 0
                 ? ""
-                : files + (files == 1 ? " file" : " files") + "  ·  +" + insertions + " −" + deletions);
+                : files + (files == 1 ? " file" : " files") + "  ·  +" + insertions + " −" + deletions
+                        + (wholeFileUnavailable ? "  ·  whole file unavailable" : wholeFiles ? "  ·  whole files" : ""));
     }
 
     /** Expands one collapsed run in place; a full rebuild is a single list swap. */
@@ -1169,7 +1267,7 @@ final class ReviewDiffColumn extends BorderPane {
         // Deliberately not rebuild(): that scrolls back to the top, and
         // expanding a run is the one action whose whole point is to stay
         // where the reader already is.
-        rows.setAll(ReviewDiffRows.build(displayedDiff, buildOptions()));
+        rows.setAll(ReviewDiffRows.build(renderedDiff(), buildOptions()));
     }
 
     /**

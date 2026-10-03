@@ -5,6 +5,8 @@ import app.drydock.review.ReadingPath;
 import app.drydock.review.ReviewIntent;
 
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -43,7 +45,8 @@ final class ReviewDiffRows {
      * already applies to a hunk with no rows to show.
      */
     record Options(boolean showContext, Set<ReviewDiffRow.RunKey> expandedRuns, int maxRows,
-                   HunkFilter filter, Map<String, List<ReadingPath.Link>> linksByHunk) {
+                   HunkFilter filter, Map<String, List<ReadingPath.Link>> linksByHunk,
+                   boolean expandRunsByDefault) {
         Options {
             expandedRuns = Set.copyOf(expandedRuns);
             if (maxRows <= 0) {
@@ -54,15 +57,20 @@ final class ReviewDiffRows {
         }
 
         Options(boolean showContext, Set<ReviewDiffRow.RunKey> expandedRuns, int maxRows) {
-            this(showContext, expandedRuns, maxRows, HunkFilter.ALL, Map.of());
+            this(showContext, expandedRuns, maxRows, HunkFilter.ALL, Map.of(), false);
         }
 
         Options(boolean showContext, Set<ReviewDiffRow.RunKey> expandedRuns, int maxRows, HunkFilter filter) {
-            this(showContext, expandedRuns, maxRows, filter, Map.of());
+            this(showContext, expandedRuns, maxRows, filter, Map.of(), false);
+        }
+
+        Options(boolean showContext, Set<ReviewDiffRow.RunKey> expandedRuns, int maxRows, HunkFilter filter,
+                Map<String, List<ReadingPath.Link>> linksByHunk) {
+            this(showContext, expandedRuns, maxRows, filter, linksByHunk, false);
         }
 
         static Options defaults(int maxRows) {
-            return new Options(true, Set.of(), maxRows, HunkFilter.ALL, Map.of());
+            return new Options(true, Set.of(), maxRows, HunkFilter.ALL, Map.of(), false);
         }
     }
 
@@ -71,6 +79,7 @@ final class ReviewDiffRows {
 
     static List<ReviewDiffRow> build(UnifiedDiff diff, Options options) {
         List<ReviewDiffRow> rows = new ArrayList<>();
+        Set<ReviewDiffRow.RunKey> folds = budgetFolds(diff, options);
         int emitted = 0;
         for (UnifiedDiff.FileDiff file : diff.files()) {
             int hunkIndex = 0;
@@ -83,7 +92,7 @@ final class ReviewDiffRows {
                 if (!options.filter().includes(file.path(), index)) {
                     continue;
                 }
-                List<ReviewDiffRow> card = buildCard(file, hunk, index, options);
+                List<ReviewDiffRow> card = buildCard(file, hunk, index, options, folds);
                 if (card.isEmpty()) {
                     continue;
                 }
@@ -113,9 +122,62 @@ final class ReviewDiffRows {
      * context hidden) yields no card at all rather than an empty one --
      * links belong to a hunk, not to a card with nothing else in it.
      */
+    /**
+     * In whole-file mode, the runs to fold so the rendered rows fit
+     * {@code options.maxRows()}: longest first, because the longest unchanged
+     * runs are the ones farthest from any change. Runs the user expanded are
+     * never folded. Empty outside whole-file mode.
+     */
+    static Set<ReviewDiffRow.RunKey> budgetFolds(UnifiedDiff diff, Options options) {
+        if (!options.expandRunsByDefault()) {
+            return Set.of();
+        }
+        record Run(ReviewDiffRow.RunKey key, int length) { }
+        List<Run> runs = new ArrayList<>();
+        int total = 0;
+        for (UnifiedDiff.FileDiff file : diff.files()) {
+            int hunkIndex = 0;
+            for (UnifiedDiff.Hunk hunk : file.hunks()) {
+                if (options.filter().includes(file.path(), hunkIndex)) {
+                    total += 1 + hunk.lines().size();
+                    int runIndex = 0;
+                    int i = 0;
+                    List<UnifiedDiff.Line> lines = hunk.lines();
+                    while (i < lines.size()) {
+                        if (lines.get(i).kind() != UnifiedDiff.Line.Kind.CONTEXT) {
+                            i++;
+                            continue;
+                        }
+                        int end = i;
+                        while (end < lines.size() && lines.get(end).kind() == UnifiedDiff.Line.Kind.CONTEXT) {
+                            end++;
+                        }
+                        ReviewDiffRow.RunKey key = new ReviewDiffRow.RunKey(file.path(), hunkIndex, runIndex++);
+                        if (end - i > COLLAPSE_THRESHOLD && !options.expandedRuns().contains(key)) {
+                            runs.add(new Run(key, end - i));
+                        }
+                        i = end;
+                    }
+                }
+                hunkIndex++;
+            }
+        }
+        runs.sort(Comparator.comparingInt(Run::length).reversed());
+        Set<ReviewDiffRow.RunKey> folds = new HashSet<>();
+        for (Run run : runs) {
+            if (total <= options.maxRows()) {
+                break;
+            }
+            folds.add(run.key());
+            total -= run.length() - 1;
+        }
+        return folds;
+    }
+
     private static List<ReviewDiffRow> buildCard(UnifiedDiff.FileDiff file, UnifiedDiff.Hunk hunk,
-                                                 int hunkIndex, Options options) {
-        List<ReviewDiffRow> body = buildBody(file, hunk, hunkIndex, options);
+                                                 int hunkIndex, Options options,
+                                                 Set<ReviewDiffRow.RunKey> folds) {
+        List<ReviewDiffRow> body = buildBody(file, hunk, hunkIndex, options, folds);
         if (body.isEmpty()) {
             return List.of();
         }
@@ -133,7 +195,8 @@ final class ReviewDiffRows {
     }
 
     private static List<ReviewDiffRow> buildBody(UnifiedDiff.FileDiff file, UnifiedDiff.Hunk hunk,
-                                                 int hunkIndex, Options options) {
+                                                 int hunkIndex, Options options,
+                                                 Set<ReviewDiffRow.RunKey> folds) {
         List<ReviewDiffRow> body = new ArrayList<>();
         int runIndex = 0;
         int i = 0;
@@ -157,7 +220,10 @@ final class ReviewDiffRows {
                 i = end;
                 continue;
             }
-            if (runLength > COLLAPSE_THRESHOLD && !options.expandedRuns().contains(key)) {
+            boolean fold = runLength > COLLAPSE_THRESHOLD && (options.expandRunsByDefault()
+                    ? folds.contains(key)
+                    : !options.expandedRuns().contains(key));
+            if (fold) {
                 body.add(new ReviewDiffRow.CollapsedRun(file.path(), hunkIndex, key.runIndex(), runLength,
                         ReviewDiffRow.Edge.BODY));
             } else {
