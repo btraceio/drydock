@@ -15,9 +15,12 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -42,6 +45,8 @@ public final class ExplorerTrailStore implements AutoCloseable {
     private static final System.Logger LOG = System.getLogger(ExplorerTrailStore.class.getName());
 
     private static final int SCHEMA_VERSION = 1;
+
+    private static final String REVIEW_PREFIX = "review:";
 
     /** One session's persisted trail. */
     public record Trail(List<NavigationTrail.Waypoint> waypoints, int cursor) {
@@ -69,6 +74,11 @@ public final class ExplorerTrailStore implements AutoCloseable {
     /** The trails file next to {@code stateFile} (same directory, {@code explorer-trails.json}). */
     public static Path siblingOf(Path stateFile) {
         return stateFile.toAbsolutePath().normalize().resolveSibling("explorer-trails.json");
+    }
+
+    /** The key a session's Review trail is stored under, apart from its Explorer trail. */
+    public static String reviewKey(String sessionKey) {
+        return REVIEW_PREFIX + sessionKey;
     }
 
     public synchronized Trail load(String sessionKey) {
@@ -120,9 +130,14 @@ public final class ExplorerTrailStore implements AutoCloseable {
         }
     }
 
-    /** Drops trails for sessions that no longer exist, so the file cannot grow forever. */
-    public synchronized void retain(java.util.Collection<String> liveSessionKeys) {
-        if (trails.keySet().retainAll(java.util.Set.copyOf(liveSessionKeys))) {
+    /**
+     * Drops trails for sessions that no longer exist, so the file cannot grow
+     * forever. A {@code review:<id>} trail lives as long as session {@code id}.
+     */
+    public synchronized void retain(Collection<String> liveSessionKeys) {
+        Set<String> live = Set.copyOf(liveSessionKeys);
+        if (trails.keySet().removeIf(key -> !live.contains(key)
+                && !(key.startsWith(REVIEW_PREFIX) && live.contains(key.substring(REVIEW_PREFIX.length()))))) {
             Map<String, Trail> snapshot = new LinkedHashMap<>(trails);
             if (pending.getAndSet(snapshot) == null && !closed) {
                 saveExecutor.execute(this::writePending);
@@ -153,11 +168,13 @@ public final class ExplorerTrailStore implements AutoCloseable {
         for (Map.Entry<String, Trail> entry : snapshot.entrySet()) {
             List<JsonValue> waypoints = new ArrayList<>();
             for (NavigationTrail.Waypoint waypoint : entry.getValue().waypoints()) {
-                waypoints.add(JsonObject.empty()
+                JsonObject encoded = JsonObject.empty()
                         .put("file", new JsonString(waypoint.file().toString()))
                         .put("label", new JsonString(waypoint.label()))
                         .put("line", JsonNumber.of(waypoint.line()))
-                        .put("pinned", new JsonBoolean(waypoint.pinned())));
+                        .put("pinned", new JsonBoolean(waypoint.pinned()));
+                waypoint.lineKey().ifPresent(key -> encoded.put("lineKey", new JsonString(key)));
+                waypoints.add(encoded);
             }
             bySession = bySession.put(entry.getKey(), JsonObject.empty()
                     .put("cursor", JsonNumber.of(entry.getValue().cursor()))
@@ -195,9 +212,9 @@ public final class ExplorerTrailStore implements AutoCloseable {
         }
     }
 
-    private static java.util.Optional<NavigationTrail.Waypoint> decodeWaypoint(JsonValue value) {
+    private static Optional<NavigationTrail.Waypoint> decodeWaypoint(JsonValue value) {
         if (!(value instanceof JsonObject object) || !(object.get("file") instanceof JsonString path)) {
-            return java.util.Optional.empty();
+            return Optional.empty();
         }
         try {
             String label = object.get("label") instanceof JsonString text
@@ -205,11 +222,14 @@ public final class ExplorerTrailStore implements AutoCloseable {
                     : Path.of(path.value()).getFileName().toString();
             int line = object.get("line") instanceof JsonNumber number ? number.asInt() : 1;
             boolean pinned = object.get("pinned") instanceof JsonBoolean flag && flag.value();
-            return java.util.Optional.of(
-                    new NavigationTrail.Waypoint(Path.of(path.value()), label, line, pinned));
+            Optional<String> lineKey = object.get("lineKey") instanceof JsonString key
+                    ? Optional.of(key.value())
+                    : Optional.empty();
+            return Optional.of(
+                    new NavigationTrail.Waypoint(Path.of(path.value()), label, line, pinned, lineKey));
         } catch (RuntimeException e) {
             // One malformed waypoint is not a reason to drop the trail.
-            return java.util.Optional.empty();
+            return Optional.empty();
         }
     }
 

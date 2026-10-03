@@ -38,21 +38,31 @@ public final class NavigationTrail {
      * line to restore on return, and whether the user pinned it against
      * eviction.
      */
-    public record Waypoint(Path file, String label, int line, boolean pinned) {
+    public record Waypoint(Path file, String label, int line, boolean pinned, Optional<String> lineKey) {
         public Waypoint {
             Objects.requireNonNull(file, "file");
             Objects.requireNonNull(label, "label");
+            Objects.requireNonNull(lineKey, "lineKey");
             if (line < 1) {
                 line = 1;
             }
         }
 
+        /** A waypoint with no line key: the Explorer's, whose lines are plain file lines. */
+        public Waypoint(Path file, String label, int line, boolean pinned) {
+            this(file, label, line, pinned, Optional.empty());
+        }
+
         Waypoint withLine(int newLine) {
-            return new Waypoint(file, label, newLine, pinned);
+            return new Waypoint(file, label, newLine, pinned, lineKey);
+        }
+
+        Waypoint withLine(int newLine, Optional<String> newLineKey) {
+            return new Waypoint(file, label, newLine, pinned, newLineKey);
         }
 
         Waypoint withPinned(boolean newPinned) {
-            return new Waypoint(file, label, line, newPinned);
+            return new Waypoint(file, label, line, newPinned, lineKey);
         }
     }
 
@@ -97,16 +107,25 @@ public final class NavigationTrail {
      * @return true when the trail actually gained a waypoint
      */
     public boolean push(Path file, String label, int line) {
+        return push(file, label, line, Optional.empty());
+    }
+
+    /**
+     * As {@link #push(Path, String, int)}, remembering a stable line key
+     * alongside the file line: a removed row has no post-image line, so the
+     * Review tour restores by key and uses the line only as a fallback.
+     */
+    public boolean push(Path file, String label, int line, Optional<String> lineKey) {
         Objects.requireNonNull(file, "file");
         if (cursor >= 0 && waypoints.get(cursor).file().equals(file)) {
-            waypoints.set(cursor, waypoints.get(cursor).withLine(line));
+            waypoints.set(cursor, waypoints.get(cursor).withLine(line, lineKey));
             return false;
         }
         // Browser semantics: navigating from mid-trail drops what was ahead.
         while (waypoints.size() > cursor + 1) {
             waypoints.remove(waypoints.size() - 1);
         }
-        waypoints.add(new Waypoint(file, label, line, false));
+        waypoints.add(new Waypoint(file, label, line, false, lineKey));
         cursor = waypoints.size() - 1;
         evict();
         return true;

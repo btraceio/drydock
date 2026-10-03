@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -124,5 +125,39 @@ class NavigationTrailTest {
         assertFalse(trail.waypoints().get(0).pinned());
         assertTrue(trail.waypoints().get(1).pinned());
         assertFalse(trail.togglePin());
+    }
+
+    @Test
+    void aPushedWaypointKeepsItsLineKey() {
+        NavigationTrail trail = new NavigationTrail();
+        assertTrue(trail.push(file("A.java"), "Step 3", 12, Optional.of("o12")));
+        assertEquals(Optional.of("o12"), trail.current().orElseThrow().lineKey());
+        assertEquals(12, trail.current().orElseThrow().line());
+    }
+
+    @Test
+    void rePushingTheCurrentFileOnlyUpdatesTheLineAndKey() {
+        NavigationTrail trail = new NavigationTrail();
+        trail.push(file("A.java"), "Step 3", 12, Optional.of("o12"));
+        assertFalse(trail.push(file("A.java"), "Step 3", 30, Optional.of("n30")));
+        assertEquals(1, trail.waypoints().size());
+        assertEquals(30, trail.current().orElseThrow().line());
+        assertEquals(Optional.of("n30"), trail.current().orElseThrow().lineKey());
+    }
+
+    @Test
+    void theThreeArgumentPushHasNoLineKey() {
+        NavigationTrail trail = new NavigationTrail();
+        open(trail, "A.java");
+        assertEquals(Optional.empty(), trail.current().orElseThrow().lineKey());
+    }
+
+    @Test
+    void pinningAndScrollingKeepTheLineKey() {
+        NavigationTrail trail = new NavigationTrail();
+        trail.push(file("A.java"), "Step 3", 12, Optional.of("o12"));
+        trail.togglePin();
+        trail.rememberLine(20);
+        assertEquals(Optional.of("o12"), trail.current().orElseThrow().lineKey());
     }
 }
