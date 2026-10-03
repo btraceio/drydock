@@ -84,6 +84,13 @@ public final class TourValidator {
                 errors.add(where + ", which is not in the tour");
                 continue;
             }
+            TourCheck owner = step.get().check(checkId).orElseThrow();
+            TourCheck named = owner.id().equals(checkId)
+                    ? owner
+                    : owner.alternates().stream().filter(alt -> alt.id().equals(checkId)).findFirst().orElse(owner);
+            if (named.kind() == TourCheck.Kind.TRACE) {
+                errors.add(where + ", which is a trace check; only predict or risk checks withhold findings");
+            }
             boolean covered = step.get().anchors().stream()
                     .anyMatch(anchor -> index.contains(anchor, finding.file(), finding.startKey()));
             if (!covered) {

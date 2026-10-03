@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalInt;
 
 import static app.drydock.review.tour.TourFixtures.SCOPE;
 import static app.drydock.review.tour.TourFixtures.coveringTour;
@@ -208,5 +209,27 @@ class TourFindingsTest {
         ReviewAnnotation dismissed = withheld("f1", "src/B.java", "o5", "c1").withTriage(Triage.DISMISSED);
 
         assertEquals(List.of(), TourValidator.validate(tour, diff, List.of(dismissed)));
+    }
+
+    @Test
+    void theValidatorRejectsAFindingWithheldByATraceCheck() {
+        TourCheck alternate = new TourCheck("t1_alt", TourCheck.Kind.PREDICT, "Alternate?",
+                List.of(TourFixtures.choice("yes"), TourFixtures.choice("no")), OptionalInt.of(1), "Because.",
+                List.of());
+        TourCheck trace = new TourCheck("t1", TourCheck.Kind.TRACE, "Who calls this?",
+                List.of(TourFixtures.choice("f"), TourFixtures.choice("g")), OptionalInt.of(0), "f does.",
+                List.of(alternate));
+        ReviewTour traced = new ReviewTour(SCOPE, TourFingerprint.of(diff), List.of(
+                TourFixtures.step("s1", List.of(new TourAnchor("src/A.java", "n1", "n22")), trace),
+                tour.step("s2").orElseThrow()));
+
+        List<String> errors = TourValidator.validate(traced, diff, List.of(
+                withheld("f1", "src/A.java", "n3", "t1"),
+                withheld("f2", "src/A.java", "n3", "t1_alt")));
+
+        assertTrue(errors.contains("finding f1 is withheld by check t1, which is a trace check; "
+                + "only predict or risk checks withhold findings"), errors.toString());
+        assertFalse(errors.stream().anyMatch(error -> error.startsWith("finding f2")),
+                "the predict alternate's own kind counts: " + errors);
     }
 }

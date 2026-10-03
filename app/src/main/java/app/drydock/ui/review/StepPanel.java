@@ -142,7 +142,7 @@ final class StepPanel extends VBox {
      * blocking problems (spec §4): one row per blocker, then send the
      * confirmed ones back or review anyway.
      */
-    void showBanner(List<ReviewAnnotation> blockers) {
+    void showBanner(List<ReviewAnnotation> blockers, boolean shelved) {
         choiceButtons.clear();
         riskBox = Optional.empty();
         overrideReason = Optional.empty();
@@ -161,14 +161,38 @@ final class StepPanel extends VBox {
         List<ReviewAnnotation> confirmed = blockers.stream()
                 .filter(blocker -> blocker.triage() == Triage.CONFIRMED)
                 .toList();
-        Button send = new Button("Send back to the author");
-        send.getStyleClass().add("primary");
-        send.setDisable(confirmed.isEmpty());
-        send.setOnAction(event -> host.sendBack(confirmed));
+        if (shelved) {
+            // Already sent: a second send would push the same prompt again.
+            Label sent = new Label("Sent to the author — waiting for their changes");
+            sent.setWrapText(true);
+            banner.getChildren().add(sent);
+        } else {
+            Button send = new Button("Send back to the author");
+            send.getStyleClass().add("primary");
+            send.setDisable(confirmed.isEmpty());
+            send.setOnAction(event -> host.sendBack(confirmed));
+            banner.getChildren().add(send);
+        }
         Button anyway = new Button("Review anyway");
         anyway.setOnAction(event -> host.reviewAnyway());
-        banner.getChildren().addAll(send, anyway);
+        banner.getChildren().add(anyway);
         content.getChildren().setAll(banner);
+    }
+
+    /** {@code a} while the banner is up: focus its first triage action, else its first enabled button. */
+    void focusBanner() {
+        List<Button> buttons = content.lookupAll(".button").stream()
+                .filter(Button.class::isInstance)
+                .map(Button.class::cast)
+                .filter(button -> !button.isDisabled() && button.isVisible())
+                .toList();
+        buttons.stream()
+                .filter(button -> button.getStyleClass().contains("step-finding-confirm"))
+                .findFirst()
+                .or(() -> buttons.stream()
+                        .filter(button -> !button.getStyleClass().contains("step-finding-reveal"))
+                        .findFirst())
+                .ifPresent(Button::requestFocus);
     }
 
     void focusUnmet(StepGate.Unmet unmet) {
@@ -252,7 +276,7 @@ final class StepPanel extends VBox {
 
     private VBox triageButtons(ReviewAnnotation finding, boolean offerNotSure) {
         Button confirm = new Button("Confirm");
-        confirm.getStyleClass().add("primary");
+        confirm.getStyleClass().addAll("primary", "step-finding-confirm");
         confirm.setOnAction(event -> host.triage(finding, Triage.CONFIRMED, Optional.empty()));
         Button dismissStart = new Button("Dismiss…");
         HBox buttons = new HBox(6, confirm, dismissStart);
@@ -260,10 +284,7 @@ final class StepPanel extends VBox {
         if (offerNotSure) {
             Button notSure = new Button("Not sure");
             // Leaves it proposed; its line is where the question lives.
-            notSure.setOnAction(event -> {
-                host.triage(finding, Triage.PROPOSED, Optional.empty());
-                host.revealFinding(finding);
-            });
+            notSure.setOnAction(event -> host.revealFinding(finding));
             buttons.getChildren().add(notSure);
         }
         TextField reason = new TextField();

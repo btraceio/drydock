@@ -23,6 +23,7 @@ import app.drydock.review.Severity;
 import app.drydock.review.Triage;
 import app.drydock.review.SubmitPlan;
 import app.drydock.review.tour.AnchorIndex;
+import app.drydock.review.tour.CheckProgress;
 import app.drydock.review.tour.HunkOverride;
 import app.drydock.review.tour.ReviewTour;
 import app.drydock.review.tour.StepGate;
@@ -820,6 +821,7 @@ public final class SessionReviewView extends BorderPane {
     private StepView shownStepView;
     private List<ReviewAnnotation> shownTriage;
     private List<ReviewAnnotation> shownBanner;
+    private boolean shownBannerShelved;
     private TourRecord shownMarksRecord;
     private String shownMarksStepId;
 
@@ -2548,7 +2550,12 @@ public final class SessionReviewView extends BorderPane {
             host.updateTour(scope, record -> record.tour().stepOfCheck(checkId)
                     .flatMap(step -> step.check(checkId).map(check -> {
                         StepProgress p = record.progress(step.id());
-                        return record.withProgress(p.withCheck(StepGrading.voided(p.check(check.id()))));
+                        CheckProgress current = p.check(check.id());
+                        // A check already passed stays passed: voiding only
+                        // spares an answer that has not succeeded yet.
+                        return current.settled()
+                                ? record
+                                : record.withProgress(p.withCheck(StepGrading.voided(current)));
                     }))
                     .orElse(record));
         }
@@ -3588,9 +3595,10 @@ public final class SessionReviewView extends BorderPane {
         List<ReviewAnnotation> findings = selectedScope().map(this::visibleFindings).orElse(List.of());
         if (TourFindings.needsBanner(record, findings)) {
             List<ReviewAnnotation> blockers = TourFindings.blockers(findings);
-            if (!blockers.equals(shownBanner)) {
-                stepPanel.showBanner(blockers);
+            if (!blockers.equals(shownBanner) || record.shelved() != shownBannerShelved) {
+                stepPanel.showBanner(blockers, record.shelved());
                 shownBanner = blockers;
+                shownBannerShelved = record.shelved();
                 shownStepView = null;
                 shownTriage = null;
             }
@@ -3813,6 +3821,7 @@ public final class SessionReviewView extends BorderPane {
         }
         if (selectedScope().map(scope -> TourFindings.needsBanner(record, visibleFindings(scope))).orElse(false)) {
             // The banner stands instead of the step: there is nothing to pass yet.
+            stepPanel.focusBanner();
             return;
         }
         Optional<StepGate.Unmet> unmet = StepGate.unmet(step.get(), record.progress(step.get().id()),

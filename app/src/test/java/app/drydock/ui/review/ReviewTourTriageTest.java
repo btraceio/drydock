@@ -128,6 +128,10 @@ class ReviewTourTriageTest extends ReviewTourFixture {
         assertFalse(lookup(".step-choice").tryQuery().isPresent(), "the banner stands instead of the step");
         assertTrue(lookup("Send back to the author").queryButton().isDisabled(),
                 "nothing confirmed, nothing to send");
+        key(KeyCode.A);
+        assertEquals(lookup("Confirm").queryButton(), ReviewDiagFxThread.call(() -> view.getScene().getFocusOwner()),
+                "a with the banner up moves focus to the banner");
+        interact(view::requestFocus);
 
         clickInPanel("Review anyway");
 
@@ -162,6 +166,26 @@ class ReviewTourTriageTest extends ReviewTourFixture {
         assertEquals(List.of("f_block"), host.sentToAuthor);
         assertTrue(record().shelved());
         assertTrue(shown("Shelved — waiting for the author's changes"));
+        assertTrue(shown("Sent to the author — waiting for their changes"));
+        assertTrue(lookup("Send back to the author").queryAllAs(Button.class).stream()
+                        .noneMatch(button -> !button.isDisabled()),
+                "a shelved tour offers no second send");
+    }
+
+    @Test
+    void dismissingARevealedFindingAfterARightAnswerKeepsTheCheckPassed() {
+        seed(withheldQuestion());
+
+        key(KeyCode.DIGIT2);
+        assertEquals(CheckProgress.Status.PASSED, progress("s1").check("c1").status());
+        clickInPanel("Dismiss…");
+        clickOn(from(lookup(".step-panel")).lookup(".step-dismiss-reason").queryAs(Node.class));
+        write("not a real problem");
+        clickInPanel("Dismiss");
+
+        assertEquals(Triage.DISMISSED, storedTriage("f_guard"));
+        assertEquals(CheckProgress.Status.PASSED, progress("s1").check("c1").status(),
+                "a check already passed is not voided");
     }
 
     @Test
