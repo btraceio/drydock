@@ -704,6 +704,24 @@ final class ReviewDiffColumn extends BorderPane {
     private long renderGeneration;
 
     /** Re-renders the rows so pin markers pick up a changed finding set. */
+    @FunctionalInterface
+    interface StepMarkSource {
+        Optional<StepMark> markAt(String file, String lineKey);
+    }
+
+    private StepMarkSource stepMarks = (file, key) -> Optional.empty();
+
+    void setStepMarkSource(StepMarkSource source) {
+        stepMarks = source == null ? (file, key) -> Optional.empty() : source;
+        refreshMarks();
+    }
+
+    /** Repaints the step marks through the same cheap render refresh as the pins. */
+    void refreshMarks() {
+        renderGeneration++;
+        refreshRender();
+    }
+
     void refreshPins() {
         renderGeneration++;
         refreshRender();
@@ -1570,6 +1588,26 @@ final class ReviewDiffColumn extends BorderPane {
             case DEL -> "row-del";
             case CONTEXT -> "row-context";
         });
+        Optional<StepMark> mark = stepMarks.markAt(row.file(), row.lineKey());
+        if (mark.isPresent()) {
+            StepMark m = mark.get();
+            box.getStyleClass().add(m.strength() == StepMark.Strength.CURRENT
+                    ? "tour-step-current" : "tour-step-other");
+            if (m.strength() == StepMark.Strength.OTHER && m.tagged()) {
+                Label tag = new Label("step " + m.stepNumber());
+                tag.getStyleClass().add("tour-step-tag");
+                box.getChildren().add(tag);
+            }
+            if (m.hidden()) {
+                // The band replaces only the source text, so the gutters keep
+                // their line numbers; the label sits on the first hidden row.
+                Label band = new Label(m.bandStart() ? "hidden until you answer" : "");
+                band.getStyleClass().add("tour-predict-band");
+                band.setMaxWidth(Double.MAX_VALUE);
+                HBox.setHgrow(band, Priority.ALWAYS);
+                box.getChildren().set(box.getChildren().indexOf(source), band);
+            }
+        }
         return box;
     }
 

@@ -2746,6 +2746,29 @@
 .review-code-row.row-del {
     -fx-background-color: -drydock-del-bg;
 }
+/* Guided tour: the current step reads strongly, other steps' changes faintly. */
+.review-code-row.tour-step-current {
+    -fx-border-color: transparent transparent transparent -drydock-accent;
+    -fx-border-width: 0 0 0 3;
+}
+.review-code-row.row-context.tour-step-current {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-opacity: 1;
+}
+.review-code-row.tour-step-other {
+    -fx-opacity: 0.72;
+}
+.tour-step-tag {
+    -fx-font-size: 10px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-padding: 0 6 0 6;
+}
+.tour-predict-band {
+    -fx-background-color: linear-gradient(from 0px 0px to 8px 8px, repeat, -drydock-accent-soft 0%, -drydock-accent-soft 50%, transparent 50%, transparent 100%);
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-style: italic;
+    -fx-padding: 0 8 0 8;
+}
 .review-code-gutter {
     -fx-min-width: 34px;
     -fx-max-width: 34px;
