@@ -77,7 +77,8 @@ class RiskCheckQueueTest extends ApplicationTest {
         });
         assertEquals(List.of("rs/c1"), dispatched);
 
-        onFx(() -> queue.onTourChanged("rs", id -> Optional.of(CheckProgress.Status.PASSED)));
+        onFx(() -> queue.onTourChanged("rs", id -> Optional.of(id.equals("c1")
+                ? CheckProgress.Status.PASSED : CheckProgress.Status.AWAITING_AGENT)));
         assertEquals(List.of("rs/c1", "rs/c2"), dispatched);
         onFx(queue::close);
     }
@@ -145,6 +146,23 @@ class RiskCheckQueueTest extends ApplicationTest {
 
         assertEquals(List.of("rs/c1"), timedOut);
         assertFalse(onFx(queue::diagInFlight));
+        onFx(queue::close);
+    }
+
+    @Test
+    void aQueuedRequestWhoseCheckIsNoLongerAwaitingIsNeverSent() throws Exception {
+        RiskCheckQueue queue = queue();
+        onFx(() -> {
+            queue.enqueue("rs", "c1");
+            queue.enqueue("rs", "c2");
+        });
+
+        // c1 is still awaiting; c2 was overridden while it waited its turn.
+        onFx(() -> queue.onTourChanged("rs", id -> Optional.of(id.equals("c1")
+                ? CheckProgress.Status.AWAITING_AGENT : CheckProgress.Status.PASSED)));
+        onFx(() -> queue.onTourChanged("rs", id -> Optional.of(CheckProgress.Status.PASSED)));
+
+        assertEquals(List.of("rs/c1"), dispatched);
         onFx(queue::close);
     }
 

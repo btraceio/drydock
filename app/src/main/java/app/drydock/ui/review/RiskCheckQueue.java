@@ -65,18 +65,31 @@ final class RiskCheckQueue {
         pump();
     }
 
-    /** Clears the in-flight request once its check is no longer awaiting the agent. */
+    /**
+     * Reconciles the queue with the tour: the in-flight request is cleared
+     * once its check is no longer awaiting the agent, and queued requests
+     * whose check is no longer awaiting (overridden or reset meanwhile) are
+     * dropped so they are never sent.
+     */
     void onTourChanged(String scopeId, Function<String, Optional<CheckProgress.Status>> statusOfCheck) {
-        if (inFlight == null || !inFlight.scopeId().equals(scopeId)) {
-            return;
-        }
-        Optional<CheckProgress.Status> status = statusOfCheck.apply(inFlight.checkId());
-        if (status.isEmpty() || status.get() != CheckProgress.Status.AWAITING_AGENT) {
+        queue.removeIf(request -> {
+            boolean stale = request.scopeId().equals(scopeId) && !awaiting(statusOfCheck, request.checkId());
+            if (stale) {
+                known.remove(request);
+            }
+            return stale;
+        });
+        if (inFlight != null && inFlight.scopeId().equals(scopeId) && !awaiting(statusOfCheck, inFlight.checkId())) {
             timeoutTimer.stop();
             known.remove(inFlight);
             inFlight = null;
-            pump();
         }
+        pump();
+    }
+
+    private static boolean awaiting(Function<String, Optional<CheckProgress.Status>> statusOfCheck, String checkId) {
+        return statusOfCheck.apply(checkId).filter(status -> status == CheckProgress.Status.AWAITING_AGENT)
+                .isPresent();
     }
 
     void close() {

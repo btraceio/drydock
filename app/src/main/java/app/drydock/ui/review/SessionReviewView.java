@@ -34,6 +34,7 @@ import app.drydock.review.tour.StepVerdicts;
 import app.drydock.review.tour.TourAnchor;
 import app.drydock.review.tour.TourFindings;
 import app.drydock.review.tour.TourRecord;
+import app.drydock.review.tour.TourCheck;
 import app.drydock.review.tour.TourStep;
 
 import javafx.animation.PauseTransition;
@@ -1339,6 +1340,17 @@ public final class SessionReviewView extends BorderPane {
         Optional<TourRecord> tourNow = host.tour(scope.get());
         if (tourNow.isPresent()) {
             riskQueue.onTourChanged(scopeId, checkId -> checkStatus(tourNow, checkId));
+            // An answer a previous run left awaiting the agent has no request
+            // behind it any more; ask again so it is judged or times out into
+            // Retry. enqueue is idempotent for one already queued or in flight.
+            for (TourStep step : tourNow.get().tour().steps()) {
+                for (TourCheck check : step.checks()) {
+                    if (tourNow.get().progress(step.id()).check(check.id()).status()
+                            == CheckProgress.Status.AWAITING_AGENT) {
+                        riskQueue.enqueue(scopeId, check.id());
+                    }
+                }
+            }
         }
 
         // Asks the agent about approvals this scope's base move disturbed.
