@@ -1,0 +1,86 @@
+package app.drydock.review.tour;
+
+import app.drydock.git.UnifiedDiff;
+import app.drydock.review.HunkDigest;
+
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+
+/**
+ * Everything persisted about one scope's tour: the tour, per-step progress,
+ * hunk overrides from the hunk diff, and -- for migrating anchors when the
+ * diff moves under it -- the row keys of every hunk the tour was written
+ * against.
+ */
+public record TourRecord(ReviewTour tour, Map<String, StepProgress> progress,
+                         Map<String, HunkOverride> hunkOverrides, Map<String, List<String>> hunkRows,
+                         boolean reviewAnyway, boolean shelved) {
+
+    public TourRecord {
+        Objects.requireNonNull(tour, "tour");
+        progress = Map.copyOf(progress);
+        hunkOverrides = Map.copyOf(hunkOverrides);
+        hunkRows = Map.copyOf(hunkRows);
+    }
+
+    public static TourRecord fresh(ReviewTour tour, UnifiedDiff reviewDiff) {
+        AnchorIndex index = AnchorIndex.of(reviewDiff);
+        Map<String, StepProgress> progress = new LinkedHashMap<>();
+        for (TourStep step : tour.steps()) {
+            progress.put(step.id(), StepProgress.fresh(step, index));
+        }
+        return new TourRecord(tour, progress, Map.of(), rowsOf(reviewDiff), false, false);
+    }
+
+    /** Row keys per hunk digest, in diff order. */
+    public static Map<String, List<String>> rowsOf(UnifiedDiff diff) {
+        Map<String, List<String>> rows = new LinkedHashMap<>();
+        for (UnifiedDiff.FileDiff file : diff.files()) {
+            for (UnifiedDiff.Hunk hunk : file.hunks()) {
+                rows.put(HunkDigest.of(file.path(), hunk),
+                        hunk.lines().stream().map(UnifiedDiff.Line::lineKey).toList());
+            }
+        }
+        return rows;
+    }
+
+    public StepProgress progress(String stepId) {
+        StepProgress existing = progress.get(stepId);
+        if (existing != null) {
+            return existing;
+        }
+        TourStep step = tour.step(stepId).orElseThrow(() -> new IllegalArgumentException("no step " + stepId));
+        return new StepProgress(step.id(), List.of(), Map.of(), StepProgress.Decision.NONE, Optional.empty(), false);
+    }
+
+    public TourRecord withProgress(StepProgress stepProgress) {
+        Map<String, StepProgress> next = new LinkedHashMap<>(progress);
+        next.put(stepProgress.stepId(), stepProgress);
+        return new TourRecord(tour, next, hunkOverrides, hunkRows, reviewAnyway, shelved);
+    }
+
+    public TourRecord withHunkOverride(String digest, Optional<HunkOverride> override) {
+        Map<String, HunkOverride> next = new LinkedHashMap<>(hunkOverrides);
+        override.ifPresentOrElse(value -> next.put(digest, value), () -> next.remove(digest));
+        return new TourRecord(tour, progress, next, hunkRows, reviewAnyway, shelved);
+    }
+
+    public TourRecord withReviewAnyway(boolean value) {
+        return new TourRecord(tour, progress, hunkOverrides, hunkRows, value, shelved);
+    }
+
+    public TourRecord withShelved(boolean value) {
+        return new TourRecord(tour, progress, hunkOverrides, hunkRows, reviewAnyway, value);
+    }
+
+    public TourRecord withTour(ReviewTour newTour) {
+        return new TourRecord(newTour, progress, hunkOverrides, hunkRows, reviewAnyway, shelved);
+    }
+
+    public TourRecord withHunkRows(Map<String, List<String>> rows) {
+        return new TourRecord(tour, progress, hunkOverrides, rows, reviewAnyway, shelved);
+    }
+}
