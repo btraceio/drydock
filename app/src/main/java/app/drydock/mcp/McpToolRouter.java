@@ -22,6 +22,7 @@ import app.drydock.review.Sections;
 import app.drydock.review.Severity;
 import app.drydock.review.SymbolScan;
 import app.drydock.review.VerdictMerge;
+import app.drydock.review.tour.AnchorIndex;
 import app.drydock.review.tour.ImpactNote;
 import app.drydock.review.tour.ReviewTour;
 import app.drydock.review.tour.TourCheck;
@@ -509,12 +510,31 @@ public final class McpToolRouter {
                     .findFirst();
             decoded.add(ReviewToolCodec.findingFromJson(scope.id(), obj, author, existing));
         }
+        rejectMisplacedWithheldFindings(scope, decoded);
         // Decoded in full before anything is stored: a batch with one bad
         // entry writes nothing, rather than half a review.
         context.upsertFindings(decoded);
         return JsonObject.empty()
                 .put("scopeId", new JsonString(scope.id()))
                 .put("findings", JsonNumber.of(decoded.size()));
+    }
+
+    /**
+     * Once a tour exists, a finding withheld behind one of its checks must
+     * sit on that check's step -- the same rule {@code review_tour} applies
+     * to findings already stored when a tour arrives.
+     */
+    private void rejectMisplacedWithheldFindings(ReviewScope scope, List<ReviewAnnotation> decoded)
+            throws McpToolException {
+        Optional<TourRecord> tour = context.tourOf(scope.id());
+        if (tour.isEmpty() || decoded.stream().allMatch(finding -> finding.withheldBy().isEmpty())) {
+            return;
+        }
+        List<String> errors = TourValidator.withheldFindingErrors(tour.get().tour(),
+                AnchorIndex.of(context.reviewDiff(scope)), decoded);
+        if (!errors.isEmpty()) {
+            throw new McpToolException("review_finding rejected, nothing stored:\n- " + String.join("\n- ", errors));
+        }
     }
 
     /**
@@ -668,7 +688,7 @@ public final class McpToolRouter {
         }
         checkTourText(steps);
         ReviewTour tour = new ReviewTour(scope.id(), TourFingerprint.of(diff), steps);
-        List<String> errors = new ArrayList<>(TourValidator.validate(tour, diff));
+        List<String> errors = new ArrayList<>(TourValidator.validate(tour, diff, context.findingsOf(scope.id())));
         errors.addAll(impactNoteErrors(caller, steps));
         if (!errors.isEmpty()) {
             throw new McpToolException("review_tour rejected, nothing stored:\n- " + String.join("\n- ", errors));

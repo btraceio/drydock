@@ -1,11 +1,18 @@
 package app.drydock.mcp;
 
+import app.drydock.review.AnnotationStatus;
+import app.drydock.review.Confidence;
+import app.drydock.review.ReviewAnnotation;
+import app.drydock.review.Severity;
+import app.drydock.review.Triage;
 import app.drydock.review.tour.TourRecord;
 import app.drydock.state.json.JsonParser;
 import app.drydock.state.json.JsonValue;
 import app.drydock.state.json.JsonValue.JsonObject;
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 
 import static app.drydock.mcp.JsonPeek.field;
@@ -89,5 +96,54 @@ class McpToolRouterTourTest extends McpRouterFixture {
         JsonValue tour = field(state, "tour");
         assertTrue(JsonPeek.bool(tour, "current"));
         assertEquals(2, JsonPeek.array(tour, "steps").size());
+    }
+
+    @Test
+    void aTourIsRejectedWhenAStoredFindingIsWithheldByACheckOffItsLines() {
+        context.upsertFindings(List.of(new ReviewAnnotation(scopeId(), "f1", Optional.empty(),
+                "src/WidgetUser.java", "n2", "n2", Severity.QUESTION, Confidence.HIGH, Optional.empty(), "Claude",
+                Instant.EPOCH, List.of(), Optional.empty(), Optional.empty(), List.of(), List.of(),
+                Optional.empty(), AnnotationStatus.OPEN, Optional.empty(), false, Triage.PROPOSED,
+                Optional.of("c1"))));
+
+        McpToolException error = assertThrows(McpToolException.class,
+                () -> router.call(callerId(), "review_tour", coveringArgs()));
+
+        assertTrue(error.getMessage().contains(
+                "finding f1 is withheld by check c1, which is not on a step covering src/WidgetUser.java n2"),
+                error.getMessage());
+        assertTrue(context.tourOf(scopeId()).isEmpty());
+    }
+
+    @Test
+    void aFindingWithheldByACheckOffItsLinesIsRejectedOnceATourExists() throws Exception {
+        router.call(callerId(), "review_tour", coveringArgs());
+
+        McpToolException error = assertThrows(McpToolException.class,
+                () -> router.call(callerId(), "review_finding", withheldFindingArgs("src/WidgetUser.java", "c1")));
+
+        assertTrue(error.getMessage().contains(
+                "finding f1 is withheld by check c1, which is not on a step covering src/WidgetUser.java n2"),
+                error.getMessage());
+        assertTrue(context.findingsOf(scopeId()).isEmpty());
+    }
+
+    @Test
+    void aFindingWithheldByACheckOnItsLinesIsStored() throws Exception {
+        router.call(callerId(), "review_tour", coveringArgs());
+
+        router.call(callerId(), "review_finding", withheldFindingArgs("src/Widget.java", "c1"));
+
+        assertEquals(Optional.of("c1"), context.findingsOf(scopeId()).getFirst().withheldBy());
+    }
+
+    private JsonObject withheldFindingArgs(String file, String checkId) {
+        JsonObject finding = JsonParser.parse("""
+                {"id":"f1","anchor":{"file":"%s","startKey":"n2"},"severity":"question",
+                 "confidence":"high","body":"body text","withheldBy":"%s"}""".formatted(file, checkId))
+                instanceof JsonObject obj ? obj : JsonObject.empty();
+        JsonObject args = JsonObject.empty().put("scopeId", new JsonValue.JsonString(scopeId()));
+        args.put("findings", new JsonValue.JsonArray(List.of(finding)));
+        return args;
     }
 }

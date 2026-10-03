@@ -571,6 +571,11 @@ class OpenSessionTabReviewSubTabTest extends ApplicationTest {
         }
 
         @Override
+        public boolean sendFindingsToAuthor(ReviewScope scope, List<ReviewAnnotation> findings) {
+            return false;
+        }
+
+        @Override
         public void submit(ReviewScope scope, SubmitPlan.DiffIndex index, List<ReviewVerdict.Decision> decisions) {
         }
 

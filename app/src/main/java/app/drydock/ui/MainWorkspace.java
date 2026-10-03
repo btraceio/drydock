@@ -2160,6 +2160,11 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
          */
         @Override
         public void applyPatch(ReviewScope scope, ReviewAnnotation finding) {
+            if (!finding.counts()) {
+                // Only a confirmed finding is sent to the author (spec §4).
+                LOG.log(Level.INFO, "Refused to apply the patch of unconfirmed finding " + finding.id());
+                return;
+            }
             finding.patch().ifPresent(patch -> {
                 boolean handedOff = sendToBoundSession(scope,
                         "Apply this proposed patch from the review of " + finding.file()
@@ -2180,11 +2185,28 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         @Override
         public boolean askAgentToFix(ReviewScope scope, ReviewIntent intent,
                                      List<ReviewAnnotation> findings) {
+            return handFindingsToSession(scope,
+                    "Address these review findings on \"" + intent.title() + "\", then summarize what you changed: ",
+                    findings);
+        }
+
+        @Override
+        public boolean sendFindingsToAuthor(ReviewScope scope, List<ReviewAnnotation> findings) {
+            return handFindingsToSession(scope,
+                    "The reviewer sent these blocking findings back. Address them, then summarize what you changed: ",
+                    findings);
+        }
+
+        /**
+         * Hands {@code findings} to the scope's bound session as one prompt
+         * opening with {@code heading}, and marks them SENT once the hand-off
+         * succeeded. False when there was nothing to hand or no session.
+         */
+        private boolean handFindingsToSession(ReviewScope scope, String heading, List<ReviewAnnotation> findings) {
             if (findings.isEmpty()) {
                 return false;
             }
-            StringBuilder prompt = new StringBuilder("Address these review findings on \"")
-                    .append(intent.title()).append("\", then summarize what you changed: ");
+            StringBuilder prompt = new StringBuilder(heading);
             int n = 1;
             for (ReviewAnnotation finding : findings) {
                 prompt.append('[').append(n++).append("] ").append(finding.file()).append(' ')

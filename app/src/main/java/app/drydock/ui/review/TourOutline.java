@@ -38,6 +38,7 @@ final class TourOutline extends VBox {
     private final VBox tourPane = new VBox(6);
     private final VBox rows = new VBox(2);
     private final VBox message = new VBox(6);
+    private final VBox notice = new VBox(6);
     private final VBox footer = new VBox(6);
     private final VBox searchPane = new VBox();
     private final HBox tabs = new HBox(4, tourTab, searchTab);
@@ -69,7 +70,7 @@ final class TourOutline extends VBox {
         scroll = new ScrollPane(rows);
         scroll.setFitToWidth(true);
         VBox.setVgrow(scroll, Priority.ALWAYS);
-        tourPane.getChildren().addAll(message, scroll, footer);
+        tourPane.getChildren().addAll(notice, message, scroll, footer);
         VBox.setVgrow(tourPane, Priority.ALWAYS);
         getChildren().addAll(tabs, tourPane);
         applyWidth();
@@ -130,6 +131,21 @@ final class TourOutline extends VBox {
             acknowledge.setOnAction(event -> onAcknowledge.run());
             footer.getChildren().add(acknowledge);
         }
+    }
+
+    /** A standing line above the steps (a shelved tour says so); empty clears it. */
+    void setNotice(Optional<String> text) {
+        String current = notice.getChildren().isEmpty() ? null : ((Label) notice.getChildren().getFirst()).getText();
+        if (text.orElse(null) == null ? current == null : text.get().equals(current)) {
+            return;
+        }
+        notice.getChildren().clear();
+        text.ifPresent(value -> {
+            Label label = new Label(value);
+            label.setWrapText(true);
+            label.getStyleClass().add("tour-outline-notice");
+            notice.getChildren().add(label);
+        });
     }
 
     void showMessage(String text, Optional<String> actionLabel, Runnable action) {

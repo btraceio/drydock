@@ -256,6 +256,9 @@ final class FakeReviewHost implements SessionReviewView.Host {
 
     @Override
     public void applyPatch(ReviewScope scope, ReviewAnnotation finding) {
+        if (!finding.counts()) {
+            return;
+        }
         finding.patch().ifPresent(patch -> {
             handedOffPrompts.add(patch.unified());
             store.mutate(finding.key(), current -> current.withStatus(AnnotationStatus.SENT));
@@ -280,6 +283,21 @@ final class FakeReviewHost implements SessionReviewView.Host {
             return false;
         }
         handedOffPrompts.add(intent.title() + ": " + findings.size() + " findings");
+        return true;
+    }
+
+    /** The ids of every finding the tour's "Send back to the author" handed over. */
+    final List<String> sentToAuthor = new ArrayList<>();
+
+    @Override
+    public boolean sendFindingsToAuthor(ReviewScope scope, List<ReviewAnnotation> findings) {
+        if (findings.isEmpty() || !sessionBound) {
+            return false;
+        }
+        for (ReviewAnnotation finding : findings) {
+            sentToAuthor.add(finding.id());
+            store.mutate(finding.key(), current -> current.withStatus(AnnotationStatus.SENT));
+        }
         return true;
     }
 

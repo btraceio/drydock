@@ -30,6 +30,7 @@ import app.drydock.review.tour.StepGrading;
 import app.drydock.review.tour.StepProgress;
 import app.drydock.review.tour.StepVerdicts;
 import app.drydock.review.tour.TourAnchor;
+import app.drydock.review.tour.TourFindings;
 import app.drydock.review.tour.TourRecord;
 import app.drydock.review.tour.TourStep;
 
@@ -342,6 +343,14 @@ public final class SessionReviewView extends BorderPane {
          * three times.
          */
         boolean askAgentToFix(ReviewScope scope, ReviewIntent intent, List<ReviewAnnotation> findings);
+
+        /**
+         * The tour's "Send back to the author": hands confirmed blocking
+         * findings to the scope's bound session through the same path as
+         * {@link #askAgentToFix}, marking them sent. False when nothing was
+         * handed over (no session, or nothing to send).
+         */
+        boolean sendFindingsToAuthor(ReviewScope scope, List<ReviewAnnotation> findings);
 
         /**
          * Posts the review once every intent is settled. {@code index}
@@ -809,6 +818,8 @@ public final class SessionReviewView extends BorderPane {
     private List<TourOutline.Row> shownRows;
     private String shownRowsCurrent;
     private StepView shownStepView;
+    private List<ReviewAnnotation> shownTriage;
+    private List<ReviewAnnotation> shownBanner;
     private TourRecord shownMarksRecord;
     private String shownMarksStepId;
 
@@ -1424,7 +1435,7 @@ public final class SessionReviewView extends BorderPane {
      * either way -- it belongs to the review even if nothing grouped it.
      */
     private List<ReviewAnnotation> findingsForMargin(ReviewScope scope) {
-        List<ReviewAnnotation> all = host.findings(scope);
+        List<ReviewAnnotation> all = visibleFindings(scope);
         if (margin.wholeReview()) {
             return all;
         }
@@ -1433,6 +1444,18 @@ public final class SessionReviewView extends BorderPane {
             return all;
         }
         return all.stream().filter(finding -> belongsToCurrentIntent(finding)).toList();
+    }
+
+    /**
+     * {@code scope}'s findings minus those a tour still withholds behind an
+     * unanswered check (spec §4). Whenever a tour exists, in either mode: a
+     * withheld finding shown in the hunk diff would spoil the check.
+     */
+    private List<ReviewAnnotation> visibleFindings(ReviewScope scope) {
+        List<ReviewAnnotation> all = host.findings(scope);
+        return host.tour(scope)
+                .map(record -> all.stream().filter(finding -> !TourFindings.hidden(finding, record)).toList())
+                .orElse(all);
     }
 
     /** Whether a finding belongs under the intent now selected. See {@link #belongsToIntent}. */
@@ -2452,7 +2475,7 @@ public final class SessionReviewView extends BorderPane {
             }
             var numbers = margin.pinNumbers();
             List<ReviewDiffColumn.Pin> pins = new ArrayList<>();
-            for (ReviewAnnotation finding : host.findings(scope.get())) {
+            for (ReviewAnnotation finding : visibleFindings(scope.get())) {
                 if (!finding.file().equals(file)) {
                     continue;
                 }
@@ -2509,7 +2532,25 @@ public final class SessionReviewView extends BorderPane {
 
         @Override
         public void triage(ReviewAnnotation finding, Triage triage, Optional<String> reason) {
-            selectedScope().ifPresent(scope -> host.setTriage(scope, finding, triage, reason));
+            selectedScope().ifPresent(scope -> triageFinding(scope, finding, triage, reason));
+        }
+    }
+
+    /**
+     * Records a triage from the margin or the step panel. Dismissing a
+     * finding a tour check was built on voids that check (spec §4): the
+     * reviewer's answer is not counted wrong, and no alternate is required.
+     */
+    private void triageFinding(ReviewScope scope, ReviewAnnotation finding, Triage triage, Optional<String> reason) {
+        host.setTriage(scope, finding, triage, reason);
+        if (triage == Triage.DISMISSED && finding.withheldBy().isPresent() && host.tour(scope).isPresent()) {
+            String checkId = finding.withheldBy().get();
+            host.updateTour(scope, record -> record.tour().stepOfCheck(checkId)
+                    .flatMap(step -> step.check(checkId).map(check -> {
+                        StepProgress p = record.progress(step.id());
+                        return record.withProgress(p.withCheck(StepGrading.voided(p.check(check.id()))));
+                    }))
+                    .orElse(record));
         }
     }
 
@@ -3511,6 +3552,9 @@ public final class SessionReviewView extends BorderPane {
             }
             shownRows = null;
             shownStepView = null;
+            shownTriage = null;
+            shownBanner = null;
+            outline.setNotice(Optional.empty());
             outline.setFooter(0, true);
             verdictBar.update(null, Optional.empty(), false);
             verdictBar.showProgress(0, 0);
@@ -3533,14 +3577,36 @@ public final class SessionReviewView extends BorderPane {
             shownRows = rows;
             shownRowsCurrent = currentStepId;
         }
+        outline.setNotice(record.shelved()
+                ? Optional.of("Shelved — waiting for the author's changes")
+                : Optional.empty());
         outline.setFooter(filesWithoutLineChanges(), filesWithoutChangesAcknowledged);
         TourStep step = record.tour().step(currentStepId).orElseThrow();
         StepProgress progress = record.progress(step.id());
         StepView stepView = new StepView(step, record.tour().number(step.id()), record.tour().steps().size(),
                 progress);
-        if (!stepView.equals(shownStepView)) {
-            stepPanel.show(stepView);
-            shownStepView = stepView;
+        List<ReviewAnnotation> findings = selectedScope().map(this::visibleFindings).orElse(List.of());
+        if (TourFindings.needsBanner(record, findings)) {
+            List<ReviewAnnotation> blockers = TourFindings.blockers(findings);
+            if (!blockers.equals(shownBanner)) {
+                stepPanel.showBanner(blockers);
+                shownBanner = blockers;
+                shownStepView = null;
+                shownTriage = null;
+            }
+        } else {
+            if (shownBanner != null || !stepView.equals(shownStepView)) {
+                stepPanel.show(stepView);
+                shownStepView = stepView;
+                shownBanner = null;
+            }
+            List<ReviewAnnotation> proposals = stepFindings(step).stream()
+                    .filter(finding -> finding.triage() == Triage.PROPOSED)
+                    .toList();
+            if (!proposals.equals(shownTriage)) {
+                stepPanel.showTriage(proposals);
+                shownTriage = proposals;
+            }
         }
         if (!tourMarksShown || !record.equals(shownMarksRecord) || !currentStepId.equals(shownMarksStepId)) {
             diffColumn.setStepMarkSource(new LiveTourMarks(record, currentStepId));
@@ -3550,6 +3616,16 @@ public final class SessionReviewView extends BorderPane {
         }
         renderTourVerdictBar(record, step, progress);
         syncTourVerdicts(record);
+    }
+
+    /** The selected scope's findings, minus withheld ones, that lie on {@code step} in the review diff. */
+    private List<ReviewAnnotation> stepFindings(TourStep step) {
+        Optional<ReviewScope> scope = selectedScope();
+        Optional<UnifiedDiff> diff = loadedDiff();
+        if (scope.isEmpty() || diff.isEmpty()) {
+            return List.of();
+        }
+        return TourFindings.onStep(step, visibleFindings(scope.get()), AnchorIndex.of(diff.get()));
     }
 
     /**
@@ -3735,7 +3811,12 @@ public final class SessionReviewView extends BorderPane {
         if (step.isEmpty()) {
             return;
         }
-        Optional<StepGate.Unmet> unmet = StepGate.unmet(step.get(), record.progress(step.get().id()));
+        if (selectedScope().map(scope -> TourFindings.needsBanner(record, visibleFindings(scope))).orElse(false)) {
+            // The banner stands instead of the step: there is nothing to pass yet.
+            return;
+        }
+        Optional<StepGate.Unmet> unmet = StepGate.unmet(step.get(), record.progress(step.get().id()),
+                stepFindings(step.get()), record);
         if (unmet.isPresent()) {
             stepPanel.focusUnmet(unmet.get());
             return;
@@ -3906,6 +3987,40 @@ public final class SessionReviewView extends BorderPane {
         @Override
         public void retryRisk(String checkId) {
             LOG.log(Level.DEBUG, "Retry the agent's verdict on check " + checkId + ": not wired yet");
+        }
+
+        @Override
+        public void triage(ReviewAnnotation finding, Triage triage, Optional<String> reason) {
+            selectedScope().ifPresent(scope -> {
+                triageFinding(scope, finding, triage, reason);
+                // The real host refreshes on the store write as well; the
+                // panel must not depend on that to drop a triaged finding.
+                refreshReviewState();
+            });
+        }
+
+        @Override
+        public void revealFinding(ReviewAnnotation finding) {
+            diffColumn.revealLine(finding.file(), finding.startKey());
+        }
+
+        @Override
+        public void sendBack(List<ReviewAnnotation> confirmedBlockers) {
+            Optional<ReviewScope> scope = selectedScope();
+            if (scope.isEmpty()) {
+                return;
+            }
+            if (host.sendFindingsToAuthor(scope.get(), confirmedBlockers)) {
+                host.updateTour(scope.get(), record -> record.withShelved(true));
+                refreshReviewState();
+            } else {
+                stepPanel.showTransient("No session to send them to: the author's agent is not running here.");
+            }
+        }
+
+        @Override
+        public void reviewAnyway() {
+            updateCurrentTour(record -> record.withReviewAnyway(true));
         }
     }
 
@@ -4139,6 +4254,11 @@ public final class SessionReviewView extends BorderPane {
     void diagExpireTourWait() {
         tourWait.stop();
         onTourWaitExpired();
+    }
+
+    /** Test-only: the pins the diff column would draw at {@code file}/{@code lineKey}. Call on the FX thread. */
+    List<ReviewDiffColumn.Pin> diagPinsAt(String file, String lineKey) {
+        return new PinSource().pinsAt(file, lineKey);
     }
 
     TourOutline diagOutline() {

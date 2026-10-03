@@ -562,6 +562,11 @@ final class ReviewFindingsMargin extends VBox {
             apply.getStyleClass().addAll("review-card-action", "primary");
             apply.setTooltip(new Tooltip(patch.summary()));
             apply.setOnAction(e -> host.applyPatch(finding));
+            if (!finding.counts()) {
+                // Applying sends the finding to the author: confirmed ones only.
+                apply.setDisable(true);
+                apply.setTooltip(new Tooltip("Confirm the finding before applying its patch"));
+            }
             buttons.getChildren().add(apply);
         });
         if (finding.severityOverride().isEmpty() && finding.effectiveSeverity() == Severity.BLOCKING) {

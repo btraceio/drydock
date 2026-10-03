@@ -1,12 +1,15 @@
 package app.drydock.review.tour;
 
 import app.drydock.git.UnifiedDiff;
+import app.drydock.review.ReviewAnnotation;
+import app.drydock.review.Triage;
 
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -35,6 +38,11 @@ public final class TourValidator {
     }
 
     public static List<String> validate(ReviewTour tour, UnifiedDiff reviewDiff) {
+        return validate(tour, reviewDiff, List.of());
+    }
+
+    /** As {@link #validate(ReviewTour, UnifiedDiff)}, plus the rules for findings withheld behind its checks. */
+    public static List<String> validate(ReviewTour tour, UnifiedDiff reviewDiff, List<ReviewAnnotation> findings) {
         List<String> errors = new ArrayList<>();
         AnchorIndex index = AnchorIndex.of(reviewDiff);
         if (tour.steps().isEmpty()) {
@@ -52,7 +60,38 @@ public final class TourValidator {
             validateStep(step, index, checkIds, errors);
         }
         validateCoverage(tour, index, errors);
+        errors.addAll(withheldFindingErrors(tour, index, findings));
         return List.copyOf(errors);
+    }
+
+    /**
+     * Every finding withheld behind a check (and not dismissed) names a check
+     * of {@code tour} on a step whose anchors contain the finding's line:
+     * the check is the moment the finding is revealed, so it must be asked
+     * where the finding is.
+     */
+    public static List<String> withheldFindingErrors(ReviewTour tour, AnchorIndex index,
+                                                     List<ReviewAnnotation> findings) {
+        List<String> errors = new ArrayList<>();
+        for (ReviewAnnotation finding : findings) {
+            if (finding.withheldBy().isEmpty() || finding.triage() == Triage.DISMISSED) {
+                continue;
+            }
+            String checkId = finding.withheldBy().get();
+            String where = "finding " + finding.id() + " is withheld by check " + checkId;
+            Optional<TourStep> step = tour.stepOfCheck(checkId);
+            if (step.isEmpty()) {
+                errors.add(where + ", which is not in the tour");
+                continue;
+            }
+            boolean covered = step.get().anchors().stream()
+                    .anyMatch(anchor -> index.contains(anchor, finding.file(), finding.startKey()));
+            if (!covered) {
+                errors.add(where + ", which is not on a step covering " + finding.file() + " "
+                        + finding.startKey());
+            }
+        }
+        return errors;
     }
 
     private static void validateStep(TourStep step, AnchorIndex index, Set<String> checkIds, List<String> errors) {

@@ -87,4 +87,23 @@ class ReviewTriageMarginTest extends ReviewViewFixture {
                 .filter(f -> f.id().equals("f2")).findFirst().orElseThrow().thread();
         assertEquals("Dismissed: not a leak", thread.get(thread.size() - 1).text());
     }
+
+    @Test
+    void aProposalsPatchCannotBeAppliedUntilItIsConfirmed() {
+        ReviewAnnotation withPatch = new ReviewAnnotation(scope.id(), "f3", Optional.of("section-1"), FILE_A,
+                "n1", "n1", Severity.QUESTION, Confidence.HIGH, Optional.of("Title f3"), "Claude", Instant.EPOCH,
+                List.of(), Optional.of(new ReviewAnnotation.Patch("--- a\n+++ b\n", "guard it")), Optional.empty(),
+                List.of(), List.of(new ReviewAnnotation.Message("Claude", Instant.EPOCH, "body of f3")),
+                Optional.empty(), AnnotationStatus.OPEN, Optional.empty(), false, Triage.PROPOSED, Optional.empty());
+        seedAndRefresh(withPatch);
+
+        assertTrue(lookup("Apply patch").queryButton().isDisabled(), "only a confirmed finding goes to the author");
+        interact(() -> host.applyPatch(scope, withPatch));
+        assertEquals(AnnotationStatus.OPEN, host.store.forScope(scope.id()).getFirst().status());
+        assertTrue(host.handedOffPrompts.isEmpty(), "the host refuses it too");
+
+        clickOn("Confirm");
+        refresh();
+        assertTrue(!lookup("Apply patch").queryButton().isDisabled());
+    }
 }

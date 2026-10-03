@@ -1,5 +1,7 @@
 package app.drydock.ui.review;
 
+import app.drydock.review.ReviewAnnotation;
+import app.drydock.review.Triage;
 import app.drydock.review.tour.CheckProgress;
 import app.drydock.review.tour.StepGate;
 import app.drydock.review.tour.StepProgress;
@@ -8,6 +10,8 @@ import app.drydock.review.tour.TourCheck;
 import javafx.beans.binding.Bindings;
 import javafx.beans.binding.BooleanBinding;
 import javafx.beans.value.ObservableStringValue;
+import javafx.geometry.Pos;
+import javafx.scene.Node;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
 import javafx.scene.control.ScrollPane;
@@ -16,6 +20,8 @@ import javafx.scene.control.TextField;
 import javafx.scene.input.KeyCode;
 import javafx.scene.input.KeyEvent;
 import javafx.scene.layout.FlowPane;
+import javafx.scene.layout.HBox;
+import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
 
 import java.util.ArrayList;
@@ -24,8 +30,9 @@ import java.util.Optional;
 
 /**
  * The right-hand panel in tour mode: the current step's narrative, anchors
- * and active check, and the containers later tasks fill with triage and
- * impact. View-only: every action goes to {@link Host}.
+ * and active check, the agent's findings on the step awaiting triage, and
+ * the blocker banner that stands in front of the tour. View-only: every
+ * action goes to {@link Host}.
  */
 final class StepPanel extends VBox {
 
@@ -40,11 +47,17 @@ final class StepPanel extends VBox {
         void askAgent(String checkId);
         void goToAnchor(int anchorIndex);
         void retryRisk(String checkId);
+        void triage(ReviewAnnotation finding, Triage triage, Optional<String> reason);
+        void revealFinding(ReviewAnnotation finding);
+        void sendBack(List<ReviewAnnotation> confirmedBlockers);
+        void reviewAnyway();
     }
 
     private final Host host;
     private final VBox content = new VBox(10);
     private final VBox extraSections = new VBox(10);
+    private final VBox triageSection = new VBox(8);
+    private final ScrollPane scroll;
     private final List<Button> choiceButtons = new ArrayList<>();
     private Optional<TextArea> riskBox = Optional.empty();
     private Optional<TextField> overrideReason = Optional.empty();
@@ -54,7 +67,8 @@ final class StepPanel extends VBox {
     StepPanel(Host host) {
         this.host = host;
         getStyleClass().add("step-panel");
-        ScrollPane scroll = new ScrollPane(new VBox(14, content, extraSections));
+        triageSection.getStyleClass().add("step-triage");
+        scroll = new ScrollPane(new VBox(14, content, extraSections));
         scroll.setFitToWidth(true);
         getChildren().add(scroll);
         applyWidth();
@@ -82,8 +96,9 @@ final class StepPanel extends VBox {
         extraSections.getChildren().clear();
     }
 
-    /** A one-line notice above the content; the next {@link #show} clears it. */
+    /** A one-line notice above the content, replacing the previous one; the next {@link #show} clears it. */
     void showTransient(String message) {
+        content.getChildren().removeIf(node -> node.getStyleClass().contains("step-panel-transient"));
         Label notice = new Label(message);
         notice.getStyleClass().add("step-panel-transient");
         notice.setWrapText(true);
@@ -100,7 +115,72 @@ final class StepPanel extends VBox {
         return true;
     }
 
+    /**
+     * The agent's findings on the step that await triage, in the triage
+     * section; empty clears it. A finding revealed by its check says so.
+     */
+    void showTriage(List<ReviewAnnotation> proposals) {
+        triageSection.getChildren().clear();
+        if (!extraSections.getChildren().contains(triageSection)) {
+            extraSections.getChildren().addFirst(triageSection);
+        }
+        if (proposals.isEmpty()) {
+            return;
+        }
+        Label heading = new Label(proposals.size() == 1
+                ? "1 finding to triage"
+                : proposals.size() + " findings to triage");
+        heading.getStyleClass().add("step-triage-header");
+        triageSection.getChildren().add(heading);
+        for (ReviewAnnotation finding : proposals) {
+            triageSection.getChildren().add(findingRow(finding, true));
+        }
+    }
+
+    /**
+     * The banner that stands instead of the step while the agent proposes
+     * blocking problems (spec §4): one row per blocker, then send the
+     * confirmed ones back or review anyway.
+     */
+    void showBanner(List<ReviewAnnotation> blockers) {
+        choiceButtons.clear();
+        riskBox = Optional.empty();
+        overrideReason = Optional.empty();
+        triageSection.getChildren().clear();
+        VBox banner = new VBox(8);
+        banner.getStyleClass().add("step-blocker-banner");
+        int count = blockers.size();
+        Label title = new Label("The agent proposes " + count
+                + (count == 1 ? " blocking problem." : " blocking problems."));
+        title.setWrapText(true);
+        title.getStyleClass().add("step-panel-header");
+        banner.getChildren().add(title);
+        for (ReviewAnnotation blocker : blockers) {
+            banner.getChildren().add(findingRow(blocker, false));
+        }
+        List<ReviewAnnotation> confirmed = blockers.stream()
+                .filter(blocker -> blocker.triage() == Triage.CONFIRMED)
+                .toList();
+        Button send = new Button("Send back to the author");
+        send.getStyleClass().add("primary");
+        send.setDisable(confirmed.isEmpty());
+        send.setOnAction(event -> host.sendBack(confirmed));
+        Button anyway = new Button("Review anyway");
+        anyway.setOnAction(event -> host.reviewAnyway());
+        banner.getChildren().addAll(send, anyway);
+        content.getChildren().setAll(banner);
+    }
+
     void focusUnmet(StepGate.Unmet unmet) {
+        if (unmet.kind() == StepGate.Kind.BLOCKER) {
+            showTransient(unmet.message());
+            return;
+        }
+        if (unmet.kind() == StepGate.Kind.TRIAGE && !triageSection.getChildren().isEmpty()) {
+            scrollTo(triageSection);
+            triageSection.lookupAll(".button").stream().findFirst().ifPresent(Node::requestFocus);
+            return;
+        }
         if (!choiceButtons.isEmpty()) {
             choiceButtons.getFirst().requestFocus();
         } else {
@@ -135,6 +215,76 @@ final class StepPanel extends VBox {
         setMaxWidth(width);
     }
 
+    private void scrollTo(Node node) {
+        Node scrolled = scroll.getContent();
+        double contentHeight = scrolled.getBoundsInLocal().getHeight();
+        double viewportHeight = scroll.getViewportBounds().getHeight();
+        if (contentHeight <= viewportHeight) {
+            return;
+        }
+        double top = scrolled.sceneToLocal(node.localToScene(0, 0)).getY();
+        scroll.setVvalue(Math.clamp(top / (contentHeight - viewportHeight), 0, 1));
+    }
+
+    /** One finding: what and where, a button to its line, and its triage while it is proposed. */
+    private VBox findingRow(ReviewAnnotation finding, boolean offerNotSure) {
+        VBox row = new VBox(6);
+        row.getStyleClass().add("step-finding");
+        if (finding.withheldBy().isPresent()) {
+            row.getChildren().add(new Label("The agent found this here:"));
+        }
+        Label title = new Label(finding.displayTitle());
+        title.setWrapText(true);
+        title.getStyleClass().add("step-finding-title");
+        Label meta = new Label(finding.effectiveSeverity().wireName() + " · " + finding.file() + ":"
+                + startLineOf(finding.startKey())
+                + (finding.triage() == Triage.CONFIRMED ? " · confirmed" : ""));
+        meta.getStyleClass().add("step-finding-meta");
+        Button reveal = new Button("Show line");
+        reveal.getStyleClass().add("step-finding-reveal");
+        reveal.setOnAction(event -> host.revealFinding(finding));
+        row.getChildren().addAll(title, meta, reveal);
+        if (finding.triage() == Triage.PROPOSED) {
+            row.getChildren().add(triageButtons(finding, offerNotSure));
+        }
+        return row;
+    }
+
+    private VBox triageButtons(ReviewAnnotation finding, boolean offerNotSure) {
+        Button confirm = new Button("Confirm");
+        confirm.getStyleClass().add("primary");
+        confirm.setOnAction(event -> host.triage(finding, Triage.CONFIRMED, Optional.empty()));
+        Button dismissStart = new Button("Dismiss…");
+        HBox buttons = new HBox(6, confirm, dismissStart);
+        buttons.setAlignment(Pos.CENTER_LEFT);
+        if (offerNotSure) {
+            Button notSure = new Button("Not sure");
+            // Leaves it proposed; its line is where the question lives.
+            notSure.setOnAction(event -> {
+                host.triage(finding, Triage.PROPOSED, Optional.empty());
+                host.revealFinding(finding);
+            });
+            buttons.getChildren().add(notSure);
+        }
+        TextField reason = new TextField();
+        reason.setPromptText("Why is it wrong?");
+        reason.getStyleClass().add("step-dismiss-reason");
+        Button dismiss = new Button("Dismiss");
+        dismiss.disableProperty().bind(blank(reason.textProperty()));
+        dismiss.setOnAction(event -> host.triage(finding, Triage.DISMISSED, Optional.of(reason.getText().strip())));
+        HBox dismissRow = new HBox(6, reason, dismiss);
+        dismissRow.setAlignment(Pos.CENTER_LEFT);
+        HBox.setHgrow(reason, Priority.ALWAYS);
+        dismissRow.setVisible(false);
+        dismissRow.setManaged(false);
+        dismissStart.setOnAction(event -> {
+            dismissRow.setVisible(true);
+            dismissRow.setManaged(true);
+            reason.requestFocus();
+        });
+        return new VBox(6, buttons, dismissRow);
+    }
+
     private static BooleanBinding blank(ObservableStringValue text) {
         return Bindings.createBooleanBinding(() -> text.get().isBlank(), text);
     }
@@ -154,7 +304,11 @@ final class StepPanel extends VBox {
     }
 
     private static String startLineOf(TourAnchor anchor) {
-        return anchor.startKey().substring(1);
+        return startLineOf(anchor.startKey());
+    }
+
+    private static String startLineOf(String key) {
+        return key.substring(1);
     }
 
     private VBox checkSection(StepView view) {

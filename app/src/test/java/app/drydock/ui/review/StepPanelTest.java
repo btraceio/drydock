@@ -1,5 +1,7 @@
 package app.drydock.ui.review;
 
+import app.drydock.review.ReviewAnnotation;
+import app.drydock.review.Triage;
 import app.drydock.review.tour.CheckProgress;
 import app.drydock.review.tour.StepProgress;
 import app.drydock.review.tour.TourAnchor;
@@ -52,6 +54,12 @@ class StepPanelTest extends ApplicationTest {
             @Override public void askAgent(String checkId) { calls.add("ask " + checkId); }
             @Override public void goToAnchor(int anchorIndex) { calls.add("anchor " + anchorIndex); }
             @Override public void retryRisk(String checkId) { calls.add("retry " + checkId); }
+            @Override public void triage(ReviewAnnotation finding, Triage triage, Optional<String> reason) {
+                calls.add("triage " + finding.id() + " " + triage);
+            }
+            @Override public void revealFinding(ReviewAnnotation finding) { calls.add("reveal " + finding.id()); }
+            @Override public void sendBack(List<ReviewAnnotation> blockers) { calls.add("send " + blockers.size()); }
+            @Override public void reviewAnyway() { calls.add("review anyway"); }
         });
         stage.setScene(new Scene(panel, 336, 700));
         stage.show();
