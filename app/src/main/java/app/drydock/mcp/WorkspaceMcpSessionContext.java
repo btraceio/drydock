@@ -36,6 +36,7 @@ import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewVerdict;
 import app.drydock.review.ReviewScopeRegistry;
 import app.drydock.review.ReviewAnnotation;
+import app.drydock.review.tour.TourStore;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -147,6 +148,7 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
     private final Supplier<List<ManagedAgentSession>> sessionCatalog;
     private final Supplier<List<Repository>> repositoryCatalog;
     private final AnnotationStore annotationStore;
+    private final TourStore tourStore;
     private final ReviewScopeRegistry reviewScopeRegistry;
     private final AgentRegistry agentRegistry;
     private final IntentGrouping intentGrouping;
@@ -174,6 +176,7 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
     public WorkspaceMcpSessionContext(Supplier<List<ManagedAgentSession>> sessionCatalog,
                                       Supplier<List<Repository>> repositoryCatalog,
                                       AnnotationStore annotationStore,
+                                      TourStore tourStore,
                                       ReviewScopeRegistry reviewScopeRegistry,
                                       AgentRegistry agentRegistry,
                                       IntentGrouping intentGrouping,
@@ -194,6 +197,7 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
         this.sessionCatalog = Objects.requireNonNull(sessionCatalog, "sessionCatalog");
         this.repositoryCatalog = Objects.requireNonNull(repositoryCatalog, "repositoryCatalog");
         this.annotationStore = Objects.requireNonNull(annotationStore, "annotationStore");
+        this.tourStore = Objects.requireNonNull(tourStore, "tourStore");
         this.reviewScopeRegistry = Objects.requireNonNull(reviewScopeRegistry, "reviewScopeRegistry");
         this.agentRegistry = Objects.requireNonNull(agentRegistry, "agentRegistry");
         this.intentGrouping = Objects.requireNonNull(intentGrouping, "intentGrouping");

@@ -20,6 +20,7 @@ import app.drydock.mcp.McpSessionContext.ExistingBranchWorktree;
 import app.drydock.mcp.McpSessionContext.RenameKind;
 import app.drydock.mcp.McpSessionContext.RenameOutcome;
 import app.drydock.review.AnnotationStore;
+import app.drydock.review.tour.TourStore;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -59,6 +60,7 @@ class WorkspaceMcpSessionContextTest {
     private final GitStatusService gitStatusService = new GitStatusService();
     private final WorktreeService worktreeService = new WorktreeService();
     private AnnotationStore annotationStore;
+    private TourStore tourStore;
 
     /**
      * The reclaim hand-back bound into the context. Defaults to success; a
@@ -74,6 +76,9 @@ class WorkspaceMcpSessionContextTest {
         worktreeService.close();
         if (annotationStore != null) {
             annotationStore.close();
+        }
+        if (tourStore != null) {
+            tourStore.close();
         }
     }
 
@@ -605,10 +610,12 @@ class WorkspaceMcpSessionContextTest {
     private WorkspaceMcpSessionContext contextWith(Path root, List<Repository> repositories) throws IOException {
         caller(root);
         annotationStore = new AnnotationStore(root.resolve("annotations.json"));
+        tourStore = new TourStore(root.resolve("review-tours.json"));
         return new WorkspaceMcpSessionContext(
                 () -> List.of(session),
                 () -> repositories,
                 annotationStore,
+                tourStore,
                 new app.drydock.review.ReviewScopeRegistry(),
                 agentRegistry,
                 new app.drydock.review.IntentGrouping(),

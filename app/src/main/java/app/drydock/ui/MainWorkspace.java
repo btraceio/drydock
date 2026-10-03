@@ -59,6 +59,7 @@ import app.drydock.review.AnnotationStatus;
 import app.drydock.review.ReviewInstructions;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
+import app.drydock.review.tour.TourStore;
 import app.drydock.review.SessionReviewScopes;
 import app.drydock.review.SubmitPlan;
 import app.drydock.search.SessionSearchService;
@@ -282,6 +283,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     private final McpActivityLog activityLog;
     private final ChangedLineService changedLineService;
     private final AnnotationStore annotationStore;
+    private final TourStore tourStore;
     private final WorkspaceViewModel viewModel;
     private final Stage stage;
 
@@ -494,7 +496,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                           GhCliService ghCliService, GitHubReviewService gitHubReviewService,
                           WorktreeService worktreeService, DiffService diffService,
                           ChangedLineService changedLineService, AnnotationStore annotationStore,
-                          ReviewScopeRegistry reviewScopeRegistry, McpActivityLog activityLog,
+                          TourStore tourStore, ReviewScopeRegistry reviewScopeRegistry, McpActivityLog activityLog,
                           ExplorerTrailStore explorerTrailStore,
                           WorkspaceViewModel viewModel, Stage stage, Path stateDirectory) {
         this.sessionManager = sessionManager;
@@ -510,6 +512,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         this.activityLog = activityLog;
         this.changedLineService = changedLineService;
         this.annotationStore = annotationStore;
+        this.tourStore = tourStore;
         this.explorerTrailStore = explorerTrailStore;
         this.reviewScopeRegistry = reviewScopeRegistry;
         this.sessionReviewScopes = new SessionReviewScopes(gitStatusService, reviewScopeRegistry);
@@ -598,6 +601,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         // unsubscribe: this workspace and the store share the application's
         // lifetime.
         annotationStore.addChangeListener(key -> Platform.runLater(this::refreshReviewCounts));
+        tourStore.addChangeListener(scopeId -> Platform.runLater(this::refreshReviewCounts));
 
         exitWatcher.setCycleCount(Animation.INDEFINITE);
         exitWatcher.play();

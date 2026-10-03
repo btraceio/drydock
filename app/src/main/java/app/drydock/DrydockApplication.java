@@ -30,6 +30,7 @@ import app.drydock.review.AnnotationStore;
 import app.drydock.ui.explorer.ExplorerTrailStore;
 import app.drydock.review.RepositoryPullRequests;
 import app.drydock.review.ReviewScopeRegistry;
+import app.drydock.review.tour.TourStore;
 import app.drydock.search.SessionSearchService;
 import app.drydock.state.JsonApplicationStateRepository;
 import app.drydock.ui.AppShell;
@@ -158,6 +159,7 @@ public final class DrydockApplication extends Application {
     private AppShell appShell;
     private GitHubService gitHubService;
     private AnnotationStore annotationStore;
+    private TourStore tourStore;
     private ExplorerTrailStore explorerTrailStore;
     /** Review scope handles, shared by the session boards and the MCP tool router. */
     private ReviewScopeRegistry reviewScopeRegistry;
@@ -233,6 +235,7 @@ public final class DrydockApplication extends Application {
         sessionManager = new SessionManager(stateRepository, agentRegistry);
         ChangedLineService changedLineService = new ChangedLineService(diffService);
         annotationStore = new AnnotationStore(AnnotationStore.siblingOf(stateRepository.stateFile()));
+        tourStore = new TourStore(TourStore.siblingOf(stateRepository.stateFile()));
         // Per-session Explorer trails (Explorer delta, part 1). A sibling of
         // the state file for the same reason the annotations are: per-profile
         // state that must not land inside a worktree.
@@ -259,8 +262,8 @@ public final class DrydockApplication extends Application {
 
         mainWorkspace = new MainWorkspace(sessionManager, agentRegistry, repositoryManager, gitStatusService,
                 searchService, ghCliService, gitHubReviewService, worktreeService, diffService, changedLineService,
-                annotationStore, reviewScopeRegistry, mcpActivityLog, explorerTrailStore, viewModel, primaryStage,
-                stateDir);
+                annotationStore, tourStore, reviewScopeRegistry, mcpActivityLog, explorerTrailStore, viewModel,
+                primaryStage, stateDir);
         RepositorySidebar sidebar =
                 new RepositorySidebar(repositoryManager, gitStatusService, worktreeService, repositoryPullRequests,
                         sessionManager, agentRegistry, mainWorkspace, viewModel);
@@ -1215,6 +1218,9 @@ public final class DrydockApplication extends Application {
         if (annotationStore != null) {
             closeQuietly("AnnotationStore", annotationStore::close);
         }
+        if (tourStore != null) {
+            closeQuietly("TourStore", tourStore::close);
+        }
         if (explorerTrailStore != null) {
             closeQuietly("ExplorerTrailStore", explorerTrailStore::close);
         }
@@ -1357,6 +1363,7 @@ public final class DrydockApplication extends Application {
                 sessionManager::sessions,
                 repositoryManager::repositories,
                 annotationStore,
+                tourStore,
                 reviewScopeRegistry,
                 agentRegistry,
                 mainWorkspace.intentGrouping(),
