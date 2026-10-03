@@ -1,0 +1,75 @@
+PR: https://github.com/btraceio/drydock/pull/21
+
+This squash commit carries no message body. Below is the pull request's
+description as it stood at merge. The 122 individual commits, each with
+its own reasoning, are preserved at c55452dfc8613cce1c580e15f24aac6b617ac342
+(refs/pull/21/head on GitHub; also branch feat/review++ while it exists):
+
+    git fetch origin refs/pull/21/head && git log FETCH_HEAD ^517f6e6~1
+
+---
+
+## Summary
+
+Reworks review navigation around a single question: *where should the reviewer start, and what follows?* The reviewer no longer walks a diff file-by-file — the change is grouped into sections derived from the code's structure, ordered by a change graph, and each approval is pinned to the content it was actually given against.
+
+## What changed
+
+**Grouping and order**
+- A change graph resolves declarations and uses across the diff (tree-sitter, with a per-extension fallback), answering per hunk as well as per file.
+- Sections follow the code's structure, not its folders; tests are reviewed beside the code they pin. Hand-rolled Kahn + Tarjan with a total tie-break give a deterministic order.
+- An entry-point rank picks where to start; `p` walks the change in reading order.
+- Computed sections render in the rail when no reviewer has run, and the rail says when its grouping is provisional.
+- A name the parser classifies as an identifier counts as a symbol even when it is some language's keyword — Java's contextual `record`/`var`/`yield`, or `from`/`with` used as method names. Previously every call to a method named `record` went unlinked, which hid a real dependency cycle.
+
+**Diffing the right thing**
+- The review base resolves to `origin/<branch>` before a local copy. Local integration branches go stale in a worktree workflow, so a base resolved locally put already-merged commits into the review. Seen live: 35 commits shown where GitHub had 3, and a PR chip at 38 where GitHub shows 35. Local-only repositories still use their local branch.
+- A worktree session's "Local changes" now shows what the worktree would contribute: its branch commits **and** its uncommitted work (staged, unstaged, untracked), measured from the fork point. It used to be `base...HEAD`, which hid every uncommitted edit under a chip promising local changes. The header says "incl. uncommitted". A main-checkout session keeps `git diff HEAD`, and the PR chip keeps the committed branch, as GitHub shows it.
+- One `ReviewScope.diffScope()` mapping feeds the diff column, intent grouping and the agent's review tools, so the human and the agent can never be shown different code under the same scope.
+
+**Approvals that stay honest**
+- A verdict is keyed by hunk content and names the base it was given against; a base move marks an approval stale only when it could actually matter.
+- A section's decision is derived from its hunks rather than stored; progress counts hunks.
+- An agent may add staleness to an approval, never take it away. The automatic recheck leaves a trace whether or not it dispatched.
+
+**Verdict bar and PATH mode**
+- The bar reflects and acts on the selected PATH row, agrees with the write path on what blocks approval, and no longer bypasses the blocking-finding refusal.
+- `a`, `r`, `u` settle the row on screen; the bar fit-checks its own height and the stale label.
+- Nothing elides at a realistic 1280px window: the `START HERE` badge renders whole above its path (which no longer wraps mid-name), and the bar's nav hint is shown whole or dropped, never cut to "n jumps to the n…".
+- The row closing a diff card keeps the card's inset at every density (it sat flush to the edge — usually a link footer).
+
+**MCP surface**
+- `review_scope` charges sections against the budget and degrades gracefully; it can hand the agent the grouping it is being asked to name.
+- `review_state` reports a verdict under the intent's own id and degrades gracefully when a scope's diff cannot be produced.
+- Agents may declare which intents their intents are built on, and which approvals a base move disturbed. Marks with no reason, or a broken `affected`, are refused.
+
+**Diag**
+- The diag script can deliver a key to the Review view; an unknown verb says so instead of impersonating `mark`, and a documented verb without a case fails the build rather than a screenshot run.
+- `faninshot` opens the fan-in popover from INTENTS mode too (it fired a control whose row had no skin yet, so the popover was built but never shown).
+- A resume that ends in a dialog instead of a tab (missing conversation, missing directory, unsupported agent) now logs why, instead of leaving no trace.
+
+## Test plan
+
+- [x] Full suite, forced (`./gradlew :app:test --rerun-tasks`): **2173 tests / 214 classes / 0 failures**.
+- [x] New and updated JUnit coverage across the change graph, section derivation, verdict storage, staleness, the verdict bar and PATH mode — including a test class that owns its own stage size across all thirty-six cases.
+- [x] Mutation-testing gaps found during the work were pinned with dedicated tests (reviewer-grouping link footer, computed ids against a real reorder, degenerate fallback, rail swap).
+- [x] **CI flake fixed at its root.** `ReviewSettleActionsTest` failed on CI for weeks and was blamed on a focus race. The cause was the test's click: `moveTo(".review-diff-cell")` took the first lookup match, whose order follows `VirtualFlow`'s timing-dependent cell recycling, and sometimes that was the spare cell hanging below the viewport — whose centre lies over the verdict bar. The fixture now clicks the list. `SessionReviewViewCloseTest` had the same target and passed vacuously on a miss; it now requires the click to land first.
+
+### Phase 3 gate
+
+Run in the real app against a purpose-built fixture repo, at 1280px and 1500px:
+
+- [x] The rail in PATH mode — legible at both widths.
+- [x] A hunk carrying all three link kinds (`calls`, `called by`, same concept) at cozy, compact and dense.
+- [x] A named cycle — the section card reads "its files reference each other in a cycle: Audit.java, Store.java".
+- [x] The fan-in popover opened from a PATH row — "5 usages outside this change · 1 changed symbol", callers with file and line.
+- [x] With a stale approval, `⏎` refuses and says why — "⚠ approved against base 515113c · base is now e4715b9" — and jumps to the stale section. Sections the base move could not touch stay fresh; one that only *calls into* the moved file is correctly marked stale.
+- [x] Moving the base dispatches a recheck (`Dispatched a recheck for scope … 515113c -> e4715b9`).
+- [x] Provenance legible without the tooltip (verified in T24).
+- [ ] **Not verified:** the agent's recheck *answer* (its "affected" marks) — agents stall on an MCP permission prompt with nobody present, so this needs a human at the keyboard.
+- [ ] **Not verified:** the same pass on a real GitHub PR; the gate used a local working-tree scope.
+
+### Known and deferred
+
+- A long-running session does not re-read its base ref while a scope stays built, so the automatic recheck fires on the next launch rather than live. Whether it should re-read is an open design question.
+- The fan-in popover renders 576px wide against its declared 460px max-width. Legible and unclipped.
