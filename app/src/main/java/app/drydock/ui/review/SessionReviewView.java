@@ -50,6 +50,7 @@ import javafx.beans.value.ChangeListener;
 import javafx.geometry.Pos;
 import javafx.scene.Node;
 import javafx.scene.control.Button;
+import javafx.scene.control.ButtonBase;
 import javafx.scene.control.Label;
 import javafx.scene.control.TextInputControl;
 import javafx.scene.control.Tooltip;
@@ -819,6 +820,15 @@ public final class SessionReviewView extends BorderPane {
      */
     private final PeekLayer peekLayer = new PeekLayer();
     private final StackPane diffStack = new StackPane();
+
+    /**
+     * Navigation's progress and outcome lines ("Looking for X…", "Could not
+     * read X"), over the diff column. Not the step panel: the trail bar and
+     * ⌘[ / ⌘] work in the hunk diff too, where the panel is not in the
+     * layout, and {@code m} can collapse it in the tour.
+     */
+    private final Label navNotice = new Label();
+    private final PauseTransition navNoticeTimer = new PauseTransition(Duration.seconds(2.6));
 
     /**
      * The session's trail: step changes, promoted peeks and search results
@@ -3449,9 +3459,15 @@ public final class SessionReviewView extends BorderPane {
         }
         // An open peek owns these three, ahead of every other binding: u is
         // its usages, not undo; Enter opens it for real, not Submit.
-        if (peekLayer.isOpen()) {
+        // Shift-modified keys keep their board meaning (⇧A, ⇧R).
+        if (peekLayer.isOpen() && !event.isShiftDown()) {
             switch (event.getCode()) {
                 case ENTER -> {
+                    if (getScene() != null && getScene().getFocusOwner() instanceof ButtonBase) {
+                        // Enter belongs to the focused button -- a peek
+                        // action, a trail chip -- as in the Explorer.
+                        return false;
+                    }
                     peekLayer.promoteTop();
                     return true;
                 }
@@ -3590,6 +3606,7 @@ public final class SessionReviewView extends BorderPane {
     public void close() {
         closed = true;
         tourWait.stop();
+        navNoticeTimer.stop();
         riskQueue.close();
         mcpPanel.ifPresent(ReviewMcpActivityPanel::detach);
         intentRail.stopWidthAnimation();
@@ -4034,10 +4051,14 @@ public final class SessionReviewView extends BorderPane {
     // ---- navigation: peek, trail, search (spec §5) ---------------------------
 
     private void installNavigation() {
-        diffStack.getChildren().setAll(diffColumn, peekLayer);
+        navNotice.getStyleClass().addAll("explorer-toast", "review-nav-notice");
+        navNotice.setVisible(false);
+        navNotice.setManaged(false);
+        navNoticeTimer.setOnFinished(event -> clearNotice());
+        diffStack.getChildren().setAll(diffColumn, peekLayer, navNotice);
         peekLayer.setOnPromote(this::promotePeek);
         peekLayer.setOnAsk(this::askAboutPeek);
-        peekLayer.setOnStackFull(() -> stepPanel.showTransient("Peek stack is full — esc to unwind"));
+        peekLayer.setOnStackFull(() -> notice("Peek stack is full — esc to unwind"));
         // Absent, not greyed, on a scope no session is bound to (delta hard rules).
         peekLayer.setAgentAvailable(() -> selectedScope().flatMap(ReviewScope::sessionId).isPresent());
         diffColumn.setSymbolClickHandler(this::peekAtSymbol);
@@ -4141,9 +4162,13 @@ public final class SessionReviewView extends BorderPane {
         } catch (NumberFormatException e) {
             return Optional.empty();
         }
+        // A number alone could name a different step of a re-posted tour;
+        // the step only counts when its first anchor is still this file.
         return currentTour().map(record -> record.tour().steps())
                 .filter(steps -> number >= 1 && number <= steps.size())
-                .map(steps -> steps.get(number - 1));
+                .map(steps -> steps.get(number - 1))
+                .filter(step -> !step.anchors().isEmpty()
+                        && Path.of(step.anchors().getFirst().file()).equals(waypoint.file()));
     }
 
     private void pushStepWaypoint(TourRecord record, TourStep step) {
@@ -4277,10 +4302,41 @@ public final class SessionReviewView extends BorderPane {
 
     /** A peek at a file the column does not show: a waypoint's, or a search result's. */
     private void openLocationPeek(Path relativePath, int line) {
-        navigation.ifPresent(nav -> pushPeekWhenReady(
-                new SymbolPeekService(nav.root(), nav.search()).peekAt(relativePath, line),
+        if (navigation.isEmpty()) {
+            // Nothing to read it from; saying so beats a key that did nothing.
+            notice("Cannot open " + relativePath + " here: this scope has no checkout to read");
+            return;
+        }
+        ReviewNavigation nav = navigation.get();
+        pushPeekWhenReady(new SymbolPeekService(nav.root(), nav.search()).peekAt(relativePath, line),
                 "Opening " + relativePath + "…", "Could not read " + relativePath,
-                "Could not read " + relativePath));
+                "Could not read " + relativePath);
+    }
+
+    /** A navigation outcome over the diff column, hidden again after a moment. */
+    private void notice(String message) {
+        showNotice(message);
+        navNoticeTimer.playFromStart();
+    }
+
+    /** A progress line over the diff column; stays until {@link #clearNotice} or the next notice. */
+    private void progressNotice(String message) {
+        navNoticeTimer.stop();
+        showNotice(message);
+    }
+
+    private void showNotice(String message) {
+        // Kept clear of the peek card's action row at the bottom, as the Explorer's toast is.
+        StackPane.setAlignment(navNotice, peekLayer.isOpen() ? Pos.TOP_CENTER : Pos.BOTTOM_CENTER);
+        navNotice.setText(message);
+        navNotice.setVisible(true);
+        navNotice.setManaged(true);
+    }
+
+    private void clearNotice() {
+        navNoticeTimer.stop();
+        navNotice.setVisible(false);
+        navNotice.setManaged(false);
     }
 
     /**
@@ -4291,26 +4347,26 @@ public final class SessionReviewView extends BorderPane {
     private void pushPeekWhenReady(CompletableFuture<Optional<SymbolPeek>> pending, String progress,
                                    String missing, String failed) {
         if (peekLayer.depth() >= PeekLayer.MAX_DEPTH) {
-            stepPanel.showTransient("Peek stack is full — esc to unwind");
+            notice("Peek stack is full — esc to unwind");
             return;
         }
-        stepPanel.showTransient(progress);
+        progressNotice(progress);
         Optional<String> scopeId = selectedScope().map(ReviewScope::id);
         pending.whenComplete((peek, failure) -> Platform.runLater(() -> {
             if (closed) {
                 return;
             }
             // The progress line goes on every path, a stale one included.
-            stepPanel.clearTransient();
+            clearNotice();
             if (!scopeId.equals(selectedScope().map(ReviewScope::id))) {
                 return;
             }
             if (failure != null) {
                 LOG.log(Level.WARNING, failed, failure);
-                stepPanel.showTransient(failed);
+                notice(failed);
                 return;
             }
-            peek.ifPresentOrElse(peekLayer::push, () -> stepPanel.showTransient(missing));
+            peek.ifPresentOrElse(peekLayer::push, () -> notice(missing));
         }));
     }
 
@@ -4325,13 +4381,13 @@ public final class SessionReviewView extends BorderPane {
         }
         selectedScope().ifPresent(scope -> {
             if (!host.openInExplorer(scope, peek.relativePath(), peek.startLine())) {
-                stepPanel.showTransient("No Explorer to open " + peek.relativePath() + " in");
+                notice("No Explorer to open " + peek.relativePath() + " in");
             }
         });
     }
 
     private void askAboutPeek(SymbolPeek peek) {
-        selectedScope().ifPresent(scope -> stepPanel.showTransient(host.askAgentAboutPeek(scope, peek)
+        selectedScope().ifPresent(scope -> notice(host.askAgentAboutPeek(scope, peek)
                 ? "Asked the session about " + peek.symbol() + " — the answer is in the agent view"
                 : "No running session to ask about " + peek.symbol()));
     }
@@ -4790,6 +4846,17 @@ public final class SessionReviewView extends BorderPane {
     /** Diagnostic-only: the trail's waypoints, oldest first. Call on the FX thread. */
     public List<NavigationTrail.Waypoint> diagTrail() {
         return trail.waypoints();
+    }
+
+    /** Test-only: replaces the trail, as restoring a saved one does. */
+    void diagRestoreTrail(List<NavigationTrail.Waypoint> waypoints, int cursor) {
+        trail.restore(waypoints, cursor);
+        trailBar.render(trail);
+    }
+
+    /** Diagnostic-only: the navigation notice over the diff column, if one shows. */
+    Optional<String> diagNotice() {
+        return navNotice.isVisible() ? Optional.of(navNotice.getText()) : Optional.empty();
     }
 
     /** Diagnostic-only: which of the current step's anchors was last revealed. */

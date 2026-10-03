@@ -100,11 +100,6 @@ final class StepPanel extends VBox {
         return backPill.isVisible();
     }
 
-    /** Removes the {@link #showTransient} notice, if one is showing. */
-    void clearTransient() {
-        content.getChildren().removeIf(node -> node.getStyleClass().contains("step-panel-transient"));
-    }
-
     void show(StepView view) {
         choiceButtons.clear();
         riskBox = Optional.empty();
