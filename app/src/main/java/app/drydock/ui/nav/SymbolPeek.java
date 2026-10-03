@@ -1,4 +1,4 @@
-package app.drydock.ui.explorer;
+package app.drydock.ui.nav;
 
 import java.nio.file.Path;
 import java.util.List;

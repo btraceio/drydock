@@ -24,7 +24,7 @@ import java.util.regex.Pattern;
  *
  * <p>Computed once per load, off the FX thread, alongside the lexer spans.</p>
  */
-final class SymbolLens {
+public final class SymbolLens {
 
     /** Files past this many characters get no lens: the scan is linear, but so is the reader's patience. */
     private static final int MAX_SCANNED_CHARS = 1_500_000;
@@ -47,7 +47,7 @@ final class SymbolLens {
      * ({@code w}, {@code raw}, {@code delta}) still get nothing, which is
      * what keeps the underline meaningful.</p>
      */
-    static Set<String> symbolsIn(String text) {
+    public static Set<String> symbolsIn(String text) {
         if (text == null || text.isEmpty() || text.length() > MAX_SCANNED_CHARS) {
             return Set.of();
         }
@@ -80,7 +80,7 @@ final class SymbolLens {
      * (one span covering the whole text) when there is nothing to mark, so
      * the caller can overlay it unconditionally.
      */
-    static StyleSpans<Collection<String>> spans(String text, Set<String> symbols) {
+    public static StyleSpans<Collection<String>> spans(String text, Set<String> symbols) {
         StyleSpansBuilder<Collection<String>> builder = new StyleSpansBuilder<>();
         if (text == null || text.isEmpty()) {
             builder.add(List.of(), 0);

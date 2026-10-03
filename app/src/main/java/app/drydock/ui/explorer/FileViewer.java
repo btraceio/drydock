@@ -1,6 +1,12 @@
 package app.drydock.ui.explorer;
 
 import app.drydock.ui.UiFormats;
+import app.drydock.ui.nav.NavigationTrail;
+import app.drydock.ui.nav.PeekLayer;
+import app.drydock.ui.nav.SearchRail;
+import app.drydock.ui.nav.SymbolPeek;
+import app.drydock.ui.nav.SymbolPeekService;
+import app.drydock.ui.nav.TrailBar;
 import app.drydock.ui.code.SyntaxHighlighter;
 import javafx.animation.PauseTransition;
 import javafx.application.Platform;

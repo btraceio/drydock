@@ -1,5 +1,10 @@
 package app.drydock.ui.explorer;
 
+import app.drydock.ui.nav.ExplorerTrailStore;
+import app.drydock.ui.nav.NavigationTrail;
+import app.drydock.ui.nav.SearchRail;
+import app.drydock.ui.nav.SymbolPeek;
+import app.drydock.ui.nav.SymbolPeekService;
 import app.drydock.search.SessionSearchService;
 import javafx.animation.KeyFrame;
 import javafx.animation.KeyValue;

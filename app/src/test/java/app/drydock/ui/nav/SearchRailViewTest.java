@@ -1,7 +1,8 @@
-package app.drydock.ui.explorer;
+package app.drydock.ui.nav;
 
 import app.drydock.ui.TestStages;
 import app.drydock.search.SessionSearchService;
+import app.drydock.ui.explorer.ExplorerFinding;
 import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;

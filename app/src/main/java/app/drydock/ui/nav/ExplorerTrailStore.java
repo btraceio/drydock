@@ -1,4 +1,4 @@
-package app.drydock.ui.explorer;
+package app.drydock.ui.nav;
 
 import app.drydock.state.json.JsonParser;
 import app.drydock.state.json.JsonValue;

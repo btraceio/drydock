@@ -1,4 +1,4 @@
-package app.drydock.ui.explorer;
+package app.drydock.ui.nav;
 
 import app.drydock.review.SymbolWords;
 import app.drydock.search.SessionSearchService;
@@ -139,7 +139,7 @@ public final class SymbolPeekService {
      * three-line method is a three-line card rather than fourteen lines of
      * whatever follows it.
      */
-    static List<String> readExcerpt(Path file, int startLine) {
+    public static List<String> readExcerpt(Path file, int startLine) {
         List<String> lines = new ArrayList<>();
         try {
             if (Files.size(file) > MAX_FILE_BYTES) {
@@ -173,7 +173,7 @@ public final class SymbolPeekService {
     }
 
     /** True when {@code symbol} appears in {@code line} on identifier boundaries. */
-    static boolean isWholeWord(String line, String symbol) {
+    public static boolean isWholeWord(String line, String symbol) {
         int from = 0;
         int at;
         while ((at = line.indexOf(symbol, from)) >= 0) {
@@ -197,7 +197,7 @@ public final class SymbolPeekService {
      * "just an occurrence"; the card says so rather than claiming a
      * definition it did not find.
      */
-    static int scoreDeclaration(Path relativePath, String rawLine, String symbol) {
+    public static int scoreDeclaration(Path relativePath, String rawLine, String symbol) {
         return DeclarationPatterns.forSymbol(symbol).score(relativePath, rawLine, symbol);
     }
 
@@ -256,7 +256,7 @@ public final class SymbolPeekService {
      * The identifier at {@code caret} in {@code line}, if there is one worth
      * peeking at. Shared by the viewer's click handler and its tests.
      */
-    static Optional<String> identifierAt(String line, int caret) {
+    public static Optional<String> identifierAt(String line, int caret) {
         if (line == null || caret < 0 || caret > line.length()) {
             return Optional.empty();
         }

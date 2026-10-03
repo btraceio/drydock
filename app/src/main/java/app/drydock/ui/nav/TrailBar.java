@@ -1,4 +1,4 @@
-package app.drydock.ui.explorer;
+package app.drydock.ui.nav;
 
 import javafx.geometry.Pos;
 import javafx.scene.control.Button;
@@ -23,7 +23,7 @@ import java.util.function.IntConsumer;
  * NavigationTrail#CAPACITY} chips and diffing that would cost more than it
  * saves.</p>
  */
-final class TrailBar extends HBox {
+public final class TrailBar extends HBox {
 
     private final Button back = new Button("‹");
     private final Button forward = new Button("›");
@@ -35,7 +35,7 @@ final class TrailBar extends HBox {
     private Consumer<Integer> onStep = direction -> { };
     private Runnable onTogglePin = () -> { };
 
-    TrailBar() {
+    public TrailBar() {
         getStyleClass().add("explorer-trail-bar");
         setAlignment(Pos.CENTER_LEFT);
         setSpacing(6);
@@ -68,20 +68,20 @@ final class TrailBar extends HBox {
         getChildren().setAll(back, forward, divider, chipScroll, pin);
     }
 
-    void setOnGoTo(IntConsumer handler) {
+    public void setOnGoTo(IntConsumer handler) {
         this.onGoTo = handler == null ? index -> { } : handler;
     }
 
-    void setOnStep(Consumer<Integer> handler) {
+    public void setOnStep(Consumer<Integer> handler) {
         this.onStep = handler == null ? direction -> { } : handler;
     }
 
-    void setOnTogglePin(Runnable handler) {
+    public void setOnTogglePin(Runnable handler) {
         this.onTogglePin = handler == null ? () -> { } : handler;
     }
 
     /** Repaints from {@code trail}; call after every navigation. */
-    void render(NavigationTrail trail) {
+    public void render(NavigationTrail trail) {
         back.setDisable(!trail.canGoBack());
         forward.setDisable(!trail.canGoForward());
         pin.setVisible(!trail.isEmpty());

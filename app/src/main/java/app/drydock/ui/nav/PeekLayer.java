@@ -1,4 +1,4 @@
-package app.drydock.ui.explorer;
+package app.drydock.ui.nav;
 
 import app.drydock.ui.code.SyntaxHighlighter;
 import javafx.geometry.Pos;
@@ -32,10 +32,10 @@ import java.util.function.Consumer;
  * card the viewer underneath must still take the mouse, or the whole file
  * would go dead the moment one peek opened.</p>
  */
-final class PeekLayer extends Pane {
+public final class PeekLayer extends Pane {
 
     /** Peek depth cap (delta part 1). Beyond this the reader is lost, not exploring. */
-    static final int MAX_DEPTH = 5;
+    public static final int MAX_DEPTH = 5;
 
     private static final double CARD_WIDTH = 430;
     private static final double CARD_MAX_BODY_HEIGHT = 190;
@@ -58,7 +58,7 @@ final class PeekLayer extends Pane {
     private Runnable onChanged = () -> { };
     private BooleanSupplier agentAvailable = () -> false;
 
-    PeekLayer() {
+    public PeekLayer() {
         getStyleClass().add("peek-layer");
         // Managed, or the StackPane above never resizes it and every card
         // lays out against a 0x0 layer -- in the top-left corner, at its
@@ -70,21 +70,21 @@ final class PeekLayer extends Pane {
         setVisible(false);
     }
 
-    void setOnPromote(Consumer<SymbolPeek> handler) {
+    public void setOnPromote(Consumer<SymbolPeek> handler) {
         this.onPromote = handler == null ? peek -> { } : handler;
     }
 
-    void setOnAsk(Consumer<SymbolPeek> handler) {
+    public void setOnAsk(Consumer<SymbolPeek> handler) {
         this.onAsk = handler == null ? peek -> { } : handler;
     }
 
     /** Called when a click would exceed {@link #MAX_DEPTH} (the "esc to unwind" toast). */
-    void setOnStackFull(Runnable handler) {
+    public void setOnStackFull(Runnable handler) {
         this.onStackFull = handler == null ? () -> { } : handler;
     }
 
     /** Called after every push/pop/clear, so the owner can repaint what depends on the stack. */
-    void setOnChanged(Runnable handler) {
+    public void setOnChanged(Runnable handler) {
         this.onChanged = handler == null ? () -> { } : handler;
     }
 
@@ -94,24 +94,24 @@ final class PeekLayer extends Pane {
      * rules): a greyed button on a session that will never come back is an
      * invitation to keep clicking.
      */
-    void setAgentAvailable(BooleanSupplier available) {
+    public void setAgentAvailable(BooleanSupplier available) {
         this.agentAvailable = available == null ? () -> false : available;
     }
 
-    int depth() {
+    public int depth() {
         return stack.size();
     }
 
-    boolean isOpen() {
+    public boolean isOpen() {
         return !stack.isEmpty();
     }
 
-    Optional<SymbolPeek> top() {
+    public Optional<SymbolPeek> top() {
         return stack.isEmpty() ? Optional.empty() : Optional.of(stack.get(stack.size() - 1));
     }
 
     /** Pushes a peek; refuses (and reports) at {@link #MAX_DEPTH}. */
-    boolean push(SymbolPeek peek) {
+    public boolean push(SymbolPeek peek) {
         if (stack.size() >= MAX_DEPTH) {
             onStackFull.run();
             return false;
@@ -123,7 +123,7 @@ final class PeekLayer extends Pane {
     }
 
     /** {@code esc}: closes exactly one card. */
-    boolean popOne() {
+    public boolean popOne() {
         if (stack.isEmpty()) {
             return false;
         }
@@ -134,7 +134,7 @@ final class PeekLayer extends Pane {
     }
 
     /** Collapses the whole stack (a promote, or opening another file). */
-    void clear() {
+    public void clear() {
         if (stack.isEmpty()) {
             return;
         }
@@ -144,7 +144,7 @@ final class PeekLayer extends Pane {
     }
 
     /** {@code u}: shows/hides the top card's occurrence list. */
-    void toggleUsages() {
+    public void toggleUsages() {
         if (stack.isEmpty()) {
             return;
         }
@@ -153,12 +153,12 @@ final class PeekLayer extends Pane {
     }
 
     /** {@code ⏎}: opens the top peek for real. */
-    void promoteTop() {
+    public void promoteTop() {
         top().ifPresent(peek -> onPromote.accept(peek));
     }
 
     /** {@code a}: hands the top peek to the bound session (absent without one). */
-    void askTop() {
+    public void askTop() {
         if (agentAvailable.getAsBoolean()) {
             top().ifPresent(peek -> onAsk.accept(peek));
         }

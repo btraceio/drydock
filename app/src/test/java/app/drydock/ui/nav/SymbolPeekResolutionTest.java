@@ -1,5 +1,6 @@
-package app.drydock.ui.explorer;
+package app.drydock.ui.nav;
 
+import app.drydock.ui.explorer.SymbolLens;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 

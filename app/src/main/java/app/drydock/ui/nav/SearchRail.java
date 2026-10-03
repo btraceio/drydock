@@ -1,7 +1,8 @@
-package app.drydock.ui.explorer;
+package app.drydock.ui.nav;
 
 import app.drydock.search.SessionSearchService;
 import app.drydock.search.SessionSearchService.FileMatches;
+import app.drydock.ui.explorer.ExplorerFinding;
 import app.drydock.search.SessionSearchService.TextMatch;
 import javafx.animation.PauseTransition;
 import javafx.application.Platform;
@@ -59,7 +60,7 @@ import java.util.function.Supplier;
  * still opens several files at once -- both predate the delta and neither is
  * something it asked to remove.</p>
  */
-final class SearchRail extends VBox {
+public final class SearchRail extends VBox {
 
     private static final Logger LOG = System.getLogger(SearchRail.class.getName());
 
@@ -67,7 +68,7 @@ final class SearchRail extends VBox {
     private static final Duration SEARCH_DEBOUNCE = Duration.millis(150);
 
     /** Opens a file in the viewer: absolute path, relative path, optional 1-based line, query for match highlight. */
-    interface FileOpener {
+    public interface FileOpener {
         void open(Path file, Path relativePath, OptionalInt line, String highlightQuery);
     }
 
@@ -150,7 +151,7 @@ final class SearchRail extends VBox {
     /** A {@code /} that arrived while collapsed, waiting for the field to exist again. */
     private boolean focusSearchOnExpand;
 
-    SearchRail(Path searchRoot, SessionSearchService searchService, FileOpener opener) {
+    public SearchRail(Path searchRoot, SessionSearchService searchService, FileOpener opener) {
         this.searchRoot = searchRoot;
         this.searchService = searchService;
         this.opener = opener;
@@ -170,71 +171,71 @@ final class SearchRail extends VBox {
         rebuild();
     }
 
-    void setOnCollapseRequested(Runnable handler) {
+    public void setOnCollapseRequested(Runnable handler) {
         this.onCollapseRequested = handler == null ? () -> { } : handler;
     }
 
-    void setOnExpandRequested(Runnable handler) {
+    public void setOnExpandRequested(Runnable handler) {
         this.onExpandRequested = handler == null ? () -> { } : handler;
     }
 
     /** Wires the listener that keeps the viewer's search-hit ticks in step with this rail. */
-    void setOnQueryChanged(Consumer<String> handler) {
+    public void setOnQueryChanged(Consumer<String> handler) {
         this.onQueryChanged = handler == null ? text -> { } : handler;
     }
 
     /** Wires the diff-overlay test tagging files that carry diff lines (handoff section C). */
-    void setDiffFileTest(Predicate<Path> test) {
+    public void setDiffFileTest(Predicate<Path> test) {
         this.diffFileTest = test == null ? relativePath -> false : test;
     }
 
     /** The diff half of the funnel: which files the current review scope touches, and by how much. */
-    void setChangedLines(Supplier<Map<Path, Set<Integer>>> supplier) {
+    public void setChangedLines(Supplier<Map<Path, Set<Integer>>> supplier) {
         this.changedLines = supplier == null ? Map::of : supplier;
         findingsCounts.clear();
         rebuild();
     }
 
     /** Open findings per file, for the ◆N chip and the findings sort. */
-    void setFindings(Function<Path, List<ExplorerFinding>> provider) {
+    public void setFindings(Function<Path, List<ExplorerFinding>> provider) {
         this.findings = provider == null ? path -> List.of() : provider;
         findingsCounts.clear();
         rebuild();
     }
 
     /** The file the viewer is showing: diff scope keeps its row even when it is out of the change. */
-    void setOpenFile(Path relativePath) {
+    public void setOpenFile(Path relativePath) {
         this.openFile = relativePath;
         rebuild();
     }
 
     /** Programmatic search (the Review tab's "Search in Explorer" chip). */
-    void setSearch(String text) {
+    public void setSearch(String text) {
         searchField.setText(text);
         searchField.requestFocus();
         searchField.positionCaret(text == null ? 0 : text.length());
     }
 
     /** {@code /}: focuses the query field. */
-    void focusSearch() {
+    public void focusSearch() {
         searchField.requestFocus();
         searchField.selectAll();
     }
 
     /** {@code d}: this change ⇄ the whole worktree. */
-    void toggleScope() {
+    public void toggleScope() {
         setScope(scope == FileRailModel.Scope.DIFF ? FileRailModel.Scope.REPO : FileRailModel.Scope.DIFF);
     }
 
     /** {@code s}: churn → findings → a-z. */
-    void cycleSort() {
+    public void cycleSort() {
         sort = sort.next();
         sortButton.setText("⇅ " + sort.label());
         rebuild();
     }
 
     /** Repaints against a changed diff overlay or a new finding. */
-    void refresh() {
+    public void refresh() {
         // This is the "a finding may have changed" signal, so it is also
         // where the memoised counts have to go.
         findingsCounts.clear();
@@ -247,7 +248,7 @@ final class SearchRail extends VBox {
     }
 
     /** Swaps to the full rail content (SessionExplorerView animates the width). */
-    void showExpanded() {
+    public void showExpanded() {
         getChildren().setAll(expandedContent);
         if (focusSearchOnExpand) {
             focusSearchOnExpand = false;
@@ -261,12 +262,12 @@ final class SearchRail extends VBox {
      * not in the scene graph until {@link #showExpanded} puts it back -- so
      * the request is held until then rather than silently dropped.
      */
-    void focusSearchWhenExpanded() {
+    public void focusSearchWhenExpanded() {
         focusSearchOnExpand = true;
     }
 
     /** Swaps to the 46px collapsed strip: a ⌕ expand button + vertical FILES label. */
-    void showCollapsed() {
+    public void showCollapsed() {
         getChildren().setAll(collapsedContent);
     }
 

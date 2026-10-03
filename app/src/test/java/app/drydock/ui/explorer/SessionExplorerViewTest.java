@@ -2,6 +2,7 @@ package app.drydock.ui.explorer;
 
 import app.drydock.ui.TestStages;
 import app.drydock.search.SessionSearchService;
+import app.drydock.ui.nav.PeekLayer;
 import javafx.geometry.Pos;
 import javafx.scene.Node;
 import javafx.scene.Scene;
