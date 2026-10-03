@@ -40,7 +40,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * {@link Button} that peeks in place or selects the step it names.
  *
  * <p>The board's {@code src/guards.h} declares {@code foo} on n1 and {@code
- * src/guards.cpp} calls it, so step 1 is called by step 2.</p>
+ * src/guards.cpp} calls it without declaring anything, so step 1 is
+ * called by step 2 and step 2 has no callers of its own to find.</p>
  */
 class ReviewTourImpactTest extends ReviewTourFixture {
 
@@ -48,7 +49,7 @@ class ReviewTourImpactTest extends ReviewTourFixture {
     UnifiedDiff fixtureDiff() {
         return new UnifiedDiff(List.of(
                 file(FILE_A, "void foo();", "void bar();"),
-                file(FILE_B, "void baz() { foo(); }")));
+                file(FILE_B, "  foo();")));
     }
 
     private static final OutOfDiffFanIn.Result TWO_CALLERS = new OutOfDiffFanIn.Result(Map.of("foo", List.of(
@@ -179,6 +180,57 @@ class ReviewTourImpactTest extends ReviewTourFixture {
         assertTrue(before == panelButton(":7  foo();"), "the impact section was not rebuilt");
     }
 
+    @Test
+    void theRealScanOfAScopeWithNothingToGrepSaysWhyRatherThanFindingForever() throws TimeoutException {
+        // No diagSetFanIn: the fixture's worktree is not a checkout, so the
+        // board's own scan lands unavailable and must still be recorded.
+        try {
+            WaitForAsyncUtils.waitFor(30, TimeUnit.SECONDS, () -> impactTexts().stream()
+                    .anyMatch(text -> text.startsWith("callers unavailable: ")));
+        } catch (TimeoutException e) {
+            throw new TimeoutException("the scan never said why; panel showed " + impactTexts());
+        }
+
+        assertFalse(impactTexts().contains("Finding callers…"), impactTexts().toString());
+    }
+
+    @Test
+    void aChangeThatCannotBeParsedSaysSoInsteadOfFindingCallersForever() throws TimeoutException {
+        interact(() -> view.diagSetGraphBuilder(diff -> {
+            throw new IllegalStateException("unbalanced braces");
+        }));
+        // A new diff instance with the same content: the tour stays valid,
+        // and requestGraph builds again instead of treating it as graphed.
+        interact(() -> view.diagShowDiff(scope, new UnifiedDiff(host.diff.files())));
+        WaitForAsyncUtils.waitFor(10, TimeUnit.SECONDS, () -> !view.diagGraphBuildPending(scope.id()));
+
+        waitForImpactText("callers unavailable: the change could not be parsed: unbalanced braces");
+        assertFalse(impactTexts().contains("Finding callers…"), impactTexts().toString());
+    }
+
+    @Test
+    void aStepThatDeclaresNothingHasNoCallersSection() throws TimeoutException {
+        setFanIn(TWO_CALLERS);
+        waitForImpactText("← foo · step 2");
+
+        interact(() -> panelButton("← foo · step 2").fire());
+        waitForImpactText("→ foo · step 1");
+
+        List<String> texts = impactTexts();
+        assertFalse(texts.contains("Called from outside the change"), "s2 only calls foo: " + texts);
+        assertFalse(texts.contains("Finding callers…"), texts.toString());
+        assertFalse(texts.stream().anyMatch(text -> text.startsWith("declaration changed")), texts.toString());
+    }
+
+    @Test
+    void anAgentLocationThatIsNotAPathSaysSoOverTheColumn() {
+        StepPanel.Host stepHost = ReviewDiagFxThread.call(view::diagStepHost);
+        interact(() -> stepHost.openLocation("src/\0bad\u0000.h", 3));
+
+        Optional<String> notice = ReviewDiagFxThread.call(view::diagNotice);
+        assertTrue(notice.isPresent() && notice.get().endsWith(": not a file path"), "notice was " + notice);
+    }
+
     // ---- the panel on its own ---------------------------------------------
 
     private static final class RecordingHost implements StepPanel.Host {
@@ -241,7 +293,7 @@ class ReviewTourImpactTest extends ReviewTourFixture {
                 "gamma", Optional.empty());
         interact(() -> panel.showImpact(new StepPanel.ImpactView(
                 List.of(new ImpactNote(FILE_A, 1, "callers must re-check the guard")),
-                calleesOnly(List.of("alpha", "beta", "gamma", "delta")), resolved, false, Optional.empty())));
+                calleesOnly(List.of("alpha", "beta", "gamma", "delta")), resolved, false, Optional.empty(), true)));
 
         List<String> texts = panelTexts(panel);
         assertEquals("Agent notes", texts.getFirst(), "the claimed notes are pinned on top: " + texts);
@@ -263,7 +315,7 @@ class ReviewTourImpactTest extends ReviewTourFixture {
     void whileTheScanRunsTheCallersSayTheyAreBeingFound() {
         StepPanel panel = detachedPanel(new RecordingHost());
         interact(() -> panel.showImpact(new StepPanel.ImpactView(List.of(), calleesOnly(List.of()), Map.of(),
-                true, Optional.empty())));
+                true, Optional.empty(), true)));
 
         List<String> texts = panelTexts(panel);
         assertTrue(texts.contains("Finding callers…"), texts.toString());
@@ -271,10 +323,26 @@ class ReviewTourImpactTest extends ReviewTourFixture {
     }
 
     @Test
+    void aStepThatDeclaresNothingShowsNoCallersButKeepsEdgesAndCallees() {
+        StepPanel panel = detachedPanel(new RecordingHost());
+        StepImpact measured = new StepImpact(List.of(),
+                List.of(new StepImpact.InChange("foo", StepImpact.Direction.CALLS, "s1", 1)),
+                List.of("alpha"), List.of(), Optional.empty());
+        interact(() -> panel.showImpact(new StepPanel.ImpactView(List.of(), measured, Map.of(), true,
+                Optional.empty(), false)));
+
+        List<String> texts = panelTexts(panel);
+        assertFalse(texts.contains("Finding callers…"), texts.toString());
+        assertFalse(texts.contains("Called from outside the change"), texts.toString());
+        assertTrue(texts.contains("→ foo · step 1"), texts.toString());
+        assertTrue(texts.contains("alpha → resolving…"), texts.toString());
+    }
+
+    @Test
     void calleesThatCannotBeResolvedHereSaySo() {
         StepPanel panel = detachedPanel(new RecordingHost());
         interact(() -> panel.showImpact(new StepPanel.ImpactView(List.of(), calleesOnly(List.of("delta")), Map.of(),
-                false, Optional.of("no checkout to search"))));
+                false, Optional.of("no checkout to search"), true)));
 
         List<String> texts = panelTexts(panel);
         assertTrue(texts.contains("delta → not resolved: no checkout to search"), texts.toString());

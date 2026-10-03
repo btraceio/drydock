@@ -70,6 +70,7 @@ import javafx.util.Duration;
 
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -85,6 +86,7 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.UnaryOperator;
 
 /**
@@ -568,6 +570,19 @@ public final class SessionReviewView extends BorderPane {
     private final Set<String> graphBuilding = new HashSet<>();
 
     /**
+     * Why the last {@link ChangeGraph} build for a scope failed, and for
+     * which diff: the step panel's impact says so instead of waiting for a
+     * graph that is not coming. Cleared when a build starts.
+     */
+    private final Map<String, GraphFailure> graphFailureByScope = new HashMap<>();
+
+    private record GraphFailure(UnifiedDiff diff, String reason) {
+    }
+
+    /** {@link ChangeGraph#of}, unless a test swapped it through {@link #diagSetGraphBuilder}. */
+    private volatile Function<UnifiedDiff, ChangeGraph> graphBuilder = ChangeGraph::of;
+
+    /**
      * Set by {@link #close()}. A graph build already running when a view
      * closes is left to finish -- there is no cancelling a virtual thread
      * mid-parse -- but its completion must not still touch this view's state
@@ -815,7 +830,8 @@ public final class SessionReviewView extends BorderPane {
     private HBox columns;
 
     private final TourOutline outline = new TourOutline();
-    private final StepPanel stepPanel = new StepPanel(new StepHost());
+    private final StepHost stepHost = new StepHost();
+    private final StepPanel stepPanel = new StepPanel(stepHost);
 
     /**
      * Peek cards over the diff column (spec §5). {@link #bodyFor} hands out
@@ -933,7 +949,7 @@ public final class SessionReviewView extends BorderPane {
 
     /** What {@link #impacts} was computed from: the diff, graph and scan by identity, the tour by value. */
     private record ImpactEntry(String scopeId, UnifiedDiff diff, ChangeGraph graph, OutOfDiffFanIn.Result fanIn,
-                               ReviewTour tour, Map<String, StepImpact> byStep) {
+                               ReviewTour tour, Map<String, StepImpact> byStep, Set<String> declaring) {
         boolean sameBoard(String otherScopeId, UnifiedDiff otherDiff, ChangeGraph otherGraph, ReviewTour otherTour) {
             return scopeId.equals(otherScopeId) && diff == otherDiff && graph == otherGraph && tour.equals(otherTour);
         }
@@ -1804,7 +1820,9 @@ public final class SessionReviewView extends BorderPane {
         // any of them.
         fanInByScope.remove(scopeId);
         graphBuilding.add(scopeId);
-        CompletableFuture.supplyAsync(() -> ChangeGraph.of(diff), SECTION_GRAPH_EXECUTOR)
+        graphFailureByScope.remove(scopeId);
+        Function<UnifiedDiff, ChangeGraph> builder = graphBuilder;
+        CompletableFuture.supplyAsync(() -> builder.apply(diff), SECTION_GRAPH_EXECUTOR)
                 .whenComplete((graph, failure) -> {
                     // Closed already: do not even queue FX work for it. A
                     // closed view still building a graph is common under a
@@ -1844,6 +1862,7 @@ public final class SessionReviewView extends BorderPane {
                             // later republish of this same diff instance as
                             // nothing new and never retry.
                             graphedDiffByScope.remove(scopeId);
+                            graphFailureByScope.put(scopeId, new GraphFailure(diff, UiErrors.message(failure)));
                             LOG.log(Level.WARNING, "Could not build a section graph for scope "
                                     + scopeId, failure);
                         }
@@ -3843,17 +3862,28 @@ public final class SessionReviewView extends BorderPane {
         Optional<ReviewScope> scope = selectedScope();
         Optional<UnifiedDiff> diff = loadedDiff();
         ChangeGraph graph = scope.map(each -> graphByScope.get(each.id())).orElse(null);
-        if (scope.isEmpty() || diff.isEmpty() || graph == null) {
-            return new StepPanel.ImpactView(step.impactNotes(), NO_IMPACT, Map.of(), true, Optional.empty());
+        if (scope.isEmpty() || diff.isEmpty()) {
+            return new StepPanel.ImpactView(step.impactNotes(), NO_IMPACT, Map.of(), true, Optional.empty(), true);
         }
         String scopeId = scope.get().id();
+        if (graph == null) {
+            GraphFailure failure = graphFailureByScope.get(scopeId);
+            if (failure != null && failure.diff() == diff.get() && !graphBuilding.contains(scopeId)) {
+                // No graph is coming for this diff: say why, never "Finding callers…" for good.
+                StepImpact unparsed = new StepImpact(List.of(), List.of(), List.of(), List.of(),
+                        Optional.of("the change could not be parsed: " + failure.reason()));
+                return new StepPanel.ImpactView(step.impactNotes(), unparsed, Map.of(), false, Optional.empty(),
+                        true);
+            }
+            return new StepPanel.ImpactView(step.impactNotes(), NO_IMPACT, Map.of(), true, Optional.empty(), true);
+        }
         OutOfDiffFanIn.Result fanIn = fanInByScope.getOrDefault(scopeId, CALLERS_PENDING);
         ImpactEntry entry = impacts;
         if (entry == null || !entry.computedFrom(scopeId, diff.get(), graph, fanIn, record.tour())) {
-            requestImpacts(new ImpactEntry(scopeId, diff.get(), graph, fanIn, record.tour(), Map.of()));
+            requestImpacts(new ImpactEntry(scopeId, diff.get(), graph, fanIn, record.tour(), Map.of(), Set.of()));
         }
         if (entry == null || !entry.sameBoard(scopeId, diff.get(), graph, record.tour())) {
-            return new StepPanel.ImpactView(step.impactNotes(), NO_IMPACT, Map.of(), true, Optional.empty());
+            return new StepPanel.ImpactView(step.impactNotes(), NO_IMPACT, Map.of(), true, Optional.empty(), true);
         }
         StepImpact measured = entry.byStep().getOrDefault(step.id(), NO_IMPACT);
         Optional<String> calleesUnavailable = navigation.isEmpty()
@@ -3870,7 +3900,7 @@ public final class SessionReviewView extends BorderPane {
             }
         }
         return new StepPanel.ImpactView(step.impactNotes(), measured, callees, entry.fanIn() == CALLERS_PENDING,
-                calleesUnavailable);
+                calleesUnavailable, entry.declaring().contains(step.id()));
     }
 
     /** Computes every step's impact for {@code key}'s inputs off the FX thread, unless that is already running. */
@@ -3884,12 +3914,21 @@ public final class SessionReviewView extends BorderPane {
         CompletableFuture
                 .supplyAsync(() -> {
                     Map<String, StepImpact> byStep = new HashMap<>();
+                    Set<String> declaring = new HashSet<>();
+                    AnchorIndex index = AnchorIndex.of(key.diff());
                     for (TourStep each : key.tour().steps()) {
                         byStep.put(each.id(), StepImpact.of(each, key.tour(), key.diff(), key.graph(), key.fanIn()));
+                        boolean declares = key.graph().declarationSites().stream()
+                                .anyMatch(site -> each.anchors().stream()
+                                        .anyMatch(anchor -> index.contains(anchor, site.file(), site.lineKey())));
+                        if (declares) {
+                            declaring.add(each.id());
+                        }
                     }
-                    return byStep;
+                    return new ImpactEntry(key.scopeId(), key.diff(), key.graph(), key.fanIn(), key.tour(),
+                            Map.copyOf(byStep), Set.copyOf(declaring));
                 }, SECTION_GRAPH_EXECUTOR)
-                .whenComplete((byStep, failure) -> {
+                .whenComplete((computedEntry, failure) -> {
                     if (closed) {
                         return;
                     }
@@ -3898,19 +3937,26 @@ public final class SessionReviewView extends BorderPane {
                             return;
                         }
                         impactsInFlight = null;
-                        Map<String, StepImpact> computed = byStep;
-                        if (failure != null) {
+                        if (failure == null) {
+                            impacts = computedEntry;
+                            renderTour(currentTour());
+                            return;
+                        }
+                        {
                             LOG.log(Level.WARNING, "Could not measure the tour's impact for scope "
                                     + key.scopeId(), failure);
                             StepImpact unmeasured = new StepImpact(List.of(), List.of(), List.of(), List.of(),
                                     Optional.of("the impact could not be measured: " + UiErrors.message(failure)));
-                            computed = new HashMap<>();
+                            Map<String, StepImpact> computed = new HashMap<>();
+                            Set<String> everyStep = new HashSet<>();
                             for (TourStep each : key.tour().steps()) {
                                 computed.put(each.id(), unmeasured);
+                                everyStep.add(each.id());
                             }
+                            // Unknown what each step declares: every one says why it is unmeasured.
+                            impacts = new ImpactEntry(key.scopeId(), key.diff(), key.graph(), key.fanIn(),
+                                    key.tour(), Map.copyOf(computed), Set.copyOf(everyStep));
                         }
-                        impacts = new ImpactEntry(key.scopeId(), key.diff(), key.graph(), key.fanIn(), key.tour(),
-                                Map.copyOf(computed));
                         renderTour(currentTour());
                     });
                 });
@@ -4732,7 +4778,15 @@ public final class SessionReviewView extends BorderPane {
 
         @Override
         public void openLocation(String file, int line) {
-            openLocationPeek(Path.of(file), line);
+            Path relativePath;
+            try {
+                relativePath = Path.of(file);
+            } catch (InvalidPathException e) {
+                // Agent-supplied text: say so rather than fail silently.
+                notice("Cannot open " + file + ": not a file path");
+                return;
+            }
+            openLocationPeek(relativePath, line);
         }
 
         @Override
@@ -4939,6 +4993,16 @@ public final class SessionReviewView extends BorderPane {
      */
     boolean diagGraphBuildPending(String scopeId) {
         return ReviewDiagFxThread.call(() -> graphBuilding.contains(scopeId));
+    }
+
+    /** Diagnostic-only: builds the next graphs with {@code builder} instead of {@link ChangeGraph#of}. */
+    void diagSetGraphBuilder(Function<UnifiedDiff, ChangeGraph> builder) {
+        graphBuilder = builder;
+    }
+
+    /** Diagnostic-only: the host the step panel acts through. */
+    StepPanel.Host diagStepHost() {
+        return stepHost;
     }
 
     /**

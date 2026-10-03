@@ -78,10 +78,14 @@ final class StepPanel extends VBox {
      * @param calleesUnavailable  why no callee can be resolved at all (no
      *                            checkout to search), instead of "resolving…"
      *                            forever
+     * @param declaresSymbols     whether the step's rows declare anything a
+     *                            caller could use; false omits the callers
+     *                            and the signature flags, there being nobody
+     *                            to find
      */
     record ImpactView(List<ImpactNote> claimed, StepImpact measured,
                       Map<String, Optional<UsageProvider.Usage>> callees, boolean pending,
-                      Optional<String> calleesUnavailable) {
+                      Optional<String> calleesUnavailable, boolean declaresSymbols) {
         ImpactView {
             claimed = List.copyOf(claimed);
             callees = Map.copyOf(callees);
@@ -220,7 +224,9 @@ final class StepPanel extends VBox {
                         note.file(), note.line(), "step-impact-note"));
             }
         }
-        if (view.pending()) {
+        if (!view.declaresSymbols()) {
+            // Nothing declared, so no callers to find and no signature to flag.
+        } else if (view.pending()) {
             impactSection.getChildren().add(impactLabel("Finding callers…", "step-impact-pending"));
         } else if (measured.unavailableReason().isPresent()) {
             impactSection.getChildren().add(impactLabel("callers unavailable: " + measured.unavailableReason().get(),
