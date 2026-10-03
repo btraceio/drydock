@@ -1014,12 +1014,13 @@ public final class DrydockApplication extends Application {
                 // (Explorer delta, part 1). They fall through to the session
                 // tabs at the trail's ends and everywhere else, so the older
                 // meaning is only shadowed while it would be ambiguous.
-                if (!mainWorkspace.navigateExplorerTrail(-1)) {
+                // The Review tour's trail likewise, with the same fall-through.
+                if (!mainWorkspace.navigateExplorerTrail(-1) && !mainWorkspace.navigateReviewTrail(-1)) {
                     mainWorkspace.selectPreviousSessionTab();
                 }
                 event.consume();
             } else if (cmd && event.getCode() == KeyCode.CLOSE_BRACKET) {
-                if (!mainWorkspace.navigateExplorerTrail(1)) {
+                if (!mainWorkspace.navigateExplorerTrail(1) && !mainWorkspace.navigateReviewTrail(1)) {
                     mainWorkspace.selectNextSessionTab();
                 }
                 event.consume();

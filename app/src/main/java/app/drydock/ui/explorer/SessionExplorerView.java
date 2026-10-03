@@ -3,7 +3,6 @@ package app.drydock.ui.explorer;
 import app.drydock.ui.nav.ExplorerTrailStore;
 import app.drydock.ui.nav.NavigationTrail;
 import app.drydock.ui.nav.SearchRail;
-import app.drydock.ui.nav.SymbolPeek;
 import app.drydock.ui.nav.SymbolPeekService;
 import app.drydock.search.SessionSearchService;
 import javafx.animation.KeyFrame;
@@ -96,34 +95,12 @@ public final class SessionExplorerView extends HBox {
             if (sendPrompt == null) {
                 return;
             }
-            sendPrompt.accept(askPrompt(peek));
+            sendPrompt.accept(peek.askPrompt());
             // The session's terminal is hidden behind the Explorer, so
             // without this the question looks like it went nowhere.
             viewer.toast("Asked the session about " + peek.symbol()
                     + " — the answer is in the agent view");
         });
-    }
-
-    /**
-     * The question the peek's {@code a} sends: the symbol, where it is
-     * declared, and every call site -- the same context the reader has in
-     * front of them, on one line because {@code sendPrompt} submits at the
-     * first newline.
-     */
-    static String askPrompt(SymbolPeek peek) {
-        StringBuilder prompt = new StringBuilder("In ")
-                .append(peek.relativePath()).append(" line ").append(peek.startLine())
-                .append(", explain ").append(peek.symbol()).append(". Occurrences: ");
-        int shown = 0;
-        for (SymbolPeek.Occurrence occurrence : peek.occurrences()) {
-            if (shown++ == 12) {
-                prompt.append("… (").append(peek.occurrences().size() - 12).append(" more)");
-                break;
-            }
-            prompt.append(occurrence.relativePath()).append(':').append(occurrence.line())
-                    .append(occurrence.inDiff() ? " (in diff)" : "").append("; ");
-        }
-        return prompt.toString().strip();
     }
 
     /**

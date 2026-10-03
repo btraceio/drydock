@@ -69,9 +69,11 @@ import app.drydock.ui.explorer.DiffOverlay;
 import app.drydock.ui.explorer.ExplorerFinding;
 import app.drydock.ui.explorer.SessionExplorerView;
 import app.drydock.ui.review.ReviewSubmitSheet;
+import app.drydock.ui.review.ReviewNavigation;
 import app.drydock.ui.review.SessionReviewView;
 import app.drydock.ui.model.WorkspaceViewModel;
 import app.drydock.ui.nav.ExplorerTrailStore;
+import app.drydock.ui.nav.SymbolPeek;
 import app.drydock.terminal.TerminalFactory;
 import app.drydock.terminal.api.TerminalHostView;
 import app.drydock.terminal.api.TerminalRuntime;
@@ -1885,7 +1887,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             KeyCode.D, KeyCode.C, KeyCode.M, KeyCode.I, KeyCode.BACK_SLASH,
             KeyCode.OPEN_BRACKET, KeyCode.CLOSE_BRACKET, KeyCode.N, KeyCode.A, KeyCode.R,
             KeyCode.U, KeyCode.F, KeyCode.V, KeyCode.DIGIT1, KeyCode.DIGIT2, KeyCode.DIGIT3,
-            KeyCode.DIGIT4);
+            KeyCode.DIGIT4, KeyCode.B, KeyCode.PERIOD, KeyCode.COMMA);
 
     /**
      * The pure logic behind {@link #reviewKeyboardBackstop(KeyEvent)},
@@ -1943,6 +1945,15 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      */
     public boolean navigateExplorerTrail(int direction) {
         return currentlySelected().map(open -> open.navigateExplorerTrail(direction)).orElse(false);
+    }
+
+    /**
+     * {@code ⌘[} / {@code ⌘]} while Review is showing: a step along the
+     * tour's trail, with the same fall-through to session tabs at its ends
+     * as {@link #navigateExplorerTrail}.
+     */
+    public boolean navigateReviewTrail(int direction) {
+        return currentlySelected().map(open -> open.navigateReviewTrail(direction)).orElse(false);
     }
 
     /**
@@ -2412,6 +2423,31 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         @Override
         public void updateTour(ReviewScope scope, UnaryOperator<TourRecord> transform) {
             tourStore.mutate(scope.id(), transform);
+        }
+
+        @Override
+        public Optional<ReviewNavigation> navigation(ReviewScope scope) {
+            // The Explorer's own conditions: a local checkout to read, and an
+            // open session whose id keys the trail. A remote session has no
+            // Explorer, and so no search to peek with.
+            if (!scope.diffable() || explorerTrailStore == null || searchService == null) {
+                return Optional.empty();
+            }
+            return scope.sessionId()
+                    .filter(id -> openTabs.containsKey(id) && !openTabs.get(id).isRemote())
+                    .map(id -> new ReviewNavigation(scope.diffRoot(), searchService, explorerTrailStore,
+                            id.value().toString()));
+        }
+
+        /** The Explorer's peek question ({@link SymbolPeek#askPrompt}), sent to the scope's own session. */
+        @Override
+        public boolean askAgentAboutPeek(ReviewScope scope, SymbolPeek peek) {
+            OpenSessionTab open = scope.sessionId().map(openTabs::get).orElse(null);
+            if (open == null || open.isProcessExited()) {
+                return false;
+            }
+            open.sendPrompt(peek.askPrompt());
+            return true;
         }
 
         /**

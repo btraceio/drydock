@@ -56,6 +56,29 @@ public record SymbolPeek(
         return String.join("\n", lines);
     }
 
+    /**
+     * The question a peek's {@code a} sends to the bound session: the
+     * symbol, where it is declared, and every call site -- the same context
+     * the reader has in front of them, on one line because a session's
+     * {@code sendPrompt} submits at the first newline. Shared by the
+     * Explorer and the Review tour so both ask the same thing.
+     */
+    public String askPrompt() {
+        StringBuilder prompt = new StringBuilder("In ")
+                .append(relativePath).append(" line ").append(startLine)
+                .append(", explain ").append(symbol).append(". Occurrences: ");
+        int shown = 0;
+        for (Occurrence occurrence : occurrences) {
+            if (shown++ == 12) {
+                prompt.append("… (").append(occurrences.size() - 12).append(" more)");
+                break;
+            }
+            prompt.append(occurrence.relativePath()).append(':').append(occurrence.line())
+                    .append(occurrence.inDiff() ? " (in diff)" : "").append("; ");
+        }
+        return prompt.toString().strip();
+    }
+
     /** Occurrences on lines the current diff scope changed. */
     public long inDiffCount() {
         return occurrences.stream().filter(Occurrence::inDiff).count();

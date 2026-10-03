@@ -36,6 +36,13 @@ import app.drydock.review.tour.TourFindings;
 import app.drydock.review.tour.TourRecord;
 import app.drydock.review.tour.TourCheck;
 import app.drydock.review.tour.TourStep;
+import app.drydock.ui.nav.ExplorerTrailStore;
+import app.drydock.ui.nav.NavigationTrail;
+import app.drydock.ui.nav.PeekLayer;
+import app.drydock.ui.nav.SearchRail;
+import app.drydock.ui.nav.SymbolPeek;
+import app.drydock.ui.nav.SymbolPeekService;
+import app.drydock.ui.nav.TrailBar;
 
 import javafx.animation.PauseTransition;
 import javafx.application.Platform;
@@ -52,6 +59,7 @@ import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
+import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
 import javafx.util.Duration;
 
@@ -67,6 +75,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
@@ -401,6 +410,22 @@ public final class SessionReviewView extends BorderPane {
          * are written, so a derivation that changed nothing writes nothing.
          */
         void applyTourVerdicts(ReviewScope scope, Map<String, Optional<ReviewVerdict.Decision>> byDigest);
+
+        /**
+         * What the tour navigates with (spec §5): the checkout peeks and
+         * search read, and where the session's trail persists. Empty when
+         * {@code scope} has no local checkout or no session -- the column
+         * then keeps its diff-local symbol lens and the trail stays in
+         * memory.
+         */
+        Optional<ReviewNavigation> navigation(ReviewScope scope);
+
+        /**
+         * A peek's {@code a}: asks the session bound to {@code scope} about
+         * {@code peek}, as the Explorer's peek does. False when there is no
+         * running session to ask.
+         */
+        boolean askAgentAboutPeek(ReviewScope scope, SymbolPeek peek);
     }
 
     /**
@@ -786,6 +811,36 @@ public final class SessionReviewView extends BorderPane {
 
     private final TourOutline outline = new TourOutline();
     private final StepPanel stepPanel = new StepPanel(new StepHost());
+
+    /**
+     * Peek cards over the diff column (spec §5). {@link #bodyFor} hands out
+     * {@link #diffStack} wherever it used to hand out the column, so the
+     * layer always sits over it.
+     */
+    private final PeekLayer peekLayer = new PeekLayer();
+    private final StackPane diffStack = new StackPane();
+
+    /**
+     * The session's trail: step changes, promoted peeks and search results
+     * add waypoints, plain peeks never do. Persisted under {@link
+     * ExplorerTrailStore#reviewKey} while a {@link ReviewNavigation} is
+     * available; otherwise kept in memory for the scope.
+     */
+    private final NavigationTrail trail = new NavigationTrail();
+    private final TrailBar trailBar = new TrailBar();
+
+    /** The store key {@link #trail} was restored from; a change of key restores another trail. */
+    private String trailKey;
+
+    private Optional<ReviewNavigation> navigation = Optional.empty();
+
+    /** The outline's Search tab; null while there is no navigation to search with. */
+    private SearchRail searchRail;
+    private Path searchRailRoot;
+
+    /** Which of the current step's anchors {@code .} / {@code ,} last revealed. */
+    private int anchorIndex;
+
     private final RiskCheckQueue riskQueue = new RiskCheckQueue(new RiskDispatcher());
     private ReviewMode mode = ReviewMode.DIFF;
 
@@ -877,6 +932,7 @@ public final class SessionReviewView extends BorderPane {
             renderTour(currentTour());
         });
         tourWait.setOnFinished(event -> onTourWaitExpired());
+        installNavigation();
 
         margin.setOnToggleCollapse(() -> setMarginCollapsed(!margin.collapsed()));
         intentRail.setOnToggleCollapse(() -> setIntentsCollapsed(!intentRail.collapsed()));
@@ -1047,6 +1103,9 @@ public final class SessionReviewView extends BorderPane {
         // The verdict bar goes last, so even with the activity panel open it
         // is still the bottom-most thing and still always present.
         centre.getChildren().add(verdictBar);
+        // The trail goes below even the verdict bar, in both modes, as the
+        // Explorer's does below its viewer.
+        centre.getChildren().add(trailBar);
         centre.getStyleClass().add("review-centre");
         return centre;
     }
@@ -1174,6 +1233,7 @@ public final class SessionReviewView extends BorderPane {
         currentStepId = null;
         userChoseMode = false;
         filesWithoutChangesAcknowledged = false;
+        bindNavigation(scope);
         // The cursor is reset BEFORE the body is built, which the destination
         // did the other way round: a cached diff publishes Loaded
         // synchronously from inside bodyFor, and the diff-resolved handler
@@ -1220,7 +1280,7 @@ public final class SessionReviewView extends BorderPane {
         if (supplied.isPresent()) {
             return supplied.get();
         }
-        VBox.setVgrow(diffColumn, Priority.ALWAYS);
+        VBox.setVgrow(diffStack, Priority.ALWAYS);
         // Checked before diffability: a diff already in hand is renderable
         // whether or not git could be run for it again.
         if (outcomeByScope.get(scope.id()) instanceof DiffOutcome.Loaded loaded) {
@@ -1236,14 +1296,14 @@ public final class SessionReviewView extends BorderPane {
             // screen to say so.
             diffColumn.setIntent(null);
             diffColumn.showDiff(scope, loaded.diff());
-            return diffColumn;
+            return diffStack;
         }
         if (!scope.diffable()) {
             return placeholder("No checkout to diff",
                     "This scope has no working copy, so there is nothing to read here.", "");
         }
         diffColumn.setScope(scope);
-        return diffColumn;
+        return diffStack;
     }
 
     /** The header's glyph, keyed to the scope kind exactly as the queue's was (spec §4.1). */
@@ -3387,6 +3447,25 @@ public final class SessionReviewView extends BorderPane {
                 || event.getTarget() instanceof TextInputControl) {
             return false;
         }
+        // An open peek owns these three, ahead of every other binding: u is
+        // its usages, not undo; Enter opens it for real, not Submit.
+        if (peekLayer.isOpen()) {
+            switch (event.getCode()) {
+                case ENTER -> {
+                    peekLayer.promoteTop();
+                    return true;
+                }
+                case U -> {
+                    peekLayer.toggleUsages();
+                    return true;
+                }
+                case A -> {
+                    peekLayer.askTop();
+                    return true;
+                }
+                default -> { }
+            }
+        }
         if (handleTourShortcut(event)) {
             return true;
         }
@@ -3440,11 +3519,15 @@ public final class SessionReviewView extends BorderPane {
     }
 
     /**
-     * Escape's unwind, topmost-first (spec §5): the symbol-lens popover, the
-     * gutter composer, then the MCP activity panel. Returns whether something
-     * was closed, so the scene filter knows whether to keep unwinding.
+     * Escape's unwind, topmost-first (spec §5): one peek card, the
+     * symbol-lens popover, the gutter composer, then the MCP activity panel.
+     * Returns whether something was closed, so the scene filter knows
+     * whether to keep unwinding.
      */
     public boolean unwindOne() {
+        if (peekLayer.popOne()) {
+            return true;
+        }
         if (diffColumn.lensOpen()) {
             diffColumn.hideLens();
             return true;
@@ -3607,6 +3690,12 @@ public final class SessionReviewView extends BorderPane {
         TourRecord record = tour.get();
         if (currentStepId == null || record.tour().step(currentStepId).isEmpty()) {
             currentStepId = firstUnsettled(record).orElse(record.tour().steps().getFirst().id());
+            anchorIndex = 0;
+            // The first step shown starts an empty trail, so walking back
+            // from the next one has somewhere to land.
+            if (trail.isEmpty()) {
+                pushStepWaypoint(record, record.tour().step(currentStepId).orElseThrow());
+            }
         }
         List<TourOutline.Row> rows = record.tour().steps().stream()
                 .map(step -> new TourOutline.Row(step.id(), record.tour().number(step.id()), step.title(),
@@ -3796,6 +3885,27 @@ public final class SessionReviewView extends BorderPane {
             case F -> {
                 return event.isShiftDown();
             }
+            case D -> {
+                // ⇧D is the search rail's scope here; plain d stays density.
+                if (event.isShiftDown()) {
+                    if (searchRail != null) {
+                        searchRail.toggleScope();
+                    }
+                    return true;
+                }
+            }
+            case B -> {
+                backToStep();
+                return true;
+            }
+            case PERIOD -> {
+                moveAnchor(1);
+                return true;
+            }
+            case COMMA -> {
+                moveAnchor(-1);
+                return true;
+            }
             default -> { }
         }
         int digit = switch (event.getCode()) {
@@ -3884,12 +3994,26 @@ public final class SessionReviewView extends BorderPane {
     }
 
     private void selectStep(String stepId) {
+        showStep(stepId, true);
+    }
+
+    /**
+     * Makes {@code stepId} current and reveals its first anchor. {@code
+     * pushWaypoint} is false only when the trail itself is the one moving
+     * -- a walk along it must not add to it.
+     */
+    private void showStep(String stepId, boolean pushWaypoint) {
         Optional<TourRecord> tour = currentTour();
         Optional<TourStep> step = tour.flatMap(record -> record.tour().step(stepId));
         if (step.isEmpty()) {
             return;
         }
         currentStepId = stepId;
+        anchorIndex = 0;
+        stepPanel.hideBackPill();
+        if (pushWaypoint) {
+            pushStepWaypoint(tour.get(), step.get());
+        }
         renderTour(tour);
         revealAnchor(step.get(), 0);
     }
@@ -3904,6 +4028,320 @@ public final class SessionReviewView extends BorderPane {
         if (anchorIndex >= 0 && anchorIndex < step.anchors().size()) {
             TourAnchor anchor = step.anchors().get(anchorIndex);
             diffColumn.revealLine(anchor.file(), anchor.startKey());
+        }
+    }
+
+    // ---- navigation: peek, trail, search (spec §5) ---------------------------
+
+    private void installNavigation() {
+        diffStack.getChildren().setAll(diffColumn, peekLayer);
+        peekLayer.setOnPromote(this::promotePeek);
+        peekLayer.setOnAsk(this::askAboutPeek);
+        peekLayer.setOnStackFull(() -> stepPanel.showTransient("Peek stack is full — esc to unwind"));
+        // Absent, not greyed, on a scope no session is bound to (delta hard rules).
+        peekLayer.setAgentAvailable(() -> selectedScope().flatMap(ReviewScope::sessionId).isPresent());
+        diffColumn.setSymbolClickHandler(this::peekAtSymbol);
+        trailBar.setOnStep(direction -> navigateTrail(direction));
+        trailBar.setOnGoTo(index -> trail.goTo(index).ifPresent(waypoint -> {
+            openWaypoint(waypoint);
+            trailChanged();
+        }));
+        trailBar.setOnTogglePin(() -> {
+            trail.togglePin();
+            trailChanged();
+        });
+        trailBar.render(trail);
+    }
+
+    /**
+     * Binds the incoming scope's navigation: its trail (restored once per
+     * store key, so flipping between a session's two chips keeps the trail
+     * in hand) and the outline's Search tab.
+     */
+    private void bindNavigation(ReviewScope scope) {
+        peekLayer.clear();
+        stepPanel.hideBackPill();
+        anchorIndex = 0;
+        navigation = host.navigation(scope);
+        String key = navigation.map(nav -> ExplorerTrailStore.reviewKey(nav.sessionKey()))
+                .orElse("scope:" + scope.id());
+        if (!key.equals(trailKey)) {
+            trailKey = key;
+            // load() reads the store's in-memory map; the file was read when the store opened.
+            ExplorerTrailStore.Trail restored = navigation.map(nav -> nav.trails().load(key))
+                    .orElse(ExplorerTrailStore.Trail.EMPTY);
+            trail.restore(restored.waypoints(), restored.cursor());
+            trailBar.render(trail);
+        }
+        if (navigation.isEmpty()) {
+            searchRail = null;
+            searchRailRoot = null;
+            outline.showSearchTab(false);
+            return;
+        }
+        ReviewNavigation nav = navigation.get();
+        if (searchRail == null || !nav.root().equals(searchRailRoot)) {
+            searchRail = new SearchRail(nav.root(), nav.search(), this::openSearchResult);
+            searchRail.setDiffFileTest(relativePath -> loadedDiff()
+                    .map(diff -> diff.files().stream().anyMatch(file -> Path.of(file.path()).equals(relativePath)))
+                    .orElse(false));
+            searchRail.setChangedLines(this::changedLinesOfReviewDiff);
+            searchRailRoot = nav.root();
+            outline.setSearchContent(searchRail);
+        }
+        outline.showSearchTab(true);
+    }
+
+    /**
+     * {@code ⌘[} / {@code ⌘]} (and the trail bar's ‹ ›): one step along the
+     * trail. False at its ends, so the global shortcut falls through to
+     * session-tab switching exactly as it does from the Explorer.
+     */
+    public boolean navigateTrail(int direction) {
+        Optional<NavigationTrail.Waypoint> target = direction < 0 ? trail.back() : trail.forward();
+        target.ifPresent(this::openWaypoint);
+        if (target.isPresent()) {
+            trailChanged();
+        }
+        return target.isPresent();
+    }
+
+    /**
+     * Returns to a waypoint without adding one: a "Step N" waypoint selects
+     * that step; any other reveals its row when the column shows its file,
+     * or opens a location peek when it does not.
+     */
+    private void openWaypoint(NavigationTrail.Waypoint waypoint) {
+        peekLayer.clear();
+        Optional<TourStep> step = stepOfWaypoint(waypoint);
+        String file = diffPath(waypoint.file());
+        String key = waypoint.lineKey().orElse("n" + waypoint.line());
+        if (step.isPresent()) {
+            showStep(step.get().id(), false);
+            if (inRenderedDiff(file)) {
+                diffColumn.revealLine(file, key);
+            }
+            return;
+        }
+        if (inRenderedDiff(file)) {
+            diffColumn.revealLine(file, key);
+        } else {
+            openLocationPeek(waypoint.file(), waypoint.line());
+        }
+        leftStep();
+    }
+
+    private Optional<TourStep> stepOfWaypoint(NavigationTrail.Waypoint waypoint) {
+        if (!waypoint.label().startsWith("Step ")) {
+            return Optional.empty();
+        }
+        int number;
+        try {
+            number = Integer.parseInt(waypoint.label().substring("Step ".length()).strip());
+        } catch (NumberFormatException e) {
+            return Optional.empty();
+        }
+        return currentTour().map(record -> record.tour().steps())
+                .filter(steps -> number >= 1 && number <= steps.size())
+                .map(steps -> steps.get(number - 1));
+    }
+
+    private void pushStepWaypoint(TourRecord record, TourStep step) {
+        if (step.anchors().isEmpty()) {
+            return;
+        }
+        TourAnchor anchor = step.anchors().getFirst();
+        pushWaypoint(Path.of(anchor.file()), "Step " + record.tour().number(step.id()), lineOf(anchor.startKey()),
+                Optional.of(anchor.startKey()));
+    }
+
+    private void pushWaypoint(Path file, String label, int line, Optional<String> lineKey) {
+        trail.push(file, label, line, lineKey);
+        trailChanged();
+    }
+
+    /** Repaints the trail bar and saves the trail, after every change to it. */
+    private void trailChanged() {
+        trailBar.render(trail);
+        navigation.ifPresent(nav -> nav.trails().save(trailKey,
+                new ExplorerTrailStore.Trail(trail.waypoints(), trail.cursor())));
+    }
+
+    /** {@code n12} / {@code o12} -> 12; the waypoint's file line, a fallback to its key. */
+    private static int lineOf(String lineKey) {
+        try {
+            return Integer.parseInt(lineKey.substring(1));
+        } catch (NumberFormatException | IndexOutOfBoundsException e) {
+            return 1;
+        }
+    }
+
+    /** A relative path as the diff names its files: forward slashes. */
+    private static String diffPath(Path relativePath) {
+        return relativePath.toString().replace('\\', '/');
+    }
+
+    /** Whether the column's rendered diff (whole files in tour mode) has {@code file}. */
+    private boolean inRenderedDiff(String file) {
+        UnifiedDiff rendered = diffColumn.renderedDiff();
+        return rendered != null && rendered.files().stream().anyMatch(candidate -> candidate.path().equals(file));
+    }
+
+    /**
+     * Reveals {@code relativePath:line} and adds a waypoint for it when the
+     * column shows that file. False when it does not, for the caller to
+     * fall back on.
+     */
+    private boolean revealAndPush(Path relativePath, int line) {
+        String file = diffPath(relativePath);
+        if (!inRenderedDiff(file)) {
+            return false;
+        }
+        String key = "n" + line;
+        diffColumn.revealLine(file, key);
+        Path name = relativePath.getFileName();
+        pushWaypoint(relativePath, name == null ? file : name.toString(), line, Optional.of(key));
+        leftStep();
+        return true;
+    }
+
+    /**
+     * Shows the "↩ back to step N" pill. Shown after a navigation that
+     * leaves the step rather than by measuring which rows the virtualized
+     * list has on screen, which it does not report reliably.
+     */
+    private void leftStep() {
+        if (mode != ReviewMode.TOUR || currentStepId == null) {
+            return;
+        }
+        currentTour().ifPresent(record -> stepPanel.showBackPill(record.tour().number(currentStepId)));
+    }
+
+    /** {@code b}: the current step's first anchor, and the pill goes. */
+    private void backToStep() {
+        currentTour().flatMap(record -> record.tour().step(currentStepId)).ifPresent(step -> {
+            anchorIndex = 0;
+            stepPanel.hideBackPill();
+            revealAnchor(step, 0);
+        });
+    }
+
+    /** {@code .} / {@code ,}: the next / previous anchor of the current step, wrapping. */
+    private void moveAnchor(int delta) {
+        currentTour().flatMap(record -> record.tour().step(currentStepId)).ifPresent(step -> {
+            int count = step.anchors().size();
+            if (count == 0) {
+                return;
+            }
+            anchorIndex = Math.floorMod(anchorIndex + delta, count);
+            stepPanel.hideBackPill();
+            revealAnchor(step, anchorIndex);
+        });
+    }
+
+    /** The new-side line numbers of each review-diff file's ADD rows, keyed by relative path. */
+    private Map<Path, Set<Integer>> changedLinesOfReviewDiff() {
+        Map<Path, Set<Integer>> changed = new HashMap<>();
+        loadedDiff().ifPresent(diff -> {
+            for (UnifiedDiff.FileDiff file : diff.files()) {
+                Set<Integer> lines = new HashSet<>();
+                for (UnifiedDiff.Hunk hunk : file.hunks()) {
+                    for (UnifiedDiff.Line line : hunk.lines()) {
+                        if (line.kind() == UnifiedDiff.Line.Kind.ADD && line.newLine().isPresent()) {
+                            lines.add(line.newLine().getAsInt());
+                        }
+                    }
+                }
+                if (!lines.isEmpty()) {
+                    changed.put(Path.of(file.path()), lines);
+                }
+            }
+        });
+        return changed;
+    }
+
+    /**
+     * A click on an underlined symbol in tour mode: a peek card over the
+     * column, resolved off the FX thread. False (the diff-local lens opens
+     * instead) in the hunk diff and wherever there is nothing to search.
+     */
+    private boolean peekAtSymbol(String symbol) {
+        if (mode != ReviewMode.TOUR || navigation.isEmpty()) {
+            return false;
+        }
+        ReviewNavigation nav = navigation.get();
+        pushPeekWhenReady(new SymbolPeekService(nav.root(), nav.search()).peek(symbol, changedLinesOfReviewDiff()),
+                "Looking for " + symbol + "…", "Nothing found for " + symbol, "Could not search for " + symbol);
+        return true;
+    }
+
+    /** A peek at a file the column does not show: a waypoint's, or a search result's. */
+    private void openLocationPeek(Path relativePath, int line) {
+        navigation.ifPresent(nav -> pushPeekWhenReady(
+                new SymbolPeekService(nav.root(), nav.search()).peekAt(relativePath, line),
+                "Opening " + relativePath + "…", "Could not read " + relativePath,
+                "Could not read " + relativePath));
+    }
+
+    /**
+     * Shows {@code progress} at once, then pushes the peek when it lands --
+     * unless the board was closed or moved to another scope meanwhile, where
+     * a card would sit over code it has nothing to do with.
+     */
+    private void pushPeekWhenReady(CompletableFuture<Optional<SymbolPeek>> pending, String progress,
+                                   String missing, String failed) {
+        if (peekLayer.depth() >= PeekLayer.MAX_DEPTH) {
+            stepPanel.showTransient("Peek stack is full — esc to unwind");
+            return;
+        }
+        stepPanel.showTransient(progress);
+        Optional<String> scopeId = selectedScope().map(ReviewScope::id);
+        pending.whenComplete((peek, failure) -> Platform.runLater(() -> {
+            if (closed) {
+                return;
+            }
+            // The progress line goes on every path, a stale one included.
+            stepPanel.clearTransient();
+            if (!scopeId.equals(selectedScope().map(ReviewScope::id))) {
+                return;
+            }
+            if (failure != null) {
+                LOG.log(Level.WARNING, failed, failure);
+                stepPanel.showTransient(failed);
+                return;
+            }
+            peek.ifPresentOrElse(peekLayer::push, () -> stepPanel.showTransient(missing));
+        }));
+    }
+
+    /**
+     * A peek's {@code ⏎}: in the column when it shows the file (a waypoint
+     * and the pill), otherwise in the session's Explorer.
+     */
+    private void promotePeek(SymbolPeek peek) {
+        peekLayer.clear();
+        if (revealAndPush(peek.relativePath(), peek.startLine())) {
+            return;
+        }
+        selectedScope().ifPresent(scope -> {
+            if (!host.openInExplorer(scope, peek.relativePath(), peek.startLine())) {
+                stepPanel.showTransient("No Explorer to open " + peek.relativePath() + " in");
+            }
+        });
+    }
+
+    private void askAboutPeek(SymbolPeek peek) {
+        selectedScope().ifPresent(scope -> stepPanel.showTransient(host.askAgentAboutPeek(scope, peek)
+                ? "Asked the session about " + peek.symbol() + " — the answer is in the agent view"
+                : "No running session to ask about " + peek.symbol()));
+    }
+
+    /** The Search tab's opener: in the column (with a waypoint) when it shows the file, else a location peek. */
+    private void openSearchResult(Path file, Path relativePath, OptionalInt line, String highlightQuery) {
+        int target = line.orElse(1);
+        peekLayer.clear();
+        if (!revealAndPush(relativePath, target)) {
+            openLocationPeek(relativePath, target);
         }
     }
 
@@ -4021,9 +4459,17 @@ public final class SessionReviewView extends BorderPane {
         }
 
         @Override
-        public void goToAnchor(int anchorIndex) {
-            currentTour().flatMap(record -> record.tour().step(currentStepId))
-                    .ifPresent(step -> revealAnchor(step, anchorIndex));
+        public void goToAnchor(int index) {
+            currentTour().flatMap(record -> record.tour().step(currentStepId)).ifPresent(step -> {
+                anchorIndex = index;
+                stepPanel.hideBackPill();
+                revealAnchor(step, index);
+            });
+        }
+
+        @Override
+        public void backToStep() {
+            SessionReviewView.this.backToStep();
         }
 
         @Override
@@ -4329,6 +4775,31 @@ public final class SessionReviewView extends BorderPane {
     /** Diagnostic-only: which surface the board shows. Call on the FX thread. */
     ReviewMode diagMode() {
         return mode;
+    }
+
+    /** Test-only: opens {@code peek} over the diff column as a resolved symbol click would. */
+    public void diagPushPeek(SymbolPeek peek) {
+        peekLayer.push(peek);
+    }
+
+    /** Diagnostic-only: whether a peek card is open. Call on the FX thread. */
+    public boolean diagPeekOpen() {
+        return peekLayer.isOpen();
+    }
+
+    /** Diagnostic-only: the trail's waypoints, oldest first. Call on the FX thread. */
+    public List<NavigationTrail.Waypoint> diagTrail() {
+        return trail.waypoints();
+    }
+
+    /** Diagnostic-only: which of the current step's anchors was last revealed. */
+    int diagAnchorIndex() {
+        return anchorIndex;
+    }
+
+    /** Diagnostic-only: whether the "↩ back to step" pill shows. */
+    boolean diagBackPillShown() {
+        return stepPanel.backPillShown();
     }
 
     /** Diagnostic-only: the step the tour is on, or null. Call on the FX thread. */

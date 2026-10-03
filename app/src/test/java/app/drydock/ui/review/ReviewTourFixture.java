@@ -80,7 +80,7 @@ abstract class ReviewTourFixture extends ApplicationTest {
         scope = registry.mint(ReviewScopeRegistry.spec(ReviewScope.Kind.WORKING_TREE,
                 Path.of("/tmp/nowhere"), Optional.of(Path.of("/tmp/nowhere")), "main", "main",
                 Optional.empty(), Optional.empty()));
-        host.tours.put(TourRecord.fresh(tour(scope.id(), host.diff), host.diff));
+        host.tours.put(TourRecord.fresh(tourFor(scope.id(), host.diff), host.diff));
         interact(() -> view.showScopes(new SessionReviewScopes.Scopes(scope, Optional.empty()),
                 SessionReviewScopes.Choice.LOCAL));
         interact(() -> view.diagShowDiff(scope, host.diff));
@@ -136,6 +136,11 @@ abstract class ReviewTourFixture extends ApplicationTest {
         }
     }
 
+    /** The tour each test starts on; a subclass may swap in a variant of {@link #tour}. */
+    ReviewTour tourFor(String scopeId, UnifiedDiff diff) {
+        return tour(scopeId, diff);
+    }
+
     /** The fixture's two-step tour for {@code scopeId}, as a NEW instance each call. */
     static ReviewTour tour(String scopeId, UnifiedDiff diff) {
         return new ReviewTour(scopeId, TourFingerprint.of(diff), List.of(
@@ -145,7 +150,7 @@ abstract class ReviewTourFixture extends ApplicationTest {
                         List.of(new TourAnchor(FILE_B, "n1", "n1")), List.of(), List.of(predict("c2")))));
     }
 
-    private static TourCheck predict(String id) {
+    static TourCheck predict(String id) {
         TourCheck alternate = new TourCheck(id + "_alt", TourCheck.Kind.PREDICT, "Alternate?",
                 List.of(choice("yes"), choice("no")), OptionalInt.of(1), "Because.", List.of());
         return new TourCheck(id, TourCheck.Kind.PREDICT, "What happens?",

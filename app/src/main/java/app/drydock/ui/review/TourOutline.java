@@ -181,7 +181,9 @@ final class TourOutline extends VBox {
         onAcknowledge = action;
     }
 
+    /** The Search tab's content -- the shared search rail -- grown to the tab's full height. */
     void setSearchContent(Node content) {
+        VBox.setVgrow(content, Priority.ALWAYS);
         searchPane.getChildren().setAll(content);
     }
 

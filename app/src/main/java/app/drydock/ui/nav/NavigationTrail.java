@@ -99,10 +99,10 @@ public final class NavigationTrail {
     /**
      * Appends a waypoint for a real navigation and makes it current.
      *
-     * <p>Re-opening the file the cursor is already on is a no-op except for
-     * the remembered line: without that, clicking the same rail row twice
-     * would grow a trail of identical chips, and returning along it would
-     * step through the same file over and over.</p>
+     * <p>Re-opening the file the cursor is already on, under the same label,
+     * is a no-op except for the remembered line: without that, clicking the
+     * same rail row twice would grow a trail of identical chips, and
+     * returning along it would step through the same file over and over.</p>
      *
      * @return true when the trail actually gained a waypoint
      */
@@ -117,7 +117,11 @@ public final class NavigationTrail {
      */
     public boolean push(Path file, String label, int line, Optional<String> lineKey) {
         Objects.requireNonNull(file, "file");
-        if (cursor >= 0 && waypoints.get(cursor).file().equals(file)) {
+        // Same file AND same label: the Explorer labels a waypoint by its
+        // file name, so for it this is "same file"; the Review tour labels
+        // by step, and two steps in one file are two places to come back to.
+        if (cursor >= 0 && waypoints.get(cursor).file().equals(file)
+                && waypoints.get(cursor).label().equals(label)) {
             waypoints.set(cursor, waypoints.get(cursor).withLine(line, lineKey));
             return false;
         }

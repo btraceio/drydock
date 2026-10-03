@@ -15,6 +15,7 @@ import app.drydock.review.Severity;
 import app.drydock.review.Triage;
 import app.drydock.review.tour.TourRecord;
 import app.drydock.review.tour.TourStore;
+import app.drydock.ui.nav.SymbolPeek;
 import javafx.scene.layout.Region;
 
 import java.nio.file.Path;
@@ -366,5 +367,15 @@ final class FakeReviewHost implements SessionReviewView.Host {
                             Optional.empty(), Instant.now(), baseCommit, headCommit)),
                     () -> store.clearVerdict(scope.id(), digest));
         });
+    }
+
+    @Override
+    public Optional<ReviewNavigation> navigation(ReviewScope scope) {
+        return Optional.empty();
+    }
+
+    @Override
+    public boolean askAgentAboutPeek(ReviewScope scope, SymbolPeek peek) {
+        return false;
     }
 }

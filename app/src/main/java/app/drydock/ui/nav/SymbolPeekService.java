@@ -84,6 +84,34 @@ public final class SymbolPeekService {
                 .thenApplyAsync(matches -> resolve(symbol, matches, changed), resolveExecutor);
     }
 
+    /**
+     * A peek at a location rather than a symbol: the excerpt of {@code
+     * relativePath} from {@code line}, for a waypoint or search result whose
+     * file the diff column does not show. Read on a virtual thread -- the
+     * caller is the FX thread.
+     *
+     * <p>Empty when the file cannot be read, or when {@code relativePath}
+     * leads outside the search root: a restored trail is read from disk, and
+     * a waypoint there is not a licence to open whatever it names.</p>
+     */
+    public CompletableFuture<Optional<SymbolPeek>> peekAt(Path relativePath, int line) {
+        return CompletableFuture.supplyAsync(() -> {
+            Path root = searchRoot.toAbsolutePath().normalize();
+            Path file = root.resolve(relativePath).normalize();
+            if (!file.startsWith(root) || file.equals(root)) {
+                return Optional.empty();
+            }
+            List<String> excerpt = readExcerpt(file, line);
+            if (excerpt.isEmpty()) {
+                return Optional.empty();
+            }
+            String title = relativePath + ":" + line;
+            String name = relativePath.getFileName() == null ? title : relativePath.getFileName().toString();
+            return Optional.of(new SymbolPeek(name, title, file, relativePath, line, excerpt, Set.of(), List.of(),
+                    false));
+        }, resolveExecutor);
+    }
+
     private Optional<SymbolPeek> resolve(String symbol, List<FileMatches> files, Map<Path, Set<Integer>> changed) {
         List<Candidate> candidates = new ArrayList<>();
         // Compiled once per peek, not once per matching line: a common

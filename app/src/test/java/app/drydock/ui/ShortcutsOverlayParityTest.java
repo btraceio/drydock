@@ -52,7 +52,11 @@ class ShortcutsOverlayParityTest {
      * Rows in "IN REVIEW" that the board's key filter does not bind: {@code
      * ⌘⏎} sends a free-text answer from the step panel's own text area.
      */
-    private static final Set<String> NOT_THE_REVIEW_BOARDS_OWN_BINDING = Set.of("⌘⏎");
+    private static final Set<String> NOT_THE_REVIEW_BOARDS_OWN_BINDING = Set.of(
+            "⌘⏎",
+            "⌘[ / ⌘]", // trail navigation: bound in the global shortcut chain, as in the Explorer
+            "⏎ / u / a" // an open peek's keys, which only exist while a peek is open
+    );
 
     /**
      * The review board's own single-letter layer, read straight off {@code
@@ -69,7 +73,7 @@ class ShortcutsOverlayParityTest {
                 .collect(Collectors.toSet());
 
         Set<String> bound = Set.of("d", "c", "m", "i", "\\", "[", "]", "n", "a", "r", "u",
-                "⏎", "⇧F", "f", "⇧A", "⇧R", "p", "v", "1", "2", "3", "4");
+                "⏎", "⇧F", "f", "⇧A", "⇧R", "p", "v", "1", "2", "3", "4", "b", ".", ",", "⇧D");
 
         assertEquals(bound, advertised,
                 "the overlay's IN REVIEW rows and what SessionReviewView.handleShortcut "

@@ -60,6 +60,7 @@ class StepPanelTest extends ApplicationTest {
             @Override public void revealFinding(ReviewAnnotation finding) { calls.add("reveal " + finding.id()); }
             @Override public void sendBack(List<ReviewAnnotation> blockers) { calls.add("send " + blockers.size()); }
             @Override public void reviewAnyway() { calls.add("review anyway"); }
+            @Override public void backToStep() { calls.add("back to step"); }
         });
         stage.setScene(new Scene(panel, 336, 700));
         stage.show();

@@ -22,6 +22,8 @@ import app.drydock.terminal.api.TerminalHostView;
 import app.drydock.terminal.api.TerminalRuntime;
 import app.drydock.terminal.api.TerminalSpec;
 import app.drydock.terminal.api.TerminalSurface;
+import app.drydock.ui.nav.SymbolPeek;
+import app.drydock.ui.review.ReviewNavigation;
 import app.drydock.ui.review.SessionReviewView;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
@@ -597,6 +599,16 @@ class OpenSessionTabReviewSubTabTest extends ApplicationTest {
         @Override
         public void applyTourVerdicts(ReviewScope scope,
                                       Map<String, Optional<ReviewVerdict.Decision>> byDigest) {
+        }
+
+        @Override
+        public Optional<ReviewNavigation> navigation(ReviewScope scope) {
+            return Optional.empty();
+        }
+
+        @Override
+        public boolean askAgentAboutPeek(ReviewScope scope, SymbolPeek peek) {
+            return false;
         }
 
         @Override

@@ -160,4 +160,15 @@ class NavigationTrailTest {
         trail.rememberLine(20);
         assertEquals(Optional.of("o12"), trail.current().orElseThrow().lineKey());
     }
+
+    @Test
+    void twoStepsInOneFileAreTwoWaypoints() {
+        NavigationTrail trail = new NavigationTrail();
+        trail.push(file("A.java"), "Step 1", 3, Optional.of("n3"));
+        assertTrue(trail.push(file("A.java"), "Step 2", 40, Optional.of("n40")),
+                "a differently labelled waypoint in the same file is a new navigation");
+        assertEquals(2, trail.waypoints().size());
+        assertEquals("Step 1", trail.waypoints().get(0).label());
+        assertEquals(Optional.of("n3"), trail.waypoints().get(0).lineKey());
+    }
 }

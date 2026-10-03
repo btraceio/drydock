@@ -10,6 +10,7 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -121,5 +122,28 @@ class SymbolPeekResolutionTest {
         String text = "int a = 1;\n";
         assertEquals(text.length(), SymbolLens.spans(text, Set.of()).length());
         assertEquals(text.length(), SymbolLens.spans(text, Set.of("a")).length());
+    }
+
+    @Test
+    void aLocationPeekShowsTheCodeAroundALine(@TempDir Path root) throws Exception {
+        Path relative = Path.of("src/Widget.java");
+        Files.createDirectories(root.resolve("src"));
+        Files.writeString(root.resolve(relative), "package src;\n\nclass Widget {\n    int size() {\n        return 4;\n    }\n}\n");
+
+        Optional<SymbolPeek> peek = new SymbolPeekService(root, null).peekAt(relative, 4)
+                .get(5, TimeUnit.SECONDS);
+
+        assertTrue(peek.isPresent());
+        assertEquals("src/Widget.java:4", peek.get().title());
+        assertEquals(4, peek.get().startLine());
+        assertEquals(relative, peek.get().relativePath());
+        assertEquals(List.of("    int size() {", "        return 4;", "    }"), peek.get().lines());
+        assertFalse(peek.get().resolvedDeclaration());
+    }
+
+    @Test
+    void aLocationPeekOutsideTheRootIsEmpty(@TempDir Path root) throws Exception {
+        assertEquals(Optional.empty(), new SymbolPeekService(root, null).peekAt(Path.of("../etc/passwd"), 1)
+                .get(5, TimeUnit.SECONDS));
     }
 }

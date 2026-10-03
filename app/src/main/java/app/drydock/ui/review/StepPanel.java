@@ -51,6 +51,7 @@ final class StepPanel extends VBox {
         void revealFinding(ReviewAnnotation finding);
         void sendBack(List<ReviewAnnotation> confirmedBlockers);
         void reviewAnyway();
+        void backToStep();
     }
 
     private final Host host;
@@ -58,6 +59,7 @@ final class StepPanel extends VBox {
     private final VBox extraSections = new VBox(10);
     private final VBox triageSection = new VBox(8);
     private final ScrollPane scroll;
+    private final Button backPill = new Button();
     private final List<Button> choiceButtons = new ArrayList<>();
     private Optional<TextArea> riskBox = Optional.empty();
     private Optional<TextField> overrideReason = Optional.empty();
@@ -70,8 +72,37 @@ final class StepPanel extends VBox {
         triageSection.getStyleClass().add("step-triage");
         scroll = new ScrollPane(new VBox(14, content, extraSections));
         scroll.setFitToWidth(true);
-        getChildren().add(scroll);
+        // The "↩ back to step N" pill sits above the scroll, outside the
+        // content show() rebuilds, so a redraw of the step does not drop it;
+        // the view decides when it shows (after a navigation away from the
+        // step) and when it goes (b, a step change, an anchor chip).
+        backPill.getStyleClass().add("step-back-pill");
+        backPill.setOnAction(event -> host.backToStep());
+        backPill.setVisible(false);
+        backPill.setManaged(false);
+        getChildren().addAll(backPill, scroll);
         applyWidth();
+    }
+
+    /** Shows "↩ back to step {@code number}"; see the constructor for who hides it. */
+    void showBackPill(int number) {
+        backPill.setText("↩ back to step " + number);
+        backPill.setVisible(true);
+        backPill.setManaged(true);
+    }
+
+    void hideBackPill() {
+        backPill.setVisible(false);
+        backPill.setManaged(false);
+    }
+
+    boolean backPillShown() {
+        return backPill.isVisible();
+    }
+
+    /** Removes the {@link #showTransient} notice, if one is showing. */
+    void clearTransient() {
+        content.getChildren().removeIf(node -> node.getStyleClass().contains("step-panel-transient"));
     }
 
     void show(StepView view) {

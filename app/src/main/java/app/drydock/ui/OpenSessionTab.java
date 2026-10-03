@@ -575,6 +575,18 @@ final class OpenSessionTab {
                 && explorer.navigateTrail(direction);
     }
 
+    /** See {@code MainWorkspace.navigateReviewTrail}: only while Review is the active sub-tab. */
+    boolean navigateReviewTrail(int direction) {
+        return activeSubTab == SubTab.REVIEW
+                && reviewView != null
+                && reviewView.navigateTrail(direction);
+    }
+
+    /** Whether the session runs against a remote repository (no local checkout, no Explorer). */
+    boolean isRemote() {
+        return isRemote;
+    }
+
     /** See {@code MainWorkspace.unwindExplorerOverlay}: one peek card, and only in the Explorer. */
     boolean unwindExplorerOverlay() {
         return activeSubTab == SubTab.EXPLORER

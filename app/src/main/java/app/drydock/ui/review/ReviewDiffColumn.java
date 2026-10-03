@@ -44,6 +44,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.BooleanSupplier;
+import java.util.function.Predicate;
 
 /**
  * The Review diff column (spec §4.4): hunk cards over a virtualized row
@@ -106,6 +107,8 @@ final class ReviewDiffColumn extends BorderPane {
 
     private final DiffService diffService;
     private final ExplorerBridge explorerBridge;
+    private Predicate<String> symbolClickHandler = symbol -> false;
+
     private PinSource pinSource = new PinSource() {
         @Override
         public List<Pin> pinsAt(String file, String lineKey) {
@@ -681,6 +684,16 @@ final class ReviewDiffColumn extends BorderPane {
                 new ReviewAnnotation.Message("You", Instant.now(), body), Severity.NIT);
         commentSink.addComment(annotation);
         closeComposer();
+    }
+
+    /**
+     * Who gets a click on an underlined symbol first. When {@code handler}
+     * returns true it took the click (the tour opens a peek over the column)
+     * and the diff-local lens stays closed; false, or no handler, opens the
+     * lens as before.
+     */
+    void setSymbolClickHandler(Predicate<String> handler) {
+        this.symbolClickHandler = handler == null ? symbol -> false : handler;
     }
 
     /** Supplies the {@code ◆n} pins; set once by the destination. */
@@ -1658,7 +1671,11 @@ final class ReviewDiffColumn extends BorderPane {
             }
             Text symbol = plain(word);
             symbol.getStyleClass().add("review-code-symbol");
-            symbol.setOnMouseClicked(e -> showLens(word, symbol));
+            symbol.setOnMouseClicked(e -> {
+                if (!symbolClickHandler.test(word)) {
+                    showLens(word, symbol);
+                }
+            });
             parts.add(symbol);
             last = matcher.end();
         }
