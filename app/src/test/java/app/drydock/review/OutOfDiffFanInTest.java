@@ -11,6 +11,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
 
@@ -53,12 +54,83 @@ class OutOfDiffFanInTest {
         assertTrue(parsed.get(0).text().contains("JmpCtxScope"));
     }
 
-    /** Occurrences inside the change are not "outside" it. */
+    /** A match on a line the change itself wrote is not a caller of the change. */
     @Test
-    void matchesInChangedFilesAreExcluded() {
+    void matchesOnChangedLinesAreExcluded() {
         assertEquals(List.of(), OutOfDiffFanIn.parse(
                 "src/guards.cpp" + NUL + "9" + NUL + "  JmpCtxScope guard;\n",
-                Set.of("src/guards.cpp")));
+                Map.of("src/guards.cpp", Set.of(9))));
+    }
+
+    /**
+     * An unedited call site in an edited file is where a signature change
+     * usually breaks: it is kept, and flagged so the reading order (which
+     * ranks by fan-in from OUTSIDE the change files) can ignore it.
+     */
+    @Test
+    void unchangedLinesOfChangedFilesAreKeptAndFlagged() {
+        List<OutOfDiffFanIn.Occurrence> parsed = OutOfDiffFanIn.parse(
+                "src/guards.cpp" + NUL + "9" + NUL + "  JmpCtxScope guard;\n"
+                        + "src/guards.cpp" + NUL + "30" + NUL + "  use(JmpCtxScope);\n"
+                        + "src/other.cpp" + NUL + "4" + NUL + "  JmpCtxScope x;\n",
+                Map.of("src/guards.cpp", Set.of(9)));
+
+        assertEquals(List.of(
+                new OutOfDiffFanIn.Occurrence("src/guards.cpp", 30, "  use(JmpCtxScope);", true),
+                new OutOfDiffFanIn.Occurrence("src/other.cpp", 4, "  JmpCtxScope x;", false)),
+                parsed);
+    }
+
+    @Test
+    void anUnavailableResultCarriesItsReason() {
+        OutOfDiffFanIn.Result timedOut = new OutOfDiffFanIn.Result(
+                Map.of(), Optional.of("git grep timed out after 30 s"));
+        assertTrue(timedOut.unavailable());
+        assertEquals("git grep timed out after 30 s", timedOut.unavailableReason().orElseThrow());
+        assertFalse(new OutOfDiffFanIn.Result(Map.of(), false).unavailable());
+        assertEquals("unavailable",
+                new OutOfDiffFanIn.Result(Map.of(), true).unavailableReason().orElseThrow());
+    }
+
+    @Test
+    void aScopeWithNoCheckoutSaysSoInsteadOfLookingEmpty() {
+        ReviewScope scope = new ReviewScope("rs_1", ReviewScope.Kind.BRANCH, Path.of("/repo"),
+                Optional.empty(), "main", "feature", Optional.empty(), Optional.empty(),
+                Optional.empty());
+        UnifiedDiff diff = new UnifiedDiff(List.of(file("src/Guards.java", "class JmpCtxScope { }")));
+
+        OutOfDiffFanIn.Result result = OutOfDiffFanIn.forScope(scope, ChangeGraph.of(diff), diff);
+
+        assertTrue(result.unavailable());
+        assertEquals("no checkout to search", result.unavailableReason().orElseThrow());
+    }
+
+    /**
+     * The whole pipeline: the diff's ADD rows say which lines of Guards.java
+     * the change wrote (line 1); a mention on an unedited line 2 of the same
+     * file is kept and flagged, the line-1 mention is not listed.
+     */
+    @Test
+    void forScopeKeepsUneditedLinesOfAChangedFileAndFlagsThem(@TempDir Path dir)
+            throws IOException, InterruptedException {
+        Path repo = initCommittedRepoWithFanIn(dir);
+        Files.writeString(repo.resolve("src/Guards.java"),
+                "class JmpCtxScope { }\nvoid again() { new JmpCtxScope(); }\n", StandardCharsets.UTF_8);
+        ReviewScope scope = new ReviewScope("rs_1", ReviewScope.Kind.BRANCH, repo,
+                Optional.of(repo), "main", "feature", Optional.empty(), Optional.empty(),
+                Optional.empty());
+        UnifiedDiff diff = new UnifiedDiff(List.of(file("src/Guards.java", "class JmpCtxScope { }")));
+
+        OutOfDiffFanIn.Result result = OutOfDiffFanIn.forScope(scope, ChangeGraph.of(diff), diff);
+
+        assertFalse(result.unavailable());
+        List<OutOfDiffFanIn.Occurrence> hits = result.bySymbol().get("JmpCtxScope");
+        List<OutOfDiffFanIn.Occurrence> inChanged =
+                hits.stream().filter(OutOfDiffFanIn.Occurrence::inChangedFile).toList();
+        assertEquals(1, inChanged.size(), "hits: " + hits);
+        assertEquals("src/Guards.java", inChanged.get(0).file());
+        assertEquals(2, inChanged.get(0).line());
+        assertTrue(hits.stream().anyMatch(o -> o.file().equals("src/Other.java") && !o.inChangedFile()));
     }
 
     @Test

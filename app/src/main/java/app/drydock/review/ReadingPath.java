@@ -268,12 +268,18 @@ public final class ReadingPath {
                                                     OutOfDiffFanIn.Result fanIn) {
         Map<String, Integer> counts = new TreeMap<>();
         for (String symbol : graph.changedDeclarations()) {
-            List<OutOfDiffFanIn.Occurrence> occurrences = fanIn.bySymbol().get(symbol);
-            if (occurrences == null || occurrences.isEmpty()) {
+            List<OutOfDiffFanIn.Occurrence> all = fanIn.bySymbol().get(symbol);
+            if (all == null) {
+                continue;
+            }
+            // Only callers in files the change does not touch rank: the
+            // in-change-file ones are listed for the reader, not for the order.
+            long outside = all.stream().filter(o -> !o.inChangedFile()).count();
+            if (outside == 0) {
                 continue;
             }
             graph.fileDeclaring(symbol)
-                    .ifPresent(file -> counts.merge(file, occurrences.size(), Integer::sum));
+                    .ifPresent(file -> counts.merge(file, (int) outside, Integer::sum));
         }
         return counts;
     }

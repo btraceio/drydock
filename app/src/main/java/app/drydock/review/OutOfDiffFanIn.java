@@ -10,10 +10,14 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.AbstractSet;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.SortedSet;
@@ -88,11 +92,54 @@ public final class OutOfDiffFanIn {
      * this feeds is showing a source line, and its original indentation is
      * part of reading it, not noise to trim.
      */
-    public record Occurrence(String file, int line, String text) {
+    public record Occurrence(String file, int line, String text, boolean inChangedFile) {
+
+        /** An occurrence in a file the change does not touch. */
+        public Occurrence(String file, int line, String text) {
+            this(file, line, text, false);
+        }
     }
 
-    /** {@code unavailable} means the scan could not run: absent, not zero. */
-    public record Result(Map<String, List<Occurrence>> bySymbol, boolean unavailable) {
+    /**
+     * {@code unavailableReason} present means the scan could not run: absent,
+     * not zero, and the reason says why (no checkout, timeout, git failure).
+     */
+    public record Result(Map<String, List<Occurrence>> bySymbol, Optional<String> unavailableReason) {
+
+        public Result {
+            Objects.requireNonNull(unavailableReason, "unavailableReason");
+        }
+
+        /** {@code unavailable} true carries the generic reason {@code "unavailable"}. */
+        public Result(Map<String, List<Occurrence>> bySymbol, boolean unavailable) {
+            this(bySymbol, unavailable ? Optional.of("unavailable") : Optional.empty());
+        }
+
+        public boolean unavailable() {
+            return unavailableReason.isPresent();
+        }
+
+        private static Result unavailable(String reason) {
+            return new Result(Map.of(), Optional.of(reason));
+        }
+    }
+
+    /** Every line of a file: the "drop the whole file" mapping of the {@code Set<String>} overloads. */
+    private static final class AllLines extends AbstractSet<Integer> {
+        @Override
+        public boolean contains(Object o) {
+            return true;
+        }
+
+        @Override
+        public Iterator<Integer> iterator() {
+            return Collections.emptyIterator();
+        }
+
+        @Override
+        public int size() {
+            return Integer.MAX_VALUE;
+        }
     }
 
     private OutOfDiffFanIn() {
@@ -114,22 +161,44 @@ public final class OutOfDiffFanIn {
     public static Result forScope(ReviewScope scope, ChangeGraph graph, UnifiedDiff diff) {
         Optional<Path> worktree = scope.worktree();
         if (worktree.isEmpty()) {
-            return new Result(Map.of(), true);
+            return Result.unavailable("no checkout to search");
         }
-        SortedSet<String> changedFiles = new TreeSet<>();
+        Map<String, Set<Integer>> changedNewLines = new HashMap<>();
         for (UnifiedDiff.FileDiff file : diff.files()) {
-            changedFiles.add(file.path());
+            Set<Integer> lines = changedNewLines.computeIfAbsent(file.path(), path -> new TreeSet<>());
+            for (UnifiedDiff.Hunk hunk : file.hunks()) {
+                for (UnifiedDiff.Line line : hunk.lines()) {
+                    if (line.kind() == UnifiedDiff.Line.Kind.ADD && line.newLine().isPresent()) {
+                        lines.add(line.newLine().getAsInt());
+                    }
+                }
+            }
         }
-        return scan(worktree.get(), graph, changedFiles);
+        return scan(worktree.get(), graph, changedNewLines);
     }
 
     /**
-     * Where each of {@code graph}'s changed declarations is used outside
-     * {@code changedFiles}. Spawns one {@code git grep} over every
+     * {@link #scan(Path, ChangeGraph, Map)} treating every line of each of
+     * {@code changedFiles} as changed, i.e. dropping those files whole.
+     */
+    public static Result scan(Path worktree, ChangeGraph graph, Set<String> changedFiles) {
+        Map<String, Set<Integer>> everything = new HashMap<>();
+        for (String file : changedFiles) {
+            everything.put(file, new AllLines());
+        }
+        return scan(worktree, graph, everything);
+    }
+
+    /**
+     * Where each of {@code graph}'s changed declarations is used other than on
+     * a changed line: in files the change does not touch, and on the
+     * unchanged lines of files it does (flagged
+     * {@link Occurrence#inChangedFile}). Spawns one {@code git grep} over every
      * uniquely-named changed declaration at once. Blocking; never call on
      * the FX thread.
      */
-    public static Result scan(Path worktree, ChangeGraph graph, Set<String> changedFiles) {
+    public static Result scan(Path worktree, ChangeGraph graph,
+                              Map<String, Set<Integer>> changedNewLinesByFile) {
         SortedSet<String> symbols = graph.changedDeclarations();
         if (symbols.isEmpty()) {
             return new Result(Map.of(), false);
@@ -159,11 +228,11 @@ public final class OutOfDiffFanIn {
             // git grep exits 1 for "no matches", a valid empty answer, not a
             // failure. Anything above 1 is.
             if (result.exitCode() > 1) {
-                LOG.log(Level.WARNING, "git grep for out-of-diff fan-in failed: "
-                        + ProcessRunner.excerpt(result.stderr()));
-                return new Result(Map.of(), true);
+                String excerpt = ProcessRunner.excerpt(result.stderr());
+                LOG.log(Level.WARNING, "git grep for out-of-diff fan-in failed: " + excerpt);
+                return Result.unavailable("git grep failed: " + excerpt);
             }
-            List<Occurrence> occurrences = parse(result.stdout(), changedFiles);
+            List<Occurrence> occurrences = parse(result.stdout(), changedNewLinesByFile);
             Map<String, List<Occurrence>> bySymbol = new TreeMap<>();
             for (String symbol : symbols) {
                 List<Occurrence> hits = occurrences.stream()
@@ -176,13 +245,13 @@ public final class OutOfDiffFanIn {
             return new Result(Collections.unmodifiableMap(bySymbol), false);
         } catch (ProcessTimeoutException e) {
             LOG.log(Level.WARNING, "git grep for out-of-diff fan-in timed out", e);
-            return new Result(Map.of(), true);
+            return Result.unavailable("git grep timed out after " + TIMEOUT.toSeconds() + " s");
         } catch (IOException | InterruptedException e) {
             if (e instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
             }
             LOG.log(Level.WARNING, "git grep for out-of-diff fan-in could not run", e);
-            return new Result(Map.of(), true);
+            return Result.unavailable("git grep could not run: " + e.getMessage());
         } finally {
             if (patterns != null) {
                 try {
@@ -232,12 +301,21 @@ public final class OutOfDiffFanIn {
     /**
      * Parses {@code git grep -z -n -F} output: one match per record,
      * records separated by {@code \n}, and within a record {@code
-     * file<NUL>line<NUL>text}. Occurrences inside {@code changedFiles} are
-     * dropped -- they are not "outside" the change. A record that does not
+     * file<NUL>line<NUL>text}. A match on a changed new line is dropped --
+     * the change wrote it, so it is not a caller of the change. A match
+     * elsewhere in a changed file is kept with {@code inChangedFile} set. A record that does not
      * split into exactly the three NUL-separated fields, or whose middle
      * field is not a line number, is skipped rather than treated as fatal.
      */
     static List<Occurrence> parse(String stdout, Set<String> changedFiles) {
+        Map<String, Set<Integer>> everything = new HashMap<>();
+        for (String file : changedFiles) {
+            everything.put(file, new AllLines());
+        }
+        return parse(stdout, everything);
+    }
+
+    static List<Occurrence> parse(String stdout, Map<String, Set<Integer>> changedNewLinesByFile) {
         List<Occurrence> occurrences = new ArrayList<>();
         for (String record : stdout.split("\n", -1)) {
             if (record.isEmpty()) {
@@ -249,11 +327,13 @@ public final class OutOfDiffFanIn {
                 continue;
             }
             String file = fields[0];
-            if (changedFiles.contains(file)) {
-                continue;
-            }
             try {
-                occurrences.add(new Occurrence(file, Integer.parseInt(fields[1]), fields[2]));
+                int line = Integer.parseInt(fields[1]);
+                Set<Integer> changedLines = changedNewLinesByFile.get(file);
+                if (changedLines != null && changedLines.contains(line)) {
+                    continue;
+                }
+                occurrences.add(new Occurrence(file, line, fields[2], changedLines != null));
             } catch (NumberFormatException e) {
                 LOG.log(Level.FINE, "skipping git grep row with a non-numeric line number");
             }
