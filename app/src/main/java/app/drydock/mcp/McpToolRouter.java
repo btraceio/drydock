@@ -51,9 +51,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.Function;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 /**
@@ -87,7 +89,10 @@ public final class McpToolRouter {
     private final Function<UnifiedDiff, ChangeGraph> graphBuilder;
 
     /**
-     * One scope's computed grouping, keyed by the diff it was computed from.
+     * One scope's change graph and out-of-diff caller scan, keyed by the diff
+     * they were computed from, and shared by every {@code review_scope}
+     * include built on them ({@code sections}, {@code impact}): asking for
+     * both, together or in turn, builds the graph and greps once.
      *
      * <p>Without it, every {@code review_scope} call that asks for {@code
      * sections} rebuilds the whole {@link ChangeGraph} AND spawns a fresh
@@ -109,10 +114,10 @@ public final class McpToolRouter {
      * eviction policy. If that ever stops holding it stops holding in both
      * places at once, which is the point of matching them.</p>
      */
-    private final Map<String, SectionsCacheEntry> sectionsByScope = new ConcurrentHashMap<>();
+    private final Map<String, GraphCacheEntry> graphByScope = new ConcurrentHashMap<>();
 
-    /** One completed {@link #computeSections} result, keyed by what it was computed from. */
-    private record SectionsCacheEntry(UnifiedDiff diff, List<Sections.Section> sections) {
+    /** One completed {@link #graphFor} result, keyed by what it was computed from. */
+    private record GraphCacheEntry(UnifiedDiff diff, ChangeGraph graph, OutOfDiffFanIn.Result fanIn) {
     }
 
     public McpToolRouter(McpSessionContext context, McpSessionRegistry registry) {
@@ -167,7 +172,11 @@ public final class McpToolRouter {
                                         + DEFAULT_SCOPE_BYTES + "."))
                                 .put("include", schemaString("Optional extras, comma-separated. "
                                         + "\"sections\" returns drydock's computed grouping: "
-                                        + "accept and name it, or regroup deliberately.")),
+                                        + "accept and name it, or regroup deliberately. "
+                                        + "\"impact\" returns, per changed declaration, its callers "
+                                        + "outside the change (name matches, not resolved references) "
+                                        + "and whether its declaration changed while call sites were "
+                                        + "not edited.")),
                         "scopeId"),
                 descriptor("review_intents",
                         "Replaces a scope's intent grouping: what the change is trying to do, at what risk, "
@@ -387,8 +396,15 @@ public final class McpToolRouter {
         // a first-time native grammar load, so it must never be a cost a plain
         // review_scope call pays, and a multi-page read must not pay it again
         // on every page for a payload that would not have changed anyway.
-        Optional<JsonValue> sectionsJson = cursor.isEmpty() && includesSections(args)
-                ? computeSections(scope, diff)
+        Set<String> includes = cursor.isEmpty() ? includes(args) : Set.of();
+        Optional<GraphCacheEntry> graph = includes.contains("sections") || includes.contains("impact")
+                ? graphFor(scope, diff)
+                : Optional.empty();
+        Optional<JsonValue> sectionsJson = includes.contains("sections")
+                ? graph.flatMap(entry -> computeSections(scope, diff, entry))
+                : Optional.empty();
+        Optional<JsonValue> impactJson = includes.contains("impact")
+                ? graph.map(entry -> ImpactJson.toJson(entry.graph(), entry.fanIn()))
                 : Optional.empty();
         // Charged against the SAME budget as hunks, not on top of it: sections
         // overlap by design (a shared foundation file appears in every section
@@ -396,8 +412,11 @@ public final class McpToolRouter {
         // not by file count the way scope/files/priorThreads do -- an
         // unaccounted addition here could dwarf a small maxBytes with no
         // signal at all.
+        // Impact is charged the same way, for the same reason: it scales with
+        // the number of changed declarations and their callers, not files.
         int sectionsBytes = sectionsJson.map(ReviewToolCodec::approximateBytes).orElse(0);
-        int hunkBudget = Math.max(0, maxBytes - sectionsBytes);
+        int impactBytes = impactJson.map(ReviewToolCodec::approximateBytes).orElse(0);
+        int hunkBudget = Math.max(0, maxBytes - sectionsBytes - impactBytes);
         ReviewToolCodec.ScopePage page = ReviewToolCodec.pageHunks(diff, cursor, hunkBudget);
 
         JsonObject result = JsonObject.empty()
@@ -428,15 +447,54 @@ public final class McpToolRouter {
                 result.put("sectionsOverBudget", new JsonBoolean(true));
             }
         }
+        if (impactJson.isPresent()) {
+            result.put("impact", impactJson.get());
+            // Absent, not empty: a failed caller search must not read as
+            // "nobody calls this".
+            graph.flatMap(entry -> entry.fanIn().unavailableReason())
+                    .ifPresent(reason -> result.put("impactUnavailable", new JsonString(reason)));
+        }
         return result;
     }
 
     /**
-     * {@code sections}, or empty if none was requested or the graph could not
-     * be built. {@link ChangeGraph#of} (via {@link SymbolScan}) can throw
-     * unchecked on a parse edge case; that must cost this ONE optional extra,
-     * never the whole call -- a caller who merely opted into {@code sections}
-     * must still get {@code hunks}, {@code scope} and {@code files}.
+     * The scope's change graph and caller scan, or empty if the graph could
+     * not be built. {@link ChangeGraph#of} (via {@link SymbolScan}) can throw
+     * unchecked on a parse edge case; that must cost the optional extras
+     * built on it, never the whole call -- a caller who merely opted into
+     * {@code sections} or {@code impact} must still get {@code hunks},
+     * {@code scope} and {@code files}.
+     *
+     * <p>Scanned synchronously, unlike the board's own background scan:
+     * an MCP tool call already runs off the FX thread, {@link
+     * OutOfDiffFanIn#scan} bounds itself with a 30s timeout, and handing an
+     * agent a first-call-always-unavailable answer it will then act on is
+     * worse than making it wait.</p>
+     *
+     * <p>Only a SUCCESSFUL build is cached -- a parse edge case must stay
+     * retryable rather than being pinned as this scope's answer.</p>
+     */
+    private Optional<GraphCacheEntry> graphFor(ReviewScope scope, UnifiedDiff diff) {
+        GraphCacheEntry cached = graphByScope.get(scope.id());
+        if (cached != null && cached.diff() == diff) {
+            return Optional.of(cached);
+        }
+        try {
+            ChangeGraph graph = graphBuilder.apply(diff);
+            GraphCacheEntry entry = new GraphCacheEntry(diff, graph,
+                    OutOfDiffFanIn.forScope(scope, graph, diff));
+            graphByScope.put(scope.id(), entry);
+            return Optional.of(entry);
+        } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, "review_scope: could not build the change graph for scope "
+                    + scope.id() + "; omitting sections and impact: " + e.getMessage(), e);
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * {@code sections} from the scope's cached graph and scan, or empty if
+     * the grouping could not be computed.
      *
      * <p>A live surface (the Review board's rail) numbers its cards off the
      * reading path's order, not {@link Sections#of}'s own grouping order --
@@ -447,29 +505,15 @@ public final class McpToolRouter {
      * exactly as the rail does -- fan-in scan included, so the two agree on
      * the rank's first term as well as on the ordering.</p>
      *
-     * <p>Scanned synchronously, unlike the board's own background scan:
-     * an MCP tool call already runs off the FX thread, {@link
-     * OutOfDiffFanIn#scan} bounds itself with a 30s timeout, and handing an
-     * agent a first-call-always-unavailable answer it will then act on is
-     * worse than making it wait.</p>
+     * <p>Recomputed from the cached graph per call rather than cached
+     * itself: it is in-memory work over a graph already built, and the
+     * expensive parts -- the parse and the grep -- are what the cache
+     * holds.</p>
      */
-    private Optional<JsonValue> computeSections(ReviewScope scope, UnifiedDiff diff) {
-        SectionsCacheEntry cached = sectionsByScope.get(scope.id());
-        if (cached != null && cached.diff() == diff) {
-            return Optional.of(ReviewToolCodec.sectionsToJson(cached.sections()));
-        }
+    private Optional<JsonValue> computeSections(ReviewScope scope, UnifiedDiff diff, GraphCacheEntry entry) {
         try {
-            ChangeGraph graph = graphBuilder.apply(diff);
-            List<Sections.Section> sections = Sections.of(diff, graph);
-            ReadingPath.Path path = ReadingPath.of(diff, graph, sections,
-                    OutOfDiffFanIn.forScope(scope, graph, diff));
-            // Cached as the ordered sections rather than as the rendered
-            // JSON: the response is assembled per call (a later page adds
-            // its own keys to it), and handing every caller the same mutable
-            // object is a defect waiting for the first one that edits it.
-            // Only a SUCCESSFUL build is cached -- a parse edge case must
-            // stay retryable rather than being pinned as this scope's answer.
-            sectionsByScope.put(scope.id(), new SectionsCacheEntry(diff, path.sections()));
+            List<Sections.Section> sections = Sections.of(diff, entry.graph());
+            ReadingPath.Path path = ReadingPath.of(diff, entry.graph(), sections, entry.fanIn());
             return Optional.of(ReviewToolCodec.sectionsToJson(path.sections()));
         } catch (RuntimeException e) {
             LOG.log(Level.WARNING, "review_scope: could not compute sections for scope "
@@ -479,16 +523,17 @@ public final class McpToolRouter {
     }
 
     /**
-     * Whether the comma-separated {@code include} argument names {@code
-     * sections}. An unknown token, or a missing/blank argument, is silently
-     * false -- this is an optional read, and a typo must not fail the call.
+     * The comma-separated {@code include} argument's tokens, stripped. An
+     * unknown token, or a missing/blank argument, simply names nothing --
+     * this is an optional read, and a typo must not fail the call.
      */
-    private static boolean includesSections(JsonObject args) throws McpToolException {
+    private static Set<String> includes(JsonObject args) throws McpToolException {
         return optionalStringArg(args, "include")
                 .map(value -> Stream.of(value.split(","))
                         .map(String::strip)
-                        .anyMatch("sections"::equals))
-                .orElse(false);
+                        .filter(token -> !token.isEmpty())
+                        .collect(Collectors.toUnmodifiableSet()))
+                .orElse(Set.of());
     }
 
     private JsonValue reviewIntents(ManagedSessionId caller, JsonValue arguments) throws McpToolException {

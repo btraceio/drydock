@@ -18,7 +18,14 @@ public enum Provenance {
     MEASURED("measured"),
 
     /** Asserted by the reviewing agent, through {@code review_intents} and its {@code reads}. */
-    CLAIMED("claimed");
+    CLAIMED("claimed"),
+
+    /**
+     * Answered by a resolving source -- a language server that has indexed
+     * the code -- rather than by name matching. Reserved for that seam
+     * ({@link UsageProvider}); nothing here produces it yet.
+     */
+    RESOLVED("resolved");
 
     private final String label;
 
@@ -33,6 +40,10 @@ public enum Provenance {
 
     /** The {@code app.css} modifier class, or none for the ordinary case. */
     public String styleClass() {
-        return this == CLAIMED ? "provenance-claimed" : "";
+        return switch (this) {
+            case MEASURED -> "";
+            case CLAIMED -> "provenance-claimed";
+            case RESOLVED -> "provenance-resolved";
+        };
     }
 }

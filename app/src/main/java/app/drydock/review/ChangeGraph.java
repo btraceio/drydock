@@ -52,6 +52,7 @@ public final class ChangeGraph {
     private final Map<Hunk, SortedSet<String>> referencesByHunk;
     private final Map<String, SortedSet<Hunk>> hunksDeclaringSymbol;
     private final Map<String, SortedSet<Hunk>> hunksReferencingSymbol;
+    private final SortedSet<DeclarationSite> declarationSites;
 
     /**
      * One hunk of one changed file, by the same index {@link
@@ -76,6 +77,32 @@ public final class ChangeGraph {
         }
     }
 
+    /**
+     * Where one changed declaration sits: the row of the review diff that
+     * declares {@code name}, by its stable line key. Every declaration made
+     * on a changed row is a site, whether or not its name is unique across
+     * the change -- placing a declaration inside a tour anchor needs no
+     * name resolution.
+     */
+    public record DeclarationSite(String name, String file, String lineKey)
+            implements Comparable<DeclarationSite> {
+        public DeclarationSite {
+            Objects.requireNonNull(name, "name");
+            Objects.requireNonNull(file, "file");
+            Objects.requireNonNull(lineKey, "lineKey");
+        }
+
+        @Override
+        public int compareTo(DeclarationSite other) {
+            int byFile = file.compareTo(other.file);
+            if (byFile != 0) {
+                return byFile;
+            }
+            int byName = name.compareTo(other.name);
+            return byName != 0 ? byName : lineKey.compareTo(other.lineKey);
+        }
+    }
+
     private ChangeGraph(SortedSet<String> files,
                         Map<String, SortedSet<String>> declarationsByFile,
                         Map<String, String> fileByUniqueDeclaration,
@@ -85,7 +112,9 @@ public final class ChangeGraph {
                         Map<Hunk, SortedSet<String>> declarationsByHunk,
                         Map<Hunk, SortedSet<String>> referencesByHunk,
                         Map<String, SortedSet<Hunk>> hunksDeclaringSymbol,
-                        Map<String, SortedSet<Hunk>> hunksReferencingSymbol) {
+                        Map<String, SortedSet<Hunk>> hunksReferencingSymbol,
+                        SortedSet<DeclarationSite> declarationSites) {
+        this.declarationSites = declarationSites;
         this.declarationsByHunk = declarationsByHunk;
         this.referencesByHunk = referencesByHunk;
         this.hunksDeclaringSymbol = hunksDeclaringSymbol;
@@ -114,6 +143,7 @@ public final class ChangeGraph {
         Map<String, List<String>> declaringFiles = new TreeMap<>();
         Map<String, SortedSet<String>> declarationsByFile = new TreeMap<>();
         Map<Hunk, SortedSet<String>> declarationsByHunk = new TreeMap<>();
+        SortedSet<DeclarationSite> declarationSites = new TreeSet<>();
         for (Map.Entry<String, List<SymbolScan.Symbol>> entry : scans.entrySet()) {
             for (SymbolScan.Symbol symbol : entry.getValue()) {
                 if (symbol.declaration() && symbol.onChangedLine()) {
@@ -125,6 +155,8 @@ public final class ChangeGraph {
                             .computeIfAbsent(new Hunk(entry.getKey(), symbol.hunk()),
                                     key -> new TreeSet<>())
                             .add(symbol.name());
+                    declarationSites.add(new DeclarationSite(symbol.name(), entry.getKey(),
+                            symbol.lineKey()));
                 }
             }
         }
@@ -193,7 +225,7 @@ public final class ChangeGraph {
         SortedSet<String> files = new TreeSet<>(scans.keySet());
         return new ChangeGraph(files, declarationsByFile, unique, out, in, inBySymbol,
                 declarationsByHunk, referencesByHunk, hunksDeclaringSymbol,
-                hunksReferencingSymbol);
+                hunksReferencingSymbol, declarationSites);
     }
 
     /** Every changed file, in this scope. */
@@ -260,6 +292,11 @@ public final class ChangeGraph {
     /** The hunks in other files that reference {@code symbol}. */
     public SortedSet<Hunk> hunksReferencingSymbol(String symbol) {
         return unmodifiableHunks(hunksReferencingSymbol.get(symbol));
+    }
+
+    /** Every declaration made on a changed row, with the row it sits on. */
+    public SortedSet<DeclarationSite> declarationSites() {
+        return Collections.unmodifiableSortedSet(declarationSites);
     }
 
     private static SortedSet<String> unmodifiable(SortedSet<String> set) {

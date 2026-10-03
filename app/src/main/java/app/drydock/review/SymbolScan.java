@@ -72,9 +72,18 @@ public final class SymbolScan {
      * here -- {@link #of} is already looping hunks -- and it is the whole
      * difference between "these two files are related" and a claim about a
      * specific hunk.
+     *
+     * <p>{@code lineKey} is the diff row the name sits on ({@link
+     * UnifiedDiff.Line#lineKey}), so a declaration can be placed inside a
+     * tour anchor and not merely inside a hunk.</p>
      */
     public record Symbol(String name, String path, int hunk, boolean declaration,
-                         boolean onChangedLine) {
+                         boolean onChangedLine, String lineKey) {
+
+        /** A symbol whose row is unknown. */
+        public Symbol(String name, String path, int hunk, boolean declaration, boolean onChangedLine) {
+            this(name, path, hunk, declaration, onChangedLine, "");
+        }
     }
 
     /**
@@ -185,7 +194,8 @@ public final class SymbolScan {
                         false, symbols);
             } else {
                 for (UnifiedDiff.Line line : hunk.lines()) {
-                    lexical(symbols, file.path(), index, line.text(), isChanged(line));
+                    lexical(symbols, file.path(), index, line.text(), isChanged(line),
+                            line.lineKey());
                 }
             }
         }
@@ -271,7 +281,7 @@ public final class SymbolScan {
             for (int index = 0; index < lines.size(); index++) {
                 if (fragment.reports(index)) {
                     lexical(out, path, hunkIndex, lines.get(index).text(),
-                            fragment.changed(index));
+                            fragment.changed(index), lines.get(index).lineKey());
                 }
             }
             return;
@@ -300,25 +310,27 @@ public final class SymbolScan {
      * two of these.</p>
      */
     private record Fragment(String text, byte[] utf8, int[] lineStart,
-                            boolean[] reportedLines, boolean[] changedLines) {
+                            boolean[] reportedLines, boolean[] changedLines, String[] lineKeys) {
 
         static Fragment of(List<UnifiedDiff.Line> lines, boolean reportContext) {
             StringBuilder joined = new StringBuilder();
             int[] lineStart = new int[lines.size()];
             boolean[] reported = new boolean[lines.size()];
             boolean[] changed = new boolean[lines.size()];
+            String[] lineKeys = new String[lines.size()];
             int offset = 0;
             for (int index = 0; index < lines.size(); index++) {
                 UnifiedDiff.Line line = lines.get(index);
                 lineStart[index] = offset;
                 reported[index] = reportContext || isChanged(line);
                 changed[index] = isChanged(line);
+                lineKeys[index] = line.lineKey();
                 joined.append(line.text()).append('\n');
                 offset += line.text().getBytes(StandardCharsets.UTF_8).length + 1;
             }
             String text = joined.toString();
             return new Fragment(text, text.getBytes(StandardCharsets.UTF_8), lineStart,
-                    reported, changed);
+                    reported, changed, lineKeys);
         }
 
         /**
@@ -340,6 +352,10 @@ public final class SymbolScan {
 
         boolean changed(int index) {
             return changedLines[index];
+        }
+
+        String lineKey(int index) {
+            return lineKeys[index];
         }
     }
 
@@ -406,17 +422,18 @@ public final class SymbolScan {
         String name = new String(fragment.utf8(), start, node.getEndByte() - start,
                 StandardCharsets.UTF_8);
         if (SymbolWords.isParsedSymbol(name)) {
-            out.add(new Symbol(name, path, hunkIndex, declaration, fragment.changed(index)));
+            out.add(new Symbol(name, path, hunkIndex, declaration, fragment.changed(index),
+                    fragment.lineKey(index)));
         }
     }
 
     private static void lexical(List<Symbol> out, String path, int hunkIndex, String text,
-                                boolean changed) {
+                                boolean changed, String lineKey) {
         Matcher matcher = SymbolWords.IDENTIFIER.matcher(text);
         while (matcher.find()) {
             String name = matcher.group();
             if (SymbolWords.isSymbol(name)) {
-                out.add(new Symbol(name, path, hunkIndex, false, changed));
+                out.add(new Symbol(name, path, hunkIndex, false, changed, lineKey));
             }
         }
     }
