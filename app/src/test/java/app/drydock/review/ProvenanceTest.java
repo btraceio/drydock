@@ -31,8 +31,7 @@ class ProvenanceTest {
         assertEquals(Provenance.MEASURED,
                 new ReadingPath.Link("calls", "h_a_0", "a.cpp").provenance());
         assertEquals(Provenance.MEASURED,
-                new ReadingPath.Step("h_a_0", "a.cpp", 1, "why",
-                        List.of(), true).provenance());
+                new ReadingPath.Step("h_a_0", "a.cpp", 1, List.of(), true).provenance());
     }
 
     /**

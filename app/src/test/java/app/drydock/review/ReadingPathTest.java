@@ -494,75 +494,18 @@ class ReadingPathTest {
         assertTrue(ordered.containsAll(asGrouped), ordered.toString());
     }
 
-    @Test
-    void everyStepStatesWhyItSitsWhereItDoes() {
-        List<ReadingPath.Step> path = pathOf(new UnifiedDiff(List.of(
-                file("src/guards.cpp", "class JmpCtxScope { };"),
-                file("src/profiler.cpp", "void go() { new JmpCtxScope(); }"))), NO_FAN_IN);
-
-        assertTrue(path.stream().noneMatch(step -> step.reason().isBlank()));
-    }
-
     /**
-     * The reason points at the rail, in the rail's own notation (§7.1): the
-     * foundation says which sections reference it, and what builds on it says
-     * so the other way round.
+     * A header and its same-basename implementation are one section, so a
+     * reference between them stays inside it.
      */
     @Test
-    void theReasonNamesTheSectionsOnTheOtherEndOfTheEdge() {
-        List<ReadingPath.Step> path = pathOf(new UnifiedDiff(List.of(
-                file("src/guards.cpp", "class JmpCtxScope { };"),
-                file("src/profiler.cpp", "void go() { new JmpCtxScope(); }"))), NO_FAN_IN);
-
-        String foundation = stepFor(path, "src/guards.cpp").reason();
-        String dependent = stepFor(path, "src/profiler.cpp").reason();
-        assertTrue(foundation.matches("referenced by [①-⑳](, [①-⑳])*"), foundation);
-        assertTrue(dependent.matches("builds on [①-⑳](, [①-⑳])*"), dependent);
-    }
-
-    /**
-     * "referenced by ①" on a row that is itself in ① tells a reviewer
-     * nothing, and a section carries the files its unit depends on, so an
-     * edge inside one section is the common case. The header and its
-     * same-basename implementation are one section, and the reason names the
-     * file instead.
-     */
-    @Test
-    void aReasonNamesTheFileWhenTheEdgeStaysInsideOneSection() {
+    void aHeaderAndItsImplementationShareASection() {
         List<ReadingPath.Step> path = pathOf(new UnifiedDiff(List.of(
                 file("src/guards.h", "class JmpCtxScope { };"),
                 file("src/guards.cpp", "void install() { new JmpCtxScope(); }"))), NO_FAN_IN);
 
-        ReadingPath.Step header = stepFor(path, "src/guards.h");
-        ReadingPath.Step implementation = stepFor(path, "src/guards.cpp");
-        assertEquals(header.sectionNumber(), implementation.sectionNumber());
-        assertEquals("referenced by guards.cpp", header.reason());
-    }
-
-    /** The reason names the count and the callers, not a bare "entry point". */
-    @Test
-    void theReasonNamesWhatCallsItFromOutside() {
-        List<ReadingPath.Step> path = pathOf(new UnifiedDiff(List.of(
-                file("src/api.cpp", "class PublicThing { };"))), fanIn("PublicThing", 7));
-
-        assertTrue(path.get(0).reason().contains("7"), path.get(0).reason());
-        assertTrue(path.get(0).reason().contains("outside the change"), path.get(0).reason());
-    }
-
-    /**
-     * A scan that could not run is not a scan that found nothing. The reason
-     * for a file with no in-diff references says so, rather than implying
-     * that nothing outside the change uses it.
-     */
-    @Test
-    void anUnavailableScanIsNotReadAsZero() {
-        UnifiedDiff diff = new UnifiedDiff(List.of(file("src/lonely.cpp", "class Lonely { };")));
-
-        String measured = pathOf(diff, NO_FAN_IN).get(0).reason();
-        String unknown = pathOf(diff, new OutOfDiffFanIn.Result(Map.of(), true)).get(0).reason();
-
-        assertFalse(measured.contains("unknown"), measured);
-        assertTrue(unknown.contains("unknown"), unknown);
+        assertEquals(stepFor(path, "src/guards.h").sectionNumber(),
+                stepFor(path, "src/guards.cpp").sectionNumber());
     }
 
     @Test

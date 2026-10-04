@@ -506,10 +506,9 @@ public final class SessionReviewView extends BorderPane {
     /**
      * What a scope's fan-in is until its scan has actually run: {@code
      * unavailable=true}, the honest input for a signal nothing has measured
-     * yet. {@link ReadingPath#of}'s own reason text says so ("outside callers
-     * unknown") rather than reading a scan that did not run as one that
-     * found nothing -- which is the whole distinction the fan-in affordance
-     * rests on (spec §4.3).
+     * yet. {@link ReadingPath#of} gives it no rank rather than reading a
+     * scan that did not run as one that found nothing -- which is the whole
+     * distinction the fan-in affordance rests on (spec §4.3).
      */
     private static final OutOfDiffFanIn.Result FAN_IN_NOT_SCANNED =
             new OutOfDiffFanIn.Result(Map.of(), true);

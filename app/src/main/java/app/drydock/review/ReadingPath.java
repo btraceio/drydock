@@ -14,8 +14,8 @@ import java.util.TreeMap;
 import java.util.TreeSet;
 
 /**
- * The order the change is read in, where to start, and what each hunk has to
- * do with the one before it (spec §6).
+ * The order the change is read in, where to start, and how each hunk links
+ * to the others (spec §6).
  *
  * <p><strong>Rank inside the sort, not after it.</strong> The entry-point
  * rank (§6.2) is handed to {@link Graphs#topologicalOrder} as its tie-break,
@@ -123,20 +123,18 @@ public final class ReadingPath {
      * meets first. {@code entryPoint} is true for the first step and no
      * other.
      */
-    public record Step(String hunkId, String file, int sectionNumber, String reason,
+    public record Step(String hunkId, String file, int sectionNumber,
                        List<Link> links, boolean entryPoint, Provenance provenance) {
         public Step {
             Objects.requireNonNull(hunkId, "hunkId");
             Objects.requireNonNull(file, "file");
-            Objects.requireNonNull(reason, "reason");
             Objects.requireNonNull(provenance, "provenance");
             links = List.copyOf(links);
         }
 
         /** See {@link Link#Link(String, String, String)} -- a step is measured too. */
-        public Step(String hunkId, String file, int sectionNumber, String reason,
-                    List<Link> links, boolean entryPoint) {
-            this(hunkId, file, sectionNumber, reason, links, entryPoint, Provenance.MEASURED);
+        public Step(String hunkId, String file, int sectionNumber, List<Link> links, boolean entryPoint) {
+            this(hunkId, file, sectionNumber, links, entryPoint, Provenance.MEASURED);
         }
     }
 
@@ -153,7 +151,7 @@ public final class ReadingPath {
      * the ordering together with the numbering that indexes into it leaves a
      * consumer nothing to reconcile: render {@link #sections()} down the
      * rail, and {@code step.sectionNumber()} is its 1-based place there,
-     * which is also the number every reason and label mints.</p>
+     * which is also the number every link label mints.</p>
      */
     public record Path(List<Step> steps, List<Sections.Section> sections) {
         public Path {
@@ -167,11 +165,7 @@ public final class ReadingPath {
      * order that path reaches them. Blocking only in the sense its inputs
      * are; never call the {@link ChangeGraph#of} that feeds it on the FX
      * thread.
-     *
-     * <p>{@code fanIn.unavailable()} is honoured rather than read as zero: a
-     * scan that could not run contributes no rank, and the reason it writes
-     * says the outside callers are unknown instead of implying there are
-     * none.</p>
+
      */
     public static Path of(UnifiedDiff diff, ChangeGraph graph,
                           List<Sections.Section> sections, OutOfDiffFanIn.Result fanIn) {
@@ -211,14 +205,12 @@ public final class ReadingPath {
         List<Step> steps = new ArrayList<>();
         for (String file : files) {
             UnifiedDiff.FileDiff fileDiff = byPath.get(file);
-            String reason = reasonFor(file, graph, byPath, sectionByHunk,
-                    fanInByFile.getOrDefault(file, 0), fanIn.unavailable());
             for (int index = 0; index < fileDiff.hunks().size(); index++) {
                 String hunkId = HunkIds.hunkId(file, index);
                 List<Link> links = linksFrom(new ChangeGraph.Hunk(file, index), graph,
                         byPath, sectionByHunk);
                 steps.add(new Step(hunkId, file, sectionByHunk.getOrDefault(hunkId, 0),
-                        reason, links, steps.isEmpty(), Provenance.MEASURED));
+                        links, steps.isEmpty(), Provenance.MEASURED));
             }
         }
         return new Path(steps, ordered);
@@ -282,63 +274,6 @@ public final class ReadingPath {
                     .ifPresent(file -> counts.merge(file, (int) outside, Integer::sum));
         }
         return counts;
-    }
-
-    // ---- reasons ------------------------------------------------------------
-
-    /**
-     * Why this file sits where it does, in the words §7.1 puts on the row.
-     * Ordered as the rank is, so the reason names the signal that actually
-     * placed it.
-     */
-    private static String reasonFor(String file, ChangeGraph graph,
-                                    Map<String, UnifiedDiff.FileDiff> byPath,
-                                    Map<String, Integer> sectionByHunk,
-                                    int fanIn, boolean fanInUnavailable) {
-        if (fanIn > 0) {
-            return "called from " + fanIn + (fanIn == 1 ? " place" : " places")
-                    + " outside the change";
-        }
-        int own = sectionOfFile(file, byPath, sectionByHunk);
-        SortedSet<String> dependents = graph.filesReferencing(file);
-        if (!dependents.isEmpty()) {
-            return "referenced by " + markers(dependents, own, byPath, sectionByHunk);
-        }
-        SortedSet<String> dependencies = graph.filesReferencedBy(file);
-        if (!dependencies.isEmpty()) {
-            return "builds on " + markers(dependencies, own, byPath, sectionByHunk);
-        }
-        String silence = ChangedPaths.isTestPath(file)
-                ? "test, referenced by nothing in the change"
-                : "nothing in the change references it";
-        // An unavailable scan is not a scan that found nothing (§4.3): this
-        // is the one reason that would otherwise read as "and nothing outside
-        // it either", which was never measured.
-        return fanInUnavailable ? silence + ", outside callers unknown" : silence;
-    }
-
-    /**
-     * {@code ③, ⑤} for a set of files: where they sit in the rail.
-     *
-     * <p>A file in {@code own} -- the section the reason is being written for
-     * -- is named instead of numbered. "referenced by ①" on a row that is
-     * itself in ① tells a reviewer nothing, and sections carry the files
-     * their unit depends on (§5.2), so an edge inside one section is the
-     * common case rather than the corner. Naming is also the fallback when a
-     * section number cannot be had at all, so a reason is never a bare
-     * count.</p>
-     */
-    private static String markers(SortedSet<String> files, int own,
-                                  Map<String, UnifiedDiff.FileDiff> byPath,
-                                  Map<String, Integer> sectionByHunk) {
-        Set<String> rendered = new LinkedHashSet<>();
-        for (String file : files) {
-            int number = sectionOfFile(file, byPath, sectionByHunk);
-            rendered.add(number > 0 && number != own
-                    ? marker(number)
-                    : ChangedPaths.fileName(file));
-        }
-        return String.join(", ", rendered);
     }
 
     // ---- links --------------------------------------------------------------
@@ -503,15 +438,6 @@ public final class ReadingPath {
             }
         }
         return numbers;
-    }
-
-    private static int sectionOfFile(String file, Map<String, UnifiedDiff.FileDiff> byPath,
-                                     Map<String, Integer> sectionByHunk) {
-        UnifiedDiff.FileDiff fileDiff = byPath.get(file);
-        if (fileDiff == null || fileDiff.hunks().isEmpty()) {
-            return 0;
-        }
-        return sectionByHunk.getOrDefault(HunkIds.hunkId(file, 0), 0);
     }
 
     /**
